@@ -323,3 +323,163 @@ def test_finite_read_deadline_no_private_body_and_shutdown_stream_ownership(conn
     with TestClient(connected_http[0], base_url=HOST) as client:
         result = client.get(PREFIX + "read/tasks", headers=headers("A"*43))
         assert result.status_code == 503 and not consumer._readers
+
+
+def test_head_runs_real_canonical_get_queries_not_static_fallback(connected_http, monkeypatch):
+    import claudlobby.plane.view as view
+    calls = []
+    original = view._fetch_tasks
+    def observed(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(view, "_fetch_tasks", observed)
+    with TestClient(connected_http[0], base_url=HOST) as client:
+        ready = login(client, connected_http)
+        for suffix in ("tasks?fleet=data", "tasks?fleet=unknown", "summary", "fleets", "channel?fleet=data&limit=1"):
+            get = client.get(PREFIX + "read/" + suffix, headers=headers(ready["token"]))
+            head = client.head(PREFIX + "read/" + suffix, headers=headers(ready["token"]))
+            assert head.status_code == get.status_code == 200
+            assert head.headers["content-type"] == get.headers["content-type"]
+            assert head.headers["content-length"] == get.headers["content-length"]
+            assert head.content == b""
+            assert head.headers["access-control-allow-origin"] == PLANE
+        assert len(calls) == 4  # the same canonical query ran for each GET/HEAD pair
+        task = client.get(PREFIX + "read/tasks?fleet=data", headers=headers(ready["token"])).json()["data"]["tasks"][0]
+        path = PREFIX + "read/tasks/" + task["task_id"] + "?fleet=data"
+        get = client.get(path, headers=headers(ready["token"]))
+        head = client.head(path, headers=headers(ready["token"]))
+        assert head.status_code == get.status_code == 200
+        assert head.headers["content-type"] == "application/json" and head.content == b""
+
+
+def test_head_real_query_closing_native_loss_denies_without_any_body(connected_http, monkeypatch):
+    import claudlobby.plane.view as view
+    app, _, identity, _, _ = connected_http
+    original = view._fetch_tasks
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        identity[0] = type(OWNER)(OWNER.namespace, "1002")
+        return result
+    with TestClient(app, base_url=HOST) as client:
+        ready = login(client, connected_http)
+        monkeypatch.setattr(view, "_fetch_tasks", changed)
+        head = client.head(PREFIX + "read/tasks?fleet=data", headers=headers(ready["token"]))
+        assert head.status_code == 403 and head.content == b""
+
+
+def test_head_stream_uses_actual_bounded_canonical_producer_and_zero_asgi_body(connected_http):
+    app, access, _, clock, _ = connected_http
+    from tests.test_plane_owner_connected import evidence
+    session = access.connected().issue(evidence(access.connected(), clock), OWNER)
+    frames = []
+    async def run():
+        scope = {"type": "http", "method": "HEAD", "path": PREFIX + "read/stream", "query_string": b"cursor=0&once=0",
+            "http_version": "1.1", "scheme": "https", "root_path": "", "server": ("host.example.test", 443),
+            "asgi": {"spec_version": "2.4"}, "headers": [(b"host", b"host.example.test"),
+                (b"origin", PLANE.encode()), (b"authorization", ("Bearer " + session.token).encode())]}
+        async def receive():
+            await asyncio.Event().wait()
+        async def send(message):
+            frames.append(message)
+        await asyncio.wait_for(app.connected_reads(scope, receive, send), 2)
+        assert not app.connected_reads._readers
+    asyncio.run(run())
+    assert frames[0]["status"] == 200
+    assert b"text/event-stream" in dict(frames[0]["headers"])[b"content-type"]
+    bodies = [m for m in frames if m["type"] == "http.response.body"]
+    assert bodies and all(m.get("body", b"") == b"" for m in bodies)
+    assert not bodies[-1].get("more_body", False)
+
+
+def test_missing_bearer_refuses_before_native_lookup_and_head_refusal_has_no_asgi_body(connected_http):
+    consumer = connected_http[0].connected_reads
+    calls = []
+    async def should_not_verify(scope):
+        calls.append(scope)
+        return OWNER
+    consumer.verify_principal = should_not_verify
+    async def run():
+        for action, method in (("read/tasks", "HEAD"), ("status", "GET")):
+            output = []
+            scope = {"type": "http", "method": method, "path": PREFIX + action, "query_string": b"",
+                "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode())]}
+            async def receive():
+                raise AssertionError("no body read expected")
+            async def send(message):
+                output.append(message)
+            await consumer(scope, receive, send)
+            assert output[0]["status"] == 403
+            if method == "HEAD":
+                assert not b"".join(m.get("body", b"") for m in output)
+    asyncio.run(run())
+    assert not calls
+
+
+def test_shutdown_cancelled_owned_stream_does_not_escape_request(connected_http):
+    consumer = connected_http[0].connected_reads
+    async def run():
+        entered = asyncio.Event()
+        async def held(scope, receive, send):
+            entered.set()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await asyncio.Event().wait()
+        consumer.read_app = held
+        scope = {"type": "http", "method": "GET", "path": PREFIX + "read/stream", "query_string": b"",
+            "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()), (b"authorization", b"Bearer " + b"A"*43)]}
+        async def receive():
+            await asyncio.Event().wait()
+        async def send(message):
+            pass
+        request = asyncio.create_task(consumer(scope, receive, send))
+        await entered.wait()
+        await consumer.shutdown()
+        await request
+        assert not consumer._readers
+    asyncio.run(run())
+
+
+def test_connected_selected_route_allowlist_matches_canonical_query_contract(connected_http):
+    from claudlobby.plane.owner_connected_http import _READS
+    app = connected_http[0].read_app.app
+    routes = {r.path: r for r in app.routes if hasattr(r, "dependant")}
+    for suffix, fields in _READS.items():
+        route = routes["/api/" + suffix]
+        assert "GET" in route.methods
+        assert {p.name for p in route.dependant.query_params} == set(fields), suffix
+    detail = routes["/api/tasks/{task_id}"]
+    assert {p.name for p in detail.dependant.query_params} == {"fleet"}
+
+
+def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_http):
+    consumer = connected_http[0].connected_reads
+    async def run():
+        entered = asyncio.Event()
+        async def held(scope, receive, send):
+            entered.set()
+            await asyncio.Event().wait()
+        consumer.read_app = held
+        scope = {"type": "http", "method": "GET", "path": PREFIX + "read/tasks", "query_string": b"",
+            "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()), (b"authorization", b"Bearer " + b"A"*43)]}
+        async def receive():
+            await asyncio.Event().wait()
+        async def send(message):
+            pass
+        request = asyncio.create_task(consumer(scope, receive, send))
+        await entered.wait()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert not consumer._readers
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("query", ["cursor=", "once=invalid"])
+def test_head_stream_preserves_canonical_get_query_validation(connected_http, query):
+    with TestClient(connected_http[0], base_url=HOST) as client:
+        ready = login(client, connected_http)
+        path = PREFIX + "read/stream?" + query
+        get = client.get(path, headers=headers(ready["token"]))
+        head = client.head(path, headers=headers(ready["token"]))
+        assert head.status_code == get.status_code == 422
+        assert head.headers["content-type"] == get.headers["content-type"]
+        assert head.content == b""

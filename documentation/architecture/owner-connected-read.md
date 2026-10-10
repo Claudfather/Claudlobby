@@ -120,3 +120,10 @@ abort reads, erase memory credential/private display and fence late results.
 A stolen token from another native principal fails; another device of the SAME
 native owner could use it. Memory is not XSS protection or device key binding.
 Operational release/CSP/literal rendering and actual device proof remain gates.
+
+Connected HEAD reads execute the same canonical GET query and protected source/
+response admission as GET, retaining status/headers while suppressing all body
+bytes. Stream HEAD stops the canonical producer after its first admitted chunk, without
+rewriting query parameters or leaving an idle SSE reader alive. The explicit connected route/query allowlist remains
+a deliberate ceiling; focused contract checks detect drift in its selected
+canonical query parameters without automatically exposing new routes.
