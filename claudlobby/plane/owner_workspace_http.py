@@ -34,11 +34,11 @@ class WorkspaceBootstrapConfig:
 def _header(scope, name):
     values = [value for key, value in scope.get("headers", ()) if key.lower() == name]
     if len(values) > 1:
-        raise AccessDenied()
+        raise AccessDenied("workspace_bootstrap_denied")
     try:
         return values[0].decode("ascii") if values else None
     except UnicodeError:
-        raise AccessDenied() from None
+        raise AccessDenied("workspace_bootstrap_denied") from None
 
 
 async def _json(receive, limit):
@@ -90,7 +90,7 @@ class WorkspaceBootstrapHTTP:
         principal = await asyncio.wait_for(self.verify_principal(scope),
                                           max(0, deadline - time.monotonic()))
         if type(principal) is not PrincipalRef:
-            raise AccessDenied()
+            raise AccessDenied("workspace_bootstrap_denied")
         return principal
 
     async def _blocking(self, fn, *args, **kwargs):
@@ -114,19 +114,19 @@ class WorkspaceBootstrapHTTP:
             fields = [field.strip().lower() for field in requested.split(",")]
             if (_header(scope, b"access-control-request-method") != "POST"
                     or len(fields) != 2 or set(fields) != {"content-type", "x-claudlobby-owner"}):
-                raise AccessDenied()
+                raise AccessDenied("workspace_bootstrap_denied")
             principal = await self._principal(scope, deadline)
             owner = await self._blocking(self.access.current_grant)
             if (owner.principal != principal or principal.namespace != "tailscale:controlplane.tailscale.com"
                     or not principal.subject.isascii() or not principal.subject.isdecimal()
                     or int(principal.subject) <= 0 or str(int(principal.subject)) != principal.subject):
-                raise AccessDenied()
+                raise AccessDenied("workspace_bootstrap_denied")
             await self._blocking(self._source)
             return None, 204
         if (_header(scope, b"x-claudlobby-owner") != "1"
                 or (_header(scope, b"content-type") or "").split(";", 1)[0].lower() != "application/json"
                 or _header(scope, b"cookie") is not None or _header(scope, b"authorization") is not None):
-            raise AccessDenied()
+            raise AccessDenied("workspace_bootstrap_denied")
         payload = await asyncio.wait_for(_json(receive, 16384 if is_stage else 1024), 5)
         if is_stage:
             if (set(payload) != {"nonce", "assertion"} or not _canonical_32_bytes(payload["nonce"])
@@ -141,7 +141,7 @@ class WorkspaceBootstrapHTTP:
             expected = await self._blocking(self.workspace.expected, payload["nonce"], principal)
             if (expected.issuer != self.config.issuer
                     or expected.operational_origin != self.config.operational_origin):
-                raise AccessDenied()
+                raise AccessDenied("workspace_bootstrap_denied")
             keys = await self.keys.get(payload["assertion"])
             attestation = await self._blocking(verify_workspace_assertion, payload["assertion"],
                                                keys, expected=expected)
@@ -182,7 +182,7 @@ class WorkspaceBootstrapHTTP:
         try:
             if (_header(scope, b"host") != self.authority or scope.get("query_string")
                     or _header(scope, b"origin") != self.config.operational_origin):
-                raise AccessDenied()
+                raise AccessDenied("workspace_bootstrap_denied")
         except AccessDenied:
             await JSONResponse({"state": "denied"}, 403, headers=headers)(scope, receive, send)
             return

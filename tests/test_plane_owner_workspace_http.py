@@ -37,6 +37,7 @@ def http(tmp_path, profile):
         return identity[0]
     app = create_owner_browser_app(tmp_path, verify_principal=verify,
         expected_origin=HOST, sampler=_Sampler({}), workspace_bootstrap=WorkspaceBootstrapConfig(ISSUER, PLANE))
+    app.access._clock = lambda: clock[0]
     async def keys(_):
         return json.dumps({"keys": [profile[1]]}).encode()
     app.workspace_bootstrap.keys.get = keys  # no network; actual PyJWT below
@@ -149,7 +150,7 @@ def test_worker_saturation_cancel_retains_capacity_until_completion(http, monkey
             await release.wait()
             return {"state": "unavailable"}, 503
         monkeypatch.setattr(consumer, "_response", held)
-        scope = {"method": "POST", "path": "/api/owner/workspace/challenge", "query_string": b"",
+        scope = {"type": "http", "method": "POST", "path": "/api/owner/workspace/challenge", "query_string": b"",
                  "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode())]}
         async def receive():
             return {"type": "http.request", "body": b"{}"}
