@@ -1906,6 +1906,167 @@ if [ "$fail" -gt "$_esc_fail_before" ]; then
     sed 's/^/    /' "$_esc_pages" 2>/dev/null || echo "    (none)"
 fi
 
+# === Scenario 2c': a stopped bot is silent; a lost unit and a dead one page (#2243) ===
+# The REAL sweep on a fleet of its own. svc_is_registered reads the unit file
+# under $HOME, so the sweep runs with this scenario's HOME and reads or writes
+# no unit outside this run; a systemctl stub answers from per-unit state files;
+# the pushes land in this scenario's own manager pane, whose --log records each
+# one submitted, and tg-post.sh records the fleet page. Four bots:
+#   vsbench no unit file, a stop record (what bot stop leaves)  -> silent
+#   vslost  no unit file and no record (a botched disenroll)    -> unit_missing
+#   vsdead  its unit installed and failed (a death)              -> service_down
+#   vsleft  its unit installed again (spin-up-bot.sh clears no record) beside
+#           an hour-old record: the sweep removes the record, so when the unit
+#           is later lost, that loss pages too
+# vsbench sweeps first, so the rows and pushes that later bots land prove the
+# sweep got past it. Then the escalation: the two unit_missing bots are ONE
+# page, sent once.
+val_scenario "validate #2243: a stopped bot is silent; a lost unit and a dead one page"
+if [ "$_OS" != Linux ]; then
+    echo "  SKIP: this scenario drives the systemd branch; the launchd branch is unit-tested"
+else
+_st_fail_before=$fail
+_st_fleet="valstop"
+_st_mgr="valstopmgr"
+_st_home="$ROOT/stop-home"
+_st_units="$ROOT/stop-units"
+_st_bin="$ROOT/stop-bin"
+_st_lib="$ROOT/stoplib"
+_st_pages="$ROOT/stop-pages.log"
+_st_pushes="$ROOT/stop-pushes.log"
+_st_bots="$ROOT/local/$_st_fleet/runtime/bots"
+mkdir -p "$_st_home/.config/systemd/user" "$_st_units" "$_st_bin" "$_st_lib" "$_st_bots"
+for _st_f in fleet-pulse.sh lib-common.sh supervisor.sh; do ln -s "$LIB_DIR/$_st_f" "$_st_lib/$_st_f"; done
+val_link_plane_shim "$_st_lib"
+: > "$_st_pages"
+cat > "$_st_lib/tg-post.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$1" >> "$_st_pages"
+STUB
+# A unit's state is $ST_UNITS/<label> (ACTIVE=, SUB=); a unit with no state
+# file reads as one systemd cannot find. is-active and show are all the sweep asks.
+cat > "$_st_bin/systemctl" <<'STUB'
+#!/bin/bash
+a=("$@"); [ "${a[0]:-}" = "--user" ] && a=("${a[@]:1}")
+verb="${a[0]:-}"; a=("${a[@]:1}")
+props=","; value=0; unit=""
+while [ "${#a[@]}" -gt 0 ]; do
+  case "${a[0]}" in
+    -p) props="$props${a[1]},"; a=("${a[@]:2}") ;;
+    --property=*) props="$props${a[0]#--property=},"; a=("${a[@]:1}") ;;
+    --value) value=1; a=("${a[@]:1}") ;;
+    -*) a=("${a[@]:1}") ;;
+    *) unit="${a[0]%.service}"; a=("${a[@]:1}") ;;
+  esac
+done
+st="${ST_UNITS:?}/$unit"
+if [ -n "$unit" ] && [ -f "$st" ]; then
+  load=loaded; active=$(sed -n 's/^ACTIVE=//p' "$st"); sub=$(sed -n 's/^SUB=//p' "$st")
+else
+  load=not-found; active=inactive; sub=dead
+fi
+case "$verb" in
+  is-active) echo "$active"; [ "$active" = active ]; exit $? ;;
+  show)
+    enter=$(awk '{printf "%.0f", ($1 - 5000) * 1000000}' /proc/uptime)
+    for kv in "Id=$unit.service" "LoadState=$load" "ActiveState=$active" "SubState=$sub" \
+              "NRestarts=0" "ExecMainStartTimestampMonotonic=$enter" \
+              "InactiveExitTimestampMonotonic=$enter"; do
+      k="${kv%%=*}"
+      if [ "$props" = "," ] || [[ "$props" == *",$k,"* ]]; then
+        if [ "$value" = 1 ]; then echo "${kv#*=}"; else echo "$kv"; fi
+      fi
+    done ;;
+esac
+exit 0
+STUB
+chmod +x "$_st_lib/tg-post.sh" "$_st_bin/systemctl"
+val_plane_ready "$ROOT" "$_st_fleet"
+tmux new-session -d -x 250 -y 60 -s "$_st_mgr" "$VAL_BOX --log '$_st_pushes'"
+sleep 1  # let the box render
+
+st_bot() {  # <bot> <unit: none|active|failed> <stop record: none|seconds ago>
+    local d="$_st_bots/$1" label="com.valstop.$1" at
+    mkdir -p "$d/data"
+    printf 'BOT_ID=%s\nBOT_NAME=%s\nBOT_SERVICE=%s\nMANAGER_TMUX=%s\nMANAGER_TMUX_SOCKET=%s\n' \
+        "$1" "$1" "$label" "$_st_mgr" "$(vsock "$_st_mgr")" > "$d/bot.conf"
+    if [ "$2" != none ]; then
+        printf '[Service]\n' > "$_st_home/.config/systemd/user/$label.service"
+        printf 'ACTIVE=%s\nSUB=%s\n' "$2" "$([ "$2" = active ] && echo running || echo failed)" > "$_st_units/$label"
+    fi
+    if [ "$3" != none ]; then
+        at=$(( $(date +%s) - $3 ))
+        printf '{"by": "operator", "reason": "parked by the harness", "request_id": "r-2243", "stopped_at": "%s", "stopped_epoch": %s}\n' \
+            "$(val_iso "$at")" "$at" > "$d/data/.stopped"
+    fi
+    return 0
+}
+st_run() {
+    CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_st_fleet" HOME="$_st_home" ST_UNITS="$_st_units" \
+        PATH="$_st_bin:$PATH" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
+        "$_st_lib/fleet-pulse.sh" "$_st_fleet" >/dev/null 2>&1 || true
+}
+st_count() {  # <bot> <type>: how many of the bot's rows are of that type
+    val_events "$ROOT" "$_st_fleet" "$1" "$2" | grep -c "\"type\":\"$2\"" || true
+}
+
+st_bot vsbench none 3600
+st_bot vslost none none
+st_bot vsdead failed none
+st_bot vsleft active 3600
+st_run
+# The positive rows first, polled (a row can land in the background), so the
+# absence checks below read a plane the sweep is known to have reached.
+_st_lost=$(val_poll 20 0.5 st_count vslost unit_missing)
+[ "${_st_lost:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#2243 a unit lost with no stop recorded is unit_missing" "$r"
+_st_dead=$(val_poll 20 0.5 st_count vsdead service_down)
+_st_dead_rows="$(val_events "$ROOT" "$_st_fleet" vsdead)"
+[ "${_st_dead:-0}" -ge 1 ] && printf '%s' "$_st_dead_rows" | grep '"type":"service_down"' | grep -q '"session":"missing"' && r=yes || r=no
+harness_check "#2243 a unit that dies on its own still pages: service_down, carrying the session" "$r"
+printf '%s' "$_st_dead_rows" | grep -q '"type":"session_missing"' && r=no || r=yes
+harness_check "#2243   ...as ONE alert: no session_missing beside it" "$r"
+_st_stop_rows="$(val_events "$ROOT" "$_st_fleet" vsbench)"
+printf '%s' "$_st_stop_rows" | grep -Eq '"type":"(unit_missing|service_down|session_missing|crash_loop)"' && r=no || r=yes
+harness_check "#2243 a recorded stop raises no row" "$r"
+grep -qF '[FLEET-PULSE] vslost unit_missing' "$_st_pushes" 2>/dev/null && r=yes || r=no
+harness_check "#2243 the manager is pushed the lost unit" "$r"
+grep -qF '[FLEET-PULSE] vsdead service_down' "$_st_pushes" 2>/dev/null && r=yes || r=no
+harness_check "#2243 the manager is pushed the dead unit" "$r"
+grep -qF '[FLEET-PULSE] vsbench' "$_st_pushes" 2>/dev/null && r=no || r=yes
+harness_check "#2243 the manager is pushed nothing for the recorded stop" "$r"
+grep -Eq '^vsbench[[:space:]]+stopped[[:space:]]+stopped' "$ROOT/state/pulse/$_st_fleet.pulse-summary.txt" 2>/dev/null && r=yes || r=no
+harness_check "#2243 the summary reads the recorded stop as stopped" "$r"
+[ ! -e "$_st_bots/vsleft/data/.stopped" ] && r=yes || r=no
+harness_check "#2243 a stop record left beside an installed unit is removed" "$r"
+
+# vsleft's unit is lost too, without bot stop: with its old record gone, the
+# loss pages. Two sweeps, so the escalation page has the window it needs even
+# when a sweep's own row lands after that sweep read the window.
+rm -f "$_st_home/.config/systemd/user/com.valstop.vsleft.service" "$_st_units/com.valstop.vsleft"
+st_run
+st_run
+_st_left=$(val_poll 20 0.5 st_count vsleft unit_missing)
+[ "${_st_left:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#2243 ...so a later loss of that unit is unit_missing, not silence" "$r"
+grep -qF '[FLEET-PULSE] vsleft unit_missing' "$_st_pushes" 2>/dev/null && r=yes || r=no
+harness_check "#2243   ...and the manager is pushed it" "$r"
+# one line, both bots, in either order
+_st_esc=$(grep -c 'unit_missing on 2 bots (' "$_st_pages" || true)
+_st_esc_line=$(grep 'unit_missing on 2 bots (' "$_st_pages" || true)
+[ "${_st_esc:-0}" -eq 1 ] && printf '%s' "$_st_esc_line" | grep -q 'vsleft' \
+    && printf '%s' "$_st_esc_line" | grep -q 'vslost' && r=yes || r=no
+harness_check "#2243 two unit_missing bots are ONE fleet page, sent once" "$r"
+
+if [ "$fail" -gt "$_st_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: #2243 rows, pages and pushes ---"
+    val_diag val_events "$ROOT" "$_st_fleet"
+    sed 's/^/    [page] /' "$_st_pages" 2>/dev/null || true
+    sed 's/^/    [push] /' "$_st_pushes" 2>/dev/null || true
+fi
+fi
+
 # === Scenario 2d: plugin marketplace registration — positional add, verified, loud on failure (#596) ===
 # Same REAL start-bot.sh, plugin management ON (non-empty FLEET_PLUGINS_REQUIRED)
 # with `claude` stubbed via the CLAUDE_BIN seam (the PATH rebuild inside
