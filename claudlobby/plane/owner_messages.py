@@ -25,8 +25,7 @@ from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
 from ..runtime_admission import RuntimeIdentity, mutation_admission
 from .ids import read_host_uid
-from .owner_access import AccessDenied, OwnerAccess, OwnerMessageGrant
-from .owner_view import VerifiedReader
+from .owner_access import AccessDenied, OwnerAccess, OwnerMessageGrant, VerifiedReader
 
 
 # These selectors can turn an otherwise explicit operation into a generated
@@ -109,7 +108,9 @@ class OwnerMessages:
         if not isinstance(text, str) or len(text) > 2000:
             raise ValueError("message requires at most 2000 characters")
         body = MessageBody.from_input(text)
-        with mutation_admission(self.root, identity=RuntimeIdentity.current()) as release:
+        identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native,
+                                   self.package.artifact_id)
+        with mutation_admission(self.root, identity=identity) as release:
             grant, ctx = self._bind(reader, fleet, fleet_uid)
             target = self._target(ctx, recipient_uid)
             route = resolve_message_route(target, root=self.root, fleet=ctx.context.fleet.name,
@@ -129,23 +130,26 @@ class OwnerMessages:
                 recipient_uid: str, request_id: str) -> OwnerMessageObservation:
         """Read the original request and receiver proof, with no native effect."""
         grant, ctx = self._bind(reader, fleet, fleet_uid)
-        target = self._target(ctx, recipient_uid)
+        recipient_alias = ctx.bots[self._target(ctx, recipient_uid)].alias
         retained = read_request(self.root, fleet_uid, request_id)
         if (retained.operation != "message.send" or retained.host_uid != self.host_uid
                 or retained.fleet_uid != fleet_uid or retained.caller_uid != ctx.caller.uid
                 or retained.recipient_uid != recipient_uid or retained.message_id is None
                 or retained.route is None or retained.route.caller_alias != ctx.caller.alias
-                or retained.route.recipient_alias != ctx.bots[target].alias
+                or retained.route.recipient_alias != recipient_alias
                 or retained.route.peer_fleet_uid != fleet_uid):
             raise AccessDenied("request_scope_mismatch")
         try:
-            observed = receipt(ctx, retained.message_id, destination=ctx.bots[target].alias, wait=0)
+            observed = receipt(ctx, retained.message_id, destination=recipient_alias, wait=0)
         except (MessageNotFoundError, MessageUnavailableError):
             # Preparation or a native effect can survive missing communication
             # recording. Preserve that evidence; absence never permits resend.
-            observed = ReceiptObservation(retained.message_id, str(self.root), None, None,
-                "unavailable", "unknown", 6, "unavailable",
-                "Receiver proof unavailable; retained request does not prove delivery")
+            observed = ReceiptObservation(
+                message_id=retained.message_id, root=str(self.root), sender=None,
+                destination=None, receipt_observation="unavailable",
+                integrity_verdict="unknown", exit_code=MessageUnavailableError.exit_code,
+                code=MessageUnavailableError.code,
+                reason="Receiver proof unavailable; retained request does not prove delivery")
         if (observed.sender is not None and observed.sender.uid != ctx.caller.uid
                 or observed.destination is not None and observed.destination.uid != recipient_uid):
             raise AccessDenied("request_scope_mismatch")

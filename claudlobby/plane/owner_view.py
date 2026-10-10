@@ -5,7 +5,6 @@ This seam exercises the read boundary with disposable data while ingress,
 pairing UI and browser credential transport are still being established.
 """
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -15,19 +14,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..context import resolve_paths
 from .ids import read_host_uid
-from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef
-
-
-@dataclass(frozen=True)
-class VerifiedReader:
-    """A verified principal and its session, supplied out of band by ingress.
-
-    Construction does not verify identity. No header, cookie, query string or
-    website account identifier is interpreted as authority by this module.
-    """
-
-    principal: PrincipalRef
-    token: str = field(repr=False)
+from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef, VerifiedReader
 
 
 ReaderVerifier = Callable[[Scope], Awaitable[VerifiedReader]]
@@ -66,7 +53,7 @@ class _OwnerReadGate:
     def _admit(self, reader: VerifiedReader) -> None:
         try:
             host_uid = read_host_uid(self.access.root / "state")
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             raise AccessUnavailable("installation identity is unavailable") from exc
         self.access.authorize_read(reader.token, reader.principal, host_uid=host_uid)
 
@@ -96,14 +83,24 @@ class _OwnerReadGate:
 
         pending_start = None
         started = False
+        stopped = False
+        event_stream = False
 
         async def guarded_send(message: Message) -> None:
-            nonlocal pending_start, started
+            nonlocal pending_start, started, stopped, event_stream
+            if stopped:
+                raise _ReadStopped()
             if message["type"] == "http.response.start":
-                # Hold headers until the first body is admitted. Dropping length
-                # permits safe early termination if a later chunk is refused.
+                # Hold headers until the first body is admitted. Only SSE may
+                # end normally on refusal; preserve other response lengths.
+                event_stream = any(k.lower() == b"content-type"
+                                   and v.split(b";", 1)[0].strip().lower() == b"text/event-stream"
+                                   for k, v in message.get("headers", []))
+                removed = {b"cache-control"}
+                if event_stream:
+                    removed.add(b"content-length")
                 headers = [(k, v) for k, v in message.get("headers", [])
-                           if k.lower() not in {b"cache-control", b"content-length"}]
+                           if k.lower() not in removed]
                 pending_start = {**message, "headers": headers + [(b"cache-control", b"no-store")]}
                 return
             if message["type"] != "http.response.body":
@@ -111,8 +108,12 @@ class _OwnerReadGate:
             try:
                 await run_in_threadpool(self._admit, reader)
             except (AccessDenied, AccessUnavailable) as exc:
+                stopped = True
                 if started:
-                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    if event_stream:
+                        await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    # No terminator for other responses: the server closes the
+                    # incomplete response, and clients detect a transport error.
                 else:
                     await _refusal(exc)(scope, receive, send)
                 raise _ReadStopped() from None
