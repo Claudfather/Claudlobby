@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `bot stop` waits for the stopped session to exit before proving it quiet, and `bot session` reads a cleanly stopped bot as absent (#2227)
+
+A bot unit runs with `KillMode=process`, so systemd marks it stopped as soon as its `ExecStop` (`tmux kill-server`) returns, while the session it started (the tmux server, `claude`, its MCP servers) is still exiting. `bot stop` read the unit's cgroup once, right then, so it refused and reported a stop that had worked as "bot lifecycle effect is unverified". Two stops on another fleet read that way on 2026-10-07, and each session had left the cgroup within about 2 s.
+
+- **The stop's quiet check waits, within a bound.** `svc_activation_quiet` takes an optional wait in seconds, and `assert_quiescent(..., settle_s=N)` passes it. Only "inactive, with processes still in the cgroup" is re-read, every 0.25 s, from the cgroup first seen, because systemd stops reporting the cgroup once it collects the emptied unit. Processes left after the wait still refuse, so the stop still reads unverified. Every other refusal returns at once. `bot stop` waits up to 30 s, on both of its branches. Every other caller still reads the cgroup once.
+- **A cgroup that vanishes while it is read counts as empty.** systemd removes an emptied unit's cgroup, and the kernel removes only an empty one. So the read no longer refuses at the moment the session finishes exiting.
+- **`bot session` and `fleet reconcile` read a cleanly stopped bot as absent.** tmux leaves its socket file behind after a clean exit, and `bot stop` keeps it, so the session observer read `unknown` and the bot `indeterminate`. `bot move` already handles this case, and these commands now use its kernel proof: an inactive exact unit, an empty cgroup where one is witnessed, and a socket that refuses connections. When all three hold, the session reads `absent`. Nothing is removed.
+- **Not changed:** `bot restart` (#1586), `bot start`, activation and `bot move` keep their single reading.
+- **Tests:**
+  - `tests/test_activation_supervisor.sh`: the wait, the cgroup kept as the witness, the bound, an immediate refusal and the range of the wait.
+  - `tests/test_activation_runtime.py`: the wait reaches the native check, with a call budget that covers it.
+  - `tests/test_bot_operations.py`: the stop waits, and both a session that never exits and a stop that never happened read unverified.
+  - `tests/test_fleet_operations.py`: a stale socket reads absent only by the proof.
+
 ### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
 
 `test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.
