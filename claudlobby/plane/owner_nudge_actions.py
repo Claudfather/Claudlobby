@@ -71,9 +71,6 @@ class OwnerNudgeActions:
         self._recheck(reader, context, grant, preview=True)
         return context
 
-    def _metadata(self, action, payload):
-        return metadata(action, payload, kind="nudge")
-
     def _bind(self, reader, payload, *, preview=False):
         context, grant = self._context(reader, payload["scope"]["fleet"])
         if payload["scope"] != context["scope"] or payload["target"]["recipient"] != context["recipients"][0]["id"]:
@@ -105,7 +102,7 @@ class OwnerNudgeActions:
             by=grant.actor_alias, expected_assignment_id=payload["target"]["assignment_id"])
 
     def prepare(self, reader, payload):
-        fields = self._metadata("prepare", payload)
+        fields = metadata("prepare", payload, kind="nudge")
         context, grant = self._bind(reader, payload, preview=True)
         self._selected_task(payload, grant)
         digest = self._intent_digest(payload, grant)
@@ -128,7 +125,7 @@ class OwnerNudgeActions:
 
     def operation(self, action, reader, payload):
         try:
-            fields = self._metadata(action, payload)
+            fields = metadata(action, payload, kind="nudge")
             context, grant = self._bind(reader, payload, preview=action == "send")
             if action == "send":
                 if self._intent_digest(payload, grant) != payload["semantic_sha256"]:

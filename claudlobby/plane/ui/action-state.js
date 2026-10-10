@@ -24,7 +24,6 @@ const timestamp = value => bounded(value) && /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\
 export const validTaskActionTarget = target => exact(target, ["recipient", "task_id", "assignment_id", "release_id"])
   && canonical(target.recipient, "actor") && canonical(target.task_id, "wi")
   && (target.assignment_id === null || canonical(target.assignment_id, "asg")) && release(target.release_id);
-export const validNudgeTarget = validTaskActionTarget;
 const taskActionKeys = ["version", "request_id", "kind", "scope", "target", "submitted_at", "semantic_sha256"];
 const taskKinds = new Set(["nudge", "feedback"]);
 const validTaskActionRow = row => row?.version === 2 && taskKinds.has(row.kind) && uuid(row.request_id)

@@ -312,11 +312,12 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   }
   function frozenTaskTarget(task, value, boardOnly, action) {
     if (boardOnly || task.resolved !== true || !Object.hasOwn(task, "body")
-        || !(action === "feedback" ? ["queued", "assigned", "active", "blocked", "completed", "failed", "cancelled"] : ["queued", "assigned", "active", "blocked"]).includes(task.state)
         || !Object.hasOwn(task, "current_assignment")) return null;
-    const assignment = task.current_assignment;
-    if (assignment === null ? !["queued", ...(action === "feedback" ? ["completed", "failed", "cancelled"] : [])].includes(task.state) : !["assigned", "active", "blocked"].includes(task.state) || !assignment || assignment.task_id !== task.task_id
-        || !["assigned", "active", "blocked"].includes(assignment.state) || assignment.terminal_event !== null) return null;
+    const assignment = task.current_assignment, live = ["assigned", "active", "blocked"];
+    // Only feedback may select terminal work, and only with no current assignment.
+    const unassigned = action === "feedback" ? ["queued", "completed", "failed", "cancelled"] : ["queued"];
+    if (assignment === null ? !unassigned.includes(task.state) : !live.includes(task.state) || !assignment || assignment.task_id !== task.task_id
+        || !live.includes(assignment.state) || assignment.terminal_event !== null) return null;
     const result = { recipient: leadId(value), task_id: task.task_id,
       assignment_id: assignment === null ? null : assignment.assignment_id, release_id: value.release_id };
     return validTaskActionTarget(result) ? result : null;
