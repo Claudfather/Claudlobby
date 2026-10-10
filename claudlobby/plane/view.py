@@ -1807,9 +1807,10 @@ def create_app(
     # this estate updates source under running daemons by design
     # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
     # not host services), so a process-lifetime token went stale in exactly
-    # the redeploy window it was built for (gauntlet round 2). Six stats
+    # the redeploy window it was built for (gauntlet round 2). Eight stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
+                 "work-loop.js", "action-state.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -1841,15 +1842,22 @@ def create_app(
         # page that re-pins stale modules (gauntlet round 2, probed).
         return _rewritten_index()
 
-    @app.get("/app.js")
-    def app_js():
-        js = (UI_DIR / "app.js").read_text()
+    def _busted_js(name, modules):
+        js = (UI_DIR / name).read_text()
         # bust the intra-module imports too, or the browser reuses pinned
         # dependencies from its module map.
         token = asset_token()
-        for module in ("panel-state.js", "api-client.js"):
+        for module in modules:
             js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
         return _no_store(Response(js, media_type="text/javascript"))
+
+    @app.get("/app.js")
+    def app_js():
+        return _busted_js("app.js", ("panel-state.js", "api-client.js", "work-loop.js"))
+
+    @app.get("/work-loop.js")
+    def work_loop_js():
+        return _busted_js("work-loop.js", ("panel-state.js", "action-state.js"))
 
     class _NoStoreStatic(StaticFiles):
         async def get_response(self, path, scope):  # pragma: no cover - thin
