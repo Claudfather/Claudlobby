@@ -10,7 +10,7 @@ import { ActionState } from '../claudlobby/plane/ui/action-state.js';
 const source = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8');
 const controller = source.replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
   .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
-const { mountWorkLoop } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
+const { mountWorkLoop, conversationTaskLink } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
 const transportSource = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
 const { createOwnerTransport } = await import(`data:text/javascript;base64,${Buffer.from(transportSource).toString('base64')}`);
 const context = { version: 1, room: 'web', simulation: true,
@@ -64,7 +64,7 @@ function dom() {
     showModal() { this.open = true; }
     close() { this.open = false; queueMicrotask(() => this.emit('close')); }
   }
-  for (const id of ['work-loop', 'task-detail', 'task-detail-content', 'task-detail-close', 'task-detail-refresh', 'rail-right', 'attention', 'tasks']) new Element(id);
+  for (const id of ['work-loop', 'task-detail', 'task-detail-content', 'task-detail-close', 'task-detail-refresh', 'rail-right', 'attention', 'tasks', 'channel']) new Element(id);
   return { document, Element, get: id => elements.get(id) };
 }
 function harness(options = {}) {
@@ -94,9 +94,15 @@ function harness(options = {}) {
     ui.get('rail-right').children = [button];
     ui.get('rail-right').emit('click', { target: button }); return button;
   };
+  const channelOpen = thread => {
+    const link = thread.task_link || {}, button = new ui.Element('', {taskOpen:link.task_id,taskFleet:link.fleet,
+      taskHost:link.host_uid,taskFleetUid:link.fleet_uid,taskThread:thread.key});
+    ui.get('channel').children = [button];
+    ui.get('channel').emit('click',{target:button});return button;
+  };
   const pendingClick = (id, discard = false) => ui.get('work-pending').onclick({ target: new ui.Element('', { [discard ? 'discard' : 'request']: id }) });
   const submit = () => { ui.get('work-body').value = 'Hello'; ui.get('work-body').emit('input'); return ui.get('work-form').onsubmit({ preventDefault() {} }); };
-  return { ...ui, loop, api, storage, sends, lookups, preparations, confirmations, update, open, pendingClick, submit };
+  return { ...ui, loop, api, storage, sends, lookups, preparations, confirmations, update, open, channelOpen, pendingClick, submit };
 }
 function saved(storage, task = null) {
   return new ActionState(storage).begin(context, 'message', { recipient: 'lead', task_id: task }, 'Private old message', 'saved-request');
@@ -297,6 +303,127 @@ test('receipt checks wait for their in-flight send; failed sends retain the orig
 const canonicalDetail = id => ({state:'ok',data:{task:{task_id:id,fleet:'web',title:'Full selected task',body:'<body>\nFull description',
   state:'completed',resolved:true,current_assignment:null,assignments:[],history:[{event:'completed',occurred_at:'2026-10-10T00:00:00Z',detail:'<recorded detail>'}],
   history_window:{shown:1,total:501,truncated:true},assignments_window:{shown:0,total:0,truncated:false},issues:[]}}});
+
+const linkedConversation = (fleet = 'web') => ({key:'chain:old-reply',work_item_id:'wi_'+'a'.repeat(32),
+  task_link:{task_id:'wi_'+'a'.repeat(32),fleet,fleet_uid:'fleet_'+'b'.repeat(32),host_uid:'host_'+'c'.repeat(32)},
+  messages:[{sender_short:'other/Worker',recipient_short:'web/Worker'}]});
+const linkedDetail = thread => {const value=canonicalDetail(thread.work_item_id);
+  Object.assign(value.data.task,{fleet:thread.task_link.fleet,fleet_uid:thread.task_link.fleet_uid});return value;};
+const linkedChannel = thread => ({state:'ok',data:{threads:[thread]}});
+
+test('main conversation opens an exact task outside the board without action effects and refocuses its replaced opener', async () => {
+  const thread=linkedConversation(), calls=[];let contexts=0;
+  const h=harness({interactionContext(){contexts++;return context;},jget(url){calls.push(url);return linkedDetail(thread);}});
+  h.loop.setRoom('web');await settle();h.update(linkedChannel(thread),{state:'ok',data:{tasks:[]}});
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  h.get('work-body').value='Unsent worker draft';h.get('work-body').emit('input');
+  const saved=h.storage.getItem('plane.pending-actions.v1'),old=h.channelOpen(thread);await settle();
+  assert.deepEqual(calls,['/api/tasks/'+thread.work_item_id+'?fleet=web']);assert.equal(contexts,1);
+  assert.match(h.get('task-detail-content').innerHTML,/Full selected task/);assert.match(h.get('task-detail-content').innerHTML,/&lt;body&gt;/);
+  assert.equal(h.get('work-body').value,'Unsent worker draft');assert.equal(h.get('work-recipient').value,'worker');
+  assert.equal(h.storage.getItem('plane.pending-actions.v1'),saved);assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  old.isConnected=false;
+  const wrong=new h.Element('',{...old.dataset,taskHost:'host_'+'d'.repeat(32)}),replacement=new h.Element('',{...old.dataset});
+  h.get('channel').children=[wrong,replacement];h.loop.updateChannel(linkedChannel(thread));
+  h.get('task-detail-close').onclick();await settle();
+  assert.equal(h.document.activeElement,replacement);assert.equal(h.get('task-detail-content').innerHTML,'');
+  assert.equal(h.get('work-body').value,'Unsent worker draft');assert.equal(h.get('work-recipient').value,'worker');assert.equal(calls.length,1);
+});
+
+test('cross-team conversation opens only its recorded owner without switching room or borrowing its action context', async () => {
+  const thread=linkedConversation('other'),calls=[];let contexts=0;
+  const h=harness({interactionContext(){contexts++;return context;},jget(url){calls.push(url);return linkedDetail(thread);}});
+  h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));h.channelOpen(thread);await settle();
+  assert.deepEqual(calls,['/api/tasks/'+thread.work_item_id+'?fleet=other']);assert.equal(contexts,1);
+  assert.match(h.get('task-detail-content').innerHTML,/other · TASK/);
+  assert.ok(h.get('task-detail-content').querySelectorAll('[data-kind]').every(button=>button.disabled));
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  assert.equal(h.get('work-recipient').value,'lead');assert.equal(h.get('work-send').disabled,false);
+  h.get('task-detail-close').onclick();await settle();assert.equal(h.get('work-recipient').value,'lead');
+});
+
+test('main conversation refuses missing, mismatched, superseded and paused link metadata before any detail read', async () => {
+  for(const mode of ['missing','id','host','fleet','superseded','source','session']) {
+    const thread=linkedConversation(),calls=[],h=harness({jget(url){calls.push(url);return linkedDetail(thread);}});
+    h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));
+    const stale=structuredClone(thread);
+    if(mode==='missing')delete thread.task_link;
+    if(mode==='id')thread.task_link.task_id='wi_'+'d'.repeat(32);
+    if(mode==='host')thread.task_link.host_uid='unverified host';
+    if(mode==='fleet')thread.task_link.fleet='all';
+    if(mode==='superseded')thread.task_link.fleet_uid='fleet_'+'d'.repeat(32);
+    if(mode==='source')h.loop.updateChannel({state:'unreadable'});
+    if(mode==='session')h.loop.pause();
+    h.channelOpen(stale);await settle();assert.deepEqual(calls,[],mode);assert.equal(h.get('task-detail').open,false,mode);
+  }
+});
+
+test('action invalidation preserves readable linked tasks while session pause refuses them', async () => {
+  const thread=linkedConversation(), calls=[],h=harness({jget(url){calls.push(url);return linkedDetail(thread);}});
+  h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));
+  h.get('work-body').value='Keep this ordinary message draft';h.get('work-body').emit('input');
+  h.loop.invalidate();h.channelOpen(thread);await settle();
+  assert.equal(calls.length,1);assert.match(h.get('task-detail-content').innerHTML,/Full selected task/);
+  assert.equal(h.get('work-send').disabled,true);
+  h.get('task-detail-close').onclick();h.loop.pause();h.channelOpen(thread);await settle();
+  assert.equal(calls.length,1);assert.equal(h.get('task-detail').open,false);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+
+test('channel loss preserves settled detail refusal and no-team remediation', async () => {
+  for (const mode of ['denied','not_found','no-team','network']) {
+    const h=harness({protected:true,jget(){if(mode==='network')throw Error('offline');
+      return {state:mode,remediation:'Specific task refusal: '+mode};}});
+    h.loop.setRoom('web');await settle();h.update();h.open('task-a',mode==='no-team'?'':'web');await settle();
+    const before=h.get('task-detail-content').innerHTML;
+    assert.match(before,mode==='no-team'?/no recorded team/:mode==='network'?/disconnected/:new RegExp('Specific task refusal: '+mode));
+    h.loop.updateChannel({state:'unreadable',remediation:'Channel source loss'});
+    assert.equal(h.get('task-detail-content').innerHTML,before,mode);
+    assert.equal(h.get('task-detail-refresh').hidden,false);
+  }
+});
+
+test('qualified task routes support raw owner UIDs or the same source qualifier without stripping the task ID', async () => {
+  for (const qualifiedOwners of [[],['fleet_uid'],['host_uid','fleet_uid']]) {
+    const thread=linkedConversation(), calls=[];
+    for(const field of ['task_id',...qualifiedOwners])thread.task_link[field]='workshop::'+thread.task_link[field];
+    thread.work_item_id=thread.task_link.task_id;
+    const h=harness({jget(url){calls.push(url);const parsed=new URL(url,'https://example.invalid');
+      assert.equal(decodeURIComponent(parsed.pathname.slice('/api/tasks/'.length)),thread.work_item_id);
+      assert.equal(parsed.searchParams.get('fleet'),'web');return linkedDetail(thread);}});
+    h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));h.channelOpen(thread);await settle();
+    assert.deepEqual(calls,['/api/tasks/workshop%3A%3Awi_'+'a'.repeat(32)+'?fleet=web']);
+    assert.match(h.get('task-detail-content').innerHTML,/Full selected task|workshop::wi_/);
+    assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  }
+});
+
+test('a linked conversation never substitutes a board snapshot for unavailable exact detail', async () => {
+  for (const response of [null, {state:'unavailable'}, {state:'ok',data:{task:null}}]) {
+    const thread=linkedConversation(), h=harness({jget(){return response;}});
+    h.loop.setRoom('web');await settle();
+    h.update(linkedChannel(thread),{state:'ok',data:{tasks:[{task_id:thread.work_item_id,fleet:'web',title:'Stale board title',state:'queued'}]}});
+    h.channelOpen(thread);await settle();
+    assert.doesNotMatch(h.get('task-detail-content').innerHTML,/Stale board title|Limited detail/);
+    assert.match(h.get('task-detail-content').innerHTML,/Task details are unavailable/);
+    assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  }
+});
+
+test('held channel task detail cannot survive source loss, session pause, room change or mismatched owner response', async () => {
+  for(const loss of ['source','session','room','fleetUid','task','fleet']) {
+    const thread=linkedConversation(),reply=deferred(),h=harness({protected:true,jget(){return reply.promise;}});
+    h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));h.channelOpen(thread);await settle();
+    const value=linkedDetail(thread);
+    if(loss==='source')h.loop.updateChannel({state:'unreadable',remediation:'Source access lost'});
+    else if(loss==='session')h.loop.pause();else if(loss==='room')h.loop.setRoom('other');
+    else if(loss==='fleetUid')value.data.task.fleet_uid='fleet_'+'d'.repeat(32);
+    else if(loss==='task')value.data.task.task_id='wi_'+'d'.repeat(32);else value.data.task.fleet='other';
+    reply.resolve(value);await settle();
+    assert.doesNotMatch(h.get('task-detail-content').innerHTML,/Full selected task|Full description/,loss);
+    assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  }
+});
 
 test('selected canonical detail loads independently of capped board and escapes full body/history', async () => {
   const calls=[];
@@ -1014,7 +1141,7 @@ function markupElement(ui) {
 }
 function conversationRenderer(thread, ui) {
   if (!ui.threadArticle) {
-    const bindings = { document: { createElement: () => markupElement(ui) }, currentFleet: 'web',
+    const bindings = { document: { createElement: () => markupElement(ui) }, currentFleet: 'web', conversationTaskLink,
       esc: value => String(value ?? ''), ago: () => '', clip: text => text, latestTx: () => null, nudgeReason: () => null,
       deliveryLine: () => '', bodyBlock: message => `<div class="body">${message.body}</div>`,
       CLASS_TAGS: new Set(), THREAD_TERMINAL_STATUS: {} };
