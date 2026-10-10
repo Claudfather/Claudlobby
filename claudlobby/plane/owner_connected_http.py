@@ -303,20 +303,26 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                         finally:
                             ready.cancel()
                             await asyncio.gather(ready, return_exceptions=True)
-                        await job  # a healthy admitted stream has no idle deadline
+                        # Observe child completion without forwarding cancellation
+                        # from the request into it. A healthy stream has no idle deadline.
+                        await asyncio.wait({job})
                     else:
-                        await asyncio.wait_for(job, READ_SECONDS)
+                        done, _ = await asyncio.wait({job}, timeout=READ_SECONDS)
+                        if not done:
+                            raise asyncio.TimeoutError
+                    if job.cancelled():
+                        if not self._stopping:
+                            raise asyncio.CancelledError
+                        if not started.is_set():
+                            await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
+                    else:
+                        job.result()
                 except asyncio.TimeoutError:
                     job.cancel()
                     await asyncio.gather(job, return_exceptions=True)
                     if not started.is_set():
                         await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
                     # Started finite responses remain incomplete, never replaced.
-                except asyncio.CancelledError:
-                    # Lifespan cancellation of our child must not escape into
-                    # an otherwise live request. Caller cancellation still does.
-                    if not (self._stopping and job.cancelled()):
-                        raise
                 finally:
                     if not job.done():
                         job.cancel()

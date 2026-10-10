@@ -415,26 +415,32 @@ def test_missing_bearer_refuses_before_native_lookup_and_head_refusal_has_no_asg
     assert not calls
 
 
-def test_shutdown_cancelled_owned_stream_does_not_escape_request(connected_http):
+@pytest.mark.parametrize("headers_started", [False, True])
+def test_shutdown_cancelled_owned_stream_does_not_escape_request(connected_http, headers_started):
     consumer = connected_http[0].connected_reads
     async def run():
         entered = asyncio.Event()
         async def held(scope, receive, send):
             entered.set()
-            await send({"type": "http.response.start", "status": 200, "headers": []})
+            if headers_started:
+                await send({"type": "http.response.start", "status": 200, "headers": []})
             await asyncio.Event().wait()
         consumer.read_app = held
         scope = {"type": "http", "method": "GET", "path": PREFIX + "read/stream", "query_string": b"",
             "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()), (b"authorization", b"Bearer " + b"A"*43)]}
         async def receive():
             await asyncio.Event().wait()
+        output = []
         async def send(message):
-            pass
+            output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
         await entered.wait()
         await consumer.shutdown()
         await request
         assert not consumer._readers
+        assert output[0]["status"] == (200 if headers_started else 503)
+        if not headers_started:
+            assert output[-1]["type"] == "http.response.body"
     asyncio.run(run())
 
 
@@ -450,15 +456,19 @@ def test_connected_selected_route_allowlist_matches_canonical_query_contract(con
     assert {p.name for p in detail.dependant.query_params} == {"fleet"}
 
 
-def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_http):
+@pytest.mark.parametrize("stopping", [False, True])
+@pytest.mark.parametrize("suffix", ["tasks", "stream"])
+def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_http, stopping, suffix):
     consumer = connected_http[0].connected_reads
     async def run():
         entered = asyncio.Event()
         async def held(scope, receive, send):
+            if suffix == "stream":
+                await send({"type": "http.response.start", "status": 200, "headers": []})
             entered.set()
             await asyncio.Event().wait()
         consumer.read_app = held
-        scope = {"type": "http", "method": "GET", "path": PREFIX + "read/tasks", "query_string": b"",
+        scope = {"type": "http", "method": "GET", "path": PREFIX + "read/" + suffix, "query_string": b"",
             "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()), (b"authorization", b"Bearer " + b"A"*43)]}
         async def receive():
             await asyncio.Event().wait()
@@ -466,10 +476,23 @@ def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_
             pass
         request = asyncio.create_task(consumer(scope, receive, send))
         await entered.wait()
+        release = asyncio.Event()
+        if stopping:
+            # Real shutdown is already draining a started lifecycle worker when
+            # the caller independently cancels this read request.
+            worker = asyncio.create_task(release.wait())
+            consumer._workers.add(worker)
+            shutdown = asyncio.create_task(consumer.shutdown())
+            await asyncio.sleep(0)
+            assert consumer._stopping and not shutdown.done()
         request.cancel()
         with pytest.raises(asyncio.CancelledError):
             await request
         assert not consumer._readers
+        if stopping:
+            release.set()
+            await shutdown
+            consumer._workers.discard(worker)
     asyncio.run(run())
 
 
