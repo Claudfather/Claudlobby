@@ -1,0 +1,117 @@
+name: release bundle
+
+# Builds what `claudlobby host setup` takes, for one commit, on a hosted
+# runner: the wheel, its offline wheelhouse and the hash lock that lists
+# exactly that wheelhouse. The commands are test.yml's offline assembly
+# rehearsal, and the bundle is uploaded only when the rehearsal passed.
+#
+# The wheel is pure Python. The wheelhouse holds platform wheels, so it is for
+# Linux aarch64 and CPython 3.11 only. pip chose each wheel for the runner,
+# whose C library can be newer than a host's: before assembling from a bundle,
+# compare its lock with the host's selected release, or read the platform tags
+# of its wheelhouse against built-on.txt.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The commit to build (a full SHA, a tag or a branch)
+        required: true
+        type: string
+      extras:
+        description: Extras whose dependencies join the wheelhouse, comma-separated (plane-ui for a host that runs the plane view)
+        required: false
+        default: ''
+        type: string
+      constraints:
+        description: Dependency versions to hold, as space-separated name==version (a selected release's dependency.lock without its hashes)
+        required: false
+        default: ''
+        type: string
+  # A dispatch reaches only the copy of this file on the default branch, so a
+  # pull request that changes it runs it once, on its own merge commit.
+  pull_request:
+    paths: ['.github/workflows/release-bundle.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: bundle (linux-aarch64, py3.11)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          # The build runs the chosen commit's own setup.py.
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build the wheel and its wheelhouse, then rehearse offline assembly
+        id: bundle
+        env:
+          EXTRAS: ${{ inputs.extras }}
+          CONSTRAINTS: ${{ inputs.constraints }}
+        run: |
+          set -euo pipefail
+          case "$EXTRAS" in
+            *[!A-Za-z0-9_,-]*) echo "extras: only letters, digits, '_', '-' and ','" >&2; exit 2 ;;
+          esac
+          work="$RUNNER_TEMP/release-bundle-work"
+          bundle="$RUNNER_TEMP/release-bundle"
+          mkdir -p "$work/dist" "$work/wheelhouse" "$bundle"
+          : > "$work/constraints.txt"
+          set -f
+          for pin in $CONSTRAINTS; do
+            [[ "$pin" =~ ^[A-Za-z0-9._-]+==[A-Za-z0-9.!+_-]+$ ]] ||
+              { echo "constraints: '$pin' is not name==version" >&2; exit 2; }
+            printf '%s\n' "$pin" >> "$work/constraints.txt"
+          done
+          set +f
+
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          .venv/bin/python -m build --wheel --no-isolation --outdir "$work/dist"
+          set -- "$work/dist/"*.whl
+          [ "$#" -eq 1 ] || { echo "expected exactly one wheel, found $#" >&2; exit 1; }
+          wheel="$1"
+          # Network access only obtains the inputs. The rehearsal assembles
+          # from them with --no-index and the hash lock it writes.
+          .venv/bin/python -m pip download --only-binary=:all: \
+            --constraint "$work/constraints.txt" \
+            --dest "$work/wheelhouse" "$wheel${EXTRAS:+[$EXTRAS]}"
+          .venv/bin/python tests/release_assembly_smoke.py \
+            --wheel "$wheel" --wheelhouse "$work/wheelhouse" \
+            --disposable-root "$work/rehearsal"
+
+          # The bundle is what the rehearsal assembled from, unchanged.
+          cp "$wheel" "$bundle/"
+          cp -r "$work/wheelhouse" "$bundle/wheelhouse"
+          cp "$work/rehearsal/dependency.lock" "$bundle/dependency.lock"
+          cp "$work/rehearsal/result.json" "$bundle/rehearsal.json"
+          .venv/bin/python -c 'import platform, sys, sysconfig; print("python", sys.version.split()[0]); print("platform", sysconfig.get_platform()); print("libc", *platform.libc_ver())' \
+            > "$bundle/built-on.txt"
+          (cd "$bundle" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
+            > "$work/SHA256SUMS"
+          mv "$work/SHA256SUMS" "$bundle/SHA256SUMS"
+
+          revision="$(git rev-parse HEAD)"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          # The checksums are printed here too, so that a download can be
+          # compared with a copy the artifact does not carry.
+          {
+            echo "### Release bundle for \`$revision\`"
+            echo
+            echo '```'
+            cat "$bundle/built-on.txt"
+            echo
+            cat "$bundle/SHA256SUMS"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claudlobby-release-${{ steps.bundle.outputs.revision }}-linux-aarch64-py311
+          path: ${{ runner.temp }}/release-bundle
+          if-no-files-found: error
