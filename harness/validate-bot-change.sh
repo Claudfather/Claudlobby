@@ -1904,7 +1904,7 @@ fi
 # === Scenario 2c': a stopped bot is silent; a lost unit and a dead one page (#2243) ===
 # The REAL sweep on a fleet of its own. svc_is_registered reads the unit file
 # under $HOME, so the sweep runs with this scenario's HOME and reads or writes
-# no unit outside this run; a systemctl stub answers from per-unit state files;
+# no unit outside this run; a `systemctl` stub answers from per-unit state files;
 # the pushes land in this scenario's own manager pane, whose --log records each
 # one submitted, and tg-post.sh records the fleet page. Four bots:
 #   vsbench no unit file, a stop record (what bot stop leaves)  -> silent
