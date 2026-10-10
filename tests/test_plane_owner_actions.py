@@ -183,9 +183,9 @@ def test_response_body_admission_hides_success_after_revocation(browser_actions,
     app, client, adapter, _, owner, ctx, _, _ = browser_actions
     request = metadata(context(client), ctx.bots["worker"].uid)
     original = app.actions.admit_response
-    def revoke(reader, result):
+    def revoke(action, reader, result):
         adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
-        return original(reader, result)
+        return original(action, reader, result)
     monkeypatch.setattr(app.actions, "admit_response", revoke)
     response = post(client, "receipt", request)
     assert response.status_code == 403 and response.json() == {"state": "denied"}
@@ -234,6 +234,12 @@ def test_action_worker_saturation_cancellation_and_capacity_recovery(browser_act
             overflow = await request()
             assert overflow[0]["status"] == 503
             assert b'"state":"unavailable"' in overflow[-1]["body"]
+            overflow_send = await _raw_http(app, "/api/owner/actions/send", headers=[
+                (b"cookie", f"{COOKIE_NAME}={reader.token}".encode())], chunks=[{
+                    "type": "http.request", "body": b"{}", "more_body": False}])
+            assert overflow_send[0]["status"] == 503
+            assert json.loads(overflow_send[-1]["body"]) == {"state": "unavailable", "effect": "not_started"}
+            assert len(entered) == 8
             requests[0].cancel()
             with pytest.raises(asyncio.CancelledError): await requests[0]
             assert app._action_workers == len(app._inflight) == 8
@@ -270,3 +276,69 @@ def test_historical_room_returns_generic_unavailable(browser_actions):
     response = post(client, "context", {"room": "historical-room"})
     assert response.status_code == 503 and response.json() == {"state": "unavailable"}
     assert app._action_workers == 0
+
+
+@pytest.mark.parametrize("refusal", ["grant", "body", "scope"])
+def test_pre_adapter_refusal_only_marks_this_submission(browser_actions, monkeypatch, refusal):
+    _, client, adapter, _, owner, ctx, _, _ = browser_actions
+    calls = native_receiver(monkeypatch)
+    request = {**metadata(context(client), ctx.bots["worker"].uid), "body": "Kept draft"}
+    if refusal == "grant":
+        adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    elif refusal == "body": request["body"] = " "
+    else: request["scope"] = {**request["scope"], "viewer": "stale-viewer"}
+    response = post(client, "send", request)
+    assert response.status_code == 403
+    assert response.json() == {"state": "denied", "effect": "not_started"}
+    assert calls == []
+    # Receipt refusal cannot resolve an earlier request, even with no record.
+    request.pop("body")
+    assert "effect" not in post(client, "receipt", request).json()
+
+
+@pytest.mark.parametrize("where", ["context", "response"])
+def test_unexpected_action_context_error_is_generic_unavailable(browser_actions, monkeypatch, where):
+    app, client, *_ = browser_actions
+    def malformed(*args):
+        raise KeyError("private malformed activation record")
+    monkeypatch.setattr(app.actions, "_context" if where == "context" else "admit_response", malformed)
+    response = post(client, "context", {"room": "example"})
+    assert response.status_code == 503
+    assert response.json() == {"state": "unavailable"}
+    assert app._action_workers == len(app._inflight) == 0
+
+
+@pytest.mark.parametrize("where", ["adapter", "held_response"])
+def test_post_adapter_failure_never_marks_not_started(browser_actions, monkeypatch, where):
+    app, client, adapter, _, owner, ctx, _, _ = browser_actions
+    calls = native_receiver(monkeypatch)
+    request = {**metadata(context(client), ctx.bots["worker"].uid), "body": "Admitted effect"}
+    if where == "adapter":
+        original = owner_actions.OwnerMessages.send
+        def revoke(self, *args, **kwargs):
+            result = original(self, *args, **kwargs)
+            adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+            from claudlobby.plane.owner_access import AccessDenied
+            raise AccessDenied("private post effect refusal")
+        monkeypatch.setattr(owner_actions.OwnerMessages, "send", revoke)
+    else:
+        def broken(*args): raise KeyError("private response error")
+        monkeypatch.setattr(app.actions, "admit_response", broken)
+    response = post(client, "send", request)
+    assert response.status_code == (403 if where == "adapter" else 503)
+    assert "effect" not in response.json() and "private" not in response.text
+    assert len(calls) == 1
+
+
+def test_reused_delivered_uuid_refusal_does_not_claim_original_rejected(browser_actions, monkeypatch):
+    _, client, adapter, _, owner, ctx, _, _ = browser_actions
+    calls = native_receiver(monkeypatch)
+    request = {**metadata(context(client), ctx.bots["worker"].uid), "body": "Original bytes"}
+    assert post(client, "send", request).json()["status"] == "delivered"
+    adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    refused = post(client, "send", request)
+    assert refused.json() == {"state": "denied", "effect": "not_started"}
+    assert "status" not in refused.json()  # not an original-UUID rejected receipt
+    request.pop("body")
+    assert "effect" not in post(client, "receipt", request).json()
+    assert len(calls) == 1

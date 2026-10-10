@@ -40,7 +40,7 @@ function harness(replies = [ready], hooks = {}) {
   const node = id => document.getElementById(`owner-session-${id}`);
   const element = document.getElementById('owner-session');
   const controls = api.mountSessionControls({ document, element,
-    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); } });
+    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); }, onActionPause() { hooks.onActionPause?.(api); } });
   return { api, calls, natives, replacements, timers, timeouts, replies, node, element, controls,
     get resumed() { return resumed; }, get paused() { return paused; },
     async click(id) { node(id).click(); await flush(); },
@@ -463,10 +463,60 @@ test(`app renewal restores worker selection and draft only with fresh matching a
     if (renewal === 'removed recipient') access = { ...access, recipients: access.recipients.filter(r => r.id !== 'worker-bot') };
     if (renewal === 'no message capability') access = { ...access, actions: [] };
     paused = false; runInNewContext(`${sync}\nsyncWorkRoom()`, bindings); await flush();
-    assert.deepEqual(rooms, ['synthetic', 'all', 'synthetic']);
+    assert.deepEqual(rooms, ['synthetic', 'synthetic']);
+    assert.doesNotMatch(document.getElementById('work-notice').textContent, /host has not enabled/);
     assert.equal(recipient.value, renewal === 'same scope' ? 'worker-bot' : 'bot-example');
     assert.equal(body.value, renewal === 'same scope' ? 'Keep this unsent draft' : '');
     assert.equal(document.getElementById('work-send').disabled, renewal === 'no message capability');
     assert.equal(storage.getItem('plane.pending-actions.v1'), before);
   } finally { await flush(); globalThis.document = oldDocument; globalThis.sessionStorage = oldStorage; }
+});
+
+
+test('explicit submission refusal preserves read session and invalidates action capability without recreating grants', async () => {
+  let invalidated = 0;
+  const h = harness([ready, {status:403,data:{state:'denied',effect:'not_started'}}, ready],
+    {onActionPause(){ invalidated++; }});
+  await h.controls.ready;
+  await assert.rejects(h.api.sendAction(action), e => e.effect === 'not_started');
+  assert.equal(invalidated, 1);
+  assert.equal(h.paused, 1); assert.equal(h.resumed, 1);
+  assert.deepEqual(h.calls.map(c=>c.url), ['/api/owner/status','/api/owner/actions/send','/api/owner/status']);
+  assert.deepEqual(h.replacements, []);
+});
+
+test('not_started is per send invocation only; receipt refusal preserves original uncertainty', async () => {
+  const h = harness([ready, {status:503,data:{state:'unavailable',effect:'not_started'}},
+    {status:403,data:{state:'denied',effect:'not_started'}}, ready]);
+  await h.controls.ready;
+  await assert.rejects(h.api.sendAction(action), e => e.effect === 'not_started');
+  await assert.rejects(h.api.actionReceipt(action), e => !e.effect && /outcome unknown/.test(e.message));
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length, 1);
+});
+
+
+for (const lifecycle of ['status','renew','logout']) test(`aborted403 ${lifecycle} body is unavailable and never replayed`, async () => {
+  const body = deferred(), started = deferred(), timers = new Set(), calls = [], replacements = [];
+  const nodes = new Map();
+  const doc = {getElementById(id){if(!nodes.has(id)) nodes.set(id,{disabled:false,addEventListener(n,f){this[n]=f;}});return nodes.get(id);}};
+  const api = createOwnerTransport({location:{replace(p){replacements.push(p);}},
+    setTimeout(f){timers.add(f);return f;},clearTimeout(f){timers.delete(f);},
+    async fetch(url){
+      calls.push(url);
+      if(lifecycle !== 'status' && calls.length === 1) return {status:200,json:async()=>ready.data};
+      return {status:403,json:async()=>{started.resolve();return body.promise;}};
+    }});
+  const controls = api.mountSessionControls({document:doc,element:{}});
+  if(lifecycle !== 'status') {
+    await controls.ready;
+    doc.getElementById(`owner-session-${lifecycle}`).click();
+  }
+  await started.promise;
+  for(const timeout of [...timers]) timeout();
+  body.resolve({state:'denied'});
+  await controls.ready; await flush();
+  assert.match(doc.getElementById('owner-session-status').textContent,/Session state is unknown/);
+  assert.deepEqual(replacements,[]);
+  assert.equal(calls.filter(c=>c.endsWith('/'+lifecycle)).length,1);
+  api.dispose?.();
 });

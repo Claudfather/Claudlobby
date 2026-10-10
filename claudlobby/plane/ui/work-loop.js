@@ -83,6 +83,20 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     if (dialog.open) dialog.close();
     selected = null;
   }
+  function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.") {
+    saveDraft();
+    if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
+      messageRecipients.set(scopeKey(context.scope), target.recipient);
+    ++epoch;
+    context = null; target = null;
+    closeDetail();
+    $("work-body").value = "";
+    notice = message;
+    paint();
+  }
+  function pause() {
+    invalidate("Session access is paused. Actions are disabled until your session is checked again; your draft is kept.");
+  }
   function setRoom(fleet) {
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
@@ -105,7 +119,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
         target = { recipient: value.recipients.some(r => r.id === remembered) ? remembered : leadId(value), task_id: null };
         kind = "message";
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
-      } else notice = "This host has not enabled an authorized browser action service.";
+      } else notice = room === "all" ? "Choose a team to see its available actions."
+        : "Browser action access is unavailable for this team. Task and activity records remain readable.";
       if (selected) $("task-detail-refresh").hidden = false;
       paint({ restoreDraft: true });
     }).catch(() => {
@@ -214,6 +229,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       let requestId;
       try { requestId = globalThis.crypto.randomUUID(); }
       catch { throw new Error("A safe request ID is unavailable. Nothing was sent."); }
+      if (state.pending.some(p => p.request_id === requestId) || state.discarded.has(requestId))
+        throw new Error("This request ID was already used. Nothing was sent; check its original receipt.");
       request = state.begin(context, kind, target, $("work-body").value, requestId);
       sending = true; inFlightRequest = request.request_id; notice = "Sending…"; paint();
       const receipt = await api.sendAction(request);
@@ -224,7 +241,18 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       }
       refresh();
     } catch (error) {
-      if (token === epoch) notice = request
+      if (request && error.effect === "not_started") {
+        // Only this fresh, owned send row is resolved. Receipt lookups never
+        // clear older IDs merely because a new invocation did not start.
+        try {
+          state.accept(request, { ...state.metadata(request), version: 1, status: "rejected" });
+          if (room === originContext.room)
+            notice = "This submission was refused before delivery; your draft is kept.";
+        } catch {
+          if (room === originContext.room)
+            notice = "This submission was refused before delivery, but its saved row could not be updated. Your draft and original request ID are kept.";
+        }
+      } else if (token === epoch) notice = request
         ? `${requestLabel(request)}: Outcome unknown. Your draft is kept. Check the original receipt before sending again.`
         : error.message;
     } finally {
@@ -262,5 +290,5 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     } finally { if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom, update };
+  return { setRoom, update, invalidate, pause };
 }

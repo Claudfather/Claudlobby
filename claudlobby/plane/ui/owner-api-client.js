@@ -132,25 +132,38 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       return null;
     }
   }
+  const unknown = () => new Error('Action outcome unknown. Check the original receipt.');
   async function ownerAction(path, body, timeout = 8000) {
     // A request may have reached delivery even when its reply or session is lost.
     // Throw on uncertainty so ActionState keeps the original saved request ID.
-    if (disposed || mode !== 'ready') throw new Error('Action outcome unknown. Check the original receipt.');
+    if (disposed || mode !== 'ready') throw unknown();
     const gen = generation;
     let result;
     try {
       result = await request(`/api/owner/actions/${path}`, true, body, timeout);
     } catch {
-      throw new Error('Action outcome unknown. Check the original receipt.');
+      throw unknown();
     }
-    if (disposed || gen !== generation || mode !== 'ready') throw new Error('Action outcome unknown. Check the original receipt.');
+    if (disposed || gen !== generation || mode !== 'ready') throw unknown();
     if (result.status === 403) {
       // A missing/revoked message grant is independent of read access. Probe
       // the current cookie without pause/resume, which would reload context.
+      mount?.onActionPause();
       await checkActionSession(gen);
-      throw new Error('Action outcome unknown. Check the original receipt.');
+      if (disposed || gen !== generation || mode !== 'ready') throw unknown();
+      if (path === 'send' && result.data?.effect === 'not_started') {
+        const refusal = new Error('This submission was refused before delivery; your draft is kept.');
+        refusal.effect = 'not_started';
+        throw refusal;
+      }
+      throw unknown();
     }
-    if (result.status !== 200) throw new Error('Action outcome unknown. Check the original receipt.');
+    if (path === 'send' && result.status === 503 && result.data?.effect === 'not_started') {
+      const refusal = new Error('This submission was refused before delivery; your draft is kept.');
+      refusal.effect = 'not_started';
+      throw refusal;
+    }
+    if (result.status !== 200) throw unknown();
     recoveryUsed = false;
     return result.data;
   }
@@ -250,11 +263,11 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     stream.open();
     return stream;
   }
-  function mountSessionControls({ document, element, onPause = () => {}, onResume = () => {} }) {
+  function mountSessionControls({ document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {} }) {
     mount = { status: document.getElementById('owner-session-status'),
       renew: document.getElementById('owner-session-renew'),
       logout: document.getElementById('owner-session-logout'),
-      check: document.getElementById('owner-session-check'), onPause, onResume };
+      check: document.getElementById('owner-session-check'), onPause, onResume, onActionPause };
     element.hidden = false;
     mount.renew.addEventListener('click', () => { void mutate('renew'); });
     mount.logout.addEventListener('click', () => { void mutate('logout'); });

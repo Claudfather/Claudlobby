@@ -844,3 +844,21 @@ including missing retained UUID history and exceptions after a possible effect,
 is `unknown`, never safe rejection or permission to resend. Responses contain
 metadata only and use `Cache-Control: no-store, private`. Direct-host HTTPS,
 trusted ingress and native receiver validation remain separate rollout gates.
+
+
+A send refusal may include `effect: "not_started"` only when that HTTP submission
+was stopped before any message adapter invocation. This is not a `rejected`
+receipt for the UUID: an earlier use of the UUID may already have had an effect,
+and missing retained history never proves otherwise. The controller can resolve
+only the fresh pending row created by that exact in-flight send, keeping its
+draft. Receipt checks and reused local IDs cannot use this marker to clear old
+uncertainty. Adapter-entry failures and held-response admission refusals remain
+unknown, even when their HTTP status is 403 or 503. No path automatically resends.
+
+An action 403 invalidates the composer capability and probes the read session
+once without pausing a valid board/SSE session or recreating a grant. Session
+pauses keep the selected team and saved draft and make no action-context request;
+a subsequent authorized resume refreshes the context. Unexpected action-context
+or response-admission failures return generic unavailable responses without
+exception text. Cancellation remains distinct and owned workers retain capacity
+until they finish.

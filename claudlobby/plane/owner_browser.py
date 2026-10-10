@@ -23,7 +23,7 @@ from starlette.types import Receive, Scope, Send
 
 from ..activation_state import ActivationError
 from ..operation_context import OperationContextError, OperationContextUnavailableError
-from .owner_actions import OwnerActions
+from .owner_actions import ActionNotStarted, OwnerActions
 from .ids import read_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, PAIRING_SECONDS, SESSION_SECONDS
 from .owner_view import VerifiedReader, create_owner_app
@@ -31,6 +31,7 @@ from .owner_view import VerifiedReader, create_owner_app
 COOKIE_NAME = "__Host-claudlobby-owner"
 _COOKIE_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 _MAX_BODY = 1024
+_MAX_ACTION_BODY = 32768
 _BODY_SECONDS = 5
 _MAX_ACTION_WORKERS = 8
 _PREFIX = "/api/owner/"
@@ -129,18 +130,22 @@ def _response(data: dict, status: int = 200, *, clear_cookie: bool = False) -> J
     return response
 
 
-async def _empty_json(receive: Receive) -> None:
+async def _read_body(receive: Receive, limit: int) -> bytearray:
     body = bytearray()
     while True:
         message = await receive()
         if message["type"] != "http.request":
             raise AccessDenied("invalid_browser_body")
         chunk = message.get("body", b"")
-        if len(body) + len(chunk) > _MAX_BODY:
+        if len(body) + len(chunk) > limit:
             raise AccessDenied("invalid_browser_body")
         body.extend(chunk)
         if not message.get("more_body", False):
-            break
+            return body
+
+
+async def _empty_json(receive: Receive) -> None:
+    body = await _read_body(receive, _MAX_BODY)
     try:
         if json.loads(body) != {}:
             raise ValueError
@@ -149,17 +154,7 @@ async def _empty_json(receive: Receive) -> None:
 
 
 async def _action_json(receive: Receive) -> dict:
-    body = bytearray()
-    while True:
-        message = await receive()
-        if message["type"] != "http.request":
-            raise AccessDenied("invalid_browser_body")
-        chunk = message.get("body", b"")
-        if len(body) + len(chunk) > 32768:
-            raise AccessDenied("invalid_browser_body")
-        body.extend(chunk)
-        if not message.get("more_body", False):
-            break
+    body = await _read_body(receive, _MAX_ACTION_BODY)
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -303,6 +298,7 @@ class _OwnerBrowser:
                 await self.read_app(scope, receive, send)
             return
         action_result = None
+        action_worker_started = False
         try:
             if scope["method"] != _METHODS[action]:
                 response = _response({"state": "denied"}, 405)
@@ -348,6 +344,7 @@ class _OwnerBrowser:
                         work.close()
                         self._action_workers -= 1
                         raise
+                    action_worker_started = True
                     self._inflight.add(task)
                     def finished(done):
                         self._inflight.discard(done)
@@ -362,6 +359,10 @@ class _OwnerBrowser:
                     response = await run_in_threadpool(self._status, principal, token)
                 else:
                     response = await run_in_threadpool(self._mutate, action, principal, token)
+        except ActionNotStarted as exc:
+            unavailable = isinstance(exc.refusal, (AccessUnavailable, OperationContextUnavailableError))
+            response = _response({"state": "unavailable" if unavailable else "denied",
+                                  "effect": "not_started"}, 503 if unavailable else 403)
         except AccessDenied as exc:
             # A delayed denial must not erase a newer cookie from a concurrent
             # successful sign-in or renewal. Only explicit logout deletes it.
@@ -373,7 +374,17 @@ class _OwnerBrowser:
             response = _response({"state": "denied"}, 403)
         except (AccessUnavailable, ActivationError, OSError, ValueError, sqlite3.Error, asyncio.TimeoutError):
             response = _response({"state": "unavailable"}, 503)
+        except Exception:
+            if not action.startswith("actions/"):
+                raise
+            response = _response({"state": "unavailable"}, 503)
         if action_result is None:
+            if action == "actions/send" and not action_worker_started:
+                # This invocation never reached an adapter; no claim about a
+                # previous use of its UUID. Never mark post-worker failures.
+                body = json.loads(response.body)
+                body["effect"] = "not_started"
+                response = _response(body, response.status_code)
             await response(scope, receive, send)
             return
         # Hold headers until current session/grant/source admission permits the
@@ -385,18 +396,19 @@ class _OwnerBrowser:
                 pending_start = message
                 return
             try:
-                await run_in_threadpool(self.actions.admit_response, reader, action_result)
-            except AccessDenied:
-                await _response({"state": "denied"}, 403)(scope, receive, send)
-                return
+                await run_in_threadpool(self.actions.admit_response, operation, reader, action_result)
             except OperationContextUnavailableError:
-                await _response({"state": "unavailable"}, 503)(scope, receive, send)
-                return
-            except OperationContextError:
-                await _response({"state": "denied"}, 403)(scope, receive, send)
-                return
+                refusal = _response({"state": "unavailable"}, 503)
+            except (AccessDenied, OperationContextError):
+                refusal = _response({"state": "denied"}, 403)
             except (AccessUnavailable, ActivationError, OSError, ValueError, sqlite3.Error):
-                await _response({"state": "unavailable"}, 503)(scope, receive, send)
+                refusal = _response({"state": "unavailable"}, 503)
+            except Exception:
+                refusal = _response({"state": "unavailable"}, 503)
+            else:
+                refusal = None
+            if refusal is not None:
+                await refusal(scope, receive, send)
                 return
             await send(pending_start)
             await send(message)

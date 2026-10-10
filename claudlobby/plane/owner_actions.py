@@ -10,9 +10,10 @@ from uuid import UUID
 from ..activation_identity import read_selected_identity_bindings
 from ..active_config import resolve_active_context
 from ..context import resolve_paths
-from ..operation_context import bind_task_context
+from ..operation_context import (bind_task_context, OperationContextError,
+                                 OperationContextUnavailableError)
 from ..request_receipts import ReceiptConflict
-from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
+from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, VerifiedReader
 from .owner_messages import OwnerMessages
 from .owner_source import inspect_source
 
@@ -32,6 +33,16 @@ def _opaque(value):
         separators=(",", ":")).encode()).hexdigest()
 
 
+class ActionNotStarted(Exception):
+    """This send invocation refused before entering any message adapter.
+
+    Does not classify prior uses of the UUID or authorize an automatic retry.
+    """
+    def __init__(self, refusal):
+        self.refusal = refusal
+        super().__init__("action submission not started")
+
+
 class OwnerActions:
     def __init__(self, root: Path, *, package=None):
         paths = resolve_paths(root=root, package=package)
@@ -41,7 +52,6 @@ class OwnerActions:
         _text(room)
         host = inspect_source(self.root)
         # Session admission precedes configuration/registry access.
-        from .owner_access import OwnerAccess
         access = OwnerAccess(self.root)
         access.authorize_read(reader.token, reader.principal, host_uid=host)
         bindings = read_selected_identity_bindings(self.root, room, package=self.package)
@@ -75,17 +85,17 @@ class OwnerActions:
         if fresh != context or current != grant:
             raise AccessDenied("message_binding_changed")
 
-    def admit_response(self, reader, result):
-        room = result.get("room", result["scope"]["fleet"])
+    def admit_response(self, action, reader, result):
+        room = result["room"] if action == "context" else result["scope"]["fleet"]
         current, _ = self._context(reader, room)
-        if "room" in result:
+        if action == "context":
             if result != current:
                 raise AccessDenied("message_binding_changed")
         elif (result["scope"] != current["scope"] or result["target"]["recipient"]
               not in {item["id"] for item in current["recipients"]}):
             raise AccessDenied("message_binding_changed")
 
-    def operation(self, action, reader, payload):
+    def _prepare_operation(self, action, reader, payload):
         fields = {"request_id", "kind", "scope", "target", "submitted_at"}
         _exact(payload, fields | ({"body"} if action == "send" else set()))
         _exact(payload["scope"], {"workspace", "host", "fleet", "viewer"})
@@ -102,15 +112,15 @@ class OwnerActions:
             raise AccessDenied("invalid_action_body") from exc
         if payload["kind"] != "message" or payload["target"]["task_id"] is not None:
             raise AccessDenied("unsupported_owner_action")
-        if action == "send" and (not isinstance(payload["body"], str)
-                or not payload["body"].strip() or len(payload["body"]) > 2000):
-            raise AccessDenied("invalid_action_body")
-        room = payload["scope"]["fleet"]
         if action == "send":
+            if (not isinstance(payload["body"], str)
+                    or not payload["body"].strip() or len(payload["body"]) > 2000):
+                raise AccessDenied("invalid_action_body")
             try:
                 payload["body"].encode("utf-8")
             except UnicodeError as exc:
                 raise AccessDenied("invalid_action_body") from exc
+        room = payload["scope"]["fleet"]
         context, grant = self._context(reader, room)
         if (payload["scope"] != context["scope"] or payload["target"]["recipient"]
                 not in {item["id"] for item in context["recipients"]}):
@@ -119,9 +129,20 @@ class OwnerActions:
         options = dict(fleet=context["room"], fleet_uid=grant.fleet_uid,
             recipient_uid=payload["target"]["recipient"], request_id=payload["request_id"],
             expected_grant=grant)
-        conflicting_send = False
         if action == "send":
             self._recheck(reader, context, grant)
+        return fields, context, grant, adapter, options
+
+    def operation(self, action, reader, payload):
+        try:
+            fields, context, grant, adapter, options = self._prepare_operation(action, reader, payload)
+        except (AccessDenied, AccessUnavailable, OperationContextError) as exc:
+            if action == "send":
+                raise ActionNotStarted(exc) from exc
+            raise
+        conflicting_send = False
+        if action == "send":
+            # Every failure from adapter entry onward is potentially post-effect.
             try:
                 adapter.send(reader, **options, text=payload["body"])
             except (AccessDenied, AccessUnavailable):
