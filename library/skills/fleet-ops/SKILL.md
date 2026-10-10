@@ -200,12 +200,17 @@ An unknown result may have reached the pane, so do not automatically retry.
 claudlobby --json bot start WORKER
 claudlobby --json bot restart WORKER
 claudlobby --json bot stop WORKER
+claudlobby --json bot stop WORKER --reason "parked until the review lands"
 ```
 
 `start` is idempotent when the selected bot's session is already ready; use
 `restart` for an intentional bounce, with a best-effort handoff and a fresh
 bridge/session readiness check. `stop` de-enrolls supervision and stops the
 session, so keepalive cannot revive it; a later `start` is explicit re-enrollment.
+`stop` also records the stop, with an optional `--reason`, so fleet-pulse raises
+no alert for the bot and shows it as stopped; `start` removes that record.
+Read `data.recording`: `degraded` means the record or its plane row did not
+land, and running the same stop again records it.
 For a slow bridge, `bot restart WORKER --ceiling SECONDS` overrides the
 per-bot readiness budget with a positive number. Read `data.changed`,
 `data.readiness`, and `data.native_outcome` in the JSON result before claiming

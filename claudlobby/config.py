@@ -190,6 +190,7 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
     "escalation_state_dir": "FLEET_PULSE_ESCALATION_STATE_DIR",
     "renotify_after_s": "FLEET_PULSE_RENOTIFY_AFTER_S",
     "rearm_window_s": "FLEET_PULSE_REARM_WINDOW_S",
+    "stopped_remind_days": "FLEET_PULSE_STOPPED_REMIND_DAYS",
 }
 
 
@@ -227,6 +228,8 @@ class FleetPulseConfig:
     escalation_state_dir: str | None = None
     renotify_after_s: int | None = None
     rearm_window_s: int | None = None
+    # Days a bot stopped through `bot stop` waits for a reminder push (#2243).
+    stopped_remind_days: int | None = None
     # The sweep's time cap in seconds (#2059). Read by claudlobby/fleet_pulse.py
     # from this config, not the unit's Environment=, so a hand-run
     # `claudlobby fleet pulse` gets it too; unset, the cap scales with load.
@@ -1487,6 +1490,7 @@ def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
         escalation_state_dir=None if sender in (None, "") else sender,
         renotify_after_s=_int("renotify_after_s"),
         rearm_window_s=_int("rearm_window_s"),
+        stopped_remind_days=_int("stopped_remind_days"),
         timeout_s=_int("timeout_s"),
     )
 

@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a bot stopped on purpose no longer pages as an outage, and one fault is one alert (#2243)
+
+A bot stopped through `bot stop` paged as an outage. fleet-pulse read the missing session and the down unit as a death: `session_missing` and `service_down` every sweep, both pushed to the manager, and two stopped bots reached the fleet escalation once per type, every 10 to 20 minutes, for hours. Over seven days on one host, all 230 escalation-type rows came from four deliberate stops and none from a real death (the issue's pre-scope comment has the measurement).
+
+- **A recorded stop is silent.** `bot stop` now writes a local record of the stop before the unit file goes, whatever the plane does: who made it, when, and an optional `--reason TEXT`, in the bot's `data/.stopped`. fleet-pulse reads that record beside the missing unit file, the fact activation, keepalive and reconcile already read, and raises no row, push or escalation for the bot. `bot start` removes the record. The plane gets notice rows, `bot_stopped` and `bot_started`, as the audit trail. The sweep never reads them, so a stop made while the plane is down stays quiet, and the stop reports `recording: degraded`.
+- **No unit file and no record is its own fault, `unit_missing`** (critical): a unit lost with nobody having stopped it, which a botched disenroll, a broken activation or a deleted unit directory leaves. It records one row every sweep and pushes once per episode, and the escalation counts it with today's threshold and window, in place of the `service_down` and `session_missing` such a bot raised. A bot stopped before this change has no record and reads as `unit_missing` until `bot stop` runs on it again; on a bot already stopped, that writes the record and changes nothing else.
+- **One fault, one alert.** A down unit raises `service_down` alone, and its payload's new `session` field (`up` or `missing`) carries what `session_missing` said. `session_missing` is for a session gone under an active unit, or on a bot with no service configured.
+- **One FLEET ALERT per sweep.** Every cause over its threshold goes out in one message; a single cause reads as before.
+- **A forgotten stop gets a reminder, never a page.** After `fleet_pulse.stopped_remind_days` days (default 3, `0` off), the manager gets one push, then one every as many days again.
+- **`stopped` everywhere.** The pulse summary shows `stopped` in both columns and `stopped since <UTC> by <caller>`. `fleet status` reports `state: "stopped"` with `stopped_since`, `stopped_by` and `stop_reason`. `fleet reconcile` reports `stopped` for a recorded stop with no enrolled unit and no ready session. A missing unit with no record never reads as stopped.
+- A recorded stop with no session also skips the activity checks: a stopped bot has no turn to be stuck in. `bot move` clears the record it copies to the moved bot.
+- The held-push and debounce-recipient rehearsals drew their two alerts from one such bot. Each now uses two workers with one alert each.
+
 ### Added — local owner approval and direct-host sign-in page
 
 `host owner initialize|confirm|revoke` require an explicit installation root

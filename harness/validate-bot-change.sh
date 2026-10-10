@@ -1841,8 +1841,9 @@ rm -f "$RB_DIR/state/bot.pid"
 # fleet-pulse runs from a stub lib dir whose tg-post.sh RECORDS the page instead of sending it,
 # so the assertion is the alert message the burst-detector actually produced. A single bot
 # (below threshold) must stay silent. 2b + 2c together cover #533 items 3-4 end-to-end: emit
-# then escalate. The incidental service_down / session_missing pages are the sandbox bots
-# having no live session; the assertions target the rc_timeout line.
+# then escalate. The sandbox bots have no installed unit and no stop record, so the same
+# sweep also counts them as unit_missing, and every cause over its threshold shares one
+# page (#2243); the assertions target the page's rc_timeout part.
 val_scenario "validate-bot-change: RC readiness ESCALATION page (#533 items 3-4)"
 _esc_fail_before=$fail
 _esc_fleet="valesc"
@@ -1887,7 +1888,7 @@ esc_run() {  # <fleet>
 esc_seed "$_esc_fleet" escone yes
 esc_seed "$_esc_fleet" esctwo yes
 esc_run "$_esc_fleet"
-grep -q 'FLEET ALERT: rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
+grep -q '^FLEET ALERT: .*rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
 harness_check "rc_timeout burst on >= threshold bots FIRES the escalation page" "$r"
 
 # Negative: only 1 bot with rc_timeout -> below threshold -> no rc_timeout page.

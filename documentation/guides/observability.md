@@ -48,8 +48,9 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 
 | Type | Source | Meaning |
 |------|--------|---------|
-| `session_missing` | pulse | Bot's tmux session is gone |
-| `service_down` | pulse | Bot's systemd/launchd unit is not active |
+| `session_missing` | pulse | Bot's tmux session is gone while its unit is active, or on a bot with no supervised service configured |
+| `service_down` | pulse | Bot's systemd/launchd unit is installed and not active. Data: `unit`, `state`, `session` (`up` or `missing`): a down unit is one alert, never a `session_missing` as well (#2243) |
+| `unit_missing` | pulse | The bot names a service, but its unit file is not installed and no stop was recorded (`bot stop` writes that record in `data/.stopped`): a unit lost with nobody having stopped it. Data: `unit`, `session`. Raised in place of `service_down` and `session_missing`, and escalated like them. A bot stopped through `bot stop` raises nothing (#2243) |
 | `activity_stuck` | pulse | Bot is animating but hasn't made a tool call in >threshold seconds |
 | `input_held` | pulse | The bot's input box holds text that was never submitted and no turn is running, past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). It is not hung: an operator presses Enter in its pane, and a restart would discard the text |
 | `usage_limit_held` | pulse | A claude.ai usage limit stopped the bot and it is still held well after the limit's printed reset (keepalive's `LIMIT` verdict, past its resume window; #996). Data: `since_epoch`, `reset_epoch`, `limit`, `reset`, `screen`, `resume` (`off`, `armed`, or `tried` when keepalive already resumed it once for this reset). Paged in place of `activity_stuck`. The remedy is a prompt to the bot, never usage credits; no restart is needed |

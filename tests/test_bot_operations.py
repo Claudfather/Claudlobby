@@ -800,3 +800,74 @@ def test_a_stop_that_did_not_happen_reads_unverified_without_waiting(cold, monke
     assert failed["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
     assert failed["data"]["native_outcome"] == "unknown"
     assert worker.native.actions == ["stop"] and waits == []
+
+
+def _plane_rows(monkeypatch, *, refuse=False):
+    """The rows the lifecycle door hands the plane, or a plane that refuses them."""
+    rows = []
+
+    def emit(_root, events, require_commit=False):
+        if refuse:
+            raise OSError("the plane is unavailable")
+        rows.extend(events)
+        return [SimpleNamespace(status="committed") for _ in events]
+    monkeypatch.setattr(bot_operations, "emit_batch", emit, raising=False)
+    return rows
+
+
+def test_bot_stop_records_the_stop_locally_and_on_the_plane_and_start_clears_it(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: the stop door always leaves its local record, the fact fleet-pulse reads to keep a
+    stopped bot silent, and a bot_stopped row naming the caller; bot start removes the record and
+    writes bot_started. Stopping a bot that is already stopped records it too (the rollout path
+    for a bot stopped before the record existed)."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    record = worker.root / "runtime/bots/worker/data/.stopped"
+
+    stopped = worker.call("bot", "stop", "worker", "--reason", "parked until the review lands")["data"]
+    assert stopped["state"] == "stopped" and stopped["changed"] is True
+    assert stopped["recording"] == "committed" and worker.native.actions == ["stop"]
+    saved = json.loads(record.read_text())
+    assert saved["by"] == "operator" and saved["reason"] == "parked until the review lands"
+    assert abs(saved["stopped_epoch"] - time.time()) < 300 and saved["stopped_at"].endswith("Z")
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_stopped"
+    assert row["payload"]["subject"] == f"bot:{stopped['fleet']}/worker"
+    data = row["payload"]["data"]["data"]
+    assert (data["by"], data["reason"], data["changed"]) == ("operator", "parked until the review lands", True)
+    assert data["request_id"] == saved["request_id"]
+
+    rows.clear()
+    again = worker.call("bot", "stop", "worker")["data"]
+    assert again["state"] == "stopped" and again["changed"] is False
+    assert json.loads(record.read_text())["reason"] is None
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_stopped" and row["payload"]["data"]["data"]["changed"] is False
+
+    rows.clear()
+    started = worker.call("bot", "start", "worker")["data"]
+    assert started["state"] == "running" and started["recording"] == "committed"
+    assert not record.exists()
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_started" and row["payload"]["data"]["data"]["by"] == "operator"
+
+
+def test_a_plane_that_refuses_the_row_neither_blocks_the_stop_nor_its_record(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243 F3: a stop must not depend on the plane. The record the sweep reads is local and
+    written first; the refused row is reported as recording degraded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch, refuse=True)
+    stopped = worker.call("bot", "stop", "worker")["data"]
+    assert stopped["state"] == "stopped" and stopped["recording"] == "degraded"
+    assert worker.native.actions == ["stop"]
+    saved = json.loads((worker.root / "runtime/bots/worker/data/.stopped").read_text())
+    assert saved["by"] == "operator"
+
+
+def test_a_stop_reason_is_one_printable_line(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    refused = worker.call("bot", "stop", "worker", "--reason", "two\nlines", expected=2)
+    assert refused["error"]["code"] == "invalid_argument"
+    assert worker.native.actions == []
+    assert not (worker.root / "runtime/bots/worker/data/.stopped").exists()

@@ -26,6 +26,13 @@ def dispatch(args) -> CommandOutput:
     if ceiling is not None and ceiling <= 0:
         raise CommandFailure("invalid_argument", "--ceiling must be a positive integer")
     running = action != "stop"
+    reason = getattr(args, "reason", None)
+    if reason is not None:
+        from ..stop_record import StopRecordError, check_reason
+        try:
+            check_reason(reason)
+        except StopRecordError as exc:
+            raise CommandFailure("invalid_argument", str(exc)) from exc
     data = {"fleet": args.fleet, "bot": args.bot_id, "requested": action,
             "native_outcome": "unattempted", "runtime_state": "unknown"}
     try:
@@ -37,7 +44,7 @@ def dispatch(args) -> CommandOutput:
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
-                                     ceiling=ceiling)
+                                     ceiling=ceiling, reason=reason)
     except BotLifecycleError as exc:
         if exc.busy:
             raise CommandFailure("conflict", str(exc), data=data, retryable=True,
@@ -95,6 +102,9 @@ def dispatch(args) -> CommandOutput:
     if result.state == "stopped":
         lines = (f"{result.fleet}/{result.bot}: de-enrolled and stopped; "
                  "the declared bot and retained identity remain selected.",)
+        if result.recording == "degraded":
+            lines += ("The stop's local record or its plane row did not land; "
+                      "run bot stop again to record it.",)
     elif result.state == "requested":
         lines = (f"{result.fleet}/{result.bot}: self restart requested; "
                  f"request={result.request_id}; final outcome in {result.log_path}.",)
