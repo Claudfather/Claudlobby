@@ -1,6 +1,7 @@
 """Host-local owner authority doors; no credential-bearing CLI arguments."""
 
 from importlib import import_module
+from pathlib import Path
 
 from ..command_result import execute
 
@@ -17,9 +18,16 @@ def register_host_owner(hosts):
     for action, help_text in (
         ("status", "Inspect this host's owner pairing without changing it"),
         ("initialize", "Prepare owner authority on an existing installation (interactive)"),
+        ("bind-source", "Attest that this Plane database belongs to this installation (interactive)"),
         ("confirm", "Approve a browser's pairing request at this terminal (interactive)"),
         ("revoke", "Revoke the current pairing and all its sessions (interactive)"),
     ):
         route = actions.add_parser(action, help=help_text)
         route.add_argument("--json", action="store_true", help="Structured result (status only)")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
+    serve = actions.add_parser("serve", help="Serve owner Plane on a private Unix socket (foreground)")
+    serve.add_argument("--json", action="store_true", help="Not supported for the foreground server")
+    serve.add_argument("--origin", required=True, help="Exact external HTTPS origin configured in Tailscale Serve")
+    serve.add_argument("--tailscale", type=Path, required=True, help="Absolute path to the native Tailscale executable")
+    serve.add_argument("--socket", type=Path, help="Private Unix socket path; default DATA_ROOT/state/plane/owner.sock")
+    serve.set_defaults(func=_dispatch, public_command="host.owner.serve")
