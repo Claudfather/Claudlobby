@@ -358,6 +358,46 @@ test('main conversation refuses missing, mismatched, superseded and paused link 
   }
 });
 
+test('action invalidation preserves readable linked tasks while session pause refuses them', async () => {
+  const thread=linkedConversation(), calls=[],h=harness({jget(url){calls.push(url);return linkedDetail(thread);}});
+  h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));
+  h.get('work-body').value='Keep this ordinary message draft';h.get('work-body').emit('input');
+  h.loop.invalidate();h.channelOpen(thread);await settle();
+  assert.equal(calls.length,1);assert.match(h.get('task-detail-content').innerHTML,/Full selected task/);
+  assert.equal(h.get('work-send').disabled,true);
+  h.get('task-detail-close').onclick();h.loop.pause();h.channelOpen(thread);await settle();
+  assert.equal(calls.length,1);assert.equal(h.get('task-detail').open,false);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+
+test('channel loss preserves settled detail refusal and no-team remediation', async () => {
+  for (const mode of ['denied','not_found','no-team','network']) {
+    const h=harness({protected:true,jget(){if(mode==='network')throw Error('offline');
+      return {state:mode,remediation:'Specific task refusal: '+mode};}});
+    h.loop.setRoom('web');await settle();h.update();h.open('task-a',mode==='no-team'?'':'web');await settle();
+    const before=h.get('task-detail-content').innerHTML;
+    assert.match(before,mode==='no-team'?/no recorded team/:mode==='network'?/disconnected/:new RegExp('Specific task refusal: '+mode));
+    h.loop.updateChannel({state:'unreadable',remediation:'Channel source loss'});
+    assert.equal(h.get('task-detail-content').innerHTML,before,mode);
+    assert.equal(h.get('task-detail-refresh').hidden,false);
+  }
+});
+
+test('qualified task routes support raw owner UIDs or the same source qualifier without stripping the task ID', async () => {
+  for (const qualifiedOwners of [[],['fleet_uid'],['host_uid','fleet_uid']]) {
+    const thread=linkedConversation(), calls=[];
+    for(const field of ['task_id',...qualifiedOwners])thread.task_link[field]='workshop::'+thread.task_link[field];
+    thread.work_item_id=thread.task_link.task_id;
+    const h=harness({jget(url){calls.push(url);const parsed=new URL(url,'https://example.invalid');
+      assert.equal(decodeURIComponent(parsed.pathname.slice('/api/tasks/'.length)),thread.work_item_id);
+      assert.equal(parsed.searchParams.get('fleet'),'web');return linkedDetail(thread);}});
+    h.loop.setRoom('web');await settle();h.update(linkedChannel(thread));h.channelOpen(thread);await settle();
+    assert.deepEqual(calls,['/api/tasks/workshop%3A%3Awi_'+'a'.repeat(32)+'?fleet=web']);
+    assert.match(h.get('task-detail-content').innerHTML,/Full selected task|workshop::wi_/);
+    assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  }
+});
+
 test('a linked conversation never substitutes a board snapshot for unavailable exact detail', async () => {
   for (const response of [null, {state:'unavailable'}, {state:'ok',data:{task:null}}]) {
     const thread=linkedConversation(), h=harness({jget(){return response;}});

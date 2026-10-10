@@ -256,11 +256,12 @@ function threadArticle(t, taskOpener = true) {
   const xfleet = t.cross_fleet
     ? `<span class="tag xfleet" title="sender and recipient are on`
       + ` different fleets">cross-fleet</span>` : "";
+  const title = threadTitle(t, reasons[0]);
   const taskLink = taskOpener ? conversationTaskLink(t) : null;
   const taskButton = taskLink ? `<button class="pill ghost" type="button" data-task-open="${esc(taskLink.task_id)}"
     data-task-fleet="${esc(taskLink.fleet)}" data-task-host="${esc(taskLink.host_uid)}"
     data-task-fleet-uid="${esc(taskLink.fleet_uid)}" data-task-thread="${esc(t.key)}"
-    aria-label="View task: ${esc(threadTitle(t, reasons[0]))}">View task</button>` : "";
+    aria-label="View task: ${esc(title)}">View task</button>` : "";
   const msgs = t.messages.map((m, i) => {
     const reason = reasons[i];
     return `
@@ -284,7 +285,7 @@ function threadArticle(t, taskOpener = true) {
   el.dataset.room = currentFleet || "all";   // the room this card's names were rendered for
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
-    <div class="t-head"><span class="t-title">${esc(threadTitle(t, reasons[0]))}</span>
+    <div class="t-head"><span class="t-title">${esc(title)}</span>
       ${taskButton}${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
     ${ladder(t, conversation)}
     ${msgs}`;
