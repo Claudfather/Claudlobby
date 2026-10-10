@@ -918,7 +918,7 @@ claudlobby --root DATA_ROOT host owner revoke-feedback --fleet-uid fleet_1111111
 
 The local CLI requires an existing explicit human actor and a required
 `--expected-assignment ASG_ID` or `none`. It never registers an actor implicitly
-or takes its identity from an ambient account or generated bot. `none` is an
+or takes its identity from an ambient account, generated bot or fleet timer. `none` is an
 explicit selection, not an omitted precondition. Terminal tasks select null even
 when they have historical assignments. The canonical operation checks the current
 selection under the task lock; unresolved work and stale selections refuse.
@@ -952,8 +952,14 @@ but has no notification from that invocation. Post-native persistence loss stays
 unknown. Native submission alone is not delivery: only the independent receiver
 byte-integrity proof can establish `received`/`delivered`.
 
-Feedback has no retry flag, recipient-box inspection, Enter repair or recording
-alert. A retained UUID cannot repeat recording or fill a missing notification.
+Feedback allows up to 120 seconds for its one native call: JSON quoting can
+expand a valid 16 KiB comment to roughly 96 KiB before its envelope. This bound
+accommodates ordinary lock and chunk pacing; a slow or hung send still returns
+unknown. Other operations retain their existing deadline. Timing out never
+authorizes another attempt.
+
+Feedback has no retry flag, operation-level held-input recovery, Enter repair or
+recording alert. A retained UUID cannot repeat recording or fill a missing notification.
 Committed replay preserves original task/assignment/message coordinates even if
 work later changes; retained uncommitted/uncertain requests are inspection-only.
 Use `request show UUID` and `message receipt MSG_ID --wait 0`, or the adapter's

@@ -60,7 +60,8 @@ def gateway(active, monkeypatch):  # noqa: F811
 def receiver(monkeypatch, *, received=True, altered=False):
     calls, repairs = [], []
     original = message_operations.send_committed_native_attempt
-    def transport(package, destination, *, message_id, body):
+    def transport(package, destination, *, message_id, body, timeout):
+        assert timeout == 120
         with sqlite3.connect(db_file(destination.root)) as conn:
             assert conn.execute("SELECT count(*) FROM events WHERE event='nudged'").fetchone()[0] == 0
             assert conn.execute("SELECT message_class FROM communications WHERE msg_id=?", (message_id,)).fetchone()[0] == "chat"

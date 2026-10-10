@@ -566,3 +566,47 @@ def test_feedback_cli_allows_manual_root_and_fleet_selectors(active, monkeypatch
                    '--request-id', str(uuid4()))
     assert result['data']['recording'] == 'committed' and result['data']['notification'] == 'received'
     assert len(calls) == 1 and repairs == []
+
+
+def test_feedback_cli_expanded_body_has_bounded_native_budget_and_never_retries(active, monkeypatch, capsys):
+    from dataclasses import replace
+    import subprocess
+    from claudlobby import message_operations, message_transport
+    from tests.package_fixtures import source_package
+
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Maximum escaped comment',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    original = message_operations.send_committed_native_attempt
+    calls = []
+
+    def native_runner(command, **kwargs):
+        calls.append(kwargs)
+        assert len(kwargs['input']) > 98301  # Escaped comment plus canonical envelope.
+        assert kwargs['timeout'] == 120
+        # Exercise the actual transport's timeout classification, without a PTY.
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'transport-v1\tinvoked\n')
+
+    def selected_transport(package, destination, **kwargs):
+        # The activation fixture seals only a stub native directory. Select the
+        # prepared helper for validation; native_runner prevents its execution.
+        return message_transport.send(replace(package, native=source_package().native),
+                                      destination, **kwargs, runner=native_runner)
+
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt',
+                        lambda *a, **k: original(*a, **k, transport=selected_transport))
+    monkeypatch.setattr(message_operations, 'repair_held_delivery',
+                        lambda *a, **k: pytest.fail('feedback must not repair input'))
+    request_id = str(uuid4())
+    args = ('task', 'feedback', task_id, '--actor', 'human:reviewer',
+            '--expected-assignment', 'none', '--text', 'x' + '\x01' * 16383,
+            '--request-id', request_id)
+    first = _call(capsys, root, *args, expected=5)
+    assert first['data']['recording'] == 'committed'
+    assert first['data']['transport'] == 'unknown' and first['data']['request_persisted']
+    recorded = _counts(root)
+    replay = _call(capsys, root, *args, expected=5)
+    assert replay['data']['replayed'] and replay['data']['transport'] == 'unknown'
+    assert _counts(root) == recorded and len(calls) == 1
+    assert calls[0]['timeout'] == 120 and len(calls[0]['input']) > 98301
