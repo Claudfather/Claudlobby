@@ -27,7 +27,7 @@ dev = ["pytest>=7.0", "tomli; python_version < '3.11'",
 # Phase-4 operator plane UI (design walk ruling 2026-08-28): the view daemon.
 # OPTIONAL by §14's degrade rule — the core ledger, doors, and ingest daemon
 # never import these; `claudlobby plane view` refuses helpfully without them.
-plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1"]
+plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1", "PyJWT[crypto]==2.15.1"]
 # Pinned (F1 lock) — bump policy: documentation/integrations/claudron-integration.md
 vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.6.1"]
 
