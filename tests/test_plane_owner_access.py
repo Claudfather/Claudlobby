@@ -373,7 +373,8 @@ def test_explicit_message_allow_is_durable_fleet_scoped_and_revocable(access):
     owner = pair(store)
     session = store.open_session(OWNER)
     approved = allow_messages(store, owner)
-    assert approved == OwnerMessageGrant(owner, FLEET, ACTOR, ALIAS)
+    assert approved == OwnerMessageGrant(owner, FLEET, ACTOR, ALIAS, approved.generation)
+    assert len(approved.generation) == 64
     assert allow_messages(store, owner) == approved
     reopened = OwnerAccess(store.root, clock=lambda: clock[0])
     assert reopened.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
@@ -389,7 +390,79 @@ def test_explicit_message_allow_is_durable_fleet_scoped_and_revocable(access):
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         reopened.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
                                    fleet_uid=FLEET)
-    assert allow_messages(store, owner) == approved
+    replacement = allow_messages(store, owner)
+    assert replacement.generation != approved.generation
+    with pytest.raises(AccessDenied, match="message_binding_changed"):
+        store.revoke_messages(expected_owner=owner, fleet_uid=FLEET, expected_grant=approved)
+    assert store.current_message_grant(expected_owner=owner, fleet_uid=FLEET) == replacement
+
+
+def legacy_message_grant(store, owner):
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("CREATE TABLE message_grants (owner_revision INTEGER NOT NULL REFERENCES grants(revision), "
+                     "fleet_uid TEXT NOT NULL, actor_uid TEXT NOT NULL, actor_alias TEXT NOT NULL, "
+                     "PRIMARY KEY(owner_revision, fleet_uid))")
+        conn.execute("INSERT INTO message_grants VALUES (?, ?, ?, ?)",
+                     (owner.revision, FLEET, ACTOR, ALIAS))
+
+
+def test_legacy_generation_is_read_only_then_migrated_without_rebinding_other_fleets(access):
+    store, _ = access
+    owner = pair(store)
+    session = store.open_session(OWNER)
+    legacy_message_grant(store, owner)
+    before = store.path.read_bytes()
+    old = store.authorize_message(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=FLEET)
+    assert old.generation.startswith("legacy_")
+    assert store.local_status() == (owner, (old,))
+    assert store.path.read_bytes() == before
+    new = store.allow_messages(expected_owner=owner, fleet_uid=OTHER_FLEET,
+                               actor_uid=OTHER_ACTOR, actor_alias="human:other")
+    assert not new.generation.startswith("legacy_")
+    assert store.current_message_grant(expected_owner=owner, fleet_uid=FLEET) == old
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT generation FROM message_grants WHERE fleet_uid = ?", (FLEET,)).fetchone()[0] == old.generation
+    store.revoke_messages(expected_owner=owner, fleet_uid=FLEET, expected_grant=old)
+    assert allow_messages(store, owner).generation != old.generation
+
+
+def test_legacy_generation_migration_failure_rolls_back_without_partial_schema(access, monkeypatch):
+    store, _ = access
+    owner = pair(store)
+    legacy_message_grant(store, owner)
+    before = store.path.read_bytes()
+    connect = sqlite3.connect
+
+    class Interrupted(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith("UPDATE message_grants SET generation"):
+                raise sqlite3.OperationalError("simulated migration interruption")
+            return super().execute(sql, *args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", lambda *a, **kw: connect(*a, **kw, factory=Interrupted))
+        with pytest.raises(AccessUnavailable):
+            allow_messages(store, owner)
+    assert store.path.read_bytes() == before
+    with sqlite3.connect(store.path) as conn:
+        assert "generation" not in {row[1] for row in conn.execute("PRAGMA table_info(message_grants)")}
+    assert allow_messages(store, owner).generation.startswith("legacy_")
+
+
+@pytest.mark.parametrize("generation", [None, "", "invalid", "0" * 63])
+def test_damaged_generation_is_not_repaired_or_admitted(access, generation):
+    store, _ = access
+    owner = pair(store)
+    legacy_message_grant(store, owner)
+    allow_messages(store, owner)  # legacy migration permits SQLite NULL; admission never does
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE message_grants SET generation = ?", (generation,))
+    before = store.path.read_bytes()
+    with pytest.raises(AccessUnavailable, match="generation"):
+        store.current_message_grant(expected_owner=owner, fleet_uid=FLEET)
+    with pytest.raises(AccessUnavailable, match="generation"):
+        allow_messages(store, owner)
+    assert store.path.read_bytes() == before
 
 
 def test_message_binding_is_immutable_until_explicit_revoke(access):

@@ -212,13 +212,16 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
                bind_task_context(route.selected, origin=route.origin))
         observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
                            wait=_RECEIPT_WAIT_S)
-        repair, observed = repair_held_delivery(
-            route, package, outcome.message_id, first=observed,
-            box_before=box_before,
-            observe=lambda wait: receipt(ctx, outcome.message_id,
-                                         destination=route.peer.alias, wait=wait))
-        if repair is not None:
-            data["enter_repair"] = repair.as_dict()
+        # A strict owner replay only inspects retained evidence. Even an Enter
+        # repair is a native effect and must not follow a repeated request UUID.
+        if not (require_durable_request and outcome.replayed):
+            repair, observed = repair_held_delivery(
+                route, package, outcome.message_id, first=observed,
+                box_before=box_before,
+                observe=lambda wait: receipt(ctx, outcome.message_id,
+                                             destination=route.peer.alias, wait=wait))
+            if repair is not None:
+                data["enter_repair"] = repair.as_dict()
     except (OperationContextUnavailableError, OperationContextError,
             MessageQueryError, PendingMigrationError, DowngradeError,
             OSError, sqlite3.Error) as exc:

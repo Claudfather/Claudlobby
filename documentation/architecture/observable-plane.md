@@ -144,7 +144,15 @@ current owner grant to one canonical fleet UID and one existing human actor UID
 and alias. It is never callable by a remote client. Approval transactionally
 creates the optional `message_grants` table in the private authority store;
 ordinary initialization and reads do not create or migrate that table. A grant
-cannot change actor until locally revoked. Owner revocation/re-pairing invalidates
+cannot change actor until locally revoked. Each grant includes an opaque durable
+`generation`: repeated approval preserves it, but revoke/reallow allocates a new
+one even for the same actor. An adapter must bind the complete grant, including
+generation, into its action context. Existing four-column stores derive a stable
+legacy generation from their persisted binding during reads. The first local
+grant write adds and persists that generation in the same transaction; it does
+not invalidate other fleets' contexts. New approvals always use fresh random
+generations. Invalid stored generations fail closed; reads never repair them.
+Owner revocation/re-pairing invalidates
 every old message grant. Reader access alone continues to refuse messages.
 
 `plane/owner_messages.py:OwnerMessages` pins an installation and accepts only
@@ -157,13 +165,16 @@ caller must register the intended human identity separately before local approva
 The send holds canonical runtime mutation admission and calls the extracted
 `commands/message_write.py:deliver_bound_message` workflow. CLI and internal
 owner sends therefore share request UUID conflict handling, recording, native
-delivery, held-box repair and receiver byte-integrity proof. Native submission
+delivery, first-attempt held-box repair and receiver byte-integrity proof. A
+strict owner replay inspects the retained outcome without native sends or Enter
+repair; ordinary CLI replay behavior is unchanged. Native submission
 alone is not success. Exceptions can follow effects: retain the original UUID,
 then `inspect` its bound request and receiver evidence without resending. A
 missing request does not prove no previous effect. The internal result types
 are evidence for a future adapter, not a ready-made browser response contract.
 
-Admission is rechecked at dispatch start and before returning inspection data.
+Admission is rechecked at dispatch start and before returning inspection data
+or send outcomes, including canonical `CommandFailure` outcome data.
 Revocation prevents subsequent admission; it does not cancel an effect already
 in progress. This slice supports ordinary messages only. It supplies no HTTP
 route, UI capability, retry control, reply, task mutation, local confirmation
@@ -256,6 +267,7 @@ Ordinary-message authority is separately approved at the local terminal:
 claudlobby --root DATA_ROOT host owner allow-messages --target-fleet example --actor human:local-owner
 # If absent, explicitly approve REGISTER, then approve the allocated UID with ALLOW:
 claudlobby --root DATA_ROOT host owner allow-messages --target-fleet example --actor human:local-owner --register-actor
+claudlobby --root DATA_ROOT host owner status --json
 claudlobby --root DATA_ROOT host owner revoke-messages --fleet-uid fleet_11111111111111111111111111111111
 ```
 
@@ -274,10 +286,16 @@ under runtime admission; any changed binding refuses. The store atomically
 rechecks the owner revision before granting. Only ordinary messages are covered;
 this grants no task mutation, reply, permission decision or website membership.
 
+Local status lists the current owner's retained message grants, including fleet
+UID, actor binding and generation, without selecting active configuration or
+reading Plane. Grants belonging to earlier owner revisions are inert and are
+not listed as current authority.
+
 Revocation displays one retained grant and requires `REVOKE-MESSAGES`. Its exact
 fleet UID names the retained authority even if active configuration or Plane
 storage is unavailable. The existing authority transaction compares both owner
-revision and displayed actor binding, refusing a replacement grant. Revocation
+revision, displayed actor binding and generation, refusing a replacement grant
+even when it approves the same actor again. Revocation
 keeps owner read access and other fleets' message grants. These doors accept no
 credential arguments, generated bot/fleet context, ambient fleet selection,
 redirected confirmation or JSON mutation mode.
@@ -335,6 +353,16 @@ uses the supplied relative lifetime, not clock equality with the host; the host
 still enforces the absolute expiry on approval. Pairing, sign-in and sign-out
 require explicit interaction; page load never opens a session. Pairing details
 stay in page memory, and successful sign-out does not immediately sign in again.
+
+The protected Plane selects its owner transport only after the read gate admits
+`/api-client.js`. It offers explicit renewal and sign-out. Renewal fences old
+reads and streams, refreshes immediately, then refreshes again when SSE opens;
+active inventory, equipment and search reads resume too. A refused sign-out
+that still has a valid session explicitly says it did not complete. Panel HTTP
+errors stay local; network failures or read-gate 503 pause private reads and
+permit one automatic status GET. Its recovery budget is rearmed by an admitted
+stream message or explicit interaction; renewal and logout are never replayed. An
+expired or absent session on GET/HEAD `/` redirects only to same-origin `/owner`.
 
 All other paths still cross the protected canonical read gate, including
 the operational renderer's static files and each SSE body delivery. Logout or locally applied revocation
@@ -862,3 +890,17 @@ a subsequent authorized resume refreshes the context. Unexpected action-context
 or response-admission failures return generic unavailable responses without
 exception text. Cancellation remains distinct and owned workers retain capacity
 until they finish.
+
+Owner source admission also requires the operator-created covering indexes. A
+table-rebuild migration may drop them even when the ownership marker survives;
+protected reads and owner-server startup refuse immediately when a required
+index is absent, without scanning payload tables or repairing schema on reads.
+After completing a supported migration, verify the selected installation and
+re-run `host owner bind-source` locally to explicitly attest the existing source
+and restore missing indexes. The command validates retained host invariants
+before committing. Foreign markers or mixed-host records cannot be rebound;
+select the correct installation or investigate their provenance instead. Corrupt
+sources and incompatible index definitions require local database/schema
+investigation, not pairing again. Browser refusals remain generic. A foreground
+owner server whose lifespan startup fails returns an unavailable exit rather
+than reporting a clean stop; its owned socket is still cleaned up.

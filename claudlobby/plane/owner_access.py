@@ -13,6 +13,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -32,6 +33,7 @@ MAX_PENDING = 32
 MAX_SESSIONS = 32
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 _HUMAN_ALIAS = re.compile(r"human:[^\s:/]+")
+_GENERATION = re.compile(r"(?:legacy_)?[0-9a-f]{64}")
 _SCHEMA = """
 BEGIN IMMEDIATE;
 CREATE TABLE metadata (singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -51,6 +53,7 @@ CREATE TABLE message_grants (
     fleet_uid TEXT NOT NULL,
     actor_uid TEXT NOT NULL,
     actor_alias TEXT NOT NULL,
+    generation TEXT NOT NULL,
     PRIMARY KEY (owner_revision, fleet_uid)
 )"""
 
@@ -121,6 +124,7 @@ class OwnerMessageGrant:
     fleet_uid: str
     actor_uid: str
     actor_alias: str
+    generation: str
 
 
 @dataclass(frozen=True)
@@ -288,12 +292,35 @@ class OwnerAccess:
         ).fetchone() is not None
 
     @staticmethod
+    def _legacy_generation(conn: sqlite3.Connection, row: sqlite3.Row) -> str:
+        # Old stores already durably bind these fields. Retain their generation
+        # across the explicit local migration, without writing during reads.
+        host_uid = conn.execute("SELECT host_uid FROM metadata").fetchone()[0]
+        binding = [host_uid, row["owner_revision"], row["fleet_uid"],
+                   row["actor_uid"], row["actor_alias"]]
+        return "legacy_" + hashlib.sha256(json.dumps(binding).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _prepare_message_grants(conn: sqlite3.Connection) -> None:
+        """Upgrade only inside an explicit local grant write transaction."""
+        if not OwnerAccess._has_message_grants(conn):
+            conn.execute(_MESSAGE_GRANTS_SCHEMA)
+        elif "generation" not in {row["name"] for row in conn.execute("PRAGMA table_info(message_grants)")}:
+            rows = conn.execute("SELECT * FROM message_grants").fetchall()
+            conn.execute("ALTER TABLE message_grants ADD COLUMN generation TEXT")
+            for row in rows:
+                conn.execute("UPDATE message_grants SET generation = ? "
+                             "WHERE owner_revision = ? AND fleet_uid = ?",
+                             (OwnerAccess._legacy_generation(conn, row),
+                              row["owner_revision"], row["fleet_uid"]))
+
+    @staticmethod
     def _message_grant(conn: sqlite3.Connection, owner: OwnerGrant,
                        fleet_uid: str) -> OwnerMessageGrant:
         if not OwnerAccess._has_message_grants(conn):
             raise AccessDenied("messages_not_allowed")
         row = conn.execute(
-            "SELECT actor_uid, actor_alias FROM message_grants "
+            "SELECT * FROM message_grants "
             "WHERE owner_revision = ? AND fleet_uid = ?",
             (owner.revision, fleet_uid),
         ).fetchone()
@@ -301,16 +328,36 @@ class OwnerAccess:
             raise AccessDenied("messages_not_allowed")
         # A damaged binding cannot become authority through a read.
         try:
+            _canonical_uid(fleet_uid, "fleet")
             actor_uid = _canonical_uid(row["actor_uid"], "actor")
             actor_alias = _human_alias(row["actor_alias"])
         except AccessDenied as exc:
             raise AccessUnavailable("owner message grant is invalid") from exc
-        return OwnerMessageGrant(owner, fleet_uid, actor_uid, actor_alias)
+        generation = (row["generation"] if "generation" in row.keys()
+                      else OwnerAccess._legacy_generation(conn, row))
+        if not isinstance(generation, str) or not _GENERATION.fullmatch(generation):
+            raise AccessUnavailable("owner message grant generation is invalid")
+        return OwnerMessageGrant(owner, fleet_uid, actor_uid, actor_alias, generation)
 
     def current_grant(self) -> OwnerGrant | None:
         """Local inspection only. Exposing this result requires its own gate."""
         with self._connection() as conn:
             return self._grant(conn)
+
+    def local_status(self) -> tuple[OwnerGrant | None, tuple[OwnerMessageGrant, ...]]:
+        """Local-only snapshot of pairing and its retained message grants.
+
+        No active fleet selection or browser session is needed. Grants from an
+        earlier owner revision are inert and are not listed as current authority.
+        """
+        with self._connection() as conn:
+            owner = self._grant(conn)
+            if owner is None or not self._has_message_grants(conn):
+                return owner, ()
+            fleets = conn.execute("SELECT fleet_uid FROM message_grants "
+                                  "WHERE owner_revision = ? ORDER BY fleet_uid",
+                                  (owner.revision,)).fetchall()
+            return owner, tuple(self._message_grant(conn, owner, row["fleet_uid"]) for row in fleets)
 
     def begin_pairing(self, principal: PrincipalRef) -> PairingChallenge:
         """After trusted human verification, request separate local approval."""
@@ -418,8 +465,7 @@ class OwnerAccess:
         actor_alias = _human_alias(actor_alias)
         with self._connection(write=True) as conn:
             owner = self._expected_owner(conn, expected_owner)
-            if not self._has_message_grants(conn):
-                conn.execute(_MESSAGE_GRANTS_SCHEMA)
+            self._prepare_message_grants(conn)
             row = conn.execute(
                 "SELECT actor_uid, actor_alias FROM message_grants "
                 "WHERE owner_revision = ? AND fleet_uid = ?",
@@ -430,10 +476,10 @@ class OwnerAccess:
                     raise AccessDenied("message_binding_changed")
             else:
                 conn.execute(
-                    "INSERT INTO message_grants VALUES (?, ?, ?, ?)",
-                    (owner.revision, fleet_uid, actor_uid, actor_alias),
+                    "INSERT INTO message_grants VALUES (?, ?, ?, ?, ?)",
+                    (owner.revision, fleet_uid, actor_uid, actor_alias, secrets.token_hex(32)),
                 )
-            return OwnerMessageGrant(owner, fleet_uid, actor_uid, actor_alias)
+            return self._message_grant(conn, owner, fleet_uid)
 
     def current_message_grant(self, *, expected_owner: OwnerGrant,
                               fleet_uid: str) -> OwnerMessageGrant:
@@ -456,6 +502,7 @@ class OwnerAccess:
             if expected_grant is not None and self._message_grant(conn, owner, fleet_uid) != expected_grant:
                 raise AccessDenied("message_binding_changed")
             if self._has_message_grants(conn):
+                self._prepare_message_grants(conn)
                 conn.execute(
                     "DELETE FROM message_grants WHERE owner_revision = ? AND fleet_uid = ?",
                     (owner.revision, fleet_uid),

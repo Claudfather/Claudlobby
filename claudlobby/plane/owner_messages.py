@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import UUID
 
 from ..active_config import resolve_active_context
-from ..command_result import CommandOutput
+from ..command_result import CommandFailure, CommandOutput
 from ..commands.message_write import deliver_bound_message
 from ..message_context import resolve_message_route
 from ..message_payload import MessageBody
@@ -132,8 +132,14 @@ class OwnerMessages:
             # Route lookup can take time. Admit again at the dispatch boundary;
             # the action thereafter may complete even if access is revoked.
             self._authorize(reader, fleet_uid, grant)
-            result = deliver_bound_message(route, body=body, request_id=request_id,
-                                            caller_context=ctx, require_durable_request=True)
+            try:
+                result = deliver_bound_message(route, body=body, request_id=request_id,
+                                                caller_context=ctx, require_durable_request=True)
+            except CommandFailure:
+                # An error can carry recorded outcome data after a native effect.
+                # Withhold it too when the session or exact grant changed.
+                self._authorize(reader, fleet_uid, grant)
+                raise
             self._authorize(reader, fleet_uid, grant)
             return result
 

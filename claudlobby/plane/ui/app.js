@@ -654,6 +654,7 @@ let refreshTimer = null;
 let safetyTimer = null;
 let generation = 0;
 let sessionPaused = false;
+let sessionEpoch = 0;
 
 async function refreshBoards() {
   if (sessionPaused) return;
@@ -774,6 +775,7 @@ function ansiToHtml(text) {
 }
 
 let currentView = "channel";
+let equipmentAlias = null;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
 let focusTimer = null;
@@ -1242,18 +1244,34 @@ $("search").addEventListener("input", () => {
     return;
   }
   searchTimer = setTimeout(async () => {
+    if (sessionPaused) return;
+    const epoch = sessionEpoch;
     const fleetAtFire = currentFleet;   // room captured at fetch time —
     const f = fleetAtFire && fleetAtFire !== "all"
       ? `&fleet=${encodeURIComponent(fleetAtFire)}` : "";
     const env = await jget(`/api/search?q=${encodeURIComponent(q)}${f}`);
     // stale if the QUERY or the ROOM moved on (two rapid tab clicks raced
     // the old room's hits under the new tab — round 2, probed)
-    if ($("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
+    if (sessionPaused || epoch !== sessionEpoch || $("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
     $("channel").hidden = true;
     $("search-results").hidden = false;
     renderSearch(env);
   }, 250);
 });
+
+function resumeOwnerReads() {
+  sessionPaused = false;
+  refreshBoards();
+  if (currentView === "fleet") {
+    const detail = $("equip-detail");
+    const alias = detail && !detail.hidden ? equipmentAlias : null, epoch = sessionEpoch;
+    void pollFleet().then(() => {
+      if (!sessionPaused && epoch === sessionEpoch && currentView === "fleet" && alias && equipmentAlias === alias)
+        openEquipment(alias);
+    });
+  }
+  if ($("search").value.trim()) $("search").dispatchEvent(new Event("input"));
+}
 
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
 // has initialized. Placed mid-file it read those bindings in their temporal
@@ -1278,6 +1296,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
       onPause() {
         sessionPaused = true;
+        ++sessionEpoch;
         ++generation; ++trustGen;
         // Invalidate the action context as well as reads. pause saves the
         // current draft in memory; resume must fetch fresh authority for this room.
@@ -1285,10 +1304,11 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         workRoom = undefined;
         clearTimeout(refreshTimer); refreshTimer = null;
         clearTimeout(safetyTimer);
+        clearTimeout(searchTimer);
         $("beat").className = "dot";
         $("beat-label").textContent = "session access paused";
       },
-      onResume() { sessionPaused = false; refreshBoards(); },
+      onResume: resumeOwnerReads,
       onActionPause() { workLoop.invalidate(); },
     }) : null;
 if (!ownerSession) refreshBoards();
@@ -1309,7 +1329,8 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
   "plugins", "voice"];
 
 async function pollFleet() {
-  if (currentView !== "fleet") return;
+  if (sessionPaused || currentView !== "fleet") return;
+  const epoch = sessionEpoch, fleet = currentFleet;
   renderState($("fleet-room"), { state: "loading" });
   // honor the fleet picker (the same fleet= the channel/search use); with
   // "all", every fleet the host records — cross-fleet twins come back
@@ -1324,6 +1345,7 @@ async function pollFleet() {
     jget("/api/org" + f).catch(() => null),
     jget("/api/utilization" + f).catch(() => null),
   ]);
+  if (sessionPaused || epoch !== sessionEpoch || currentView !== "fleet" || currentFleet !== fleet) return;
   if (inv && inv.data && util && util.data) {
     const by = {};
     for (const u of util.data) by[u.alias] = u;
@@ -1415,11 +1437,15 @@ function renderInventory(env, orgEnv) {
 }
 
 async function openEquipment(alias) {
+  if (sessionPaused) return;
+  const epoch = sessionEpoch;
   const box = $("equip-detail");
   if (!box) return;
+  equipmentAlias = alias;
   box.hidden = false;
   renderState(box, { state: "loading" });
   const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
+  if (sessionPaused || epoch !== sessionEpoch || equipmentAlias !== alias) return;
   if (!env || env.state !== "ok") {
     box.innerHTML = stateBlock(env ? env.state : "disconnected",
                                env && env.provenance, env && env.remediation);
@@ -1461,6 +1487,6 @@ async function openEquipment(alias) {
         </details>
       </div>
     </div>`;
-  box.querySelector(".ed-close").addEventListener("click", () => { box.hidden = true; });
+  box.querySelector(".ed-close").addEventListener("click", () => { equipmentAlias = null; box.hidden = true; });
   box.scrollIntoView({ block: "nearest" });
 }

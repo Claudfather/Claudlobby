@@ -58,6 +58,7 @@ def test_status_reports_pairing_then_revocation_without_secret(owner, capsys):
     data = json.loads(output)["data"]
     assert data["state"] == "paired"
     assert data["owner"]["revision"] == grant.revision
+    assert data["message_grants"] == []
     assert challenge.token not in output and session.token not in output
     owner.revoke_owner(expected_revision=grant.revision)
     assert call(owner, "status", "--json") == 0
@@ -198,7 +199,7 @@ def allow(store, *extra):
     return call(store, "allow-messages", "--target-fleet", "example", "--actor", "human:local-owner", *extra)
 
 
-def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config(message_owner, monkeypatch):
+def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config(message_owner, monkeypatch, capsys):
     store, host, owner, ctx = message_owner
     output = terminal(monkeypatch, iter(["ALLOW\n"]))
     assert allow(store) == 0
@@ -209,6 +210,17 @@ def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config
     # Revocation reads only retained authority; no active config or Plane needed.
     (store.root / "state/selected-release.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
+    capsys.readouterr()
+    before = store.path.read_bytes()
+    assert call(store, "status", "--json") == 0
+    retained = json.loads(capsys.readouterr().out)["data"]["message_grants"]
+    assert len(retained) == 1
+    assert retained[0]["fleet_uid"] == ctx.fleet_uid
+    assert retained[0]["actor_uid"] == ctx.caller.uid
+    assert retained[0]["generation"] == grant.generation
+    assert call(store, "status") == 0
+    assert ctx.fleet_uid in capsys.readouterr().out
+    assert store.path.read_bytes() == before
     output = terminal(monkeypatch, iter(["REVOKE-MESSAGES\n"]))
     assert call(store, "revoke-messages", "--fleet-uid", ctx.fleet_uid) == 0
     assert ctx.caller.uid in output.getvalue()
@@ -299,15 +311,17 @@ def test_changed_actor_uid_after_display_refuses_grant(message_owner, monkeypatc
         store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
 
 
-def test_revoke_cannot_remove_a_replacement_binding(message_owner, monkeypatch):
+@pytest.mark.parametrize("same_actor", [False, True])
+def test_revoke_cannot_remove_a_replacement_binding(message_owner, monkeypatch, same_actor):
     store, _, owner, ctx = message_owner
-    original = store.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid, actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    store.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid, actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
     terminal(monkeypatch, iter([]))
     replacement = []
     def change(*args):
         store.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
         replacement.append(store.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
-                          actor_uid="actor_" + uuid4().hex, actor_alias="human:replacement"))
+                          actor_uid=ctx.caller.uid if same_actor else "actor_" + uuid4().hex,
+                          actor_alias=ctx.caller.alias if same_actor else "human:replacement"))
     monkeypatch.setattr(host_owner, "_approve", change)
     assert call(store, "revoke-messages", "--fleet-uid", ctx.fleet_uid) == 4
     assert store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid) == replacement[0]
@@ -320,3 +334,101 @@ def test_final_allow_never_registers_existing_actor(message_owner, monkeypatch):
     monkeypatch.setattr("claudlobby.operation_context.resolve_task_mutation_context",
                         lambda *a, **k: pytest.fail("ALLOW must not register an actor"))
     assert allow(store) == 0
+
+
+@pytest.mark.parametrize("fleet_uid,code,message", [
+    ("bad-fleet", 2, "canonical fleet"),
+    ("fleet_" + "0" * 32, 4, "no retained message grant"),
+])
+def test_revoke_message_errors_do_not_recommend_pairing(message_owner, monkeypatch, capsys, fleet_uid, code, message):
+    store, *_ = message_owner
+    terminal(monkeypatch, iter([]))
+    assert call(store, "revoke-messages", "--fleet-uid", fleet_uid) == code
+    output = capsys.readouterr()
+    assert message in output.err
+    assert "pairing again" not in output.err
+
+
+def test_existing_actor_binding_requires_local_revoke_not_pairing(message_owner, monkeypatch, capsys):
+    store, _, owner, ctx = message_owner
+    store.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                         actor_uid="actor_" + uuid4().hex, actor_alias="human:another")
+    terminal(monkeypatch, iter(["ALLOW\n"]))
+    assert allow(store) == 4
+    output = capsys.readouterr()
+    assert "revoke the retained grant" in output.err
+    assert "pairing again" not in output.err
+
+
+@pytest.mark.parametrize("error", [OSError("private filesystem detail"), sqlite3.OperationalError("private database detail")])
+def test_message_storage_failure_is_not_misdiagnosed_as_terminal_failure(message_owner, monkeypatch, capsys, error):
+    store, *_ = message_owner
+    terminal(monkeypatch, iter([]))
+
+    def unavailable(*args):
+        raise error
+
+    monkeypatch.setattr(host_owner, "_message_preview", unavailable)
+    assert allow(store) == 6
+    output = capsys.readouterr()
+    assert "message grant could not be bound or persisted" in output.err
+    assert "confirmation did not complete" not in output.err
+    assert "private" not in output.err
+
+
+def test_message_storage_translation_does_not_wrap_unrelated_status_error(owner, monkeypatch):
+    from types import SimpleNamespace
+    error = sqlite3.OperationalError("unexpected status programming defect")
+
+    def unexpected(*args):
+        raise error
+
+    monkeypatch.setattr(OwnerAccess, "local_status", unexpected)
+    args = SimpleNamespace(root=str(owner.root), fleet=None, seed=False, json=False, owner_action="status")
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        host_owner.dispatch(args)
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("problem,expected,code", [("unbound", "host owner bind-source", 6),
+    ("index", "host owner bind-source", 6), ("foreign", "Do not rebind", 4),
+    ("corrupt", "database and schema locally", 6)])
+def test_serve_source_failures_have_local_source_remediation(tmp_path, capsys, problem, expected, code):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    from claudlobby.plane.owner_source import bind_source
+    from tests.test_plane_two_fleets import _seed
+    _seed(tmp_path)
+    store = OwnerAccess.initialize(tmp_path)
+    if problem != "unbound": bind_source(tmp_path)
+    if problem == "index":
+        with sqlite3.connect(db_file(tmp_path)) as conn:
+            conn.execute("DROP INDEX owner_source_events_host")
+    if problem == "foreign":
+        with sqlite3.connect(db_file(tmp_path)) as conn:
+            conn.execute("UPDATE owner_source_binding SET host_uid='foreign-host'")
+    if problem == "corrupt": db_file(tmp_path).write_bytes(b"not SQLite")
+    assert call(store, "serve", "--origin", "https://plane.example.test", "--tailscale", "/unused/binary") == code
+    error = capsys.readouterr().err
+    assert expected in error and "request pairing again" not in error
+    assert str(tmp_path) not in error and "foreign-host" not in error
+    if problem in {"foreign", "corrupt"}:
+        assert "re-run host owner bind-source" not in error
+
+
+def test_bind_foreign_source_never_suggests_pairing_or_rebinding(tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    from claudlobby.plane.owner_source import bind_source
+    from tests.test_plane_two_fleets import _seed
+    _seed(tmp_path)
+    store = OwnerAccess.initialize(tmp_path)
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET host_uid='foreign-host'")
+        conn.execute("UPDATE work_items SET host_uid='foreign-host'")
+    terminal(monkeypatch, iter(["BIND\n"]))
+    assert call(store, "bind-source") == 4
+    error = capsys.readouterr().err
+    assert "Do not rebind" in error and "request pairing again" not in error
+    assert "re-run host owner bind-source" not in error and "foreign-host" not in error
