@@ -1,6 +1,8 @@
 """Version-2 nudge HTTP semantics; authority and effects stay with OwnerNudges."""
 from __future__ import annotations
 
+from .owner_action_authorization import action_authorization, scope_inputs
+
 from contextlib import closing
 from pathlib import Path
 
@@ -21,13 +23,14 @@ from .owner_source import admit_source, inspect_source, source_host_uid
 
 
 class OwnerNudgeActions:
-    def __init__(self, root: Path, *, package):
+    def __init__(self, root: Path, *, package, authorization=None):
         self.root, self.package = root, package
+        self.authorization = action_authorization(self.root, authorization)
 
     def _context(self, reader, room):
         _text(room)
         host = inspect_source(self.root)
-        access = OwnerAccess(self.root)
+        access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
         bindings = read_selected_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_nudge(reader.token, reader.principal,
@@ -48,10 +51,10 @@ class OwnerNudgeActions:
                 or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
                 or route.peer != manager or route.manager != manager):
             raise AccessDenied("nudge_binding_changed")
-        scope = {"workspace": _opaque([str(self.root), host]), "host": host, "fleet": room,
-            "viewer": _opaque(["task.nudge", grant.fleet_uid, reader.principal.namespace,
+        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], access, reader, host)), "host": host, "fleet": room,
+            "viewer": _opaque(scope_inputs(["task.nudge", grant.fleet_uid, reader.principal.namespace,
                 reader.principal.subject, grant.owner.revision, grant.generation,
-                grant.actor_uid, grant.actor_alias])}
+                grant.actor_uid, grant.actor_alias], access, reader, host))}
         return {"version": 2, "room": room, "scope": scope, "simulation": False,
             "recipients": [{"id": manager.uid, "label": manager_name, "lead": True}],
             "actions": ["nudge"], "release_id": route.release_id}, grant
@@ -131,7 +134,7 @@ class OwnerNudgeActions:
                 if self._intent_digest(payload, grant) != payload["semantic_sha256"]:
                     raise AccessDenied("nudge_intent_changed")
             self._recheck(reader, context, grant, preview=action == "send")
-            adapter = OwnerNudges(self.root, package=self.package)
+            adapter = OwnerNudges(self.root, package=self.package, authorization=self.authorization)
             options = dict(fleet=context["room"], fleet_uid=grant.fleet_uid,
                 task_id=payload["target"]["task_id"], manager_uid=payload["target"]["recipient"],
                 request_id=payload["request_id"], expected_grant=grant)

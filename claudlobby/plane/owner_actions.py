@@ -1,6 +1,8 @@
 """Fixed owner HTTP action dispatch; no identity creation or retries."""
 from __future__ import annotations
 
+from .owner_action_authorization import action_authorization, scope_inputs
+
 from datetime import datetime
 import hashlib
 import json
@@ -54,13 +56,14 @@ class ActionNotStarted(Exception):
 
 
 class OwnerActions:
-    def __init__(self, root: Path, *, package=None):
+    def __init__(self, root: Path, *, package=None, authorization=None):
         paths = resolve_paths(root=root, package=package)
         self.root, self.package = paths.root, paths.package
+        self.authorization = action_authorization(self.root, authorization)
         from .owner_nudge_actions import OwnerNudgeActions
         from .owner_feedback_actions import OwnerFeedbackActions
-        self.nudges = OwnerNudgeActions(self.root, package=self.package)
-        self.feedback = OwnerFeedbackActions(self.root, package=self.package)
+        self.nudges = OwnerNudgeActions(self.root, package=self.package, authorization=self.authorization)
+        self.feedback = OwnerFeedbackActions(self.root, package=self.package, authorization=self.authorization)
 
     def _task_action(self, kind):
         if kind == "nudge":
@@ -73,7 +76,7 @@ class OwnerActions:
         _text(room)
         host = inspect_source(self.root)
         # Session admission precedes configuration/registry access.
-        access = OwnerAccess(self.root)
+        access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
         bindings = read_selected_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_message(reader.token, reader.principal,
@@ -89,10 +92,10 @@ class OwnerActions:
         recipients = [{"id": actor.uid, "label": name} for name, actor in sorted(ctx.bots.items())]
         if not 1 <= len(recipients) <= 100:
             raise AccessUnavailable("owner actions unavailable")
-        scope = {"workspace": _opaque([str(self.root), host]), "host": host,
-            "fleet": room, "viewer": _opaque([grant.fleet_uid, reader.principal.namespace,
+        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], access, reader, host)), "host": host,
+            "fleet": room, "viewer": _opaque(scope_inputs([grant.fleet_uid, reader.principal.namespace,
                 reader.principal.subject, grant.owner.revision, grant.generation,
-                grant.actor_uid, grant.actor_alias])}
+                grant.actor_uid, grant.actor_alias], access, reader, host))}
         return {"version": 1, "room": room, "scope": scope, "simulation": False,
                 "recipients": recipients, "actions": ["message"]}, grant
 
@@ -158,7 +161,7 @@ class OwnerActions:
         if (payload["scope"] != context["scope"] or payload["target"]["recipient"]
                 not in {item["id"] for item in context["recipients"]}):
             raise AccessDenied("action_scope_mismatch")
-        adapter = OwnerMessages(self.root, package=self.package)
+        adapter = OwnerMessages(self.root, package=self.package, authorization=self.authorization)
         options = dict(fleet=context["room"], fleet_uid=grant.fleet_uid,
             recipient_uid=payload["target"]["recipient"], request_id=payload["request_id"],
             expected_grant=grant)

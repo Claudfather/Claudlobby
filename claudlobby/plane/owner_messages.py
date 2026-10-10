@@ -8,6 +8,8 @@ to bots in one exact fleet are supported; no reply, task mutation or retry API.
 
 from __future__ import annotations
 
+from .owner_action_authorization import action_authorization
+
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -56,13 +58,13 @@ class OwnerMessages:
     in a future browser adapter. No constructor or method enables a service.
     """
 
-    def __init__(self, root: Path, *, package: PackageResources):
+    def __init__(self, root: Path, *, package: PackageResources, authorization=None):
         self.root = Path(root)
         if not self.root.is_absolute() or self.root.resolve(strict=True) != self.root:
             raise ValueError("owner messages require an explicit unredirected root")
         self.host_uid = read_host_uid(self.root / "state")
         self.package = package
-        self.access = OwnerAccess(self.root)
+        self.access = action_authorization(self.root, authorization)
 
     def _authorize(self, reader: VerifiedReader, fleet_uid: str,
                    expected_grant: OwnerMessageGrant) -> OwnerMessageGrant:

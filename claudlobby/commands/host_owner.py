@@ -161,6 +161,8 @@ def _allow_action(args, paths, store, terminal, action):
             _unchanged(preview, {**registered, "actor_uid": None})
             preview = registered
     _describe_action(terminal, preview)
+    terminal.write("This capability may be used through direct owner access or its explicitly bound connected workspace.\n"
+                   "Workspace approval alone grants no fleet action.\n")
     if action == "message":
         terminal.write("Allow ordinary messages only as this actor in this fleet.\n"
                        "This grants no task mutations, replies or permission decisions.\n")

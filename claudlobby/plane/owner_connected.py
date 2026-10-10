@@ -195,6 +195,21 @@ class OwnerConnected:
         with self.access._connection() as conn:
             return self._admit(conn, token, principal, host_uid, operational_origin)
 
+    def authorize_action(self, kind, token, principal, *, host_uid, fleet_uid, operational_origin):
+        """Connected session AND explicit local grant in one read snapshot.
+
+        Fixed kinds only. This never grants, registers, or issues a direct session.
+        Grants remain native-principal/fleet specific, not workspace specific.
+        """
+        from .owner_access import _canonical_uid
+        if kind not in ("message", "nudge", "feedback"):
+            raise AccessDenied("unsupported_owner_action")
+        fleet_uid = _canonical_uid(fleet_uid, "fleet", action=kind)
+        with self.access._connection() as conn:
+            admission = self._admit(conn, token, principal, host_uid, operational_origin)
+            grant = self.access._action_grant(conn, admission.owner, fleet_uid, kind)
+            return admission, grant
+
     def renew(self, token, principal, *, host_uid, operational_origin):
         with self.access._connection(write=True) as conn:
             admission = self._admit(conn, token, principal, host_uid, operational_origin)
