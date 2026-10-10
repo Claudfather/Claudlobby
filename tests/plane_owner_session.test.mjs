@@ -454,7 +454,8 @@ test(`app renewal restores worker selection and draft only with fresh matching a
     const before = storage.getItem('plane.pending-actions.v1');
     assert.equal(document.getElementById('work-send').disabled, false);
     const bindings = { workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
-      sessionPaused: false, generation: 1, trustGen: 1, refreshTimer: null, safetyTimer: null,
+      sessionPaused: false, sessionEpoch: 1, generation: 1, trustGen: 1,
+      refreshTimer: null, safetyTimer: null, searchTimer: null,
       clearTimeout() {}, $: id => document.getElementById(id), showLoading() {} };
     paused = true; runInNewContext(`(function() { ${pause} })()`, bindings);
     assert.equal(bindings.workRoom, undefined);

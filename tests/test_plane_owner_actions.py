@@ -342,3 +342,75 @@ def test_reused_delivered_uuid_refusal_does_not_claim_original_rejected(browser_
     request.pop("body")
     assert "effect" not in post(client, "receipt", request).json()
     assert len(calls) == 1
+
+
+def reallow_same_actor(adapter, owner, ctx):
+    adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    return adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+        actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+
+
+def test_same_actor_reallow_changes_scope_and_refuses_old_send_and_receipt(browser_actions, monkeypatch):
+    _, client, adapter, _, owner, ctx, options, _ = browser_actions
+    calls = native_receiver(monkeypatch)
+    first = context(client)
+    request = metadata(first, ctx.bots["worker"].uid)
+    assert post(client, "send", {**request, "body": "First generation bytes"}).json()["status"] == "delivered"
+    # Repeating approval is idempotent; explicit revoke/reallow is a new grant.
+    same = adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+        actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    assert same == options["expected_grant"] and context(client) == first
+    replacement = reallow_same_actor(adapter, owner, ctx)
+    fresh = context(client)
+    assert replacement.generation != same.generation
+    assert fresh["scope"]["viewer"] != first["scope"]["viewer"]
+    assert {**fresh, "scope": first["scope"]} == first
+    # Neither an old retained receipt nor a new UUID with old scope is admitted.
+    assert post(client, "receipt", request).json() == {"state": "denied"}
+    stale = {**request, "request_id": str(uuid4()), "body": "Stale authority"}
+    refusal = post(client, "send", stale)
+    assert refusal.status_code == 403
+    assert refusal.json() == {"state": "denied", "effect": "not_started"}
+    assert len(calls) == 1
+    new_request = metadata(fresh, ctx.bots["worker"].uid)
+    sent = post(client, "send", {**new_request, "body": "Fresh generation bytes"})
+    assert sent.status_code == 200 and sent.json()["status"] == "delivered"
+    assert post(client, "receipt", new_request).json() == sent.json()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("action", ["context", "send", "receipt"])
+def test_same_actor_reallow_denies_held_response(browser_actions, monkeypatch, action):
+    app, client, adapter, _, owner, ctx, _, _ = browser_actions
+    calls = native_receiver(monkeypatch)
+    request = metadata(context(client), ctx.bots["worker"].uid)
+    payload = {"room": "example"} if action == "context" else request
+    if action == "send": payload = {**request, "body": "Effect before response fence"}
+    original = app.actions.admit_response
+    def rotate_then_admit(which, reader, result):
+        reallow_same_actor(adapter, owner, ctx)
+        return original(which, reader, result)
+    with monkeypatch.context() as held:
+        held.setattr(app.actions, "admit_response", rotate_then_admit)
+        response = post(client, action, payload)
+    assert response.status_code == 403 and response.json() == {"state": "denied"}
+    assert request["request_id"] not in response.text
+    assert len(calls) == (1 if action == "send" else 0)
+    assert context(client)["scope"]["viewer"] != request["scope"]["viewer"]
+
+
+def test_same_actor_reallow_during_inspection_hides_effect_result(browser_actions, monkeypatch):
+    _, client, adapter, _, owner, ctx, _, _ = browser_actions
+    calls = native_receiver(monkeypatch)
+    request = metadata(context(client), ctx.bots["worker"].uid)
+    original = owner_actions.OwnerMessages.inspect
+    def rotate_after_inspect(self, *args, **kwargs):
+        observed = original(self, *args, **kwargs)
+        reallow_same_actor(adapter, owner, ctx)
+        return observed
+    with monkeypatch.context() as held:
+        held.setattr(owner_actions.OwnerMessages, "inspect", rotate_after_inspect)
+        response = post(client, "send", {**request, "body": "Admitted old generation"})
+    assert response.status_code == 403 and response.json() == {"state": "denied"}
+    assert len(calls) == 1
+    assert context(client)["scope"]["viewer"] != request["scope"]["viewer"]

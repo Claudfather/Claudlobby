@@ -861,7 +861,9 @@ returns declared bot UIDs as recipients, `simulation: false`, and only the
 `message` action. The server recomputes frozen host/fleet/actor bindings and the
 current local message grant for every request. Opaque workspace/viewer hashes
 are comparison fences, not secret capabilities; viewer binds principal, owner
-revision, frozen fleet UID and human actor, and survives session-cookie rotation.
+revision, frozen fleet UID, human actor and durable message-grant generation,
+and survives session-cookie rotation. Revoke/reallow creates a new viewer scope
+even for the same actor; old contexts, sends, receipts and held responses are refused.
 Submitted scope is compared to this recomputed context. Only ordinary messages
 with `task_id: null`, canonical UUIDs and nonempty bodies up to 2,000 characters
 are admitted. `submitted_at` is browser display metadata, not server acceptance.

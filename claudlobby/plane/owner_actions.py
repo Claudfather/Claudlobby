@@ -70,7 +70,8 @@ class OwnerActions:
             raise AccessUnavailable("owner actions unavailable")
         scope = {"workspace": _opaque([str(self.root), host]), "host": host,
             "fleet": room, "viewer": _opaque([grant.fleet_uid, reader.principal.namespace,
-                reader.principal.subject, grant.owner.revision, grant.actor_uid, grant.actor_alias])}
+                reader.principal.subject, grant.owner.revision, grant.generation,
+                grant.actor_uid, grant.actor_alias])}
         return {"version": 1, "room": room, "scope": scope, "simulation": False,
                 "recipients": recipients, "actions": ["message"]}, grant
 
