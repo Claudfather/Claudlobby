@@ -57,10 +57,10 @@ test('default and synthetic transports do not mount session controls or probe ow
   globalThis.location = { origin: 'http://fixture.example.test', search: '' };
   try {
     const normal = await load(await readFile(new URL('../claudlobby/plane/ui/api-client.js', import.meta.url), 'utf8'));
-    assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.prepareAction,undefined);
+    assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.feedbackContext,undefined);assert.equal(normal.prepareAction,undefined);
     await normal.jget('/api/tasks');
     const synthetic = await load(await readFile(new URL('./fixtures/plane_work_loop/api-client.js', import.meta.url), 'utf8'));
-    assert.equal(synthetic.mountSessionControls, undefined);assert.equal(synthetic.nudgeContext,undefined);assert.equal(synthetic.prepareAction,undefined);
+    assert.equal(synthetic.mountSessionControls, undefined);assert.equal(synthetic.nudgeContext,undefined);assert.equal(synthetic.feedbackContext,undefined);assert.equal(synthetic.prepareAction,undefined);
     await synthetic.jget('/api/tasks');
     await synthetic.jget('/api/channel');
     assert.deepEqual(calls, ['/api/tasks', '/fixture/records']);
@@ -739,7 +739,7 @@ test(`late action403 invalidates only its originating composer: ${change}`, asyn
   const late = deferred(); let loop;
   const fresh = change === 'other room' ? { ...context, room: 'second-team', scope: { ...context.scope, fleet: 'second-team' } }
     : change === 'new grant scope' ? { ...context, scope: { ...context.scope, viewer: 'new-generation-viewer' } } : context;
-  const h = harness([ready, ok(context), ok(null), () => late.promise, ok(fresh), ok(null), ready, ok(['board'])], {
+  const h = harness([ready, ok(context), ok(null), ok(null), () => late.promise, ok(fresh), ok(null), ok(null), ready, ok(['board'])], {
     onActionPause(api, scope, kind, recipient) { loop.invalidate(undefined, scope, kind, recipient); }
   });
   try {
@@ -829,4 +829,25 @@ test('app forwards capability kind and original scope without globally pausing t
   const body=app.match(/onActionPause\(scope, kind, recipient\) \{([^}]+)\}/)[1],calls=[];
   runInNewContext(`(function(scope,kind,recipient){${body}})(scope,kind,recipient)`,{scope:nudgeMetadata.scope,kind:'nudge',recipient:nudgeMetadata.target.recipient,workLoop:{invalidate(...args){calls.push(args);}}});
   assert.deepEqual(calls,[[undefined,nudgeMetadata.scope,'nudge',nudgeMetadata.target.recipient]]);
+});
+
+
+const feedbackContext={...nudgeContext,scope:{...nudgeContext.scope,viewer:'feedback-generation'},actions:['feedback']};
+const feedbackMetadata={...nudgeMetadata,kind:'feedback',scope:feedbackContext.scope};
+test('owner feedback wire is exact v2, independent of messages/nudges; prepared body and receipt remain distinct',async()=>{
+ const {semantic_sha256,...pre}=feedbackMetadata,response={...feedbackMetadata,status:'recorded'};
+ const h=harness([ready,ok(feedbackContext),ok(feedbackMetadata),ok(response),ok(response)]);await h.controls.ready;
+ assert.deepEqual(await h.api.feedbackContext('synthetic'),feedbackContext);await h.api.prepareAction({...pre,body:'Exact comment'});await h.api.sendAction({...feedbackMetadata,body:'Exact comment'});await h.api.actionReceipt({...feedbackMetadata,body:'never repeat'});
+ assert.deepEqual(h.calls.slice(1).map(c=>JSON.parse(c.options.body)),[{room:'synthetic',kind:'feedback'},{...pre,body:'Exact comment'},{...feedbackMetadata,body:'Exact comment'},feedbackMetadata]);
+ assert.deepEqual(h.timeouts,[8000,8000,8000,45000,8000]);h.controls.dispose();
+});
+test('feedback refusal reports only its original scope/kind/lead and keeps read session usable without replay',async()=>{
+ const pauses=[],h=harness([ready,denied,ready,ok({state:'ok'})],{onActionPause(_api,scope,kind,recipient){pauses.push({scope,kind,recipient});}});await h.controls.ready;
+ await assert.rejects(h.api.sendAction({...feedbackMetadata,body:'Comment'}),/unknown/);assert.deepEqual(pauses,[{scope:feedbackMetadata.scope,kind:'feedback',recipient:feedbackMetadata.target.recipient}]);
+ assert.equal((await h.api.jget('/api/tasks')).state,'ok');assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,1);assert.ok(!h.calls.some(c=>c.url.endsWith('/prepare')));assert.deepEqual(h.replacements,[]);h.controls.dispose();
+});
+for(const lifecycle of ['renew','logout'])test(`session ${lifecycle} fences late feedback prepare/send without replay`,async()=>{
+ const {semantic_sha256,...pre}=feedbackMetadata;
+ for(const path of ['prepare','send']){const held=deferred(),h=harness([ready,()=>held.promise,ok(lifecycle==='renew'?{state:'ready'}:{state:'signed_out'})]);await h.controls.ready;
+ const action=path==='prepare'?h.api.prepareAction({...pre,body:'Comment'}):h.api.sendAction({...feedbackMetadata,body:'Comment'});const rejection=assert.rejects(action,/unknown/);await h.click(lifecycle);held.resolve(ok(path==='prepare'?feedbackMetadata:{...feedbackMetadata,status:'delivered'}));await rejection;assert.equal(h.calls.filter(c=>c.url.endsWith('/'+path)).length,1);h.controls.dispose();}
 });

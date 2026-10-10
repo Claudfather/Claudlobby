@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ActionState, validContext, validNudgeContext } from '../claudlobby/plane/ui/action-state.js';
+import { ActionState, validContext, validNudgeContext, validFeedbackContext } from '../claudlobby/plane/ui/action-state.js';
 
 const context = {version:1, room:'web', simulation:true,
   scope:{workspace:'example', host:'workshop', fleet:'web', viewer:'owner'},
@@ -247,4 +247,23 @@ test('v2 reason uses logical task identity across assignment/release while pendi
   state.beginPrepared(nudgeContext,original,prepared(original));
   assert.deepEqual(state.pending[0].target,nudgeTarget);assert.equal(state.pending[0].semantic_sha256,'d'.repeat(64));
   assert.ok(!state.storage.getItem(state.key).includes('Kept task reason'));
+});
+
+
+const feedbackContext={...nudgeContext,scope:{...nudgeContext.scope,viewer:'feedback-generation'},actions:['feedback']};
+test('v2 feedback prepared rows reload beside nudge and legacy rows without storing any comment',()=>{
+ const store=storage(),state=new ActionState(store);assert.equal(validFeedbackContext(feedbackContext),true);assert.equal(validNudgeContext(feedbackContext),false);
+ state.begin(context,'message',{recipient:'lead',task_id:null},'Legacy','legacy');
+ const nudge=state.prepare(nudgeContext,nudgeTarget,'Reason',nudgeId);state.beginPrepared(nudgeContext,nudge,prepared(nudge));
+ const request=state.prepare(feedbackContext,nudgeTarget,'Exact comment \n Ω','22222222-2222-4222-8222-222222222222');const sending=state.beginPrepared(feedbackContext,request,prepared(request));
+ assert.equal(sending.body,'Exact comment \n Ω');assert.equal(sending.kind,'feedback');assert.ok(!store.getItem(state.key).includes('Exact comment'));
+ const restored=new ActionState(store);assert.equal(restored.storageError,false);assert.deepEqual(restored.pending.map(r=>r.kind),['message','nudge','feedback']);
+ restored.accept(restored.pending[2],nudgeReceipt(sending,'recorded'));assert.equal(restored.pending.length,3);restored.accept(restored.pending[2],nudgeReceipt(sending));assert.equal(restored.pending.length,2);
+});
+test('feedback immutable proof binds kind/assignment/release/digest and logical guard survives assignment change',()=>{
+ const state=new ActionState(storage()),request=state.prepare(feedbackContext,nudgeTarget,'Comment',nudgeId);const sending=state.beginPrepared(feedbackContext,request,prepared(request));
+ assert.throws(()=>state.prepare(feedbackContext,{...nudgeTarget,assignment_id:'asg_'+'e'.repeat(32)},'Second','22222222-2222-4222-8222-222222222222'),/original receipt/);
+ for(const patch of [{kind:'nudge'},{semantic_sha256:'e'.repeat(64)},{target:{...nudgeTarget,assignment_id:'asg_'+'e'.repeat(32)}},{target:{...nudgeTarget,release_id:'r-'+'e'.repeat(64)}},{status:'unknown'}])assert.throws(()=>state.accept(sending,{...nudgeReceipt(sending),...patch}),/does not match/);
+ const another=new ActionState(storage());assert.throws(()=>another.beginPrepared(nudgeContext,request,prepared(request)),/did not match/);assert.equal(another.pending.length,0);
+ for(const body of ['Bad \uD800','Bad\u0000','x'.repeat(2001)])assert.throws(()=>another.prepare(feedbackContext,nudgeTarget,body,nudgeId),/comment/);
 });
