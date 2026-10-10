@@ -302,6 +302,16 @@ still enforces the absolute expiry on approval. Pairing, sign-in and sign-out
 require explicit interaction; page load never opens a session. Pairing details
 stay in page memory, and successful sign-out does not immediately sign in again.
 
+The protected Plane selects its owner transport only after the read gate admits
+`/api-client.js`. It offers explicit renewal and sign-out. Renewal fences old
+reads and streams, refreshes immediately, then refreshes again when SSE opens;
+active inventory, equipment and search reads resume too. A refused sign-out
+that still has a valid session explicitly says it did not complete. Panel HTTP
+errors stay local; network failures or read-gate 503 pause private reads and
+permit one automatic status GET. Its recovery budget is rearmed by an admitted
+stream message or explicit interaction; renewal and logout are never replayed. An
+expired or absent session on GET/HEAD `/` redirects only to same-origin `/owner`.
+
 All other paths still cross the protected canonical read gate, including
 the operational renderer's static files and each SSE body delivery. Logout or locally applied revocation
 therefore blocks the next private delivery. Tests exercise this with disposable
