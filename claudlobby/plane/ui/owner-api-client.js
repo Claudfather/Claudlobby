@@ -365,7 +365,10 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   }
   function readHandle() {
     const handle = Object.freeze({ jget, createEventSource, dispose, snapshot: readerSnapshot,
-      start: () => checkSession(),
+      start() {
+        recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false;
+        return checkSession(); // Explicit read-only Check; never login or replay.
+      },
       subscribe(listener) {
         stateListeners.add(listener);
         return () => stateListeners.delete(listener);

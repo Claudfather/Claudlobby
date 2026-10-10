@@ -113,8 +113,8 @@ test('source window truncation and assignment/actor references remain source sco
 test('renderer shows per-host availability and partial totals without inventing recorder failure', async () => {
   const { runInNewContext } = await import('node:vm');
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
-  const nodes = new Map(['fleet-totals','host-facts','beat','beat-label','overview'].map(k => [k, {innerHTML:'',textContent:'',className:''}]));
-  const context = { $: id => nodes.get(id), fleets: [], currentFleet: null,
+  const nodes = new Map(['fleet-totals','host-facts','beat','beat-label','overview','fleet-tabs'].map(k => [k, {innerHTML:'',textContent:'',className:'',querySelectorAll:()=>[]}]));
+  const context = { $: id => nodes.get(id), fleets: [], currentFleet: null, interactionApi:{dispose(){}},
     esc: v => String(v ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),
     ago: () => 'recently', stateBlock: () => 'unavailable' };
   runInNewContext(app.slice(app.indexOf('function renderHeader('), app.indexOf('function toggleMessageBody(')), context);
@@ -127,6 +127,10 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.match(nodes.get('fleet-totals').innerHTML, /totals cover readable sources/);
   assert.match(nodes.get('beat-label').textContent, /1\/2 sources readable/);
   assert.match(nodes.get('host-facts').textContent, /<Host A>: denied/);
+  runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'), app.indexOf('// ONE pick path')), context);
+  context.fleets=[{alias:'a / team',bots:99,source_state:'denied'},{alias:'b / team',bots:2,source_state:'ok'}];
+  context.renderFleetTabs(); assert.match(nodes.get('fleet-tabs').innerHTML, /denied/);
+  assert.doesNotMatch(nodes.get('fleet-tabs').innerHTML, /99/);
   env.state='unavailable'; env.data.fleets=[]; env.data.sources[1].state='unavailable'; env.data.sources[1].host=null;
   context.renderOverview(env); assert.match(nodes.get('overview').innerHTML, /Host B/);
 });
@@ -169,4 +173,17 @@ test('malformed projection is scoped to its source and cannot hide the other hos
   const result = await api.jget('/api/channel?limit=120');
   assert.equal(result.state,'ok'); assert.equal(result.data.coverage.reachable,1);
   assert.equal(result.data.threads[0].work_item_id,'b::'+wi);
+});
+
+test('a source lost after its read completes cannot paint while the other host read is held', async () => {
+  const { api, a, b } = await pair(); const held = deferred();
+  b.routes.set('/api/channel?limit=120', held.promise);
+  const reading = api.jget('/api/channel?limit=120');
+  await new Promise(r => setImmediate(r));
+  a.setStatus('sign_in_required'); await a.reader.start();
+  held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));
+  const result = await reading;
+  assert.equal(result.state,'ok'); assert.equal(result.data.coverage.reachable,1);
+  assert.equal(result.data.threads.length,0);
+  assert.equal(result.data.sources[0].state,'denied');
 });

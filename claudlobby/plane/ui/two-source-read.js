@@ -10,7 +10,7 @@ const sum = (rows, key) => rows.every(r => Number.isSafeInteger(r[key]) && r[key
 
 export function createTwoSourceReadTransport({ sources }) {
   if (!Array.isArray(sources) || sources.length !== 2) throw new Error('Exactly two core read handles are required.');
-  const rooms = new Map(), streams = new Set();
+  const rooms = new Map(), streams = new Set(), admittedResults = new WeakMap();
   let disposed = false;
   const entries = sources.map(({ key, label, reader }) => {
     if (typeof key !== 'string' || !slug.test(key) || key.trim() !== key || typeof label !== 'string' || !label || label.length > 80 ||
@@ -76,14 +76,14 @@ export function createTwoSourceReadTransport({ sources }) {
         tx: (m.tx || []).map(x => fields(e, x, ['msg_id'])) })) };
   }
   async function read(e, url) {
-    if (disposed || e.reader.snapshot().state !== 'ready' || !e.host || e.reader.snapshot().read_profile.host_uid !== e.host || entries.some(other => other !== e && other.host === e.host)) return failed(e.state);
+    if (disposed || e.reader.snapshot().state !== 'ready' || !e.host || e.reader.snapshot().read_profile.host_uid !== e.host || entries.some(other => other !== e && other.host === e.host)) return failed(e.state, e.reader.snapshot().remediation || 'This source is not currently readable. Check its owner session.');
     const epoch = e.epoch;
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
     if (disposed || epoch !== e.epoch || e.reader.snapshot().state !== 'ready') return failed(e.state);
     if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object')) value = failed();
     if (['denied', 'absent', 'unreadable', 'unavailable', 'disconnected'].includes(value.state) && e.state !== value.state) { e.epoch++; e.state = value.state; notify(); }
-    else e.state = 'ok';
+    else if (value.state === 'ok') { e.state = 'ok'; admittedResults.set(value, { entry: e, epoch }); }
     return value;
   }
   function coverage(values) {
@@ -122,6 +122,12 @@ export function createTwoSourceReadTransport({ sources }) {
     const chosen = owning ? [owning.e] : entries;
     const suffix = path === '/api/channel' ? '?limit=120' : '';
     const values = await Promise.all(chosen.map(e => read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''))));
+    // One host may finish before its loss while the other host is still reading.
+    // Recheck admission at combination, not only when each request completed.
+    chosen.forEach((e, i) => {
+      if (values[i].state === 'ok' && (admittedResults.get(values[i])?.entry !== e || admittedResults.get(values[i])?.epoch !== e.epoch || e.reader.snapshot().state !== 'ready'))
+        values[i] = failed(e.state);
+    });
     if (owning) {
       const v = values[0];
       if (v.state !== 'ok') return v;
@@ -186,7 +192,8 @@ export function createTwoSourceReadTransport({ sources }) {
     for (const e of entries) {
       const child = e.reader.createEventSource(url); children.push(child);
       child.onmessage = ev => {
-        if (disposed || e.reader.snapshot().state !== 'ready') return;
+        if (disposed || e.reader.snapshot().state !== 'ready' || !e.host ||
+            e.reader.snapshot().read_profile.host_uid !== e.host || entries.some(other => other !== e && other.host === e.host)) return;
         try { const payload = JSON.parse(ev.data); facade.onmessage?.({ data: JSON.stringify({ ...payload, source: e.key, rows: payload.rows.map(r => ({ ...r, source: e.key })) }) }); } catch { /* next read refresh corrects malformed push */ }
       };
       child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };

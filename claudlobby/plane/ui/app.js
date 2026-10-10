@@ -993,7 +993,8 @@ function renderFleetTabs() {
   // selected; the merged host view is the explicit last resort.
   el.innerHTML = [...fleets.map((f) => f.alias), "all"].map((f) => {
     const meta = fleets.find((x) => x.alias === f);
-    const n = meta ? `<small>${esc(meta.bots)}</small>` : "<small>host</small>";
+    const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok" ? meta.source_state : meta.bots)}</small>`
+      : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
     return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
       + ` data-fleet="${esc(f)}" type="button">${esc(f)} ${n}</button>`;
   }).join("");
