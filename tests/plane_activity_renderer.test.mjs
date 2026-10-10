@@ -152,12 +152,24 @@ test('mixed task history shows recorded acts without deriving work from nudge de
   assert.equal((visible(html(t)).match(/>progress</g) || []).length, 1);
 });
 
-test('ordinary message body, delivery line and assignment ribbon retain their presentation', () => {
+test('task-linked chat receipt never implies assignment or work has started', () => {
   const t = thread(); Object.assign(t.messages[0], { message_class: 'chat', body: 'Ordinary <text>', body_words: 'Ordinary <text>',
     delivery: 'delivered', delivery_state: 'confirmed by the receiver' });
   const rendered = visible(html(t));
   assert.match(rendered, /Ordinary &lt;text&gt;/); assert.match(rendered, /confirmed by the receiver/);
-  assert.match(rendered, /dispatched/); assert.match(rendered, /working…/);
+  assert.doesNotMatch(rendered, /dispatched|working…|>delivered</);
+  t.task_events = [{ event: 'accepted' }, { event: 'progress' }, { event: 'completed' }];
+  assert.match(visible(html(t)), /Task history:.*accepted.*progress.*completed/);
+});
+
+if (process.env.PLANE_FEEDBACK_FIXTURE) test('canonical queued feedback receipt stays separate from task progress', async () => {
+  const t = JSON.parse(await readFile(process.env.PLANE_FEEDBACK_FIXTURE, 'utf8'));
+  assert.equal(t.delivered, true); // Canonical thread delivery includes the comment.
+  assert.equal(t.messages[0].message_class, 'chat');
+  assert.equal(t.messages[0].assignment_id, null);
+  const rendered = visible(html(t));
+  assert.match(rendered, /Consider &lt;this&gt; next\./);
+  assert.doesNotMatch(rendered, /dispatched|working…|>delivered</);
 });
 
 if (process.env.PLANE_ACTIVITY_FIXTURE) test('actual canonical query projection renders the paired nudge', async () => {
