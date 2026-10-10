@@ -645,6 +645,18 @@ def nudge_body(task_id: str, assignment_id: str | None, by: str, reason: str) ->
 UNSPECIFIED_ASSIGNMENT = object()
 
 
+def nudge_semantic_digest(task_id: str, *, reason: str, by: str,
+                          expected_assignment_id=UNSPECIFIED_ASSIGNMENT) -> str:
+    """Pure canonical intent digest; omission and explicit null stay distinct."""
+    semantic_fields = dict(task_id=task_id, reason=reason, by=by)
+    if expected_assignment_id is not UNSPECIFIED_ASSIGNMENT:
+        if expected_assignment_id is not None and (not isinstance(expected_assignment_id, str)
+                or not re.fullmatch(ID_PATTERNS["assignment"], expected_assignment_id)):
+            raise TaskQueryError("expected assignment must be a canonical assignment ID or null")
+        semantic_fields["expected_assignment_id"] = expected_assignment_id
+    return semantic_digest(semantic_fields)
+
+
 def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: str,
           route: MessageRouteBinding, by: str | None = None,
           expected_assignment_id=UNSPECIFIED_ASSIGNMENT, admit_read=None) -> TaskOperationResult:
@@ -659,13 +671,8 @@ def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: s
             or route.recipient_alias != manager.alias or route.manager_alias != manager.alias
             or route.manager_uid != manager.uid):
         raise ReceiptConflict("nudge route differs from the frozen caller or fleet manager")
-    semantic_fields = dict(task_id=task_id, reason=reason, by=by_alias)
-    if expected_assignment_id is not UNSPECIFIED_ASSIGNMENT:
-        if expected_assignment_id is not None and (not isinstance(expected_assignment_id, str)
-                or not re.fullmatch(ID_PATTERNS["assignment"], expected_assignment_id)):
-            raise TaskQueryError("expected assignment must be a canonical assignment ID or null")
-        semantic_fields["expected_assignment_id"] = expected_assignment_id
-    semantic = semantic_digest(semantic_fields)
+    semantic = nudge_semantic_digest(task_id, reason=reason, by=by_alias,
+                                     expected_assignment_id=expected_assignment_id)
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
         previous = _existing(store, ctx, "task.nudge", semantic, manager.uid,
                              fact_count=2, notification=True, route=route)

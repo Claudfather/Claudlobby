@@ -960,3 +960,16 @@ def test_nudge_source_admission_shares_reads_and_uses_fresh_postcommit_snapshot(
     result = tasks.nudge(ctx, str(uuid4()), task.task_id, reason="Check recorded work",
                         route=_manager_route(ctx), expected_assignment_id=None, admit_read=check)
     assert result.recording == "committed" and seen == [0, 0, 1]
+
+
+def test_nudge_semantic_helper_preserves_recipe_omission_and_explicit_null():
+    from claudlobby.request_receipts import semantic_digest
+    task_id = 'wi_' + 'a'*32
+    fields = dict(task_id=task_id, reason=' exact reason\n', by='human:operator')
+    omitted = tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'])
+    explicit = tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'], expected_assignment_id=None)
+    assert omitted == semantic_digest(fields)
+    assert explicit == semantic_digest({**fields, 'expected_assignment_id':None})
+    assert omitted != explicit
+    with pytest.raises(tasks.TaskQueryError):
+        tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'], expected_assignment_id='')
