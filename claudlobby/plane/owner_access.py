@@ -1,10 +1,10 @@
-"""Host-owned direct-reader pairing and sessions; no runtime entry point yet.
+"""Host-owned direct-reader pairing and sessions.
 
 This is a policy/state primitive, NOT an identity verifier. A future trusted
-ingress must establish a human PrincipalRef; a separate local confirmation
-door must authorize pairing/revocation. Neither is supplied by this module.
+ingress must establish a human PrincipalRef; the host owner CLI separately
+authorizes local pairing/revocation. Neither is supplied by this module.
 The internal owner_view factory exercises this policy with an explicitly
-injected verifier. No CLI, env flag, or runtime service enables it. See the owner
+injected verifier. No runtime service enables the network factory. See the owner
 access foundation section of documentation/architecture/observable-plane.md.
 """
 
@@ -24,13 +24,14 @@ import tempfile
 import time
 from typing import Callable, Iterator
 
-from .ids import read_host_uid
+from .ids import ID_PATTERNS, read_host_uid
 
 PAIRING_SECONDS = 300
 SESSION_SECONDS = 900
 MAX_PENDING = 32
 MAX_SESSIONS = 32
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
+_HUMAN_ALIAS = re.compile(r"human:[^\s:/]+")
 _SCHEMA = """
 BEGIN IMMEDIATE;
 CREATE TABLE metadata (singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -44,6 +45,14 @@ CREATE TABLE challenges (digest TEXT PRIMARY KEY, namespace TEXT NOT NULL,
 CREATE TABLE sessions (digest TEXT PRIMARY KEY, revision INTEGER NOT NULL REFERENCES grants,
                        created_at REAL NOT NULL, expires_at REAL NOT NULL);
 """
+_MESSAGE_GRANTS_SCHEMA = """
+CREATE TABLE message_grants (
+    owner_revision INTEGER NOT NULL REFERENCES grants(revision),
+    fleet_uid TEXT NOT NULL,
+    actor_uid TEXT NOT NULL,
+    actor_alias TEXT NOT NULL,
+    PRIMARY KEY (owner_revision, fleet_uid)
+)"""
 
 
 class AccessDenied(ValueError):
@@ -77,6 +86,19 @@ class PrincipalRef:
 
 
 @dataclass(frozen=True)
+class VerifiedReader:
+    """A verified principal and its session, supplied out of band by ingress.
+
+    Construction does not verify identity. No header, cookie, query string or
+    website account identifier is interpreted as authority by this module.
+    """
+
+    principal: PrincipalRef
+    token: str = field(repr=False)
+
+
+
+@dataclass(frozen=True)
 class PairingChallenge:
     token: str = field(repr=False)
     principal: PrincipalRef
@@ -92,6 +114,16 @@ class OwnerGrant:
 
 
 @dataclass(frozen=True)
+class OwnerMessageGrant:
+    """Locally approved ordinary-message actor for one fleet and owner revision."""
+
+    owner: OwnerGrant
+    fleet_uid: str
+    actor_uid: str
+    actor_alias: str
+
+
+@dataclass(frozen=True)
 class ReaderSession:
     token: str = field(repr=False)
     grant: OwnerGrant
@@ -104,12 +136,26 @@ def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
+def _canonical_uid(value: str, kind: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(ID_PATTERNS[kind], value) is None:
+        raise AccessDenied("invalid_message_binding")
+    return value
+
+
+def _human_alias(value: str) -> str:
+    if not isinstance(value, str) or _HUMAN_ALIAS.fullmatch(value) is None:
+        raise AccessDenied("invalid_message_binding")
+    return value
+
+
 class OwnerAccess:
     """Explicit, host-scoped state, separate from the append-only Plane ledger.
 
-    Only ``authorize_read`` returns a read admission. It must be called for
-    every request and before each stream delivery; never cache its result.
-    This class grants no action, website membership or workspace authority.
+    ``authorize_read`` must be called for every request and before each stream
+    delivery; never cache its result. Ordinary messages require a separate,
+    explicit local grant and ``authorize_message`` admission. This class does
+    not send messages or grant other actions, website membership or workspace
+    authority.
     Same-UID processes/root can alter its files and are outside this boundary.
     """
 
@@ -227,6 +273,40 @@ class OwnerAccess:
             raise AccessDenied("owner_not_paired")
         return grant
 
+    @staticmethod
+    def _expected_owner(conn: sqlite3.Connection, expected_owner: OwnerGrant) -> OwnerGrant:
+        grant = OwnerAccess._grant(conn)
+        if (not isinstance(expected_owner, OwnerGrant) or grant is None
+                or not grant.active or grant != expected_owner):
+            raise AccessDenied("grant_changed")
+        return grant
+
+    @staticmethod
+    def _has_message_grants(conn: sqlite3.Connection) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_grants'"
+        ).fetchone() is not None
+
+    @staticmethod
+    def _message_grant(conn: sqlite3.Connection, owner: OwnerGrant,
+                       fleet_uid: str) -> OwnerMessageGrant:
+        if not OwnerAccess._has_message_grants(conn):
+            raise AccessDenied("messages_not_allowed")
+        row = conn.execute(
+            "SELECT actor_uid, actor_alias FROM message_grants "
+            "WHERE owner_revision = ? AND fleet_uid = ?",
+            (owner.revision, fleet_uid),
+        ).fetchone()
+        if row is None:
+            raise AccessDenied("messages_not_allowed")
+        # A damaged binding cannot become authority through a read.
+        try:
+            actor_uid = _canonical_uid(row["actor_uid"], "actor")
+            actor_alias = _human_alias(row["actor_alias"])
+        except AccessDenied as exc:
+            raise AccessUnavailable("owner message grant is invalid") from exc
+        return OwnerMessageGrant(owner, fleet_uid, actor_uid, actor_alias)
+
     def current_grant(self) -> OwnerGrant | None:
         """Local inspection only. Exposing this result requires its own gate."""
         with self._connection() as conn:
@@ -270,6 +350,24 @@ class OwnerAccess:
             conn.execute("DELETE FROM challenges")
             return self._owner(conn, expected_principal)
 
+    def inspect_pairing(self, token: str) -> PairingChallenge:
+        """Local console preview only; never expose this lookup remotely.
+
+        The subsequent confirmation rechecks expiry, revision and principal in
+        its write transaction. Previewing a request does not consume or grant it.
+        """
+        digest = _digest(token)
+        with self._connection() as conn:
+            now = self._now()
+            row = conn.execute("SELECT * FROM challenges WHERE digest = ?", (digest,)).fetchone()
+            grant = self._grant(conn)
+            revision = grant.revision if grant else 0
+            if (row is None or not row["created_at"] <= now < row["expires_at"]
+                    or row["revision"] != revision or (grant is not None and grant.active)):
+                raise AccessDenied("pairing_unavailable")
+            return PairingChallenge(token, PrincipalRef(row["namespace"], row["subject"]),
+                                    row["expires_at"])
+
     @staticmethod
     def _issue(conn: sqlite3.Connection, grant: OwnerGrant, now: float) -> ReaderSession:
         conn.execute("DELETE FROM sessions WHERE expires_at <= ? OR created_at > ?", (now, now))
@@ -307,6 +405,61 @@ class OwnerAccess:
             if grant.host_uid != host_uid:
                 raise AccessDenied("wrong_deployment")
             return grant
+
+    def allow_messages(self, *, expected_owner: OwnerGrant, fleet_uid: str,
+                       actor_uid: str, actor_alias: str) -> OwnerMessageGrant:
+        """Local approval only; caller must bind current registry IDs separately.
+
+        A remote caller must never invoke this method. An active fleet binding
+        is immutable; revoke it explicitly before approving a different actor.
+        """
+        fleet_uid = _canonical_uid(fleet_uid, "fleet")
+        actor_uid = _canonical_uid(actor_uid, "actor")
+        actor_alias = _human_alias(actor_alias)
+        with self._connection(write=True) as conn:
+            owner = self._expected_owner(conn, expected_owner)
+            if not self._has_message_grants(conn):
+                conn.execute(_MESSAGE_GRANTS_SCHEMA)
+            row = conn.execute(
+                "SELECT actor_uid, actor_alias FROM message_grants "
+                "WHERE owner_revision = ? AND fleet_uid = ?",
+                (owner.revision, fleet_uid),
+            ).fetchone()
+            if row is not None:
+                if row["actor_uid"] != actor_uid or row["actor_alias"] != actor_alias:
+                    raise AccessDenied("message_binding_changed")
+            else:
+                conn.execute(
+                    "INSERT INTO message_grants VALUES (?, ?, ?, ?)",
+                    (owner.revision, fleet_uid, actor_uid, actor_alias),
+                )
+            return OwnerMessageGrant(owner, fleet_uid, actor_uid, actor_alias)
+
+    def revoke_messages(self, *, expected_owner: OwnerGrant, fleet_uid: str) -> None:
+        """Locally remove one current owner/fleet ordinary-message grant."""
+        fleet_uid = _canonical_uid(fleet_uid, "fleet")
+        with self._connection(write=True) as conn:
+            owner = self._expected_owner(conn, expected_owner)
+            if self._has_message_grants(conn):
+                conn.execute(
+                    "DELETE FROM message_grants WHERE owner_revision = ? AND fleet_uid = ?",
+                    (owner.revision, fleet_uid),
+                )
+
+    def authorize_message(self, token: str, principal: PrincipalRef, *,
+                          host_uid: str, fleet_uid: str) -> OwnerMessageGrant:
+        """Admit one fleet's ordinary messages using one read-only snapshot.
+
+        The caller must derive host/fleet IDs from its actual target, never
+        from browser-supplied claims. This does not authorize message content,
+        recipients, replies, nudges, or any other operation.
+        """
+        fleet_uid = _canonical_uid(fleet_uid, "fleet")
+        with self._connection() as conn:
+            owner = self._admit(conn, _digest(token), principal)
+            if owner.host_uid != host_uid:
+                raise AccessDenied("wrong_deployment")
+            return self._message_grant(conn, owner, fleet_uid)
 
     def renew_session(self, token: str, principal: PrincipalRef) -> ReaderSession:
         """Atomically rotate a still-valid session; old token cannot be replayed."""

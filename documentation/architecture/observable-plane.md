@@ -71,7 +71,8 @@ counts the provisional ones. Session uids are transcript-stable
 ## Owner access foundation (not enabled)
 
 `plane/owner_access.py` is an internal policy/state primitive for **direct,
-whole-deployment reads**. It does not authenticate a browser. The internal
+whole-deployment reads**, with separately approved per-fleet ordinary messages.
+It does not authenticate a browser. The internal
 `plane/owner_view.py:create_owner_app` factory exercises it with an explicitly
 injected verifier; no CLI command, environment flag or startup job enables
 that factory. The current runtime view is unchanged. This is bounded owner-access work
@@ -132,9 +133,43 @@ exposed; `initialize` validates existing authority through a read-only
 connection and is not a recovery door. HTTP reads never perform this recovery.
 
 These lifetimes and limits are bounded experiment choices, not a selected
-browser protocol. The primitive grants no website membership, workspace
-binding or operational write authority. It cannot be substituted for the
-canonical action policy or Plane actor attestation (#1622).
+browser protocol. Pairing and reader sessions grant no website membership,
+workspace binding or operational writes. The separate message grant below
+does not replace canonical operation binding or Plane actor attestation (#1622).
+
+### Explicit owner messages (internal, no browser endpoint)
+
+`OwnerAccess.allow_messages` is a local approval primitive: it binds the exact
+current owner grant to one canonical fleet UID and one existing human actor UID
+and alias. It is never callable by a remote client. Approval transactionally
+creates the optional `message_grants` table in the private authority store;
+ordinary initialization and reads do not create or migrate that table. A grant
+cannot change actor until locally revoked. Owner revocation/re-pairing invalidates
+every old message grant. Reader access alone continues to refuse messages.
+
+`plane/owner_messages.py:OwnerMessages` pins an installation and accepts only
+an already verified `VerifiedReader`. For each operation it checks the session
+and grant, binds current active host/fleet/actor identities, and refuses generated
+bot/timer environment selectors. It accepts an exact recipient UID from that
+fleet, never an alias supplied as the sender or an OS-account fallback. The
+caller must register the intended human identity separately before local approval.
+
+The send holds canonical runtime mutation admission and calls the extracted
+`commands/message_write.py:deliver_bound_message` workflow. CLI and internal
+owner sends therefore share request UUID conflict handling, recording, native
+delivery, held-box repair and receiver byte-integrity proof. Native submission
+alone is not success. Exceptions can follow effects: retain the original UUID,
+then `inspect` its bound request and receiver evidence without resending. A
+missing request does not prove no previous effect. The internal result types
+are evidence for a future adapter, not a ready-made browser response contract.
+
+Admission is rechecked at dispatch start and before returning inspection data.
+Revocation prevents subsequent admission; it does not cancel an effect already
+in progress. This slice supports ordinary messages only. It supplies no HTTP
+route, UI capability, retry control, reply, task mutation, local confirmation
+UI, trusted ingress verifier or browser origin/CSRF policy. Those and a real
+isolated bot canary remain required before enabling browser operations. Tests
+use real private activation/Plane owners with a synthetic native receiver.
 
 ### Protected read factory (internal experiment)
 
@@ -149,7 +184,8 @@ The required asynchronous verifier supplies an immutable `VerifiedReader`
 (principal and session token) from trusted server code. No identity headers,
 cookies, URL credentials, website user IDs or workspace IDs are interpreted.
 The test verifier is out of band and synthetic; it is not a production
-Tailscale verifier. There is no HTTP session-creation or pairing endpoint.
+Tailscale verifier. This factory has no HTTP session-creation or pairing endpoint;
+the separate browser transport below owns those exact lifecycle routes.
 
 Admission happens before calling the view and again immediately before every
 response body chunk, using current host identity, grant and session state.
@@ -182,9 +218,99 @@ supported hosts and browsers. Tailscale Serve
 they must not be accepted from an arbitrary directly reachable backend.
 Website-connected sessions additionally require independently verified website
 identity/workspace evidence; a supplied user/workspace string is insufficient.
-The view's GET-only contract must remain intact, with pairing/session mutations
-behind a separate authority service. No real protected use is claimed by the
-synthetic policy tests.
+The view's GET-only contract remains intact, with pairing/session mutations
+in the separate authority transport below. No real protected use is claimed by
+the synthetic policy tests.
+
+### Local owner administration
+
+The supported local authority door is `claudlobby --root DATA_ROOT host owner`.
+`DATA_ROOT` names the existing installation; these commands never create an
+installation identity, select a fleet, start a service or change Tailscale.
+Run them in the operator terminal on that host:
+
+```sh
+claudlobby --root DATA_ROOT host owner initialize
+claudlobby --root DATA_ROOT host owner status --json
+claudlobby --root DATA_ROOT host owner confirm
+claudlobby --root DATA_ROOT host owner revoke
+```
+
+`initialize` requires typing `INITIALIZE` and prepares private authority storage.
+It preserves existing grants and is not a database-recovery operation. `status`
+is read-only; unavailable authority is an error, never an unpaired result.
+`confirm` reads the browser's short-lived pairing code with terminal echo disabled,
+previews its exact principal, host and expiry, then requires typing `PAIR`.
+The operator compares that principal with the browser before approving. The
+write transaction rechecks the previewed request; expiry or concurrent approval
+cannot turn a stale prompt into authority. No code is accepted in CLI arguments
+or printed by the command. `revoke` shows the current grant and requires typing
+`REVOKE`; the expected revision prevents revoking a replacement owner.
+
+Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
+Composed bot permissions deny these operator-only command forms as well.
+These checks prevent accidental invocation in a bot context; they do not
+isolate a malicious process with the same OS privileges. Revocation invalidates
+the pairing and its sessions without stopping fleets or deleting their history.
+Local confirmation grants private reads only: website membership and ordinary
+message permissions remain separate.
+
+### Direct-host browser transport (internal experiment)
+
+`plane/owner_browser.py:create_owner_browser_app` wraps the protected read
+factory and exposes exactly five lifecycle routes. It requires an asynchronous
+trusted `PrincipalRef` verifier and one configured canonical external HTTPS
+origin. There is no default identity verifier: cookies, query parameters and
+Tailscale/forwarded identity headers do not establish identity here. No CLI,
+environment flag or startup service enables this transport.
+
+| Route | Method | Effect |
+| --- | --- | --- |
+| `/api/owner/status` | GET | Reports needs-pairing, sign-in-required or ready; never initializes authority. |
+| `/api/owner/pair` | POST | Returns a five-minute challenge and verified principal for separate local approval. |
+| `/api/owner/login` | POST | Opens a session after local confirmation; a current session is rotated; stale cookies recover through fresh verified sign-in. |
+| `/api/owner/renew` | POST | Rotates the current session, invalidating its old token. |
+| `/api/owner/logout` | POST | Ends the current session and removes its cookie. |
+
+Every HTTP request must match the configured Host; any supplied Origin must
+match the configured HTTPS origin. POSTs additionally require that Origin,
+`X-Claudlobby-Owner: 1`, JSON content type and an empty JSON object (at most
+1 KiB, read within five seconds). Cross-origin preflight, query-bearing
+lifecycle requests and ambiguous Host/Origin/intent headers are refused. No CORS policy
+admits another origin. Local HTTP forwarding is permitted only because the
+caller must separately secure its HTTPS proxy/backend boundary.
+
+The session is carried only by `__Host-claudlobby-owner`, with Secure,
+HttpOnly, SameSite=Strict, Path=/ and no Domain. Responses never put session
+credentials in JSON or URLs, and lifecycle responses are no-store. Only
+explicit logout deletes the cookie. Status and failed-renewal responses
+do not clear it: a delayed response must not erase a newer cookie installed by
+an overlapping renewal. Explicit sign-in recovers malformed or expired cookies
+using the freshly verified principal and current local grant. The pairing
+challenge is not a session: local `confirm_pairing` must still verify its exact
+token and displayed principal. No HTTP confirmation, revocation, message grant
+or bot action exists.
+
+The exact public shell routes `/owner`, `/owner-entry.js` and `/owner-entry.css`
+contain no private facts and accept only query-free GET/HEAD under the same
+Host/Origin boundary. Their CSP permits only same-origin scripts, styles and
+requests, denies framing and uses no inline script or external asset. The page
+distinguishes unpaired, awaiting local approval, expired, sign-in-required,
+ready, signed-out, denied and unavailable states. Its local pairing countdown
+uses the supplied relative lifetime, not clock equality with the host; the host
+still enforces the absolute expiry on approval. Pairing, sign-in and sign-out
+require explicit interaction; page load never opens a session. Pairing details
+stay in page memory, and successful sign-out does not immediately sign in again.
+
+All other paths still cross the protected canonical read gate, including
+the operational renderer's static files and each SSE body delivery. Logout or locally applied revocation
+therefore blocks the next private delivery. Tests exercise this with disposable
+state and an injected synthetic principal, plus a loopback HTTP subprocess
+simulating a proxy. They do not prove actual HTTPS browser cookie behavior or
+Tailscale identity. Trusted ingress, database ownership,
+real browser validation and an independent bot canary remain activation gates.
+This is a same-origin direct-host protocol, not website OAuth, cross-origin
+embedding or workspace membership.
 
 ## The write spine
 

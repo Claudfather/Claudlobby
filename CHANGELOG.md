@@ -16,6 +16,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`harness/validate-bot-change.sh` uses the same helper.** Its session-scope scenario copied `node` twice per run (244,318,240 bytes) and now links it on Linux.
 - **`tests/test_stand_in_fixtures.py` pins it** with a small file in `node`'s place. It fails if a Linux stand-in holds a copy, if a copy is made more than once per name, if a copy loses its `libnode` link, or if either test file copies a file itself.
 
+### Added — local owner approval and direct-host sign-in page
+
+`host owner initialize|confirm|revoke` require an explicit installation root
+and interactive operator terminal; pairing codes are read with hidden input,
+never as command arguments. The terminal shows the exact principal before
+approval, and stale revocation cannot remove a replacement pairing.
+`host owner status --json` inspects authority without creating it. The internal
+browser factory serves a self-contained `/owner` page for pairing, sign-in and
+sign-out, with no website dependency or persistent browser credential storage.
+Existing private reads remain gated. Trusted Tailscale ingress and network
+activation remain separate; the default Plane service keeps its existing
+read-only behavior and serves the new inert static assets without owner APIs.
+
+### Fixed — `bot stop` waits for the stopped session to exit before proving it quiet, and `bot session` reads a cleanly stopped bot as absent (#2227)
+
+A bot unit runs with `KillMode=process`, so systemd marks it stopped as soon as its `ExecStop` (`tmux kill-server`) returns, while the session it started (the tmux server, `claude`, its MCP servers) is still exiting. `bot stop` read the unit's cgroup once, right then, so it refused and reported a stop that had worked as "bot lifecycle effect is unverified". Two stops on another fleet read that way on 2026-10-07, and each session had left the cgroup within about 2 s.
+
+- **The stop's quiet check waits, within a bound.** `svc_activation_quiet` takes an optional wait in seconds, and `assert_quiescent(..., settle_s=N)` passes it. Only "inactive, with processes still in the cgroup" is re-read, every 0.25 s, from the cgroup first seen, because systemd stops reporting the cgroup once it collects the emptied unit. Processes left after the wait still refuse, so the stop still reads unverified. Every other refusal returns at once. `bot stop` waits up to 30 s, on both of its branches. Every other caller still reads the cgroup once.
+- **A cgroup that vanishes while it is read counts as empty.** systemd removes an emptied unit's cgroup, and the kernel removes only an empty one. So the read no longer refuses at the moment the session finishes exiting.
+- **`bot session` and `fleet reconcile` read a cleanly stopped bot as absent.** tmux leaves its socket file behind after a clean exit, and `bot stop` keeps it, so the session observer read `unknown` and the bot `indeterminate`. `bot move` already handles this case, and these commands now use its kernel proof: an inactive exact unit, an empty cgroup where one is witnessed, and a socket that refuses connections. When all three hold, the session reads `absent`. Nothing is removed.
+- **Not changed:** `bot restart` (#1586), `bot start`, activation and `bot move` keep their single reading.
+- **Tests:**
+  - `tests/test_activation_supervisor.sh`: the wait, the cgroup kept as the witness, the bound, an immediate refusal and the range of the wait.
+  - `tests/test_activation_runtime.py`: the wait reaches the native check, with a call budget that covers it.
+  - `tests/test_bot_operations.py`: the stop waits, and both a session that never exits and a stop that never happened read unverified.
+  - `tests/test_fleet_operations.py`: a stale socket reads absent only by the proof.
+
+### Added — internal direct-host browser session transport
+
+An internal factory connects an explicitly verified principal to local owner
+pairing and protected Plane reads. Exact status, pairing, sign-in, renewal and
+sign-out routes reuse the existing owner authority; session credentials stay
+in a Secure/HttpOnly host cookie. Host, Origin and explicit request-intent checks
+guard lifecycle writes, while static files and SSE retain the read gate's
+per-delivery checks. No runtime command enables it. A production identity
+verifier, local confirmation UI and actual HTTPS browser validation remain
+required; website OAuth and bot action endpoints are outside this increment.
+
+### Added — internal owner-authorized ordinary-message adapter
+
+An explicitly paired host owner can receive a separately approved message grant
+for one fleet and existing human actor. The internal adapter checks that grant,
+current identities and active-release admission before using the same send and
+receiver-integrity workflow as the CLI. It retains request evidence for recovery
+without resending, including when communication recording failed. Reader sessions
+remain read-only by default. No browser endpoint or runtime service enables this
+adapter; trusted ingress, local confirmation UI and real bot canary validation
+remain required before browser operations are activated.
+
 ### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
 
 `test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.

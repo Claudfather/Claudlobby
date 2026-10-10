@@ -38,6 +38,10 @@ from .supervision_inventory import Adapter, InventoryError, _catalog, collect_en
 
 
 _SELF_RESPONSE_WAIT_S = 30
+# A KillMode=process bot unit reads stopped once its ExecStop returns, while the
+# session it started (tmux, claude, MCP servers) is still exiting. The stop's
+# quiet check waits this long for that session to leave the unit's cgroup (#2227).
+_STOP_SETTLE_S = 30
 
 
 class BotLifecycleError(RuntimeError):
@@ -497,13 +501,15 @@ def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
                                     entry["target"], control, "submitted")
 
 
-def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False):
+def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False,
+                     settle_s=0):
     state = _native(adapter, "svc_inventory_state", installed, target)
     if state not in {"not-found not-found inactive", "unchanged unloaded inactive"}:
         raise BotLifecycleError("bot de-enrollment is not established",
                                 effect_attempted=effect_attempted)
     try:
-        assert_quiescent(adapter, installed_file=installed, target=target, socket_path=socket_path)
+        assert_quiescent(adapter, installed_file=installed, target=target, socket_path=socket_path,
+                         settle_s=settle_s)
     except (ActivationError, OSError) as exc:
         raise BotLifecycleError("bot native/session quiescence is unavailable",
                                 effect_attempted=effect_attempted, unavailable=True) from exc
@@ -586,7 +592,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                 spec.environment["TMUX_TMPDIR"])
                         effect_begun = True
                         _confirm_stopped(adapter, installed, entry["target"], socket,
-                                         effect_attempted=True)
+                                         effect_attempted=True, settle_s=_STOP_SETTLE_S)
                         after = _observed(root, declarations, adapter, entry["target"], installed)
                         if after.installed:
                             raise BotLifecycleError("bot unit remains installed")
@@ -600,7 +606,8 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                                 release_id=release.release_id,
                                                 target=entry["target"]) from exc
                 else:
-                    _confirm_stopped(adapter, installed, entry["target"], socket)
+                    _confirm_stopped(adapter, installed, entry["target"], socket,
+                                     settle_s=_STOP_SETTLE_S)
                 return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                           entry["target"], "stopped", bool(unit.installed), "not_running")
             bot_conf = spec.bot_dir / "bot.conf"
