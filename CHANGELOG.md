@@ -28,6 +28,54 @@ remain read-only by default. No browser endpoint or runtime service enables this
 adapter; trusted ingress, local confirmation UI and real bot canary validation
 remain required before browser operations are activated.
 
+### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
+
+`test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.
+
+### Fixed — a usage-limit stop is named, paged, and (opt-in) resumed once after its reset (#996)
+
+A claude.ai usage limit ends a bot's turn with one line, `You've hit your session limit · resets 10:50pm (America/New_York)`, and on this estate nothing resumed it. Every bot runs with `--remote-control`, and while that bridge is up Claude Code (2.1.291 and 2.1.292, read from the binary and reproduced) arms neither its own automatic continue nor its limit menu. The pane sat at an empty prompt that keepalive read as IDLE, so `data/.idle` also kept `activity_stuck` quiet, and bots sat 75 to 85 minutes past the reset until someone noticed.
+
+- **keepalive reads that frame as `LIMIT`, not `IDLE`.** It takes two facts, never one. The first is the bot's own record: `usage-limit-hook.sh`, a new StopFailure and Stop hook, writes `data/.usage-limit` when Claude Code ends a turn with `error: rate_limit` and clears it when a turn ends normally. The second is the whole pane: the new `usage-limit.py` reads the limit line, which sits above `tail -10`, as the bot's last word, with its reset time and what holds the screen. A limit line a bot merely quotes writes no record, so it is never a stop. `LIMIT` writes `data/.limit`, no `.idle`, and sends no reload and no bridge heal. It rides the heartbeat sample, and `fleet status` shows `limit`.
+- **The reset is read as Claude Code prints it.** A time with no date is within 24 hours after the hit that printed it, since Claude Code adds the date only beyond 24 hours. In the hour that repeats when DST ends, it is the later pass: an hour late delays a resume, an hour early would type it while the limit holds. A later hit in the same hold that prints the same limit and reset reads the reset the hold first read, so a hit after the reset is not read as tomorrow's.
+- **fleet-pulse pages `usage_limit_held` (critical) in place of `activity_stuck`** when a bot is still held after its reset: the printed minute, plus 60 s (the print drops the seconds), plus keepalive's resume grace, plus `OBSERVABILITY_USAGE_LIMIT_SLACK_S` (300 s). The page names the limit, the reset and the remedy. Before the reset, a held bot pages nobody: that wait is expected.
+- **The resume is opt-in per bot (`KEEPALIVE_LIMIT_RESUME_ENABLED=1` in its `fleet.yaml` env).** Runtime scripts are in force on every bot at activation, and this door types into a bot's pane, so one armed bot is the only canary. Once the reset has passed, it takes one action per reset, recorded before its first key and emitted as `keepalive_limit_resume`:
+  - If the usage-limit menu is up with its pointer on the exact label "Stop and wait for limit to reset", it sends one Enter. It never chooses by position: a server flag can put usage credits first, and a pointer anywhere else gets no keys.
+  - It then sends the resume prompt.
+  - Any other menu or dialog, a box holding text, or a running turn gets no keys. Neither does a second limit with the same reset: that one goes to an operator.
+- **`usage_limit_hit`** records each stop with the limit line, and the protocol's "no instrument reports `rate_limit`" now reads: a limit that trips is recorded; position against the ceiling still is not.
+
+### Fixed — each fleet's copy of an interval timer is anchored to the clock at its own second on the host (#1654)
+
+On a host with several fleets, every fleet composed the same interval timers, and each job's copies fired together: four keepalives and the host probe in one second every minute, four pulse sweeps every five minutes. A first-run offset alone does not last. A timer that counts from its last start (`OnUnitActiveSec=`) moves all its later ticks whenever a start is pulled early by a wake of the user manager or delayed by load, and copies that meet share a wake from then on. Measured on a four-fleet host, offset copies merged again within minutes to an hour with `AccuracySec=10`, and two of five merged within 75 minutes with `AccuracySec=1`.
+
+- **Anchored to the clock.** An interval of whole minutes that divides an hour, or of whole hours that divides a day, is now `OnCalendar=` in UTC with `AccuracySec=1`. The minute splits into one band of seconds per fleet plus one for the host (12 s each with four fleets), and each job takes its own second in its fleet's band; a job longer than a minute also runs a minute after the previous fleet's copy. No two interval units on a host are due in the same second, and a late start delays only that run. In a soak on this host, five copies 12 s apart kept five separate 10 s windows on all 120 ticks of two hours paired with the interval form, and on 1,436 of 1,440 ticks over 24 hours; each of the other four held one or two starts the user manager made 2 to 23 s late, and the next tick was back on its points. The job's `startup_delay`, rounded down to the minute, places it in its cycle.
+- **First runs.** A unit's first run after any start is its next point. `host activate` starts timers only after every bot is verified ready, so none runs into a starting bot there; at a user-manager start, timers and bots start together, as before.
+- **Cost.** Keepalive and the probe now run 60 times an hour, against about 53.5 when each start could come up to 10 s late: about +131 CPU-s an hour on a four-fleet host, 0.9% of four cores. Some job now holds the activation lock about 61% of the time in normal operation (21% before) and about 83% in the three hours after an activation (40% before), which is why #2208's wait ships with this.
+- **Kept as it was:** an interval that has no clock points (a fleet's `pulse_interval: 420`, a 30 s job) keeps `OnActiveSec=`/`OnUnitActiveSec=` with a slot for its first run only. launchd keeps `StartInterval` with no slot. An anchored job never emits `Persistent=`. Calendar jobs are unchanged.
+- **What the docs claimed, corrected.** `system.yaml` and the schema doc said an activation runs an overdue job at once; for the interval form it counts every first run from its last daemon-reload instead. They also said a job's later ticks keep their slots; under `OnUnitActiveSec=` they do not.
+- **Tests:** `tests/test_timer_phase.py` composes four fleets and the host's jobs on one data root and checks that no two interval units share a second. When `systemd-analyze` is present, systemd's own calendar parser checks each expression.
+
+### Changed — Home Assistant: the library grants hass-mcp's 17 read tools by name, not the whole server
+
+Until now a bot that attached `homeassistant` composed `mcp__homeassistant__*`, so all 29 hass-mcp tools ran without a prompt, `restart_ha` and nine tools that rewrite dashboards included.
+
+- **`library/mcp/homeassistant.json` declares `read_only_tools`:** the 17 tools that only read, each checked in the hass-mcp 0.6.0 source. The composer emits one `mcp__homeassistant__<tool>` allow for each and never the wildcard, and the `tool_grants` of `library/integrations/homeassistant.md` mirror the list, as compose requires.
+- **The other 12 prompt:** `entity_action`, `call_service_tool`, `restart_ha` and nine dashboard tools. So does any tool a later release adds, until it is listed.
+- **Upgrade:** a bot that controls devices unattended needs `mcp__homeassistant__entity_action` and `mcp__homeassistant__call_service_tool` in `bots.<name>.tool_permissions.allow` before this reaches it. Without them, its device control waits on a prompt.
+- **Not a hard boundary:** `call_service_tool` can still call `homeassistant.restart`, and every tool has the token's full reach. The integration doc says so.
+- **The per-bot grant is named by its real key.** Two compose errors and the docs for the read-only split told operators to grant a write in fleet.yaml `tools.allow`, a shape that now fails to parse. They name `tool_permissions.allow`.
+- **Tests:** `tests/test_readonly_mcp_grants.py` composes a bot from the shipped library and pins the 17, the 19 with the device-control grant, and no wildcard. The shipped-library pins cover `homeassistant` too.
+
+### Fixed — The Home Assistant MCP fragment runs the server its tool list, doc and skills describe
+
+`library/mcp/homeassistant.json` pointed at HA's built-in MCP endpoint, `${HA_URL}/api/mcp/`, while its tool list, `library/integrations/homeassistant.md` and the `home`, `weather` and `status-personal` skills named the tools of the community server hass-mcp. The built-in endpoint answers only without the trailing slash and needs an HA integration set up first, so the server failed to connect at session start; connected, it would have offered none of the tools the docs and skills name.
+
+- **The fragment runs hass-mcp 0.6.0 over stdio:** `uvx --from hass-mcp==0.6.0 hass-mcp`, the shape the library's other pinned Python servers use, so `host cache warm` and `doctor` cover it. `HA_URL` and `HA_TOKEN` pass through the same env contract.
+- **`_permissions_contract.tools` lists the 29 tools 0.6.0 serves.** The 12 it listed are all among them. The entry above narrows what the library grants.
+- **The `/home` skill calls the tools as 0.6.0 takes them.** `entity_action` accepts only `on`, `off` or `toggle`, with service data in `params`, so the skill's `turn_on` and `turn_off` examples returned an error. `call_service_tool` takes the `entity_id` inside `data`.
+- **The integration doc** says what a host installs, what the token can reach, how to check the connection, and which REST calls to use when the server does not connect.
+
 ### Fixed — `host activate` waits up to 300 s for running jobs before refusing, and jobs that start meanwhile back off (#2208)
 
 `host activate` took the host activation lock without waiting, and every composed timer job, host operation and native bot start holds that lock shared while it runs. An activation attempted while any of them ran was refused, and the refusal said another activation held the lock. On a four-fleet host some job held it 21% of the time in normal operation; per-fleet timer slots (#2209) raise that to about 61%.

@@ -401,7 +401,7 @@ def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) ->
     ``_resolve_mcp_permissions`` grant role (and its superset gate) is cut:
     add a tool upstream and the directional error here names the fix. A bot
     that genuinely needs a write tool gets it explicitly via fleet.yaml
-    ``tools.allow``; that operator path is untouched here.
+    ``tool_permissions.allow``; that operator path is untouched here.
     """
     contract = _load_mcp_contract(paths, name)
     if not contract:
@@ -416,7 +416,7 @@ def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) ->
             f"integration {name!r}: tool_grants {extra} not auto-grantable — the mcp "
             f"fragment declares read_only_tools, so grants must be exact "
             f"mcp__{name}__<tool> entries from that read-only set. Writes stay "
-            "prompt-gated; grant one per-bot via tools.allow if genuinely needed."
+            "prompt-gated; grant one per-bot via tool_permissions.allow if genuinely needed."
         )
     missing = sorted(mirror - set(tool_grants))
     if missing:
@@ -438,7 +438,7 @@ def _assert_no_write_autoallows(
     would otherwise compose every catalog write into each equipping bot. This
     is the union-layer invariant: for every attached server whose contract
     declares ``read_only_tools``, no accumulated pattern may reach beyond the
-    read set. Runs before fleet.yaml ``tools.allow`` is appended — that layer
+    read set. Runs before fleet.yaml ``tool_permissions.allow`` is appended — that layer
     is the operator's deliberate, auditable escape hatch and stays exempt.
     """
     for entry in bot.mcp:
@@ -463,7 +463,7 @@ def _assert_no_write_autoallows(
                     f"bot {bot.bot_id!r}: allow patterns {bad} cover non-read tools "
                     f"of read-only server {server!r} — no library-derived layer "
                     "(integration, skill, expertise, guardrail) may auto-allow a "
-                    "write. Grant it per-bot via fleet.yaml tools.allow if "
+                    "write. Grant it per-bot via fleet.yaml tool_permissions.allow if "
                     "genuinely needed."
                 )
 
@@ -2994,11 +2994,11 @@ def compose_settings_local(
         _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
 
     # Union-layer write guardrail: with every library-derived layer accumulated
-    # (and before the operator's tools.allow escape hatch below), nothing may
+    # (and before the operator's tool_permissions.allow escape hatch below), nothing may
     # cover a non-read tool of a read-only-contracted server (#661).
     _assert_no_write_autoallows(bot, paths, allow_patterns)
 
-    # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
+    # Layer 6/7: Explicit tool_permissions.allow from fleet defaults + bot config
     _append_unique(allow_patterns, bot.tool_permissions.allow)
 
     # Bot-level deny wins over all allow layers
@@ -4012,20 +4012,120 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 # Fleet-level timer generation
 # ---------------------------------------------------------------------------
 
+# An interval job whose interval divides an hour or a day is anchored to the
+# clock (OnCalendar=, in UTC) at its own second of the minute. Every run is due
+# at its own clock point, so a late start delays only that run. A timer
+# counting from its last start (OnUnitActiveSec=) cannot keep copies apart:
+# every start pulled early by a wake of the user manager, or delayed by load,
+# moves all its later ticks, and copies that meet share a wake from then on.
+# AccuracySec=1 lets a start come up to a second after its point; a stalled
+# user manager can start it later still.
+_ANCHORED_ACCURACY_S = 1
+# Any other interval keeps OnUnitActiveSec=, and only its first run after a
+# start gets a slot: copies spread over at most this long, or the interval when
+# that is shorter, so no copy's first run moves by 150 s or more.
+_INTERVAL_SPREAD_S = 150
 
-def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
+
+def _host_timer_slot(paths: Paths, *, host: bool = False) -> tuple[int, int]:
+    """This fleet's slot among the host's copies of an interval job, and how many slots there are.
+
+    Every fleet composes the same interval timers, and identical timers fire in
+    the same second. Each slot owns its own band of seconds of every minute
+    (``_calendar_seconds``), so no anchored unit is due in the same second as
+    any other unit on the host; a job longer than a minute also runs one
+    minute after the previous slot's copy. An unanchored interval gets only a
+    first-run offset (``_interval_phase_s``), which later ticks lose.
+
+    Fleets are numbered in the sorted overlay enumeration the boot ladder uses
+    (``_iter_fleet_dirs``), so every compose path assigns the same slots, and
+    host jobs take the slot after the last fleet's. A fleet with no place under
+    ``local/`` (root mode, or an overlay pointed at explicitly) takes slot 0,
+    as it ladders standalone. Slots come from the manifests present at compose
+    time: adding, removing or renaming a fleet moves the fleets after it, and a
+    staged host plan composes every fleet at once, so one activation moves them
+    all together.
+    """
+    fleets = [directory.resolve() for directory in _iter_fleet_dirs(paths.root / "local")
+              if (directory / "fleet.yaml").is_file()]
+    slots = max(len(fleets), 1) + 1
+    if host:
+        return slots - 1, slots
+    here = paths.fleet_dir.resolve() if paths.fleet_dir is not None else None
+    return (fleets.index(here) if here in fleets else 0), slots
+
+
+def _anchored(interval_s: int) -> bool:
+    """Whether every *interval_s* seconds is a fixed set of clock points each hour or day."""
+    return ((interval_s % 60 == 0 and 3600 % interval_s == 0)
+            or (interval_s % 3600 == 0 and 86400 % interval_s == 0))
+
+
+def _interval_calendar(interval_s: int, position_s: int) -> str:
+    """OnCalendar= for every *interval_s* seconds, *position_s* into each cycle from 00:00 UTC."""
+    hours, rest = divmod(position_s, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if interval_s == 60:
+        return f"*-*-* *:*:{seconds:02d} UTC"
+    if interval_s < 3600:
+        return f"*-*-* *:{minutes:02d}/{interval_s // 60}:{seconds:02d} UTC"
+    if interval_s == 3600:
+        return f"*-*-* *:{minutes:02d}:{seconds:02d} UTC"
+    if interval_s < 86400:
+        return f"*-*-* {hours:02d}/{interval_s // 3600}:{minutes:02d}:{seconds:02d} UTC"
+    return f"*-*-* {hours:02d}:{minutes:02d}:{seconds:02d} UTC"
+
+
+def _calendar_seconds(schedules: dict, slot: tuple[int, int]) -> dict[str, int]:
+    """The second of the minute each of one owner's anchored interval jobs runs at.
+
+    The minute is split into one band per slot (12 s each with four fleets and
+    the host). Each anchored job the owner declares takes its own second in the
+    owner's band, the shortest interval first, so no two units on the host
+    are due in the same second while a band holds all its owner's jobs. A fleet
+    ranks the jobs it declares, composed or not, so whether a gated job
+    composes never moves another job's second.
+    """
+    index, slots = slot
+    band = max(60 // slots, 1)
+    names = sorted((name for name, sched in schedules.items()
+                    if sched["type"] == "interval" and _anchored(sched["seconds"])),
+                   key=lambda name: (schedules[name]["seconds"], schedules[name]["startup"], name))
+    step = max(band // len(names), 1) if names else 1
+    return {name: index * band + (rank * step) % band for rank, name in enumerate(names)}
+
+
+def _interval_phase_s(interval_s: int, slot: tuple[int, int]) -> int:
+    """How much later than slot 0's copy this slot's copy of an interval job first runs.
+
+    The copies sit in equal steps across the shorter of the interval and
+    ``_INTERVAL_SPREAD_S``, so the offset is always less than the interval.
+    """
+    index, slots = slot
+    return index * (min(interval_s, _INTERVAL_SPREAD_S) // slots)
+
+
+def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
+                            slot: tuple[int, int] | None = None, second: int | None = None) -> dict:
     """Resolve timer scheduling from config.
 
     Returns a dict describing the schedule type:
-      {"type": "interval", "seconds": 300, "startup": 300}
+      {"type": "interval", "seconds": 300, "startup": 330, "phase": 0,
+       "calendar": "*-*-* *:01/5:14 UTC"}
+      {"type": "interval", "seconds": 420, "startup": 450, "phase": 30, "calendar": None}
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
 
-    ``startup`` is the first run's delay, counted from the timer's own start
-    (OnActiveSec=): the job's ``startup_delay``, else its interval up to 900 s.
-    A past OnBootSec= or OnStartupSec= point fires a timer at once
-    (systemd.timer(5)), and an activation restarts every timer. OnUnitActiveSec=
-    counts from the service's last start, which the manager keeps across a timer
-    restart, so a job overdue on its interval still runs at once.
+    An interval job stays type "interval" (launchd keeps StartInterval). With
+    its host ``slot`` and its ``second`` of the minute (``_calendar_seconds``)
+    an anchored interval gets ``calendar``: its ``startup_delay`` into each
+    cycle, rounded down to the minute, one minute later per slot before it, at
+    that second. Its first run after any start is its next point. Any other
+    interval keeps ``startup``, the first run's delay from the timer's own start
+    (OnActiveSec=): ``startup_delay``, else the interval up to 900 s, plus
+    ``phase`` for its slot (``_interval_phase_s``). A past OnBootSec= or
+    OnStartupSec= point fires a timer at once (systemd.timer(5)). An activation
+    counts every OnActiveSec= from its last daemon-reload, and every
+    daemon-reload re-arms OnActiveSec= for a waiting timer.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}
@@ -4040,7 +4140,13 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
                 seconds = int(val)
     startup = timer_cfg.get("startup_delay")
     startup = min(seconds, 900) if startup is None else int(startup)
-    return {"type": "interval", "seconds": seconds, "startup": startup}
+    if slot is not None and second is not None and _anchored(seconds):
+        minutes = ((startup % seconds) // 60 + slot[0]) % (seconds // 60)
+        return {"type": "interval", "seconds": seconds, "startup": startup, "phase": 0,
+                "calendar": _interval_calendar(seconds, minutes * 60 + second)}
+    phase = _interval_phase_s(seconds, slot) if slot is not None else 0
+    return {"type": "interval", "seconds": seconds, "startup": startup + phase, "phase": phase,
+            "calendar": None}
 
 
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
@@ -4342,15 +4448,28 @@ def _write_timer_units(
         timer_lines.append(
             f"Description=claudlobby {name} timer ({scope}) -- tick every {secs}s"
         )
-        timer_lines.extend(
-            [
-                "",
-                "[Timer]",
-                f"OnActiveSec={sched['startup']}",
-                f"OnUnitActiveSec={secs}",
-                "AccuracySec=10",
-            ]
-        )
+        timer_lines.extend(["", "[Timer]"])
+        if sched.get("calendar"):
+            timer_lines.extend(
+                [
+                    "# Anchored to the clock at this unit's own second on the host.",
+                    f"OnCalendar={sched['calendar']}",
+                    f"AccuracySec={_ANCHORED_ACCURACY_S}",
+                ]
+            )
+        else:
+            if sched.get("phase"):
+                timer_lines.append(
+                    f"# First run: a {sched['startup'] - sched['phase']} s startup delay,"
+                    f" plus {sched['phase']} s for this unit's slot on the host."
+                )
+            timer_lines.extend(
+                [
+                    f"OnActiveSec={sched['startup']}",
+                    f"OnUnitActiveSec={secs}",
+                    "AccuracySec=10",
+                ]
+            )
     else:
         expr = sched["expression"]
         timer_lines.append(f"Description=claudlobby {name} timer ({scope}) -- {expr}")
@@ -4362,7 +4481,9 @@ def _write_timer_units(
                 "AccuracySec=60",
             ]
         )
-    if persistent:
+    # An anchored interval job never catches up a missed run: at an activation
+    # that would fire every one of them at once (#2059).
+    if persistent and not sched.get("calendar"):
         timer_lines.append("Persistent=true")
     if randomized_delay:
         timer_lines.append(f"RandomizedDelaySec={randomized_delay}")
@@ -5025,8 +5146,14 @@ def compose_fleet_timers(
     composed_jobs: set[str] = set()
 
     if emit_defaults:
+        slot = _host_timer_slot(paths)
+        # Ranked over every job the fleet declares, the leaf-manager-gated ones
+        # included, so the gate never moves another job's second.
+        seconds = _calendar_seconds(
+            {name: _resolve_timer_schedule(cfg, merged_defaults)
+             for name, cfg in merged_defaults.get("jobs", {}).items()}, slot)
         for name, cfg in timers.items():
-            sched = _resolve_timer_schedule(cfg, merged_defaults)
+            sched = _resolve_timer_schedule(cfg, merged_defaults, slot, seconds.get(name))
             script = cfg.get("script", "")
             svc_type = cfg.get("type", "oneshot")
             _write_timer_units(
@@ -5264,6 +5391,23 @@ def _prune_host_units(timers_dir: Path, base: str) -> None:
                       leftover.name)
 
 
+def _host_job_armed(name: str, cfg: dict) -> bool:
+    """Whether a host job composes a unit: declared armed, and its install extra imports.
+
+    The two shapes default OPPOSITE ways, and the asymmetry is the safety
+    property rather than an oversight: a TIMER with no `enroll` key is armed
+    (that is how every shipped host job reads), while a SERVICE must say
+    `enroll: true` in as many words — the macOS leg bootstraps every
+    claudlobby-*.plist it finds, so a resident process must never arrive by
+    omission.
+    """
+    if cfg.get("unit") == "service":
+        declared = cfg.get("enroll") is True
+    else:
+        declared = cfg.get("enroll", True) is not False
+    return declared and not _switches.missing_extra(name)
+
+
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Emit host-global singleton units from system.yaml ``host.jobs``.
 
@@ -5288,6 +5432,10 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
 
     timers_dir.mkdir(parents=True, exist_ok=True)
     _host_cascade: dict = {}      # lazily filled by the first job that asks
+    host_slot = _host_timer_slot(paths, host=True)
+    host_seconds = _calendar_seconds(
+        {name: _resolve_timer_schedule(cfg, {}) for name, cfg in host_jobs.items()
+         if cfg.get("unit") != "service" and _host_job_armed(name, cfg)}, host_slot)
     for name, cfg in host_jobs.items():
         unit = host_unit_name(name, prefix=prefix)
         # COMPOSE-TIME DORMANCY, now for every host job shape (F7). A host
@@ -5309,17 +5457,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         # composing it keeps the honest failure honest, and the switch table
         # prints the pip line as its arm.
         _extra = _switches.missing_extra(name)
-        # The two shapes default OPPOSITE ways, and the asymmetry is the
-        # safety property rather than an oversight: a TIMER with no `enroll`
-        # key is armed (that is how every shipped host job reads), while a
-        # SERVICE must say `enroll: true` in as many words — the macOS leg
-        # bootstraps every claudlobby-*.plist it finds, so a resident process
-        # must never arrive by omission.
-        if cfg.get("unit") == "service":
-            _declared = cfg.get("enroll") is True
-        else:
-            _declared = cfg.get("enroll", True) is not False
-        _armed = _declared and not _extra
+        _armed = _host_job_armed(name, cfg)
         if not _armed:
             if _extra:
                 _log.warning(
@@ -5351,7 +5489,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                 phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
             )
             continue
-        sched = _resolve_timer_schedule(cfg, {})
+        sched = _resolve_timer_schedule(cfg, {}, host_slot, host_seconds.get(name))
         # Switch carrier for a self-gated host door (chunk 3a.1): a host timer
         # starts with a CLOSED env, so a door that consults a flag needs it
         # stamped as an Environment= line — the same problem the keepalive

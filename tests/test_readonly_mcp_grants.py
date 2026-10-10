@@ -7,7 +7,7 @@ every other tool keeps prompting. The server wildcard is never emitted for
 such a server, the paired integration's ``tool_grants`` must mirror the read
 set exactly, and no library-derived layer (integration, skill, expertise,
 guardrail) may cover a write — both directions hard-fail compose. fleet.yaml
-``tools.allow`` stays the operator's explicit escape hatch.
+``tool_permissions.allow`` stays the operator's explicit escape hatch.
 
 The shipped split-contract library content is pinned here too — the mechanism
 guarding writes is only as good as the curated lists it enforces.
@@ -234,7 +234,7 @@ class TestUnionLayerWriteGuard:
 
     Skill ``tool_grants`` join the same allow union as integration grants; the
     union-layer assert must catch a write there, while the operator's
-    fleet.yaml ``tools.allow`` stays exempt.
+    fleet.yaml ``tool_permissions.allow`` stays exempt.
     """
 
     def _compose_with_skill(self, tmp_path, skill_grants: list[str]):
@@ -259,7 +259,7 @@ class TestUnionLayerWriteGuard:
         assert "mcp__shopify__getProduct" in settings["permissions"]["allow"]
 
     def test_operator_tools_allow_write_stays_exempt(self, tmp_path):
-        """fleet.yaml tools.allow is appended after the guard — the escape hatch."""
+        """fleet.yaml tool_permissions.allow is appended after the guard — the escape hatch."""
         paths = _build_library(
             tmp_path / "r", integration_grants=[f"mcp__shopify__{t}" for t in READS]
         )
@@ -316,6 +316,24 @@ class TestShippedLibraryContent:
             "delete_product",
             "publish_product",
             "upload_image",
+        ],
+        # homeassistant: hass-mcp 0.6.0. entity_action and call_service_tool
+        # control devices; a bot that needs them unattended grants them in its
+        # fleet.yaml tool_permissions.allow. restart_ha and the dashboard tools
+        # restart HA or rewrite a dashboard in one call.
+        "homeassistant": [
+            "entity_action",
+            "call_service_tool",
+            "restart_ha",
+            "set_dashboard_config",
+            "add_card",
+            "update_card",
+            "remove_card",
+            "move_card",
+            "add_view",
+            "update_view",
+            "remove_view",
+            "restore_dashboard",
         ],
         "google-analytics": [],
         "posthog": [],
@@ -395,6 +413,14 @@ class TestShippedLibraryContent:
             "inspect_url_enhanced",
             "batch_url_inspection",
             "check_indexing_issues",
+        },
+        # homeassistant: checked in the pinned hass-mcp 0.6.0 source. Each reads
+        # HA's states (and its area map, through a POST to /api/template that
+        # only renders a template); none calls a service or saves a dashboard.
+        "homeassistant": {
+            "domain_summary_tool",
+            "search_entities_tool",
+            "system_overview",
         },
         # meta-ads uses meta_ads_<verb>_<object> naming; none fit get_*/list_*.
         # All 35 are confirmed side-effect-free reads in the pinned
@@ -497,3 +523,89 @@ class TestShippedLibraryContent:
             )
             assert write not in contract["read_only_tools"]
             assert f"mcp__{name}__{write}" not in grants
+
+
+class TestShippedHomeAssistantGrant:
+    """The shipped Home Assistant grant: hass-mcp's 17 reads, never the server.
+
+    hass-mcp 0.6.0 serves 29 tools. The library grants the 17 that only read;
+    the 12 that change HA prompt unless a bot's fleet.yaml grants them in
+    ``tool_permissions.allow``. A bot that controls devices grants
+    ``entity_action`` and ``call_service_tool`` there and composes exactly 19.
+    Composed from the shipped library, so the wildcard coming back by either
+    path (the fragment losing ``read_only_tools``, or ``tool_grants`` going back
+    to ``mcp__homeassistant__*``) fails these tests.
+    """
+
+    READS = {
+        "domain_summary_tool",
+        "get_dashboard_config",
+        "get_entities_by_area",
+        "get_entity",
+        "get_error_log",
+        "get_history",
+        "get_history_range",
+        "get_statistics",
+        "get_statistics_range",
+        "get_version",
+        "list_automations",
+        "list_dashboard_backups",
+        "list_dashboards",
+        "list_entities",
+        "list_view_sections",
+        "search_entities_tool",
+        "system_overview",
+    }
+    DEVICE_CONTROL = {"call_service_tool", "entity_action"}
+    PROMPTING = {
+        "restart_ha",
+        "set_dashboard_config",
+        "add_card",
+        "update_card",
+        "remove_card",
+        "move_card",
+        "add_view",
+        "update_view",
+        "remove_view",
+        "restore_dashboard",
+    }
+
+    @staticmethod
+    def _names(tools) -> list[str]:
+        return sorted(f"mcp__homeassistant__{t}" for t in tools)
+
+    def _composed(self, tmp_path, operator_allow: list[str]) -> list[str]:
+        """The bot's composed ``mcp__homeassistant`` allows, from the shipped library."""
+        (tmp_path / "runtime" / "bots").mkdir(parents=True)
+        paths = Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package())
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="homeassistant", instances=["default"])],
+        )
+        bot.tool_permissions.allow.extend(operator_allow)
+        settings = compose_settings_local(bot, _single_bot_fleet(bot), paths)
+        return sorted(
+            p for p in settings["permissions"]["allow"] if p.startswith("mcp__homeassistant")
+        )
+
+    def test_contract_splits_the_29_tools(self):
+        contract = json.loads(
+            (REPO_DIR / "library" / "mcp" / "homeassistant.json").read_text()
+        )["_permissions_contract"]
+        universe = self.READS | self.DEVICE_CONTROL | self.PROMPTING
+        assert len(universe) == 29
+        assert set(contract["tools"]) == universe
+        assert set(contract.get("read_only_tools") or []) == self.READS
+
+    def test_library_grants_the_17_reads_and_no_wildcard(self, tmp_path):
+        composed = self._composed(tmp_path, [])
+        assert "mcp__homeassistant__*" not in composed
+        assert composed == self._names(self.READS)
+
+    def test_device_control_grant_composes_exactly_the_19(self, tmp_path):
+        composed = self._composed(tmp_path, self._names(self.DEVICE_CONTROL))
+        assert "mcp__homeassistant__*" not in composed
+        assert composed == self._names(self.READS | self.DEVICE_CONTROL)
+        assert not set(composed) & set(self._names(self.PROMPTING))
