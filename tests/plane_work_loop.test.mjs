@@ -746,6 +746,21 @@ test('capability recovery does not overwrite a message edited while its nudge co
 const ownerFeedback = {...ownerNudge,scope:{...ownerNudge.scope,viewer:'feedback-grant'},actions:['feedback']};
 const feedbackOptions = extra => ({interactionContext:()=>null,feedbackContext:()=>ownerFeedback,protected:true,jget:()=>ownerDetail(),
   crypto:{randomUUID:()=> '22222222-2222-4222-8222-222222222222'},...extra});
+for(const transition of ['none','room','session'])
+test(`feedback context waits for nudge and fences the originating epoch: ${transition}`,async()=>{
+  const held=deferred(),reads=[];
+  const h=harness(feedbackOptions({interactionContext:room=>{reads.push(['message',room]);return null;},
+    nudgeContext:room=>{reads.push(['nudge',room]);return room==='web'?held.promise:null;},
+    feedbackContext:room=>{reads.push(['feedback',room]);return room==='web'?ownerFeedback:null;}}));
+  h.loop.setRoom('web');await settle();
+  assert.deepEqual(reads,[['message','web'],['nudge','web']]);
+  if(transition==='room')h.loop.setRoom('other');
+  if(transition==='session')h.loop.pause();
+  await settle();held.resolve(ownerNudge);await settle();
+  assert.equal(reads.filter(([kind,room])=>kind==='feedback'&&room==='web').length,transition==='none'?1:0);
+  if(transition==='room')assert.equal(reads.filter(([kind,room])=>kind==='feedback'&&room==='other').length,1);
+  assert.equal(h.preparations.length,0);assert.equal(h.sends.length,0);
+});
 async function chooseFeedback(h) {
   h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
   const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback');

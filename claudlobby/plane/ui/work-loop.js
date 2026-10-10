@@ -190,12 +190,18 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       if (selected) $("task-detail-refresh").hidden = false;
       paint(); // An unrelated context result must not replace an authored draft.
     }
-    Promise.resolve().then(() => api.interactionContext?.(selectedRoom)).then(value => accept(value, null)).catch(() => accept(null, null));
-    for (const action of ["nudge", "feedback"]) {
-      const readContext = taskContextReader(action);
-      if (typeof readContext === "function")
-        Promise.resolve().then(() => readContext(selectedRoom)).then(value => accept(value, action)).catch(() => accept(null, action));
-    }
+    Promise.resolve().then(() => token === epoch ? api.interactionContext?.(selectedRoom) : null)
+      .then(value => accept(value, null)).catch(() => accept(null, null));
+    // Keep one task-context read in flight per room alongside the message read.
+    Promise.resolve().then(async () => {
+      for (const action of ["nudge", "feedback"]) {
+        if (token !== epoch) return;
+        const readContext = taskContextReader(action);
+        if (typeof readContext !== "function") continue;
+        try { accept(await readContext(selectedRoom), action); }
+        catch { accept(null, action); }
+      }
+    });
   }
   function detail() {
     if (!selected) return;
