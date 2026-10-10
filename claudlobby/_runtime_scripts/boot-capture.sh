@@ -143,7 +143,10 @@ mkdir -p "$DIR" 2>/dev/null
 # "every directory is declared". Here an empty roster would mean capturing zero
 # bots and calling the boot done — absence of evidence recorded as evidence of
 # absence, on a measurement that cannot be retaken.
-declared_bots_strict "$DIR/bad-manifests" > "$DIR/declared" 2>/dev/null
+# The helper only appends to its --bad-out file and refuses one that holds
+# content, and each tick of this boot writes here again: start it empty.
+rm -f "$DIR/bad-manifests"
+declared_bots_strict --bad-out "$DIR/bad-manifests" > "$DIR/declared" 2>/dev/null
 DECLARED_N="$(wc -l < "$DIR/declared" 2>/dev/null | tr -d ' ')"
 [ -n "$DECLARED_N" ] || DECLARED_N=0
 if [ "$DECLARED_N" -eq 0 ]; then
