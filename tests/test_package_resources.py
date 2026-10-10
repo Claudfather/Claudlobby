@@ -119,13 +119,14 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     # A private index proves authored inputs without a commit, remote or identity.
     _run(["git", "init", "--quiet"], source)
     _run(["git", "add", "."], source)
-    _run(["git", "add", "--force", "examples/teams/revenue-web-app/fleet.yaml"], source)
+    assert "examples/teams/revenue-web-app/fleet.yaml" in _run(["git", "ls-files"], source).splitlines()
     ignored = ("voices/local/operator.md", "library/skills/printify/config.json",
-               "claudlobby/_runtime_scripts/fleet-state.json")
+               "claudlobby/_runtime_scripts/fleet-state.json", "examples/teams/private/fleet.yaml")
     for name in ignored:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("PRIVATE-OPERATOR-FIXTURE-DO-NOT-PACKAGE\n")
+    assert _run(["git", "check-ignore", "examples/teams/private/fleet.yaml"], source).strip() == "examples/teams/private/fleet.yaml"
 
     before_removal = tmp_path / "before-removal"
     _run([sys.executable, "-m", "build", "--no-isolation", "--wheel",

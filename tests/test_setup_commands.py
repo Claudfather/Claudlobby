@@ -145,6 +145,8 @@ def test_template_setup_refuses_project_added_during_staging_and_restores_declar
     with pytest.raises(CommandFailure, match="changed while staging") as refused:
         setup.dispatch(args)
     assert refused.value.data["config_declaration"] == "removed"
+    assert "correct --repository/--goal or use an authored --config FILE" in refused.value.error.hint
+    assert "correct the selected installed template" not in refused.value.error.hint
     assert not effects and not (root / "local/shop/fleet.yaml").exists()
     assert (root / "local/shop/projects.yaml").read_text() == "projects: {}\n"
 
@@ -253,6 +255,7 @@ def test_fleet_setup_refuses_mismatched_authored_name_before_activation(tmp_path
     with pytest.raises(CommandFailure, match="fleet declaration removed") as refused:
         run()
     assert refused.value.data["config_declaration"] == "removed"
+    assert f"correct {source} and rerun fleet setup" in refused.value.error.hint
     assert "config validate" in refused.value.error.hint and not (root / "local").exists()
     declared = root / "local/example/fleet.yaml"
     declared.parent.mkdir(parents=True)
