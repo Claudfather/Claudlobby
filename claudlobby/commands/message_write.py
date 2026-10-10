@@ -131,15 +131,132 @@ def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> 
                          lines=(f"{outcome.message_id}\trecording=committed\tdelivery=not_requested",))
 
 
+def deliver_bound_message(route, *, body=None, report=None, request_id,
+                          kind="chat", parent_message_id=None,
+                          retry_uncertain=False, caller_context=None) -> CommandOutput:
+    """Send and observe an authorized, frozen route under the caller's runtime admission.
+
+    The caller must already hold runtime mutation admission and authorize the
+    route and any reply parent. This helper does not authenticate a browser or
+    authorize an actor; a browser gateway must do that before calling it.
+    ``caller_context`` is a prebound TaskOperationContext for a human caller;
+    generated callers are bound from the route's origin for receipt lookup.
+    """
+    from ..message_operations import (read_recipient_box, repair_held_delivery,
+                                      send_message, send_unlinked_report)
+    from ..message_queries import MessageQueryError, receipt
+    from ..operation_context import (OperationContextError, OperationContextUnavailableError,
+                                     bind_task_context)
+    from ..plane.migrations import DowngradeError
+    from ..plane.schema_state import PendingMigrationError
+
+    package = route.selected.paths.package
+    release_id = route.release_id
+    if ((caller_context is None) != (route.origin is not None)
+            or caller_context is not None and caller_context.caller != route.caller):
+        raise CommandFailure("conflict", "message caller context differs from the frozen route",
+                             release_id=release_id)
+
+    trusted_tiers, tiers_available = _alert_tiers(route)
+    # The box just before the send, for the chip repair (#2105).
+    box_before = read_recipient_box(route, package)
+    if report is not None:
+        outcome = send_unlinked_report(route, package, report,
+                                       request_id=request_id,
+                                       retry_uncertain=retry_uncertain,
+                                       trusted_tiers=trusted_tiers)
+    else:
+        outcome = send_message(route, package, body,
+                               request_id=request_id,
+                               kind="answer" if parent_message_id is not None else kind,
+                               parent_message_id=parent_message_id,
+                               retry_uncertain=retry_uncertain,
+                               trusted_tiers=trusted_tiers)
+    data = _data(route, outcome, parent_message_id=parent_message_id)
+    if report is not None:
+        data["report_status"] = report.status
+        data["task_id"] = data["assignment_id"] = None
+    if outcome.code == "recording_degraded":
+        if not tiers_available:
+            if data["alert"] is not None:
+                from ..recording_alerts import ChannelOutcome
+                availability = data["alert"]["telegram"]["debounce_available"]
+                data["alert"]["telegram"] = asdict(
+                    ChannelOutcome("failed", availability, "selected_tiers_unavailable"))
+            print(f"recording-alert: fleet={route.selected.fleet.name} request={request_id} "
+                  "channel=telegram status=failed reason=selected_tiers_unavailable",
+                  file=sys.stderr)
+        raise _effect_failure("recording_degraded",
+                             "message recording is degraded; inspect the request before retrying",
+                             data=data, request_id=request_id, release_id=release_id)
+    # rc 3 (#1236): the box never showed the payload, so the transport
+    # withheld its Enter. The text can still land; the receipt wait and
+    # the held-box repair below decide (#2105).
+    withheld = outcome.delivery == "unknown" and getattr(outcome, "native_returncode", None) == 3
+    if outcome.delivery != "submitted" and not withheld:
+        code = "delivery_failed" if outcome.delivery == "failed" else "delivery_unknown"
+        raise _effect_failure(code, "message transport was not confirmed; inspect the request",
+                             data=data, request_id=request_id, release_id=release_id)
+    # A tmux success is only submission. This read owns the final byte
+    # integrity verdict. It never resends the native payload; when no
+    # receipt came, the owner may press the Enter a held box waits for.
+    try:
+        ctx = (caller_context if caller_context is not None else
+               bind_task_context(route.selected, origin=route.origin))
+        observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
+                           wait=_RECEIPT_WAIT_S)
+        repair, observed = repair_held_delivery(
+            route, package, outcome.message_id, first=observed,
+            box_before=box_before,
+            observe=lambda wait: receipt(ctx, outcome.message_id,
+                                         destination=route.peer.alias, wait=wait))
+        if repair is not None:
+            data["enter_repair"] = repair.as_dict()
+    except (OperationContextUnavailableError, OperationContextError,
+            MessageQueryError, PendingMigrationError, DowngradeError,
+            OSError, sqlite3.Error) as exc:
+        data["receipt_observation"] = "unavailable"
+        data["integrity_verdict"] = "unknown"
+        raise _effect_failure("delivery_unknown",
+                             "message was submitted; final receipt proof is unavailable",
+                             data=data, request_id=request_id, release_id=release_id) from exc
+    if (observed.sender is None or observed.destination is None
+            or observed.sender.uid != route.caller.uid
+            or observed.sender.alias != route.caller.alias
+            or observed.destination.uid != route.peer.uid
+            or observed.destination.alias != route.peer.alias):
+        data["receipt_observation"] = observed.receipt_observation
+        data["integrity_verdict"] = "unknown"
+        raise _effect_failure("delivery_unknown",
+                             "message was submitted; receipt identities differ from the frozen route",
+                             data=data, request_id=request_id, release_id=release_id)
+    data["receipt_observation"] = observed.receipt_observation
+    data["integrity_verdict"] = observed.integrity_verdict
+    if observed.integrity_verdict == "delivered":
+        data["delivery"] = "received"
+    elif observed.integrity_verdict in {"truncated", "altered"}:
+        data["delivery"] = "failed"
+        raise _effect_failure("delivery_failed",
+                             "message receiver proof shows a byte mismatch; inspect the request",
+                             data=data, request_id=request_id, release_id=release_id)
+    else:
+        raise _effect_failure("delivery_unknown",
+                             f"message was submitted; {observed.reason}"
+                             if observed.code == "unavailable" and observed.reason else
+                             "message was submitted; final receiver proof is incomplete",
+                             data=data, request_id=request_id, release_id=release_id)
+    return CommandOutput(data, release_id=release_id,
+                         lines=(f"{outcome.message_id}\trecording={outcome.recording}\t"
+                                "delivery=received",))
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
-    from ..message_operations import (MessageConflict, MessageIdentityUnavailable,
-                                      read_recipient_box, repair_held_delivery, send_message,
-                                      send_unlinked_report)
-    from ..message_queries import MessageQueryError, receipt, show_message
+    from ..message_operations import MessageConflict, MessageIdentityUnavailable
+    from ..message_queries import MessageQueryError, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope,
                                      resolve_task_mutation_context)
@@ -158,6 +275,7 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
         request_id = _request_id(args.request_id)
         is_report = args.public_command == "fleet.reports.submit"
+        body = report = None
         if is_report:
             report = ReportPayload(args.status, summary=args.summary, percent=args.percent,
                                    pr_url=args.pr, pr_role=args.pr_role,
@@ -218,97 +336,11 @@ def dispatch(args) -> CommandOutput:
                     or route.peer_fleet_uid != parent.sender.fleet_uid):
                 raise CommandFailure("conflict", "reply route differs from recorded parent participants",
                                      release_id=release_id)
-            trusted_tiers, tiers_available = _alert_tiers(route)
-            # The box just before the send, for the chip repair (#2105).
-            box_before = read_recipient_box(route, selected.paths.package)
-            if is_report:
-                outcome = send_unlinked_report(route, selected.paths.package, report,
-                                               request_id=request_id,
-                                               retry_uncertain=args.retry_uncertain,
-                                               trusted_tiers=trusted_tiers)
-            else:
-                outcome = send_message(route, selected.paths.package, body,
-                                       request_id=request_id,
-                                       kind="answer" if parent_message_id is not None else args.kind,
-                                       parent_message_id=parent_message_id,
-                                       retry_uncertain=args.retry_uncertain,
-                                       trusted_tiers=trusted_tiers)
-            data = _data(route, outcome, parent_message_id=parent_message_id)
-            if is_report:
-                data["report_status"] = report.status
-                data["task_id"] = data["assignment_id"] = None
-            if outcome.code == "recording_degraded":
-                if not tiers_available:
-                    if data["alert"] is not None:
-                        from ..recording_alerts import ChannelOutcome
-                        availability = data["alert"]["telegram"]["debounce_available"]
-                        data["alert"]["telegram"] = asdict(
-                            ChannelOutcome("failed", availability, "selected_tiers_unavailable"))
-                    print(f"recording-alert: fleet={route.selected.fleet.name} request={request_id} "
-                          "channel=telegram status=failed reason=selected_tiers_unavailable",
-                          file=sys.stderr)
-                raise _effect_failure("recording_degraded",
-                                     "message recording is degraded; inspect the request before retrying",
-                                     data=data, request_id=request_id, release_id=release_id)
-            # rc 3 (#1236): the box never showed the payload, so the transport
-            # withheld its Enter. The text can still land; the receipt wait and
-            # the held-box repair below decide (#2105).
-            withheld = outcome.delivery == "unknown" and getattr(outcome, "native_returncode", None) == 3
-            if outcome.delivery != "submitted" and not withheld:
-                code = "delivery_failed" if outcome.delivery == "failed" else "delivery_unknown"
-                raise _effect_failure(code, "message transport was not confirmed; inspect the request",
-                                     data=data, request_id=request_id, release_id=release_id)
-            # A tmux success is only submission. This read owns the final byte
-            # integrity verdict. It never resends the native payload; when no
-            # receipt came, the owner may press the Enter a held box waits for.
-            try:
-                ctx = (human_ctx if human_ctx is not None else
-                       bind_task_context(route.selected, origin=route.origin))
-                observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
-                                   wait=_RECEIPT_WAIT_S)
-                repair, observed = repair_held_delivery(
-                    route, selected.paths.package, outcome.message_id, first=observed,
-                    box_before=box_before,
-                    observe=lambda wait: receipt(ctx, outcome.message_id,
-                                                 destination=route.peer.alias, wait=wait))
-                if repair is not None:
-                    data["enter_repair"] = repair.as_dict()
-            except (OperationContextUnavailableError, OperationContextError,
-                    MessageQueryError, PendingMigrationError, DowngradeError,
-                    OSError, sqlite3.Error) as exc:
-                data["receipt_observation"] = "unavailable"
-                data["integrity_verdict"] = "unknown"
-                raise _effect_failure("delivery_unknown",
-                                     "message was submitted; final receipt proof is unavailable",
-                                     data=data, request_id=request_id, release_id=release_id) from exc
-            if (observed.sender is None or observed.destination is None
-                    or observed.sender.uid != route.caller.uid
-                    or observed.sender.alias != route.caller.alias
-                    or observed.destination.uid != route.peer.uid
-                    or observed.destination.alias != route.peer.alias):
-                data["receipt_observation"] = observed.receipt_observation
-                data["integrity_verdict"] = "unknown"
-                raise _effect_failure("delivery_unknown",
-                                     "message was submitted; receipt identities differ from the frozen route",
-                                     data=data, request_id=request_id, release_id=release_id)
-            data["receipt_observation"] = observed.receipt_observation
-            data["integrity_verdict"] = observed.integrity_verdict
-            if observed.integrity_verdict == "delivered":
-                data["delivery"] = "received"
-            elif observed.integrity_verdict in {"truncated", "altered"}:
-                data["delivery"] = "failed"
-                raise _effect_failure("delivery_failed",
-                                     "message receiver proof shows a byte mismatch; inspect the request",
-                                     data=data, request_id=request_id, release_id=release_id)
-            else:
-                raise _effect_failure("delivery_unknown",
-                                     f"message was submitted; {observed.reason}"
-                                     if observed.code == "unavailable" and observed.reason else
-                                     "message was submitted; final receiver proof is incomplete",
-                                     data=data, request_id=request_id, release_id=release_id)
-        return CommandOutput(data, release_id=release_id,
-                             lines=(f"{outcome.message_id}\trecording={outcome.recording}\t"
-                                    "delivery=received",))
+            return deliver_bound_message(
+                route, body=body, report=report, request_id=request_id,
+                kind=args.kind if args.public_command == "message.send" else "chat",
+                parent_message_id=parent_message_id,
+                retry_uncertain=args.retry_uncertain, caller_context=human_ctx)
     except CommandFailure:
         raise
     except ReportPayloadError as exc:
