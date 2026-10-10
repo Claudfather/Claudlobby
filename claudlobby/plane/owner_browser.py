@@ -27,6 +27,7 @@ from .owner_actions import ActionNotStarted, OwnerActions
 from .ids import read_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, PAIRING_SECONDS, SESSION_SECONDS
 from .owner_view import VerifiedReader, create_owner_app
+from .owner_source import inspect_source
 
 COOKIE_NAME = "__Host-claudlobby-owner"
 _COOKIE_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -210,6 +211,17 @@ class _OwnerBrowser:
         if origin is not None and origin != self.origin:
             raise AccessDenied("wrong_browser_origin")
 
+    def _read_profile(self, reader: VerifiedReader) -> dict:
+        host_uid = inspect_source(self.access.root)
+        self.access.authorize_read(reader.token, reader.principal, host_uid=host_uid)
+        return {"version": 1, "profile": "direct-owner-read-v1", "host_uid": host_uid}
+
+    def _ready(self, principal: PrincipalRef, token: str, **data) -> JSONResponse:
+        reader = VerifiedReader(principal, token)
+        response = _response({"state": "ready", **data, "read_profile": self._read_profile(reader)})
+        response._profile_reader = reader
+        return response
+
     def _status(self, principal: PrincipalRef, token: str | None) -> JSONResponse:
         grant = self.access.current_grant()
         if grant is None or not grant.active:
@@ -220,10 +232,34 @@ class _OwnerBrowser:
             try:
                 self.access.authorize_read(token, principal,
                     host_uid=read_host_uid(self.access.root / "state"))
-                return _response({"state": "ready"})
             except AccessDenied:
-                pass
+                return _response({"state": "sign_in_required"})
+            return self._ready(principal, token)
         return _response({"state": "sign_in_required"})
+
+    async def _send_profile(self, response, reader, scope, receive, send):
+        # Admit again before publishing headers or metadata, including a new
+        # session cookie. No held lifecycle response may disclose stale identity.
+        pending_start = None
+        async def profile_send(message):
+            nonlocal pending_start
+            if message["type"] == "http.response.start":
+                pending_start = message
+                return
+            try:
+                profile = await run_in_threadpool(self._read_profile, reader)
+                if profile != json.loads(response.body)["read_profile"]:
+                    raise AccessDenied("owner_source_changed")
+            except AccessDenied:
+                refusal = _response({"state": "denied"}, 403)
+            except (AccessUnavailable, OSError, ValueError, sqlite3.Error):
+                refusal = _response({"state": "unavailable"}, 503)
+            else:
+                await send(pending_start)
+                await send(message)
+                return
+            await refusal(scope, receive, send)
+        await response(scope, receive, profile_send)
 
     def _mutate(self, action: str, principal: PrincipalRef, token: str | None) -> JSONResponse:
         if action == "pair":
@@ -251,7 +287,7 @@ class _OwnerBrowser:
                 session = self.access.open_session(principal)
         else:
             session = self.access.open_session(principal)
-        response = _response({"state": "ready", "expires_at": session.expires_at})
+        response = self._ready(principal, session.token, expires_at=session.expires_at)
         response.set_cookie(COOKIE_NAME, session.token, max_age=SESSION_SECONDS,
                             path="/", secure=True, httponly=True, samesite="strict")
         return response
@@ -386,7 +422,11 @@ class _OwnerBrowser:
                 body = json.loads(response.body)
                 body["effect"] = "not_started"
                 response = _response(body, response.status_code)
-            await response(scope, receive, send)
+            reader = getattr(response, "_profile_reader", None)
+            if reader is not None:
+                await self._send_profile(response, reader, scope, receive, send)
+            else:
+                await response(scope, receive, send)
             return
         # Hold headers until current session/grant/source admission permits the
         # body. A slow or revoked operation cannot leak stale private metadata.

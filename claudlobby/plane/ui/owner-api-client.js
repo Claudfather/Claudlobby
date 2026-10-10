@@ -6,7 +6,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   monotonicNow = () => globalThis.performance.now() } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
   let actionChecking = null, recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
-  let mount = null, statusNote = null;
+  let mount = null, statusNote = null, readHost = null;
   const reads = new Set(), streams = new Set();
   const labels = {
     checking: 'Checking owner session…', ready: 'Owner session · renew before it expires.',
@@ -32,6 +32,24 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     for (const stream of streams) stream.pause();
     mount?.onPause();
     render();
+  }
+  function admitReady(data) {
+    const profile = data?.read_profile;
+    if (!profile || Object.keys(profile).sort().join() !== 'host_uid,profile,version' ||
+        profile.version !== 1 || profile.profile !== 'direct-owner-read-v1' ||
+        typeof profile.host_uid !== 'string' || profile.host_uid.length !== 37 ||
+        !/^host_[0-9a-f]{32}$/.test(profile.host_uid)) {
+      pause('unavailable');
+      render('Plane browser/server compatibility could not be verified. Update both to the same release and reload.');
+      return false;
+    }
+    if (readHost !== null && readHost !== profile.host_uid) {
+      pause('unavailable');
+      render('The connected host changed. Reopen Plane on the intended host before continuing.');
+      return false;
+    }
+    readHost = profile.host_uid; // Pinned for this transport lifetime, including renewal/recovery.
+    return true;
   }
   function resume(note) {
     mode = 'ready';
@@ -73,7 +91,9 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     try {
       const result = await request('/api/owner/status');
       if (disposed || gen !== generation) return;
-      if (result.status === 200 && result.data?.state === 'ready') resume(note);
+      if (result.status === 200 && result.data?.state === 'ready') {
+        if (admitReady(result.data)) resume(note);
+      }
       else if (result.status === 403 || (result.status === 200 &&
         ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
       else pause('unavailable');
@@ -95,7 +115,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       if (disposed || gen !== generation) return;
       if (result.status === 200 && result.data?.state === (action === 'renew' ? 'ready' : 'signed_out')) {
         if (action === 'logout') leave('signed_out');
-        else { recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
+        else if (admitReady(result.data)) { recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
       } else if (result.status === 403) {
         refusal = true;
       } else pause('unavailable'); // A lost logout reply is not success.
@@ -187,7 +207,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       try {
         const result = await request('/api/owner/status');
         if (disposed || gen !== generation || mode !== 'ready') return;
-        if (result.status === 200 && result.data?.state === 'ready') return;
+        if (result.status === 200 && result.data?.state === 'ready') { admitReady(result.data); return; }
         if (result.status === 403 || (result.status === 200 &&
           ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
         else pause('unavailable');

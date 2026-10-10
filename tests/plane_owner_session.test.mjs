@@ -6,7 +6,8 @@ const source = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.j
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
 const { createOwnerTransport } = await load(source);
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
-const ready = { status: 200, data: { state: 'ready' } };
+const readProfile = { version: 1, profile: 'direct-owner-read-v1', host_uid: 'host_' + '1'.repeat(32) };
+const ready = { status: 200, data: { state: 'ready', read_profile: readProfile } };
 const denied = { status: 403, data: { state: 'denied' } };
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 function harness(replies = [ready], hooks = {}) {
@@ -808,7 +809,7 @@ for(const lifecycle of ['renew','logout'])
 test(`session ${lifecycle} fences late nudge prepare and send results without mutation replay`,async()=>{
   const {semantic_sha256,...pre}=nudgeMetadata;
   for(const path of ['prepare','send']) {
-    const late=deferred(),h=harness([ready,()=>late.promise,ok(lifecycle==='renew'?{state:'ready'}:{state:'signed_out'})]);await h.controls.ready;
+    const late=deferred(),h=harness([ready,()=>late.promise,ok(lifecycle==='renew'?ready.data:{state:'signed_out'})]);await h.controls.ready;
     const operation=path==='prepare'?h.api.prepareAction({...pre,body:'Reason'}):h.api.sendAction({...nudgeMetadata,body:'Reason'});
     const rejected=assert.rejects(operation,/unknown/);await h.click(lifecycle);
     late.resolve(ok(path==='prepare'?nudgeMetadata:{...nudgeMetadata,status:'delivered'}));await rejected;
@@ -849,7 +850,7 @@ test('feedback refusal reports only its original scope/kind/lead and keeps read 
 });
 for(const lifecycle of ['renew','logout'])test(`session ${lifecycle} fences late feedback prepare/send without replay`,async()=>{
  const {semantic_sha256,...pre}=feedbackMetadata;
- for(const path of ['prepare','send']){const held=deferred(),h=harness([ready,()=>held.promise,ok(lifecycle==='renew'?{state:'ready'}:{state:'signed_out'})]);await h.controls.ready;
+ for(const path of ['prepare','send']){const held=deferred(),h=harness([ready,()=>held.promise,ok(lifecycle==='renew'?ready.data:{state:'signed_out'})]);await h.controls.ready;
  const action=path==='prepare'?h.api.prepareAction({...pre,body:'Comment'}):h.api.sendAction({...feedbackMetadata,body:'Comment'});const rejection=assert.rejects(action,/unknown/);await h.click(lifecycle);held.resolve(ok(path==='prepare'?feedbackMetadata:{...feedbackMetadata,status:'delivered'}));await rejection;assert.equal(h.calls.filter(c=>c.url.endsWith('/'+path)).length,1);h.controls.dispose();}
 });
 
@@ -1259,4 +1260,70 @@ test(`same-room roster replacement preserves pending inspection focus intent: ${
   h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
   assert.equal(h.document.activeElement, focus === 'origin' ? h.buttons.get('.ed-close') : focus === 'composer' ? composer : replacement);
   assert.equal(h.state.equipmentFocus, null); assert.deepEqual(h.selections, []);
+});
+
+
+test('read profile admission refuses legacy, malformed and unsupported profiles before any private work', async () => {
+  const invalid = [undefined, null, [], {}, { ...readProfile, version: 2 },
+    { ...readProfile, profile: 'cross-origin' }, { ...readProfile, host_uid: 'host_bad' },
+    { ...readProfile, host_uid: readProfile.host_uid + '\n' }, { ...readProfile, actions: ['message'] }];
+  for (const profile of invalid) {
+    const h = harness([{ status: 200, data: { state: 'ready', read_profile: profile } }]);
+    await h.controls.ready;
+    h.api.createEventSource('/api/stream');
+    assert.equal(await h.api.jget('/api/tasks'), null);
+    assert.equal(await h.api.interactionContext('engineering'), null);
+    await assert.rejects(h.api.sendAction(action), /unknown/);
+    assert.equal(h.resumed, 0);
+    assert.equal(h.natives.length, 0);
+    assert.equal(h.calls.length, 1);
+    assert.match(h.node('status').textContent, /compatibility.*Update both.*reload/);
+    assert.deepEqual(h.replacements, []);
+    h.controls.dispose();
+  }
+});
+
+test('read profile pins the host through renewal and permits only same-host explicit recovery', async () => {
+  const switched = { ...ready.data, read_profile: { ...readProfile, host_uid: 'host_' + '2'.repeat(32) } };
+  const h = harness([ready, ok(switched), ok(switched), ready, ok(['board'])]);
+  await h.controls.ready;
+  h.api.createEventSource('/api/stream');
+  await h.click('renew');
+  assert.equal(h.natives[0].closed, true);
+  assert.equal(await h.api.jget('/api/tasks'), null);
+  await assert.rejects(h.api.actionReceipt(action), /unknown/);
+  assert.equal(h.resumed, 1);
+  assert.match(h.node('status').textContent, /host changed.*Reopen Plane/);
+  await h.click('check');
+  assert.equal(h.resumed, 1);
+  await h.click('check');
+  assert.equal(h.resumed, 2);
+  assert.deepEqual(await h.api.jget('/api/tasks'), ['board']);
+  assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 1); // one explicit renewal, no mutation replay
+  h.controls.dispose();
+});
+
+test('read profile recovery rejects an incompatible action-refusal status without signing out or replay', async () => {
+  const h = harness([ready, denied, { status: 200, data: { state: 'ready' } }]);
+  await h.controls.ready;
+  h.api.createEventSource('/api/stream');
+  await assert.rejects(h.api.sendAction(action), /unknown/);
+  assert.equal(h.natives[0].closed, true);
+  assert.equal(await h.api.jget('/api/tasks'), null);
+  assert.equal(h.calls.length, 3);
+  assert.match(h.node('status').textContent, /Update both/);
+  assert.deepEqual(h.replacements, []);
+  h.controls.dispose();
+});
+
+test('read profile missing on renewal cannot reopen an admitted stream', async () => {
+  const h = harness([ready, { status: 200, data: { state: 'ready', expires_at: 123 } }]);
+  await h.controls.ready; h.api.createEventSource('/api/stream');
+  await h.click('renew');
+  assert.equal(h.natives[0].closed, true);
+  assert.equal(h.natives.length, 1);
+  assert.equal(h.resumed, 1);
+  assert.equal(await h.api.jget('/api/tasks'), null);
+  assert.match(h.node('status').textContent, /compatibility/);
+  h.controls.dispose();
 });
