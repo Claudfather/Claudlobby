@@ -9,7 +9,6 @@ ancestry, and (b) an unresolvable answer is loud rather than plausible.
 """
 
 import os
-import shutil
 import signal
 import subprocess
 import textwrap
@@ -39,22 +38,15 @@ def test_parses_under_bash():
 
 # --- the load-bearing property: ancestry, not namespace ----------------------
 
-def _fake_tree(tmp_path, script):
+def _fake_tree(native_stand_ins, tmp_path, script):
     """Run `script` under a process genuinely named `claude`.
 
-    A native Node copy keeps its own executable name on macOS, where framework
-    Python re-execs as Python.app even through a `claude` symlink. The process
-    group and bounded wait keep a broken fixture from hanging the suite.
+    The `claude` is the session's node stand-in (tests/stand_in_fixtures.py).
+    Node keeps that name on macOS, where framework Python re-execs as
+    Python.app even through a `claude` symlink. The process group and bounded
+    wait keep a broken fixture from hanging the suite.
     """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("native ancestry fixture needs node (a claudlobby prerequisite)")
-    fake = tmp_path / "claude"
-    shutil.copy2(node, fake)
-    # Homebrew Node may load libnode relative to the copied executable.
-    source_lib = Path(node).resolve().parent.parent / "lib"
-    for library in source_lib.glob("libnode*.dylib"):
-        (tmp_path / library.name).symlink_to(library)
+    fake = native_stand_ins / "claude"
     runner = textwrap.dedent("""
         const {spawnSync, execFileSync} = require('child_process');
         console.log(`ANCESTOR=${process.pid}`);
@@ -80,9 +72,10 @@ def _fake_tree(tmp_path, script):
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
-def test_resolves_to_an_ancestor_named_claude(tmp_path):
+def test_resolves_to_an_ancestor_named_claude(tmp_path, native_stand_ins):
     resolved = tmp_path / "resolved-pid"
     r = _fake_tree(
+        native_stand_ins,
         tmp_path,
         f'bash "{DOOR}" --pid > "{resolved}"; '
         f'read -r got < "{resolved}"; echo "GOT=$got"',
@@ -138,9 +131,10 @@ def test_never_consults_the_process_table():
         assert banned not in code, f"{banned!r} appears in executable code"
 
 
-def test_from_walks_the_given_ancestry(tmp_path):
+def test_from_walks_the_given_ancestry(tmp_path, native_stand_ins):
     """--from is the seam that makes the walk testable without a real session."""
     r = _fake_tree(
+        native_stand_ins,
         tmp_path,
         f'owner="$PPID"; echo "GOT=$(bash {DOOR} --from "$owner")"',
     )
@@ -155,8 +149,8 @@ def test_rejects_a_non_pid_from():
     assert "pid" in r.stderr.lower()
 
 
-def test_summary_shape(tmp_path):
-    r = _fake_tree(tmp_path, f'bash {DOOR} --summary')
+def test_summary_shape(tmp_path, native_stand_ins):
+    r = _fake_tree(native_stand_ins, tmp_path, f'bash {DOOR} --summary')
     assert r.returncode == 0, r.stderr
     out = [l for l in r.stdout.splitlines() if l.startswith("PID ")][-1]
     assert out.startswith("PID ")
