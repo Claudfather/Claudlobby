@@ -940,8 +940,8 @@ changes its generation even for the same actor. Status lists `feedback_grants`
 alongside existing grants without requiring an active selection. Reads of older
 stores do not create the optional feedback table or migrate message grants.
 
-`plane/owner_feedback.py:OwnerFeedback` is an internal bound adapter, with no
-HTTP/UI entry point. `submit` requires a trusted `VerifiedReader`, the exact typed
+`plane/owner_feedback.py:OwnerFeedback` is the bound adapter used by the protected
+owner browser feedback capability. `submit` requires a trusted `VerifiedReader`, the exact typed
 feedback grant, task/fleet/manager identities, explicit assignment-or-null and
 selected release. It binds the existing human, admits the selected runtime and
 source, and reauthorizes before dispatch and before disclosing success or raw
@@ -1064,7 +1064,8 @@ owner revision, fleet, registered human actor and nudge-grant generation.
 Ordinary-message version-1 requests, responses and viewer-hash inputs are
 unchanged. Revoking either action grant does not change the other capability.
 A read session alone grants neither action; no HTTP path registers an actor or
-authors a grant. Replies, feedback and permission decisions remain unsupported.
+authors a grant. Feedback has its own capability below; replies and permission
+decisions remain unsupported.
 
 Nudge metadata has exactly `version: 2`, `kind: "nudge"`, canonical
 `request_id`, `scope`, `submitted_at`, `semantic_sha256`, and `target` containing
@@ -1125,6 +1126,46 @@ manager within the authorized scope, so selecting a changed assignment or
 release preserves that draft. Submitted pending metadata retains its original
 assignment, release, digest and UUID; a new selection cannot bypass its pending
 receipt guard. Session loss still pauses all action kinds.
+
+### Independently granted owner browser task feedback
+
+The same context, prepare, send and receipt endpoints accept the fixed
+version-2 kind `feedback`. Context requires its separate `OwnerFeedbackGrant`,
+uses the `task.feedback` viewer namespace and advertises only the configured
+lead. Read, message and nudge access confer no feedback authority. Revoking or
+replacing a feedback grant leaves the other capabilities unchanged.
+
+Feedback uses the same exact metadata shape and bounds as nudges. Preparation
+reads the full canonical task and explicit current assignment, validates the
+authored text through `MessageBody`, and returns the canonical
+`feedback_semantic_digest`. It reserves nothing and writes no fact. Resolved
+terminal tasks accept comments with an explicit null current assignment;
+historical assignments never become current selections. Nudges remain open-only.
+
+After preparation the browser rechecks its capability, selection and unchanged
+draft, saves only immutable metadata, then sends once. The server rechecks the
+digest and selection before `OwnerFeedback.submit`. Feedback records one linked
+human chat; it changes no task or assignment state and provides no approval.
+
+Pure receipt lookup compares the original task, assignment, release, manager,
+scope and digest. `recorded` requires that exact committed communication fact;
+`delivered` also requires the independent receiver's matching bytes and identities.
+Uncertain requests retain their original UUID. Receipt checks, reload and
+capability refresh never resend, repair Enter or fill notification gaps.
+
+The shared core task detail enables Give feedback only with that capability and
+a valid canonical selection. Its composer states that the comment goes to the
+lead without approving or changing the task. Message, nudge and feedback drafts
+and pending requests remain separate. A refused capability gets one fenced
+read-only recheck; it cannot erase another draft or restore an old task selection.
+Old-grant pending metadata stays visible with receipt checking disabled under a
+replacement grant. Authored comment text remains in tab memory only.
+
+`owner_task_action_protocol.py` shares only the strict version-2 metadata codec
+between the two fixed task kinds. Their authority, task policy and receipt
+classification remain in their respective adapters. Both reuse the existing
+owner request gates and eight-worker limit. Synthetic tests and isolated browser
+or receiver observations do not establish live host activation or trusted HTTPS.
 
 ### Selected task detail
 

@@ -1,4 +1,4 @@
-"""Grant-bound ordinary-message HTTP payloads; no identity creation or retries."""
+"""Fixed owner HTTP action dispatch; no identity creation or retries."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -58,7 +58,16 @@ class OwnerActions:
         paths = resolve_paths(root=root, package=package)
         self.root, self.package = paths.root, paths.package
         from .owner_nudge_actions import OwnerNudgeActions
+        from .owner_feedback_actions import OwnerFeedbackActions
         self.nudges = OwnerNudgeActions(self.root, package=self.package)
+        self.feedback = OwnerFeedbackActions(self.root, package=self.package)
+
+    def _task_action(self, kind):
+        if kind == "nudge":
+            return self.nudges
+        if kind == "feedback":
+            return self.feedback
+        raise AccessDenied("unsupported_owner_action")
 
     def _context(self, reader: VerifiedReader, room: str):
         _text(room)
@@ -88,8 +97,8 @@ class OwnerActions:
                 "recipients": recipients, "actions": ["message"]}, grant
 
     def context(self, reader, payload):
-        if type(payload) is dict and payload.get("kind") == "nudge":
-            return self.nudges.context(reader, payload)
+        if type(payload) is dict and "kind" in payload:
+            return self._task_action(payload["kind"]).context(reader, payload)
         _exact(payload, {"room"})
         context, grant = self._context(reader, payload["room"])
         self._recheck(reader, context, grant)
@@ -101,11 +110,21 @@ class OwnerActions:
             raise AccessDenied("message_binding_changed")
 
     def prepare(self, reader, payload):
-        return self.nudges.prepare(reader, payload)
+        if type(payload) is not dict:
+            raise AccessDenied("invalid_action_body")
+        return self._task_action(payload.get("kind")).prepare(reader, payload)
 
     def admit_response(self, action, reader, result):
         if result.get("version") == 2:
-            return self.nudges.admit_response(action, reader, result)
+            # Context has one declared capability; operations retain its kind.
+            if action == "context":
+                declared = result.get("actions")
+                if type(declared) is not list or len(declared) != 1:
+                    raise AccessDenied("unsupported_owner_action")
+                kind = declared[0]
+            else:
+                kind = result.get("kind")
+            return self._task_action(kind).admit_response(action, reader, result)
         room = result["room"] if action == "context" else result["scope"]["fleet"]
         current, _ = self._context(reader, room)
         if action == "context":
@@ -148,8 +167,8 @@ class OwnerActions:
         return fields, context, grant, adapter, options
 
     def operation(self, action, reader, payload):
-        if type(payload) is dict and payload.get("kind") == "nudge":
-            return self.nudges.operation(action, reader, payload)
+        if type(payload) is dict and payload.get("kind") in ("nudge", "feedback"):
+            return self._task_action(payload["kind"]).operation(action, reader, payload)
         try:
             fields, context, grant, adapter, options = self._prepare_operation(action, reader, payload)
         except (AccessDenied, AccessUnavailable, OperationContextError) as exc:

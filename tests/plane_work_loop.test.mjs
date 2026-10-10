@@ -70,7 +70,8 @@ function harness(options = {}) {
   const sends = [], lookups = [], preparations = [];
   const api = {
     interactionContext: options.interactionContext || (() => context),
-    ...(options.nudgeContext ? {nudgeContext:options.nudgeContext,prepareAction:request=>{preparations.push(request);if(options.prepareAction)return options.prepareAction(request);const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};}} : {}),
+    ...(options.feedbackContext ? {feedbackContext:options.feedbackContext} : {}),
+    ...(options.nudgeContext || options.feedbackContext ? {...(options.nudgeContext ? {nudgeContext:options.nudgeContext} : {}),prepareAction:request=>{preparations.push(request);if(options.prepareAction)return options.prepareAction(request);const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};}} : {}),
     ...(options.jget ? {jget:options.jget} : {}),
     ...(options.protected ? {mountSessionControls(){}} : {}),
     sendAction: request => { sends.push(request); return options.sendAction ? options.sendAction(request) : receipt(request); },
@@ -739,4 +740,140 @@ test('capability recovery does not overwrite a message edited while its nudge co
     assert.equal(h.get('work-body').value,'Message edited during recovery');assert.equal(h.get('work-recipient').value,'worker');
     assert.equal(h.nudgeReads,2);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);
   } finally {h.controls.dispose();}
+});
+
+
+const ownerFeedback = {...ownerNudge,scope:{...ownerNudge.scope,viewer:'feedback-grant'},actions:['feedback']};
+const feedbackOptions = extra => ({interactionContext:()=>null,feedbackContext:()=>ownerFeedback,protected:true,jget:()=>ownerDetail(),
+  crypto:{randomUUID:()=> '22222222-2222-4222-8222-222222222222'},...extra});
+for(const transition of ['none','room','session'])
+test(`feedback context waits for nudge and fences the originating epoch: ${transition}`,async()=>{
+  const held=deferred(),reads=[];
+  const h=harness(feedbackOptions({interactionContext:room=>{reads.push(['message',room]);return null;},
+    nudgeContext:room=>{reads.push(['nudge',room]);return room==='web'?held.promise:null;},
+    feedbackContext:room=>{reads.push(['feedback',room]);return room==='web'?ownerFeedback:null;}}));
+  h.loop.setRoom('web');await settle();
+  assert.deepEqual(reads,[['message','web'],['nudge','web']]);
+  if(transition==='room')h.loop.setRoom('other');
+  if(transition==='session')h.loop.pause();
+  await settle();held.resolve(ownerNudge);await settle();
+  assert.equal(reads.filter(([kind,room])=>kind==='feedback'&&room==='web').length,transition==='none'?1:0);
+  if(transition==='room')assert.equal(reads.filter(([kind,room])=>kind==='feedback'&&room==='other').length,1);
+  assert.equal(h.preparations.length,0);assert.equal(h.sends.length,0);
+});
+async function chooseFeedback(h) {
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback');
+  assert.equal(button.disabled,false);button.onclick();await settle();
+}
+for(const state of ['queued','active','completed','failed','cancelled'])
+test(`real feedback freezes canonical ${state} selection; terminal feedback uses explicit null`,async()=>{
+  const assignment=state==='active'?{assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null}:null;
+  const data=ownerDetail(assignment);data.data.task.state=state;
+  const h=harness(feedbackOptions({jget:()=>data,nudgeContext:()=>ownerNudge}));
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  const buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,['completed','failed','cancelled'].includes(state));
+  buttons.find(b=>b.dataset.kind==='feedback').onclick();await settle();
+  assert.match(h.get('work-notice').textContent,/comment.*does not approve or change/);
+  await h.submit();assert.equal(h.sends.length,1);assert.equal(h.preparations[0].kind,'feedback');
+  assert.equal(h.sends[0].target.assignment_id,assignment?.assignment_id??null);
+  assert.match(h.get('work-notice').textContent,/lead received this feedback/);
+});
+for(const messages of [false,true])for(const nudges of [false,true])for(const feedback of [false,true])
+test(`independent owner capabilities: message=${messages},nudge=${nudges},feedback=${feedback}`,async()=>{
+  const h=harness(feedbackOptions({interactionContext:()=>messages?{...context,simulation:false,actions:['message']}:null,
+    nudgeContext:()=>nudges?ownerNudge:null,feedbackContext:()=>feedback?ownerFeedback:null}));
+  h.loop.setRoom('web');await settle();assert.equal(h.get('work-form').hidden,!messages);
+  h.open(nudgeTaskId);await settle();const buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,!feedback);
+  assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,!nudges);
+  assert.equal(h.sends.length,0);assert.equal(h.preparations.length,0);
+});
+for(const change of ['body','body-reverted','room','pause','different-task','grant'])
+test(`late feedback prepare never sends after ${change}`,async()=>{
+  const held=deferred(),h=harness(feedbackOptions({prepareAction:()=>held.promise}));await chooseFeedback(h);
+  const submitting=h.submit();await settle();
+  if(change.startsWith('body')){h.get('work-body').value='Edited comment';h.get('work-body').emit('input');if(change==='body-reverted'){h.get('work-body').value='Hello';h.get('work-body').emit('input');}}
+  if(change==='room')h.loop.setRoom('other');if(change==='pause')h.loop.pause();if(change==='different-task')h.open('wi_'+'f'.repeat(32));
+  if(change==='grant')h.loop.invalidate(undefined,ownerFeedback.scope,'feedback',ownerFeedback.recipients[0].id);
+  const {body,...metadata}=h.preparations[0];held.resolve({...metadata,semantic_sha256:'d'.repeat(64)});await submitting;
+  assert.equal(h.sends.length,0);assert.equal(new ActionState(h.storage).pending.length,0);
+});
+for(const [label,change] of [['missing current assignment',t=>delete t.current_assignment],['terminal with active assignment',t=>{t.state='completed';t.current_assignment={assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null};}],['unresolved',t=>{t.resolved=false;}],['historical assignment',t=>{t.state='completed';t.current_assignment={assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'completed',terminal_event:'completed'};}]])
+test(`feedback refuses malformed selection: ${label}`,async()=>{
+ const data=ownerDetail();change(data.data.task);const h=harness(feedbackOptions({jget:()=>data}));h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+ const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback');assert.equal(button.disabled,true);button.onclick();assert.equal(h.preparations.length,0);
+});
+test('feedback recorded and lost-response reload keep original metadata; inspection never prepares or sends',async()=>{
+  for(const lost of [false,true]) {
+    const storage=store(),h=harness(feedbackOptions({storage,sendAction:r=>{if(lost)throw Error('lost');return receipt(r,'recorded');}}));await chooseFeedback(h);await h.submit();
+    const original=new ActionState(storage).pending[0];assert.equal(original.kind,'feedback');assert.ok(!storage.getItem('plane.pending-actions.v1').includes('Hello'));
+    if(!lost)assert.match(h.get('work-notice').textContent,/recorded.*delivery.*unconfirmed/);
+    const newer={...ownerFeedback,release_id:'r-'+'f'.repeat(64)},restored=harness(feedbackOptions({storage,feedbackContext:()=>newer,jget:()=>{throw Error('lookup must not select task');}}));
+    restored.loop.setRoom('web');await settle();assert.equal(restored.sends.length,0);assert.equal(restored.preparations.length,0);
+    await restored.pendingClick(original.request_id);assert.deepEqual(restored.lookups,[original]);assert.equal(restored.sends.length,0);assert.equal(restored.preparations.length,0);
+  }
+});
+test('feedback reallow leaves old-generation request visible and prevents inspecting it under replacement grant',async()=>{
+  const storage=store(),h=harness(feedbackOptions({storage,sendAction:()=>{throw Error('lost');}}));await chooseFeedback(h);await h.submit();const original=new ActionState(storage).pending[0];
+  const newer={...ownerFeedback,scope:{...ownerFeedback.scope,viewer:'replacement-grant'}},restored=harness(feedbackOptions({storage,feedbackContext:()=>newer}));
+  restored.loop.setRoom('web');await settle();assert.match(restored.get('work-pending').innerHTML,/Retained request from prior access/);assert.ok(restored.get('work-pending').innerHTML.includes(original.request_id));
+  await restored.pendingClick(original.request_id);assert.equal(restored.lookups.length,0);assert.equal(new ActionState(storage).pending.length,1);
+});
+test('feedback refusal has one independent refresh and preserves message/nudge drafts without auto-selecting task',async()=>{
+  let feedbackReads=0,nudgeReads=0;const held=deferred();
+  const h=harness(feedbackOptions({interactionContext:()=>({...context,simulation:false,actions:['message']}),nudgeContext:()=>{nudgeReads++;return ownerNudge;},
+    feedbackContext:()=>++feedbackReads===1?ownerFeedback:held.promise}));
+  h.loop.setRoom('web');await settle();h.get('work-recipient').value='worker';h.get('work-recipient').onchange();h.get('work-body').value='Worker draft';h.get('work-body').emit('input');
+  h.open(nudgeTaskId);await settle();h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+  h.get('work-body').value='Nudge reason';h.get('work-body').emit('input');h.open(nudgeTaskId);await settle();h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').onclick();await settle();
+  h.get('work-body').value='Feedback comment';h.get('work-body').emit('input');h.loop.invalidate(undefined,ownerFeedback.scope,'feedback',ownerFeedback.recipients[0].id);await settle();
+  assert.equal(feedbackReads,2);assert.equal(nudgeReads,1);assert.equal(h.get('work-body').value,'Worker draft');assert.equal(h.get('work-recipient').value,'worker');
+  h.get('work-body').value='New worker draft';h.get('work-body').emit('input');held.resolve(ownerFeedback);await settle();assert.equal(h.get('work-body').value,'New worker draft');
+  h.open(nudgeTaskId);await settle();h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').onclick();await settle();assert.equal(h.get('work-body').value,'Feedback comment');
+  h.open(nudgeTaskId);await settle();h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();assert.equal(h.get('work-body').value,'Nudge reason');assert.equal(h.sends.length,0);
+});
+test('late old-manager feedback refusal cannot disable refreshed same-viewer capability',async()=>{
+  let current=ownerFeedback;const h=harness(feedbackOptions({feedbackContext:()=>current}));await chooseFeedback(h);
+  current={...ownerFeedback,recipients:[{id:'actor_'+'f'.repeat(32),label:'New lead',lead:true}]};h.loop.setRoom('web');await settle();
+  h.loop.invalidate(undefined,ownerFeedback.scope,'feedback',ownerFeedback.recipients[0].id);h.open(nudgeTaskId);await settle();
+  assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').disabled,false);
+});
+test('feedback selection owns snapshots of context and current assignment, not transport response objects',async()=>{
+  const capability=structuredClone(ownerFeedback),assignment={assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null};
+  const data=ownerDetail(assignment),originalTarget={recipient:capability.recipients[0].id,task_id:nudgeTaskId,assignment_id:nudgeAssignment,release_id:capability.release_id};
+  const h=harness(feedbackOptions({feedbackContext:()=>capability,jget:()=>data}));
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  capability.scope.viewer='changed-outside-controller';capability.recipients[0].id='actor_'+'f'.repeat(32);
+  capability.release_id='r-'+'f'.repeat(64);capability.actions[0]='nudge';
+  data.data.task.task_id='wi_'+'f'.repeat(32);data.data.task.state='completed';
+  assignment.assignment_id='asg_'+'f'.repeat(32);assignment.terminal_event='completed';
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').onclick();await settle();await h.submit();
+  assert.equal(h.sends.length,1);assert.deepEqual(h.sends[0].target,originalTarget);
+  assert.deepEqual(h.sends[0].scope,ownerFeedback.scope);assert.equal(h.sends[0].kind,'feedback');
+});
+test('nudge and feedback capability refreshes have independent generations and never replace the message draft',async()=>{
+  const feedback=deferred(),nudge=deferred();let feedbackReads=0,nudgeReads=0;
+  const h=harness(feedbackOptions({interactionContext:()=>({...context,simulation:false,actions:['message']}),
+    feedbackContext:()=>++feedbackReads===1?ownerFeedback:feedback.promise,nudgeContext:()=>++nudgeReads===1?ownerNudge:nudge.promise}));
+  h.loop.setRoom('web');await settle();h.get('work-body').value='Independent message draft';h.get('work-body').emit('input');
+  h.loop.invalidate(undefined,ownerFeedback.scope,'feedback',ownerFeedback.recipients[0].id);
+  h.loop.invalidate(undefined,ownerNudge.scope,'nudge',ownerNudge.recipients[0].id);await settle();
+  assert.equal(feedbackReads,2);assert.equal(nudgeReads,2);nudge.resolve(ownerNudge);await settle();h.open(nudgeTaskId);await settle();
+  let buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,true);assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,false);
+  feedback.resolve(ownerFeedback);await settle();buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,false);assert.equal(h.get('work-body').value,'Independent message draft');
+  assert.equal(h.preparations.length,0);assert.equal(h.sends.length,0);
+});
+for(const loss of ['room','pause'])
+test(`late feedback capability refresh cannot restore access after ${loss}`,async()=>{
+  const held=deferred();let reads=0;
+  const h=harness(feedbackOptions({feedbackContext:()=>++reads===1?ownerFeedback:held.promise}));await chooseFeedback(h);
+  h.loop.invalidate(undefined,ownerFeedback.scope,'feedback',ownerFeedback.recipients[0].id);await settle();assert.equal(reads,2);
+  if(loss==='room')h.loop.setRoom('all');else h.loop.pause();
+  held.resolve(ownerFeedback);await settle();h.open(nudgeTaskId);await settle();
+  assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').disabled,true);
+  assert.equal(h.get('work-form').hidden,true);assert.equal(h.sends.length,0);assert.equal(h.preparations.length,0);
 });

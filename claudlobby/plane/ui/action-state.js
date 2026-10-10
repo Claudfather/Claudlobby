@@ -21,25 +21,28 @@ const canonical = (value, prefix) => typeof value === "string" && new RegExp(`^$
 const release = value => typeof value === "string" && /^r-[0-9a-f]{64}$/.test(value);
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const timestamp = value => bounded(value) && /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
-export const validNudgeTarget = target => exact(target, ["recipient", "task_id", "assignment_id", "release_id"])
+export const validTaskActionTarget = target => exact(target, ["recipient", "task_id", "assignment_id", "release_id"])
   && canonical(target.recipient, "actor") && canonical(target.task_id, "wi")
   && (target.assignment_id === null || canonical(target.assignment_id, "asg")) && release(target.release_id);
-const nudgeKeys = ["version", "request_id", "kind", "scope", "target", "submitted_at", "semantic_sha256"];
-const validNudgeRow = row => row?.version === 2 && row.kind === "nudge" && uuid(row.request_id)
-  && exact(row.scope, FIELDS) && validScope(row.scope) && validNudgeTarget(row.target) && timestamp(row.submitted_at)
+const taskActionKeys = ["version", "request_id", "kind", "scope", "target", "submitted_at", "semantic_sha256"];
+const taskKinds = new Set(["nudge", "feedback"]);
+const validTaskActionRow = row => row?.version === 2 && taskKinds.has(row.kind) && uuid(row.request_id)
+  && exact(row.scope, FIELDS) && validScope(row.scope) && validTaskActionTarget(row.target) && timestamp(row.submitted_at)
   && typeof row.semantic_sha256 === "string" && /^[0-9a-f]{64}$/.test(row.semantic_sha256);
-const validRow = row => row?.version === 2 ? exact(row, nudgeKeys) && validNudgeRow(row) : validLegacyRow(row);
+const validRow = row => row?.version === 2 ? exact(row, taskActionKeys) && validTaskActionRow(row) : validLegacyRow(row);
 const logicalKey = row => row.version === 2
   ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.recipient, row.target.task_id]) : rowKey(row);
-export function validNudgeContext(context) {
-  return context?.version === 2 && context.simulation === false && validScope(context.scope)
+export function validTaskActionContext(context, kind = context?.actions?.[0]) {
+  return taskKinds.has(kind) && context?.version === 2 && context.simulation === false && validScope(context.scope)
     && exact(context.scope, FIELDS) && bounded(context.room) && context.scope.fleet === context.room && release(context.release_id)
-    && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === "nudge"
+    && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === kind
     && Array.isArray(context.recipients) && context.recipients.length === 1
     && canonical(context.recipients[0].id, "actor") && bounded(context.recipients[0].label) && context.recipients[0].lead === true;
 }
+export const validNudgeContext = context => validTaskActionContext(context, "nudge");
+export const validFeedbackContext = context => validTaskActionContext(context, "feedback");
 export function samePreparation(request, prepared) {
-  return exact(prepared, nudgeKeys) && validNudgeRow(prepared)
+  return exact(prepared, taskActionKeys) && validTaskActionRow(prepared)
     && prepared.request_id === request.request_id && prepared.submitted_at === request.submitted_at
     && rowKey(prepared) === rowKey(request);
 }
@@ -57,7 +60,7 @@ export function validContext(context) {
 }
 
 export function sameReceipt(request, receipt) {
-  if (request?.version === 2) return exact(receipt, [...nudgeKeys, "status"]) && receipt.version === 2 && validNudgeRow(receipt)
+  if (request?.version === 2) return exact(receipt, [...taskActionKeys, "status"]) && receipt.version === 2 && validTaskActionRow(receipt)
     && receipt.request_id === request.request_id && receipt.submitted_at === request.submitted_at
     && receipt.semantic_sha256 === request.semantic_sha256 && rowKey(receipt) === rowKey(request)
     && ["recorded", "delivered", "rejected"].includes(receipt.status);
@@ -142,12 +145,12 @@ export class ActionState {
   }
 
   prepare(context, target, body, requestId) {
-    if (!validNudgeContext(context) || !validNudgeTarget(target)
+    if (!validTaskActionContext(context) || !validTaskActionTarget(target)
         || target.recipient !== context.recipients[0].id || target.release_id !== context.release_id)
-      throw new Error("This task nudge is unavailable. Refresh the task and select it again.");
-    if (typeof body !== "string" || !body.trim() || body.length > 2000 || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body))
-      throw new Error("Enter a reason of up to 2,000 characters.");
-    const request = { version: 2, request_id: requestId, kind: "nudge", scope: { ...context.scope },
+      throw new Error("This task action is unavailable. Refresh the task and select it again.");
+    if (typeof body !== "string" || !body.trim() || body.length > 2000 || body.includes("\u0000") || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body))
+      throw new Error(context.actions[0] === "feedback" ? "Enter a comment of up to 2,000 characters." : "Enter a reason of up to 2,000 characters.");
+    const request = { version: 2, request_id: requestId, kind: context.actions[0], scope: { ...context.scope },
       target: { ...target }, submitted_at: new Date().toISOString(), body };
     if (!uuid(requestId)) throw new Error("A safe request ID is unavailable. Nothing was sent.");
     if (this.unresolved(request)) throw new Error("Check the original receipt before sending again.");
@@ -159,7 +162,8 @@ export class ActionState {
   }
 
   beginPrepared(context, request, prepared) {
-    if (!samePreparation(request, prepared)) throw new Error("Task nudge preparation did not match. Nothing was sent.");
+    if (!samePreparation(request, prepared) || request.kind !== context?.actions?.[0]
+        || scopeKey(request.scope) !== scopeKey(context.scope)) throw new Error("Task action preparation did not match. Nothing was sent.");
     // Recheck the capability and logical pending block after the async prepare.
     this.prepare(context, request.target, request.body, request.request_id);
     const row = this.metadata(prepared);

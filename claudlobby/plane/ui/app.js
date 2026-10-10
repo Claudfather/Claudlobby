@@ -185,12 +185,12 @@ function machineryBlock(m, prose = null) {
        + `<div class="machinery">${parts}</div>${raw}</details>`;
 }
 
-// The task ribbon renders SERVER facts: thread.delivered / thread.terminal.
-function ladder(thread, nudged) {
+// Task-linked conversation delivery cannot establish assignment delivery.
+function ladder(thread, conversation) {
   if (!thread.work_item_id) return "";
-  if (nudged) {
-    // Thread delivery includes the lead's nudge prompt. It cannot establish
-    // assignment delivery or imply that the worker has started the task.
+  if (conversation) {
+    // Nudges and comments can be received before any worker is assigned.
+    // Render recorded task acts, independently of conversation delivery.
     const history = thread.task_events.filter(e => e.event === "accepted" || e.event === "progress"
       || Object.hasOwn(THREAD_TERMINAL_STATUS, e.event));
     const labels = [...new Set(history.map(e => THREAD_TERMINAL_STATUS[e.event] || e.event))];
@@ -273,7 +273,7 @@ function threadArticle(t) {
     <div class="t-kicker">${kicker}</div>
     <div class="t-head"><span class="t-title">${esc(threadTitle(t, reasons[0]))}</span>
       ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
-    ${ladder(t, reasons.some((r) => r !== null))}
+    ${ladder(t, reasons.some((r) => r !== null) || t.messages.some(m => m.message_class === "chat"))}
     ${msgs}`;
   return el;
 }
