@@ -1036,6 +1036,15 @@ HTTP tests use synthetic identity/activation and receiver fixtures; actual
 native receiver, browser, trusted ingress and rollout require their separate
 canary evidence.
 
+The browser keeps message and nudge capabilities independently. A nudge refusal
+allows one fenced read-only capability recheck; it never repeats preparation or
+sending. If ordinary messaging remains granted, its composer and selected
+recipient remain available. An unsent reason belongs to the logical task and
+manager within the authorized scope, so selecting a changed assignment or
+release preserves that draft. Submitted pending metadata retains its original
+assignment, release, digest and UUID; a new selection cannot bypass its pending
+receipt guard. Session loss still pauses all action kinds.
+
 ### Selected task detail
 
 `GET /api/tasks/{TASK_ID}?fleet=RECORDED_ALIAS` reads one canonical `wi_` ID

@@ -10,6 +10,8 @@ const source = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', imp
 const controller = source.replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
   .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const { mountWorkLoop } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
+const transportSource = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const { createOwnerTransport } = await import(`data:text/javascript;base64,${Buffer.from(transportSource).toString('base64')}`);
 const context = { version: 1, room: 'web', simulation: true,
   scope: { workspace: 'example', host: 'workshop', fleet: 'web', viewer: 'owner' },
   recipients: [{ id: 'lead', label: 'Lead', lead: true }, { id: 'worker', label: 'Worker' }],
@@ -74,6 +76,7 @@ function harness(options = {}) {
     sendAction: request => { sends.push(request); return options.sendAction ? options.sendAction(request) : receipt(request); },
     actionReceipt: request => { lookups.push(request); return options.actionReceipt ? options.actionReceipt(request) : receipt(request); },
   };
+  if (options.transport) Object.assign(api, options.transport);
   const loop = mountWorkLoop({ api, renderThread: () => new ui.Element(), refresh: () => {} });
   const board = { state: 'ok', data: { tasks: ['task-a', 'task-b'].map(task_id => ({ task_id, fleet: 'web', title: task_id })) } };
   const update = () => loop.update(board, { state: 'ok', data: { threads: [] } });
@@ -85,7 +88,7 @@ function harness(options = {}) {
   };
   const pendingClick = (id, discard = false) => ui.get('work-pending').onclick({ target: new ui.Element('', { [discard ? 'discard' : 'request']: id }) });
   const submit = () => { ui.get('work-body').value = 'Hello'; ui.get('work-body').emit('input'); return ui.get('work-form').onsubmit({ preventDefault() {} }); };
-  return { ...ui, loop, storage, sends, lookups, preparations, confirmations, update, open, pendingClick, submit };
+  return { ...ui, loop, api, storage, sends, lookups, preparations, confirmations, update, open, pendingClick, submit };
 }
 function saved(storage, task = null) {
   return new ActionState(storage).begin(context, 'message', { recipient: 'lead', task_id: task }, 'Private old message', 'saved-request');
@@ -332,12 +335,12 @@ test('unsupported synthetic detail retains labelled limited board snapshot; prot
   }
 });
 
-test('scoped action refusal preserves another scope detail; current refusal fences its delayed read', async () => {
+test('production scoped action refusal preserves readable details and disables only its capability', async () => {
   for (const field of ['workspace', 'host', 'fleet', 'viewer']) {
     const result = deferred();
     const h = harness({ jget() { return result.promise; } });
     h.loop.setRoom('web'); await settle(); h.open(); await settle();
-    h.loop.invalidate(undefined, { ...context.scope, [field]: 'previous-scope' });
+    h.loop.invalidate(undefined, { ...context.scope, [field]: 'previous-scope' }, 'message', context.recipients[0].id);
     await settle();
     assert.equal(h.get('task-detail').open, true);
     assert.equal(h.get('work-form').hidden, false);
@@ -347,11 +350,11 @@ test('scoped action refusal preserves another scope detail; current refusal fenc
   const result = deferred();
   const h = harness({ jget() { return result.promise; } });
   h.loop.setRoom('web'); await settle(); h.open(); await settle();
-  h.loop.invalidate(undefined, context.scope); await settle();
-  assert.equal(h.get('task-detail').open, false);
+  h.loop.invalidate(undefined, context.scope, 'message', context.recipients[0].id); await settle();
+  assert.equal(h.get('task-detail').open, true);
   assert.equal(h.get('work-form').hidden, true);
   result.resolve(canonicalDetail('task-a')); await settle();
-  assert.doesNotMatch(h.get('task-detail-content').innerHTML, /Full selected task/);
+  assert.match(h.get('task-detail-content').innerHTML, /Full selected task/);
 });
 
 test('fresh submission refusal removes only owned pending row and keeps draft', async () => {
@@ -459,14 +462,14 @@ test(`malformed or non-object recorded detail stays raw without inferred prose: 
   assert.doesNotMatch(html,/<p class="note">(?:Summary|Reason|Question)<\/p>|<json>|<array>|<string>/);
 });
 
-for (const close of ['button','escape','pause','invalidate'])
+for (const close of ['button','escape','pause','source-loss'])
 test(`closing private task detail erases its body/history and preserves refocus: ${close}`, async () => {
   const h = harness({jget(){return canonicalDetail('task-a');}}); h.loop.setRoom('web'); await settle();
   const opener = h.open(); await settle(); assert.match(h.get('task-detail-content').innerHTML,/Full description/);
   if(close === 'button') h.get('task-detail-close').onclick();
   else if(close === 'escape') h.get('task-detail').close();
   else if(close === 'pause') h.loop.pause();
-  else h.loop.invalidate(undefined,context.scope);
+  else h.loop.invalidate();
   await settle(); assert.equal(h.get('task-detail-content').innerHTML,'');
   assert.equal(h.document.activeElement,opener); assert.equal(h.get('task-detail').open,false);
 });
@@ -621,9 +624,9 @@ test(`independent owner capabilities enable message=${messages} and nudge=${nudg
 
 
 test('late old-manager denial preserves refreshed nudge context with unchanged scope',async()=>{
-  let current=ownerNudge;
+  let current=ownerNudge, contextReads=0;
   const late=deferred();
-  const h=harness(nudgeOptions({nudgeContext:()=>current,sendAction:()=>late.promise}));
+  const h=harness(nudgeOptions({nudgeContext:()=>{contextReads++;return current;},sendAction:()=>late.promise}));
   await chooseNudge(h);
   const submitting=h.submit();await settle();
   assert.equal(h.sends.length,1);
@@ -631,11 +634,109 @@ test('late old-manager denial preserves refreshed nudge context with unchanged s
   current={...ownerNudge,recipients:[{id:'actor_'+ 'f'.repeat(32),label:'New lead',lead:true}]};
   await chooseNudge(h);h.get('work-body').value='New lead reason';h.get('work-body').emit('input');
   // The transport reports the originating recipient for every mutation refusal.
-  h.loop.invalidate(undefined,original.scope,'nudge',original.target.recipient);
+  h.loop.invalidate(undefined,original.scope,'nudge',original.target.recipient);await settle();
+  assert.equal(contextReads,2); // The old manager cannot start recovery for the new capability.
   assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-body').value,'New lead reason');
   assert.equal(h.get('work-recipient').value,current.recipients[0].id);
   late.resolve({...original,status:'unknown'});await submitting;
   assert.equal(new ActionState(h.storage).pending.length,1);assert.equal(h.sends.length,1);
   h.loop.invalidate(undefined,current.scope,'nudge',current.recipients[0].id);
   assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-send').disabled,true);
+});
+
+
+async function ownerRecoveryHarness({ messages = false, recovery = 200, heldRecovery } = {}) {
+  let session = 'ready', nudgeReads = 0, detailReads = 0, prepareCount = 0;
+  const calls = [], redirects = [], timers = new Set();
+  const newer = { ...ownerNudge, release_id: 'r-' + 'f'.repeat(64) };
+  const transport = createOwnerTransport({
+    EventSource: class { close() {} }, location: {replace(path) { redirects.push(path); }},
+    setTimeout(fn) { timers.add(fn); return fn; }, clearTimeout(fn) { timers.delete(fn); },
+    async fetch(url, options) {
+      const body = options.body ? JSON.parse(options.body) : null; calls.push({url,body});
+      let status = 200, data;
+      if (url === '/api/owner/status') { status = session === 'ready' ? 200 : 503; data = {state:session}; }
+      else if (url === '/api/owner/logout') data = {state:'signed_out'};
+      else if (url === '/api/tasks?source-loss') { session='unavailable';status=503;data={state:'unavailable'}; }
+      else if (url.startsWith('/api/tasks/')) {
+        const assignment = ++detailReads > 1 ? {assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null} : null;
+        data = ownerDetail(assignment);
+      } else if (url.endsWith('/context')) {
+        if (body.kind === 'nudge') {
+          if (body.room === 'web' && ++nudgeReads === 2) {
+            if (heldRecovery) await heldRecovery.promise;
+            status = recovery; data = recovery === 200 ? newer : {state:'denied'};
+          } else data = body.room === 'web' ? ownerNudge : {...newer,room:body.room,scope:{...newer.scope,fleet:body.room}};
+        } else { status=messages?200:403;data=messages?{...context,simulation:false,actions:['message']}:{state:'denied'}; }
+      } else if (url.endsWith('/prepare')) {
+        if (++prepareCount === 1) { status=403;data={state:'denied'}; }
+        else { const {body:reason,...metadata}=body;data={...metadata,semantic_sha256:'d'.repeat(64)}; }
+      } else if (url.endsWith('/send')) { const {body:reason,...metadata}=body;data={...metadata,status:'delivered'}; }
+      else throw Error('unexpected '+url);
+      return {status,async json(){return data;}};
+    },
+  });
+  const h = harness(nudgeOptions({transport}));
+  for (const id of ['owner-session','owner-session-status','owner-session-renew','owner-session-logout','owner-session-check']) new h.Element(id);
+  const controls = transport.mountSessionControls({document:h.document,element:h.get('owner-session'),
+    onPause(){h.loop.pause();},onActionPause(scope,kind,recipient){h.loop.invalidate(undefined,scope,kind,recipient);}});
+  await controls.ready;
+  return {...h,calls,redirects,controls,get nudgeReads(){return nudgeReads;}};
+}
+const flushRecovery = async () => { for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve)); };
+for (const messages of [false,true]) for (const recovery of [200,403])
+test(`real prepare403 performs one capability read without mutation replay: messages=${messages}, context=${recovery}`,async()=>{
+  const h=await ownerRecoveryHarness({messages,recovery});
+  try {
+    h.loop.setRoom('web');await flushRecovery();
+    if(messages) {
+      h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+      h.get('work-body').value='Ordinary worker draft';h.get('work-body').emit('input');
+    }
+    h.open(nudgeTaskId);await flushRecovery();
+    h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+    h.get('work-body').value='Keep logical task reason';h.get('work-body').emit('input');
+    await h.get('work-form').onsubmit({preventDefault(){}});await flushRecovery();
+    assert.equal(h.nudgeReads,2);assert.equal(h.calls.filter(c=>c.url.endsWith('/prepare')).length,1);
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);assert.equal(new ActionState(h.storage).pending.length,0);
+    assert.equal(h.get('work-form').hidden,!messages);assert.deepEqual(h.redirects,[]);
+    if(messages) {assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.get('work-body').value,'Ordinary worker draft');}
+    h.open(nudgeTaskId);await flushRecovery();
+    const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge');
+    assert.equal(button.disabled,recovery!==200);assert.match(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+    if(recovery===200) {
+      button.onclick();await settle();assert.equal(h.get('work-body').value,'Keep logical task reason');
+      await h.get('work-form').onsubmit({preventDefault(){}});await flushRecovery();
+      const sent=h.calls.filter(c=>c.url.endsWith('/send'));assert.equal(sent.length,1);
+      assert.equal(sent[0].body.target.assignment_id,nudgeAssignment);assert.equal(sent[0].body.target.release_id,'r-'+'f'.repeat(64));
+      assert.equal(sent[0].body.body,'Keep logical task reason');assert.equal(h.nudgeReads,2);
+    }
+  } finally {h.controls.dispose();}
+});
+for (const loss of ['room','session','source'])
+test(`late capability refresh cannot restore nudge after ${loss} loss`,async()=>{
+  const held=deferred(),h=await ownerRecoveryHarness({heldRecovery:held});
+  try {
+    await chooseNudge(h);await flushRecovery();
+    const submitting=h.submit();await flushRecovery();assert.equal(h.nudgeReads,2);
+    if(loss==='room')h.loop.setRoom('all');
+    if(loss==='session')h.get('owner-session-logout').emit('click');
+    if(loss==='source')await h.api.jget('/api/tasks?source-loss');
+    await flushRecovery();held.resolve();await submitting;await flushRecovery();
+    assert.equal(h.get('work-form').hidden,true);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);
+    assert.equal(new ActionState(h.storage).pending.length,0);
+    if(loss==='room')assert.equal(h.get('work-scope').textContent,'all');
+    else {h.open(nudgeTaskId);await flushRecovery();assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').some(b=>!b.disabled),false);}
+  } finally {h.controls.dispose();}
+});
+test('capability recovery does not overwrite a message edited while its nudge context read is pending',async()=>{
+  const held=deferred(),h=await ownerRecoveryHarness({messages:true,heldRecovery:held});
+  try {
+    await chooseNudge(h);await flushRecovery();const submitting=h.submit();await flushRecovery();
+    assert.equal(h.get('work-form').hidden,false);h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+    h.get('work-body').value='Message edited during recovery';h.get('work-body').emit('input');
+    held.resolve();await submitting;await flushRecovery();
+    assert.equal(h.get('work-body').value,'Message edited during recovery');assert.equal(h.get('work-recipient').value,'worker');
+    assert.equal(h.nudgeReads,2);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);
+  } finally {h.controls.dispose();}
 });
