@@ -400,9 +400,11 @@ def dispatch(args) -> CommandOutput:
         values = _inputs(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if args.public_command == "task.feedback" and (origin is not None or any(
-                key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE"))):
-            # Fleet timers deliberately have no bot origin; their generated
-            # carrier still cannot borrow an explicitly named human identity.
+                key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE",
+                                               "CLAUDLOBBY_RELEASE_ID"))):
+            # Fleet timers and host update children can have no bot origin.
+            # Their fleet/service/release carriers cannot borrow a human; the
+            # timer marker is also refused defensively, even when empty.
             raise CommandFailure("conflict", "task feedback requires an explicit local human caller")
         fleet_name = selected.fleet.name
         if selected.paths.seed:

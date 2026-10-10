@@ -925,6 +925,12 @@ selection under the task lock; unresolved work and stale selections refuse.
 Authored text is bounded by `MessageBody` (16,384 UTF-8 bytes); normal capture
 policy still controls readable retention. Receipts retain digests, not plaintext.
 
+The local `task feedback` CLI uses an explicitly named, already registered human
+actor. It does not require an owner session or feedback grant. Generated bot,
+fleet, service and release carriers are refused, including empty markers; manual
+root and fleet selection remains supported. The owner adapter requires its own
+verified session and exact feedback grant for both submission and inspection.
+
 Owner read pairing, message grants and nudge grants confer no feedback authority.
 `allow-feedback` separately confirms `ALLOW-FEEDBACK`; optional
 `--register-actor` first requires its own `REGISTER` confirmation. Its independent
