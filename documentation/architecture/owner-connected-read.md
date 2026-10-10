@@ -120,3 +120,54 @@ abort reads, erase memory credential/private display and fence late results.
 A stolen token from another native principal fails; another device of the SAME
 native owner could use it. Memory is not XSS protection or device key binding.
 Operational release/CSP/literal rendering and actual device proof remain gates.
+
+## Connected browser carrier
+
+The canonical `connected-read-client.js` module exports
+`createConnectedReadClient` with a selected reference
+`{reference_id,endpoint_origin,revision}`, trusted `documentContext`
+`{issuer,operational_origin,subject,workspace_id,context_generation}`, a
+`currentContext()` callback and `obtainSessionAssertion(input,{signal})` callback.
+The current callback supplies the actual authenticated v2 website DTO:
+`{version:2,user:{id},workspace:{id,name},context_generation,references}`.
+Reference objects have exactly the three keys above. The operational Origin
+must match the current document Origin; trusted issuer/document configuration
+is separate from website metadata. Parent messages and object shapes establish
+no authority. The entry supplies verified document configuration and fresh child
+metadata, and disposes the controller on observed identity/reference loss.
+
+`connect()` explicitly performs challenge, maintained website signer callback,
+and issue. The callback receives the original eight-field website request,
+including reference_id and expected_context_generation. Host UID comes only
+from the exact-origin challenge; issue/status/renew must match its pinned host
+and binding tuple. Genuine host responses go through the existing single owner
+profile checker before installing a credential or admitting a core read handle.
+Missing/unsupported capabilities or changed authenticated context fail closed.
+`start()` and `check()` only inspect an existing session; they never sign in.
+`renew()` and `logout()` are explicit serialized controls; an unknown mutation
+reply is never replayed. Successful logout retains local pairing and binding.
+
+Only `readHandle`, lifecycle controls, `snapshot()` and `subscribe()` are public.
+The handle is core minted and works with the finite two-source reader; it has no
+action export or global sign-in redirect. Session token, nonce and assertion
+are held only in private memory/body/header ownership, never returned by the
+controller, stored, logged or placed in URLs. Disposal through either controller
+or handle aborts reads, closes streams and removes credential references.
+Reload requires fresh sign-in. Relative lifetime uses a finite nondecreasing
+monotonic clock; expiry or clock failure stops private reads.
+
+The direct fetch carrier uses credentials:omit, no-store and redirect:error for
+the finite connected read/lifecycle roster. Its fetch SSE parser handles split
+UTF8 and CRLF, numeric source-local id/cursor, default data, named source,
+retry hints and comments. Frames/body/header deadlines and size bounds refuse
+malformed or oversized streams. It delegates reconnection and quiet-stream
+budgets to the existing owner controller and introduces no parallel retry loop.
+Successful HTTP reads never rearm persistent stream failures. Token rotation,
+source loss and disposal fence old requests/chunks without mutation replay.
+
+This library does not fetch account metadata, mount a central operational entry,
+choose CSP/private-network permissions or prove a real device/carrier. Those
+remain separate reviewed integration and browser gates. Unchanged trusted
+account context can support host-local renewal through provider outage under
+the documented non-lease policy; unknown metadata is unavailable, and observed
+account/workspace/reference changes require a new authenticated entry.
