@@ -163,13 +163,13 @@ def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
-def _canonical_uid(value: str, kind: str, *, action="message") -> str:
+def _canonical_uid(value: str, kind: str, *, action: str) -> str:
     if not isinstance(value, str) or re.fullmatch(ID_PATTERNS[kind], value) is None:
         raise AccessDenied(f"invalid_{action}_binding")
     return value
 
 
-def _human_alias(value: str, *, action="message") -> str:
+def _human_alias(value: str, *, action: str) -> str:
     if not isinstance(value, str) or _HUMAN_ALIAS.fullmatch(value) is None:
         raise AccessDenied(f"invalid_{action}_binding")
     return value

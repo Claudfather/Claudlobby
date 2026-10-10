@@ -15,7 +15,7 @@ import re
 
 from ..activation_identity import read_selected_identity_bindings
 from ..active_config import resolve_active_context
-from ..command_result import CommandFailure, CommandOutput
+from ..command_result import CommandOutput
 from ..commands.task_write import nudge_bound_task
 from ..message_context import resolve_message_route
 from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
@@ -124,7 +124,9 @@ class OwnerNudges:
                 result = nudge_bound_task(ctx, route, self.package, request_id=request_id,
                     task_id=task_id, reason=reason, expected_assignment_id=expected_assignment_id,
                     admit_read=self._admit_read)
-            except CommandFailure:
+            except Exception:
+                # Raw canonical failures can also disclose task or receipt
+                # state, including after recording or native delivery.
                 self._authorize(reader, fleet_uid, grant)
                 raise
             self._authorize(reader, fleet_uid, grant)

@@ -20,9 +20,9 @@ from claudlobby.plane.owner_access import AccessDenied, OwnerAccess, PrincipalRe
 from claudlobby.plane.owner_nudges import OwnerNudges
 from claudlobby.plane.owner_source import SourceDenied, SourceUnavailable, bind_source
 from claudlobby.request_queries import RequestNotFoundError
-from claudlobby.request_receipts import ReceiptConflict, RequestStore
+from claudlobby.request_receipts import ReceiptBusy, ReceiptConflict, RequestStore
 from claudlobby.runtime_admission import ReleaseMismatch
-from claudlobby.task_queries import TaskQueryError
+from claudlobby.task_queries import TaskNotFoundError, TaskQueryError
 from claudlobby.task_state import TaskStateError
 from tests.package_fixtures import source_package
 from tests.test_activation import cold, tmp_path  # noqa: F401
@@ -232,6 +232,59 @@ def test_exact_grant_is_rechecked_before_effect_and_before_any_outcome(gateway, 
         else:
             invoke(gateway)
     assert len(calls) == (0 if boundary == "route" else 1)
+
+
+@pytest.mark.parametrize("error_type", [task_operations.TaskConflictError, TaskQueryError,
+                                       TaskNotFoundError, ReceiptConflict, ReceiptBusy])
+@pytest.mark.parametrize("change", [None, "grant", "session", "source"])
+def test_raw_canonical_failure_requires_current_authority(gateway, monkeypatch, error_type, change):
+    adapter, reader, ctx, options, _ = gateway
+    calls, repairs = receiver(monkeypatch)
+    failure = error_type("private canonical task or request state")
+
+    def fail(*args, **kwargs):
+        if change == "grant":
+            adapter.access.revoke_nudges(expected_owner=options["expected_grant"].owner,
+                                        fleet_uid=ctx.fleet_uid)
+        elif change == "session":
+            adapter.access.renew_session(reader.token, reader.principal)
+        elif change == "source":
+            with sqlite3.connect(db_file(adapter.root)) as conn:
+                conn.execute("UPDATE work_items SET host_uid='foreign-host'")
+        raise failure
+
+    monkeypatch.setattr(owner_nudges, "nudge_bound_task", fail)
+    if change is None:
+        with pytest.raises(error_type) as raised:
+            invoke(gateway)
+        assert raised.value is failure
+    else:
+        with pytest.raises(SourceDenied if change == "source" else AccessDenied) as raised:
+            invoke(gateway)
+        assert "private canonical" not in str(raised.value)
+    assert calls == repairs == []
+
+
+def test_authorized_raw_failure_after_delivery_keeps_original_error_and_receipt(gateway, monkeypatch):
+    adapter, reader, _, options, _ = gateway
+    calls, repairs = receiver(monkeypatch)
+    original = owner_nudges.nudge_bound_task
+    failure = TaskQueryError("canonical result unavailable after delivery")
+
+    def fail_after_delivery(*args, **kwargs):
+        original(*args, **kwargs)
+        raise failure
+
+    monkeypatch.setattr(owner_nudges, "nudge_bound_task", fail_after_delivery)
+    with pytest.raises(TaskQueryError) as raised:
+        invoke(gateway)
+    assert raised.value is failure
+    observed = adapter.inspect(reader, **options)
+    assert observed.request.request_id == options["request_id"]
+    assert any(stage.kind == "recording" and stage.proof.status == "committed"
+               for stage in observed.request.stages)
+    assert observed.receiver.integrity_verdict == "delivered"
+    assert len(calls) == len(repairs) == 1
 
 
 @pytest.mark.parametrize("failure", ["lock", "prepare", "reserve", "committed_outcome"])
