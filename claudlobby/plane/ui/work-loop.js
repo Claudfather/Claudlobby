@@ -347,17 +347,25 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const reports = $("task-reports"), button = $("task-conversation-update");
     // The channel is the admitted current-room read. Task IDs are opaque,
     // shared across that room's cross-fleet threads; never infer from aliases.
-    const threads = channel?.state === "ok" ? channel.data.threads.filter(t => t.work_item_id === selected.id) : [];
-    const signature = JSON.stringify(channel?.state === "ok" ? threads : [channel?.state, channel?.provenance, channel?.remediation]);
-    if (conversation?.signature === signature) { button.hidden = true; return; }
-    const selection = document.getSelection();
-    const reading = reports.contains(document.activeElement) || (selection && !selection.isCollapsed
-      && (reports.contains(selection.anchorNode) || reports.contains(selection.focusNode)));
+    const ok = channel?.state === "ok";
+    const threads = ok ? channel.data.threads.filter(t => t.work_item_id === selected.id) : [];
+    const signature = JSON.stringify(ok ? threads : [channel?.state, channel?.provenance, channel?.remediation]);
+    const active = document.activeElement, held = active === button || reports.contains(active);
+    // Hiding the focused button or clearing a focused message would drop focus
+    // to the page. Keep it on the region; never take it from elsewhere.
+    const settle = keepFocus => {
+      button.hidden = true;
+      if (keepFocus && document.activeElement !== reports) { reports.tabIndex = -1; reports.focus(); }
+    };
+    if (conversation?.signature === signature) { settle(active === button); return; }
+    // Focus on the region itself (left there by an explicit update) survives
+    // replacement; only focus or selected text inside it would be lost.
+    const reading = (active !== reports && reports.contains(active)) || selectionTouches(reports);
     // Source loss clears stale text even during interaction. Healthy updates
     // wait for explicit consent when focus or a text selection would be lost.
-    if (!explicit && channel?.state === "ok" && reading) { button.hidden = false; return; }
+    if (!explicit && ok && reading) { button.hidden = false; return; }
     const previous = conversation?.threads || new Map(), next = new Map();
-    if (channel?.state !== "ok") reports.innerHTML = stateBlock(channel?.state || "disconnected", channel?.provenance, channel?.remediation);
+    if (!ok) reports.innerHTML = stateBlock(channel?.state || "disconnected", channel?.provenance, channel?.remediation);
     else if (!threads.length) reports.innerHTML = '<p class="detail-empty">No linked conversation or result is available in the recent channel window.</p>';
     else {
       const articles = threads.map(thread => {
@@ -377,8 +385,18 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       reports.replaceChildren(...articles);
     }
     conversation = { signature, threads: next };
-    button.hidden = true;
-    if (explicit) { reports.tabIndex = -1; reports.focus(); }
+    settle(explicit || held);
+  }
+  // Endpoints inside the node, or a range reaching it from outside (select all).
+  function selectionTouches(node) {
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    if (node.contains(selection.anchorNode) || node.contains(selection.focusNode)) return true;
+    for (let index = 0; index < (selection.rangeCount || 0); index++) {
+      const range = selection.getRangeAt(index);
+      if (!range.collapsed && range.intersectsNode(node)) return true;
+    }
+    return false;
   }
   function frozenTaskTarget(task, value, boardOnly, action) {
     if (boardOnly || task.resolved !== true || !Object.hasOwn(task, "body")
@@ -425,7 +443,11 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       + (capability("message") ? " Close this task and use Talk to your team to send an ordinary message." : "");
   }
   function update(tasks, messages) {
-    board = tasks; channel = messages;
+    board = tasks; updateChannel(messages);
+  }
+  // A channel-only read (stream source loss) leaves the board snapshot as read.
+  function updateChannel(messages) {
+    channel = messages;
     // Lifecycle and action preconditions stay frozen until explicit Refresh.
     // Only the admitted recent conversation read may update in place.
     if (selected) { $("task-detail-refresh").hidden = false; updateConversation(); }
@@ -556,5 +578,5 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom, update, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
+  return { setRoom, update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
 }

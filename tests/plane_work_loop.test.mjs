@@ -979,22 +979,57 @@ test('late delivery for the prior recipient keeps the newly selected bot draft',
   assert.equal(h.sends.length, 1); assert.deepEqual(h.lookups, []);
 });
 
-// Channel reads use the production thread renderer contract: message IDs and
-// nested disclosures. They never ask the action transport to prepare or send.
+// Channel reads run app.js's own threadArticle and machineryBlock, so the
+// message and disclosure markup the controller selects on is production's: a
+// rename there fails these tests. Only the leaf formatters are stubbed. Reads
+// never ask the action transport to prepare or send.
+const appSource = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+function appSlice(start, end) {
+  const from = appSource.indexOf(start), to = appSource.indexOf(end, from);
+  assert.ok(from >= 0 && to > from, `app.js no longer contains ${start} before ${end}`);
+  return appSource.slice(from, to);
+}
 const conversationRead = (...threads) => ({ state: 'ok', data: { threads } });
 const conversationThread = (id = 'task-a', messages = ['first'], extra = {}) => ({
-  key: id, work_item_id: id, latest_seq: messages.length,
-  messages: messages.map(msg_id => ({msg_id, body: msg_id})), ...extra,
+  key: id, work_item_id: id, latest_seq: messages.length, task_events: [],
+  messages: messages.map(msg_id => ({msg_id, body: msg_id, message_class: 'chat', sender_short: 'lead', recipient_short: 'owner'})), ...extra,
 });
-function conversationRenderer(thread, ui) {
-  const article = new ui.Element(); article.dataset.key = thread.key;
-  for (const row of thread.messages) {
-    const message = new ui.Element('', {msgId:row.msg_id}); message.className = 'msg';
-    const disclosure = new ui.Element(); disclosure.tagName = 'DETAILS';
-    const control = new ui.Element(); disclosure.append(control); message.append(disclosure); article.append(message);
-  }
-  return article;
+// The shared double keeps innerHTML flat; a rendered card needs its nesting.
+function markupElement(ui) {
+  const root = new ui.Element();
+  Object.defineProperty(root, 'innerHTML', { get() { return this.html || ''; }, set(html) {
+    this.html = html; this.children = [];
+    const open = [this];
+    for (const [, close, tag, attributes] of html.matchAll(/<(\/?)([a-z][\w-]*)\b([^>]*)>/g)) {
+      if (close) { open.pop(); continue; }
+      const dataset = {};
+      for (const data of attributes.matchAll(/data-([\w-]+)="([^"]*)"/g))
+        dataset[data[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = data[2];
+      const child = new ui.Element('', dataset);
+      child.tagName = tag.toUpperCase(); child.className = attributes.match(/\bclass="([^"]*)"/)?.[1] || '';
+      open.at(-1).append(child); open.push(child);
+    }
+  } });
+  return root;
 }
+function conversationRenderer(thread, ui) {
+  if (!ui.threadArticle) {
+    const bindings = { document: { createElement: () => markupElement(ui) }, currentFleet: 'web',
+      esc: value => String(value ?? ''), ago: () => '', clip: text => text, latestTx: () => null, nudgeReason: () => null,
+      deliveryLine: () => '', bodyBlock: message => `<div class="body">${message.body}</div>`,
+      CLASS_TAGS: new Set(), THREAD_TERMINAL_STATUS: {} };
+    runInNewContext(appSlice('function machineryBlock(', '// Keyed render:'), bindings);
+    ui.threadArticle = bindings.threadArticle;
+  }
+  return ui.threadArticle(thread);
+}
+// Located by structure, not by the controller's selectors.
+const nodesIn = (root, match) => root.children.flatMap(child => [...(match(child) ? [child] : []), ...nodesIn(child, match)]);
+const messagesIn = article => nodesIn(article, node => 'msgId' in node.dataset);
+const disclosuresIn = article => nodesIn(article, node => node.tagName === 'DETAILS');
+// A Selection double with one Range: its endpoints and the nodes it spans.
+const selectionOver = (anchorNode, focusNode, ...spanned) => ({ isCollapsed: false, anchorNode, focusNode, rangeCount: 1,
+  getRangeAt: () => ({ collapsed: false, intersectsNode: node => spanned.some(root => root === node || root.contains(node) || node.contains(root)) }) });
 async function conversationHarness(options = {}) {
   const reads = [];
   const h = harness({renderThread:conversationRenderer, jget(url) { reads.push(url); return canonicalDetail(url.includes('task-b') ? 'task-b' : 'task-a'); }, ...options});
@@ -1003,13 +1038,15 @@ async function conversationHarness(options = {}) {
 }
 test('same-task recent replies update only conversation, retaining disclosures and frozen action selection', async () => {
   const h = await conversationHarness(), content = h.get('task-detail-content'), snapshot = content.innerHTML;
-  const first = h.get('task-reports').children[0]; first.children[0].children[0].open = true;
+  const first = h.get('task-reports').children[0];
+  assert.equal(messagesIn(first).length, 1); assert.equal(disclosuresIn(first).length, 1); disclosuresIn(first)[0].open = true;
   h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
   h.get('work-body').value = 'Unsent worker draft'; h.get('work-body').emit('input');
   h.update(conversationRead(conversationThread('task-a', ['first', 'reply']), conversationThread('task-b', ['foreign'])),
     {state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',state:'active',current_assignment:{assignment_id:'new'}}]}});
   const article = h.get('task-reports').children[0];
-  assert.equal(article.children.length, 2); assert.equal(article.children[0].children[0].open, true);
+  assert.deepEqual(messagesIn(article).map(message => message.dataset.msgId), ['first', 'reply']);
+  assert.deepEqual(disclosuresIn(article).map(disclosure => disclosure.open), [true, false]);
   assert.equal(content.innerHTML, snapshot); assert.equal(h.reads.length, 1);
   assert.equal(h.get('work-recipient').value, 'worker'); assert.equal(h.get('work-body').value, 'Unsent worker draft');
   content.querySelectorAll('[data-kind]')[0].onclick();
@@ -1025,37 +1062,79 @@ test('unchanged conversation nodes remain and receipt-only evidence updates with
   assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
 });
 test('conversation focus or text selection defers updates until explicit opt-in without replacing the task', async () => {
-  for (const interaction of ['focus', 'selection']) {
+  // 'spanning' is select-all in the dialog: both endpoints lie outside the region.
+  for (const interaction of ['focus', 'selection', 'spanning']) {
     const h = await conversationHarness(), reports = h.get('task-reports'), first = reports.children[0];
-    const control = first.children[0].children[0].children[0];
-    if (interaction === 'focus') control.focus();
-    else h.document.selection = {isCollapsed:false,anchorNode:control,focusNode:control};
+    const content = h.get('task-detail-content'), control = disclosuresIn(first)[0].children[0];
+    const selection = interaction === 'selection' ? selectionOver(control, control, control)
+      : interaction === 'spanning' ? selectionOver(content, content, content) : null;
+    if (interaction === 'focus') control.focus(); else h.document.selection = selection;
+    const focused = h.document.activeElement;
     h.update(conversationRead(conversationThread('task-a', ['first', 'reply'])));
     assert.equal(reports.children[0], first); assert.equal(h.get('task-conversation-update').hidden, false);
-    if (interaction === 'focus') assert.equal(h.document.activeElement, control);
-    else assert.equal(h.document.selection.anchorNode, control);
+    assert.equal(h.document.activeElement, focused); assert.equal(h.document.selection, selection);
     h.get('task-conversation-update').onclick();
-    assert.equal(reports.children[0].children.length, 2); assert.equal(h.get('task-conversation-update').hidden, true);
+    assert.equal(messagesIn(reports.children[0]).length, 2); assert.equal(h.get('task-conversation-update').hidden, true);
     assert.equal(h.document.activeElement, reports); assert.equal(h.reads.length, 1);
+    // Focus left on the region by that opt-in must not defer every later update.
+    h.document.selection = null;
+    h.update(conversationRead(conversationThread('task-a', ['first', 'reply', 'third'])));
+    assert.equal(messagesIn(reports.children[0]).length, 3); assert.equal(h.get('task-conversation-update').hidden, true);
+    assert.equal(h.document.activeElement, reports);
     assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
   }
 });
+test('hiding a focused update button keeps focus on the conversation region without taking it from elsewhere', async () => {
+  for (const outcome of ['updated', 'reverted', 'elsewhere']) {
+    const h = await conversationHarness(), reports = h.get('task-reports'), button = h.get('task-conversation-update');
+    const control = disclosuresIn(reports.children[0])[0].children[0], close = h.get('task-detail-close');
+    h.document.selection = selectionOver(control, control, control);
+    h.update(conversationRead(conversationThread('task-a', ['first', 'reply']))); assert.equal(button.hidden, false);
+    if (outcome === 'elsewhere') close.focus(); else button.focus();
+    h.document.selection = null;
+    h.update(conversationRead(conversationThread('task-a', outcome === 'updated' ? ['first', 'reply', 'third'] : ['first'])));
+    assert.equal(button.hidden, true); assert.equal(messagesIn(reports.children[0]).length, outcome === 'updated' ? 3 : 1);
+    assert.equal(h.document.activeElement, outcome === 'elsewhere' ? close : reports);
+    assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  }
+});
+test('the real stream source callback clears an open conversation through the channel-only door and keeps the board', async () => {
+  const h = harness({renderThread:conversationRenderer, jget() { return {state:'unavailable',remediation:'Unsupported detail route'}; }});
+  h.loop.setRoom('web'); await settle(); h.update(conversationRead(conversationThread())); h.open(); await settle();
+  assert.match(h.get('task-detail-content').innerHTML, /limited board snapshot/);
+  assert.equal(messagesIn(h.get('task-reports').children[0]).length, 1);
+  // app.js's own openStream, wired to this controller; only its panels are stubbed.
+  const listeners = new Map(), cleared = [];
+  const bindings = { createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
+    workLoop: h.loop, $: id => h.get(id), renderSummary() {}, renderHeader: value => cleared.push(value),
+    renderHostFacts: value => cleared.push(value), renderState() {}, pushDebugRow() {}, scheduleRefresh() {} };
+  runInNewContext(appSlice('function openStream() {', '$("debug-toggle")'), bindings); bindings.openStream();
+  listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
+  assert.deepEqual(cleared, [null, null]);
+  assert.equal(h.get('task-reports').children.length, 0); assert.match(h.get('task-reports').innerHTML, /Source access unavailable/);
+  h.get('task-detail-refresh').onclick(); await settle();
+  assert.match(h.get('task-detail-content').innerHTML, /limited board snapshot/);
+  assert.match(h.get('task-reports').innerHTML, /Source access unavailable/);
+});
 test('conversation does not disturb focus or selection in the frozen lifecycle region', async () => {
   const h = await conversationHarness(), content = h.get('task-detail-content');
-  h.get('task-detail-close').focus(); h.document.selection = {isCollapsed:false,anchorNode:content,focusNode:content};
+  const title = h.get('task-detail-title'), selection = selectionOver(title, title, title);
+  assert.ok(content.contains(title) && !h.get('task-reports').contains(title));
+  h.get('task-detail-close').focus(); h.document.selection = selection;
   h.update(conversationRead(conversationThread('task-a', ['first', 'reply'])));
-  assert.equal(h.get('task-reports').children[0].children.length, 2);
-  assert.equal(h.document.activeElement, h.get('task-detail-close')); assert.equal(h.document.selection.anchorNode, content);
+  assert.equal(messagesIn(h.get('task-reports').children[0]).length, 2);
+  assert.equal(h.document.activeElement, h.get('task-detail-close')); assert.equal(h.document.selection, selection);
 });
 test('source loss clears conversation immediately and a retained update button cannot revive old room or session text', async () => {
   for (const change of ['room', 'session', 'close']) {
     const h = await conversationHarness(), reports = h.get('task-reports');
-    reports.children[0].children[0].children[0].children[0].focus();
+    disclosuresIn(reports.children[0])[0].children[0].focus();
     h.update(conversationRead(conversationThread('task-a', ['first', 'reply'])));
     const staleButton = h.get('task-conversation-update'); assert.equal(staleButton.hidden, false);
     h.update({state:'denied',remediation:'Source access unavailable'});
     assert.equal(reports.children.length, 0); assert.match(reports.innerHTML, /Source access unavailable/);
-    assert.equal(staleButton.hidden, true);
+    // Focus moves off the cleared message onto the region now holding only the state.
+    assert.equal(staleButton.hidden, true); assert.equal(h.document.activeElement, reports);
     if (change === 'room') h.loop.setRoom('other');
     else if (change === 'session') h.loop.pause(); else h.get('task-detail-close').onclick();
     staleButton.onclick(); await settle();
