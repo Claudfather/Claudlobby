@@ -229,10 +229,10 @@ def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config
     assert store.current_grant() == owner
 
 
-@pytest.mark.parametrize("action", ["allow-messages", "revoke-messages"])
+@pytest.mark.parametrize("action", ["allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges"])
 def test_message_grants_require_terminal_json_refusal_and_explicit_scope(message_owner, monkeypatch, action):
     store, _, _, ctx = message_owner
-    extra = ["--target-fleet", "example", "--actor", "human:local-owner"] if action == "allow-messages" else ["--fleet-uid", ctx.fleet_uid]
+    extra = ["--target-fleet", "example", "--actor", "human:local-owner"] if action.startswith("allow-") else ["--fleet-uid", ctx.fleet_uid]
     monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
     assert call(store, action, *extra) == 4
     assert call(store, action, *extra, "--json") == 2
@@ -368,7 +368,7 @@ def test_message_storage_failure_is_not_misdiagnosed_as_terminal_failure(message
     def unavailable(*args):
         raise error
 
-    monkeypatch.setattr(host_owner, "_message_preview", unavailable)
+    monkeypatch.setattr(host_owner, "_grant_preview", unavailable)
     assert allow(store) == 6
     output = capsys.readouterr()
     assert "message grant could not be bound or persisted" in output.err
@@ -404,7 +404,7 @@ def test_message_storage_translation_does_not_wrap_unrelated_status_error(owner,
     def unexpected(*args):
         raise error
 
-    monkeypatch.setattr(OwnerAccess, "local_status", unexpected)
+    monkeypatch.setattr(OwnerAccess, "local_action_status", unexpected)
     args = SimpleNamespace(root=str(owner.root), fleet=None, seed=False, json=False, owner_action="status")
     with pytest.raises(sqlite3.OperationalError) as caught:
         host_owner.dispatch(args)
@@ -453,3 +453,54 @@ def test_bind_foreign_source_never_suggests_pairing_or_rebinding(tmp_path, monke
     error = capsys.readouterr().err
     assert "Do not rebind" in error and "request pairing again" not in error
     assert "re-run host owner bind-source" not in error and "foreign-host" not in error
+
+
+def test_nudge_console_registration_is_separate_and_status_revoke_need_no_active_config(message_owner, monkeypatch, capsys):
+    store, _, owner, ctx = message_owner
+    actor = "human:nudge-owner"
+    args = ("--target-fleet", "example", "--actor", actor, "--register-actor")
+    terminal(monkeypatch, iter(["REGISTER\n", "ALLOW\n"]))
+    assert call(store, "allow-nudges", *args) == 4  # message approval word is insufficient
+    with pytest.raises(AccessDenied, match="nudges_not_allowed"):
+        store.current_nudge_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    output = terminal(monkeypatch, iter(["ALLOW-NUDGES\n"]))
+    assert call(store, "allow-nudges", *args) == 0
+    grant = store.current_nudge_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    assert "selected-task nudges only" in output.getvalue() and grant.actor_alias == actor
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    (store.root / "state/selected-release.json").unlink()
+    db_file(store.root).rename(store.root / "retained-plane")
+    capsys.readouterr()
+    assert call(store, "status", "--json") == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["message_grants"] == []
+    assert data["nudge_grants"][0]["generation"] == grant.generation
+    terminal(monkeypatch, iter(["REVOKE-NUDGES\n"]))
+    assert call(store, "revoke-nudges", "--fleet-uid", ctx.fleet_uid) == 0
+    assert store.current_grant() == owner
+
+
+@pytest.mark.parametrize("boundary", ["allow", "revoke"])
+def test_nudge_console_refuses_owner_or_generation_replacement(message_owner, monkeypatch, boundary):
+    store, _, owner, ctx = message_owner
+    binding = dict(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                   actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    first = store.allow_nudges(**binding)
+    terminal(monkeypatch, iter([]))
+    replacement = []
+    def race(*args):
+        if boundary == "revoke":
+            store.revoke_nudges(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+            replacement.append(store.allow_nudges(**binding))
+        else:
+            store.revoke_owner(expected_revision=owner.revision)
+            challenge = store.begin_pairing(PRINCIPAL)
+            store.confirm_pairing(challenge.token, expected_principal=PRINCIPAL)
+    monkeypatch.setattr(host_owner, "_approve", race)
+    if boundary == "revoke":
+        assert call(store, "revoke-nudges", "--fleet-uid", ctx.fleet_uid) == 4
+        assert store.current_nudge_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid) == replacement[0]
+        assert replacement[0].generation != first.generation
+    else:
+        assert call(store, "allow-nudges", "--target-fleet", "example", "--actor", ctx.caller.alias) == 4
