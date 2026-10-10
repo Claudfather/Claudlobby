@@ -294,10 +294,18 @@ function renderChannel(env) {
   const room = currentFleet || "all";
   for (const t of env.data.threads) {
     const prev = existing.get(t.key);
-    frag.appendChild(prev && prev.dataset.seq === String(t.latest_seq)
-                     && prev.dataset.room === room
-                     && prev.dataset.receipts === channelReceiptKey(t)
-      ? prev : threadArticle(t));
+    const reuse = prev && prev.dataset.seq === String(t.latest_seq)
+      && prev.dataset.room === room && prev.dataset.receipts === channelReceiptKey(t);
+    const article = reuse ? prev : threadArticle(t);
+    if (prev && !reuse && prev.dataset.room === room) {
+      const expanded = new Set([...prev.querySelectorAll(".msg[data-msg-id]")]
+        .filter(message => message.querySelector("details")?.open).map(message => message.dataset.msgId));
+      for (const message of article.querySelectorAll(".msg[data-msg-id]")) {
+        const disclosure = message.querySelector("details");
+        if (disclosure) disclosure.open = expanded.has(message.dataset.msgId);
+      }
+    }
+    frag.appendChild(article);
   }
   el.replaceChildren(frag);
 }
