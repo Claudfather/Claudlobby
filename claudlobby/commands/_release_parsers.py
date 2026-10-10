@@ -175,7 +175,7 @@ def register_release_subparsers(sub):
     doctor.add_argument("--no-delivery", dest="delivery", action="store_false", default=True,
                         help="Skip repository delivery probes, reporting that evidence as unchecked")
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
-    status = _route(hosts, "status", "host.status", "Inspect recorded host state; running processes are unobserved")
+    status = _route(hosts, "status", "host.status", "Inspect recorded state and passive cold-host prerequisites; no setup effects")
     status.set_defaults(func=_dispatch_host)
     activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
     activate.description = ("First activation requires explicit global --root. "

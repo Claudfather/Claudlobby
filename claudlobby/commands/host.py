@@ -25,7 +25,7 @@ def _hint(root):
             "running-session handoff and starts without durable receipts need their missing witness repaired first")
 
 
-def _status(args, root):
+def _status(args, root, *, preactivation=None):
     problem = None
     try:
         diagnosis = _host_releases(args, root)
@@ -58,11 +58,55 @@ def _status(args, root):
             "bootstrap_eligibility": "not_checked", "upgrade_supported": state == "active",
             "recovery_supported": len(recovery) == 1 and recovery[0]["supported_step"] is not None,
             "recovery": recovery}
+    if preactivation is not None:
+        data["preactivation"] = preactivation
     if problem:
         raise CommandFailure(problem.code, f"{problem.code}: recorded host state is {state}",
                              data=data, release_id=executing, hint=_hint(root))
+    _storage_observation_refusal(data, executing)
     return CommandOutput(data, executing,
                          (f"Host recorded state: {state}; running processes are unobserved.",))
+
+
+def _storage_observation_refusal(data, executing=None):
+    observed = data.get("preactivation", {}).get("plane_storage")
+    if observed in {"invalid", "redirected", "unavailable"}:
+        code = "unavailable" if observed == "unavailable" else "conflict"
+        raise CommandFailure(code, f"{code}: Plane storage cannot be safely inspected",
+                             data=data, release_id=executing)
+
+
+def _passive_status(args):
+    from ..setup_observations import ObservationError, observe, status_root
+
+    try:
+        root = _host_root(args)
+        root_state = "directory"
+    except CommandFailure as existing:
+        if existing.error.code != "not_found":
+            raise
+        try:
+            root, root_state = status_root(args.root)
+        except ObservationError as exc:
+            code = ("invalid_argument" if exc.area == "argument" else
+                    "unavailable" if exc.state == "unavailable" else "conflict")
+            raise CommandFailure(code, f"{code}: host status requires a safely inspectable data root") from exc
+        if root_state != "absent":
+            raise existing  # Preserve the recorded owner's existing-root refusal.
+    observation = observe(root, root_state)
+    if root_state == "directory":
+        try:
+            return _status(args, root, preactivation=observation)
+        except CommandFailure as exc:
+            exc.data.setdefault("preactivation", observation)
+            raise
+    data = {"root": str(root), "recorded_status": "unselected", "selection": None,
+            "selected_activation": None, "unfinished_activations": [], "activation_errors": [],
+            "selection_error": None, "releases": [], "runtime_observation": "unknown",
+            "bootstrap_eligibility": "not_checked", "upgrade_supported": False,
+            "recovery_supported": False, "recovery": [], "preactivation": observation}
+    _storage_observation_refusal(data)
+    return CommandOutput(data, lines=("Host data root is absent; no setup or activation was performed.",))
 
 
 def _operator_shell(root=None):
@@ -350,6 +394,8 @@ def dispatch(args):
         if args.root is None:
             raise CommandFailure("invalid_argument", "invalid argument: an explicit --root is required",
                                  hint=f"supply claudlobby --root PATH {args.public_command.replace('.', ' ')}")
+        if args.public_command == "host.status":
+            return _passive_status(args)
         root = _host_root(args)
         if repairing:
             return _repair_start(args, root)  # The backend checks recorded native ancestry.
