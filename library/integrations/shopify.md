@@ -62,7 +62,7 @@ Wire config: `library/mcp/shopify.json` (uses `${SHOPIFY_ACCESS_TOKEN}`, `${SHOP
 
 #### Permissions
 
-Read-only tools (`get*`, `list*`) are auto-allowed for every bot that attaches this MCP, so headless bots never stall on a read prompt. Mutations (`createProduct`, `updateProduct`, `createRefund`, `adjustInventory`, etc.) always prompt; a bot that genuinely needs an unattended write gets it via fleet.yaml `tools.allow`. Split declared in `library/mcp/shopify.json` `_permissions_contract` (see `library/mcp/README.md`).
+Read-only tools (`get*`, `list*`) are auto-allowed for every bot that attaches this MCP, so headless bots never stall on a read prompt. Mutations (`createProduct`, `updateProduct`, `createRefund`, `adjustInventory`, etc.) always prompt; a bot that genuinely needs an unattended write gets it via fleet.yaml `tool_permissions.allow`. Split declared in `library/mcp/shopify.json` `_permissions_contract` (see `library/mcp/README.md`).
 
 #### Hidden / Unlisted Product Pattern
 

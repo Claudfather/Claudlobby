@@ -144,6 +144,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # Critical like the page it replaces; the remedy is an operator Enter, not
     # a restart, so it is not one of fleet-pulse's Telegram escalation types.
     "input_held": "critical",
+    # #996: a bot a claude.ai usage limit still holds after the limit's printed
+    # reset (keepalive's LIMIT verdict, past its resume window), paged in place
+    # of activity_stuck. Critical like input_held, and like it not one of
+    # fleet-pulse's Telegram escalation types: the remedy is a prompt to the bot.
+    "usage_limit_held": "critical",
+    # #996: the bot's own StopFailure hook recording a usage-limit stop (the
+    # limit line in data.limit_line), and keepalive's one resume for a reset
+    # (data.menu, data.outcome).
+    "usage_limit_hit": "notice",
+    "keepalive_limit_resume": "notice",
     # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
