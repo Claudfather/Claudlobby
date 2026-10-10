@@ -2168,6 +2168,13 @@ def create_app(
     def api_client_js():
         return _busted_js("api-client.js", ("connected-workspace.js",))
 
+    @app.head("/api-client.js")
+    def api_client_head():
+        # Preserve the former static asset HEAD door and its GET headers.
+        response = _busted_js("api-client.js", ("connected-workspace.js",))
+        response.body = b""
+        return response
+
     @app.get("/connected-workspace.js")
     def connected_workspace_js():
         return _busted_js("connected-workspace.js", ("connected-read-client.js", "two-source-read.js"))
