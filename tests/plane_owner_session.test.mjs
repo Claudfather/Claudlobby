@@ -424,8 +424,8 @@ test(`app renewal restores worker selection and draft only with fresh matching a
   const pause = app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
   const sync = app.slice(app.indexOf('function syncWorkRoom()'), app.indexOf('const ownerSession ='));
   const controller = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
-    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
-    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+    .replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
   const { mountWorkLoop } = await load(controller);
   const { ActionState } = await load(await readFile(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url), 'utf8'));
   const elements = new Map(), values = new Map();
@@ -726,8 +726,8 @@ test('a quiet stable stream checks expired current cookie and redirects without 
 for (const change of ['other room', 'new grant scope', 'current scope'])
 test(`late action403 invalidates only its originating composer: ${change}`, async () => {
   const text = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
-    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
-    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+    .replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
   const { mountWorkLoop } = await load(text);
   const elements = new Map(), values = new Map();
   const document = { getElementById(id) {

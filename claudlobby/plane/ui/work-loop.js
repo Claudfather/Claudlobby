@@ -1,5 +1,5 @@
-import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "/action-state.js";
-import { esc, ago, stateBlock } from "/panel-state.js";
+import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
+import { esc, ago, stateBlock } from "./panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.

@@ -6,7 +6,7 @@ const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-clien
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
 const { createOwnerReadHandle } = await import(ownerURL);
 const adapterText = await readFile(new URL('../claudlobby/plane/ui/two-source-read.js', import.meta.url), 'utf8');
-const { createTwoSourceReadTransport, createWorkspaceReadTransport } = await load(adapterText.replace('"/owner-api-client.js"', JSON.stringify(ownerURL)));
+const { createTwoSourceReadTransport, createWorkspaceReadTransport } = await load(adapterText.replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
 const wi = 'wi_' + '1'.repeat(32), fleet = 'fleet_' + '2'.repeat(32), actor = 'actor_' + '3'.repeat(32);
 const ok = data => ({ state: 'ok', provenance: { last_ingest_at: '2026-01-01' }, data });
 function deferred() { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; }
@@ -438,4 +438,22 @@ test('held old one-source detail cannot paint private bytes after disposal or co
   assert.ok(h.paints.every(v=>!JSON.stringify(v).includes('stale private body')));
   assert.equal((await fresh.jget('/api/overview')).data.coverage.total,2);
   fresh.dispose();
+});
+
+// Deploying the unchanged graph below a release path must never load the
+// public demo's root adapter, or create a second owner-handle module instance.
+test('canonical module graph stays inside its release directory', async () => {
+  const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js',
+    'action-state.js', 'owner-api-client.js', 'two-source-read.js'];
+  for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
+    for (const name of files) {
+      const source = await readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
+      for (const [, specifier] of source.matchAll(/^import .*? from ["']([^"']+)["'];/gm)) {
+        const target = new URL(specifier, prefix + name);
+        assert.ok(target.href.startsWith(prefix), `${name} escapes its release`);
+        assert.ok(files.includes(target.href.slice(prefix.length)));
+        assert.ok(specifier.startsWith('./'));
+      }
+    }
+  }
 });
