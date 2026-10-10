@@ -16,6 +16,7 @@ import pytest
 from claudlobby import activation, bot_operations, context
 from claudlobby.__main__ import main
 from claudlobby.activation_enrollment import selected_bot_entry
+from claudlobby.activation_runtime import RuntimeEvidenceError
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units
 from tests.package_fixtures import source_package
@@ -747,3 +748,55 @@ def test_a_changed_unit_is_refused_before_any_effect(cold, monkeypatch, capsys):
     refused = worker.call("bot", "restart", "worker", expected=4)
     assert refused["error"]["code"] == "conflict"
     assert "svc_bot_enroll_exact" not in worker.native.calls and worker.native.actions == []
+
+
+def test_a_stop_waits_for_the_session_it_stopped_to_exit(cold, monkeypatch, capsys):  # noqa: F811
+    """#2227: KillMode=process marks a bot unit stopped while its session is still
+    exiting, so the stop's quiet check gets a bounded wait instead of one read.
+    A repeated stop of the de-enrolled bot waits the same way."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    waits = []
+    monkeypatch.setattr(bot_operations, "assert_quiescent",
+                        lambda *args, **kwargs: waits.append(kwargs.get("settle_s", 0)))
+    stopped = worker.call("bot", "stop", "worker")["data"]
+    assert stopped["state"] == "stopped" and stopped["changed"] is True
+    assert stopped["native_outcome"] == "observed"
+    again = worker.call("bot", "stop", "worker")["data"]
+    assert again["state"] == "stopped" and again["changed"] is False
+    assert waits == [bot_operations._STOP_SETTLE_S] * 2 and 0 < waits[0] <= 60
+
+
+def test_a_stop_whose_session_never_exits_still_reads_unverified(cold, monkeypatch, capsys):  # noqa: F811
+    """The wait is bounded: a session still in the cgroup at the bound refuses,
+    and the stop reads unverified, never stopped."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+
+    def still_exiting(*args, **kwargs):
+        raise RuntimeEvidenceError("svc_activation_quiet", kwargs["target"], "native refusal (3)")
+    monkeypatch.setattr(bot_operations, "assert_quiescent", still_exiting)
+    stuck = worker.call("bot", "stop", "worker", expected=6)
+    assert stuck["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
+    assert stuck["data"]["native_outcome"] == "unknown"
+    assert worker.native.actions == ["stop"]
+
+
+def test_a_stop_that_did_not_happen_reads_unverified_without_waiting(cold, monkeypatch, capsys):  # noqa: F811
+    """A unit still enrolled and active after the stop call is refused on its
+    state read, before any quiet wait: the wait covers only a session exiting."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.host.states[worker.native.target] = "enabled loaded active"
+    waits = []
+    monkeypatch.setattr(bot_operations, "assert_quiescent",
+                        lambda *args, **kwargs: waits.append(kwargs))
+    real_call = worker.native.call
+
+    def nothing_stops(function, *args, timeout=30):
+        if function == "svc_bot_disenroll_exact":  # the call returns; the unit runs on
+            worker.native.actions.append("stop")
+            return subprocess.CompletedProcess([function], 0, "effect-attempted\n", "")
+        return real_call(function, *args, timeout=timeout)
+    monkeypatch.setattr(worker.native, "call", nothing_stops)
+    failed = worker.call("bot", "stop", "worker", expected=6)
+    assert failed["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
+    assert failed["data"]["native_outcome"] == "unknown"
+    assert worker.native.actions == ["stop"] and waits == []

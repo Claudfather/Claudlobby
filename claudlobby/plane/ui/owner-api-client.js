@@ -1,0 +1,210 @@
+// Selected only by the trusted owner browser server, inside its read gate.
+// Explicit renewal avoids assuming when a restored page's session began.
+export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis),
+  EventSource = globalThis.EventSource, location = globalThis.location,
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
+  let generation = 0, mode = 'checking', busy = false, disposed = false;
+  let checking = null, recoveryUsed = false;
+  let mount = null, statusNote = null;
+  const reads = new Set(), streams = new Set();
+  const labels = {
+    checking: 'Checking owner session…', ready: 'Owner session · renew before it expires.',
+    renewing: 'Renewing owner session…', logout: 'Signing out…',
+    unavailable: 'Connection unavailable. Session state is unknown; check again.',
+    denied: 'Owner access ended. Returning to sign-in…',
+    signed_out: 'Signed out. Local owner pairing remains.',
+  };
+  function render(note) {
+    if (!mount) return;
+    if (note) statusNote = note;
+    mount.status.textContent = statusNote || labels[mode];
+    mount.renew.disabled = busy || mode !== 'ready';
+    mount.logout.disabled = busy || !['ready', 'unavailable'].includes(mode);
+    mount.check.disabled = busy;
+  }
+  function pause(next) {
+    generation++;
+    mode = next;
+    statusNote = null;
+    for (const controller of reads) controller.abort();
+    for (const stream of streams) stream.pause();
+    mount?.onPause();
+    render();
+  }
+  function resume(note) {
+    mode = 'ready';
+    for (const stream of streams) stream.open();
+    render(note);
+    if (!streams.size) mount?.onResume();
+  }
+  function leave(next) {
+    pause(next);
+    location.replace('/owner'); // fixed same-origin entry, never auto-login
+  }
+  async function request(url, action = false) {
+    const controller = new AbortController();
+    reads.add(controller);
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(url, { method: action ? 'POST' : 'GET',
+        credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,
+        ...(action ? { headers: { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' }, body: '{}' } : {}),
+      });
+      // Keep the timeout through body consumption, not only response headers.
+      let data;
+      try { data = await response.json(); }
+      catch (error) { if (response.status !== 403) throw error; }
+      return { status: response.status, data };
+    } finally {
+      clearTimeout(timer);
+      reads.delete(controller);
+    }
+  }
+  async function checkSession(recover = false) {
+    if (disposed || busy) return;
+    if (checking) return checking;
+    if (recover && recoveryUsed) { pause('unavailable'); return; }
+    if (recover) recoveryUsed = true;
+    pause('checking');
+    busy = true;
+    render();
+    const gen = generation;
+    checking = (async () => {
+      try {
+        const result = await request('/api/owner/status');
+        if (disposed || gen !== generation) return;
+        if (result.status === 200 && result.data?.state === 'ready') resume();
+        else if (result.status === 403 || (result.status === 200 &&
+          ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
+        else pause('unavailable');
+      } catch {
+        if (!disposed && gen === generation) pause('unavailable');
+      } finally {
+        busy = false;
+        checking = null;
+        render();
+      }
+    })();
+    return checking;
+  }
+  async function mutate(action) {
+    if (disposed || busy || (action === 'renew' && mode !== 'ready')) return;
+    busy = true;
+    pause(action === 'renew' ? 'renewing' : 'logout');
+    const gen = generation;
+    let refusal = false;
+    try {
+      const result = await request(`/api/owner/${action}`, true);
+      if (disposed || gen !== generation) return;
+      if (result.status === 200 && result.data?.state === (action === 'renew' ? 'ready' : 'signed_out')) {
+        if (action === 'logout') leave('signed_out');
+        else { recoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
+      } else if (result.status === 403) {
+        refusal = true;
+      } else pause('unavailable'); // A lost logout reply is not success.
+    } catch {
+      if (!disposed && gen === generation) pause('unavailable');
+    } finally {
+      busy = false;
+      render();
+    }
+    // Another tab may have rotated the shared cookie during this operation.
+    // Check the current cookie once; never replay a mutation or auto-login.
+    if (refusal && !disposed) { recoveryUsed = false; await checkSession(true); }
+  }
+  async function jget(url) {
+    if (disposed || mode !== 'ready') return null;
+    const gen = generation;
+    try {
+      const result = await request(url);
+      if (disposed || gen !== generation || mode !== 'ready') return null;
+      if (result.status === 403) {
+        if (recoveryUsed) leave('denied');
+        else await checkSession(true);
+        return null;
+      }
+      if (result.status !== 200) { pause('unavailable'); return null; }
+      recoveryUsed = false;
+      return result.data;
+    } catch {
+      if (!disposed && gen === generation && mode === 'ready') pause('unavailable');
+      return null;
+    }
+  }
+  function createEventSource(url) {
+    const listeners = new Map();
+    let native = null, closed = false;
+    const stream = {
+      onmessage: null, onerror: null, onopen: null,
+      removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
+      addEventListener(name, callback) {
+        if (!listeners.has(name)) listeners.set(name, new Set());
+        listeners.get(name).add(callback);
+        if (native) attach(name, native, generation);
+      },
+      pause() { native?.close(); native = null; },
+      close() { closed = true; stream.pause(); streams.delete(stream); },
+      open() {
+        if (closed || disposed || mode !== 'ready' || native) return;
+        const gen = generation;
+        native = new EventSource(url, { withCredentials: true });
+        const source = native;
+        source.onopen = event => {
+          if (source !== native || gen !== generation || mode !== 'ready') return;
+          stream.onopen?.(event);
+          // Refresh after the new stream reaches HEAD, closing the gap
+          // between the previous board snapshot and reconnection.
+          mount?.onResume();
+        };
+        source.onmessage = event => {
+          if (source !== native || gen !== generation || mode !== 'ready') return;
+          recoveryUsed = false;
+          stream.onmessage?.(event);
+        };
+        source.onerror = event => {
+          if (source !== native || gen !== generation || mode !== 'ready') return;
+          stream.onerror?.(event);
+          void checkSession(true);
+        };
+        for (const name of listeners.keys()) attach(name, source, gen);
+      },
+    };
+    function attach(name, source, gen) {
+      // At most one native listener per event name per source.
+      source._ownerEvents ??= new Set();
+      if (source._ownerEvents.has(name)) return;
+      source._ownerEvents.add(name);
+      source.addEventListener(name, event => {
+        if (source !== native || gen !== generation || mode !== 'ready') return;
+        for (const callback of listeners.get(name) || []) callback(event);
+      });
+    }
+    streams.add(stream);
+    stream.open();
+    return stream;
+  }
+  function mountSessionControls({ document, element, onPause = () => {}, onResume = () => {} }) {
+    mount = { status: document.getElementById('owner-session-status'),
+      renew: document.getElementById('owner-session-renew'),
+      logout: document.getElementById('owner-session-logout'),
+      check: document.getElementById('owner-session-check'), onPause, onResume };
+    element.hidden = false;
+    mount.renew.addEventListener('click', () => { void mutate('renew'); });
+    mount.logout.addEventListener('click', () => { void mutate('logout'); });
+    mount.check.addEventListener('click', () => { recoveryUsed = false; void checkSession(); });
+    render();
+    const ready = checkSession();
+    return { ready, dispose };
+  }
+  function dispose() {
+    disposed = true;
+    pause('unavailable');
+    for (const stream of [...streams]) stream.close();
+  }
+  return { jget, createEventSource, mountSessionControls };
+}
+
+const owner = createOwnerTransport();
+export const jget = owner.jget;
+export const createEventSource = owner.createEventSource;
+export const mountSessionControls = owner.mountSessionControls;

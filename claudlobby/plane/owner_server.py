@@ -15,11 +15,18 @@ import signal
 import threading
 
 
+class OwnerServerConfigurationError(ValueError):
+    """Actionable local configuration refusal, never a browser response."""
+
+
 def _private_directory(path: Path):
-    info = path.lstat()
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise OwnerServerConfigurationError("owner socket requires an existing owner-only directory") from exc
     if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
             or info.st_uid != os.geteuid()):
-        raise ValueError("owner socket requires an existing owner-only directory")
+        raise OwnerServerConfigurationError("owner socket requires an existing owner-only directory")
     return info.st_dev, info.st_ino
 
 
@@ -28,10 +35,10 @@ def private_listener(path: Path):
     """Bind only a new socket; never remove an existing or replacement path."""
     path = Path(path)
     if not path.is_absolute():
-        raise ValueError("owner socket path must be absolute")
+        raise OwnerServerConfigurationError("owner socket path must be absolute")
     parent_identity = _private_directory(path.parent)
     if os.path.lexists(path):
-        raise ValueError("owner socket path exists; inspect the previous server")
+        raise OwnerServerConfigurationError("owner socket path exists; inspect the previous server")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     identity = None
     try:
@@ -41,7 +48,7 @@ def private_listener(path: Path):
         identity = info.st_dev, info.st_ino
         if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid()
                 or _private_directory(path.parent) != parent_identity):
-            raise ValueError("owner socket changed during creation")
+            raise OwnerServerConfigurationError("owner socket changed during creation")
         path.chmod(0o600)
         listener.listen(32)
         yield listener
@@ -56,7 +63,7 @@ def private_listener(path: Path):
                 pass
 
 
-def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path,
+def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path | None = None,
           package=None):
     """Foreground server; caller explicitly selects root and local authority."""
     import uvicorn
@@ -69,9 +76,13 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path,
 
     OwnerAccess(root).current_grant()  # validate existing authority, no initialization
     inspect_source(root)  # explicit local source attestation must already exist
-    app = create_owner_browser_app(root, expected_origin=origin,
-        verify_principal=ServePrincipalVerifier(tailscale_binary=Path(tailscale_binary)),
-        package=package)
+    try:
+        app = create_owner_browser_app(root, expected_origin=origin,
+            verify_principal=ServePrincipalVerifier(tailscale_binary=Path(tailscale_binary)),
+            package=package)
+    except ValueError as exc:
+        raise OwnerServerConfigurationError(str(exc)) from exc
+    socket_path = socket_path or Path(root) / "state/plane/owner.sock"
 
     class OwnerServer(uvicorn.Server):
         @contextmanager
@@ -79,7 +90,7 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path,
             # Let the CLI unwind and remove its owned socket after shutdown.
             # Uvicorn's default re-raises SIGTERM before that outer cleanup.
             if threading.current_thread() is not threading.main_thread():
-                raise ValueError("owner server must run in the main thread")
+                raise OwnerServerConfigurationError("owner server must run in the main thread")
             previous = {sig: signal.signal(sig, self.handle_exit)
                         for sig in (signal.SIGINT, signal.SIGTERM)}
             try:

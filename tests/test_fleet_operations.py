@@ -3,6 +3,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import shutil
+import socket
 import subprocess
 
 import pytest
@@ -11,6 +13,7 @@ from claudlobby import fleet_operations as fleet
 from claudlobby import fleet_pulse
 from claudlobby.bot_operations import BotLifecycleError, BotLifecycleResult
 from claudlobby.config import FleetPulseConfig
+from tests.ingest_listener import short_socket_dir
 
 
 def _scope(tmp_path, *, origin=None):
@@ -235,3 +238,72 @@ def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monke
     expected_bots = iter(("worker-a",))
     one = fleet.reconcile_fleet(root=tmp_path, fleet="example", bot="worker-a", adapter=Native())
     assert [(row.bot, row.state) for row in one.bots] == [("worker-a", "unsupervised_down")]
+
+
+def test_reconcile_reads_a_cleanly_stopped_session_absent_only_by_the_quiet_proof(tmp_path, monkeypatch):
+    """#2227: tmux leaves its socket file after a clean exit and bot stop keeps it,
+    so the session observer reads unknown. As bot move does, only the kernel proof
+    (inactive exact unit, empty cgroup where witnessed, socket refusing
+    connections) reads that as absent; anything less stays unknown."""
+    destination, _, selected = _scope(tmp_path)
+    monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
+    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
+    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
+    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
+        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
+    tmux_dir = short_socket_dir("sq-")
+    stale = tmux_dir / f"tmux-{os.getuid()}" / "private"
+    stale.parent.mkdir()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(stale))  # bound, never listening: what a clean tmux exit leaves
+    monkeypatch.setattr(fleet, "build_supervision_spec", lambda _b, _f, _p: SimpleNamespace(
+        bot_dir=tmp_path, label="private", environment={"TMUX_TMPDIR": str(tmux_dir)}))
+    unit = SimpleNamespace(declaration=SimpleNamespace(scope="bot", fleet="example", bot="worker-a",
+                                                       working_directory=tmp_path),
+                           target="worker-a.service", installed=(),
+                           properties=(("ActiveState", "inactive"),))
+    monkeypatch.setattr(fleet, "collect_enrollment", lambda *_a, **_k: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(units=[unit])))
+    native = {"session": "unknown", "quiet": (0, "inactive\tno-cgroup-witness\n")}
+    calls = []
+
+    class Native:
+        package = destination.paths.package
+
+        def read(self, function):
+            assert function == "svc_inventory_catalog"
+            return f"manager\tLinux\ndirectory\t{tmp_path}\n"
+
+        def call(self, function, *args, timeout=30):
+            calls.append(function)
+            if function == "svc_bot_session_observe":
+                return subprocess.CompletedProcess([], 0, native["session"] + "\n", "")
+            assert function == "svc_activation_quiet"
+            assert args[:2] == (tmp_path / "worker-a.service", "worker-a.service")
+            rc, out = native["quiet"]
+            return subprocess.CompletedProcess([], rc, out, "")
+
+    def session():
+        calls.clear()
+        row, = fleet.reconcile_fleet(root=tmp_path, fleet="example", bot="worker-a",
+                                     adapter=Native()).bots
+        return row.session, row.state
+
+    try:
+        assert session() == ("absent", "unsupervised_down")
+        assert calls == ["svc_bot_session_observe", "svc_activation_quiet"]
+        assert stale.exists()  # the proof never removes the socket file
+        native["quiet"] = (3, "")  # the unit still active, or its session still exiting
+        assert session() == ("unknown", "indeterminate")
+        native["quiet"] = (0, "inactive\tno-cgroup-witness\n")
+        stale.unlink()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as live:
+            live.bind(str(stale))
+            live.listen(1)  # a server still answers on the socket: never absent
+            assert session() == ("unknown", "indeterminate")
+        for observed in ("ready", "absent"):  # a definite observation needs no proof
+            native["session"] = observed
+            session()
+            assert calls == ["svc_bot_session_observe"]
+    finally:
+        shutil.rmtree(tmux_dir, ignore_errors=True)

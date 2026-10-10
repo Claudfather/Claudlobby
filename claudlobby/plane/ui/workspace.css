@@ -613,3 +613,7 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
   .task-facts { grid-template-columns:1fr; gap:4px }
   .task-facts dd { margin-bottom:10px }
 }
+
+.owner-session { display:flex; align-items:center; flex-wrap:wrap; gap:8px; max-width:38rem; }
+.owner-session [role="status"] { color:var(--dim); font-size:11px; }
+.owner-session[hidden] { display:none; }

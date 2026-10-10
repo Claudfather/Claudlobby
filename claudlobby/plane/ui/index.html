@@ -27,6 +27,12 @@
   <span class="pill" id="fleet-totals" title="every fleet on this host — bots, working now, needing you, overdue (the overview's own figures)"><b>—</b> bots</span>
   <span class="pill presence-strip" id="presence-strip" hidden></span>
   <span class="spacer"></span>
+  <div id="owner-session" class="owner-session" aria-label="Owner session" hidden>
+    <span id="owner-session-status" role="status" aria-live="polite"></span>
+    <button id="owner-session-renew" class="pill ghost" type="button">Keep signed in</button>
+    <button id="owner-session-check" class="pill ghost" type="button">Check session</button>
+    <button id="owner-session-logout" class="pill ghost" type="button" title="Ends this browser session; local owner pairing remains">Sign out</button>
+  </div>
   <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">Technical detail</button>
 </header>
 <main>

@@ -28,6 +28,7 @@ _MAX_OUTPUT = 64 * 1024
 _MAX_STDERR = 8 * 1024
 _TIMEOUT_SECONDS = 5
 _CONCURRENCY = 4
+_MAX_PENDING = 32
 # A read-only native macOS probe showed the bundled app selects GUI error
 # output without TERM; fixed TERM=dumb returned JSON and official ControlURL.
 # Select CLI mode explicitly without inheriting terminal or credential state.
@@ -126,7 +127,6 @@ async def _stop(proc, *, kill: bool) -> None:
                 # A still-running owned parent must be killed independently.
                 if proc.returncode is None:
                     proc.kill()
-        if kill:
             # The parent may have exited before a descendant. Discard killed
             # pipes to EOF with bounded memory and a separate cleanup deadline.
             async def drain(stream):
@@ -163,6 +163,7 @@ class ServePrincipalVerifier:
             raise ValueError("an absolute configured native Tailscale executable is required") from None
         self.binary = str(binary)
         self._slots = asyncio.BoundedSemaphore(_CONCURRENCY)
+        self._pending = 0
 
     async def _command(self, *args: str) -> dict:
         proc = None
@@ -211,12 +212,19 @@ class ServePrincipalVerifier:
 
     async def __call__(self, scope) -> PrincipalRef:
         source = _source_ip(scope)
-        # No unbounded admission queue, even when a daemon stalls. Acquisition
-        # does not yield when a slot is free, so this check is atomic per loop.
-        if self._slots.locked():
+        # Reservation does not yield: active + queued work is bounded on this
+        # event loop. The deadline includes waiting for one of four CLI slots.
+        if self._pending >= _MAX_PENDING:
             raise AccessUnavailable("owner_identity_busy")
-        async with self._slots:
-            try:
-                return await asyncio.wait_for(self._admit(source), timeout=_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                raise AccessUnavailable("owner_identity_lookup_unavailable") from None
+        self._pending += 1
+
+        async def queued_admission():
+            async with self._slots:
+                return await self._admit(source)
+
+        try:
+            return await asyncio.wait_for(queued_admission(), timeout=_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise AccessUnavailable("owner_identity_lookup_unavailable") from None
+        finally:
+            self._pending -= 1
