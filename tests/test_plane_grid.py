@@ -410,14 +410,14 @@ def test_asset_token_tracks_in_place_updates(tmp_path, asset):
 
     client = TestClient(create_app(tmp_path, package=source_package()))
     tok1 = _re.search(r"/app\.js\?v=([a-f0-9]+)", client.get("/").text).group(1)
-    app_js = view_mod.UI_DIR / asset
-    st = app_js.stat()
-    _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    path = view_mod.UI_DIR / asset
+    st = path.stat()
+    _os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     try:
         tok2 = _re.search(r"/app\.js\?v=([a-f0-9]+)",
                           client.get("/").text).group(1)
     finally:
-        _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns))
+        _os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert tok1 != tok2
 
 
