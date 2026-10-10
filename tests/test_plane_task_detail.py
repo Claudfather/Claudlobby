@@ -143,3 +143,89 @@ def test_detail_query_and_provenance_share_admitted_snapshot(protected, tmp_path
     result = c.get(URL).json()
     assert result["state"] == "ok" and result["data"]["task"]["title"] == "work for engineering"
     assert result["provenance"]["last_ingest_seq"] == checked[0]
+
+
+def task_event(kind, *, actor="bot:engineering/one", **detail):
+    return {"event_type": "task", "emitter": "t", "fleet": "engineering",
+        "payload": {"work_item_id": TASK, "assignment_id": "asg_" + "a" * 32,
+                    "event": kind, "actor": actor, **detail}}
+
+
+def test_detail_attention_uses_full_snapshot_before_caps_and_board_window(tmp_path, monkeypatch):
+    _seed(tmp_path)
+    question = "Choose <one> or two?\nThe next step depends on your answer."
+    emit_batch(tmp_path, [task_event("escalated", question=question, by="synthetic-manager"),
+        *[task_event("nudged", reason="Still waiting", by="synthetic-owner") for _ in range(4)],
+        *[{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
+           "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
+                       "created_by": "bot:engineering/mgr"}} for i in range(205)]])
+    monkeypatch.setattr(view, "_TASK_DETAIL_HISTORY", 1)
+    c = client(tmp_path)
+    assert TASK not in {t["task_id"] for t in c.get("/api/tasks?fleet=engineering").json()["data"]["tasks"]}
+    task = c.get(URL).json()["data"]["task"]
+    assert task["attention_question"] == question and task["attention_by"] == "synthetic-manager"
+    assert task["attention_reason"][0] == "escalated"
+    assert [e["event"] for e in task["history"]] == ["nudged"]
+    assert task["history_window"]["truncated"] is True
+    emit_batch(tmp_path, [task_event("progress", summary="Answer incorporated")])
+    assert c.get(URL).json()["data"]["task"]["attention_question"] is None
+
+
+def test_detail_explicit_projections_and_consistent_actor_labels(tmp_path):
+    _seed(tmp_path)
+    emit_batch(tmp_path, [task_event("accepted", summary="Started"),
+                         task_event("completed", summary="Finished")])
+    task = client(tmp_path).get(URL).json()["data"]["task"]
+    assert set(task) == {"task_id", "fleet_uid", "title", "body", "repo", "project_key",
+        "workstream_id", "created_by_uid", "occurred_at", "state", "fleet", "created_by_alias",
+        "resolved", "current_assignment", "assignments", "history", "terminal_event", "issues",
+        "display_ids", "history_window", "assignments_window", "issues_window", "display_ids_window",
+        "attention", "attention_reason", "attention_since", "attention_question", "attention_by",
+        "attention_act_reason", "delivery"}
+    assignment = task["assignments"][0]
+    assert set(assignment) == {"assignment_id", "task_id", "assignee_uid", "assigned_by_uid", "expected_by",
+        "dispatch_message_id", "occurred_at", "state", "assignee_alias", "assignee_short", "assigned_by_alias",
+        "assigned_by_short", "terminal_event", "history", "history_window"}
+    assert assignment["assignee_short"] == "one" and assignment["assigned_by_short"] == "mgr"
+    assert task["current_assignment"] is None
+    for event in [*task["history"], task["terminal_event"], *assignment["history"], assignment["terminal_event"]]:
+        assert set(event) == {"event_id", "task_id", "assignment_id", "event", "actor_uid", "occurred_at",
+                             "detail", "deadline", "successor_id", "actor_alias", "actor_short"}
+        assert event["actor_alias"] == "bot:engineering/one" and event["actor_short"] == "one"
+        assert "host_uid" not in event and "emitter" not in event and "ingested_at" not in event
+
+
+def test_assignment_history_actor_aliases_use_bounded_lookup_batches(tmp_path, monkeypatch):
+    _seed(tmp_path)
+    emit_batch(tmp_path, [task_event("progress", actor=f"bot:engineering/synthetic-{i}", summary="Recorded")
+                          for i in range(405)])
+    monkeypatch.setattr(view, "_TASK_DETAIL_HISTORY", 1)
+    monkeypatch.setattr(view, "_TASK_DETAIL_ASSIGNMENT_HISTORY", 500)
+    conn = view._ro_conn(db_file(tmp_path))
+    try:
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 400)
+        conn.execute("BEGIN")
+        task = view._fetch_task_detail(conn, TASK, "engineering")["task"]
+    finally:
+        conn.close()
+    history = task["assignments"][0]["history"]
+    assert len(history) == 405 and len(task["history"]) == 1
+    assert {event["actor_short"] for event in history} == {f"synthetic-{i}" for i in range(405)}
+    assert all(event["actor_alias"].startswith("bot:engineering/synthetic-") for event in history)
+
+
+def test_detail_attention_and_provenance_share_snapshot(protected, tmp_path, monkeypatch):
+    _, c, *_ = protected
+    emit_batch(tmp_path, [task_event("escalated", question="Original question", by="synthetic-manager")])
+    with sqlite3.connect(db_file(tmp_path)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+    original = view._detail_attention
+    def concurrent(conn, snapshot, task):
+        assert conn.in_transaction
+        emit_batch(tmp_path, [task_event("progress", summary="Later answer")])
+        return original(conn, snapshot, task)
+    with monkeypatch.context() as patch:
+        patch.setattr(view, "_detail_attention", concurrent)
+        result = c.get(URL).json()
+    assert result["data"]["task"]["attention_question"] == "Original question"
+    assert c.get(URL).json()["data"]["task"]["attention_question"] is None

@@ -41,7 +41,11 @@ export async function jget(url) {
   if(u.pathname.startsWith('/api/tasks/')) {
     const id=decodeURIComponent(u.pathname.slice('/api/tasks/'.length));
     const task=active.flatMap(tasks).find(t=>t.task_id===id);
-    return task?env({task:{...task,body:'Synthetic task description; no real fleet data.',assignments:[],history:[]}})
+    return task?env({task:{task_id:task.task_id,fleet:task.fleet,title:task.title,state:task.state,
+      resolved:task.resolved,body:'Synthetic task description; no real fleet data.\nThis is a full example detail response.',
+      current_assignment:task.current_assignment,assignments:[],
+      history:[{...task.last_event,actor_alias:'engineer',actor_short:'Engineer',detail:JSON.stringify({summary:'Synthetic recorded history; no real result.'})}],
+      attention_question:task.attention_question || null,attention_reason:task.attention_reason || [],delivery:task.delivery}})
       :{state:'not_found',remediation:'No synthetic task in this example team.'};
   }
   if(u.pathname==='/api/tasks') return env({tasks:active.flatMap(tasks),issue_count:0,truncated:false});
