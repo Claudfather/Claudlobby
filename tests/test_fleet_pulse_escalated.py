@@ -298,7 +298,10 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_e
 
     got = [sweep(F), sweep(g, threshold="9"), sweep(F), sweep(g)]
     assert got == [
-        sorted([alert("bridge_down", F), alert("session_missing", F)]),  # f's two bursts
+        # f's two bursts, as one message: a sweep sends every cause over its threshold
+        # together, each still debounced by its own marker (#2243)
+        ["FLEET ALERT: session_missing on 1 bots (w1); bridge_down on 1 bots (w1). "
+         f"Check {F} fleet health immediately."],
         [],                  # g below threshold for every type: clears ONLY its own markers...
         [],                  # ...so f's are still inside their window
         [alert("session_missing", g)],   # and g's own burst is not silenced by f's marker
