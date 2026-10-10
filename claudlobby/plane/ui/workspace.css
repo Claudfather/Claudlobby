@@ -617,3 +617,13 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .owner-session { display:flex; align-items:center; flex-wrap:wrap; gap:8px; max-width:38rem; }
 .owner-session [role="status"] { color:var(--dim); font-size:11px; }
 .owner-session[hidden] { display:none; }
+
+.task-record-body { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; margin:12px 0; }
+.task-history { padding-left:22px; }
+.task-history li { margin:10px 0; overflow-wrap:anywhere; }
+.task-assignment { margin:10px 0; overflow-wrap:anywhere; }
+
+.task-record-details { margin:10px 0; color:var(--dim); font-size:12px; overflow-wrap:anywhere; }
+.task-record-details summary { cursor:pointer; }
+.task-record-details .task-facts { margin:12px 0; }
+.task-history > li { margin:16px 0; }

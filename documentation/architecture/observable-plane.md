@@ -971,3 +971,44 @@ sources and incompatible index definitions require local database/schema
 investigation, not pairing again. Browser refusals remain generic. A foreground
 owner server whose lifespan startup fails returns an unavailable exit rather
 than reporting a clean stop; its owned socket is still cleaned up.
+
+
+### Selected task detail
+
+`GET /api/tasks/{TASK_ID}?fleet=RECORDED_ALIAS` reads one canonical `wi_` ID
+through the existing selected-ID task reducer. It does not depend on the
+200-card board cap or infer identity from a legacy display name. The recorded
+fleet UID comes from that task's identity link in the same SQLite snapshot.
+Source admission, reduction and envelope provenance share the connection and
+read transaction; the existing protected view also admits the response before
+releasing private bytes. No read initializes, repairs or mutates the source.
+
+The response includes the full stored task title/body, canonical lifecycle,
+current assignment, assignments, task/assignment history and unresolved issues.
+Task, assignment and event fields use explicit public allowlists; recorder Fact
+metadata and future reducer fields do not become implicit browser fields. Alias
+lookups include displayed assignment histories and terminal events in batches
+of 400, with the existing short-label helper. Current attention questions use
+the full selected canonical snapshot and shared attention queries in the same
+read transaction, so later nudges and display caps cannot hide an unanswered raise.
+Presentation keeps the latest 500 task events, 100 assignments and 100 events per
+assignment, plus up to 100 issues/display IDs. Each bounded collection discloses
+its total, shown count and truncation. Lifecycle is reduced from the complete
+selected canonical history before presentation limits; a window is never used
+to certify task state. Bodies are not silently shortened: a detail payload above
+2 MiB is unavailable with the canonical `task show` remedy. These are response
+limits, not a bound on reducing a task with unusually large retained history.
+
+The existing dialog reads this endpoint through `jget`, fences delayed replies
+against selection/close/refresh, and refreshes only explicitly while reading.
+Closing or pausing access erases the body/history DOM as well as fencing replies.
+Known string summary/reason/question fields render as escaped prose; full exact
+raw event details (including malformed/non-object JSON) and record identifiers
+remain in collapsed disclosures. Action copy names only actually granted actions.
+Linked conversation/results remain honestly limited to the existing recent
+channel window, and completion alone does not imply review. Older non-owner or
+synthetic transports can retain a labelled limited board snapshot when full
+detail is unavailable. A task without a recorded team may show its unresolved
+board snapshot only on an unprotected read-only transport, without requesting
+a guessed team. Protected refusals and mismatched IDs never fall back to stale
+private detail. No task actions or grants are enabled by this read slice.
