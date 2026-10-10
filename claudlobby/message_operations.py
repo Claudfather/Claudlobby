@@ -550,7 +550,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                      "unknown" not in (comm_status, tx_status) else "unknown")
         degraded = recording != "committed" or not persistence[0]
         alert = None
-        if degraded:
+        # Strict owner replay inspects retained evidence only. An absent or
+        # expired alert debounce must not turn it into a new outbound page.
+        if degraded and not (require_durable_request and not reservation.new):
             component = ("request_receipt" if not persistence[0] else
                          ("report_intent" if _report is not None else "message_intent")
                          if comm_status != "committed" else "transmission_record")

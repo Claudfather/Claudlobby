@@ -42,9 +42,15 @@ def _terminal():
 
 
 def _approve(terminal, word):
-    terminal.write(f"Type {word} to continue: ")
-    terminal.flush()
-    if terminal.readline(32).strip() != word:
+    try:
+        terminal.write(f"Type {word} to continue: ")
+        terminal.flush()
+        answer = terminal.readline(32).strip()
+    except OSError as exc:
+        # Preserve the confirmation failure before the grant storage handler
+        # sees it; a hung-up terminal is not an authority persistence outage.
+        raise CommandFailure("conflict", "owner confirmation did not complete; inspect owner status") from exc
+    if answer != word:
         raise CommandFailure("conflict", "owner change cancelled")
 
 

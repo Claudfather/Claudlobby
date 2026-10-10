@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 import shutil
 import sqlite3
 from uuid import uuid4
@@ -28,6 +29,7 @@ from claudlobby import task_operations as tasks
 from tests.ingest_listener import listening_socket, short_socket_dir
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
+from tests.test_recording_alerts import private_alert  # noqa: F401
 
 
 @pytest.fixture
@@ -112,6 +114,71 @@ def test_recorder_outage_continues_one_disclosed_native_send(estate, monkeypatch
     assert result.delivery == "submitted" and result.recording == "unrecorded"
     assert result.alert == "alerted" and len(calls) == 1
     assert "Recording degraded" in calls[0]
+
+
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("debounce", ["missing", "expired", "unavailable"])
+def test_strict_degraded_replay_never_dispatches_alerts(estate, private_alert, monkeypatch, durable, debounce):
+    """Real native debounce and private carrier stubs, never external pages."""
+    from claudlobby.recording_alerts import notify_recording_degraded
+
+    route, _, _ = estate
+    _, package, _, tier = private_alert
+    root = route.selected.paths.root
+    selected = replace(route.selected, paths=Paths(root=root, package=package),
+                       fleet=replace(route.selected.fleet, service_prefix="svc"))
+    route = replace(route, origin=selected, selected=selected, peer_context=selected,
+                    manager_destination=replace(route.manager_destination, socket="svc.manager"))
+    original_emit = messages.emit_batch
+
+    def outage(root, raw, **kwargs):
+        if raw[0]["event_type"] == "communication":
+            raise sqlite3.OperationalError("synthetic persistent recorder outage")
+        return original_emit(root, raw, **kwargs)
+
+    monkeypatch.setattr(messages, "emit_batch", outage)
+    transport_calls, notify_calls = [], []
+
+    def transport(*args, **kwargs):
+        transport_calls.append(kwargs["message_id"])
+        return TransportOutcome("submitted", native_returncode=0)
+
+    def notify(*args, **kwargs):
+        notify_calls.append(kwargs["request_id"])
+        return notify_recording_degraded(*args, **kwargs)
+
+    request_id = str(uuid4())
+    options = dict(request_id=request_id, require_durable_request=durable,
+                   trusted_tiers=tier, transport=transport, notify=notify,
+                   clear=lambda *a, **k: pytest.fail("degraded recording must not clear alerts"))
+    body = MessageBody("Synthetic degraded send")
+    first = messages.send_message(route, package, body, **options)
+    assert first.code == "recording_degraded" and first.exit_code == 11
+    assert first.alert.manager.status == "submitted"
+    assert first.alert.telegram.status == "carrier_accepted"
+    assert len(notify_calls) == len(transport_calls) == 1
+    state = root / "state/recording-alerts"
+    if debounce == "expired":
+        for channel in ("manager", "telegram"):
+            os.utime(state / f"example.recording_degraded_{channel}", (1, 1))
+    else:
+        shutil.rmtree(state)
+        if debounce == "unavailable":
+            state.write_text("not a directory")
+    replay = messages.send_message(route, package, body, **options)
+    assert replay.replayed and replay.message_id == first.message_id
+    assert replay.code == "recording_degraded" and replay.exit_code == 11
+    assert not replay.ok and replay.recording == first.recording
+    assert len(transport_calls) == 1
+    expected_alerts = 1 if durable else 2
+    assert len(notify_calls) == expected_alerts
+    for channel in ("manager", "telegram"):
+        assert len((root / f"{channel}-capture").read_text().splitlines()) == expected_alerts
+    if durable:
+        assert replay.alert is None
+    else:
+        assert replay.alert.manager.status == "submitted"
+        assert replay.alert.telegram.status == "carrier_accepted"
 
 
 @pytest.mark.parametrize("durable", [False, True])

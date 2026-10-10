@@ -376,6 +376,27 @@ def test_message_storage_failure_is_not_misdiagnosed_as_terminal_failure(message
     assert "private" not in output.err
 
 
+@pytest.mark.parametrize("operation", ["write", "flush", "readline"])
+def test_approval_io_failure_is_confirmation_failure_not_storage_failure(message_owner, monkeypatch, capsys, operation):
+    store, _, owner, ctx = message_owner
+    console = terminal(monkeypatch, iter(["ALLOW\n"]))
+    original_write = console.write
+
+    def hung_up(*args):
+        if operation == "write" and not args[0].startswith("Type ALLOW"):
+            return original_write(*args)
+        raise OSError("synthetic terminal hangup")
+
+    monkeypatch.setattr(console, operation, hung_up)
+    assert allow(store) == 4
+    output = capsys.readouterr()
+    assert "owner confirmation did not complete" in output.err
+    assert "could not be bound or persisted" not in output.err
+    assert "synthetic terminal hangup" not in output.err
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+
+
 def test_message_storage_translation_does_not_wrap_unrelated_status_error(owner, monkeypatch):
     from types import SimpleNamespace
     error = sqlite3.OperationalError("unexpected status programming defect")
