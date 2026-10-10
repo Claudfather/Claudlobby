@@ -537,6 +537,32 @@ def test_bot_create_json_requires_complete_flags_and_only_authors_source(
     assert retired.value.code == 2
 
 
+def test_bot_create_replaces_fleet_yaml_instead_of_rewriting_it(tmp_path, monkeypatch, capsys):
+    """A reader that opened fleet.yaml before the write keeps the whole old file.
+
+    Rewriting in place truncates the manifest first, so a reader, or a crash,
+    between the truncate and the write meets an empty fleet.yaml. The write goes
+    through fleet setup's atomic writer: a temporary file beside it, then a rename.
+    """
+    import json
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    manifest = tmp_path / "fleet.yaml"
+    manifest.write_text(FLEET_WITH_BOTS)
+    inode = manifest.stat().st_ino
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    with manifest.open() as reader:
+        assert main(["--root", str(tmp_path), "--json", "bot", "create", "--name",
+                     "newbie", "--expertise", "orchestration", "--yes"]) == 0
+        assert reader.read() == FLEET_WITH_BOTS
+    assert json.loads(capsys.readouterr().out)["data"]["written"] is True
+    assert "newbie:" in manifest.read_text()
+    assert manifest.stat().st_ino != inode
+    assert not list(tmp_path.glob(".fleet-yaml-*"))
+
+
 def test_bot_create_refuses_redirected_fleet_source(tmp_path, monkeypatch, capsys):
     import json
     from claudlobby import context
