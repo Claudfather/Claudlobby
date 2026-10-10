@@ -271,7 +271,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     controls.check.disabled = controls.check.hidden;
     controls.check.setAttribute('aria-disabled', String(!!loading || controls.check.hidden));
     if (phase === 'ready' && !controls.rows.length) clients.forEach(({reference}, index) => {
-      const row = document.createElement('span'); row.setAttribute('role','group');
+      const row = document.createElement('span'); row.setAttribute('role','group'); row.tabIndex = -1;
       row.setAttribute('aria-label', new URL(reference.endpoint_origin).hostname);
       const label = document.createElement('span'); row.append(label);
       const buttons = [];
@@ -284,18 +284,23 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const detail = document.createElement('small'); row.append(detail);
       const proposal = document.createElement('span'); proposal.setAttribute('role','group');
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
-      row.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal}); element.append(row);
+      row.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
+        onForget:() => { if (phase === 'ready') {
+          const button = buttons.find(({operation}) => operation === 'enroll').button;
+          (button.disabled ? row : button).focus();
+        } }}); element.append(row);
       controls.rows.push({row,label,detail,buttons});
     });
     controls.rows.forEach(({row,label,detail,buttons},index) => {
-      row.hidden = phase !== 'ready'; const {reference,client} = clients[index], status = client.snapshot();
+      row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
+      enrollment.refresh?.(); const approval = enrollment.snapshot();
       label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${status.state}`;
       detail.textContent = status.remediation || '';
       for (const {button,operation} of buttons) button.disabled = row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
-        || clients[index].enrollment.snapshot().busy
+        || approval.busy
         || ['connect','enroll'].includes(operation) && status.state === 'ready'
-        || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(clients[index].enrollment.snapshot().state)
+        || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
         || operation === 'renew' && status.state !== 'ready'
         || operation === 'logout' && !['ready','unavailable'].includes(status.state);
     });

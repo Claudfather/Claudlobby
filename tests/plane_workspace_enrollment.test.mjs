@@ -40,9 +40,27 @@ test('wrong challenge purpose/issuer/origin/shape/nonce/clock refuses before sig
 });
 
 test('wrong assertion finite DTO refuses without staging or exposing assertion/code',async()=>{
- for(const result of [{version:2,assertion:'e30.e30.AAAA',expires_at:1800000120},{version:1,assertion:'not a JWT',expires_at:1800000120},{version:1,assertion:'e30.e30.AAAA',expires_at:1800000121},{version:1,assertion:'e30.e30.AAAA',expires_at:1800000120,extra:true}]){
+ for(const result of [{version:2,assertion:'e30.e30.AAAA',expires_at:1800000120},{version:1,assertion:'not a JWT',expires_at:1800000120},{version:1,assertion:'e30.e30.AAAA',expires_at:1800000126},{version:1,assertion:'e30.e30.AAAA',expires_at:1800000120,extra:true},{version:1,assertion:'a.b.'+'c'.repeat(8189),expires_at:1800000120}]){
   const h=harness();h.assertion=result;assert.equal(await h.api.start(),false);assert.equal(h.calls.length,2);assert.ok(!h.text().includes(nonce));h.api.dispose();
  }
+});
+
+test('five-second browser clock skew is tolerated without accepting unbounded host or issuer retention',async()=>{
+ for(const secondsBehind of [1,5]){
+  const h=harness();h.clock=1800000000-secondsBehind;assert.equal(await h.api.start(),true);
+  assert.ok(h.timers.filter(t=>t.active).every(t=>t.ms<=125000));h.api.dispose();
+ }
+ const h=harness();h.challenge={...h.challenge,expires_at:1800000306};assert.equal(await h.api.start(),false);assert.equal(h.calls.length,1);h.api.dispose();
+});
+
+test('workspace rename refreshes the label and disposal erases it permanently, including later cancellation',async()=>{
+ const h=harness();assert.ok(h.text().includes('Test workspace'));
+ h.current={workspace:{...context.workspace,name:'Renamed workspace'}};h.api.refresh();
+ assert.ok(h.text().includes('Renamed workspace'));assert.ok(!h.text().includes('Test workspace'));
+ await h.api.start();const cancel=h.nodes.find(n=>n.tag==='button');h.api.dispose();const changes=h.changed.length;
+ h.api.cancel();cancel.click();h.api.refresh();
+ assert.equal(h.api.snapshot().state,'disposed');assert.equal(h.changed.length,changes);
+ assert.ok(!h.text().includes('Renamed workspace'));assert.ok(!h.text().includes(nonce));
 });
 
 test('each asynchronous boundary fences account loss/cancel/disposal and never sends the following write',async()=>{

@@ -3,7 +3,7 @@ const keys = (value, fields) => value && typeof value === 'object' && !Array.isA
   && Object.keys(value).sort().join() === [...fields].sort().join();
 const hostID = value => typeof value === 'string' && value.length === 37 && /^host_[0-9a-f]{32}$/.test(value);
 const nonceID = value => typeof value === 'string' && value.length === 43 && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value);
-const jwt = value => typeof value === 'string' && value.length <= 12288 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
+const jwt = value => typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
 
 export function createWorkspaceEnrollment({reference, issuer, operationalOrigin, currentContext,
   obtainAssertion, fetch = globalThis.fetch.bind(globalThis), now = () => Date.now() / 1000,
@@ -14,7 +14,9 @@ export function createWorkspaceEnrollment({reference, issuer, operationalOrigin,
   const busy = () => ['challenging','asserting','staging'].includes(state);
   const snapshot = () => Object.freeze({state, expires_at:expires, busy:busy()});
   const notify = () => { paint(); try { onChange(snapshot()); } catch {} };
-  const validTime = value => Number.isFinite(now()) && Number.isSafeInteger(value) && value > now() && value <= now() + 300;
+  // These bounds limit local retention; the host decides validity with its own clock.
+  const validTime = (value, lifetime = 300) => Number.isFinite(now()) && Number.isSafeInteger(value)
+    && value > now() && value <= now() + lifetime + 5;
   const current = ticket => {
     if (disposed || ticket !== epoch) return false;
     if (!currentContext()) { forget('refused'); return false; }
@@ -75,7 +77,7 @@ export function createWorkspaceEnrollment({reference, issuer, operationalOrigin,
         nonce:code,operational_origin:operationalOrigin},{signal});
       if (!current(ticket)) return false;
       if (!keys(result,['version','assertion','expires_at']) || result.version !== 1 || !jwt(result.assertion)
-        || !validTime(result.expires_at) || result.expires_at > now() + 120) throw new Error();
+        || !validTime(result.expires_at,120)) throw new Error();
       deadline(result.expires_at);
       if (!validTime(expires)) { forget('expired'); return false; }
       state = 'staging'; staged = true; notify();
@@ -95,7 +97,8 @@ export function createWorkspaceEnrollment({reference, issuer, operationalOrigin,
   }
   function paint() {
     if (!panel) return;
-    const {note, secret, instructions, cancel} = panel;
+    const {label, note, secret, instructions, cancel} = panel;
+    label.textContent = disposed ? '' : `Approve workspace ${currentContext()?.workspace.name || ''} from ${issuer} on ${new URL(endpoint).hostname}. Disconnect an existing session first. Approval is only available at this computer’s local terminal.`;
     const visible = ['awaiting_local_approval','unknown'].includes(state) && !!code;
     note.textContent = state === 'awaiting_local_approval' ? 'Workspace proposal saved. Approve it locally on this computer, then choose Connect.'
       : state === 'unknown' ? 'The proposal may have been saved. Inspect it locally with this code. It has not been confirmed here; do not resend automatically.'
@@ -105,17 +108,17 @@ export function createWorkspaceEnrollment({reference, issuer, operationalOrigin,
     secret.textContent = visible ? 'Approval code: ' + code : '';
     instructions.hidden = !visible; cancel.hidden = state === 'idle' || disposed;
   }
-  function mountPanel({document, element}) {
+  function cancel() { if (!disposed) forget(); }
+  function mountPanel({document, element, onForget = () => {}}) {
     const label = document.createElement('span');
-    label.textContent = `Approve workspace ${currentContext()?.workspace.name || ''} from ${issuer} on ${new URL(endpoint).hostname}. Disconnect an existing session first. Approval is only available at this computer’s local terminal.`;
     const note = document.createElement('span'); note.setAttribute('role','status'); note.setAttribute('aria-live','polite');
     const secret = document.createElement('code');
     const instructions = document.createElement('span');
     instructions.textContent = 'On this computer, replace DATA_ROOT with its existing Claudlobby installation data root. Run claudlobby --root DATA_ROOT host owner confirm-workspace. Paste the approval code at the hidden prompt, inspect the issuer, account and workspace in the local preview, and approve there. Staging does not connect or grant fleet actions.';
     const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'pill ghost'; cancel.textContent = 'Forget approval code';
-    cancel.addEventListener('click',() => forget()); element.append(label,note,secret,instructions,cancel);
-    panel = {note,secret,instructions,cancel}; paint();
+    cancel.addEventListener('click',() => { if (disposed) return; forget(); onForget(); }); element.append(label,note,secret,instructions,cancel);
+    panel = {label,note,secret,instructions,cancel}; paint();
   }
-  return Object.freeze({start,cancel:() => forget(),snapshot,mountPanel,
+  return Object.freeze({start,cancel,snapshot,mountPanel,refresh:paint,
     dispose() { if (disposed) return; disposed = true; forget('disposed'); }});
 }

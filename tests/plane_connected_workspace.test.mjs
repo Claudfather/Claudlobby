@@ -223,6 +223,19 @@ test('account loss during host staging erases approval code and fences late stag
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
+test('forgetting approval returns keyboard focus to that computer, including an in-flight request',async()=>{
+ for(const busy of [false,true]){
+  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();
+  if(busy)h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
+  const pending=h.api.act(0,'enroll');if(busy)await flush();else await pending;
+  const row=h.ui.get('owner-session').children[2],proposal=row.children.at(-1),cancel=proposal.children.at(-1);
+  cancel.focus();cancel.click();assert.ok([row,row.children[5]].includes(h.ui.document.activeElement));
+  assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));
+  if(busy)held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));await pending;
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);h.api.dispose();
+ }
+});
+
 test('temporary account loading is aria-disabled and activation guarded without blurring focus',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
   const check=h.ui.get('owner-session').children[1];check.focus();

@@ -2176,7 +2176,7 @@ def create_app(
         return response
 
     @app.get("/workspace-enrollment.js")
-    async def _workspace_enrollment_js():
+    def workspace_enrollment_js():
         return _busted_js("workspace-enrollment.js", ())
 
     @app.get("/connected-workspace.js")
