@@ -5,7 +5,6 @@ This seam exercises the read boundary with disposable data while ingress,
 pairing UI and browser credential transport are still being established.
 """
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -15,19 +14,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..context import resolve_paths
 from .ids import read_host_uid
-from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef
-
-
-@dataclass(frozen=True)
-class VerifiedReader:
-    """A verified principal and its session, supplied out of band by ingress.
-
-    Construction does not verify identity. No header, cookie, query string or
-    website account identifier is interpreted as authority by this module.
-    """
-
-    principal: PrincipalRef
-    token: str = field(repr=False)
+from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef, VerifiedReader
 
 
 ReaderVerifier = Callable[[Scope], Awaitable[VerifiedReader]]

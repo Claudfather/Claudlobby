@@ -86,6 +86,19 @@ class PrincipalRef:
 
 
 @dataclass(frozen=True)
+class VerifiedReader:
+    """A verified principal and its session, supplied out of band by ingress.
+
+    Construction does not verify identity. No header, cookie, query string or
+    website account identifier is interpreted as authority by this module.
+    """
+
+    principal: PrincipalRef
+    token: str = field(repr=False)
+
+
+
+@dataclass(frozen=True)
 class PairingChallenge:
     token: str = field(repr=False)
     principal: PrincipalRef

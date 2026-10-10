@@ -21,9 +21,8 @@ from claudlobby.message_payload import MessagePayloadError
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.owner_access import AccessDenied, OwnerAccess, PrincipalRef
+from claudlobby.plane.owner_access import AccessDenied, OwnerAccess, PrincipalRef, VerifiedReader
 from claudlobby.plane.owner_messages import OwnerMessages, _GENERATED_ENV
-from claudlobby.plane.owner_view import VerifiedReader
 from claudlobby.request_queries import RequestNotFoundError
 from claudlobby.request_receipts import ReceiptConflict
 from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
@@ -272,3 +271,38 @@ def test_invalid_message_never_sends(gateway, monkeypatch, text):
     with pytest.raises((ValueError, MessagePayloadError)):
         adapter.send(reader, **options, text=text)
     assert calls == []
+
+
+@pytest.mark.parametrize("field", ["native", "artifact_id"])
+def test_send_admits_the_pinned_package_before_transport(gateway, monkeypatch, field):
+    adapter, reader, _, _, options = gateway
+    calls = native_receiver(monkeypatch)
+    changed = (adapter.package.native / "foreign") if field == "native" else "foreign-artifact"
+    adapter.package = replace(adapter.package, **{field: changed})
+    with pytest.raises(ActivationError):
+        adapter.send(reader, **options, text="Must not use unadmitted scripts")
+    assert calls == []
+    assert not list((adapter.root / "state/requests").glob("*/*.json"))
+
+
+@pytest.mark.parametrize("mismatch", ["missing_human", "wrong_actor", "generated_with_context"])
+def test_shared_delivery_refuses_conflicting_caller_before_any_effect(gateway, monkeypatch, mismatch):
+    from claudlobby.commands.message_write import deliver_bound_message
+    from claudlobby.message_context import resolve_message_route
+    from claudlobby.message_payload import MessageBody
+    adapter, _, _, ctx, options = gateway
+    route = resolve_message_route("worker", root=adapter.root, fleet="example",
+                                  package=adapter.package, caller_context=ctx)
+    caller = ctx
+    if mismatch == "missing_human":
+        caller = None
+    elif mismatch == "wrong_actor":
+        caller = replace(ctx, caller=ctx.bots["manager"])
+    else:
+        route = replace(route, origin=ctx.context)
+    calls = native_receiver(monkeypatch)
+    with pytest.raises(CommandFailure, match="caller context differs"):
+        deliver_bound_message(route, body=MessageBody.from_input("Must not send"),
+                              request_id=options["request_id"], caller_context=caller)
+    assert calls == []
+    assert not list((adapter.root / "state/requests").glob("*/*.json"))

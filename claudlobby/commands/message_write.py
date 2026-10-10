@@ -152,8 +152,9 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
 
     package = route.selected.paths.package
     release_id = route.release_id
-    if caller_context is None and route.origin is None:
-        raise CommandFailure("conflict", "message caller context is required for a human route",
+    if ((caller_context is None) != (route.origin is not None)
+            or caller_context is not None and caller_context.caller != route.caller):
+        raise CommandFailure("conflict", "message caller context differs from the frozen route",
                              release_id=release_id)
 
     trusted_tiers, tiers_available = _alert_tiers(route)
@@ -274,6 +275,7 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
         request_id = _request_id(args.request_id)
         is_report = args.public_command == "fleet.reports.submit"
+        body = report = None
         if is_report:
             report = ReportPayload(args.status, summary=args.summary, percent=args.percent,
                                    pr_url=args.pr, pr_role=args.pr_role,
@@ -334,13 +336,11 @@ def dispatch(args) -> CommandOutput:
                     or route.peer_fleet_uid != parent.sender.fleet_uid):
                 raise CommandFailure("conflict", "reply route differs from recorded parent participants",
                                      release_id=release_id)
-            result = deliver_bound_message(
-                route, body=None if is_report else body,
-                report=report if is_report else None, request_id=request_id,
+            return deliver_bound_message(
+                route, body=body, report=report, request_id=request_id,
                 kind=args.kind if args.public_command == "message.send" else "chat",
                 parent_message_id=parent_message_id,
                 retry_uncertain=args.retry_uncertain, caller_context=human_ctx)
-        return result
     except CommandFailure:
         raise
     except ReportPayloadError as exc:
