@@ -184,7 +184,8 @@ The required asynchronous verifier supplies an immutable `VerifiedReader`
 (principal and session token) from trusted server code. No identity headers,
 cookies, URL credentials, website user IDs or workspace IDs are interpreted.
 The test verifier is out of band and synthetic; it is not a production
-Tailscale verifier. There is no HTTP session-creation or pairing endpoint.
+Tailscale verifier. This factory has no HTTP session-creation or pairing endpoint;
+the separate browser transport below owns those exact lifecycle routes.
 
 Admission happens before calling the view and again immediately before every
 response body chunk, using current host identity, grant and session state.
@@ -217,9 +218,55 @@ supported hosts and browsers. Tailscale Serve
 they must not be accepted from an arbitrary directly reachable backend.
 Website-connected sessions additionally require independently verified website
 identity/workspace evidence; a supplied user/workspace string is insufficient.
-The view's GET-only contract must remain intact, with pairing/session mutations
-behind a separate authority service. No real protected use is claimed by the
-synthetic policy tests.
+The view's GET-only contract remains intact, with pairing/session mutations
+in the separate authority transport below. No real protected use is claimed by
+the synthetic policy tests.
+
+### Direct-host browser transport (internal experiment)
+
+`plane/owner_browser.py:create_owner_browser_app` wraps the protected read
+factory and exposes exactly five lifecycle routes. It requires an asynchronous
+trusted `PrincipalRef` verifier and one configured canonical external HTTPS
+origin. There is no default identity verifier: cookies, query parameters and
+Tailscale/forwarded identity headers do not establish identity here. No CLI,
+environment flag or startup service enables this transport.
+
+| Route | Method | Effect |
+| --- | --- | --- |
+| `/api/owner/status` | GET | Reports needs-pairing, sign-in-required or ready; never initializes authority. |
+| `/api/owner/pair` | POST | Returns a five-minute challenge and verified principal for separate local approval. |
+| `/api/owner/login` | POST | Opens a session after local confirmation; a current session is rotated; stale cookies recover through fresh verified sign-in. |
+| `/api/owner/renew` | POST | Rotates the current session, invalidating its old token. |
+| `/api/owner/logout` | POST | Ends the current session and removes its cookie. |
+
+Every HTTP request must match the configured Host; any supplied Origin must
+match the configured HTTPS origin. POSTs additionally require that Origin,
+`X-Claudlobby-Owner: 1`, JSON content type and an empty JSON object (at most
+1 KiB, read within five seconds). Cross-origin preflight, query-bearing
+lifecycle requests and ambiguous Host/Origin/intent headers are refused. No CORS policy
+admits another origin. Local HTTP forwarding is permitted only because the
+caller must separately secure its HTTPS proxy/backend boundary.
+
+The session is carried only by `__Host-claudlobby-owner`, with Secure,
+HttpOnly, SameSite=Strict, Path=/ and no Domain. Responses never put session
+credentials in JSON or URLs, and lifecycle responses are no-store. Only
+explicit logout deletes the cookie. Status and failed-renewal responses
+do not clear it: a delayed response must not erase a newer cookie installed by
+an overlapping renewal. Explicit sign-in recovers malformed or expired cookies
+using the freshly verified principal and current local grant. The pairing
+challenge is not a session: local `confirm_pairing` must still verify its exact
+token and displayed principal. No HTTP confirmation, revocation, message grant
+or bot action exists.
+
+All other paths still cross the protected canonical read gate, including
+static files and each SSE body delivery. Logout or locally applied revocation
+therefore blocks the next private delivery. Tests exercise this with disposable
+state and an injected synthetic principal, plus a loopback HTTP subprocess
+simulating a proxy. They do not prove actual HTTPS browser cookie behavior or
+Tailscale identity. Trusted ingress, local confirmation UI, database ownership,
+real browser validation and an independent bot canary remain activation gates.
+This is a same-origin direct-host protocol, not website OAuth, cross-origin
+embedding or workspace membership.
 
 ## The write spine
 
