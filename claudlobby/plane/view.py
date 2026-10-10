@@ -1403,7 +1403,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
                 unacked = len(pr.unacked_rows(past, ack["seq"], pr.TERMINAL_STATUSES))
                 acked_by, acked_at = _short(ack["by"]), ack["acked_at"]
         rows.append({
-            "alias": alias, "bots": f["bots"], "provisional": f["provisional"],
+            "alias": alias, "uid": f["uid"], "bots": f["bots"], "provisional": f["provisional"],
             "presence": {"counts": presence_counts(verdicts),
                          "live_poll": live_poll},
             "open": open_n, "open_scope": "assigned_to_fleet_bots",
