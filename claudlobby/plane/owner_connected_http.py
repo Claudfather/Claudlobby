@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
 from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json, _DEADLINE
+from .owner_view import _ReadStopped
 from .session_assertion import verify_session_assertion
 from .workspace_assertion import _canonical_32_bytes
 
@@ -41,10 +42,8 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         self.connected = access.connected()
         self.read_app = read_app.with_admission(self._reader, self._admit_reader)
         self._readers = set()
-        self._connected_stopping = False
 
     async def shutdown(self):
-        self._connected_stopping = True
         # The corrected bootstrap owns cancellation/drain of mutation workers.
         await super().shutdown()
         readers = tuple(self._readers)
@@ -64,8 +63,9 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             raise AccessDenied("connected_session_denied")
 
     async def _reader(self, scope):
+        token = _token(scope)
         principal = await self._read_principal(scope)
-        return VerifiedReader(principal, _token(scope))
+        return VerifiedReader(principal, token)
 
     async def _read_principal(self, scope):
         try:
@@ -115,13 +115,13 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             method, allowed = self._preflight_fields(scope, action)
             await self._preflight(scope, method, allowed)
             return None, 204
-        principal = await self._principal(scope, deadline)
-        host_uid = await self._blocking(self._source)
         if action in {"challenge", "issue"}:
             if _header(scope, b"authorization") is not None:
                 raise AccessDenied("connected_session_denied")
         else:
             token = _token(scope)
+        principal = await self._principal(scope, deadline)
+        host_uid = await self._blocking(self._source)
         if action != "status":
             if (_header(scope, b"x-claudlobby-owner") != "1"
                     or (_header(scope, b"content-type") or "").split(";", 1)[0].lower() != "application/json"):
@@ -140,8 +140,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             self._binding_config(with_binding)
             challenge = await self._blocking(self.connected.begin, principal)
             e = challenge.expected
-            if e.issuer != self.config.issuer or e.operational_origin != self.config.operational_origin:
-                raise AccessDenied("connected_session_denied")
+            self._binding_config(e)
             body = {"version": 1, "state": "awaiting_session_assertion", "nonce": e.nonce,
                 "issuer": e.issuer, "host_uid": e.host_uid, "operational_origin": e.operational_origin,
                 "binding_revision": e.binding_revision, "binding_generation": e.binding_generation,
@@ -152,8 +151,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             return body, 202
         if action == "issue":
             expected = await self._blocking(self.connected.expected, payload["nonce"], principal)
-            if expected.issuer != self.config.issuer or expected.operational_origin != self.config.operational_origin:
-                raise AccessDenied("connected_session_denied")
+            self._binding_config(expected)
             keys = await self.keys.get(payload["assertion"])
             attestation = await self._blocking(verify_session_assertion, payload["assertion"], keys, expected=expected)
             principal = await self._principal(scope, deadline)
@@ -235,6 +233,12 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             raise InvalidRequest
 
     async def __call__(self, scope, receive, send):
+        if scope["method"] == "HEAD":
+            downstream = send
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    message = {**message, "body": b""}
+                await downstream(message)
         headers = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
                    "Vary": "Origin", "X-Content-Type-Options": "nosniff"}
         try:
@@ -252,36 +256,40 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 raise InvalidRequest
             if is_read:
                 self._read_route(scope, suffix)
-            if self._connected_stopping:
+            if self._stopping:
                 await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
                 return
+            started = asyncio.Event()
+            head = is_read and scope["method"] == "HEAD"
+            async def cors_send(message):
+                if message["type"] == "http.response.start":
+                    names = {key.lower().encode() for key in headers}
+                    message = {**message, "headers": [(k, v) for k, v in message.get("headers", [])
+                        if k.lower() not in names] + [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+                    started.set()
+                if head and suffix == "stream" and message["type"] == "http.response.body" and message.get("more_body"):
+                    # The canonical gate has already admitted this first chunk.
+                    # Finish HEAD now and unwind its producer through that gate,
+                    # preserving original GET query validation without an idle tail.
+                    await send({**message, "body": b"", "more_body": False})
+                    raise _ReadStopped()
+                await send(message)
             if scope["method"] == "OPTIONS":
                 method, allowed = self._preflight_fields(scope, action)
                 headers.update({"Access-Control-Allow-Methods": method,
                     "Access-Control-Allow-Headers": ", ".join(allowed),
                     "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"})
-                async def preflight_send(message):
-                    if message["type"] == "http.response.start":
-                        names = {key.lower().encode() for key in headers}
-                        message = {**message, "headers": [(k, v) for k, v in message.get("headers", [])
-                            if k.lower() not in names] + [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
-                    await send(message)
                 # Read query shape was already checked; no query enters OPTIONS
                 # authority. Reuse the same owned deadline/cancel/drain machinery.
-                await super().__call__({**scope, "query_string": b""}, receive, preflight_send)
+                await super().__call__({**scope, "query_string": b""}, receive, cors_send)
             elif scope["method"] != method and not (is_read and scope["method"] == "HEAD"):
                 await JSONResponse({"state": "denied"}, 405,
                     headers={**headers, "Allow": "GET, HEAD, OPTIONS" if is_read else method + ", OPTIONS"})(scope, receive, send)
             elif is_read:
-                started = asyncio.Event()
-                async def cors_send(message):
-                    if message["type"] == "http.response.start":
-                        names = {key.lower().encode() for key in headers}
-                        message = {**message, "headers": [(k, v) for k, v in message.get("headers", [])
-                            if k.lower() not in names] + [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
-                        started.set()
-                    await send(message)
-                inner = {**scope, "path": "/api/" + suffix, "raw_path": ("/api/" + suffix).encode()}
+                # Canonical API routes are GET-only. HEAD traverses their exact
+                # query/source/response gates, with only the outgoing body removed.
+                inner = {**scope, "method": "GET", "path": "/api/" + suffix,
+                         "raw_path": ("/api/" + suffix).encode()}
                 job = asyncio.create_task(self.read_app(inner, receive, cors_send))
                 self._readers.add(job)
                 try:
@@ -295,9 +303,20 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                         finally:
                             ready.cancel()
                             await asyncio.gather(ready, return_exceptions=True)
-                        await job  # a healthy admitted stream has no idle deadline
+                        # Observe child completion without forwarding cancellation
+                        # from the request into it. A healthy stream has no idle deadline.
+                        await asyncio.wait({job})
                     else:
-                        await asyncio.wait_for(job, READ_SECONDS)
+                        done, _ = await asyncio.wait({job}, timeout=READ_SECONDS)
+                        if not done:
+                            raise asyncio.TimeoutError
+                    if job.cancelled():
+                        if not self._stopping:
+                            raise asyncio.CancelledError
+                        if not started.is_set():
+                            await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
+                    else:
+                        job.result()
                 except asyncio.TimeoutError:
                     job.cancel()
                     await asyncio.gather(job, return_exceptions=True)
@@ -309,8 +328,6 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                         job.cancel()
                         await asyncio.gather(job, return_exceptions=True)
                     self._readers.discard(job)
-            elif len(self._workers) >= 8:
-                await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
             else:
                 # Delegate the corrected bootstrap deadline/drain machinery.
                 await super().__call__(scope, receive, send)
