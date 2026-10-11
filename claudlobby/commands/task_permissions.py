@@ -5,30 +5,7 @@ import json
 import os
 import sqlite3
 
-from ..command_result import CommandFailure, CommandOutput, execute
-
-
-def register(task_children):
-    parser = task_children.add_parser("permission", help="Request and decide exact task permissions")
-    children = parser.add_subparsers(dest="permission_action", required=True)
-    for verb in ("request", "show", "check", "approve", "decline", "revoke"):
-        child = children.add_parser(verb)
-        child.add_argument("--json", action="store_true")
-        child.add_argument("task_id" if verb == "request" else "permission_id")
-        if verb not in {"show", "check"}:
-            child.add_argument("--request-id", required=True, metavar="UUID")
-            child.add_argument("--reason", required=True, metavar="TEXT")
-        if verb in {"request", "check"}:
-            child.add_argument("--scope-file", required=True, metavar="JSON")
-        if verb in {"approve", "decline", "revoke"}:
-            child.add_argument("--scope-sha256", required=True,
-                               help="Exact digest displayed by permission show")
-        child.set_defaults(func=_dispatch, public_command="task.permission." + verb)
-
-
-def _dispatch(args):
-    return execute(args.public_command, lambda: dispatch(args), json_output=args.json,
-                   request_id=getattr(args, "request_id", None))
+from ..command_result import CommandFailure, CommandOutput
 
 
 def _scope(path):

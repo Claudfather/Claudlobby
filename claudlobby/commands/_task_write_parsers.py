@@ -9,11 +9,12 @@ _DEADLINE_HELP = ("RFC3339 deadline, or 'none' for open-ended; omitted freezes n
 
 
 def _dispatch(args):
-    module = (".assignment_delivery" if args.public_command == "assignment.deliver" else
+    module = (".task_permissions" if args.public_command.startswith("task.permission.") else
+              ".assignment_delivery" if args.public_command == "assignment.deliver" else
               ".task_recheck" if args.public_command == "task.recheck" else ".task_write")
     return execute(args.public_command,
                    lambda: import_module(module, __package__).dispatch(args),
-                   json_output=args.json, request_id=args.request_id)
+                   json_output=args.json, request_id=getattr(args, "request_id", None))
 
 
 def _route(children, verb, command, help):
@@ -34,9 +35,26 @@ def add_report_flags(parser):
     parser.add_argument("--skill", metavar="NAME")
 
 
+def _register_permissions(task_children):
+    parser = task_children.add_parser("permission", help="Request and decide exact task permissions")
+    children = parser.add_subparsers(dest="permission_action", required=True)
+    for verb in ("request", "show", "check", "approve", "decline", "revoke"):
+        child = children.add_parser(verb)
+        child.add_argument("--json", action="store_true")
+        child.add_argument("task_id" if verb == "request" else "permission_id")
+        if verb not in {"show", "check"}:
+            child.add_argument("--request-id", required=True, metavar="UUID")
+            child.add_argument("--reason", required=True, metavar="TEXT")
+        if verb in {"request", "check"}:
+            child.add_argument("--scope-file", required=True, metavar="JSON")
+        if verb in {"approve", "decline", "revoke"}:
+            child.add_argument("--scope-sha256", required=True,
+                               help="Exact digest displayed by permission show")
+        child.set_defaults(func=_dispatch, public_command="task.permission." + verb)
+
+
 def register_task_write_subparsers(task_children, assignment_children):
-    from .task_permissions import register as register_permissions
-    register_permissions(task_children)
+    _register_permissions(task_children)
     admitting = _route(task_children, "admit", "task.admit", "Admit unassigned fleet work")
     admitting.add_argument("--title", required=True, metavar="TEXT")
     admitting.add_argument("--body-file", metavar="FILE")
