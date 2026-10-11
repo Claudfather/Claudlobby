@@ -87,10 +87,10 @@ def validate_github_identity_history(plan) -> None:
     New journals after staging are visible even if rollback restored all of the
     candidate's reviewed source and selected-release bytes.
     """
-    import yaml
-
     if "fleet_sources" not in plan.effects:
         return  # Pre-frozen-source plans predate named connections.
+    import yaml
+
     try:
         candidates = {name: _frozen_github_connections(plan, name) for name in plan.fleets}
     except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
