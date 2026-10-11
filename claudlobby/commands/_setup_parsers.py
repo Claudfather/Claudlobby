@@ -29,6 +29,8 @@ def register_fleet_setup(children):
                         help="Use the candidate team shipped in the selected release")
     parser.add_argument("--repository", metavar="OWNER/REPO", help="Explicit approved repository for --template")
     parser.add_argument("--goal", metavar="TEXT", help="Explicit approved goal for --template")
+    parser.add_argument("--github-config", metavar="FILE", help="Local fleet YAML containing the named GitHub connection")
+    parser.add_argument("--github-connection", metavar="ID", help="Connection to attach to this template's selected repository")
     parser.add_argument("--plan-only", action="store_true",
                         help="Prepare a frozen configuration plan without activation or supervision changes")
     parser.add_argument("--install-directory", metavar="PATH", help="Required when activating (without --plan-only)")

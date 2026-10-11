@@ -530,10 +530,12 @@ test('changed connection fences held preview, preserves goal and never launches'
 });
 test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  h.context.github={name:'Team App',mode:'independent',repository:h.context.repository,permissions:{contents:'write',pull_requests:'write'}};
   const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
   assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
+  assert.ok(panel.children.some(e=>e.textContent.includes('GitHub: Team App') && e.textContent.includes('pull requests write')));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });

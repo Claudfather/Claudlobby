@@ -52,6 +52,33 @@ def test_team_template_missing_resource_refuses_without_checkout_fallback(tmp_pa
         setup._template_config("other", "shop", "example-org/shop", "Improve checkout tests")
 
 
+def test_template_attaches_only_selected_connection_and_repository(tmp_path):
+    import yaml
+    from claudlobby.config import load_fleet_snapshot
+    from claudlobby.github_connections import resolve_github_binding
+
+    connection = {"name": "Team App", "mode": "independent", "app_id": 123,
+                  "installation_id": 456, "permissions": {"contents": "write", "pull_requests": "write"},
+                  "credential_refs": {"private_key_path_env": "TEAM_APP_KEY"},
+                  "repos": ["example-org/30-day-app", "example-org/other"]}
+    source = tmp_path / "connections.yaml"
+    source.write_text(yaml.safe_dump({"fleet": {"github": {"connections": {
+        "team-app": connection, "unselected": {**connection, "app_id": 789}}}}}))
+    policy = setup._template_github(source, "team-app")
+    content = setup._template_config("revenue-web-app", "shop", "example-org/30-day-app", "Improve signup", github_policy=policy)
+    fleet, _ = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    assert list(fleet.github_connections) == ["team-app"]
+    for name in ("lead", "engineer", "reviewer"):
+        binding = resolve_github_binding(fleet, name, "example-org/30-day-app")
+        assert binding.connection_id == "team-app" and binding.project == "p-30-day-app"
+        with pytest.raises(ValueError):
+            resolve_github_binding(fleet, name, "example-org/other")
+    with pytest.raises(CommandFailure, match="does not authorize"):
+        setup._template_config("revenue-web-app", "shop", "foreign/repo", "Improve signup", github_policy=policy)
+    with pytest.raises(CommandFailure, match="required together"):
+        setup._template_github(source, None)
+
+
 def test_setup_parser_requires_one_source():
     import argparse
     from claudlobby.commands._setup_parsers import register_fleet_setup
@@ -60,8 +87,10 @@ def test_setup_parser_requires_one_source():
     register_fleet_setup(parser.add_subparsers())
     assert parser.parse_args(["setup", "--config", "authored.yaml", "--install-directory", "/units"]).template is None
     args = parser.parse_args(["setup", "--template", "revenue-web-app", "--repository", "example-org/shop",
-                              "--goal", "Improve checkout tests", "--install-directory", "/units"])
+                              "--goal", "Improve checkout tests", "--install-directory", "/units",
+                              "--github-config", "connections.yaml", "--github-connection", "team-app"])
     assert args.config is None and args.repository == "example-org/shop"
+    assert args.github_config == "connections.yaml" and args.github_connection == "team-app"
     for flags in ([], ["--config", "file", "--template", "revenue-web-app"], ["--template", "other"]):
         with pytest.raises(SystemExit) as refused:
             parser.parse_args(["setup", "--install-directory", "/units", *flags])

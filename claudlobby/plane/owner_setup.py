@@ -37,16 +37,20 @@ class SetupGrant:
     generation: str
     created_at: float
     expires_at: float
+    github_policy: str | None = None
 
 
 def _snapshot(grant):
-    return json.dumps(asdict(grant),sort_keys=True,separators=(",", ":"))
+    values=asdict(grant)
+    if values["github_policy"] is None: values.pop("github_policy")
+    return json.dumps(values,sort_keys=True,separators=(",", ":"))
 
 
 def _declaration_scope(grant):
     """Exact local approval inputs; generations/times do not own authored bytes."""
     return {key:value for key,value in asdict(grant).items()
-        if key not in {"generation","created_at","expires_at"}}
+        if key not in {"generation","created_at","expires_at"}
+        and not (key=="github_policy" and value is None)}
 
 
 def _uuid(value):
@@ -67,12 +71,13 @@ class OwnerSetup:
         conn.execute("SELECT singleton,snapshot,active,launch_id,launch_plan FROM setup_grant LIMIT 0")
         conn.execute("SELECT plan_id,generation,created_at,expires_at,payload FROM setup_previews LIMIT 0")
 
-    def candidate(self, principal, *, template, fleet, repository, release_id, release_seal, install_directory):
+    def candidate(self, principal, *, template, fleet, repository, release_id, release_seal, install_directory,
+                  github_policy=None):
         # Reuse the installed template's finite repository/fleet policy, with a
         # harmless validation goal; no authoring, registration or staging here.
         from ..commands.setup import _template_config
         if not isinstance(fleet,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*",fleet): raise AccessDenied("setup_denied")
-        _template_config(template,fleet,repository,"Validate selected repository scope")
+        _template_config(template,fleet,repository,"Validate selected repository scope",github_policy=github_policy)
         directory=Path(install_directory)
         if (not directory.is_absolute() or directory.resolve()!=directory or not directory.is_dir()
                 or not re.fullmatch(r"r-[0-9a-f]{64}",release_id) or not re.fullmatch(r"[0-9a-f]{64}",release_seal)):
@@ -81,7 +86,7 @@ class OwnerSetup:
             _,binding=self.connected._context(conn,principal)
             now=self.access._now()
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,release_id,release_seal,
-                str(directory),str(uuid4()),now,now+GRANT_SECONDS)
+                str(directory),str(uuid4()),now,now+GRANT_SECONDS,github_policy)
 
     def allow(self, expected):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
@@ -266,9 +271,16 @@ class SetupEngine:
     def context(self,reader):
         grant=self.store.authorize(reader)
         self._release(grant)
+        github=None
+        if grant.github_policy is not None:
+            from ..github_connections import parse_github_policy
+            connections,_=parse_github_policy(json.loads(grant.github_policy))
+            connection=next(iter(connections.values()))
+            github={"connection_id":connection.connection_id,"name":connection.name,"mode":connection.mode,
+                    "repository":grant.repository,"permissions":dict(connection.permissions)}
         return {"version":1,"template":grant.template,"fleet":grant.fleet,"repository":grant.repository,
             "release_id":grant.release_id,"release_seal":grant.release_seal,"generation":grant.generation,
-            "expires_at":grant.expires_at,"request":self.store.retained_request(reader)}
+            "expires_at":grant.expires_at,"request":self.store.retained_request(reader),"github":github}
 
     def preview(self,reader,generation,goal):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
@@ -283,7 +295,8 @@ class SetupEngine:
         self._release(grant)
         self.store.preview_capacity(reader,grant)
         output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
-            config=None,repository=grant.repository,goal=goal,replace_config=self.store.owned_declaration(reader,grant),plan_only=True,install_directory=None))
+            config=None,repository=grant.repository,goal=goal,github_policy=grant.github_policy,
+            replace_config=self.store.owned_declaration(reader,grant),plan_only=True,install_directory=None))
         if output.data["fleets"] != [grant.fleet]: raise AccessDenied("setup_other_fleet")
         return self.store.retain(reader,grant,{**output.data,"version":1})
 
