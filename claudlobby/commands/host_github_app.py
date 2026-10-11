@@ -78,7 +78,14 @@ def _issuer(args) -> CommandOutput:
                         raise ValueError("invalid webhook secret mapping")
                     secrets[int(app_id)] = path
                 webhooks = GithubWebhooks(store, secrets)
-            uvicorn.run(create_app(store, GithubMinter(keys), consent, webhooks), host="127.0.0.1", port=args.port,
+            enrollment = None
+            if args.enrollment_config:
+                from ..github_enrollment import GithubEnrollment
+                if consent is None or webhooks is None or consent.provider.app_id not in webhooks.secrets:
+                    raise ValueError("enrollment needs consent and matching webhook configuration")
+                config = json.loads(_private_file(args.enrollment_config).read_text())
+                enrollment = GithubEnrollment(consent, config)
+            uvicorn.run(create_app(store, GithubMinter(keys), consent, webhooks, enrollment), host="127.0.0.1", port=args.port,
                         access_log=False, date_header=False)
             result = {"issuer": "stopped"}
     except ImportError as exc:

@@ -179,6 +179,7 @@ def register_release_subparsers(sub):
             route.add_argument("--port", type=int, default=8091)
             route.add_argument("--consent-config", metavar="PATH")
             route.add_argument("--webhook-secret", action="append", default=[], metavar="APP_ID=PATH")
+            route.add_argument("--enrollment-config", metavar="PATH")
         if action != "serve":
             route.add_argument("--json", action="store_true", help="One schema-1 result object")
     update = hosts.add_parser("update", help="Run selected host runtime or sibling update owners")

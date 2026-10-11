@@ -43,6 +43,109 @@ def _consent_flow(tmp_path):
     return ConsentFlow(GrantStore(tmp_path / "grants.db"), provider)
 
 
+
+def _enrollment_request():
+    from claudlobby.github_enrollment import prepare_request
+    return prepare_request(request_id="00000000-0000-4000-8000-000000000001",
+        workspace_id="00000000-0000-4000-8000-000000000002", host_uid="host_" + "a" * 32,
+        nonce="A" * 43, binding=_issuer_grant()["binding"], repository_id=123, credential="c" * 43)
+
+
+def _enrollment_proof(request, **overrides):
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from claudlobby.github_enrollment import PURPOSE, request_digest
+    key = Ed25519PrivateKey.generate()
+    public = json.loads(jwt.algorithms.OKPAlgorithm.to_jwk(key.public_key()))
+    public["kid"] = "enrollment-test"
+    now = int(time.time())
+    claims = dict(iss="https://website.example.invalid", sub="00000000-0000-4000-8000-000000000003",
+        workspace_id=request["workspace_id"], host_uid=request["host_uid"], nonce=request["nonce"],
+        operational_origin="https://plane.example.invalid", binding_revision=1,
+        binding_generation="00000000-0000-4000-8000-000000000004", iat=now, nbf=now, exp=now+120,
+        jti="00000000-0000-4000-8000-000000000005", purpose=PURPOSE,
+        aud="urn:claudfather:github-enrollment:https://issuer.example.invalid:v1",
+        request_digest=request_digest(request), credential_digest=request["credential_digest"])
+    claims.update(overrides)
+    return jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": public["kid"]}), json.dumps({"keys": [public]}).encode()
+
+
+def test_account_enrollment_stages_retryable_consent_without_approving_access(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from fastapi.testclient import TestClient
+    from claudlobby.github_enrollment import GithubEnrollment
+    from claudlobby.github_issuer import create_app, IssuanceDenied
+    flow, request = _consent_flow(tmp_path), _enrollment_request()
+    enrollment = GithubEnrollment(flow, {"website_origin": "https://website.example.invalid",
+                                        "operational_origin": "https://plane.example.invalid"})
+    assertion, keys = _enrollment_proof(request)
+    async def keyset(_): return keys
+    enrollment.keys.get = keyset
+    flow.provider.verify = lambda *_: 456
+    flow.store.initialize()
+    client = TestClient(create_app(flow.store, lambda *_: _issuer_token(), flow, enrollment=enrollment),
+                        base_url=flow.provider.origin, follow_redirects=False)
+    payload = {"request": request, "assertion": assertion}
+    assert client.post("/v1/github/enroll", json=payload, headers={"Origin": "https://plane.example.invalid"}).status_code == 403
+    response = client.post("/v1/github/enroll", json=payload)
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    invitation = response.json()
+    assert invitation["new_issuance"] == "not_allowed"
+    assert client.post("/v1/github/enroll", json=payload).json() == invitation
+    duplicate = {**request, "request_id": "00000000-0000-4000-8000-000000000006"}
+    duplicate_assertion, duplicate_keys = _enrollment_proof(duplicate)
+    keys = duplicate_keys
+    duplicate_payload = {"request": duplicate, "assertion": duplicate_assertion}
+    pending = client.post("/v1/github/enroll", json=duplicate_payload).json()
+    issue = {"schema": 1, "binding": request["binding"], "revision": "a" * 64}
+    with pytest.raises(IssuanceDenied): flow.store.issue("c" * 43, issue, lambda *_: pytest.fail("unapproved mint"))
+    assert client.get(invitation["authorization_url"]).status_code == 200
+    begin = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
+    state = parse_qs(urlsplit(begin.headers["location"]).query)["state"][0]
+    assert client.get("/v1/github/callback?state=" + state + "&code=example-code").status_code == 303
+    # A separately staged invitation cannot create a second active binding,
+    # even when it finishes after the first consent succeeds.
+    assert client.get(pending["authorization_url"]).status_code == 200
+    begin = client.post("/v1/github/connect", data={"ticket": pending["ticket"]}, headers={"Origin": flow.provider.origin})
+    state = parse_qs(urlsplit(begin.headers["location"]).query)["state"][0]
+    assert client.get("/v1/github/callback?state=" + state + "&code=second-code").status_code == 303
+    assert flow.page(pending["ticket"])[0]["status"] == "needs_operator"
+    assert client.post("/v1/github/enroll", json=duplicate_payload).status_code == 409
+    assert flow.store.issue("c" * 43, issue, lambda *_: _issuer_token())["token"] == "ghs_example_only"
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_enrollments").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM github_consent").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM github_grants WHERE revoked=0").fetchone()[0] == 1
+        db.execute("UPDATE github_consent SET expires_at=0 WHERE ticket=?", (invitation["ticket"],))
+    assertion, keys = _enrollment_proof(request)
+    response = client.post("/v1/github/enroll", json={"request": request, "assertion": assertion})
+    assert response.status_code == 409 and response.json()["error"] == "enrollment_restart_required"
+    saved = flow.store.path.read_bytes()
+    assert b"c" * 43 not in saved and assertion.encode() not in saved
+
+
+def test_account_enrollment_binds_exact_request_and_refuses_session_token_reuse(tmp_path):
+    from claudlobby.github_enrollment import GithubEnrollment
+    from claudlobby.github_issuer import IssuanceDenied
+    from claudlobby.plane.workspace_assertion import AssertionRefused
+    flow, request = _consent_flow(tmp_path), _enrollment_request()
+    flow.store.initialize()
+    enrollment = GithubEnrollment(flow, {"website_origin": "https://website.example.invalid",
+                                        "operational_origin": "https://plane.example.invalid"})
+    assertion, keys = _enrollment_proof(request)
+    for changed in ({**request, "credential_digest": "b" * 64}, {**request, "repository_id": 456}):
+        with pytest.raises(AssertionRefused): enrollment.enroll(changed, assertion, keys)
+    wrong, wrong_keys = _enrollment_proof(request, purpose="claudfather-workspace-host-session-v1")
+    with pytest.raises(AssertionRefused): enrollment.enroll(request, wrong, wrong_keys)
+    enrollment.enroll(request, assertion, keys)
+    changed = {**request, "repository_id": 456}
+    changed_assertion, changed_keys = _enrollment_proof(changed)
+    with pytest.raises(IssuanceDenied, match="changed"):
+        enrollment.enroll(changed, changed_assertion, changed_keys)
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_consent").fetchone()[0] == 1
+
+
 def test_issuer_browser_consent_only_grants_after_same_browser_callback(tmp_path, capsys):
     from urllib.parse import parse_qs, urlsplit
     from fastapi.testclient import TestClient

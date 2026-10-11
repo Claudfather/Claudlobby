@@ -6,12 +6,12 @@ issuer credential bound to their approved workspace and deployment. The website
 does not mint tokens or proxy repository data. Independent App connections
 continue to mint locally without this service.
 
-This is the service/operator interface. Browser GitHub consent can verify the
-person's App installation and selected repository access. Website-account
-enrollment and guided host credential delivery still need to be connected before
-self-service onboarding. The HTTP endpoint cannot register its own callers:
-the operator stages the workspace/deployment grant before asking for GitHub
-consent. No public service is enabled by installing the package.
+This is the service/operator interface. Browser GitHub consent verifies the
+person's App installation and selected repository access. The operator can stage
+a grant, or explicitly enable account-bound enrollment as described below.
+Guided host credential persistence and the browser setup integration remain to
+be connected before self-service onboarding. Installing the package does not
+enable a public service.
 
 ## Provision an approved connection
 
@@ -175,3 +175,47 @@ that do not emit an App authorization revocation are not currently rechecked
 after consent. Configure and accept real webhook delivery before public use,
 alongside the remaining website enrollment and secure host handoff. No real App
 consent, webhook delivery or host credential handoff has been accepted yet.
+
+## Account-bound enrollment
+
+Add `--enrollment-config /private/issuer/enrollment.json` to `serve` to enable
+`POST /v1/github/enroll`. This requires the consent configuration and a webhook
+secret for that same App. The private JSON file contains only these exact HTTPS
+origins:
+
+```json
+{
+  "website_origin": "https://website.example.invalid",
+  "operational_origin": "https://plane.example.invalid"
+}
+```
+
+The host prepares a UUID request, its workspace and host IDs, a random nonce,
+the exact managed binding, numeric repository ID, and SHA-256 digest of its
+locally retained random credential. `github_enrollment.prepare_request` and
+`request_digest` define this contract. The website signs the request and
+credential digests with a short-lived, enrollment-specific account assertion.
+The issuer reads public keys only from the configured website's `/api/auth/jwks`.
+The website's `GITHUB_ISSUER_ORIGIN` must equal the configured consent origin.
+A read-session assertion cannot enroll access.
+
+The host sends `{ "request": { ... }, "assertion": "..." }` as JSON. This
+endpoint does not accept browser Origin requests. It returns the existing GitHub
+consent invitation, never a credential or access token. A repeated request ID
+with the same account and exact request returns that invitation; changed input
+is refused. Expired, cancelled or conflicted invitations return HTTP 409
+`enrollment_restart_required` and require a new request ID. Each
+workspace can have at most 16 unexpired pending enrollment invitations.
+
+Enrollment grants expire 30 days after staging and still require the same-browser
+GitHub administrator consent before any issuance. Duplicate active approval for
+the same credential and exact binding is refused under the approval lock,
+including when two pending invitations finish concurrently. The account assertion proves
+website workspace ownership, not physical host ownership or permission to run
+host actions. The host must separately authorize setup and retain its credential;
+this service does not write host secrets or configure fleets. Account closure
+does not revoke already approved GitHub grants: revoke them explicitly using the
+issuer command, or through the configured GitHub revocation events.
+
+The host/browser enrollment wiring and real-provider acceptance are outstanding.
+This endpoint is a core integration contract, not a finished self-service flow.

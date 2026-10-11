@@ -1,7 +1,7 @@
-"""Browser GitHub consent for an issuer-operator-staged deployment grant.
+"""Browser GitHub consent for an explicitly staged deployment grant.
 
-No public enrollment policy: the operator still authenticates the workspace and
-deployment before staging. GitHub verifies the consenting repository admin.
+An operator or the account enrollment owner stages the requested scope.
+GitHub separately verifies the consenting repository admin.
 OAuth tokens stay in memory and are never used to perform repository writes.
 """
 
@@ -190,19 +190,18 @@ class ConsentFlow:
         if grant["binding"]["app_id"] != self.provider.app_id:
             raise IssuanceDenied("different managed App")
         digest = _credential_digest(credential)
-        ticket = secrets.token_urlsafe(32)
         self.store.initialize()
         with self.store.transaction() as db:
-            self.store.check_grant_available(db, grant, digest)
-            db.execute(
-                "INSERT INTO github_consent (ticket,grant_json,credential_digest,expires_at,status) VALUES (?,?,?,?, 'invited')",
-                (
-                    ticket,
-                    _json(grant),
-                    digest,
-                    min(time.time() + 900, grant["expires_at"]),
-                ),
-            )
+            return self.invite_in_transaction(db, grant, digest)
+
+    def invite_in_transaction(self, db, grant, digest):
+        """Shared staging only; callers establish operator/account authority."""
+        ticket = secrets.token_urlsafe(32)
+        self.store.check_grant_available(db, grant, digest)
+        db.execute(
+            "INSERT INTO github_consent (ticket,grant_json,credential_digest,expires_at,status) VALUES (?,?,?,?, 'invited')",
+            (ticket, _json(grant), digest, min(time.time() + 900, grant["expires_at"])),
+        )
         return {
             "authorization_url": self.provider.origin + CONNECT + "?ticket=" + ticket,
             "ticket": ticket,

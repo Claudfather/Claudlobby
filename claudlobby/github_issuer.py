@@ -1,7 +1,8 @@
 """Managed GitHub issuance, with issuer-owned grants and no operational replica.
 
-Only the local operator can approve/revoke grants. The HTTP door can mint for an
-exact approved binding; a customer's configuration is never its own authority.
+Local operator approval or verified browser consent establishes grants. The
+HTTP token door mints only for an exact approved binding; a customer configuration
+is never its own authority.
 The SQLite write transaction serializes issuance with confirmed revocation.
 """
 
@@ -128,6 +129,10 @@ class GrantStore:
                 delivery_id TEXT NOT NULL, body_digest TEXT NOT NULL, selector TEXT NOT NULL,
                 UNIQUE(app_id,delivery_id)
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS github_enrollments (
+                request_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL,
+                issuer TEXT NOT NULL, subject TEXT NOT NULL, result TEXT NOT NULL
+            )""")
 
     @staticmethod
     def validate_grant(grant):
@@ -149,6 +154,9 @@ class GrantStore:
             raise GrantConflict("credential already belongs to another deployment")
         if db.execute("SELECT 1 FROM github_grants WHERE grant_id=?", (grant["grant_id"],)).fetchone():
             raise GrantConflict("grant ID already exists; revoked grants cannot be restored")
+        if db.execute("SELECT 1 FROM github_grants WHERE credential_digest=? AND binding=? AND revoked=0 AND expires_at>?",
+                      (digest, _json(grant["binding"]), time.time())).fetchone():
+            raise GrantConflict("binding already has active approval")
 
     @staticmethod
     def approve_in_transaction(db, grant, digest):
@@ -296,7 +304,7 @@ class GithubMinter:
             raise IssuerUnavailable("GitHub issuance unavailable; check installation access and issuer configuration") from exc
 
 
-def create_app(store, mint, consent=None, webhooks=None):
+def create_app(store, mint, consent=None, webhooks=None, enrollment=None):
     import asyncio
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
@@ -329,4 +337,6 @@ def create_app(store, mint, consent=None, webhooks=None):
         routes.extend(consent.routes())
     if webhooks is not None:
         routes.extend(webhooks.routes())
+    if enrollment is not None:
+        routes.extend(enrollment.routes())
     return Starlette(routes=routes)
