@@ -17,11 +17,14 @@ plane stores once. Two passes at once are harmless for the same reason.
 What a pass cannot read it names, and records nothing for: an unresolved or
 missing transcript directory, or an unreadable transcript, is that bot's
 ``reason``, and its cursor stays where it was, so the rows wait for a pass that
-reads. Before a bot's first pass only its newest session is read, from at most
-FIRST_READ bytes before its end. Bytes appended past READ_CAP in one pass are
-skipped and counted (``skipped_bytes``): a boundary row in them is not recorded.
-Cost per pass: one directory listing per bot and the bytes appended since the
-last pass, never more than READ_CAP per transcript.
+reads. Before a bot's first pass only its own newest session is read, never a
+hook's headless one beside it (``transcript_usage.newest_own_session``), from
+at most FIRST_READ bytes before its end; a newer session that cannot be told
+apart from it is the bot's ``reason`` until a pass can. Bytes appended past
+READ_CAP in one pass are skipped and counted (``skipped_bytes``): a boundary
+row in them is not recorded. Cost per pass: one directory listing per bot and
+the bytes appended since the last pass, never more than READ_CAP per
+transcript; at a bot's first pass, the session heads that name its own.
 """
 
 from __future__ import annotations
@@ -35,7 +38,8 @@ from hashlib import sha256
 from pathlib import Path
 
 from .plane.ids import derive_uid
-from .transcript_usage import _loads, compaction_row, session_transcripts, transcript_source
+from .transcript_usage import (_loads, compaction_row, newest_own_session, session_transcripts,
+                               transcript_source)
 
 CURSOR_FILE = "compaction-cursor.json"
 EMITTER = "fleet-compactions"
@@ -126,7 +130,12 @@ def _read_bot(paths, fleet, bot: str, state: dict, started_ns: int, observed_at:
         return {**out, "reason": issue}, [], None
     followed = state.get("files") if isinstance(state.get("files"), dict) else {}
     last_pass = state.get("pass_ns") if type(state.get("pass_ns")) is int else None
-    newest = max(sessions, key=lambda entry: (entry[2], entry[0]))[0] if sessions else None
+    newest = None
+    if last_pass is None:
+        chosen, issue = newest_own_session(source.directory, sessions)
+        if issue:
+            return {**out, "reason": issue}, [], None
+        newest = chosen[0] if chosen else None
     keep_after = time.time_ns() - _FOLLOW_S * 10**9
     events, files = [], {}
     for name, size, mtime_ns in sorted(sessions):

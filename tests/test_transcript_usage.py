@@ -486,6 +486,33 @@ def _session(directory, name, rows, *, mtime=None):
     return path
 
 
+def _cli(rows):
+    """An interactive session: Claude Code names `entrypoint` cli on its rows
+    from the first attachment on; the header rows before it name none (row keys
+    from a live 2.1 transcript, values invented)."""
+    head = [{"type": "mode", "mode": "normal", "sessionId": "s1"},
+            {"parentUuid": None, "isSidechain": False, "attachment": {"type": "x"},
+             "type": "attachment", "uuid": "a1", "timestamp": rows[0]["timestamp"],
+             "userType": "external", "entrypoint": "cli", "sessionId": "s1"}]
+    return head + [{**row, "entrypoint": "cli"} for row in rows]
+
+
+def _headless(ts, prompt="summarize the segment", *, cr=35188):
+    """A hook's detached `claude -p` session: two queue rows, the prompt row
+    naming `entrypoint` sdk-cli after its message, then one small call (row keys
+    from a live 2.1 transcript, values invented). The prompt rides the enqueue
+    row and the message, both ahead of the first `entrypoint`."""
+    return [{"type": "queue-operation", "operation": "enqueue", "timestamp": ts,
+             "sessionId": "h1", "content": prompt},
+            {"type": "queue-operation", "operation": "dequeue", "timestamp": ts,
+             "sessionId": "h1"},
+            {"parentUuid": None, "isSidechain": False, "promptId": "p1", "type": "user",
+             "message": {"role": "user", "content": prompt}, "uuid": "u1", "timestamp": ts,
+             "permissionMode": "default", "promptSource": "sdk", "turnOrigin": "sdk",
+             "userType": "external", "entrypoint": "sdk-cli", "sessionId": "h1"},
+            {**_usage(ts, 21, 0, cr), "entrypoint": "sdk-cli", "sessionId": "h1"}]
+
+
 class TestCurrentContext:
     """#2206 proposal 1: a bot's live context is its newest main-chain usage
     row (input + cache read + cache creation) with that row's time; null with
@@ -591,6 +618,67 @@ class TestCurrentContext:
             ctx = tu.current_context(paths, fleet, "b")
         finally:
             path.chmod(0o600)
+        assert (ctx["tokens"], ctx["reason"]) == (None, "unreadable_transcript_file")
+
+    def test_a_hooks_headless_session_is_never_the_context(self, tmp_path):
+        """#2212 review, finding 1: a hook's detached `claude -p` session lands
+        beside the bot's own and stays the newest file for minutes. Its prompt
+        rides ahead of its first `entrypoint`, here past 64 KiB, as in the
+        larger real ones."""
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_usage("2026-10-07T21:37:13Z", 9, 1200, 443091)]),
+                 mtime=1_000)
+        _session(d, "h1.jsonl", _headless("2026-10-07T21:37:39Z", "p" * 70_000), mtime=2_000)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["session"], ctx["reason"]) == (444300, "s1", None)
+
+    def test_headless_sessions_alone_have_no_transcript(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "h1.jsonl", _headless("2026-10-07T21:37:39Z"))
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["reason"]) == (None, "no_transcript")
+
+    def test_a_session_naming_no_entrypoint_is_the_bots_own(self, tmp_path):
+        """A transcript without the field (an older Claude Code, or a session
+        whose first rows are still to come) counts as the bot's own."""
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_usage("2026-10-07T21:00:00Z", 1, 2, 3)]), mtime=1_000)
+        _session(d, "s2.jsonl", [_usage("2026-10-07T21:10:00Z", 4, 5, 6)], mtime=2_000)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["session"]) == (15, "s2")
+
+    def test_a_newer_session_that_cannot_be_told_apart_is_no_answer(self, tmp_path):
+        """Whether a newer session is the bot's is unknown when its head runs
+        past the cap before naming an entrypoint, or ends in a line still
+        being written: no answer then, never the older session's figure."""
+        import os
+
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_usage("2026-10-07T21:00:00Z", 1, 2, 3)]), mtime=1_000)
+        _session(d, "h1.jsonl", _headless("2026-10-07T21:10:00Z", "p" * 10_000), mtime=2_000)
+        capped = tu.current_context(paths, fleet, "b", head_cap=4096)
+        assert (capped["tokens"], capped["reason"]) == (None, "session_entrypoint_beyond_cap")
+        assert tu.current_context(paths, fleet, "b")["session"] == "s1"
+        partial = d / "s3.jsonl"
+        partial.write_text(json.dumps(_headless("2026-10-07T21:20:00Z")[0])[:40])
+        os.utime(partial, (3_000, 3_000))
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["reason"]) == (None, "session_head_incomplete")
+
+    def test_an_unreadable_newer_session_is_no_answer(self, tmp_path):
+        import os
+        import pytest
+
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file")
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_usage("2026-10-07T21:00:00Z", 1, 2, 3)]), mtime=1_000)
+        newer = _session(d, "s2.jsonl", [_usage("2026-10-07T21:10:00Z", 4, 5, 6)], mtime=2_000)
+        newer.chmod(0)
+        try:
+            ctx = tu.current_context(paths, fleet, "b")
+        finally:
+            newer.chmod(0o600)
         assert (ctx["tokens"], ctx["reason"]) == (None, "unreadable_transcript_file")
 
 

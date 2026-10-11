@@ -199,6 +199,25 @@ def test_before_the_first_pass_only_the_newest_transcript_is_read(tmp_path):
     assert [e["payload"]["data"]["data"]["session"] for e in plane.sent] == ["s1"]
 
 
+def test_before_the_first_pass_a_hooks_headless_session_is_passed_over(tmp_path):
+    """#2212 review, finding 1: a hook's detached `claude -p` session lands
+    beside the bot's own and is newer; the first pass reads the bot's own."""
+    rec = _recorder()
+    fleet, paths = _fleet(tmp_path, "b")
+    d = _transcripts(tmp_path, paths, "b")
+    write_jsonl(d / "s1.jsonl", [
+        {**_boundary("2026-10-07T21:30:00Z", 444180, 17000, "u1"), "entrypoint": "cli"}])
+    os.utime(d / "s1.jsonl", (1_000, 1_000))
+    write_jsonl(d / "h1.jsonl", [
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-07T21:37:39Z",
+         "sessionId": "h1", "content": "summarize"},
+        {**_said("2026-10-07T21:37:39Z", "summarize", session="h1"), "entrypoint": "sdk-cli"}])
+    plane = Plane()
+    result = rec.record_compactions(paths, fleet, emit=plane)
+    assert _pre(plane) == [444180]
+    assert _bot(result, "b")["reason"] is None
+
+
 def test_an_unreadable_transcript_records_nothing_and_says_why(tmp_path):
     if os.geteuid() == 0:
         pytest.skip("root reads a mode-000 file")

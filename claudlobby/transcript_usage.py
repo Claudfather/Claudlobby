@@ -55,6 +55,15 @@ MAX_ENTRIES = 8192
 # stretch between two usage rows was 511 KB; the cap allows four times that.
 CONTEXT_TAIL_BYTES = 2 * 1024 * 1024
 _TAIL_BLOCK = 64 * 1024
+# A hook's detached `claude -p` session writes its transcript beside the bot's
+# own, and it is not the bot's: its rows name `entrypoint` sdk-cli where an
+# interactive session's name cli (the field separated 120 of 120 real files,
+# #2212 review). The field follows the prompt, which a headless session holds
+# twice before it, so its first value ended 12 to 166 KB into the 13 headless
+# files measured, against under 6 KB in 27 interactive ones. The read that
+# finds it stops at that row, never past this cap.
+SESSION_HEAD_BYTES = 2 * 1024 * 1024
+HEADLESS_ENTRYPOINT = "sdk-cli"
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
                  "cache_read_input_tokens")
 
@@ -509,6 +518,59 @@ def session_transcripts(directory: Path) -> tuple[list, str | None]:
     return found, None
 
 
+def _first_entrypoint(fh, size: int, cap: int) -> tuple[str | None, str]:
+    """A transcript's first top-level ``entrypoint`` value, read forwards from
+    its start over its first ``size`` bytes in blocks, never past ``cap``; and
+    how the read ended: ``found``, ``absent`` (the file holds none),
+    ``beyond_cap``, or ``incomplete`` (its last line is still being written)."""
+    pos, carry = 0, b""
+    while pos < size:
+        if pos >= cap:
+            return None, "beyond_cap"
+        step = min(_TAIL_BLOCK, size - pos, cap - pos)
+        block = fh.read(step)
+        if len(block) != step:
+            raise OSError("transcript shrank during the read")
+        pos += step
+        lines = (carry + block).split(b"\n")
+        carry = lines.pop()
+        for line in lines:
+            if b'"entrypoint"' in line:
+                obj = _loads(line)
+                if isinstance(obj, dict) and isinstance(obj.get("entrypoint"), str):
+                    return obj["entrypoint"], "found"
+    if not carry:
+        return None, "absent"
+    obj = _loads(carry)
+    if not isinstance(obj, dict):
+        return None, "incomplete"
+    value = obj.get("entrypoint")
+    return (value, "found") if isinstance(value, str) else (None, "absent")
+
+
+def newest_own_session(directory: Path, sessions: list, *,
+                       cap: int = SESSION_HEAD_BYTES) -> tuple[tuple | None, str | None]:
+    """The newest of a bot's ``sessions`` (as ``session_transcripts`` lists
+    them) that is its own and not a hook's headless ``claude -p`` call: its
+    first ``entrypoint`` value is not HEADLESS_ENTRYPOINT, and a session with
+    none counts as the bot's own. ``(entry, None)``; ``(None, None)`` when
+    every session is headless; ``(None, reason)`` when a newer session cannot
+    be told apart from the bot's own, which is no answer: it may be the bot's."""
+    for entry in sorted(sessions, key=lambda entry: (entry[2], entry[0]), reverse=True):
+        try:
+            with open(directory / entry[0], "rb") as fh:
+                value, ended = _first_entrypoint(fh, entry[1], cap)
+        except OSError:
+            return None, "unreadable_transcript_file"
+        if ended == "beyond_cap":
+            return None, "session_entrypoint_beyond_cap"
+        if ended == "incomplete":
+            return None, "session_head_incomplete"
+        if value != HEADLESS_ENTRYPOINT:
+            return entry, None
+    return None, None
+
+
 class _Tail:
     """The complete lines of one file, newest first, read backwards in blocks
     and never more than ``cap`` bytes from its end."""
@@ -540,15 +602,20 @@ class _Tail:
             yield carry
 
 
-def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES) -> dict:
+def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
+                    head_cap: int = SESSION_HEAD_BYTES) -> dict:
     """One bot's live context (#2206): its newest main-chain usage row's input
     + cache read + cache creation tokens and that row's time, with any
-    compaction written after the row. ``tokens`` is None, never 0, with a
-    ``reason`` when no such row can be read.
+    compaction written after the row. The row is from the bot's own newest
+    session, never a hook's headless one (``newest_own_session``). ``tokens``
+    is None, never 0, with a ``reason`` when no such row can be read.
 
     Cost per call: one listing of the bot's transcript directory (at most
-    MAX_ENTRIES entries) and reads from the end of its newest session
-    transcript, in 64 KiB blocks, stopping at the row and never past ``cap``.
+    MAX_ENTRIES entries); the head of its own newest session and of each newer
+    one, forwards in 64 KiB blocks, stopping at the first ``entrypoint`` and
+    never past ``head_cap``; then reads from the end of its own newest session,
+    in 64 KiB blocks, stopping at the row and never past ``cap``. ``bytes_read``
+    counts that last read.
     """
     result = {"tokens": None, "at": None, "reason": None, "session": None,
               "compacted_after": None, "bytes_read": 0, "cap": cap}
@@ -556,9 +623,12 @@ def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES)
     if source.directory is None:
         return {**result, "reason": source.issue}
     sessions, issue = session_transcripts(source.directory)
-    if issue or not sessions:
+    chosen = None
+    if issue is None:
+        chosen, issue = newest_own_session(source.directory, sessions, cap=head_cap)
+    if chosen is None:
         return {**result, "reason": issue or "no_transcript"}
-    name, size, _ = max(sessions, key=lambda entry: (entry[2], entry[0]))
+    name, size, _ = chosen
     result["session"] = name[:-len(".jsonl")]
     tail = None
     try:
