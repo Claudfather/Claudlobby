@@ -95,6 +95,44 @@ def test_no_write_routes_exist(tmp_path):
             assert methods <= {"GET", "HEAD"}, (route.path, methods)
 
 
+def test_channel_shows_bounded_checkin_history_without_a_telegram_conversation(tmp_path):
+    from tests.test_checkins_cli import _decision, _query, F
+
+    for i in range(12):
+        _decision(tmp_path, "lead", f"ck_{i:032x}", age_h=i,
+                  action="ask", raise_={"decided": True, "reason": "Which goal next?", "held": []})
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    data = client.get("/api/channel", params={"fleet": F}).json()["data"]
+    assert data["threads"] == []
+    assert data["checkins_state"] == "ok" and data["checkins_truncated"]
+    assert len(data["checkins"]) == data["checkins_limit"] == 10
+    canonical = _query(tmp_path, limit=10)
+    assert [r["checkin_id"] for r in data["checkins"]] == [r["checkin_id"] for r in canonical]
+    assert data["checkins"][0]["actor_uid"] == canonical[0]["actor_uid"]
+    assert data["checkins"][0]["actor_alias"] == f"bot:{F}/lead"
+    assert data["checkins"][0]["reason"] == "Which goal next?"
+    assert client.get("/api/channel").json()["data"]["checkins"] == data["checkins"]
+    assert client.get("/api/channel?fleet=other").json()["state"] == "unknown"
+
+
+def test_checkin_read_failure_does_not_hide_conversations_or_claim_no_decisions(tmp_path, monkeypatch):
+    from claudlobby.commands import checkins
+    from tests.test_checkins_cli import _decision, CK1
+
+    _seed_conversation(tmp_path)
+    _decision(tmp_path, "lead", CK1, age_h=0)
+    original = checkins.collect_checkins
+    def unavailable(*args, **kwargs):
+        assert kwargs["include_dispatches"] is False
+        if args[1] == "f":
+            raise ValueError("unreadable recorded detail")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(checkins, "collect_checkins", unavailable)
+    data = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()["data"]
+    assert data["threads"] and data["checkins_state"] == "unavailable"
+    assert [r["checkin_id"] for r in data["checkins"]] == [CK1]
+
+
 def test_connections_are_query_only(tmp_path):
     import sqlite3
 

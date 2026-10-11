@@ -129,6 +129,8 @@ button:disabled {
   border-radius:12px;
   box-shadow:0 2px 5px #15271903
 }
+.thread>details>summary { padding:13px 17px; font-weight:600; cursor:pointer }
+.thread>details>p { margin:0; padding:0 17px 13px; color:var(--dim); font-size:12px; line-height:1.5 }
 .thread .t-kicker {
   color:#73836a;
   font-size:9px;

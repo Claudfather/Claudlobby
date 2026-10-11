@@ -123,6 +123,7 @@ def _row(r) -> dict:
     return {
         "checkin_id": g.get("checkin_id"), "prev_checkin_id": g.get("prev_checkin_id"),
         "actor": r["subject_alias"], "bot": _bot_of(r["subject_alias"]),
+        "actor_uid": r["subject_uid"], "ingest_seq": r["ingest_seq"],
         "occurred_at": r["occurred_at"],
         "action": g.get("action"), "project_key": g.get("project_key"),
         "raise": {"decided": bool(raise_.get("decided")), "reason": raise_.get("reason")},
@@ -135,7 +136,7 @@ def _row(r) -> dict:
 
 def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | None,
                      last: bool, raised: bool = False, limit: int | None = None,
-                     checkin_id: str | None = None) -> list[dict]:
+                     checkin_id: str | None = None, include_dispatches: bool = True) -> list[dict]:
     """Newest first by occurred_at. `since` None means no window (--last);
     `raised` keeps only rows whose raise.decided is true (the ask count).
 
@@ -175,7 +176,7 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
                 break
         if limit is not None:
             out = out[:limit]
-        joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out])
+        joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out]) if include_dispatches else {}
         for row in out:
             row["dispatches"] = joined.get((row["checkin_ref"] or "").split("checkin:", 1)[-1], [])
         return out
