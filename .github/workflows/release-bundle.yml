@@ -6,7 +6,7 @@ name: release bundle
 # rehearsal, and the bundle is uploaded only when the rehearsal passed.
 #
 # The wheel is pure Python. The wheelhouse holds platform wheels, so it is for
-# Linux aarch64 and CPython 3.11 only. pip chose each wheel for the runner,
+# Linux aarch64 or macOS arm64 and CPython 3.11 only. pip chose each wheel for the runner,
 # whose C library can be newer than a host's: before assembling from a bundle,
 # compare its lock with the host's selected release, or read the platform tags
 # of its wheelhouse against built-on.txt.
@@ -37,8 +37,18 @@ permissions:
 
 jobs:
   bundle:
-    name: bundle (linux-aarch64, py3.11)
-    runs-on: ubuntu-24.04-arm
+    name: bundle (${{ matrix.target }}, py3.11)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            machine: aarch64
+          - runner: macos-15
+            target: macos-arm64
+            machine: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -54,11 +64,13 @@ jobs:
         env:
           EXTRAS: ${{ inputs.extras }}
           CONSTRAINTS: ${{ inputs.constraints }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
           case "$EXTRAS" in
             *[!A-Za-z0-9_,-]*) echo "extras: only letters, digits, '_', '-' and ','" >&2; exit 2 ;;
           esac
+          python -c 'import os, platform; assert platform.machine() == os.environ["EXPECTED_MACHINE"], "unexpected runner architecture"'
           work="$RUNNER_TEMP/release-bundle-work"
           bundle="$RUNNER_TEMP/release-bundle"
           mkdir -p "$work/dist" "$work/wheelhouse" "$bundle"
@@ -88,14 +100,19 @@ jobs:
 
           # The bundle is what the rehearsal assembled from, unchanged.
           cp "$wheel" "$bundle/"
+          cp claudlobby/bootstrap.py "$bundle/bootstrap.py"
           cp -r "$work/wheelhouse" "$bundle/wheelhouse"
           cp "$work/rehearsal/dependency.lock" "$bundle/dependency.lock"
           cp "$work/rehearsal/result.json" "$bundle/rehearsal.json"
           .venv/bin/python -c 'import platform, sys, sysconfig; print("python", sys.version.split()[0]); print("platform", sysconfig.get_platform()); print("libc", *platform.libc_ver())' \
             > "$bundle/built-on.txt"
-          (cd "$bundle" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
-            > "$work/SHA256SUMS"
-          mv "$work/SHA256SUMS" "$bundle/SHA256SUMS"
+          .venv/bin/python - "$bundle" <<'PY_CHECKSUMS'
+          import hashlib, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          paths = sorted(path for path in root.rglob("*") if path.is_file())
+          lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{path.relative_to(root).as_posix()}\n" for path in paths]
+          (root / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+          PY_CHECKSUMS
 
           revision="$(git rev-parse HEAD)"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
@@ -112,6 +129,6 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: claudlobby-release-${{ steps.bundle.outputs.revision }}-linux-aarch64-py311
+          name: claudlobby-release-${{ steps.bundle.outputs.revision }}-${{ matrix.target }}-py311
           path: ${{ runner.temp }}/release-bundle
           if-no-files-found: error

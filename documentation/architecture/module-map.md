@@ -5,6 +5,8 @@ the root `CLAUDE.md` in #2035, which keeps only where to start. It lives here ra
 `claudlobby/CLAUDE.md` because Codex reads that file on its way to
 `claudlobby/_runtime_scripts/`, within one 32 KiB budget.
 
+The [website boundary](website-boundary.md) maps the shared operational UI and host capabilities to the thin account/product site.
+
 ```
 claudlobby/
   github_consent.py   — Optional issuer-owned browser consent for staged deployment grants: PKCE and a same-browser callback, exact App/installation/repository verification, and atomic grant approval. Personal GitHub tokens remain in memory; account enrollment stages the same consent; host delivery stays separate.
@@ -49,6 +51,7 @@ claudlobby/
   freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited; deny-by-default rungs (#703): denied source values, externals report + unused-declaration WARN, fleet-tier .env guard, rendered tools/ (backs `claudlobby config validate --runtime`)
   project_checkout.py — Idempotent assigned-repository working copies using active GitHub bindings; shared by the bot CLI and guided setup.
   commands/project_checkout.py — Public `bot prepare-repository` door with selected-release mutation admission.
+  bootstrap.py        — Stdlib first command copied byte-identically into a trusted local bundle; validates carrier/checksums, installs a temporary matching CLI offline and delegates host setup without selection or activation.
   setup_observations.py — Passive package, executable and storage facts for `host status`, in text and JSON; never changes recorded diagnosis or grants bootstrap authority. No credential/native-manager probes, SQLite or initialization. Owns the shared runtime executable names consumed by commands/setup.py.
   status.py           — Fleet health dashboard (tmux/systemd/fleet-state + the plane: the newest `bot.heartbeat` sample per bot for heartbeat/pane state through presence's own `LATEST_HEARTBEAT_SQL`, and the heartbeat series behind the utilization columns — F18 R2b, keepalive.log is gone; a plane that cannot answer renders those columns `unknown`, flags health `?`, says why under the table and in `--json`'s `plane_unreachable`, never blank-as-healthy)
   stop_record.py      — The stop door's local record of a deliberate stop (#2243): `bot stop` writes `<bot>/data/.stopped` (who, when, an optional reason) before the unit file goes, whatever the plane does, and `bot start` removes it. fleet-pulse, `fleet status` and `fleet reconcile` read it beside the unit-file fact (`svc_is_registered` in the sweep, its parity-pinned mirror `unit_installed` in `fleet status`, enrollment in reconcile): a recorded stop is silent and reads `stopped`. A missing unit with no record never reads `stopped`; fleet-pulse raises `unit_missing` for it
