@@ -47,6 +47,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   let token = null, pending = null, binding = null, hostUID = null, expires = 0;
   let epoch = 0, disposed = false, ended = false, busy = false, lastNow = null, expiryTimer = null;
   const requests = new Set(), cursors = new Map();
+  let setupOnly = false; const setupListeners = new Set();
+  const snapshot = () => setupOnly ? Object.freeze({...handle.snapshot(),state:"setup_only",epoch,remediation:"First-team setup only; dashboard reads are not admitted."}) : handle.snapshot();
+  const notify = () => { for (const listener of setupListeners) { try { listener(snapshot()); } catch {} } };
   let owner, handle, actions = null, actionEpoch = 0, actionSourceChanged = () => {}, unsubscribe = () => {};
   function now() {
     const value = monotonicNow();
@@ -58,13 +61,13 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     return value;
   }
   function wipe() {
-    token = null; pending = null; expires = 0;
+    token = null; pending = null; expires = 0; setupOnly = false;
     clearTimeout(expiryTimer); expiryTimer = null;
     for (const request of requests) request.abort();
   }
   function stop(note, permanent = false) {
     epoch++; ended ||= permanent; wipe();
-    owner?.sessionControls.suspend(note);
+    owner?.sessionControls.suspend(note); notify();
   }
   function contextMatches() {
     let c;
@@ -164,21 +167,27 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     }
   }
   function admission(data, start, needsToken) {
-    const fields = ['version', 'state', 'expires_in', 'read_profile', 'session_context', ...(needsToken ? ['token'] : [])];
+    const setup = data?.state === 'setup_only';
+    const fields = ['version', 'state', 'expires_in', setup ? 'setup_profile' : 'read_profile', 'session_context', ...(needsToken ? ['token'] : [])];
     const c = data?.session_context;
-    if (!keys(data, fields) || data.version !== 1 || data.state !== 'ready'
+    if (!keys(data, fields) || data.version !== 1 || !['ready','setup_only'].includes(data.state)
         || !Number.isSafeInteger(data.expires_in) || data.expires_in <= 0 || data.expires_in > 900
         || !keys(c, ['issuer', 'subject', 'workspace_id', 'binding_revision', 'binding_generation', 'operational_origin'])
         || c.issuer !== doc.issuer || c.subject !== doc.subject || c.workspace_id !== doc.workspace_id
         || c.operational_origin !== doc.operational_origin || c.binding_revision !== binding?.binding_revision
-        || c.binding_generation !== binding?.binding_generation || data.read_profile?.host_uid !== hostUID
+        || c.binding_generation !== binding?.binding_generation
+        || (setup ? (!keys(data.setup_profile,['version','profile','host_uid']) || data.setup_profile.version !== 1 || data.setup_profile.profile !== 'first-team-setup-v1' || data.setup_profile.host_uid !== hostUID) : data.read_profile?.host_uid !== hostUID)
         || (needsToken && !secret(data.token)) || !valid() || start + data.expires_in * 1000 <= now()) {
       stop('Connected session compatibility or bound identity could not be verified. Reopen Plane.', true);
       throw new Error();
     }
     // The single canonical owner checker still validates and pins read_profile.
-    pending = { data, token: needsToken ? data.token : token, expires: start + data.expires_in * 1000 };
+    pending = { data, token: needsToken ? data.token : token, expires: start + data.expires_in * 1000, setup };
     return data;
+  }
+  function commitSetup() {
+    if (!pending?.setup || !valid()) throw new Error();
+    token = pending.token; expires = pending.expires; pending = null; setupOnly = true; armExpiry(); notify();
   }
   async function carrier(url, options) {
     // A read-only probe cannot expire/abort an explicit sign-in before issue.
@@ -188,7 +197,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (url === '/api/owner/status' && pending) return { status: 200, json: async () => pending.data };
     const action = { '/api/owner/status': 'status', '/api/owner/renew': 'renew', '/api/owner/logout': 'logout' }[url];
     if (action) {
-      if (!valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
+      // Before any admitted challenge, missing sign-in is a local denial.
+      // A retained binding with a lost issue response stays unknown.
+      if ((action === 'status' && !token && !binding) || !valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         { method: action === 'status' ? 'GET' : 'POST', ...(action !== 'status' ? { body: {} } : {}), signal: options.signal });
       if (result.status === 200 && action !== 'logout') admission(result.data, result.start, action === 'renew');
@@ -318,6 +329,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   unsubscribe = handle.subscribe(state => {
     if (['denied', 'signed_out'].includes(state.state)) { epoch++; wipe(); }
     else if (state.state === 'unavailable') pending = null;
+    notify();
   });
   async function connect() {
     if (disposed || ended || busy || !valid()) return false;
@@ -353,20 +365,49 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         body: { nonce: c.nonce, assertion: evidence.assertion }, bearer: null, timeout: 35000 });
       if (issued.status !== 200 || disposed || gen !== epoch) throw new Error();
       admission(issued.data, issued.start, true);
-      await handle.start(); // genuine issued response goes through the one profile checker
-      return handle.snapshot().state === 'ready';
+      if (pending.setup) commitSetup();
+      else await handle.start(); // Only a real read profile reaches the canonical checker.
+      return ['ready','setup_only'].includes(snapshot().state);
     } catch {
       if (!disposed && gen === epoch) stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
       return false;
     } finally { busy = false; }
   }
+  async function lifecycle(action) {
+    if (!setupOnly && action === 'status') return handle.start();
+    if (busy || !valid(true)) return false;
+    busy = true;
+    try {
+      if (!setupOnly) return await (action === 'renew' ? owner.sessionControls.renew() : owner.sessionControls.logout());
+      const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
+        {method:action === 'status' ? 'GET' : 'POST',...(action === 'status' ? {} : {body:{}})});
+      if (result.status !== 200) { stop('Connection could not be confirmed. Check again explicitly.'); return false; }
+      if (action === 'logout') {
+        if (!keys(result.data,['version','state']) || result.data.version !== 1 || result.data.state !== 'signed_out') throw new Error();
+        stop('Disconnected. Connect again explicitly.'); return true;
+      }
+      admission(result.data,result.start,action === 'renew');
+      if (pending.setup) commitSetup();
+      else { setupOnly = false; await handle.start(); notify(); }
+      return ['ready','setup_only'].includes(snapshot().state);
+    } catch { stop('Connection outcome unknown. Check again explicitly.'); return false; }
+    finally { busy = false; }
+  }
+  async function setupRequest(operation, input) {
+    if (!valid(true)) throw new Error('Setup outcome unknown. Check the original activation receipt.');
+    const result = await http(ref.endpoint_origin + '/api/owner/connected/setup/' + operation,
+      {method:'POST',body:input,timeout:operation === 'launch' ? 45000 : 15000,limit:131072});
+    if (result.status !== 200) throw new Error('Setup unavailable or refused. A lost launch must be inspected, never repeated.');
+    return result.data;
+  }
   function dispose() {
     if (disposed) return;
-    handle.dispose();
+    handle.dispose(); setupListeners.clear();
   }
-  return Object.freeze({ connect, start: () => handle.start(), check: () => handle.start(),
-    renew: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.renew(); } finally { busy = false; } } },
-    logout: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.logout(); } finally { busy = false; } } },
+  return Object.freeze({ connect, start: () => lifecycle('status'), check: () => lifecycle('status'),
+    renew: () => lifecycle('renew'), logout: () => lifecycle('logout'),
+    setupContext: () => setupRequest('context',{}), setupPreview: input => setupRequest('preview',input),
+    setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');
       actionSourceChanged = onSourceChange;
@@ -374,5 +415,5 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         stamp:() => `${epoch}:${actionEpoch}:${handle.snapshot().epoch}`,onPause});
       return actions;
     },
-    dispose, readHandle: handle, snapshot: handle.snapshot, subscribe: handle.subscribe });
+    dispose, readHandle: handle, snapshot, subscribe(listener) { setupListeners.add(listener); return () => setupListeners.delete(listener); } });
 }

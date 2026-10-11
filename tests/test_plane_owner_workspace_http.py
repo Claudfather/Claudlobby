@@ -277,20 +277,22 @@ def test_pool_wait_is_in_deadline_and_never_begins_late(http, monkeypatch):
 def test_late_source_never_starts_begin_and_retains_capacity(http, monkeypatch):
     import threading
     from claudlobby.plane import owner_workspace_http as module
-    monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
+    # Exercise expiry while source validation is held, not a 50ms race to
+    # finish real SQLite/filesystem reads on the supported-platform runners.
+    monkeypatch.setattr(module, "RESPONSE_SECONDS", 2, raising=False)
     consumer = http[0].workspace_bootstrap
     entered, release = threading.Event(), threading.Event()
     original = consumer._source
     def held():
         value = original()
         entered.set()
-        release.wait(3)
+        release.wait(10)
         return value
     monkeypatch.setattr(consumer, "_source", held)
     async def scenario():
         responses = []
         try:
-            await asyncio.wait_for(_raw_challenge(consumer, responses), 0.5)
+            await asyncio.wait_for(_raw_challenge(consumer, responses), 5)
             assert entered.is_set() and responses[0]["status"] == 503
             assert len(consumer._workers) == 1
             release.set()

@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl
 from starlette.responses import JSONResponse
 
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
+from .owner_source import SourceUnavailable
 from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json, _DEADLINE
 from .owner_view import _ReadStopped
 from .session_assertion import verify_session_assertion
@@ -89,9 +90,22 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         finally:
             _DEADLINE.reset(token)
 
+    def _session_source(self,principal):
+        from .owner_setup import OwnerSetup
+        try: return self._setup_source()
+        except SourceUnavailable:
+            # A partially applied canonical activation may leave an unbound
+            # recorder. Only the locally granted original activation is recoverable;
+            # read/action routes continue to require their recorder admission.
+            try:
+                return OwnerSetup(self.access).recovery_host(principal)
+            except (AccessDenied, AccessUnavailable):
+                pass
+            raise  # Preserve the original recorder classification.
+
     async def _admission(self, token, principal):
         # A fresh source preflight precedes any session mutation.
-        host_uid = await self._blocking(self._source)
+        host_uid = await self._blocking(self._session_source,principal)
         admission = await self._blocking(self.connected.authorize, token, principal,
             host_uid=host_uid, operational_origin=self.config.operational_origin)
         self._binding_config(admission.binding)
@@ -102,8 +116,16 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         now = self.access._now()
         if not admission.created_at <= now < admission.expires_at:
             raise AccessDenied("connected_session_denied")
-        return {"version": 1, "state": "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
-            "read_profile": {"version": 1, "profile": "direct-owner-read-v1", "host_uid": admission.owner.host_uid},
+        try:
+            self._source()
+            setup_only=False
+        except SourceUnavailable:
+            # Setup-only is a positive admission, never a generic outage label.
+            if self._session_source(admission.owner.principal) != admission.owner.host_uid:
+                raise AccessDenied("connected_session_denied")
+            setup_only=True
+        return {"version": 1, "state": "setup_only" if setup_only else "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
+            ("setup_profile" if setup_only else "read_profile"): {"version": 1, "profile": "first-team-setup-v1" if setup_only else "direct-owner-read-v1", "host_uid": admission.owner.host_uid},
             "session_context": {"issuer": binding.issuer, "subject": binding.subject,
                 "workspace_id": binding.workspace_id, "binding_revision": binding.revision,
                 "binding_generation": binding.generation, "operational_origin": binding.operational_origin}}
@@ -121,7 +143,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         else:
             token = _token(scope)
         principal = await self._principal(scope, deadline)
-        host_uid = await self._blocking(self._source)
+        host_uid = await self._blocking(self._session_source,principal)
         if action != "status":
             if (_header(scope, b"x-claudlobby-owner") != "1"
                     or (_header(scope, b"content-type") or "").split(";", 1)[0].lower() != "application/json"):
@@ -146,7 +168,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 "binding_revision": e.binding_revision, "binding_generation": e.binding_generation,
                 "expires_at": math.floor(challenge.expires_at)}
             principal = await self._principal(scope, deadline)
-            await self._blocking(self._source)
+            await self._blocking(self._session_source,principal)
             await self._blocking(self.connected.admit_challenge, challenge, principal)
             return body, 202
         if action == "issue":
@@ -155,7 +177,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             keys = await self.keys.get(payload["assertion"])
             attestation = await self._blocking(verify_session_assertion, payload["assertion"], keys, expected=expected)
             principal = await self._principal(scope, deadline)
-            await self._blocking(self._source)
+            await self._blocking(self._session_source,principal)
             session = await self._blocking(self.connected.issue, attestation, principal)
             token = session.token
         else:
@@ -165,7 +187,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                                      operational_origin=self.config.operational_origin)
                 # Final current owner/binding check, without requiring the deleted token.
                 principal = await self._principal(scope, deadline)
-                await self._blocking(self._source)
+                await self._blocking(self._session_source,principal)
                 binding = await self._blocking(self.workspace.active_binding, principal)
                 if binding != admission.binding:
                     raise AccessDenied("connected_session_denied")
@@ -176,7 +198,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 token = session.token
         principal = await self._principal(scope, deadline)
         admission = await self._admission(token, principal)
-        body = self._ready(admission)
+        body = await self._blocking(self._ready,admission)
         if action in {"issue", "renew"}:
             body["token"] = token
         return body, 200
@@ -191,7 +213,10 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         token = _DEADLINE.set(time.monotonic() + READ_SECONDS)
         try:
             principal = await self._read_principal(scope)
-            await self._blocking(self._source)
+            if scope["path"].startswith(PREFIX+"read/"):
+                await self._blocking(self._source)
+            else:
+                await self._blocking(self._session_source,principal)
             binding = await self._blocking(self.workspace.active_binding, principal)
             self._binding_config(binding)
         except asyncio.TimeoutError:

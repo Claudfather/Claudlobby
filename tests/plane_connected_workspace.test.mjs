@@ -11,7 +11,7 @@ const adapterURL = uri((await read('two-source-read.js')).replace('"./owner-api-
 const {createWorkspaceReadTransport}=await import(adapterURL);
 const enrollmentURL = uri(await read('workspace-enrollment.js'));
 const workspaceText = await read('connected-workspace.js');
-const workspaceURL = uri(workspaceText.replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
+const workspaceURL = uri(workspaceText.replace('"./guided-setup.js"',JSON.stringify(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url).href)).replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
 const {createConnectedWorkspace} = await import(workspaceURL);
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const wi = 'wi_'+'1'.repeat(32), fleetUID='fleet_'+'2'.repeat(32);
@@ -477,4 +477,98 @@ test('overview completed before source loss cannot consume the later recovery re
   assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
   await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
   stream.close();h.api.dispose();
+});
+
+test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
+  const h=harness(),a=refs[0].endpoint_origin;
+  h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
+  await h.api.checkAccount(); await h.api.act(0,'connect'); await h.api.act(1,'connect');
+  assert.equal(h.api.snapshot().computers[0].state,'setup_only');
+  const fleets=await h.api.jget('/api/fleets');
+  assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
+  assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
+  h.api.dispose();
+});
+
+const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
+function setupHarness(options={}) {
+  const calls=[],listeners=new Set(),saved=new Map(); let state={state:'setup_only',epoch:1};
+  const pending={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
+  const context={version:1,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',release_id:'r-'+'b'.repeat(64),release_seal:'c'.repeat(64),generation:id(9),expires_at:1800003600,request:null};
+  const preview={...context,plan_id:pending.plan_id,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},activation:'not_requested',expires_at:1800000600};
+  const client={snapshot:()=>state,subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},
+    async setupContext(){calls.push(['context']);return context;},
+    async setupPreview(input){calls.push(['preview',input]);return preview;},
+    async setupLaunch(input){assert.equal(saved.has('test'),true);calls.push(['launch',input]);throw new Error('lost');},
+    async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:1,state:'active',recorded_activation:{}};},...options.client};
+  const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
+  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:()=>1800000000});
+  return {api,client,calls,saved,pending,context,preview,storage,
+    change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
+}
+test('goal preview and explicit exact-plan launch retain UUID before lost response; reload only inspects',async()=>{
+  const h=setupHarness();assert.equal(h.calls.length,0);
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  h.api.setGoal('Changed goal');assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,2);
+  h.api.setGoal('Improve checkout tests');assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  await h.api.run('launch');assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  h.api.dispose();
+  const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(resumed.snapshot().pending,h.pending);assert.equal(h.calls.length,3);
+  await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');assert.match(resumed.snapshot().note,/Team started/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
+});
+test('changed connection fences held preview, preserves goal and never launches',async()=>{
+  const held=deferred(),h=setupHarness({client:{setupPreview:()=>held.promise}});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');const reading=h.api.run('preview');
+  h.change({epoch:2,state:'unavailable'});held.resolve(h.preview);assert.equal(await reading,false);
+  assert.equal(h.api.snapshot().plan,null);assert.equal(h.api.snapshot().goal,'Improve checkout tests');
+  assert.equal(await h.api.run('launch'),false);h.api.dispose();
+});
+test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
+  assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
+  h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});
+
+test('canonical reserved request wins two-tab storage conflict, preserving both IDs through reload',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  const losing={...h.pending,request_id:id(11)};
+  h.saved.set('test',JSON.stringify(losing));
+  const restored=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  h.context.request={...h.pending};
+  assert.equal(await restored.run('context'),true);
+  assert.deepEqual(restored.snapshot().pending,h.pending);assert.deepEqual(restored.snapshot().conflicts,[losing]);
+  await restored.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(reloaded.snapshot().pending,h.pending);assert.deepEqual(reloaded.snapshot().conflicts,[losing]);
+  restored.dispose();reloaded.dispose();h.api.dispose();
+});
+
+test('only a new grant generation clears blocking pending; same-generation null never permits retry',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(await h.api.run('context'),true);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);
+  h.context.generation=id(12);
+  assert.equal(await h.api.run('context'),true);assert.equal(h.api.snapshot().pending,null);
+  assert.deepEqual(h.api.snapshot().conflicts,[h.pending]);
+  h.client.setupPreview=async input=>{h.calls.push(['preview',input]);return {...h.preview,generation:id(12)};};
+  assert.equal(await h.api.run('preview'),true);assert.equal(h.api.snapshot().goal,'Improve tests');
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+
+test('expired or revoked browser receipt retains original identifiers with local inspection guidance',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  h.client.setupReceipt=async()=>{throw new Error('approval expired');};
+  assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
