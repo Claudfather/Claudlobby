@@ -93,6 +93,17 @@ submits, repairs or retries: it proves the original recorded decision and report
 the permission's *current* state, including a later revocation. An uncertain
 response keeps the original UUID; it does not authorize another decision.
 
-These endpoints do not execute approved effects or notify a bot. Shared dashboard
-controls and targeted notification are the next integration step. The canonical
-records remain on the host; no website permission database is required.
+These endpoints do not execute approved effects or notify a bot. Targeted
+notification remains a separate integration step. The canonical records remain
+on the host; no website permission database is required.
+
+The shared task detail panel displays the requested action, target and limits.
+An admitted owner can approve or decline a pending request, or revoke an approved
+request, with an explicit reason and confirmation. The same controls serve direct
+host access and connected workspaces; connected identifiers stay qualified by host.
+
+Before sending, the browser retains the original request UUID and exact intent
+metadata in session storage. The reason stays in memory. An uncertain response
+leaves a **Check receipt** action; inspection never resubmits the decision. A
+recorded approval can show a later revocation. The panel reports the current
+permission state without claiming that the requested action was executed.

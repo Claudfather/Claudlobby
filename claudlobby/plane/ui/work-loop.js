@@ -1,4 +1,5 @@
 import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
+import { createPermissionPanel } from "./permission-panel.js";
 import { esc, ago, stateBlock } from "./panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
@@ -29,6 +30,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let storage;
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
+  const permissions = createPermissionPanel({api,storage});
   const contextsByKind = new Map(), checkingReceipts = new Set();
   const actionRefreshEpochs = new Map();
   const taskContextReader = action => action === "nudge" ? api.nudgeContext : action === "feedback" ? api.feedbackContext : null;
@@ -142,12 +144,14 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     onActionsChange();
   }
   function closeDetail() {
+    permissions.close();
     ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null;
     $("task-detail-content").innerHTML = "";
     if (dialog.open) dialog.close();
     selected = null;
   }
   function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.", expectedScope, affectedKind, expectedRecipient) {
+    if (affectedKind === "permission") { permissions.pause(expectedScope); return; }
     if (affectedKind) {
       const affected = contextsByKind.get(affectedKind);
       if (!affected || (expectedScope && scopeKey(expectedScope) !== scopeKey(affected.scope))
@@ -217,6 +221,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (!keepDetail) { board = null; channel = null; closeDetail(); }
     else if (pendingDetail) { ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null; showDetailUnavailable(null); } $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
     notice = "Checking available actions…"; paint();
+    if (keepDetail && detailSnapshot) void permissions.show($("task-permissions"),detailSnapshot.task);
     function accept(value, taskKind) {
       if (token !== epoch) return;
       const valid = selectedRoom !== "all" && (taskKind ? validTaskActionContext(value, taskKind) : validContext(value))
@@ -253,10 +258,12 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     });
   }
   function showDetailUnavailable(...block) {
+    permissions.close();
     $("task-detail-content").innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock(...block);
   }
   function detail() {
     if (!selected) return;
+    permissions.close();
     const token = ++detailEpoch, selection = selected; pendingDetail = null; detailSnapshot = null; conversation = null;
     const content = $("task-detail-content");
     // Read at call time: a late reply must see the board as it is then.
@@ -346,6 +353,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       ${task.attention_question || task.attention_reason?.includes("escalated") ? `<div class="task-question"><b>Needs your input</b><pre class="task-record-body">${esc(task.attention_question || "The question was not recorded.")}</pre></div>` : ""}
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
       ${boardOnly ? '<p class="note">Showing a limited board snapshot. Full task detail is unavailable in this view.</p>' : `
+      <div id="task-permissions"></div>
       <h3>Task description</h3>${task.body === null || task.body === undefined ? '<p class="detail-empty">No task body was recorded.</p>' : `<pre class="task-record-body">${esc(task.body)}</pre>`}
       <h3>Recorded task reports</h3>
       <p class="note">Reports recorded against this task, including those outside the recent activity window. Completion alone does not mean a result was reviewed.</p>
@@ -369,6 +377,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <p class="note" id="task-action-note"></p>`;
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
+    if (!boardOnly) void permissions.show($("task-permissions"),task);
     const recorded = $("task-recorded-reports");
     if (recorded) {
       const threads = task.report_threads?.filter(t => t.work_item_id === task.task_id);

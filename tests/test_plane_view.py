@@ -723,6 +723,11 @@ def test_app_js_import_is_cache_busted(tmp_path):
     assert work_loop.headers.get("cache-control") == "no-store"
     assert 'from "./action-state.js?v=' in work_loop.text
     assert 'from "./panel-state.js?v=' in work_loop.text
+    assert 'from "./permission-panel.js?v=' in work_loop.text
+    permissions = client.get("/permission-panel.js")
+    assert permissions.status_code == 200 and permissions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in permissions.text
+    assert 'from "./panel-state.js?v=' in permissions.text
     transport = client.get("/api-client.js")
     assert transport.status_code == 200
     assert transport.headers.get("cache-control") == "no-store"

@@ -212,7 +212,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (actionPath) {
       if (options.method !== 'POST') throw new Error();
       const result = await http(ref.endpoint_origin + '/api/owner/connected/actions/' + actionPath[1],
-        {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:32768});
+        {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:actionPath[1] === 'context' ? 524288 : 32768});
       return {status:result.status,json:async () => result.data};
     }
     const route = readRoute(url);
