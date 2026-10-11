@@ -487,14 +487,22 @@ def _channel_lineage(conn, comms):
 
 
 def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
-                   fleet: str | None = None) -> dict:
+                   fleet: str | None = None, *, report_task: str | None = None) -> dict:
     cols = ("ingest_seq, msg_id, occurred_at, sender_alias,"
             " recipient_alias, recipient_raw, message_class, command_type,"
             " privacy, body, body_bytes, truncated, work_item_id,"
             " assignment_id, reply_to_msg_id, emitter, fleet_uid,"
             " recipient_fleet")
     fleet = _fleet_scope(conn, fleet)
-    if fleet:
+    if report_task is not None:
+        # The selected task was admitted by _fetch_task_detail. Reuse channel
+        # lineage checks and privacy-aware projection for its indexed reports.
+        comms = [dict(r) for r in conn.execute(
+            f"SELECT {cols} FROM communications WHERE msg_id IN ("
+            "SELECT msg_id FROM communications WHERE work_item_id=?"
+            " AND message_class='report' AND emitter=? ORDER BY ingest_seq DESC LIMIT ?)"
+            " ORDER BY ingest_seq DESC", (report_task, TASK_EMITTER, limit)).fetchall()]
+    elif fleet:
         # Per-team channels are the DEFAULT view (operator ruling 2026-08-29:
         # rooms, not a firehose). A room shows every message that TOUCHES the
         # fleet — sender OR recipient — so a cross-fleet thread stays whole in
@@ -614,11 +622,13 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             "SELECT w.work_item_id,w.title,w.repo,w.fleet_uid,w.host_uid,f.alias AS fleet"
             " FROM work_items w JOIN identity_registry f ON f.uid=w.fleet_uid AND f.kind='fleet'"
             f" WHERE w.work_item_id IN ({ph}) AND f.parent_uid=w.host_uid", wi_ids).fetchall()}
-        for r in conn.execute(
-            f"SELECT work_item_id, assignment_id, event, occurred_at,"
-            f" ingest_seq, detail FROM events WHERE kind='task'"
-            f" AND work_item_id IN ({ph}) ORDER BY ingest_seq", wi_ids):
-            task_events_by_wi.setdefault(r["work_item_id"], []).append(dict(r))
+        # Task detail already carries its own bounded canonical history.
+        if report_task is None:
+            for r in conn.execute(
+                f"SELECT work_item_id, assignment_id, event, occurred_at,"
+                f" ingest_seq, detail FROM events WHERE kind='task'"
+                f" AND work_item_id IN ({ph}) ORDER BY ingest_seq", wi_ids):
+                task_events_by_wi.setdefault(r["work_item_id"], []).append(dict(r))
 
     out = []
     for t in threads.values():
@@ -649,7 +659,8 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             + [e["ingest_seq"] for e in t["task_events"]])
         out.append(t)
     out.sort(key=lambda t: t["latest_seq"], reverse=True)
-    return {"threads": out, "lineage": lineage}
+    return {"threads": out, "lineage": lineage,
+            **({"scan_limited": len(comms) == limit} if report_task is not None else {})}
 
 
 def _stale_tier(arm, now: str) -> str | None:
@@ -702,6 +713,7 @@ _TASK_DETAIL_ASSIGNMENTS = 100
 _TASK_DETAIL_ASSIGNMENT_HISTORY = 100
 _TASK_DETAIL_ISSUES = 100
 _TASK_DETAIL_BYTES = 2 * 1024 * 1024
+_TASK_DETAIL_REPORTS = 8
 
 
 class TaskDetailError(Exception):
@@ -763,12 +775,12 @@ def _detail_attention(conn, snapshot, task):
             "attention_act_reason": arm[lead + "_reason"] if lead and not escalation else None}
 
 
-def _fetch_task_detail(conn, task_id, fleet):
+def _fetch_task_detail(conn, task_id, fleet, names=None):
     """One opaque ID, one recorded fleet UID, one canonical read projection.
 
     Task bodies are stored work-item content; missing content is not invented
-    from a communication preview. Linked conversations remain the channel's
-    separate recent window. No registration, state inference or mutation.
+    from a communication preview. Linked reports get a separate bounded read;
+    other conversation remains the channel's recent window. No mutations.
     """
     if not re.fullmatch(ID_PATTERNS["work_item"], task_id):
         raise TaskDetailError("invalid", "A canonical task ID is required.")
@@ -832,6 +844,24 @@ def _fetch_task_detail(conn, task_id, fleet):
     data = {"task": result, "payload_limit_bytes": _TASK_DETAIL_BYTES}
     if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES:
         raise TaskDetailError("unavailable", "Task detail exceeds this view's size limit; use claudlobby task show for the canonical record.")
+    reports = _fetch_channel(conn, names or {}, _TASK_DETAIL_REPORTS + 1, fleet, report_task=task_id)
+    result["report_threads"] = [t for t in reports["threads"] if t["work_item_id"] == task_id]
+    result["reports_window"] = {"limit": _TASK_DETAIL_REPORTS,
+        "truncated": bool(reports.get("scan_limited") or reports.get("lineage", {}).get("unresolved_threads"))}
+    if result["report_threads"]:
+        # Admitted messages for one task share one thread, oldest first. Drop
+        # whole older messages; reports must never crowd out the task itself.
+        thread = result["report_threads"][0]
+        while thread["messages"] and (len(thread["messages"]) > _TASK_DETAIL_REPORTS
+                or len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES):
+            thread["messages"].pop(0)
+            result["reports_window"]["truncated"] = True
+        if not thread["messages"]:
+            result["report_threads"] = []
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES:
+        # Even the added envelope can exceed the remaining budget. Absence is
+        # explicitly unavailable to clients, never an assertion of no reports.
+        del result["report_threads"], result["reports_window"]
     return data
 
 
@@ -1824,7 +1854,8 @@ def create_app(
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str, fleet: str | None = None):
         # The same snapshot also supplies provenance for ordinary local views.
-        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet),
+        names = _channel_names(root)
+        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet, names),
                                      snapshot=True))
 
     @app.get("/api/identities")

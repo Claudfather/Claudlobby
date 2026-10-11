@@ -58,7 +58,13 @@ test('colliding identities stay distinct; all and selected activity preserve can
 test('outside-board detail routes by exact source/team and refuses mismatched ownership', async () => {
   const { api, a, b } = await pair();
   const url = `/api/tasks/${encodeURIComponent('a::'+wi)}?fleet=a%20%2F%20team`;
+  a.routes.get(`/api/tasks/${wi}?fleet=team`).data.task.report_threads = a.routes.get('/api/channel?limit=120').data.threads;
   const detail = await api.jget(url);
+  const recorded = detail.data.task.report_threads[0];
+  assert.equal(recorded.work_item_id, 'a::'+wi);
+  assert.equal(recorded.task_link.host_uid, 'a::'+a.host);
+  assert.ok(recorded.messages[0].msg_id.startsWith('a::'));
+  assert.equal(recorded.messages[0].body, '<literal>');
   assert.equal(detail.data.task.task_id, 'a::'+wi);
   assert.equal(detail.data.task.fleet_uid, 'a::'+fleet);
   assert.equal(b.calls.filter(c => c.url.startsWith('/api/tasks/')).length, 0);

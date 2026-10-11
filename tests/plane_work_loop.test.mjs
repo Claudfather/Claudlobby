@@ -1469,3 +1469,25 @@ test('composer and recoverable pending labels show the readable team while retai
   assert.doesNotMatch(h.get('work-recoverable').innerHTML,/c-abcdefghijkl/);assert.match(h.get('work-recoverable').innerHTML,/original-uuid/);
   assert.equal(h.sends.length+h.lookups.length+h.preparations.length,0);
 });
+
+
+test('recorded reports survive the recent window and remain a frozen task snapshot', async () => {
+  const h = await conversationHarness({ jget() {
+    const response = canonicalDetail('task-a');
+    response.data.task.report_threads = [conversationThread('task-a', ['older-result'])];
+    response.data.task.reports_window = {limit:8,truncated:true};
+    return response;
+  } });
+  const recorded = h.get('task-recorded-reports'), first = recorded.children[0];
+  assert.deepEqual(messagesIn(first).map(m => m.dataset.msgId), ['older-result']);
+  assert.match(h.get('task-detail-content').innerHTML, /Some recorded reports are outside this bounded view/);
+  disclosuresIn(first)[0].open = true;
+  h.get('work-body').value = 'Unsent draft'; h.get('work-body').emit('input');
+  h.update(conversationRead(conversationThread('task-a', ['new-reply'])));
+  assert.equal(recorded.children[0], first); assert.equal(disclosuresIn(first)[0].open, true);
+  assert.deepEqual(messagesIn(h.get('task-reports').children[0]).map(m => m.dataset.msgId), ['new-reply']);
+  assert.equal(h.get('work-body').value, 'Unsent draft');
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  const olderHost = await conversationHarness();
+  assert.match(olderHost.get('task-recorded-reports').innerHTML, /Recorded reports are unavailable/);
+});

@@ -65,6 +65,7 @@ export function createWorkspaceReadTransport({ sources }) {
       ...(v.last_event ? { last_event: event(e, v.last_event) } : {}),
       ...(v.assignments ? { assignments: v.assignments.map(x => assignment(e, x)) } : {}),
       ...(v.history ? { history: v.history.map(x => event(e, x)) } : {}), terminal_event: event(e, v.terminal_event),
+      ...(v.report_threads ? { report_threads: v.report_threads.map(t => thread(e, t)) } : {}),
       ...(v.issues ? { issues: v.issues.map(x => event(e, x)) } : {}),
       ...(v.display_ids ? { display_ids: v.display_ids.map(x => qualified(e, x)) } : {}),
       delivery: fields(e, v.delivery, ['message_id']) };
