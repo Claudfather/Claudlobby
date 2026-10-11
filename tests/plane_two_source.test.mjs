@@ -449,7 +449,7 @@ test('held old one-source detail cannot paint private bytes after disposal or co
 // Deploying the unchanged graph below a release path must never load the
 // public demo's root adapter, or create a second owner-handle module instance.
 test('canonical module graph stays inside its release directory', async () => {
-  const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js',
+  const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js', 'permission-panel.js',
     'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js'];
   for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
     for (const name of files) {

@@ -278,3 +278,25 @@ test('consistently source-qualified task intent persists without body; mixed-sou
  assert.equal(restored.storageError,false);assert.deepEqual(restored.pending[0].target,target);assert.equal(restored.pending[0].body,undefined);
  for(const altered of [{...target,recipient:'computer-2::'+nudgeTarget.recipient},{...target,task_id:nudgeTarget.task_id},{...target,assignment_id:'computer-2::asg_'+'a'.repeat(32)}])assert.throws(()=>new ActionState(storage()).prepare(context,altered,'Reason',nudgeId),/unavailable/);
 });
+
+
+test('permission decisions retain exact intent without reason and recover a later-revoked approval',()=>{
+ const p={permission_id:'perm_'+'1'.repeat(32),task_id:'wi_'+'2'.repeat(32),request_event_id:'ev_'+'3'.repeat(32),assignment_id:null,
+  requester:{uid:'actor_'+'4'.repeat(32),alias:'Lead'},scope:{action:'merge',target:'example/repo#1',constraints:'Reviewed commit only'},
+  scope_sha256:'a'.repeat(64),reason:'Ready for review',state:'pending',decided_by:null,decision_reason:null};
+ const c={version:2,room:'web',scope:{workspace:'example',host:'host_'+'5'.repeat(32),fleet:'web',viewer:'permission-grant'},
+  simulation:false,actions:['permission'],release_id:'r-'+'6'.repeat(64),task_id:p.task_id,permissions:[p],has_more:false};
+ const t={permission_id:p.permission_id,task_id:p.task_id,scope_sha256:p.scope_sha256,release_id:c.release_id};
+ const saved=storage(),s=new ActionState(saved,'permissions'),id='11111111-1111-4111-8111-111111111111';
+ for(const body of ['bad\rreason','bad\u0000','bad\uD800','Ω'.repeat(1025)])assert.throws(()=>s.prepare(c,t,body,id,'approve'),/reason/);
+ const request=s.prepare(c,t,'Private decision reason',id,'approve'),{body,...metadata}=request;
+ s.beginPrepared(c,request,{...metadata,semantic_sha256:'b'.repeat(64)});
+ assert.ok(!saved.getItem(s.key).includes(body));
+ const restored=new ActionState(saved,'permissions'),original=restored.pending[0];
+ assert.throws(()=>restored.prepare(c,t,'Decline','22222222-2222-4222-8222-222222222222','decline'),/original receipt/);
+ const receipt={...original,status:'recorded',execution:'not_requested',notification:'not_requested',
+  permission:{...p,state:'revoked',decided_by:{uid:'actor_'+'7'.repeat(32),alias:'Owner'},decision_reason:'Revoked later'}};
+ for(const patch of [{status:'unknown',permission:null},{decision:'decline'},{scope:{...original.scope,host:'host_'+'8'.repeat(32)}},
+  {semantic_sha256:'c'.repeat(64)},{target:{...t,release_id:'r-'+'9'.repeat(64)}}])assert.throws(()=>restored.accept(original,{...receipt,...patch}),/does not match/);
+ restored.accept(original,receipt);assert.equal(restored.pending.length,0);
+});

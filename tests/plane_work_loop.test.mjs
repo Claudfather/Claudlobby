@@ -9,6 +9,7 @@ import { ActionState } from '../claudlobby/plane/ui/action-state.js';
 // used here. Browser rendering and native keyboard behavior remain browser QA.
 const source = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8');
 const controller = source.replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+  .replaceAll('from "./permission-panel.js"', `from "${new URL('../claudlobby/plane/ui/permission-panel.js', import.meta.url)}"`)
   .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const { mountWorkLoop, conversationTaskLink } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
 const transportSource = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
@@ -55,6 +56,7 @@ function dom() {
     replaceChildren(...children) { this.html = ''; this.children = children; }
     closest(selector) {
       if (selector === '#attention, #tasks') return this.panel || null;
+      if (selector.includes(', ')) return selector.split(', ').map(part => this.closest(part)).find(Boolean) || null;
       return this.querySelectorAll.call({ children: [this] }, selector)[0] || null;
     }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
@@ -79,7 +81,8 @@ function harness(options = {}) {
     ...(options.roomLabel ? {roomLabel:options.roomLabel} : {}),
     interactionContext: options.interactionContext || (() => context),
     ...(options.feedbackContext ? {feedbackContext:options.feedbackContext} : {}),
-    ...(options.nudgeContext || options.feedbackContext ? {...(options.nudgeContext ? {nudgeContext:options.nudgeContext} : {}),prepareAction:request=>{preparations.push(request);if(options.prepareAction)return options.prepareAction(request);const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};}} : {}),
+    ...(options.permissionContext ? {permissionContext:options.permissionContext} : {}),
+    ...(options.nudgeContext || options.feedbackContext || options.permissionContext ? {...(options.nudgeContext ? {nudgeContext:options.nudgeContext} : {}),prepareAction:request=>{preparations.push(request);if(options.prepareAction)return options.prepareAction(request);const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};}} : {}),
     ...(options.jget ? {jget:options.jget} : {}),
     ...(options.protected ? {mountSessionControls(){}} : {}),
     sendAction: request => { sends.push(request); return options.sendAction ? options.sendAction(request) : receipt(request); },
@@ -1490,4 +1493,43 @@ test('recorded reports survive the recent window and remain a frozen task snapsh
   assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
   const olderHost = await conversationHarness();
   assert.match(olderHost.get('task-recorded-reports').innerHTML, /Recorded reports are unavailable/);
+});
+
+
+const permissionRecord={permission_id:'perm_'+'1'.repeat(32),task_id:nudgeTaskId,request_event_id:'ev_'+'2'.repeat(32),assignment_id:null,
+ requester:{uid:'actor_'+'3'.repeat(32),alias:'Lead'},scope:{action:'merge',target:'example/repo#1',constraints:'Only the reviewed commit'},
+ scope_sha256:'4'.repeat(64),reason:'Ready <for> review',state:'pending',decided_by:null,decision_reason:null};
+const ownerPermission={version:2,room:'web',scope:{workspace:'example',host:'host_'+'5'.repeat(32),fleet:'web',viewer:'permission-grant'},
+ simulation:false,actions:['permission'],release_id:'r-'+'6'.repeat(64),task_id:nudgeTaskId,permissions:[permissionRecord],has_more:false};
+const permissionReceipt=(request,state='approved')=>{const {body,...metadata}=request;return {...metadata,status:'recorded',execution:'not_requested',notification:'not_requested',
+ permission:{...permissionRecord,state,decided_by:{uid:'actor_'+'7'.repeat(32),alias:'Owner'},decision_reason:'Decision recorded'}};};
+const permissionOptions=extra=>({interactionContext:()=>null,permissionContext:()=>ownerPermission,protected:true,jget:()=>ownerDetail(),
+ crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'},sendAction:permissionReceipt,actionReceipt:permissionReceipt,...extra});
+async function openPermission(h){h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();return h.get('task-permissions');}
+function selectPermission(h,panel,decision){panel.onclick({target:panel.querySelectorAll('[data-permission-decision]').find(b=>b.dataset.permissionDecision===decision)});h.get('permission-decision-reason').value='Owner reason';h.get('permission-decision-reason').oninput();}
+
+test('task permission panel requires explicit decision, retains a lost-response UUID and only inspects it after reload',async()=>{
+ const storage=store(),h=harness(permissionOptions({storage,sendAction:()=>{throw Error('Lost response');}})),panel=await openPermission(h);
+ assert.match(panel.innerHTML,/Only the reviewed commit/);assert.match(panel.innerHTML,/Ready &lt;for&gt; review/);
+ selectPermission(h,panel,'approve');assert.equal(h.sends.length,0);
+ await h.get('permission-decision-form').onsubmit({preventDefault(){}});
+ assert.equal(h.sends.length,1);assert.ok(!storage.getItem('plane.pending-permissions.v1').includes('Owner reason'));
+ const restored=harness(permissionOptions({storage})),next=await openPermission(restored);
+ assert.ok(next.querySelectorAll('[data-permission-decision]').every(b=>b.disabled));
+ next.onclick({target:next.querySelectorAll('[data-permission-receipt]')[0]});await settle();
+ assert.equal(restored.sends.length,0);assert.equal(restored.lookups.length,1);
+ assert.match(next.innerHTML,/Permission is currently approved/);assert.equal(storage.getItem('plane.pending-permissions.v1'),'[]');
+ selectPermission(restored,next,'revoke');assert.equal(restored.sends.length,0);
+});
+
+test('changing task access during permission preparation prevents send; a new task cannot accept the old response',async()=>{
+ const preparation=deferred(),h=harness(permissionOptions({prepareAction:()=>preparation.promise})),panel=await openPermission(h);
+ selectPermission(h,panel,'decline');const submitting=h.get('permission-decision-form').onsubmit({preventDefault(){}});
+ h.loop.invalidate(undefined,ownerPermission.scope,'permission');
+ const {body,...metadata}=h.preparations[0];preparation.resolve({...metadata,semantic_sha256:'d'.repeat(64)});await submitting;
+ assert.equal(h.sends.length,0);assert.match(panel.innerHTML,/Permission access paused/);
+ const response=deferred(),j=harness(permissionOptions({sendAction:()=>response.promise})),other=await openPermission(j);
+ selectPermission(j,other,'approve');const sending=j.get('permission-decision-form').onsubmit({preventDefault(){}});await settle();
+ j.get('task-detail-close').onclick();await settle();response.resolve(permissionReceipt(j.sends[0]));await sending;
+ assert.equal(new ActionState(j.storage,'plane.pending-permissions.v1').pending.length,1);
 });
