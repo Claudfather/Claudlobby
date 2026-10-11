@@ -197,8 +197,8 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
 test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
   for(const n of h.ui.nav)assert.equal(n.disabled,n.dataset.view!=='channel');assert.equal(h.ui.get('search').disabled,true);
-  const root=h.ui.get('owner-session'),row=root.children[2],check=root.children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[1],check);
-  const connect=row.children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1],connect);
+  const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
+  const connect=row.children[1].children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[1],connect);
   for(const id of ['fleet','channel']){
     const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
     const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
@@ -220,8 +220,8 @@ test('api-client selects only an existing marker; absent marker preserves legacy
 // This separates keyed focus from the unsupported-view assertions above.
 test('account recheck preserves the same focused control rather than replacing its DOM',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  const root=h.ui.get('owner-session'),check=root.children[1];check.focus();
-  await h.api.checkAccount();assert.equal(root.children[1],check);assert.equal(check.isConnected,true);
+  const root=h.ui.get('owner-session'),check=root.children[0].children[1];check.focus();
+  await h.api.checkAccount();assert.equal(root.children[0].children[1],check);assert.equal(check.isConnected,true);
   assert.equal(h.ui.document.activeElement,check);h.api.dispose();
 });
 
@@ -232,7 +232,7 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
  const calls=h.calls.slice(before);assert.deepEqual(calls.map(c=>new URL(c.url).pathname),['/api/plane/context','/api/owner/workspace/challenge','/api/plane/host-assertion','/api/owner/workspace/stage']);
  const signer=calls.find(c=>c.url.endsWith('/host-assertion'));assert.equal(signer.init.credentials,'include');assert.deepEqual(Object.keys(JSON.parse(signer.init.body)).sort(),['host_uid','nonce','operational_origin','workspace_id']);
  assert.notEqual(h.api.snapshot().computers[0].state,'ready');assert.equal(h.api.snapshot().computers[1].state,'ready');
- const root=h.ui.get('owner-session'),first=root.children[2],proposal=first.children.at(-1);
+ const root=h.ui.get('owner-session'),first=root.children[1],proposal=first.children.at(-1).children[1];
  assert.ok(proposal.children.some(c=>c.textContent.includes('Approval code:')));assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,1);
  assert.equal(await h.api.act(0,'enroll'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);
  // Synthetic host fixture now represents local approval; UI itself has no confirm door.
@@ -243,7 +243,7 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
 test('account loss during host staging erases approval code and fences late staged result',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
- assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[2].children.at(-1);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[1].children.at(-1).children[1];assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
@@ -252,8 +252,8 @@ test('forgetting approval returns keyboard focus to that computer, including an 
   const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();
   if(busy)h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
   const pending=h.api.act(0,'enroll');if(busy)await flush();else await pending;
-  const row=h.ui.get('owner-session').children[2],proposal=row.children.at(-1),cancel=proposal.children.at(-1);
-  cancel.focus();cancel.click();assert.ok([row,row.children[5]].includes(h.ui.document.activeElement));
+  const row=h.ui.get('owner-session').children[1],proposal=row.children.at(-1).children[1],cancel=proposal.children.at(-1);
+  cancel.focus();cancel.click();assert.ok([row,row.children[1].children[5]].includes(h.ui.document.activeElement));
   assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));
   if(busy)held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));await pending;
   assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);h.api.dispose();
@@ -262,7 +262,7 @@ test('forgetting approval returns keyboard focus to that computer, including an 
 
 test('temporary account loading is aria-disabled and activation guarded without blurring focus',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  const check=h.ui.get('owner-session').children[1];check.focus();
+  const check=h.ui.get('owner-session').children[0].children[1];check.focus();
   const held=deferred();h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
   const before=h.calls.length,pending=h.api.checkAccount();await flush();
   assert.equal(check.disabled,false);assert.equal(check.attributes['aria-disabled'],'true');assert.equal(h.ui.document.activeElement,check);
@@ -325,7 +325,7 @@ test('unavailable admitted host exposes explicit Disconnect and uses existing ca
   const h=harness({count:1});h.mount();await h.api.checkAccount();await flush();await h.api.act(0,'connect');
   h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/status',()=>reply(503,{}));
   await h.api.act(0,'check');assert.equal(h.api.snapshot().computers[0].state,'unavailable');
-  const buttons=h.ui.get('owner-session').children[2].children;
+  const buttons=h.ui.get('owner-session').children[1].children[1].children;
   assert.equal(buttons[3].disabled,true);assert.equal(buttons[4].disabled,false);
   buttons[4].click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');h.api.dispose();

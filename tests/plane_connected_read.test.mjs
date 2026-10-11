@@ -87,7 +87,11 @@ test('explicit real handshake yields one canonical minted handle, exact signer b
 });
 
 test('start and explicit check never sign in, synthesize pairing or replay a mutation', async () => {
-  const h = harness(); await h.api.start(); await h.api.check();
+  const h = harness(); await h.api.start();
+  assert.equal(h.api.snapshot().state, 'denied');
+  assert.doesNotMatch(h.api.snapshot().remediation || '', /expired/i);
+  await h.api.check();
+  assert.equal(h.api.snapshot().state, 'denied');
   assert.equal(h.calls.length, 0); assert.equal(h.signings.length, 0);
   assert.notEqual(h.api.snapshot().state, 'ready'); h.api.dispose();
 });

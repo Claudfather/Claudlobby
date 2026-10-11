@@ -292,10 +292,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const {document, element} = mount; element.hidden = false;
     if (!mount.controls) {
       element.replaceChildren();
+      element.className = 'owner-session connected-session';
+      const heading = document.createElement('div'); heading.className = 'connection-heading'; element.append(heading);
       const note = document.createElement('span'); note.setAttribute('role','status');
-      note.setAttribute('aria-live','polite'); element.append(note);
+      note.setAttribute('aria-live','polite'); heading.append(note);
       const check = document.createElement('button'); check.type = 'button'; check.className = 'pill ghost';
-      check.textContent = 'Check account'; check.addEventListener('click', () => { if (!check.disabled && !loading) void checkAccount(); }); element.append(check);
+      check.textContent = 'Check account'; check.addEventListener('click', () => { if (!check.disabled && !loading) void checkAccount(); }); heading.append(check);
       mount.controls = {note, check, rows:[]};
     }
     const controls = mount.controls;
@@ -310,38 +312,55 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     controls.check.disabled = controls.check.hidden;
     controls.check.setAttribute('aria-disabled', String(!!loading || controls.check.hidden));
     if (phase === 'ready' && !controls.rows.length) clients.forEach(({reference}, index) => {
-      const row = document.createElement('span'); row.setAttribute('role','group'); row.tabIndex = -1;
+      const row = document.createElement('div'); row.className = 'connection-card'; row.setAttribute('role','group'); row.tabIndex = -1;
       row.setAttribute('aria-label', new URL(reference.endpoint_origin).hostname);
-      const label = document.createElement('span'); row.append(label);
+      const label = document.createElement('strong'); label.className = 'connection-name'; row.append(label);
+      const actions = document.createElement('div'); actions.className = 'connection-actions'; row.append(actions);
+      const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
+      access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';
+      access.setAttribute('aria-label','Set up access on ' + new URL(reference.endpoint_origin).hostname + ' (opens in a new tab)');
+      actions.append(access);
       const buttons = [];
-      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],['enroll','Approve workspace on this computer']]) {
+      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],['enroll','Approve workspace']]) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'pill ghost'; button.textContent = title;
         button.setAttribute('aria-label', title + ' ' + new URL(reference.endpoint_origin).hostname);
         button.addEventListener('click', () => { if (button.isConnected && !button.disabled) void act(index,operation); });
-        row.append(button); buttons.push({button,operation});
+        actions.append(button); buttons.push({button,operation});
       }
-      const detail = document.createElement('small'); row.append(detail);
-      const proposal = document.createElement('span'); proposal.setAttribute('role','group');
+      const detail = document.createElement('p'); detail.className = 'connection-detail'; row.append(detail);
+      const help = document.createElement('details'); help.className = 'connection-approval';
+      const summary = document.createElement('summary'); summary.textContent = 'Workspace approval steps'; help.append(summary); row.append(help);
+      const proposal = document.createElement('div'); proposal.setAttribute('role','group');
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
-      row.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
+      help.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
         onForget:() => { if (phase === 'ready') {
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); element.append(row);
-      controls.rows.push({row,label,detail,buttons});
+      controls.rows.push({row,label,detail,buttons,help,access,approvalState:'idle'});
     });
-    controls.rows.forEach(({row,label,detail,buttons},index) => {
+    controls.rows.forEach((controls,index) => {
+      const {row,label,detail,buttons,help,access} = controls;
       row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
-      label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${status.state}`;
-      detail.textContent = status.remediation || '';
-      for (const {button,operation} of buttons) button.disabled = row.hidden || pending.has(index)
+      const labels = {ready:'Connected',denied:'Not connected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
+      label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${labels[status.state] || status.state}`;
+      detail.textContent = status.remediation || (status.state === 'denied'
+        ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
+        : '');
+      access.hidden = status.state === 'ready';
+      if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
+      controls.approvalState = approval.state;
+      for (const {button,operation} of buttons) {
+        button.hidden = ['renew','logout'].includes(operation) && !['ready','unavailable','renewing','logout'].includes(status.state);
+        button.disabled = row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
         || approval.busy
         || ['connect','enroll'].includes(operation) && status.state === 'ready'
         || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
         || operation === 'renew' && status.state !== 'ready'
         || operation === 'logout' && !['ready','unavailable'].includes(status.state);
+      }
     });
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}}) {
