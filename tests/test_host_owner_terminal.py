@@ -104,9 +104,10 @@ def test_attest_existing_source_through_actual_cli_terminal(tmp_path):
     inspect_source(tmp_path)
 
 
-# Only release/native-manager identity is a fixture; terminal approval, CLI
-# dispatch, active config, mutation admission, Plane registration and authority
-# writes are real. This is not a sealed installed CLI or live bot canary.
+# Only release/native-manager identity, which includes the operator shell's
+# unit ancestry, is a fixture; terminal approval, CLI dispatch, active config,
+# mutation admission, Plane registration and authority writes are real. This is
+# not a sealed installed CLI or live bot canary.
 from tests.test_activation import cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
@@ -125,6 +126,8 @@ release = read_release(root, read_selection(root)['release_id'], verify_files=Fa
 package = replace(source_package(), native=release.native_path, artifact_id=release.inputs.artifact_id)
 context.get_resources = lambda: package
 RuntimeIdentity.current = classmethod(lambda cls: RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id))
+from claudlobby.commands import operator_context
+operator_context.require_operator_context = lambda root=None: None
 from claudlobby.__main__ import main
 raise SystemExit(main(sys.argv[1:]))
 """

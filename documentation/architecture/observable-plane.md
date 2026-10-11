@@ -259,7 +259,10 @@ or printed by the command. `revoke` shows the current grant and requires typing
 `REVOKE`; the expected revision prevents revoking a replacement owner.
 
 Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
-Composed bot permissions deny these operator-only command forms as well.
+On an activated host, a change also runs the native ancestry check that the
+other operator-only commands use: it refuses before its terminal opens when the
+process runs inside a managed unit. Composed bot permissions deny these
+operator-only command forms as well.
 
 Ordinary-message authority is separately approved at the local terminal:
 

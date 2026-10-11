@@ -158,7 +158,7 @@ def dispatch(args):
             if is_decision:
                 # No identity registration or activation lock while the human
                 # considers a decision. Re-admit the same release after approval.
-                with _terminal() as terminal:
+                with _terminal(root) as terminal:
                     with mutation_admission(root, identity=RuntimeIdentity.current()) as release:
                         expected = release_id = release.release_id
                         bindings = read_selected_identity_bindings(root, selected.fleet.name,

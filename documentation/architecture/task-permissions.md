@@ -27,9 +27,12 @@ assignment and latest decision. A local operator uses
 `task permission approve|decline|revoke PERMISSION_ID --scope-sha256 DIGEST
 --reason TEXT --request-id UUID`. The CLI previews the complete record and
 requires confirmation through the operator terminal. Generated bot and timer
-contexts cannot use this door. The actor comes from the resolved local account,
-never a supplied `--by` claim. The terminal is an accident boundary, not a
-sandbox against other processes with the operator's OS privileges.
+contexts cannot use this door: it refuses their selectors and, on an activated
+host, refuses before the terminal opens when the process runs inside a managed
+unit. Composed bot permissions also deny the three decision forms. The actor
+comes from the resolved local account, never a supplied `--by` claim. The
+terminal is an accident boundary, not a sandbox against other processes with
+the operator's OS privileges.
 
 The request is bound to one host, fleet, bot and task assignment. Approval is
 valid only while that task remains open, the assignment is unchanged, and the

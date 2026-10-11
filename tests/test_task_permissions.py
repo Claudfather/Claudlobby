@@ -141,7 +141,9 @@ def test_cli_request_show_and_operator_decision_use_canonical_owner(active, monk
     from contextlib import contextmanager
     from io import StringIO
     import json
+    from pathlib import Path
     from claudlobby.commands import host_owner
+    from tests.test_host_owner import unit_ancestry_refuses
     from tests.test_task_write_cli import _call
     from tests.test_plane_owner_messages import native_receiver
     from claudlobby import message_operations
@@ -169,9 +171,16 @@ def test_cli_request_show_and_operator_decision_use_canonical_owner(active, monk
     for key in env:
         monkeypatch.delenv(key)
     _call(capsys, root, *decision, expected=4)  # redirected stdin is not operator approval
+    with monkeypatch.context() as m:
+        # Nor is a terminal inside a managed unit: unit ancestry refuses before
+        # the terminal opens or the request is read.
+        roots = unit_ancestry_refuses(m)
+        refused = _call(capsys, root, *decision, expected=4)
+    assert "outside a managed unit" in refused["error"]["message"]
+    assert [Path(where).resolve() for where in roots] == [Path(root).resolve()]
 
     @contextmanager
-    def terminal():
+    def terminal(where):
         stream = StringIO()
         def answer(cap):
             from claudlobby.runtime_admission import RuntimeIdentity, mutation_admission
