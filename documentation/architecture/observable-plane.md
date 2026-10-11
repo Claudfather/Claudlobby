@@ -409,9 +409,15 @@ claudlobby --root /path/to/data host owner serve --origin https://plane.example.
 The default socket is `DATA_ROOT/state/plane/owner.sock`. An explicit `--socket`
 can select a shorter absolute path when the host's Unix-socket path limit requires
 it. The containing directory must already be owned by the process user with mode
-0700; the socket is 0600. Existing socket paths are never deleted on startup.
-Graceful shutdown removes only the socket this invocation created. After an
-unclean exit, the operator must inspect a retained socket before removing it.
+0700 on a local filesystem; the socket is 0600. A private `SOCKET.lock` file
+serializes listeners and records the exact socket and parent-directory identity.
+After an unclean exit, startup can reclaim only that recorded socket, with the
+same ownership and permissions, after a bounded connection probe confirms no
+listener remains. Live, replaced, unrecorded or uncertain paths are preserved
+and require local inspection. Older releases and a crash before ownership is
+recorded can leave such an unrecorded socket. Graceful shutdown removes only
+this invocation's socket and clears the record; the lock file stays in place.
+This recovery does not start a service, renew authority or configure Serve.
 There is no TCP fallback. A daemon unable to reach this socket leaves access
 unavailable; it is not a reason to expose an unprotected loopback backend.
 
