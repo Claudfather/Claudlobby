@@ -70,7 +70,7 @@ _PUBLIC.update({("host", "backup", action): f"host.backup.{action}"
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
                 for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
                                "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
-                               "allow-feedback", "revoke-feedback")})
+                               "allow-feedback", "revoke-feedback", "allow-permissions", "revoke-permissions")})
 _PUBLIC.update({("plane", action): f"plane.{action}" for action in
                 ("doctor", "emit", "emit-batch", "expire", "status", "spool", "prune", "registry")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
