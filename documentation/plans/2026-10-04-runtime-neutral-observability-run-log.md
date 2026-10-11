@@ -1,7 +1,7 @@
 ---
 title: "Run log — runtime-neutral observability (#2145): P0 canaries"
 type: run-log
-status: P0 Claude legs done; §10 orders 2–6 merged, 2–3 activated on the floor host (2026-10-07); the Codex batch and Half A's activation are outstanding
+status: P0 Claude legs done; §10 orders 2–6 merged; 2–3 activated on the floor host (2026-10-07), Half A (2026-10-11); the Codex batch is outstanding
 created: 2026-10-05
 epic: 2026-10-04-runtime-neutral-observability-plan.md
 issue: Claudfather/Claudlobby#2145
@@ -295,6 +295,55 @@ and CHANGELOG carry the new names.
   moves every bot to clauDNA 0.27 at its restart. The Claudron PR that flips register row 10 to shipped follows it.
 - The Codex batch (C1–C5, C7–C9; `~/rnc-results-4.md`). It was numbered before the Half A check but hasn't run. C1's
   `session_id` answer gates Claudron's ops-log id regex, P4 and #2149.
+
+### 2026-10-10 to 2026-10-11 — Half A activated on the floor host, after two watchdog resets and a recovery
+
+Run by a Claude Code session on the operator's Mac mini, over SSH to the Pi. Full reports kept by the operator
+(`~/rnc-results-6.md`, `~/rnc-results-7.md`; logs on the Pi under `~/rnc-release-6/`).
+
+**The activation stranded (2026-10-10 18:27Z to 2026-10-11 00:22Z).** Activation `728eb2c3…` moved the floor host
+(Pi 5 on an SD card, 21 bots, four fleets) to Half A's release `r-f4555c47…` (source `c28c91c`). The host reset
+twice under its systemd runtime watchdog (`RuntimeWatchdogSec=14`):
+- **During `backup_saved`.** `PRAGMA quick_check` on the 1.19 GB plane-DB copy sorted through SQLite temp files on
+  the card for about 22 minutes (#2313). Resumed with `SQLITE_TMPDIR=/dev/shm`, the same check passed in about 4.
+- **During `bots_started`,** at the 16th bot start and load 13 to 14. Each started bot's resumed work piled onto
+  the next start (#2314).
+
+After the second reset nothing could continue the activation. The resume only re-observes recorded starts,
+`repair-start` fit one bot of 15, native admission refused every unit, and rollback has no CLI verb. No record was
+edited by hand.
+
+**The recovery (2026-10-11).** #2312 adds `host repair-after-reset`.
+- Run from a scratch CLI built from its branch (`d132dd6`), it proved the 16 recorded starts dead (the plane
+  daemon, the 14 bots with results, and one bot start with none), archived them as `kind: host_reset` and reopened
+  `ingest_started`, in one write that started nothing (17:49Z).
+- The sealed release's own `--resume` then started the plane daemon and all 21 bots fresh, about 45 s per bot, and
+  committed at 19:02:28Z. The activation is `active`. The bots were down about 24.5 hours.
+- The watchdog was off for the resume, through a drop-in removed afterwards (14 s again at 19:21Z). A longer
+  timeout isn't an option on this host: its own watchdog drop-in says the BCM2835 caps the timeout at 15 s (#2315).
+  Peak load was 17.5 during the starts and about 27 just after, with the CPU mostly idle. Nothing reset.
+
+**Half A's rollout check: PASS.**
+- `CLAUDLOBBY_AGENT_CLI=claude` in 21 of 21 `bot.conf` (control: 0).
+- The marker scrub: none of the three markers in the environ of three new bots' `claude`. Their transcripts are
+  saved, and no pane shows "Transcript saving is off".
+- clauDNA 0.27: the three current sessions are `claudna.session/2` with `agent_cli: "claude"`, and their
+  `session.opened` carries it.
+- The refusals, on a copy of one fleet's `fleet.yaml`: `agent_cli: codex` and a `runtime:` key each give rc 4
+  naming the bot. The restored copy is byte-identical to the live file.
+- The fleet-event row: `fleet notify` stored `source_ref` `fleet-events:sha:` + 32 hex.
+- All 21 bots `healthy` and `ready`; a manager and a worker answered a DM. `host doctor` is rc 6, as on 2026-10-10.
+  `plane doctor`: quarantine 27 (unchanged since 2026-10-07) and 14 reaped emits in 24 h (155 on 2026-10-10).
+
+**Runbook lessons.**
+- `fleet notify --event` takes `[a-z][a-z0-9_]{0,63}`: `rollout_check`, not `rollout-check`.
+- `event show` doesn't print `source_ref`; read it from the stored row.
+- A bot's current clauDNA session is the `open` one whose `claude_pid` is the bot's running `claude`, not the
+  newest directory: an older, closed session's directory was touched a second after that bot's new one opened.
+- `repair-after-reset --json` prints the envelope only; the resume command is the runbook's.
+
+**Follow-ups.** Claudron#226 flips register row 10 to shipped (P1 Claudlobby Task 10's Half A step). The Codex
+batch (`~/rnc-results-4.md`) is still outstanding.
 
 ## Plan changes this log caused (2026-10-05)
 
