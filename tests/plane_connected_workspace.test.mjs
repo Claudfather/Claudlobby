@@ -479,8 +479,15 @@ test('overview completed before source loss cannot consume the later recovery re
   stream.close();h.api.dispose();
 });
 
-test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
+test('setup-only computer opens its launched team, keeps other hosts separate and fences account loss',async t=>{
   const h=harness(),a=refs[0].endpoint_origin;
+  const previous=Object.getOwnPropertyDescriptor(globalThis,'localStorage'),saved=new Map();
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)}});
+  t.after(()=>{h.api.dispose();if(previous)Object.defineProperty(globalThis,'localStorage',previous);else delete globalThis.localStorage;});
+  const opened=[];h.mount({onOpenTeam(room,roster){opened.push(room);assert.equal(roster.state,'ok');return true;}});
+  const original={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
+  const approved={version:1,template:'revenue-web-app',fleet:'team',repository:'example-org/shop',release_id:'r-'+'b'.repeat(64),
+    release_seal:'c'.repeat(64),generation:id(9),expires_at:1800003600,request:original};
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
     setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
@@ -489,7 +496,25 @@ test('setup-only computer stays visible without blocking the other admitted dash
   const fleets=await h.api.jget('/api/fleets');
   assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
-  h.api.dispose();
+  h.overrides.set(a+'/api/owner/connected/setup/context',()=>reply(200,approved));
+  h.overrides.set(a+'/api/owner/connected/setup/receipt',()=>reply(200,{...original,version:1,state:'active'}));
+  const panel=h.ui.get('owner-session').children[2].children.find(e=>e.attributes['aria-label']?.startsWith('First-team setup'));
+  const click=async title=>{panel.children.find(e=>e.textContent===title).click();await flush();};
+  const open=panel.children.find(e=>e.textContent==='Open team');assert.equal(open.disabled,true);
+  await click('Check computer setup');await click('Check launch status');assert.equal(open.disabled,false);
+  h.overrides.set(a+'/api/owner/connected/status',()=>reply(200,{version:1,state:'ready',expires_in:900,
+    read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
+  const roster={fleets:[{alias:'team',uid:fleetUID,bots:3,provisional:0}]};
+  const fleetDoor=a+'/api/owner/connected/read/fleets';h.overrides.set(fleetDoor,()=>reply(200,ok(roster)));
+  await click('Open team');assert.deepEqual(opened,[sourceA+' / team']);
+  assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(open.disabled,false);
+  // A healthy second computer cannot make an unavailable first computer's team open.
+  h.overrides.set(fleetDoor,()=>reply(503,{}));await click('Open team');assert.equal(opened.length,1);
+  const held=deferred();h.overrides.set(fleetDoor,()=>held.promise);open.click();await flush();
+  h.metadataStatus=401;await h.api.checkAccount();held.resolve(reply(200,ok(roster)));await flush();
+  assert.equal(opened.length,1);
+  assert.equal(h.calls.filter(c=>/\/setup\/(launch|repository)$|\/actions\/(prepare|send)$/.test(c.url)).length,0);
 });
 
 const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
