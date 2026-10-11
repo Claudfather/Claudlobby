@@ -32,6 +32,8 @@ def _issuer_token():
 
 def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):
     from copy import deepcopy
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
     from fastapi.testclient import TestClient
     from claudlobby.github_issuer import GrantStore, create_app
 
@@ -47,16 +49,20 @@ def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):
     output = capsys.readouterr()
     assert credential not in output.out + output.err
     assert json.loads(output.out)["command"] == "host.github-app.issuer.approve"
-    calls = []
+    calls, provider_expiries = [], []
     def mint(binding, repository_id):
         calls.append((binding, repository_id))
-        return _issuer_token()
+        result = _issuer_token()
+        result["_provider_expires_at"] = datetime.fromisoformat(result["expires_at"]).timestamp() + 45
+        provider_expiries.append(datetime.fromtimestamp(result["_provider_expires_at"], timezone.utc).isoformat())
+        return result
     client = TestClient(create_app(store, mint))
     payload = {"schema": 1, "binding": grant["binding"], "revision": grant["binding"]["revision"]}
     headers = {"Authorization": "Bearer " + credential}
     result = client.post("/v1/github/token", json=payload, headers=headers)
     assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
     assert result.json()["revision"] == payload["revision"]
+    assert 0 < (datetime.fromisoformat(result.json()["expires_at"]) - parsedate_to_datetime(result.headers["date"])).total_seconds() <= 3600
     assert calls == [(grant["binding"], 123)]
     # A valid credential cannot assert authority over another bot/repo/App/scope.
     for key, value in (("bot_id", "other"), ("repo", "other/service"), ("installation_id", 35),
@@ -71,7 +77,7 @@ def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):
     assert main(["host", "github-app", "issuer", "revoke", "--json", "--store", str(store.path), "--grant-id", grant["grant_id"]]) == 0
     revoked = json.loads(capsys.readouterr().out)["data"]
     assert revoked["new_issuance"] == "blocked" and revoked["host_enforcement"] == "unconfirmed"
-    assert revoked["residual_token_expires_at"] == result.json()["expires_at"]
+    assert revoked["residual_token_expires_at"] == provider_expiries[0]
     assert client.post("/v1/github/token", json=payload, headers=headers).status_code == 403
     assert len(calls) == 1
     assert credential.encode() not in store.path.read_bytes()
@@ -117,9 +123,16 @@ def test_issuer_scope_checks_and_revoke_serializes_with_mint(tmp_path):
 
 
 def test_issuer_minter_uses_server_key_repository_id_and_no_proxy(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from email.utils import formatdate
     import httpx
     import jwt
     from claudlobby.github_issuer import GithubMinter
+
+    # GitHub is 45 seconds ahead of the issuer. A full-lifetime token must
+    # still work, while retaining the actual provider expiry for revocation.
+    provider_now = int(time.time()) + 45
+    raw = {**_issuer_token(), "expires_at": datetime.fromtimestamp(provider_now + 3600, timezone.utc).isoformat()}
 
     key = tmp_path / "app.pem"
     key.write_bytes(b"test-key-only")
@@ -134,9 +147,12 @@ def test_issuer_minter_uses_server_key_repository_id_and_no_proxy(tmp_path, monk
             assert url == "https://api.github.com/app/installations/34/access_tokens"
             assert headers["Authorization"] == "Bearer test-jwt"
             assert json == {"repository_ids": [123], "permissions": {"contents": "read"}}
-            return httpx.Response(201, json=_issuer_token(), request=httpx.Request("POST", url))
+            return httpx.Response(201, json=raw, headers={"Date": formatdate(provider_now, usegmt=True)}, request=httpx.Request("POST", url))
     monkeypatch.setattr(httpx, "Client", Client)
-    assert GithubMinter({12: key})(_issuer_grant()["binding"], 123)["token"] == "ghs_example_only"
+    result = GithubMinter({12: key})(_issuer_grant()["binding"], 123)
+    assert result["token"] == "ghs_example_only"
+    assert 3590 < datetime.fromisoformat(result["expires_at"]).timestamp() - time.time() < 3600
+    assert result["_provider_expires_at"] == provider_now + 3600
 
 
 def test_setup_uses_packaged_native_owner_and_does_not_echo_secret(tmp_path, monkeypatch, capsys):

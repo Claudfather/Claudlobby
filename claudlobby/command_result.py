@@ -185,9 +185,11 @@ def _command_from_argv(tokens: list[str]) -> str | None:
             index += 1
             continue
         if token in {part[0] for part in _PUBLIC}:
-            return _PUBLIC.get(tuple(tokens[index:index + 4]),
-                               _PUBLIC.get(tuple(tokens[index:index + 3]),
-                                           _PUBLIC.get(tuple(tokens[index:index + 2]), token)))
+            for width in (4, 3, 2):
+                route = _PUBLIC.get(tuple(tokens[index:index + width]))
+                if route:
+                    return route
+            return token
         return None
     return None
 

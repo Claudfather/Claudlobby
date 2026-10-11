@@ -58,7 +58,8 @@ def _issuer(args) -> CommandOutput:
                     raise ValueError("invalid App key mapping")
                 keys[int(app_id)] = _private_file(path)
             _private_file(store.path)
-            uvicorn.run(create_app(store, GithubMinter(keys)), host="127.0.0.1", port=args.port, access_log=False)
+            uvicorn.run(create_app(store, GithubMinter(keys)), host="127.0.0.1", port=args.port,
+                        access_log=False, date_header=False)
             result = {"issuer": "stopped"}
     except ImportError as exc:
         raise CommandFailure("unavailable", "Install the plane-ui extra to run the issuer") from exc
