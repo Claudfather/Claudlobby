@@ -274,6 +274,8 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
                 if item["phase"] == "bots" and os.path.lexists(declaration.working_directory):
                     raise ActivationError("bootstrap refuses pre-existing bot runtime directories")
         rank, _ = _roster(plan, declarations, package)
+        from .plane.owner_service import preflight as owner_service_preflight
+        owner_service_preflight(starts)
         if sum(item["phase"] == "ingest" and item["enroll"] for _, item in declarations) != 1:
             raise ActivationError("bootstrap requires exactly one declared ingest unit")
         # An empty original roster cannot supply the caller checks used by the
@@ -789,6 +791,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if blocked:
                 raise CandidateDisabledOverride(tuple(blocked))
         _preflight_candidate_placement(inventory, candidates, install_directory)
+        from .plane.owner_service import preflight as owner_service_preflight, managed_listeners
+        owner_service_preflight(starts, managed=managed_listeners(source_plan, inventory))
         retired_units = tuple(unit for unit in inventory.units
                               if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)
@@ -929,6 +933,9 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
         for entry in startable:
             source = entry["source"]
             _, _, unit = starts[source]
+            if source not in prior_effects:
+                from .plane.owner_service import preflight as owner_service_preflight
+                owner_service_preflight({source: starts[source]})
             fence = prior_effects[source]["fence"] if source in prior_effects else None
             readiness = (lambda: _ingest_ready(root, release)) if phase == "ingest" else None
             if source in prior_effects:
