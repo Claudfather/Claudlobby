@@ -11,10 +11,15 @@ from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_owner_feedback import gateway  # noqa: F401
 from tests.test_plane_owner_feedback_http import feedback_http, post, counts  # noqa: F401
 from tests.test_task_permissions import SCOPE
+from tests.test_plane_owner_messages import native_receiver
 
 
 @pytest.fixture
-def permissions_http(feedback_http):
+def permissions_http(feedback_http, monkeypatch):
+    from claudlobby import message_operations
+    from claudlobby.commands import message_write
+    monkeypatch.setattr(message_operations, 'read_recipient_box', lambda *a, **k: None)
+    monkeypatch.setattr(message_write, '_RECEIPT_WAIT_S', 0)
     _, client, adapter, reader, ctx, options, _ = feedback_http
     bot = replace(ctx, caller=ctx.bots['manager'], caller_fleet_uid=ctx.fleet_uid)
     permission = task_permissions.request_permission(bot, str(uuid4()), options['task_id'],
@@ -50,6 +55,7 @@ def prepare(fixture, decision='approve'):
 
 def test_http_decision_lost_response_receipt_and_revocation(permissions_http, monkeypatch):
     from claudlobby.plane import emit_api
+    calls = native_receiver(monkeypatch)
     client, adapter, _, ctx, permission, _, context = permissions_http
     row = prepare(permissions_http)
     emit = emit_api.emit_batch
@@ -62,13 +68,14 @@ def test_http_decision_lost_response_receipt_and_revocation(permissions_http, mo
     assert sent.json()['status'] == 'recorded'
     assert sent.json()['permission']['state'] == 'approved'
     assert sent.json()['permission']['decided_by']['uid'] == ctx.caller.uid
-    assert sent.json()['execution'] == sent.json()['notification'] == 'not_requested'
+    assert sent.json()['execution'] == 'not_requested'
+    assert sent.json()['notification'] == 'unknown' and calls == []
     before = counts(adapter)
     assert post(client, 'receipt', row).json() == sent.json()
     assert counts(adapter) == before  # Inspection never resends or repairs.
     monkeypatch.setattr(emit_api, 'emit_batch', emit)
     assert post(client, 'send', {**row, 'body': 'Reviewed these exact terms'}).json() == sent.json()
-    assert counts(adapter) == before
+    assert counts(adapter) == before and calls == []
     revoke = prepare(permissions_http, 'revoke')
     revoked = post(client, 'send', {**revoke, 'body': 'Reviewed these exact terms'})
     assert revoked.json()['permission']['state'] == 'revoked'
@@ -78,7 +85,8 @@ def test_http_decision_lost_response_receipt_and_revocation(permissions_http, mo
     assert post(client, 'prepare', {**proposal(permissions_http), 'body': 'Again'}).status_code == 403
 
 
-def test_scope_or_grant_change_cannot_decide_and_receipt_never_claims_other_intent(permissions_http):
+def test_scope_or_grant_change_cannot_decide_and_receipt_never_claims_other_intent(permissions_http, monkeypatch):
+    native_receiver(monkeypatch)
     client, adapter, reader, ctx, permission, grant, _ = permissions_http
     row = prepare(permissions_http)
     before = counts(adapter)
@@ -98,6 +106,41 @@ def test_scope_or_grant_change_cannot_decide_and_receipt_never_claims_other_inte
     assert post(client, 'send', {**row, 'body': 'Reviewed these exact terms'}).status_code == 403
     assert adapter.access.authorize_feedback(reader.token, reader.principal,
         host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid)
+
+
+@pytest.mark.parametrize('received,altered,status', [
+    (True, False, 'received'), (False, False, 'unknown'), (True, True, 'failed'),
+])
+def test_decision_notifies_requester_once_without_message_grant(permissions_http, monkeypatch, received, altered, status):
+    from claudlobby.plane.owner_access import AccessDenied
+    from claudlobby.request_queries import read_request
+    from uuid import UUID, uuid5
+    client, adapter, reader, ctx, permission, _, _ = permissions_http
+    calls = native_receiver(monkeypatch, received=received, altered=altered)
+    with pytest.raises(AccessDenied):
+        adapter.access.authorize_message(reader.token, reader.principal,
+            host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid)
+    row = prepare(permissions_http)
+    sent = post(client, 'send', {**row, 'body': 'Reviewed these exact terms'}).json()
+    assert sent['status'] == 'recorded' and sent['permission']['state'] == 'approved'
+    assert sent['notification'] == status and sent['execution'] == 'not_requested'
+    assert len(calls) == 1
+    child = str(uuid5(UUID(row['request_id']), 'claudlobby.permission.notification.v1'))
+    notice = read_request(ctx.root, ctx.fleet_uid, child)
+    assert notice.recipient_uid == permission.requester.uid and notice.caller_uid == ctx.caller.uid
+    assert notice.message_id == calls[0][0]
+    assert all(text in calls[0][1] for text in [permission.permission_id, permission.task_id, row['request_id'], 'Decision: approve'])
+    before = counts(adapter)
+    assert post(client, 'receipt', row).json() == sent
+    assert post(client, 'send', {**row, 'body': 'Reviewed these exact terms'}).json() == sent
+    assert counts(adapter) == before and len(calls) == 1
+    revoke = prepare(permissions_http, 'revoke')
+    revoked = post(client, 'send', {**revoke, 'body': 'Reviewed these exact terms'}).json()
+    assert revoked['permission']['state'] == 'revoked' and len(calls) == 2
+    assert 'Decision: revoke' in calls[1][1]
+    recovered = post(client, 'receipt', row).json()
+    assert recovered['permission']['state'] == 'revoked' and recovered['notification'] == status
+    assert len(calls) == 2
 
 
 def test_generated_caller_and_source_loss_refuse_permission_reads(permissions_http, monkeypatch):

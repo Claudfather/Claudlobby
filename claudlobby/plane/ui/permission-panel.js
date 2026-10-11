@@ -61,7 +61,10 @@ export function createPermissionPanel({api, storage}) {
     state.accept(request,receipt);
     context = {...context,permissions:context.permissions.map(p => p.permission_id === receipt.permission.permission_id ? receipt.permission : p)};
     form = null;
-    note = `Decision recorded. Permission is currently ${receipt.permission.state}. Check task reports for execution results.`;
+    const delivery = receipt.notification === 'received' ? 'The requesting bot received the notice.'
+      : receipt.notification === 'not_requested' ? 'This host did not request a bot notification.'
+      : `Bot notification is unconfirmed. Decision receipt: ${request.request_id}.`;
+    note = `Decision recorded. Permission is currently ${receipt.permission.state}. ${delivery} Check task reports for execution results.`;
   }
   async function send(event) {
     event.preventDefault();
