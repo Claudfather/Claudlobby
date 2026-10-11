@@ -9,6 +9,7 @@ The [website boundary](website-boundary.md) maps the shared operational UI and h
 
 ```
 claudlobby/
+  task_permissions.py — Canonical task-scoped permission requests, explicit human decisions and exact bot/scope checks over existing Plane facts; `commands/task_permissions.py` owns CLI admission and local terminal confirmation. No effect execution. Reference: `documentation/architecture/task-permissions.md`.
   github_consent.py   — Issuer-owned repository selection and consent share PKCE and same-browser callbacks. Selection downloads nonsecret configuration only; exact App/installation/repository verification separately approves bot grants. Personal GitHub tokens remain in memory.
   github_selection.py — Finite nonsecret repository-selection format and managed setup policy; URL normalization, trusted-origin matching and fixed scope/env names. Downloaded configuration grants no authority.
   github_enrollment.py — Account-bound managed GitHub enrollment: exact signed request and credential digests stage retryable consent; host secrets stay local and GitHub consent remains required.
