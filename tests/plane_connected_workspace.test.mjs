@@ -504,7 +504,7 @@ function setupHarness(options={}) {
     async setupLaunch(input){assert.equal(saved.has('test'),true);calls.push(['launch',input]);throw new Error('lost');},
     async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:1,state:'active',recorded_activation:{}};},...options.client};
   const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
-  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:()=>1800000000});
+  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:options.now??(()=>1800000000)});
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
 }
@@ -573,4 +573,23 @@ test('expired or revoked browser receipt retains original identifiers with local
   assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+
+
+test('repository preparation requires approved active launch and retries without a second activation',async()=>{
+  let clock=1800000000;
+  const h=setupHarness({now:()=>clock}),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const button=panel.children.find(e=>e.textContent==='Prepare repository');
+  h.context.can_prepare_repository=true;h.context.repository='Example-Org/Shop';h.preview.repository=h.context.repository;
+  h.client.setupRepository=async input=>{h.calls.push(['repository',input]);return {...input,version:1,repository:h.context.repository,
+    checkouts:['lead','engineer','reviewer'].map(bot=>({bot,repository:h.context.repository.toLowerCase(),state:'existing'}))};};
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(button.disabled,true);assert.equal(await h.api.run('repository'),false);
+  await h.api.run('receipt');assert.equal(button.disabled,false);
+  assert.equal(await h.api.run('repository'),true);assert.match(h.api.snapshot().note,/Working copies are available/);
+  assert.equal(await h.api.run('repository'),true);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  assert.ok(h.calls.filter(c=>c[0]==='repository').every(c=>JSON.stringify(c[1])===JSON.stringify(h.pending)));
+  clock=h.context.expires_at;await h.api.run('receipt');
+  assert.equal(button.disabled,true);assert.equal(await h.api.run('repository'),false);h.api.dispose();
 });

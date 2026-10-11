@@ -8,6 +8,7 @@ export function createGuidedSetup({client, storage, storageKey,
   newUUID = () => globalThis.crypto.randomUUID(), now = () => Date.now()/1000, onChange = () => {}}) {
   let context = null, plan = null, pending = null, conflicts = [], goal = '', planGoal = '', note = '', busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
+  let teamActive = false;
   try { if (storage === undefined) storage = globalThis.localStorage; const text = storage?.getItem(storageKey); if (text && text.length < 8192) { const value = JSON.parse(text); if (request(value)) pending = Object.freeze({...value});
     else if (value && Object.keys(value).sort().join() === 'conflicts,pending' && (value.pending === null || request(value.pending))
         && Array.isArray(value.conflicts) && value.conflicts.length <= 16 && value.conflicts.every(request)) {
@@ -22,7 +23,7 @@ export function createGuidedSetup({client, storage, storageKey,
   }
   function changed() { render(); onChange(); }
   function connectionChanged(next) {
-    if (next.epoch !== state.epoch || next.state !== state.state) { epoch++; context = null; plan = null; }
+    if (next.epoch !== state.epoch || next.state !== state.state) { epoch++; context = null; plan = null; teamActive = false; }
     state = next; changed();
   }
   async function run(operation) {
@@ -41,7 +42,7 @@ export function createGuidedSetup({client, storage, storageKey,
             || !value.github.permissions || Array.isArray(value.github.permissions)
             || typeof value.github.permissions !== 'object'
             || Object.values(value.github.permissions).some(level => !['read','write'].includes(level)))) throw new Error();
-        context = Object.freeze({...value}); plan = null;
+        context = Object.freeze({...value}); plan = null; teamActive = false;
         if (pending && (pending.generation !== value.generation || value.request
             && !['generation','plan_id','request_id'].every(key => pending[key] === value.request[key]))) {
           retainConflict(pending);
@@ -76,17 +77,34 @@ export function createGuidedSetup({client, storage, storageKey,
         const original = pending, result = await client.setupReceipt(original);
         if (disposed || ticket !== epoch || original !== pending || !active()) return false;
         receipt(result);
+      } else if (operation === 'repository') {
+        if (!pending || !teamActive || context?.can_prepare_repository !== true || context.expires_at <= now()) return false;
+        note = 'Preparing working copies for your team. This can take a few minutes; keep this page open.'; changed();
+        const original = pending, result = await client.setupRepository(original);
+        if (disposed || ticket !== epoch || original !== pending || !active()) return false;
+        const repository = context.repository.toLowerCase();
+        if (!result || result.version !== 1 || !['generation','plan_id','request_id'].every(k => result[k] === original[k])
+            || typeof result.repository !== 'string' || result.repository.toLowerCase() !== repository
+            || !Array.isArray(result.checkouts) || !result.checkouts.length
+            || result.checkouts.some(row => !['prepared','existing'].includes(row.state)
+              || typeof row.repository !== 'string' || row.repository.toLowerCase() !== repository)) throw new Error();
+        note = 'Working copies are available for your team. Open its dashboard to give the lead the first task. Application dependencies and setup scripts have not been run.';
       } else return false;
       return true;
     } catch {
-      if (!disposed && ticket === epoch) note = pending ? 'Activation outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
+      if (!disposed && ticket === epoch) note = operation === 'repository'
+        ? 'Repository preparation could not be confirmed and may still be running on your computer. Wait a few minutes before retrying preparation; existing working copies are preserved. If it keeps failing, check the selected connection locally. Do not launch the team again.'
+        : pending ? 'Activation outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
       return false;
     } finally { busy = false; if (!disposed) changed(); }
   }
   function receipt(value) {
     if (!value || value.version !== 1 || !pending || !['generation','plan_id','request_id'].every(k => value[k] === pending[k])
         || !['unknown','prepared','activating','rolling_back','rolled_back','active'].includes(value.state)) throw new Error();
-    note = value.state === 'active'
+    teamActive = value.state === 'active';
+    note = teamActive && context?.can_prepare_repository === true
+      ? 'Team started. Prepare its repository below, then check connection for the dashboard.'
+      : value.state === 'active'
       ? 'Team started. Check connection for its dashboard. Provider and repository access have not been tested here.'
       : value.state === 'activating' || value.state === 'prepared'
       ? 'Still checking. Inspect the original setup receipt; this never repeats or resumes setup.'
@@ -106,7 +124,8 @@ export function createGuidedSetup({client, storage, storageKey,
     for (const [operation,button] of Object.entries(controls)) button.disabled = !active() || busy
       || operation === 'preview' && (!context || !!pending || !goal.trim() || context.expires_at <= now())
       || operation === 'launch' && (!context || !plan || !!pending || goal !== planGoal || plan.expires_at <= now() || context.expires_at <= now())
-      || operation === 'receipt' && !pending;
+      || operation === 'receipt' && !pending
+      || operation === 'repository' && (!teamActive || !pending || context?.can_prepare_repository !== true || context.expires_at <= now());
   }
   function mountPanel({document,element}) {
     const heading = document.createElement('strong'); heading.textContent = 'Create your team'; element.append(heading);
@@ -116,7 +135,7 @@ export function createGuidedSetup({client, storage, storageKey,
     area.placeholder = 'What should your team accomplish? For example, simplify signup and add tests for the checkout flow.';
     area.setAttribute('aria-label','Approved repository goal'); area.addEventListener('input',() => { goal = area.value; changed(); }); element.append(area);
     const controls = {};
-    for (const [operation,title] of [['context','Check computer setup'],['preview','Preview team'],['launch','Launch team'],['receipt','Check launch status']]) {
+    for (const [operation,title] of [['context','Check computer setup'],['preview','Preview team'],['launch','Launch team'],['receipt','Check launch status'],['repository','Prepare repository']]) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = title; button.className = 'pill ghost';
       button.addEventListener('click',() => { if (!button.disabled) void run(operation); }); element.append(button); controls[operation] = button;
     }

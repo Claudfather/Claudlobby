@@ -85,6 +85,8 @@ def test_http_plan_exact_launch_pure_original_receipt_and_partial_source_transit
         assert status.status_code==200 and status.json()['state']=='setup_only' and 'read_profile' not in status.json()
         assert post(client,'receipt',token,request).json()==result.json()
         assert post(client,'launch',token,request).json()==result.json() and len(calls)==1
+        assert post(client,'repository',token,request).status_code==403  # Legacy grant never acquired clone authority.
+        assert post(client,'repository',token,{**request,'repository':'other/repo'}).status_code==403
         assert post(client,'receipt',token,{**request,'request_id':str(uuid4())}).status_code==403
         assert post(client,'preview',token,{'generation':grant.generation,'goal':'Another goal'}).status_code==403
         assert client.get('/api/owner/connected/read/overview',headers=headers(token)).status_code in (403,503)

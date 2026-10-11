@@ -464,3 +464,115 @@ def test_plan_only_parser_needs_no_native_directory_and_dispatch_has_no_activati
     args.json = False
     _setup_parsers._dispatch(args)
     assert args.activation_id is None and observed["request_id"] is None
+
+
+@pytest.fixture
+def repository_context(tmp_path):
+    import json
+    from claudlobby.config import load_fleet_snapshot
+    from claudlobby.paths import Paths
+    from claudlobby.resources import get_resources
+    from claudlobby.composer import compose_github_bindings, GITHUB_BINDINGS_FILENAME
+
+    root = tmp_path.resolve() / "host with spaces"
+    manifest = root / "local/shop/fleet.yaml"
+    manifest.parent.mkdir(parents=True)
+    source = root / "connections.yaml"
+    source.write_text(json.dumps({"fleet": {"github": {"connections": {"team-app": {
+        "name": "Team App", "mode": "independent", "app_id": 123, "installation_id": 456,
+        "permissions": {"contents": "write"}, "credential_refs": {"private_key_path_env": "TEAM_APP_KEY"}}}}}}))
+    content = setup._template_config("revenue-web-app", "shop", "example-org/shop", "Improve signup",
+                                     github_policy=setup._template_github(source, "team-app"))
+    manifest.write_bytes(content)
+    fleet, _ = load_fleet_snapshot(manifest, content, None)
+    paths = Paths(root, package=get_resources(), fleet_dir=manifest.parent)
+    bot = paths.bot_runtime("lead")
+    (bot / "data").mkdir(parents=True)
+    document, _ = compose_github_bindings(fleet.bots["lead"], fleet)
+    (bot / GITHUB_BINDINGS_FILENAME).write_text(document)
+    (manifest.parent / ".env").write_text("TEAM_APP_KEY=/private/example.pem\n")
+    return SimpleNamespace(paths=paths, fleet=fleet)
+
+
+def test_repository_prepare_real_git_preserves_dirty_work_and_refuses_foreign_origin(repository_context, tmp_path, monkeypatch):
+    from claudlobby import project_checkout as checkout
+    context = repository_context
+    bot = context.paths.bot_runtime("lead")
+    binding = checkout.resolve_github_binding(context.fleet, "lead", "example-org/shop")
+    env = checkout._environment(context, "lead", bot, binding)
+    source = tmp_path / "source"
+    source.mkdir()
+    assert checkout._git(["init", str(source)], env=env).returncode == 0
+    (source / "README.md").write_text("Local repository fixture\n")
+    assert checkout._git(["add", "README.md"], env=env, cwd=source).returncode == 0
+    assert checkout._git(["-c", "user.name=Example", "-c", "user.email=example@example.test", "commit", "-m", "fixture"], env=env, cwd=source).returncode == 0
+    real_git = checkout._git
+    clones = []
+
+    def local_transport(args, **kwargs):
+        if "clone" in args:
+            clones.append(args)
+            assert kwargs["env"]["TEAM_APP_KEY"] == "/private/example.pem"
+            assert "GITHUB_TOKEN" not in kwargs["env"]
+            assert args[-2] == "https://github.com/example-org/shop.git"
+            # Exercise Git and filesystem publication; substitute only the transport.
+            result = real_git([*args[:-2], str(source), args[-1]], **kwargs)
+            assert result.returncode == 0, result.stderr
+            assert real_git(["remote", "set-url", "origin", args[-2]], env=kwargs["env"], cwd=args[-1]).returncode == 0
+            return result
+        return real_git(args, **kwargs)
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-must-not-be-forwarded")
+    monkeypatch.setattr(checkout, "_git", local_transport)
+    first = checkout.prepare_checkout(context, "lead", "Example-Org/Shop")
+    target = Path(first["path"])
+    assert first["state"] == "prepared" and (target / "README.md").exists()
+    (target / "README.md").write_text("Uncommitted work\n")
+    assert checkout.prepare_checkout(context, "lead", "example-org/shop")["state"] == "existing"
+    assert (target / "README.md").read_text() == "Uncommitted work\n" and len(clones) == 1
+    assert not list(target.parent.glob(".prepare-*"))
+    real_git(["remote", "set-url", "origin", "https://github.com/other/repo.git"], env=env, cwd=target)
+    with pytest.raises(checkout.CheckoutError, match="origin"):
+        checkout.prepare_checkout(context, "lead", "example-org/shop")
+    assert (target / "README.md").read_text() == "Uncommitted work\n"
+    with pytest.raises(ValueError):
+        checkout.prepare_checkout(context, "lead", "other/repo")
+    assert len(clones) == 1
+
+
+def test_repository_prepare_refuses_changed_binding_and_cleans_failed_clone(repository_context, monkeypatch):
+    from claudlobby import project_checkout as checkout
+    context = repository_context
+    bot = context.paths.bot_runtime("lead")
+    monkeypatch.setattr(checkout, "_git", lambda *a, **k: SimpleNamespace(returncode=1))
+    with pytest.raises(checkout.CheckoutError, match="clone failed"):
+        checkout.prepare_checkout(context, "lead", "example-org/shop")
+    assert not (bot / "projects/shop").exists()
+    assert not list((bot / "projects").glob(".prepare-*"))
+    (bot / checkout.GITHUB_BINDINGS_FILENAME).write_text("changed")
+    with pytest.raises(checkout.CheckoutError, match="differs from the active plan"):
+        checkout.prepare_checkout(context, "lead", "example-org/shop")
+
+
+def test_repository_prepare_public_cli_uses_active_context_and_mutation_admission(repository_context, monkeypatch, capsys):
+    from contextlib import contextmanager
+    from claudlobby.__main__ import main
+    from claudlobby import active_config, runtime_admission, project_checkout
+    context = repository_context
+    calls = []
+    @contextmanager
+    def admission(root, **kwargs):
+        calls.append("admitted")
+        yield SimpleNamespace(release_id="r-" + "a" * 64)
+        calls.append("released")
+    def prepare(ctx, bot, repo):
+        assert ctx is context and calls == ["admitted"]
+        assert bot == "lead" and repo == "example-org/shop"
+        return {"bot": bot, "repository": repo, "path": "/example/projects/shop", "state": "prepared"}
+    monkeypatch.setattr(runtime_admission, "mutation_admission", admission)
+    monkeypatch.setattr(active_config, "resolve_active_context", lambda **kw: context)
+    monkeypatch.setattr(project_checkout, "prepare_checkout", prepare)
+    assert main(["--root", str(context.paths.root), "--fleet", "shop", "--json", "bot", "prepare-repository", "lead", "--repository", "example-org/shop"]) == 0
+    assert calls == ["admitted", "released"]
+    import json
+    assert json.loads(capsys.readouterr().out)["command"] == "bot.prepare-repository"
