@@ -255,6 +255,7 @@ def test_issuer_consent_verifies_provider_user_installation_and_repo_admin(tmp_p
     flow, grant = _consent_flow(tmp_path), _issuer_grant()
     installation = {"id": 34, "app_id": 12, "permissions": {"contents": "read"}, "suspended_at": None}
     repository = {"id": 123, "full_name": "example/service", "permissions": {"admin": True}}
+    discovery = False
     class Client:
         def __init__(self, **kwargs):
             assert kwargs == {"trust_env": False, "follow_redirects": False, "timeout": 15}
@@ -262,9 +263,11 @@ def test_issuer_consent_verifies_provider_user_installation_and_repo_admin(tmp_p
         def __exit__(self, *args): pass
         def post(self, url, *, headers, data):
             assert url == "https://github.com/login/oauth/access_token"
-            assert data == {"client_id": "Iv1.example", "client_secret": "example-client-secret",
+            expected = {"client_id": "Iv1.example", "client_secret": "example-client-secret",
                             "redirect_uri": flow.provider.origin + "/v1/github/callback", "code": "example-code",
                             "code_verifier": "v" * 43, "repository_id": 123}
+            if discovery: expected.pop("repository_id")
+            assert data == expected
             return httpx.Response(200, json={"access_token": "ghu_example", "refresh_token": "unused"}, request=httpx.Request("POST", url))
         def get(self, url, *, headers):
             assert headers["Authorization"] == "Bearer ghu_example"
@@ -284,6 +287,61 @@ def test_issuer_consent_verifies_provider_user_installation_and_repo_admin(tmp_p
             flow.provider.verify("example-code", "v" * 43, grant)
         target.clear()
         target.update(before)
+    from claudlobby.github_selection import PERMISSIONS
+    discovery = True
+    installation['permissions'] = dict(PERMISSIONS)
+    selected = flow.provider.resolve_repository('example-code','v'*43,'https://github.com/Example/Service.git')
+    assert selected == {'version':1,'app_id':12,'installation_id':34,'repository_id':123,
+        'repository':'example/service','issuer_origin':flow.provider.origin,'permissions':PERMISSIONS}
+    repository['permissions']['admin'] = False
+    with pytest.raises(IssuanceDenied):
+        flow.provider.resolve_repository('example-code','v'*43,'example/service')
+
+
+def test_repository_selection_is_same_browser_configuration_and_never_a_grant(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from starlette.testclient import TestClient
+    from claudlobby.github_issuer import create_app
+    from claudlobby.github_selection import PERMISSIONS, read_selection
+    flow = _consent_flow(tmp_path)
+    flow.store.initialize()
+    selected = {'version':1,'app_id':12,'installation_id':34,'repository_id':123,
+        'repository':'example/service','issuer_origin':flow.provider.origin,'permissions':dict(PERMISSIONS)}
+    calls=[]
+    def resolve(code, verifier, repository):
+        calls.append((code, repository)); return selected
+    flow.provider.resolve_repository = resolve
+    app = create_app(flow.store,lambda *_:pytest.fail('discovery minted a token'),flow)
+    client = TestClient(app,base_url=flow.provider.origin,follow_redirects=False)
+    stranger = TestClient(app,base_url=flow.provider.origin,follow_redirects=False)
+    location=client.get('/v1/github/repositories').headers['location']
+    ticket=parse_qs(urlsplit(location).query)['ticket'][0]
+    assert 'Choose your repository' in client.get(location).text
+    data={'ticket':ticket,'repository':'https://github.com/Example/Service.git/'}
+    assert client.post('/v1/github/connect',data=data,headers={'Origin':'https://other.example'}).status_code==403
+    start=client.post('/v1/github/connect',data=data,headers={'Origin':flow.provider.origin})
+    state=parse_qs(urlsplit(start.headers['location']).query)['state'][0]
+    callback='/v1/github/callback?state='+state+'&code=selection-code'
+    assert stranger.get(callback).status_code==403 and calls==[]
+    assert client.get(callback).status_code==303
+    assert client.get(callback).status_code==403 and calls==[('selection-code','example/service')]
+    assert stranger.get(location).status_code==403
+    download=location+'&download=1'
+    assert stranger.get(download).status_code==403
+    assert 'Repository selected' in client.get(location).text
+    response=client.get(download)
+    assert response.status_code==200 and response.json()==selected
+    assert response.headers['cache-control']=='no-store' and 'attachment' in response.headers['content-disposition']
+    file=tmp_path/'selection.json';file.write_bytes(response.content)
+    repo,policy,enrollment=read_selection(file,flow.provider.origin)
+    assert repo=='example/service' and enrollment=={'issuer_origin':flow.provider.origin,'repository_id':123}
+    assert json.loads(policy)['connections']['managed']['repos']==[repo]
+    with pytest.raises(ValueError):read_selection(file,'https://other.example')
+    with flow.store.transaction() as db:
+        assert db.execute('SELECT count(*) FROM github_grants').fetchone()[0]==0
+        assert tuple(db.execute('SELECT status,verifier,state_digest FROM github_consent').fetchone())==('selected',None,None)
+        db.execute('UPDATE github_consent SET expires_at=0 WHERE ticket=?',(ticket,))
+    assert client.get(download).status_code==403
 
 
 def test_issuer_consent_conflicts_fail_before_login_or_require_new_invitation(tmp_path):

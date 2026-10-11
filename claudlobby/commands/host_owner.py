@@ -330,8 +330,21 @@ def dispatch(args):
                     repository_id = getattr(args,"github_repository_id",None)
                     enrollment = None if issuer is None and repository_id is None else {
                         "issuer_origin":issuer,"repository_id":repository_id}
+                    repository = args.repository
+                    selection_file = getattr(args,"github_selection",None)
+                    if selection_file is not None:
+                        from ..github_selection import read_selection, repository_input
+                        if github_policy is not None or repository_id is not None:
+                            raise CommandFailure("invalid_argument", "--github-selection cannot be combined with configured GitHub connection or repository ID flags")
+                        try:
+                            selected_repository,github_policy,enrollment = read_selection(selection_file,issuer)
+                            if repository is not None and repository_input(repository) != selected_repository:
+                                raise ValueError("repository differs")
+                            repository = selected_repository
+                        except (OSError,ValueError,TypeError,KeyError) as exc:
+                            raise CommandFailure("invalid_argument", "invalid GitHub selection; verify the file, repository and explicit trusted --github-issuer-origin") from exc
                     grant = setup.candidate(_active_owner(store).principal, template=args.template,
-                        fleet=args.target_fleet, repository=args.repository, release_id=args.release,
+                        fleet=args.target_fleet, repository=repository, release_id=args.release,
                         release_seal=release.seal_sha256, install_directory=str(directory),github_policy=github_policy,
                         github_enrollment=enrollment)
                     terminal.write("Approve one first-team setup from the bound connected workspace.\n"

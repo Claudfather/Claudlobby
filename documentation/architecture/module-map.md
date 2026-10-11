@@ -9,7 +9,8 @@ The [website boundary](website-boundary.md) maps the shared operational UI and h
 
 ```
 claudlobby/
-  github_consent.py   — Optional issuer-owned browser consent for staged deployment grants: PKCE and a same-browser callback, exact App/installation/repository verification, and atomic grant approval. Personal GitHub tokens remain in memory; account enrollment stages the same consent; host delivery stays separate.
+  github_consent.py   — Issuer-owned repository selection and consent share PKCE and same-browser callbacks. Selection downloads nonsecret configuration only; exact App/installation/repository verification separately approves bot grants. Personal GitHub tokens remain in memory.
+  github_selection.py — Finite nonsecret repository-selection format and managed setup policy; URL normalization, trusted-origin matching and fixed scope/env names. Downloaded configuration grants no authority.
   github_enrollment.py — Account-bound managed GitHub enrollment: exact signed request and credential digests stage retryable consent; host secrets stay local and GitHub consent remains required.
   github_webhooks.py  — Managed issuer GitHub revocation ingress: App-specific HMAC verification, durable replay suppression, scoped grant revocation and fencing of in-flight consent. Never restores grants.
   github_issuer.py    — Optional managed GitHub token issuer: local operator grants bind a host credential to one workspace/deployment and exact composed bot/repository revisions; issuance narrows by repository ID and permission, serializes with revocation, and retains only expiry metadata. Optional account-bound enrollment stages consent, never a fleet-data proxy. Reference: `documentation/runbooks/managed-github-issuer.md`
