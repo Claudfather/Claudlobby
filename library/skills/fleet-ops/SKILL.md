@@ -151,7 +151,11 @@ oldest 50; any other view carries their number (`reports.count`) and the command
 lists them (`reports.list_command`).
 `--bot BOT` changes only the view. It does not change your caller identity.
 For current session and supervision evidence, use `claudlobby --json fleet status`
-or `claudlobby --json bot status BOT`. `claudlobby --json bot session BOT` reads
+or `claudlobby --json bot status BOT`. Each bot's `context` there is the input,
+cache-read and cache-write tokens of its newest main-chain call, with that
+call's time, read from its transcript; `tokens` is null with a `reason`, never 0,
+when the transcript cannot answer, and `compacted_after` names a compaction
+written since that call. `claudlobby --json bot session BOT` reads
 the selected private session and native enrollment; it does not inspect another
 process by name. Use `claudlobby --json bot logs BOT` or the manager's
 `claudlobby --json fleet logs` for bounded file tails. A missing bot log is
