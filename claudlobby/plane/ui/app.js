@@ -342,9 +342,28 @@ function threadArticle(t, taskOpener = true) {
 // Keyed render: unchanged threads keep their existing DOM node (open
 // machinery <details>, text selection, layout) — a full innerHTML rebuild
 // collapsed all of it every refresh (gauntlet; §16 preserved-focus).
+function checkinArticle(data) {
+  const rows = data.checkins || [], asks = rows.filter(row => row.action === 'ask').length;
+  const el = document.createElement('article'); el.className = 'thread';
+  el.dataset.key = 'lead-checkins'; el.dataset.receipts = JSON.stringify([rows, data.checkins_state, data.checkins_truncated]);
+  el.innerHTML = `<details${asks ? ' open' : ''}><summary>Recent check-ins${asks ? ` · ${asks} asked for input` : ''}</summary>
+    <p>Recorded decisions, not a list of unanswered requests. Message the lead to follow up.</p>
+    ${data.checkins_state === 'unavailable' ? '<p>Some check-in history is unavailable. Other activity may still be available.</p>' : ''}
+    ${rows.map(row => `<div class="msg"><div class="who"><b>${esc(row.actor_short)}</b><span>${esc(row.fleet)}</span>
+      <time>${esc(ago(row.occurred_at))}</time></div>
+      <strong>${esc(({ask:'Asked for your input', dispatch:'Selected work to dispatch', nothing:'Chose not to start more work'})[row.action] || 'Decision unavailable')}</strong>
+      <pre class="task-record-body">${esc(row.reason || 'The reason was not captured.')}</pre>
+      ${row.rationale && row.rationale !== row.reason ? `<p>${esc(row.rationale)}</p>` : ''}
+      ${row.truncated ? '<p>The recorded detail was cut short.</p>' : ''}
+      ${row.actor_uid ? `<button class="pill ghost" type="button" data-bot-inspect="${esc(row.actor_uid)}" data-checkin-bot="${esc(row.actor_uid)}"
+        data-checkin-alias="${esc(row.actor_alias)}" data-checkin-fleet="${esc(row.fleet)}">View bot and message</button>` : ''}</div>`).join('')}
+    ${data.checkins_truncated ? '<p>Showing recent check-ins only. Older decisions remain in the host record.</p>' : ''}</details>`;
+  return el;
+}
+
 function renderChannel(env) {
   const el = $("channel");
-  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length })) return;
+  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) return;
   const existing = new Map(
     [...el.querySelectorAll("article.thread")].map((n) => [n.dataset.key, n]));
   const frag = document.createDocumentFragment();
@@ -353,6 +372,25 @@ function renderChannel(env) {
   // fleet-qualified names under `all`, so a card kept across a tab switch
   // showed the previous room's names (live on the Mini, U follow-up)
   const room = currentFleet || "all";
+  if (env.data.checkins?.length || env.data.checkins_state === 'unavailable') {
+    let article = checkinArticle(env.data);
+    const prev = existing.get('lead-checkins');
+    if (prev?.dataset.room === room) {
+      if (prev.dataset.receipts === article.dataset.receipts) article = prev;
+      else article.querySelector('details').open = prev.querySelector('details').open;
+    }
+    article.dataset.room = room;
+    for (const button of article.querySelectorAll('[data-checkin-bot]')) {
+      const current = () => {
+        const identity = rosterIdentities.get(button.dataset.checkinBot);
+        return identity && !identity.provisional && identity.alias === button.dataset.checkinAlias
+          && identity.fleet === button.dataset.checkinFleet ? identity : null;
+      };
+      button.disabled = !current();
+      button.onclick = () => { if (!button.disabled && button.isConnected && !sessionPaused && current()) inspectBot(current()); };
+    }
+    frag.appendChild(article);
+  }
   for (const t of env.data.threads) {
     const prev = existing.get(t.key);
     const reuse = prev && prev.dataset.seq === String(t.latest_seq)
@@ -531,7 +569,7 @@ function renderTasks(env) {
     : "";
   attEl.innerHTML = attn.length || issues || limited
     ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: "nothing needs you" });
+    : stateBlock("idle", null, null, { label: "no tasks need attention" });
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: "no other tasks" });
 }
@@ -893,7 +931,7 @@ async function refreshBoards() {
   adoptFleets(ov);   // the overview carries the fleet list + default: one door
   if (syncWorkRoom()) { refreshBoards(); return; }
   renderHeader(ov); renderHostFacts(ov);
-  renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
+  renderFleet(fl); renderChannel(ch); renderTasks(tk); renderSummary(sm);
   workLoop.update(tk, ch);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick

@@ -984,7 +984,7 @@ def checkin_event_scope_sql(col: str = "e") -> str:
 # links. Current local-human decisions have a fleet UID but no bot alias;
 # historical null-fleet rows retain the exact bot-alias fallback.
 _CHECKIN_ROWS_HEAD = (
-    "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
+    "SELECT e.subject_uid AS subject_uid, e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
     " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
     " e.source_ref AS source_ref"
     " FROM events e"
