@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
@@ -25,12 +26,29 @@ from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
-def _paths(tmp_path):
+def _paths(tmp_path, package=None):
     root = tmp_path / "claudlobby"
     fleet_dir = root / "local" / "home" / "tl"
     (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
     (root / "lib").mkdir(parents=True)
-    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+    return Paths(root=root, fleet_dir=fleet_dir, package=package or source_package())
+
+
+# A bot's directory on some host, and its own checkout of this repo, where the
+# dev-checkout guardrail puts bot dev work. Anything under them sits inside a
+# bot runtime tree by location alone.
+_BOT_DIR = ("host", "local", "home", "ops", "runtime", "bots", "dev")
+_BOT_CHECKOUT = (*_BOT_DIR, "projects", "Claudlobby")
+
+
+def _package_at(checkout):
+    """This tree's package with every path spelled under *checkout* instead."""
+    package = source_package()
+    tree = Path(__file__).resolve().parents[1]
+    return dataclasses.replace(package, **{
+        f.name: checkout / getattr(package, f.name).relative_to(tree)
+        for f in dataclasses.fields(package) if isinstance(getattr(package, f.name), Path)
+    })
 
 
 def _bot(**overrides):
@@ -172,6 +190,70 @@ class TestImproperFleetPaths:
         paths = _paths(tmp_path)
         txt = "</array></dict> http://www.apple.com/DTDs/PropertyList-1.0.dtd </plist>"
         assert improper_fleet_paths(txt, _bot(), paths) == []
+
+
+class TestAnchorsUnderABotRuntime:
+    """A bot's own checkout sits under its runtime tree, so the selected package,
+    or a data root kept beside it, contains ``/runtime/bots/`` by location alone
+    (#823). Only what a path adds to the longest composer anchor it lies under is
+    read for fleet layout, never the anchor's own value; the content-root test,
+    and a path under no anchor, are judged as before."""
+
+    @pytest.fixture
+    def nested(self, tmp_path, monkeypatch):
+        checkout = tmp_path.joinpath(*_BOT_CHECKOUT)
+        cli = checkout / ".venv" / "bin" / "claudlobby"
+        monkeypatch.setattr("claudlobby.resources.selected_cli", lambda: cli)
+        return _paths(tmp_path, _package_at(checkout)), cli
+
+    def test_selected_package_under_a_bot_checkout_is_clean(self, nested):
+        paths, cli = nested
+        text = "\n".join((
+            f'CLAUDLOBBY_NATIVE_DIR="{paths.lib}"',
+            f'CLAUDLOBBY_LIBRARY_DIR="{paths.base_library}"',
+            f'CLAUDLOBBY_CLI="{cli}"',
+            f"ExecStart={paths.lib}/keepalive.sh kev",
+        ))
+        assert improper_fleet_paths(text, _bot(), paths) == []
+
+    def test_data_root_under_a_bot_runtime_is_clean(self, tmp_path):
+        paths = _paths(tmp_path.joinpath(*_BOT_DIR, "data"))
+        # What generate writes under the root: the fleet-state export, and a
+        # host timer's WorkingDirectory and log.
+        text = "\n".join((
+            'export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"',
+            f"<string>{paths.root}</string>",
+            f"<string>{paths.root}/state/plane-host-probe.log</string>",
+        ))
+        assert improper_fleet_paths(text, _bot(), paths) == []
+
+    # --- locks: what a path adds to its anchor is still read for fleet layout ---
+
+    def test_fleet_layout_below_a_package_anchor_is_flagged(self, nested):
+        paths, _ = nested
+        tail = f"{paths.lib}/x/runtime/bots/kev/y"
+        assert [p for p, _ in improper_fleet_paths(tail, _bot(), paths)] == [tail]
+
+    def test_runtime_tree_at_a_nested_root_is_flagged(self, tmp_path):
+        paths = _paths(tmp_path.joinpath(*_BOT_DIR, "data"))
+        husk = f"{paths.root}/runtime/bots/kev/x"
+        assert [p for p, _ in improper_fleet_paths(husk, _bot(), paths)] == [husk]
+
+    def test_other_fleet_overlay_under_a_nested_root_is_flagged(self, tmp_path):
+        paths = _paths(tmp_path.joinpath(*_BOT_DIR, "data"))
+        other = f"{paths.root}/local/home/other-fleet/x"
+        assert [p for p, _ in improper_fleet_paths(other, _bot(), paths)] == [other]
+
+    def test_package_in_another_fleets_overlay_is_flagged(self, tmp_path, monkeypatch):
+        # Being an anchor exempts nothing from the local/ test: a package
+        # installed in another fleet's overlay of this root is a cross-fleet
+        # dependency.
+        paths = _paths(tmp_path)
+        checkout = paths.root / "local/home/other-fleet/runtime/bots/z/projects/Claudlobby"
+        paths = dataclasses.replace(paths, package=_package_at(checkout))
+        monkeypatch.setattr("claudlobby.resources.selected_cli", lambda: checkout / "cli")
+        native = str(paths.lib)
+        assert [p for p, _ in improper_fleet_paths(f'"{native}"', _bot(), paths)] == [native]
 
 
 class TestAuditBotPaths:
@@ -337,6 +419,27 @@ class TestComposeBotFiresPathGuard:
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         assert bot_dir.is_dir()
+
+    def test_package_under_a_bot_checkout_composes_clean(self, fleet_dir, tmp_path, monkeypatch):
+        # The selected package in a bot's own checkout (#823), spelled through a
+        # symlink to this tree so CI composes from the same nesting. Rendering
+        # audits the wiring before anything is written and the post-write audit
+        # reads it again; both must pass, with the spelling kept.
+        from claudlobby.composer import compose_bot
+        from claudlobby.config import load_fleet
+
+        checkout = tmp_path.joinpath(*_BOT_CHECKOUT)
+        checkout.parent.mkdir(parents=True)
+        checkout.symlink_to(Path(__file__).resolve().parents[1], target_is_directory=True)
+        cli = checkout / ".venv" / "bin" / "claudlobby"
+        for module in ("resources", "context", "composer"):
+            monkeypatch.setattr(f"claudlobby.{module}.selected_cli", lambda: cli)
+        package = _package_at(checkout)
+        nested = _write_nested_fleet(fleet_dir, "${FLEET_ROOT}/data/x")
+        paths = Paths(root=fleet_dir, fleet_dir=nested, package=package)
+        fleet, _ = load_fleet(nested / "fleet.yaml")
+        bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
+        assert str(package.native) in (bot_dir / "bot.conf").read_text()
 
     def test_foreign_host_env_path_makes_compose_bot_raise(self, fleet_dir):
         # rajan's seam-1 repro at the compose seam: a fully-external hand-typed
