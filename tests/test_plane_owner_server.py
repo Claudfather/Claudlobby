@@ -131,10 +131,19 @@ def running_server(root, socket_path, binary):
             env=constructed_env(), stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 10
-            while not socket_path.exists() and process.poll() is None and time.monotonic() < deadline:
+            ready = False
+            # bind creates the path before listen and application startup.
+            # Wait for the actual read route, not merely the filesystem entry.
+            while process.poll() is None and time.monotonic() < deadline:
+                try:
+                    ready = request(socket_path, "/owner")[0] == 200
+                except (OSError, http.client.HTTPException):
+                    ready = False
+                if ready:
+                    break
                 time.sleep(0.02)
             log.flush()
-            assert process.poll() is None and socket_path.exists(), (root / "server.log").read_text()
+            assert process.poll() is None and ready, (root / "server.log").read_text()
             yield process
         finally:
             if process.poll() is None:
