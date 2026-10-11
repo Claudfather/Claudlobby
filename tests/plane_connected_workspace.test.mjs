@@ -620,3 +620,26 @@ test('repository preparation requires approved active launch and retries without
   clock=h.context.expires_at;await h.api.run('receipt');
   assert.equal(button.disabled,true);assert.equal(await h.api.run('repository'),false);h.api.dispose();
 });
+
+test('guided GitHub consent shows exact issuer links and requires all bot access before preview',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();
+  h.context.github={name:'Team App',mode:'managed',repository:h.context.repository,permissions:{contents:'write'}};
+  h.context.github_enrollment={issuer_origin:'https://issuer.example.test',bots:['lead','engineer','reviewer'],credentials_ready:false};
+  let allApproved=false, redirect=false;
+  h.client.setupGithubAuthorize=async({generation,bot})=>({version:1,generation,bot,request_id:id(20),state:'awaiting_consent',
+    authorization_url:(redirect?'https://wrong.example.test':'https://issuer.example.test')+'/v1/github/connect?ticket='+'A'.repeat(43)});
+  h.client.setupGithubCheck=async({generation})=>({version:1,generation,state:allApproved?'credentials_ready':'needs_authorization',
+    bots:['lead','engineer','reviewer'].map(bot=>({bot,state:allApproved||bot==='lead'?'approved':'needs_consent'}))});
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve signup');
+  assert.equal(await h.api.run('preview'),false);
+  assert.equal(await h.api.run('github','lead'),true);
+  const links=()=>panel.children.flatMap(e=>e.children).flatMap(e=>e.children).filter(e=>e.tagName==='A');
+  assert.equal(links().length,1);assert.equal(links()[0].target,'_blank');assert.equal(links()[0].rel,'noopener noreferrer');
+  redirect=true;assert.equal(await h.api.run('github','engineer'),false);assert.equal(links().length,1);
+  assert.equal(await h.api.run('github_check'),true);assert.equal(await h.api.run('preview'),false);
+  assert.match(h.api.snapshot().note,/not ready for every bot/);
+  allApproved=true;assert.equal(await h.api.run('github_check'),true);
+  assert.equal(h.api.snapshot().context.github_enrollment.credentials_ready,true);
+  assert.equal(await h.api.run('preview'),true);h.api.dispose();
+});

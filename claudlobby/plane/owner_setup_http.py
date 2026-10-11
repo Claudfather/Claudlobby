@@ -11,7 +11,7 @@ from .owner_setup import SetupEngine, _uuid
 from .owner_source import source_host_uid
 
 PREFIX="/api/owner/connected/setup/"
-OPERATIONS=frozenset({"context","preview","launch","receipt","repository"})
+OPERATIONS=frozenset({"context","preview","launch","receipt","repository","github_prepare","github_submit","github_check"})
 
 class SetupHTTP(ConnectedActionsHTTP):
     def __init__(self, access, *, config, authority, verify_principal):
@@ -23,6 +23,8 @@ class SetupHTTP(ConnectedActionsHTTP):
     def response_seconds(self,scope):
         # Three clones allow 120s each plus credential-tier reads and closing admission.
         if scope.get("setup_operation")=="repository": return 600
+        if scope.get("setup_operation")=="github_check": return 60
+        if scope.get("setup_operation")=="github_submit": return 25
         return 45 if scope.get("setup_operation")=="launch" else 15
 
     async def _perform_action(self,scope,receive,operation,progress):
@@ -44,10 +46,14 @@ class SetupHTTP(ConnectedActionsHTTP):
         binding=await self._blocking(self.workspace.active_binding,principal)
         if binding.issuer!=self.config.issuer or binding.operational_origin!=self.config.operational_origin: raise AccessDenied("setup_denied")
         payload=await asyncio.wait_for(_json(receive,32768),5)
-        expected={"context":set(),"preview":{"generation","goal"},"launch":{"generation","plan_id","request_id"},"receipt":{"generation","plan_id","request_id"},"repository":{"generation","plan_id","request_id"}}[operation]
+        expected={"context":set(),"preview":{"generation","goal"},"launch":{"generation","plan_id","request_id"},"receipt":{"generation","plan_id","request_id"},"repository":{"generation","plan_id","request_id"},
+            "github_prepare":{"generation","bot"},"github_submit":{"generation","request_id","assertion"},"github_check":{"generation"}}[operation]
         if set(payload)!=expected: raise InvalidRequest
         if operation!="context" and (not _uuid(payload["generation"]) or payload["generation"]!=grant.generation): raise InvalidRequest
         if operation=="preview" and (not isinstance(payload["goal"],str) or len(payload["goal"])>2000): raise InvalidRequest
+        if operation=="github_prepare" and (not isinstance(payload["bot"],str) or len(payload["bot"])>128): raise InvalidRequest
+        if operation=="github_submit" and (not _uuid(payload["request_id"]) or not isinstance(payload["assertion"],str)
+                or not 1<=len(payload["assertion"])<=8192): raise InvalidRequest
         if operation in {"launch","receipt","repository"}:
             if (not isinstance(payload["plan_id"],str) or not re.fullmatch(r"p-[0-9a-f]{64}",payload["plan_id"]) or not _uuid(payload["request_id"])): raise InvalidRequest
         fn=getattr(self.engine,operation)
@@ -73,7 +79,8 @@ class SetupHTTP(ConnectedActionsHTTP):
         operation=scope["path"][len(PREFIX):]
         if operation not in OPERATIONS:
             await JSONResponse({"state":"denied"},404,headers={"Cache-Control":"private, no-store"})(scope,receive,send);return
-        mapped={"context":"context","preview":"prepare","launch":"send","receipt":"receipt","repository":"send"}[operation]
+        mapped={"context":"context","preview":"prepare","launch":"send","receipt":"receipt","repository":"send",
+            "github_prepare":"prepare","github_submit":"send","github_check":"send"}[operation]
         # Concurrent requests must never modify an instance callback. Dispatch
         # translation belongs in the protected method using immutable path.
         translated={**scope,"path":"/api/owner/connected/actions/"+mapped,"setup_operation":operation}

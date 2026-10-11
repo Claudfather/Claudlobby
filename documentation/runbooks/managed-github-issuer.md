@@ -173,7 +173,7 @@ replay provider deliveries itself. It rejects bodies over 2 MiB and takes no
 automatic recovery action for missing events. Personal repository-role changes
 that do not emit an App authorization revocation are not currently rechecked
 after consent. Configure and accept real webhook delivery before public use,
-alongside the remaining website enrollment and secure host handoff. No real App
+alongside acceptance of website enrollment and secure host handoff. No real App
 consent, webhook delivery or host credential handoff has been accepted yet.
 
 ## Account-bound enrollment
@@ -217,5 +217,32 @@ this service does not write host secrets or configure fleets. Account closure
 does not revoke already approved GitHub grants: revoke them explicitly using the
 issuer command, or through the configured GitHub revocation events.
 
-The host/browser enrollment wiring and real-provider acceptance are outstanding.
-This endpoint is a core integration contract, not a finished self-service flow.
+## Guided first-team connection
+
+The existing local `host owner allow-setup` approval accepts the optional pair
+`--github-issuer-origin` and `--github-repository-id` alongside a selected managed
+`--github-config` / `--github-connection`. The issuer must be an exact HTTPS origin;
+the repository ID must identify the selected repository. The local approval freezes
+both, together with the template, connection, repository and workspace. A browser
+cannot change this scope or select credential environment variable names.
+
+Guided setup offers **Authorize** for each bot. The host retains one random
+credential and a retryable request per bot in its private owner database. The
+website receives only the request and credential digests to sign. The host submits
+that assertion to the approved issuer; the user opens its consent link to review
+the exact bot and repository permissions. Each bot requires its own consent under
+the current issuer contract. Network failures preserve the request. An explicit
+terminal issuer response allows a new invitation on the next authorization attempt.
+
+**Check GitHub access** probes each exact composed binding and reports approved,
+needs consent, or unavailable. The probe obtains and discards short-lived scoped
+tokens. After all three checks succeed, core writes only the issuer URL and retained
+credential to a new private fleet `.env`, using the existing atomic setup writer.
+It never rewrites an operator-owned `.env`. Identical retries and local reapproval
+of the same setup scope reuse the credential. Preview requires those credentials
+to be installed; runtime consumers still enforce current issuer authorization.
+Removing local setup approval does not revoke already approved issuer grants.
+
+Installation/repository selection is still configured locally. Real App consent,
+webhooks, native host launch and cold-host onboarding require acceptance before
+public self-service. These are not established by synthetic issuer checks.

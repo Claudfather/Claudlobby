@@ -191,6 +191,13 @@ def test_issuer_browser_consent_only_grants_after_same_browser_callback(tmp_path
     assert client.get("/v1/github/callback?state=" + abandoned + "&code=old-code").status_code == 403 and calls == []
     callback = "/v1/github/callback?" + "state=" + query["state"][0] + "&code=example-code"
     assert stranger.get(callback).status_code == 403 and calls == []
+    # A second bot's consent may be open while the first is at GitHub. Its
+    # browser cookie and completion must not invalidate the first invitation.
+    other_grant = {**grant,"grant_id":"second-bot","binding":{**grant["binding"],"bot_id":"reviewer","revision":"b"*64}}
+    other = flow.invite(other_grant,credential)
+    client.get(other["authorization_url"])
+    other_start = client.post("/v1/github/connect",data={"ticket":other["ticket"]},headers={"Origin":flow.provider.origin})
+    other_state = parse_qs(urlsplit(other_start.headers["location"]).query)["state"][0]
     complete = client.get(callback)
     assert complete.status_code == 303 and complete.headers["location"] == invitation["authorization_url"]
     assert "GitHub is connected" in client.get(complete.headers["location"]).text
@@ -199,6 +206,9 @@ def test_issuer_browser_consent_only_grants_after_same_browser_callback(tmp_path
     from hashlib import sha256
     from base64 import urlsafe_b64encode
     assert query["code_challenge"] == [urlsafe_b64encode(sha256(calls[0][1].encode()).digest()).decode().rstrip("=")]
+    other_complete = client.get("/v1/github/callback?state="+other_state+"&code=other-code")
+    assert other_complete.status_code == 303 and other_complete.headers["location"] == other["authorization_url"]
+    assert calls[1][2] == other_grant and "GitHub is connected" in client.get(other["authorization_url"]).text
     result = flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: _issuer_token())
     assert result["token"] == "ghs_example_only"
     saved = flow.store.path.read_bytes()

@@ -23,6 +23,7 @@ claudlobby/
   plane/owner_connected_http.py — Exact operational-Origin header-only sessions and canonical read/SSE delegation, sharing the existing protected view instance and bounded bootstrap work owner. Reference: `documentation/architecture/owner-connected-read.md`
   plane/owner_action_authorization.py — Fixed internal direct/connected action policy selection; connected full-binding scope fence, never browser-selected authority.
   plane/owner_setup.py — Optional local first-team setup grant and retained canonical preview/activation receipt; connected identity is necessary but does not grant setup.
+  plane/owner_setup_github.py — Locally approved managed enrollment, host-retained credentials, per-bot access checks and exclusive private fleet env publication; shared compositor binding and issuer contracts.
   plane/owner_setup_http.py — Finite connected first-team context/preview/launch/receipt carrier, bounded owned work, existing setup and activation owners.
   plane/ui/guided-setup.js — Shared first-team plan confirmation and original activation receipt controller; no read admission or automatic launch.
   plane/owner_connected_actions_http.py — Finite connected action HTTP carrier and bounded owned queue; canonical engines and explicit local grants remain the effect owners.

@@ -39,12 +39,14 @@ class SetupGrant:
     expires_at: float
     github_policy: str | None = None
     repository_prepare: bool = False
+    github_enrollment: dict | None = None
 
 
 def _snapshot(grant):
     values=asdict(grant)
     if values["github_policy"] is None: values.pop("github_policy")
     if not values["repository_prepare"]: values.pop("repository_prepare")
+    if values["github_enrollment"] is None: values.pop("github_enrollment")
     return json.dumps(values,sort_keys=True,separators=(",", ":"))
 
 
@@ -53,6 +55,7 @@ def _declaration_scope(grant):
     return {key:value for key,value in asdict(grant).items()
         if key not in {"generation","created_at","expires_at"}
         and not (key=="github_policy" and value is None)
+        and not (key=="github_enrollment" and value is None)
         and not (key=="repository_prepare" and value is False)}
 
 
@@ -75,12 +78,14 @@ class OwnerSetup:
         conn.execute("SELECT plan_id,generation,created_at,expires_at,payload FROM setup_previews LIMIT 0")
 
     def candidate(self, principal, *, template, fleet, repository, release_id, release_seal, install_directory,
-                  github_policy=None):
+                  github_policy=None, github_enrollment=None):
         # Reuse the installed template's finite repository/fleet policy, with a
         # harmless validation goal; no authoring, registration or staging here.
         from ..commands.setup import _template_config
         if not isinstance(fleet,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*",fleet): raise AccessDenied("setup_denied")
         _template_config(template,fleet,repository,"Validate selected repository scope",github_policy=github_policy)
+        from .owner_setup_github import configuration
+        configuration(github_policy,github_enrollment)
         directory=Path(install_directory)
         if (not directory.is_absolute() or directory.resolve()!=directory or not directory.is_dir()
                 or not re.fullmatch(r"r-[0-9a-f]{64}",release_id) or not re.fullmatch(r"[0-9a-f]{64}",release_seal)):
@@ -89,7 +94,8 @@ class OwnerSetup:
             _,binding=self.connected._context(conn,principal)
             now=self.access._now()
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,release_id,release_seal,
-                str(directory),str(uuid4()),now,now+GRANT_SECONDS,github_policy,github_policy is not None)
+                str(directory),str(uuid4()),now,now+GRANT_SECONDS,github_policy,github_policy is not None,
+                dict(github_enrollment) if github_enrollment is not None else None)
 
     def allow(self, expected):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
@@ -102,12 +108,14 @@ class OwnerSetup:
                 for statement in _SCHEMA: conn.execute(statement)
             self._schema(conn)
             row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
+            compatible = None
             if row:
                 retained=self._grant(row)
                 if (row["active"] == 1 and retained.binding_snapshot==OwnerConnected._snapshot(binding)
                         and retained.created_at<=self.access._now()<retained.expires_at):
                     raise AccessDenied("setup_already_allowed")
                 if _declaration_scope(retained) == _declaration_scope(expected):
+                    compatible = retained
                     # Retain only proof of authored-byte ownership, not preview
                     # authorization/expiry. No prior plan becomes launchable.
                     for preview in conn.execute("SELECT plan_id,payload FROM setup_previews WHERE generation=?",(retained.generation,)).fetchall():
@@ -117,6 +125,8 @@ class OwnerSetup:
                 # A stale/expired approval has no authority. New terminal
                 # approval explicitly replaces it with a fresh generation.
             conn.execute("INSERT OR REPLACE INTO setup_grant VALUES(1,?,1,NULL,NULL)",(_snapshot(expected),))
+            from .owner_setup_github import initialize
+            initialize(conn,expected,previous=compatible)
 
     def local(self):
         with self.access._connection() as conn:
@@ -133,6 +143,8 @@ class OwnerSetup:
         if (not _uuid(grant.generation) or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in (grant.created_at,grant.expires_at))
                 or grant.expires_at-grant.created_at!=GRANT_SECONDS or type(grant.repository_prepare) is not bool
                 or grant.repository_prepare and grant.github_policy is None): raise AccessUnavailable()
+        from .owner_setup_github import configuration
+        configuration(grant.github_policy,grant.github_enrollment)
         return grant
 
     def revoke(self, expected):
@@ -244,6 +256,8 @@ class SetupEngine:
     def __init__(self, access):
         self.store=OwnerSetup(access)
         self.root=access.root
+        from .owner_setup_github import SetupGithub
+        self.github=SetupGithub(self.store)
         from threading import Lock
         self._effects_lock=Lock()
 
@@ -257,7 +271,8 @@ class SetupEngine:
         if (self.root / "local").is_symlink(): raise AccessDenied("setup_other_fleet")
         if (self.root / "local").exists():
             if any(path!=target or path.is_symlink() for path in (self.root / "local").iterdir()): raise AccessDenied("setup_other_fleet")
-        if target.exists() and any(path.name!="fleet.yaml" for path in target.iterdir()):
+        if target.exists() and any(path.name!="fleet.yaml" and not
+                (path.name==".env" and self.github.owns_env(grant)) for path in target.iterdir()):
             raise AccessDenied("setup_other_inputs")  # No unapproved overlay/project policy rides the shipped template.
         declarations=declared_paths(self.root,get_resources())
         if any(paths.fleet_dir!=target for paths in declarations): raise AccessDenied("setup_other_fleet")
@@ -285,7 +300,33 @@ class SetupEngine:
         return {"version":1,"template":grant.template,"fleet":grant.fleet,"repository":grant.repository,
             "release_id":grant.release_id,"release_seal":grant.release_seal,"generation":grant.generation,
             "expires_at":grant.expires_at,"request":self.store.retained_request(reader),"github":github,
-            "can_prepare_repository":grant.repository_prepare}
+            "can_prepare_repository":grant.repository_prepare,
+            "github_enrollment":None if grant.github_enrollment is None else {
+                "issuer_origin":grant.github_enrollment["issuer_origin"],"bots":list(self.github.bindings(grant)),
+                "credentials_ready":self.github.owns_env(grant)}}
+
+    def _github(self,reader,generation,operation,**payload):
+        if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
+        try:
+            grant=self.store.authorize(reader,effects=True)
+            if grant.generation!=generation: raise AccessDenied("setup_denied")
+            self._release(grant)
+            self._first_team(grant)
+            return getattr(self.github,operation)(reader,grant,**payload)
+        finally: self._effects_lock.release()
+
+    def github_prepare(self,reader,generation,bot):
+        return self._github(reader,generation,"prepare",bot=bot)
+
+    def github_submit(self,reader,generation,request_id,assertion):
+        return self._github(reader,generation,"submit",request_id=request_id,assertion=assertion)
+
+    def github_check(self,reader,generation):
+        return self._github(reader,generation,"check")
+
+    def _github_ready(self,grant):
+        if grant.github_enrollment is not None and not self.github.owns_env(grant):
+            raise AccessDenied("setup_github_not_ready")
 
     def preview(self,reader,generation,goal):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
@@ -298,6 +339,7 @@ class SetupEngine:
         if grant.generation!=generation: raise AccessDenied("setup_denied")
         self._first_team(grant)
         self._release(grant)
+        self._github_ready(grant)
         self.store.preview_capacity(reader,grant)
         output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
             config=None,repository=grant.repository,goal=goal,github_policy=grant.github_policy,
@@ -324,6 +366,7 @@ class SetupEngine:
             self.store.request(reader,grant,plan_id,request_id)
             return self.receipt(reader,generation,plan_id,request_id)
         self._first_team(grant)
+        self._github_ready(grant)
         if plan.fleets != (grant.fleet,): raise AccessDenied("setup_other_fleet")
         plan.check_fresh()
         if self.store.reserve(reader,grant,plan_id,request_id):

@@ -42,6 +42,12 @@ def _digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _cookie_name(ticket):
+    # Several bot/host invitations can be open in the same browser. Each
+    # OAuth state still requires its own invitation's HttpOnly browser secret.
+    return COOKIE + "-" + _digest(ticket)
+
+
 class GithubConsentProvider:
     def __init__(self, config):
         if not isinstance(config, dict) or set(config) != {
@@ -312,6 +318,13 @@ class ConsentFlow:
                 )
         return self.provider.origin + CONNECT + "?ticket=" + row["ticket"]
 
+    def callback_cookie_name(self, state):
+        with self.store.transaction() as db:
+            row = db.execute("SELECT ticket FROM github_consent WHERE state_digest=? AND status='authorizing' AND expires_at>?",
+                (_digest(state),time.time())).fetchone()
+            if row is None: raise IssuanceDenied("consent attempt unavailable")
+            return _cookie_name(row["ticket"])
+
     def routes(self):
         from starlette.concurrency import run_in_threadpool
         from starlette.responses import HTMLResponse, RedirectResponse
@@ -340,17 +353,18 @@ class ConsentFlow:
                         "error_uri",
                     }:
                         raise IssuanceDenied("invalid callback")
+                    cookie_name = await run_in_threadpool(self.callback_cookie_name,query.get("state",[None])[0])
                     location = await run_in_threadpool(
                         self.complete,
                         query.get("state", [None])[0],
-                        request.cookies.get(COOKIE),
+                        request.cookies.get(cookie_name),
                         None if "error" in query else query.get("code", [None])[0],
                     )
                     response = RedirectResponse(
                         location, status_code=303, headers=headers()
                     )
                     response.delete_cookie(
-                        COOKIE, secure=True, httponly=True, samesite="lax"
+                        cookie_name, secure=True, httponly=True, samesite="lax"
                     )
                     return response
                 if request.method == "POST":
@@ -376,7 +390,7 @@ class ConsentFlow:
                     if set(values) != {"ticket"} or len(values["ticket"]) != 1:
                         raise IssuanceDenied("invalid consent form")
                     location = await run_in_threadpool(
-                        self.begin, values["ticket"][0], request.cookies.get(COOKIE)
+                        self.begin, values["ticket"][0], request.cookies.get(_cookie_name(values["ticket"][0]))
                     )
                     return RedirectResponse(
                         location, status_code=303, headers=headers()
@@ -392,7 +406,7 @@ class ConsentFlow:
                 response = HTMLResponse(_page(row), headers=headers())
                 if cookie:
                     response.set_cookie(
-                        COOKIE,
+                        _cookie_name(request.query_params["ticket"]),
                         cookie,
                         max_age=900,
                         secure=True,

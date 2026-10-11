@@ -53,6 +53,8 @@ def register_host_owner(hosts):
     allow.add_argument("--repository", required=True, metavar="OWNER/REPO")
     allow.add_argument("--github-config", type=Path, metavar="FILE", help="Local fleet YAML containing the approved GitHub connection")
     allow.add_argument("--github-connection", metavar="ID", help="Freeze this connection into the setup approval")
+    allow.add_argument("--github-issuer-origin", help="Allow managed enrollment through this exact HTTPS issuer")
+    allow.add_argument("--github-repository-id", type=int, help="Exact GitHub repository ID for managed enrollment")
     allow.add_argument("--release", required=True)
     allow.add_argument("--install-directory", required=True, type=Path)
     allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
