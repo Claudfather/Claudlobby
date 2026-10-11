@@ -385,6 +385,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     disable();
     const observer = MutationObserver ? new MutationObserver(disable) : null;
     const roster = document.getElementById('fleet'); if (roster) observer?.observe(roster, {childList:true,subtree:true});
+    const channel = document.getElementById('channel'); if (channel) observer?.observe(channel, {childList:true,subtree:true});
     const active = () => {
       clearTimeout(refreshTimer); refreshTimer = null;
       if (document.visibilityState !== 'hidden') void checkAccount();

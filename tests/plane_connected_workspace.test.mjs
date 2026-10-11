@@ -31,7 +31,7 @@ function dom() {
     querySelector:q=>q==='main'?elements.get('main'):null,
     querySelectorAll:q=>{
       assert.ok(['#view-nav button, [data-bot-inspect]', '#view-nav button, #debug-toggle, [data-bot-inspect]'].includes(q), 'selector must be modelled explicitly');
-      return [...nav,...(q.includes('#debug-toggle')?[elements.get('debug-toggle')]:[]),...(elements.get('fleet').children||[]).filter(e=>e.dataset.botInspect)];
+      return [...nav,...(q.includes('#debug-toggle')?[elements.get('debug-toggle')]:[]),...['fleet','channel'].flatMap(id=>elements.get(id).children).filter(e=>e.dataset.botInspect)];
     },
     addEventListener(n,fn){listeners.set(n,fn);},removeEventListener(n){listeners.delete(n);}};
   class Element {
@@ -46,9 +46,9 @@ function dom() {
     close(){this.closed=true;}
     click(){if(!this.disabled)this.handlers.click?.();}
   }
-  for(const id of ['owner-session','main','fleet','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
+  for(const id of ['owner-session','main','fleet','channel','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
   const nav=['channel','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
-  class Observer {constructor(fn){this.fn=fn;observers.push(this);}observe(){}disconnect(){this.closed=true;}}
+  class Observer {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
 }
 function harness(options={}) {
@@ -199,7 +199,10 @@ test('controls retain focus, allow team inspection and disable unsupported navig
   for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','fleet'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[2],check=root.children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[1],check);
   const connect=row.children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1],connect);
-  const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';h.ui.get('fleet').append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,false);
+  for(const id of ['fleet','channel']){
+    const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
+    const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,false);
+  }
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 

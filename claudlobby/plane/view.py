@@ -487,6 +487,30 @@ def _channel_lineage(conn, comms):
         "ancestor_lookups": looked_up, "unresolved_threads": sum(reasons.values()), "reasons": reasons}
 
 
+def _recent_checkins(conn, fleet):
+    """Read the CLI's decision records; these are history, not unresolved asks."""
+    from ..commands.checkins import collect_checkins
+
+    limit = 10
+    rows = []
+    unavailable = False
+    selected = [fleet] if fleet else [r["alias"] for r in conn.execute(_FLEET_ROWS_SQL)]
+    for name in selected:
+        try:
+            for row in collect_checkins(conn, name, since=None, bot=None, last=False, limit=limit + 1,
+                                        include_dispatches=False):
+                rows.append({"checkin_id": row["checkin_id"], "actor_uid": row["actor_uid"],
+                    "actor_alias": row["actor"], "actor_short": row["bot"] or row["actor"],
+                    "fleet": name, "occurred_at": row["occurred_at"], "ingest_seq": row["ingest_seq"],
+                    "action": row["action"], "reason": row["raise"]["reason"],
+                    "rationale": row["rationale"], "truncated": row["truncated"]})
+        except (ValueError, TypeError, sqlite3.DatabaseError, TaskStateError):
+            unavailable = True
+    rows.sort(key=lambda r: (_epoch(r["occurred_at"]) or 0, r["ingest_seq"]), reverse=True)
+    return {"checkins": rows[:limit], "checkins_state": "unavailable" if unavailable else "ok", "checkins_limit": limit,
+            "checkins_truncated": len(rows) > limit}
+
+
 def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
                    fleet: str | None = None, *, report_task: str | None = None) -> dict:
     cols = ("ingest_seq, msg_id, occurred_at, sender_alias,"
@@ -495,6 +519,7 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             " assignment_id, reply_to_msg_id, emitter, fleet_uid,"
             " recipient_fleet")
     fleet = _fleet_scope(conn, fleet)
+    checkins = _recent_checkins(conn, fleet) if report_task is None else {}
     if report_task is not None:
         # The selected task was admitted by _fetch_task_detail. Reuse channel
         # lineage checks and privacy-aware projection for its indexed reports.
@@ -532,7 +557,7 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             f"SELECT {cols} FROM communications"
             " ORDER BY ingest_seq DESC LIMIT ?", (limit,)).fetchall()]
     if not comms:
-        return {"threads": []}
+        return {"threads": [], **checkins}
     msg_ids = [c["msg_id"] for c in comms]
     ph = ",".join("?" * len(msg_ids))
     # fold F4: `received` is the RECEIVER's proof, consumed ONLY by the delivery
@@ -660,7 +685,7 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             + [e["ingest_seq"] for e in t["task_events"]])
         out.append(t)
     out.sort(key=lambda t: t["latest_seq"], reverse=True)
-    return {"threads": out, "lineage": lineage,
+    return {"threads": out, "lineage": lineage, **checkins,
             **({"scan_limited": len(comms) == limit} if report_task is not None else {})}
 
 
