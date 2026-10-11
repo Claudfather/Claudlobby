@@ -92,19 +92,19 @@ export function createGuidedSetup({client, storage, storageKey,
         note = 'Working copies are available for your team. Open team to see its activity and start a conversation. Application dependencies and setup scripts have not been run.';
       } else if (operation === 'open') {
         if (!teamFleet || typeof onOpenTeam !== 'function') return false;
-        const opened = await onOpenTeam(teamFleet);
+        let opened;
+        try { opened = await onOpenTeam(teamFleet) === true; }
+        catch { opened = false; }
         // Checking the connection can admit dashboard reads and reset setup context.
         // The workspace callback fences that transition before selecting the team.
         if (disposed || !active()) return false;
         note = opened ? 'Team dashboard opened. Talk to your team below when messaging is approved on this computer.'
           : 'The team dashboard is not available yet. Check the connection and try Open team again; this does not repeat the launch.';
-        return opened === true;
+        return opened;
       } else return false;
       return true;
     } catch {
-      if (!disposed && (ticket === epoch || operation === 'open' && active())) note = operation === 'open'
-        ? 'The team dashboard could not be opened. Check the connection and try Open team again; this does not repeat the launch.'
-        : operation === 'repository'
+      if (!disposed && ticket === epoch) note = operation === 'repository'
         ? 'Repository preparation could not be confirmed and may still be running on your computer. Wait a few minutes before retrying preparation; existing working copies are preserved. If it keeps failing, check the selected connection locally. Do not launch the team again.'
         : pending ? 'Activation outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
       return false;

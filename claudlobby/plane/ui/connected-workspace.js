@@ -297,14 +297,18 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (index < 0 || !live() || pending.has(index) || typeof mount?.onOpenTeam !== 'function') return false;
     pending.add(index); changed();
     try {
-      if (!await row.client.check() || !live() || row.client.snapshot().state !== 'ready') return false;
-      const epoch = row.client.snapshot().epoch, room = `${row.key} / ${fleet}`;
+      if (row.client.snapshot().state !== 'ready' && !await row.client.check()) return false;
+      if (!live() || row.client.snapshot().state !== 'ready') return false;
+      const epoch = row.client.snapshot().epoch;
       const roster = await jget('/api/fleets');
-      if (!live() || row.client.snapshot().state !== 'ready' || epoch !== row.client.snapshot().epoch
-          || !roster.data?.fleets?.some(f => f.alias === room && f.source_state === 'ok')) return false;
-      return mount.onOpenTeam(room,roster) === true;
+      if (!live() || row.client.snapshot().state !== 'ready' || epoch !== row.client.snapshot().epoch) return false;
+      const team = roster.data?.fleets?.find(f => {
+        const route = transport.routeRoom(f.alias);
+        return f.source_state === 'ok' && route?.key === row.key && route.fleet === fleet;
+      });
+      return !!team && mount.onOpenTeam(team.alias,roster) === true;
     } catch { return false; }
-    finally { pending.delete(index); changed(); }
+    finally { pending.delete(index); if (!disposed) changed(); }
   }
   function render() {
     if (!mount) return;

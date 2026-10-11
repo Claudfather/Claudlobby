@@ -509,8 +509,10 @@ test('setup-only computer opens its launched team, keeps other hosts separate an
   const fleetDoor=a+'/api/owner/connected/read/fleets';h.overrides.set(fleetDoor,()=>reply(200,ok(roster)));
   await click('Open team');assert.deepEqual(opened,[sourceA+' / team']);
   assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(open.disabled,false);
+  const checks=h.calls.filter(c=>c.url===a+'/api/owner/connected/status').length;
   // A healthy second computer cannot make an unavailable first computer's team open.
   h.overrides.set(fleetDoor,()=>reply(503,{}));await click('Open team');assert.equal(opened.length,1);
+  assert.equal(h.calls.filter(c=>c.url===a+'/api/owner/connected/status').length,checks,'opening an admitted team must not reconnect its stream');
   const held=deferred();h.overrides.set(fleetDoor,()=>held.promise);open.click();await flush();
   h.metadataStatus=401;await h.api.checkAccount();held.resolve(reply(200,ok(roster)));await flush();
   assert.equal(opened.length,1);

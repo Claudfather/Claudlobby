@@ -1498,12 +1498,11 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onOpenTeam(room, roster) {
         if (sessionPaused) return false;
         adoptFleets(roster);
-        if (!fleets.some(f => f.alias === room)) return false;
         pickFleet(room);
         const conversation = $("work-loop");
         conversation.tabIndex = -1;
         conversation.focus();
-        conversation.scrollIntoView({block:"center"});
+        conversation.scrollIntoView({block:"nearest"});
         return true;
       },
     }) : null;
