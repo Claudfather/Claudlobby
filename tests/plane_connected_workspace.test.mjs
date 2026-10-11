@@ -643,3 +643,34 @@ test('guided GitHub consent shows exact issuer links and requires all bot access
   assert.equal(h.api.snapshot().context.github_enrollment.credentials_ready,true);
   assert.equal(await h.api.run('preview'),true);h.api.dispose();
 });
+
+test('connected permission decisions unwrap only their host and inspect the original receipt after a lost response',async()=>{
+ const h=harness();await h.api.checkAccount();await h.api.act(0,'connect');await h.api.act(1,'connect');
+ await h.api.jget('/api/overview');
+ const permission={permission_id:'perm_'+'1'.repeat(32),task_id:wi,request_event_id:'ev_'+'2'.repeat(32),assignment_id:null,
+  requester:{uid:'actor_'+'3'.repeat(32),alias:'Lead'},scope:{action:'deploy',target:'example.test',constraints:'Staging only'},
+  scope_sha256:'4'.repeat(64),reason:'Review release',state:'pending',decided_by:null,decision_reason:null};
+ const capability={version:2,room:'team',scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'permission-grant'},
+  simulation:false,actions:['permission'],release_id:'r-'+'5'.repeat(64),task_id:wi,permissions:[permission],has_more:false};
+ // A full page of valid quoted text exceeds the old 512 KiB context cap.
+ capability.permissions=Array.from({length:50},(_,i)=>({...permission,permission_id:'perm_'+i.toString(16).padStart(32,'0'),
+  scope:{...permission.scope,target:'"'.repeat(1024),constraints:'"'.repeat(4096)},reason:'"'.repeat(2048)}));
+ capability.permissions[0]=permission;capability.has_more=true;
+ assert.ok(new TextEncoder().encode(JSON.stringify(capability)).length>524288);
+ const url=refs[0].endpoint_origin+'/api/owner/connected/actions/';let sent;
+ h.overrides.set(url+'context',init=>{assert.deepEqual(JSON.parse(init.body),{room:'team',kind:'permission',task_id:wi});return reply(200,capability);});
+ h.overrides.set(url+'prepare',init=>{const {body,...metadata}=JSON.parse(init.body);assert.equal(metadata.target.task_id,wi);assert.equal(metadata.target.permission_id,permission.permission_id);return reply(200,{...metadata,semantic_sha256:'6'.repeat(64)});});
+ h.overrides.set(url+'send',init=>{sent=JSON.parse(init.body);throw Error('Lost response');});
+ h.overrides.set(url+'receipt',init=>{const metadata=JSON.parse(init.body);const {body,...original}=sent;assert.deepEqual(metadata,original);return reply(200,{...metadata,status:'recorded',execution:'not_requested',notification:'not_requested',permission:{...permission,state:'approved',decided_by:{uid:'actor_'+'7'.repeat(32),alias:'Owner'},decision_reason:body}});});
+ const c=await h.api.permissionContext(sourceA+' / team',sourceA+'::'+wi);
+ assert.equal(c.permissions[0].requester.uid,sourceA+'::'+permission.requester.uid);
+ const state=new ActionState({getItem:()=>null,setItem(){}}),p=c.permissions[0],target={permission_id:p.permission_id,task_id:p.task_id,scope_sha256:p.scope_sha256,release_id:c.release_id};
+ const request=state.prepare(c,target,'Approved scope',id(8),'approve');
+ const before=h.calls.length;
+ await assert.rejects(()=>h.api.prepareAction({...request,target:{...target,permission_id:sourceB+'::'+permission.permission_id}}));
+ assert.equal(h.calls.length,before);
+ const sending=state.beginPrepared(c,request,await h.api.prepareAction(request));await assert.rejects(()=>h.api.sendAction(sending));
+ const result=await h.api.actionReceipt(state.pending[0]);state.accept(state.pending[0],result);
+ assert.equal(result.permission.permission_id,p.permission_id);assert.equal(state.pending.length,0);
+ assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,1);h.api.dispose();
+});

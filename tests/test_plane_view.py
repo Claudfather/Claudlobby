@@ -723,6 +723,11 @@ def test_app_js_import_is_cache_busted(tmp_path):
     assert work_loop.headers.get("cache-control") == "no-store"
     assert 'from "./action-state.js?v=' in work_loop.text
     assert 'from "./panel-state.js?v=' in work_loop.text
+    assert 'from "./permission-panel.js?v=' in work_loop.text
+    permissions = client.get("/permission-panel.js")
+    assert permissions.status_code == 200 and permissions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in permissions.text
+    assert 'from "./panel-state.js?v=' in permissions.text
     transport = client.get("/api-client.js")
     assert transport.status_code == 200
     assert transport.headers.get("cache-control") == "no-store"
@@ -1894,7 +1899,7 @@ def test_every_arm_carries_its_own_date_column(tmp_path):
 
 
 def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
-    """Attention names SQL arms; lifecycle labels name only reducer states."""
+    """Attention names canonical work/permission reasons; lifecycle stays unchanged."""
     import re
     from pathlib import Path as _P
 
@@ -1904,7 +1909,8 @@ def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
            / "app.js").read_text()
     why = src.split("const WHY = {", 1)[1].split("\n};", 1)[0]
     assert set(re.findall(r"^  (\w+):", why, re.M)) == \
-        {name for name, _s, _a, _w in ATTENTION_ARMS}
+        ({name for name, _s, _a, _w in ATTENTION_ARMS}
+         | {"permission_pending", "permission_unavailable"})
     status = src.split("const TASK_STATUS = {", 1)[1].split("\n};", 1)[0]
     labelled = set(re.findall(r"^  (\w+):", status, re.M))
     assert labelled == {"queued", "assigned", "active", "blocked",

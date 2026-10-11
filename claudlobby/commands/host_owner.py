@@ -27,6 +27,7 @@ _ACTION_LABELS = {
     "message": ("ordinary messages", "ordinary-message", "ALLOW", "REVOKE-MESSAGES"),
     "nudge": ("task nudges", "task-nudge", "ALLOW-NUDGES", "REVOKE-NUDGES"),
     "feedback": ("task feedback", "task-feedback", "ALLOW-FEEDBACK", "REVOKE-FEEDBACK"),
+    "permission": ("permission decisions", "permission-decision", "ALLOW-PERMISSIONS", "REVOKE-PERMISSIONS"),
 }
 
 
@@ -170,10 +171,16 @@ def _allow_action(args, paths, store, terminal, action):
         terminal.write("Allow selected-task nudges only as this actor in this fleet.\n"
                        "Nudges record a task event and ask its fleet manager to act.\n"
                        "This grants no ordinary messages, other task mutations or permission decisions.\n")
-    else:
+    elif action == "feedback":
         terminal.write("Allow task-linked comments as this actor to this fleet's configured lead.\n"
                        "Comments may concern open or completed work.\n"
                        "This grants no ordinary messages, nudges, task state changes or permission decisions.\n")
+    else:
+        terminal.write("Allow this actor to approve, decline and revoke exact task permission requests.\n"
+                       "Requests can concern merges, deployments, spending or deletion.\n"
+                       "Each decision must name the recorded request and its exact scope.\n"
+                       "This capability records authority; it does not execute those effects.\n"
+                       "Revoking this capability prevents new decisions; existing approvals remain until individually revoked.\n")
     label, _, allow_word, _ = _ACTION_LABELS[action]
     _approve(terminal, allow_word)
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
@@ -185,7 +192,7 @@ def _allow_action(args, paths, store, terminal, action):
                 or ctx.caller.uid != preview["actor_uid"] or ctx.caller.alias != preview["actor_alias"]):
             raise CommandFailure("conflict", "approved actor identities changed")
         allow = {"message": store.allow_messages, "nudge": store.allow_nudges,
-                 "feedback": store.allow_feedback}[action]
+                 "feedback": store.allow_feedback, "permission": store.allow_permissions}[action]
         grant = allow(expected_owner=preview["owner"], fleet_uid=ctx.fleet_uid,
                                     actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
     return CommandOutput({"state": "allowed", "grant": asdict(grant)},
@@ -198,6 +205,7 @@ def _revoke_action(args, store, terminal, action):
         "message": (store.current_message_grant, store.revoke_messages),
         "nudge": (store.current_nudge_grant, store.revoke_nudges),
         "feedback": (store.current_feedback_grant, store.revoke_feedback),
+        "permission": (store.current_permission_grant, store.revoke_permissions),
     }[action]
     grant = current(expected_owner=owner, fleet_uid=args.fleet_uid)
     _describe(terminal, owner)
@@ -300,10 +308,13 @@ def dispatch(args):
                 lines.append("Nudge grant: " + json.dumps(asdict(nudge), ensure_ascii=True))
             for feedback in feedbacks:
                 lines.append("Feedback grant: " + json.dumps(asdict(feedback), ensure_ascii=True))
+            for permission in status.permission_grants:
+                lines.append("Permission grant: " + json.dumps(asdict(permission), ensure_ascii=True))
             return CommandOutput({"state": state, "owner": asdict(grant) if grant else None,
                                   "message_grants": [asdict(message) for message in messages],
                                   "nudge_grants": [asdict(nudge) for nudge in nudges],
-                                  "feedback_grants": [asdict(feedback) for feedback in feedbacks]},
+                                  "feedback_grants": [asdict(feedback) for feedback in feedbacks],
+                                  "permission_grants": [asdict(p) for p in status.permission_grants]},
                                  lines=tuple(lines))
         with _terminal() as terminal:
             if args.owner_action in {"allow-setup", "revoke-setup"}:
@@ -378,8 +389,8 @@ def dispatch(args):
                 store.connected().initialize(expected_owner=owner)
                 return CommandOutput({"state": "initialized"}, lines=("Connected read-session storage initialized.",))
             if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
-                                     "allow-feedback", "revoke-feedback"}:
-                action = {"messages": "message", "nudges": "nudge", "feedback": "feedback"}[
+                                     "allow-feedback", "revoke-feedback", "allow-permissions", "revoke-permissions"}:
+                action = {"messages": "message", "nudges": "nudge", "feedback": "feedback", "permissions": "permission"}[
                     args.owner_action.split("-", 1)[1]]
                 with _grant_errors(action):
                     if args.owner_action.startswith("allow-"):

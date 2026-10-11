@@ -34,7 +34,8 @@ def register_host_owner(hosts):
                 help="Explicitly prepare host identity and owner authority before first activation")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
     for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
-                              ("feedback", "task-linked comments")):
+                              ("feedback", "task-linked comments"),
+                              ("permissions", "task permission decisions")):
         allow = actions.add_parser("allow-" + capability,
             help=f"Allow {label} as a local human in one active fleet (interactive)")
         allow.add_argument("--target-fleet", required=True, help="Explicit active fleet name")

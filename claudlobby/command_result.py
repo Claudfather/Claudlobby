@@ -65,12 +65,14 @@ _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
 _PUBLIC.update({("host", "github-app", "issuer", action): f"host.github-app.issuer.{action}"
                 for action in ("approve", "invite", "cancel", "revoke", "serve")})
+_PUBLIC.update({("task", "permission", action): f"task.permission.{action}"
+                for action in ("request", "show", "check", "approve", "decline", "revoke")})
 _PUBLIC.update({("host", "backup", action): f"host.backup.{action}"
                 for action in ("create", "inspect", "restore")})
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
                 for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
                                "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
-                               "allow-feedback", "revoke-feedback")})
+                               "allow-feedback", "revoke-feedback", "allow-permissions", "revoke-permissions")})
 _PUBLIC.update({("plane", action): f"plane.{action}" for action in
                 ("doctor", "emit", "emit-batch", "expire", "status", "spool", "prune", "registry")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
