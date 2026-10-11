@@ -27,7 +27,8 @@ def test_team_template_materializes_exact_scope_and_preserves_policy():
 
     goal = 'Improve "checkout": café conversion tests'
     content = setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
-    fleet, _ = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    fleet, defaults = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    assert defaults["jobs"]["manager-checkin"]["enroll"] is True
     assert content == setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
     assert fleet.name == "shop" and fleet.service_prefix == "com.claudlobby.shop"
     assert fleet.mission.startswith(f"Approved goal: {goal}.")

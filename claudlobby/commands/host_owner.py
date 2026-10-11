@@ -360,7 +360,9 @@ def dispatch(args):
                         github_enrollment=enrollment)
                     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
                         "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
-                        "This can enroll/start native services and consume provider usage.\n")
+                        "This can enroll/start native services and consume provider usage.\n"
+                        "After launch, the idle lead periodically revisits the approved goal, even with the browser closed.\n"
+                        "These check-ins consume provider usage even when no new task is selected.\n")
                     terminal.write("The selected GitHub connection will be assigned to the lead, engineer and reviewer for this repository.\n"
                         if github_policy else "No named GitHub connection selected; existing template credential requirements still apply.\n")
                     if github_policy:

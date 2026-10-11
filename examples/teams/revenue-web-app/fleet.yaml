@@ -16,6 +16,8 @@ fleet:
     remote_control: false
     permission_mode: default
     dangerously_skip_permissions: false
+    jobs:
+      manager-checkin: { enroll: true }
     scope:
       org: example-org
       repos: [example-org/revenue-web-app]

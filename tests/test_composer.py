@@ -56,10 +56,13 @@ def _make_paths(root: Path) -> Paths:
 class TestRevenueWebAppCandidate:
     @pytest.mark.parametrize("bot_id", ["lead", "engineer", "reviewer"])
     def test_shipped_roles_compose_scoped_policy_without_extra_connections(self, tmp_path, bot_id):
-        from claudlobby.composer import _resolve_channel_permissions, compose_claude_md
+        from claudlobby.composer import (
+            _resolve_channel_permissions, compose_claude_md, compose_fleet_timers,
+            resolve_effective_skills,
+        )
 
         candidate = Path(__file__).resolve().parents[1] / "examples/teams/revenue-web-app/fleet.yaml"
-        fleet, _ = load_fleet(candidate)
+        fleet, defaults = load_fleet(candidate)
         paths = _make_paths(tmp_path)
         bot = fleet.bots[bot_id]
         instructions = compose_claude_md(bot, fleet, paths)
@@ -82,6 +85,11 @@ class TestRevenueWebAppCandidate:
         # Channel selection disables wiring/grants; inherited prose is retained.
         assert "Both channels fire at lifecycle boundaries" in instructions
         if bot_id == "lead":
+            assert "checkin" in resolve_effective_skills(bot, fleet, paths, is_manager=True)
+            timers = compose_fleet_timers(fleet, paths, defaults)
+            assert (timers / f"{fleet.service_prefix}.manager-checkin.timer").is_file()
+            assert (timers / f"{fleet.service_prefix}.manager-checkin.plist").is_file()
+            assert f"{fleet.service_prefix}.manager-checkin" not in (timers / "DORMANT").read_text()
             assert "Auto-merge (`gh pr merge --squash`)" in instructions
             assert "auto-merge and re-merge guidance: reviewer approval alone never authorizes a merge" in instructions
             assert "check its current scope immediately before acting" in instructions

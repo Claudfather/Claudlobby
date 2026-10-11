@@ -204,6 +204,7 @@ export function createGuidedSetup({client, storage, storageKey,
   }
   function mountPanel({document,element}) {
     const heading = document.createElement('strong'); heading.textContent = 'Create your team'; element.append(heading);
+    const ongoing = document.createElement('p'); ongoing.textContent = 'Your team can keep working with this browser closed. Recurring lead check-ins use your provider account even when no new task is selected.'; element.append(ongoing);
     const declaration = document.createElement('p'); element.append(declaration);
     const connection = document.createElement('p'); element.append(connection);
     const enrollment = document.createElement('div'); element.append(enrollment);
