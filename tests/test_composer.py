@@ -68,7 +68,8 @@ class TestRevenueWebAppCandidate:
 
         assert "example-org/revenue-web-app" in instructions
         assert fleet.mission in instructions
-        assert "The fleet does not auto-merge PRs" in instructions
+        assert "claudlobby task permission request TASK_ID" in instructions
+        assert "claudlobby task permission check PERMISSION_ID" in instructions
         assert "Without explicit human confirmation" in instructions
         assert "Always create a feature branch" in instructions
         assert "skip Telegram-specific posts and tools, never canonical reports" in instructions
@@ -77,7 +78,7 @@ class TestRevenueWebAppCandidate:
         if bot_id == "lead":
             assert "Auto-merge (`gh pr merge --squash`)" in instructions
             assert "auto-merge and re-merge guidance: reviewer approval alone never authorizes a merge" in instructions
-            assert "the human performs the merge" in instructions
+            assert "check its current scope immediately before acting" in instructions
         assert bot.channels == []
         assert not bot.remote_control
         assert bot.permission_mode == "default"

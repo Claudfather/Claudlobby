@@ -32,12 +32,12 @@ def test_team_template_materializes_exact_scope_and_preserves_policy():
     assert fleet.name == "shop" and fleet.service_prefix == "com.claudlobby.shop"
     assert fleet.mission.startswith(f"Approved goal: {goal}.")
     assert "Require explicit human permission" in fleet.mission
-    assert "the human performs the merge" in fleet.bots["lead"].mission
+    assert "reviewer approval alone never authorizes a merge" in fleet.bots["lead"].mission
     assert {key: bot.expertise for key, bot in fleet.bots.items()} == {
         "lead": ["orchestration"], "engineer": ["software-engineering"], "reviewer": ["code-review"]}
     assert all(bot.scope.org == "example-org" and bot.scope.repos == ["example-org/shop"]
                for bot in fleet.bots.values())
-    assert all("merge-policy-human" in bot.guardrails and not bot.dangerously_skip_permissions
+    assert all("task-scoped-effects" in bot.guardrails and not bot.dangerously_skip_permissions
                and not bot.channels and not bot.remote_control for bot in fleet.bots.values())
     assert fleet.projects_derived and all(p.validation.tier == "review" for p in fleet.projects.values())
 
