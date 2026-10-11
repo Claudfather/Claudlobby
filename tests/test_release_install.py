@@ -235,12 +235,33 @@ def bootstrap_bundle(tmp_path, monkeypatch):
     return bootstrap, script, wheel, sums
 
 
+def _installer(script, target):
+    with zipfile.ZipFile(target, 'w') as archive:
+        for path in script.parent.rglob('*'):
+            if path.is_file():
+                name = path.relative_to(script.parent).as_posix()
+                archive.write(path, '__main__.py' if name == 'bootstrap.py' else name)
+
+
+@pytest.mark.parametrize('packaged', [False, True])
 @pytest.mark.parametrize('interrupted', [False, True])
-def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(bootstrap_bundle, tmp_path, monkeypatch, interrupted):
+def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(bootstrap_bundle, tmp_path, monkeypatch, interrupted, packaged):
     bootstrap, script, wheel, _ = bootstrap_bundle
     calls = []
     monkeypatch.setattr(bootstrap, '_run', lambda argv, env, **_: calls.append((argv, env)))
     observed = {}
+    original_bundle = bootstrap._bundle
+    def inspect_bundle(script):
+        observed['input'] = script.parent
+        return original_bundle(script)
+    monkeypatch.setattr(bootstrap, '_bundle', inspect_bundle)
+    if packaged:
+        installer = tmp_path / 'install.pyz'
+        _installer(script, installer)
+        monkeypatch.setattr(bootstrap, '__loader__', bootstrap.zipimport.zipimporter(str(installer)))
+        monkeypatch.setattr(bootstrap, '__file__', str(installer / '__main__.py'))
+    else:
+        monkeypatch.setattr(bootstrap, '__file__', str(script))
     class Setup:
         def __init__(self, argv, env, start_new_session):
             observed.update(argv=argv, env=env, owned=start_new_session, work=Path(argv[0]).parents[2])
@@ -251,6 +272,7 @@ def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(boots
         def wait(self):
             self.waits += 1
             assert observed['work'].is_dir(), 'setup inputs were deleted before child exit'
+            assert observed['input'].is_dir(), 'installer inputs were deleted before child exit'
             if interrupted and self.waits <= 2:
                 raise KeyboardInterrupt
             return 3
@@ -261,10 +283,11 @@ def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(boots
     root = (tmp_path / 'new-data').resolve()
     if interrupted:
         with pytest.raises(KeyboardInterrupt):
-            bootstrap.bootstrap(script, root, json_output=True)
+            bootstrap.main(['--root', str(root), '--json'])
     else:
-        assert bootstrap.bootstrap(script, root, json_output=True) == 3
+        assert bootstrap.main(['--root', str(root), '--json']) == 3
     assert not root.exists() and not observed['work'].exists()
+    assert observed['input'].exists() is (not packaged)
     assert 'SECRET_TOKEN' not in observed['env'] and 'PYTHONPATH' not in observed['env']
     assert observed['owned'] and observed['argv'][-1] == '--json'
     assert len(calls) == 4
@@ -301,6 +324,36 @@ def test_bootstrap_carrier_refusals_precede_installation(bootstrap_bundle, tmp_p
     root = (tmp_path / 'new-data').resolve()
     with pytest.raises(bootstrap.BundleError): bootstrap.bootstrap(script, root)
     assert not root.exists()
+
+
+@pytest.mark.parametrize('fault', ['traversal', 'symlink', 'duplicate', 'case-collision', 'extra',
+                                 'oversized', 'wrong-launcher'])
+def test_installer_rejects_bad_archive_before_installation(bootstrap_bundle, tmp_path, monkeypatch, fault):
+    bootstrap, script, wheel, sums = bootstrap_bundle
+    if fault == 'wrong-launcher':
+        script.write_bytes(script.read_bytes() + b'\n')
+        sums()  # Still must match the candidate module, even with updated checksums.
+    installer = tmp_path / 'install.pyz'
+    _installer(script, installer)
+    if fault == 'oversized':
+        monkeypatch.setattr(bootstrap, '_MAX_FILE', script.stat().st_size - 1)
+    elif fault != 'wrong-launcher':
+        name = {'traversal': '../escaped', 'symlink': 'linked', 'duplicate': 'built-on.txt',
+                'case-collision': 'BUILT-ON.TXT', 'extra': 'extra'}[fault]
+        info = zipfile.ZipInfo(name)
+        if fault == 'symlink': info.external_attr = 0o120777 << 16
+        with zipfile.ZipFile(installer, 'a') as archive:
+            if fault == 'duplicate':
+                with pytest.warns(UserWarning, match='Duplicate name'):
+                    archive.writestr(info, b'changed')
+            else: archive.writestr(info, b'changed')
+    monkeypatch.setattr(bootstrap, '_run', lambda *_: pytest.fail('installation started'))
+    directory = (tmp_path / 'extracted').resolve()
+    directory.mkdir()
+    root = (tmp_path / 'data').resolve()
+    with pytest.raises(bootstrap.BundleError):
+        bootstrap.bootstrap(bootstrap._extract_installer(installer, directory), root)
+    assert not root.exists() and not (tmp_path / 'escaped').exists()
 
 
 @pytest.mark.parametrize('target,machine,platform_tag,accepted', [
