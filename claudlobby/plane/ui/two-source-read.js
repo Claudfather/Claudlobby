@@ -134,14 +134,30 @@ export function createWorkspaceReadTransport({ sources }) {
     const url = new URL(input, 'https://plane.invalid');
     if (url.origin !== 'https://plane.invalid') return failed('invalid');
     const path = url.pathname, detail = /^\/api\/tasks\/([^/]+)$/.exec(path);
+    const teamRead = ['/api/inventory', '/api/org', '/api/utilization'].includes(path);
     const roster = ['/api/fleets', '/api/channel', '/api/tasks', '/api/identities', '/api/overview', '/api/summary'];
-    if (!detail && !roster.includes(path)) return failed();
-    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : detail || ['/api/tasks', '/api/identities'].includes(path) ? ['fleet'] : [];
+    if (!detail && !teamRead && path !== '/api/equipment' && !roster.includes(path)) return failed();
+    const allowed = path === '/api/equipment' ? ['alias'] : path === '/api/channel' ? ['fleet', 'limit'] : detail || teamRead || ['/api/tasks', '/api/identities'].includes(path) ? ['fleet'] : [];
     if ([...url.searchParams.keys()].some(k => !allowed.includes(k) || url.searchParams.getAll(k).length !== 1)) return failed('invalid');
     if (path === '/api/channel' && url.searchParams.has('limit') && url.searchParams.get('limit') !== '120') return failed('invalid');
     const selected = url.searchParams.get('fleet');
-    const owning = selected && rooms.get(selected);
+    let owning = selected && rooms.get(selected);
     if (selected && !owning) return failed('unknown', 'Select an admitted source team.');
+    if (path === '/api/equipment') {
+      const alias = url.searchParams.get('alias');
+      const e = typeof alias === 'string' && entries.find(e => alias.startsWith(e.key + '::'));
+      if (!e || alias.length > 1024) return failed('invalid');
+      const raw = alias.slice(e.key.length + 2), revision = e.routingRevision;
+      if (!raw) return failed('invalid');
+      const value = await read(e, '/api/equipment?alias=' + encodeURIComponent(raw));
+      if (value.state !== 'ok') return value;
+      if (revision !== e.routingRevision) return failed('unavailable', 'The source team mapping changed; inspect the bot again.');
+      if (value.data.alias !== raw) return failed('denied', 'Equipment did not match the selected bot.');
+      return {...value, data:fields(e, value.data, [], ['alias'])};
+    }
+    // Team details use one explicit source. A single-team workspace needs no picker.
+    if (teamRead && !owning && rooms.size === 1) owning = rooms.values().next().value;
+    if (teamRead && !owning) return failed('unknown', 'Choose a team to see its bots, project and tools.');
     if (detail) {
       let id;
       try { id = decodeURIComponent(detail[1]); } catch { return failed('invalid'); }
@@ -168,6 +184,8 @@ export function createWorkspaceReadTransport({ sources }) {
     if (owning) {
       const v = values[0];
       if (v.state !== 'ok') return v;
+      if (['/api/inventory', '/api/org'].includes(path) && v.data.fleet !== owning.raw.alias)
+        return failed('denied', 'Details did not match the selected team.');
       return project(owning.e, path, v);
     }
     const good = entries.flatMap((e, i) => {
@@ -206,6 +224,11 @@ export function createWorkspaceReadTransport({ sources }) {
     if (path === '/api/channel') return { ...v, data: { ...d, threads: d.threads.map(t => thread(e, t)) } };
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
     if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid'], ['alias'], ['fleet'])) } };
+    if (path === '/api/inventory') return {...v, data:{...d, fleet:room(e,d.fleet),
+      bots:d.bots.map(x => fields(e,x,[],['alias']))}};
+    if (path === '/api/org') return {...v, data:{...d, fleet:room(e,d.fleet), display_label:`${e.label} / ${d.fleet}`,
+      available:d.available.map(value => room(e,value))}};
+    if (path === '/api/utilization') return {...v, data:d.map(x => fields(e,x,[],['alias']))};
     if (path === '/api/overview' && (!d.totals || !d.host)) throw new Error('Missing source facts.');
     if (path === '/api/overview') return { ...v, data: { ...d, fleets: d.fleets.map(x => ({...fields(e, x, ['uid'], ['acked_by'], ['alias']),display_label:`${e.label} / ${x.alias}`})) } };
     return v;

@@ -1495,6 +1495,16 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onResume: resumeOwnerReads,
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
       onActionSourceChange(source) { workLoop.refreshActions(source); },
+      onOpenTeam(room, roster) {
+        if (sessionPaused) return false;
+        adoptFleets(roster);
+        pickFleet(room);
+        const conversation = $("work-loop");
+        conversation.tabIndex = -1;
+        conversation.focus();
+        conversation.scrollIntoView({block:"nearest"});
+        return true;
+      },
     }) : null;
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
@@ -1606,7 +1616,7 @@ function renderInventory(env, orgEnv) {
       </div>`).join("")}</details>`;
   }).join("");
   const orgHtml = orgEnv && orgEnv.state === "ok" && orgEnv.data
-    ? `<details class="org" open><summary>org · ${esc(orgEnv.data.fleet)}${orgEnv.data.manager ? ` · manager ${esc(orgEnv.data.manager)}` : ""}${
+    ? `<details class="org" open><summary>org · ${esc(orgEnv.data.display_label || orgEnv.data.fleet)}${orgEnv.data.manager ? ` · manager ${esc(orgEnv.data.manager)}` : ""}${
         orgEnv.data.cycles.length ? ` · <b>${orgEnv.data.cycles.length} reporting cycle(s)</b>` : ""}${
         orgEnv.data.malformed_edges ? ` · <b>${esc(orgEnv.data.malformed_edges)} malformed edge(s) skipped${
           (orgEnv.data.malformed_bots || []).length ? `: ${esc(orgEnv.data.malformed_bots.join(", "))}` : ""}</b>` : ""}${

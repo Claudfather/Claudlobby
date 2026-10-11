@@ -66,6 +66,32 @@ test('outside-board detail routes by exact source/team and refuses mismatched ow
   a.routes.get(`/api/tasks/${wi}?fleet=team`).data.task.fleet_uid = 'fleet_'+'f'.repeat(32);
   assert.equal((await api.jget(url)).state, 'denied');
 });
+test('team details and bot inspection use the chosen source, preserve identities and fence stale equipment', async () => {
+  const {api,a,b}=await pair(), alias='bot:team/worker';
+  a.routes.set('/api/inventory?fleet=team',ok({fleet:'team',bots:[{alias,short:'worker',counts:{}}],projects:[],library:[],counts:{bots:1,projects:0,library:0,library_in_use:0}}));
+  a.routes.set('/api/org?fleet=team',ok({fleet:'team',manager:'lead',roots:[],available:['team']}));
+  a.routes.set('/api/utilization?fleet=team',ok([{alias,busy_pct_24h:50}]));
+  const equipment={alias,short:'worker',equipment:{skills:['review']},posture:{},org:{},changes:[],versions:1};
+  const equipmentURL='/api/equipment?alias='+encodeURIComponent(alias);
+  a.routes.set(equipmentURL,ok(equipment));
+  const inv=await api.jget('/api/inventory?fleet=a%20%2F%20team');
+  assert.equal(inv.data.bots[0].alias,'a::'+alias);
+  assert.equal(inv.data.fleet,'a / team');assert.equal(inv.data.bots[0].short,'a / worker');
+  assert.equal((await api.jget('/api/org?fleet=a%20%2F%20team')).data.display_label,'a / team');
+  assert.equal((await api.jget('/api/utilization?fleet=a%20%2F%20team')).data[0].alias,inv.data.bots[0].alias);
+  const selected='/api/equipment?alias='+encodeURIComponent(inv.data.bots[0].alias);
+  assert.equal((await api.jget(selected)).data.alias,inv.data.bots[0].alias);
+  assert.equal(b.calls.some(c=>/inventory|equipment|utilization|\/org/.test(c.url)),false);
+  assert.notEqual((await api.jget('/api/inventory')).state,'ok');
+  assert.notEqual((await api.jget('/api/equipment?alias='+encodeURIComponent(alias))).state,'ok');
+  a.routes.set(equipmentURL,ok({...equipment,alias:'bot:team/other'}));assert.equal((await api.jget(selected)).state,'denied');
+  const held=deferred();a.routes.set(equipmentURL,held.promise);const reading=api.jget(selected);await new Promise(r=>setImmediate(r));
+  a.setStatus('sign_in_required');await a.reader.start();held.resolve(ok(equipment));assert.notEqual((await reading).state,'ok');
+  api.dispose();
+  const only=await source('one','a'),single=createWorkspaceReadTransport({sources:[only]});await single.jget('/api/fleets');
+  only.routes.set('/api/inventory?fleet=team',a.routes.get('/api/inventory?fleet=team'));
+  assert.equal((await single.jget('/api/inventory')).data.fleet,'one / team');single.dispose();
+});
 test('source refusal fences held detail without clearing other source, keeps admitted fleet labels and honest windows', async () => {
   const { api, a } = await pair();
   const hold = deferred(); a.routes.set(`/api/tasks/${wi}?fleet=team`, hold.promise);

@@ -137,7 +137,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
         currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
-        row.setup = createGuidedSetup({client:row.client,storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
+        row.setup = createGuidedSetup({client:row.client,now,onOpenTeam:fleet => openTeam(row,fleet),storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -291,6 +291,25 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     catch { return false; }
     finally { pending.delete(index); if (!disposed) changed(); }
   }
+  async function openTeam(row, fleet) {
+    const index = clients.indexOf(row), ticket = sequence;
+    const live = () => !disposed && phase === 'ready' && ticket === sequence && clients[index] === row;
+    if (index < 0 || !live() || pending.has(index) || typeof mount?.onOpenTeam !== 'function') return false;
+    pending.add(index); changed();
+    try {
+      if (row.client.snapshot().state !== 'ready' && !await row.client.check()) return false;
+      if (!live() || row.client.snapshot().state !== 'ready') return false;
+      const epoch = row.client.snapshot().epoch;
+      const roster = await jget('/api/fleets');
+      if (!live() || row.client.snapshot().state !== 'ready' || epoch !== row.client.snapshot().epoch) return false;
+      const team = roster.data?.fleets?.find(f => {
+        const route = transport.routeRoom(f.alias);
+        return f.source_state === 'ok' && route?.key === row.key && route.fleet === fleet;
+      });
+      return !!team && mount.onOpenTeam(team.alias,roster) === true;
+    } catch { return false; }
+    finally { pending.delete(index); if (!disposed) changed(); }
+  }
   function render() {
     if (!mount) return;
     const {document, element} = mount; element.hidden = false;
@@ -350,12 +369,13 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state);
     });
   }
-  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}}) {
-    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange}; paused = true; invoke(onPause); changed();
-    const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
+  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onOpenTeam}) {
+    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onOpenTeam}; paused = true; invoke(onPause); changed();
+    const unavailable = 'Unavailable in this connected view. Activity, tasks and team details remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (button.dataset.view === 'channel' && !['denied','disposed'].includes(phase)) continue;
+        if ((['channel','fleet'].includes(button.dataset.view) || button.dataset.botInspect)
+            && !['denied','disposed'].includes(phase)) continue;
         button.disabled = true; button.title = unavailable;
       }
       const search = document.getElementById('search'); if (search) { search.disabled = true; search.title = unavailable; search.value = ''; }
