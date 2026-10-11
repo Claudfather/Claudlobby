@@ -63,6 +63,8 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("event", ("list", "show"))) for verb in verbs})
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
+_PUBLIC.update({("host", "backup", action): f"host.backup.{action}"
+                for action in ("create", "inspect", "restore")})
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
                 for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
                                "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",

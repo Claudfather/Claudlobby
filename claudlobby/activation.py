@@ -66,7 +66,11 @@ def _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, a
         raise
 
 
-def _empty_plane(root: Path) -> None:
+def _bootstrap_plane(root: Path, release) -> bool:
+    """Return whether the bootstrap owns restored data instead of an empty DB."""
+    from .host_backup import restored_bootstrap
+    if restored_bootstrap(root, release):
+        return True
     # Bootstrap intentionally accepts less than upgrade: any existing Plane
     # content (DB, sidecar, socket/lock, spool, raw stage or unknown file) needs
     # the recovery/upgrade owner. db_file is the canonical noncreating path.
@@ -78,6 +82,7 @@ def _empty_plane(root: Path) -> None:
             raise ActivationError("bootstrap requires absent Plane data and queues; use explicit recovery/upgrade")
     except OSError as exc:
         raise ActivationError("bootstrap cannot prove Plane state empty") from exc
+    return False
 
 
 def _probe(root: Path):
@@ -252,7 +257,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         for prior in (root / "state/activations").glob("*/activation.json"):
             record = read_activation(root, prior.parent.name)
             raise ActivationError(f"existing activation {record.activation_id} requires explicit recovery, not bootstrap")
-        _empty_plane(root)
+        _bootstrap_plane(root, release)
         plan.check_fresh()
         inventory = collect_enrollment(root, (), bootstrap_empty=True, adapter=adapter).require_complete()
         install_directory = Path(install_directory)
@@ -269,6 +274,8 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
                 if item["phase"] == "bots" and os.path.lexists(declaration.working_directory):
                     raise ActivationError("bootstrap refuses pre-existing bot runtime directories")
         rank, _ = _roster(plan, declarations, package)
+        from .plane.owner_service import preflight as owner_service_preflight
+        owner_service_preflight(starts)
         if sum(item["phase"] == "ingest" and item["enroll"] for _, item in declarations) != 1:
             raise ActivationError("bootstrap requires exactly one declared ingest unit")
         # An empty original roster cannot supply the caller checks used by the
@@ -287,7 +294,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         for step, phase in (("producers_paused", "producers"), ("sessions_handed_off", None),
                             ("sessions_quiesced", "bots"), ("ingest_quiesced", "ingest")):
             store.begin(activation_id, step)
-            _empty_plane(root)
+            _bootstrap_plane(root, release)
             evidence = (units.pause_phase(store, activation_id, phase, adapter=adapter).digest if phase else
                         _digest({"bootstrap_empty": True, "sessions": [], "handoffs": []}))
             store.complete(activation_id, step, evidence_digest=evidence)
@@ -301,8 +308,8 @@ def _finish_bootstrap_activation(root, store, activation_id, plan, release,
     completed = set(record.body["completed"])
     if "queues_classified" not in completed:
         store.begin(activation_id, "queues_classified")
-        _empty_plane(root)
-        migration = build_migration_manifest(root, release, release, initialize_empty=True)
+        restored = _bootstrap_plane(root, release)
+        migration = build_migration_manifest(root, release, release, initialize_empty=not restored)
         if migration.blockers or any(row["file_count"] != 0 for row in migration.queues.values()):
             raise ActivationError("bootstrap migration/queue proof is blocked")
         store.complete(activation_id, "queues_classified", evidence_digest=migration.manifest_id[2:])
@@ -314,8 +321,8 @@ def _finish_bootstrap_activation(root, store, activation_id, plan, release,
                 raise ActivationError("saved bootstrap migration manifest has an unknown schema")
             migration = MigrationManifest(**payload)
         else:
-            _empty_plane(root)
-            migration = build_migration_manifest(root, release, release, initialize_empty=True)
+            restored = _bootstrap_plane(root, release)
+            migration = build_migration_manifest(root, release, release, initialize_empty=not restored)
         if migration.manifest_id[2:] != record.body["evidence"]["queues_classified"]:
             raise ActivationError("bootstrap queues differ from their recorded migration manifest")
     if "migration_applied" not in completed:
@@ -784,6 +791,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if blocked:
                 raise CandidateDisabledOverride(tuple(blocked))
         _preflight_candidate_placement(inventory, candidates, install_directory)
+        from .plane.owner_service import preflight as owner_service_preflight, managed_listeners
+        owner_service_preflight(starts, managed=managed_listeners(source_plan, inventory))
         retired_units = tuple(unit for unit in inventory.units
                               if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)
@@ -924,6 +933,9 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
         for entry in startable:
             source = entry["source"]
             _, _, unit = starts[source]
+            if source not in prior_effects:
+                from .plane.owner_service import preflight as owner_service_preflight
+                owner_service_preflight({source: starts[source]})
             fence = prior_effects[source]["fence"] if source in prior_effects else None
             readiness = (lambda: _ingest_ready(root, release)) if phase == "ingest" else None
             if source in prior_effects:
@@ -1282,7 +1294,7 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                 if next_step in record.body["completed"]:
                     continue
                 store.begin(activation_id, next_step)
-                _empty_plane(root)
+                _bootstrap_plane(root, release)
                 evidence = (units.pause_phase(store, activation_id, phase, adapter=adapter).digest if phase else
                             _digest({"bootstrap_empty": True, "sessions": [], "handoffs": []}))
                 store.complete(activation_id, next_step, evidence_digest=evidence)

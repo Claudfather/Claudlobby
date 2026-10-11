@@ -97,6 +97,9 @@ def test_exactly_the_categories_that_ship_off():
     visible test edit and an argued reason, never a silent registry entry."""
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert opt_in == {"update-siblings", "session-digest", "code-audit-sweep",
+                      # Explicit private write-capable serving; owner grants
+                      # and native endpoint configuration remain separate.
+                      "plane-owner",
                       "weekly-worker-restart",
                       # mutates operator source — update-siblings' OWN
                       # category, not a new one: armed, vault-sync commits and

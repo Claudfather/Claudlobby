@@ -131,10 +131,19 @@ def running_server(root, socket_path, binary):
             env=constructed_env(), stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 10
-            while not socket_path.exists() and process.poll() is None and time.monotonic() < deadline:
+            ready = False
+            # bind creates the path before listen and application startup.
+            # Wait for the actual read route, not merely the filesystem entry.
+            while process.poll() is None and time.monotonic() < deadline:
+                try:
+                    ready = request(socket_path, "/owner")[0] == 200
+                except (OSError, http.client.HTTPException):
+                    ready = False
+                if ready:
+                    break
                 time.sleep(0.02)
             log.flush()
-            assert process.poll() is None and socket_path.exists(), (root / "server.log").read_text()
+            assert process.poll() is None and ready, (root / "server.log").read_text()
             yield process
         finally:
             if process.poll() is None:
@@ -352,3 +361,25 @@ def test_private_listener_refuses_invalid_or_shared_lock_record(socket_path):
         with private_listener(socket_path):
             pytest.fail("modified a shared file")
     assert not socket_path.exists()
+
+
+def test_service_handover_refuses_live_foreground_without_changing_it(socket_path):
+    from types import SimpleNamespace
+    from claudlobby.activation_state import ActivationRefusal
+    from claudlobby.plane.owner_service import preflight
+
+    root = socket_path.parent
+    unit = SimpleNamespace(argv=("/example/bin/python",), root=root, unit="example-plane-owner",
+        command=("/example/bin/claudlobby", "--root", str(root), "host", "owner", "serve",
+                 "--origin", "https://host.example.test", "--socket", str(socket_path)))
+    starts = {"unit": (None, None, unit)}
+    preflight(starts)
+    assert not list(root.iterdir()), "preflight must not create sockets or lock files"
+    with private_listener(socket_path):
+        before = {p.name: p.stat().st_ino for p in root.iterdir()}
+        with pytest.raises(ActivationRefusal, match="stop the foreground"):
+            preflight(starts)
+        # An already-managed unit is quiesced by the existing activation owner.
+        preflight(starts, managed={(unit.unit, socket_path)})
+        assert {p.name: p.stat().st_ino for p in root.iterdir()} == before
+    preflight(starts)

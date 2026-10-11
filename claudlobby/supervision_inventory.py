@@ -769,7 +769,9 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 or env.get("CLAUDLOBBY_ROOT") != str(data_root)
                 or not legacy_source and not all(env.get(key) for key in (
                     "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI",
-                    "CLAUDLOBBY_ARTIFACT_ID", "FLEET_ROOT"))):
+                    "CLAUDLOBBY_ARTIFACT_ID"))
+                or not legacy_source and declaration.scope in ("fleet", "bot")
+                and not env.get("FLEET_ROOT")):
             raise InventoryError(f"ambiguous or incomplete declaration: {name}")
         expected[name] = declaration
     for declaration in declarations:

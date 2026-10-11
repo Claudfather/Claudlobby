@@ -38,10 +38,11 @@ def _private_directory(path: Path):
 
 
 @contextmanager
-def _listener_lease(path: Path, parent_identity):
+def _listener_lease(path: Path, parent_identity, *, create=True):
     # Never unlink the lock: a second inode would permit two simultaneous owners.
     lock_path = path.with_name(path.name + ".lock")
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(lock_path, flags | (os.O_CREAT if create else 0), 0o600)
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
@@ -75,7 +76,7 @@ def _listener_lease(path: Path, parent_identity):
         os.close(fd)
 
 
-def _reclaim_listener(path: Path, previous, parent_identity):
+def _reclaim_listener(path: Path, previous, parent_identity, *, remove=True):
     info = path.lstat()
     identity = info.st_dev, info.st_ino
     if (not stat.S_ISSOCK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
@@ -98,7 +99,20 @@ def _reclaim_listener(path: Path, previous, parent_identity):
             or stat.S_IMODE(current.st_mode) != 0o600 or current.st_uid != os.geteuid()
             or _private_directory(path.parent) != parent_identity):
         raise OwnerServerConfigurationError("owner socket changed during recovery")
-    path.unlink()
+    if remove:
+        path.unlink()
+
+
+def check_listener_available(path: Path):
+    """Noncreating activation preflight; startup repeats ownership and liveness."""
+    identity = _private_directory(path.parent)
+    if not os.path.lexists(path.with_name(path.name + ".lock")):
+        if os.path.lexists(path):
+            raise OwnerServerConfigurationError("owner socket is unrecorded; inspect it locally")
+        return
+    with _listener_lease(path, identity, create=False) as (_, previous):
+        if os.path.lexists(path):
+            _reclaim_listener(path, previous, identity, remove=False)
 
 
 @contextmanager

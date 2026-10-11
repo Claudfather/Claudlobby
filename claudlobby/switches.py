@@ -310,6 +310,18 @@ SWITCHES: tuple[Switch, ...] = (
              "extra; fronting it with Tailscale Serve stays yours)",
     ),
     Switch(
+        key="plane-owner",
+        scope=HOST_SERVICE,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="plane-owner",
+        config_extra="origin, tailscale and optional socket/workspace origins",
+        requires_extra="plane-ui",
+        plane=True,
+        why_opt_in="private write-capable endpoint can spend model budget and mutate operator configuration",
+        what="private owner server under native supervision; grants and Tailscale Serve stay separate",
+    ),
+    Switch(
         key="plane-host-probe",
         scope=HOST_JOB,
         polarity=OPT_OUT,
