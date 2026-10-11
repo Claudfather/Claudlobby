@@ -69,3 +69,30 @@ database-only replacement-host backup preserves event history but excludes these
 receipt files along with other local authority. Restored event rows alone cannot
 authorize work: make a fresh request and obtain a new operator decision. Restoring
 the database also does not restore host login credentials or browser grants.
+
+## Host-authorized browser decisions
+
+The existing direct-owner and connected-workspace action endpoints accept the
+fixed `permission` kind. A local operator must first approve the independent
+`host owner allow-permissions --target-fleet F --actor human:ALIAS` capability
+at a terminal (with separately confirmed `--register-actor` if needed). Read,
+message, nudge, feedback and workspace grants never imply this capability.
+`host owner revoke-permissions --fleet-uid FLEET_UID` removes it without touching
+other capabilities. This stops new decisions; already recorded approvals must
+be individually revoked through `task permission revoke` or an authorized
+browser decision. Normal task closure or reassignment also invalidates their use.
+
+The context endpoint accepts `kind`, `room`, and canonical `task_id`, returning
+up to 50 newest proven requests and an explicit `has_more` flag (also set when
+the bounded 1,000-event scan is exhausted). Unproven request rows are omitted; a
+genuine request with ambiguous history is shown as unavailable, never approved. Preparation
+binds the permission ID, task, exact scope digest, active release, decision,
+reason and request UUID to the current owner/grant/workspace generation. Sending
+calls the same canonical decision owner as the CLI. Receipt inspection never
+submits, repairs or retries: it proves the original recorded decision and reports
+the permission's *current* state, including a later revocation. An uncertain
+response keeps the original UUID; it does not authorize another decision.
+
+These endpoints do not execute approved effects or notify a bot. Shared dashboard
+controls and targeted notification are the next integration step. The canonical
+records remain on the host; no website permission database is required.

@@ -143,6 +143,64 @@ def read_permission(conn, permission_id, *, root, host_uid, fleet_uid):
             conn.rollback()
 
 
+def list_task_permissions(conn, task_id, *, root, host_uid, fleet_uid):
+    """Newest 50 proven requests for a task, with explicit scan truncation.
+
+    Unproven generic events cannot hide another request by poisoning its list.
+    A genuine request with ambiguous later history is shown as unavailable,
+    never as an older approval. The caller owns source admission and a snapshot.
+    """
+    _id(task_id, ID_PATTERNS["work_item"], "task")
+    show_task(conn, task_id, fleet_uid=fleet_uid).require_resolved()
+    rows = conn.execute(
+        "SELECT * FROM events WHERE kind='system' AND emitter=? "
+        "AND host_uid=? AND fleet_uid=? AND event='permission_requested' "
+        "AND detail_truncated=0 AND CASE WHEN json_valid(detail) "
+        "THEN json_extract(detail, '$.task_id') END=? ORDER BY ingest_seq DESC LIMIT 1001",
+        (EMITTER, host_uid, fleet_uid, task_id),
+    ).fetchall()
+    items = []
+    for row in rows[:1000]:
+        try:
+            data = json.loads(row["detail"])
+            if not isinstance(data, dict) or not _canonical_fact(root, conn, row, data):
+                continue
+        except TaskOperationUnavailableError:
+            raise
+        except (ValueError, TypeError, AttributeError):
+            continue  # An unproven diagnostic row cannot disable this task list.
+        ref = row["source_ref"]
+        if not isinstance(ref, str) or not ref.startswith("permission:"):
+            raise TaskConflictError("canonical permission request reference is inconsistent")
+        permission_id = ref.removeprefix("permission:")
+        try:
+            permission = read_permission(conn, permission_id,
+                root=root, host_uid=host_uid, fleet_uid=fleet_uid)
+            if permission.task_id != task_id:
+                raise TaskConflictError("permission request belongs to a different task")
+            item = permission.as_dict()
+        except TaskConflictError:
+            item = {"permission_id": permission_id, "task_id": task_id, "state": "unavailable"}
+        items.append(item)
+        if len(items) == 51:
+            break
+    return tuple(items[:50]), len(items) > 50 or len(rows) > 1000
+
+
+def permission_decision_digest(permission_id, scope_sha256, reason, *, release_id=None):
+    """One semantic contract for CLI decisions and browser receipt recovery."""
+    _id(permission_id, _PERMISSION_ID, "reference")
+    if not isinstance(scope_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", scope_sha256):
+        raise TaskQueryError("permission decision requires the displayed scope digest")
+    _text(reason, "reason", 2048)
+    extra = {}
+    if release_id is not None:
+        if not isinstance(release_id, str) or not re.fullmatch(r"r-[0-9a-f]{64}", release_id):
+            raise TaskQueryError("permission decision requires a canonical release")
+        extra["release_id"] = release_id
+    return semantic_digest(dict(permission_id=permission_id, scope_sha256=scope_sha256, reason=reason, **extra))
+
+
 def _permission_snapshot(conn, permission_id, *, root, host_uid, fleet_uid):
     _id(permission_id, _PERMISSION_ID, "reference")
     rows = conn.execute(
@@ -178,10 +236,14 @@ def _permission_snapshot(conn, permission_id, *, root, host_uid, fleet_uid):
                     data["assignment_id"], actor, PermissionScope.from_dict(data["scope"]),
                     _text(data["reason"], "reason", 2048), "pending")
             elif permission is not None:
-                if (set(data) != {"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason"}
+                if (set(data) not in ({"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason"},
+                                     {"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason", "release_id"})
                         or data["request_event_id"] != permission.request_event_id
                         or data["scope_sha256"] != permission.scope.digest
                         or not re.fullmatch(r"human:[^\s:/]+", actor.alias)):
+                    raise ValueError
+                if "release_id" in data and (not isinstance(data["release_id"], str)
+                        or not re.fullmatch(r"r-[0-9a-f]{64}", data["release_id"])):
                     raise ValueError
                 transition = next((pair for pair in _DECISIONS.values()
                                    if row["event"] == "permission_" + pair[1]), None)
@@ -263,7 +325,7 @@ def _event(ctx, request_id, permission_id, event, data, previous):
 
 def decide_permission(ctx: TaskOperationContext, request_id: str, permission_id: str, *,
                       decision: str, scope_sha256: str, reason: str,
-                      admit_read=None) -> PermissionResult:
+                      admit_read=None, release_id=None) -> PermissionResult:
     """Record an authenticated human decision for the displayed exact scope.
 
     The terminal/browser boundary authenticates the human; a bot or provenance
@@ -276,12 +338,8 @@ def decide_permission(ctx: TaskOperationContext, request_id: str, permission_id:
         raise TaskConflictError("permission decisions require an authenticated human caller")
     if decision not in _DECISIONS:
         raise TaskQueryError("permission decision must be approve, decline or revoke")
-    _id(permission_id, _PERMISSION_ID, "reference")
-    if not isinstance(scope_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", scope_sha256):
-        raise TaskQueryError("permission decision requires the displayed scope digest")
-    _text(reason, "reason", 2048)
+    semantic = permission_decision_digest(permission_id, scope_sha256, reason, release_id=release_id)
     operation = "task.permission." + decision
-    semantic = semantic_digest(dict(permission_id=permission_id, scope_sha256=scope_sha256, reason=reason))
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store, _reader(ctx) as conn:
         previous = _existing(store, ctx, operation, semantic)
         with _read_snapshot(conn, admit_read):
@@ -301,7 +359,8 @@ def decide_permission(ctx: TaskOperationContext, request_id: str, permission_id:
                     _current(ctx, conn, permission)
                 raw = _event(ctx, request_id, permission_id, next_state,
                     dict(permission_id=permission_id, request_event_id=permission.request_event_id,
-                         scope_sha256=scope_sha256, reason=reason), previous)
+                         scope_sha256=scope_sha256, reason=reason,
+                         **({"release_id": release_id} if release_id is not None else {})), previous)
                 receipt = _prepare(store, ctx, operation, semantic, (raw,), permission.task_id,
                                    permission.assignment_id)
             _commit(store, ctx, conn, receipt, (raw,), check, admit_read=admit_read)

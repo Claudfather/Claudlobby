@@ -45,6 +45,9 @@ class ConnectedActionAuthorization:
     def authorize_feedback(self, token, principal, **target):
         return self._action("feedback", token, principal, **target)
 
+    def authorize_permission(self, token, principal, **target):
+        return self._action("permission", token, principal, **target)
+
     def scope_binding(self, reader, host_uid):
         admission = self.access.connected().authorize(reader.token, reader.principal,
             host_uid=host_uid, operational_origin=self.operational_origin)
