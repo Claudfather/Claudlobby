@@ -225,8 +225,7 @@ export function createWorkspaceReadTransport({ sources }) {
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
     if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid'], ['alias'], ['fleet'])) } };
     if (path === '/api/inventory') return {...v, data:{...d, fleet:room(e,d.fleet),
-      bots:d.bots.map(x => fields(e,x,[],['alias'])),
-      projects:d.projects.map(x => fields(e,x,[],['alias'])), library:d.library.map(x => fields(e,x,[],['alias']))}};
+      bots:d.bots.map(x => fields(e,x,[],['alias']))}};
     if (path === '/api/org') return {...v, data:{...d, fleet:room(e,d.fleet), display_label:`${e.label} / ${d.fleet}`,
       available:d.available.map(value => room(e,value))}};
     if (path === '/api/utilization') return {...v, data:d.map(x => fields(e,x,[],['alias']))};
