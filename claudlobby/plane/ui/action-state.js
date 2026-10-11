@@ -40,7 +40,7 @@ const validTaskActionRow = row => row?.version === 2 && taskKinds.has(row.kind) 
 const validRow = row => row?.kind === "permission" ? validPermissionRow(row)
   : row?.version === 2 ? exact(row, taskActionKeys) && validTaskActionRow(row) : validLegacyRow(row);
 const logicalKey = row => row.kind === "permission"
-  ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.permission_id]) : row.version === 2
+  ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.permission_id, row.decision === "revoke" ? "revoke" : "decide"]) : row.version === 2
   ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.recipient, row.target.task_id]) : rowKey(row);
 export function validTaskActionContext(context, kind = context?.actions?.[0]) {
   return taskKinds.has(kind) && context?.version === 2 && context.simulation === false && validScope(context.scope)
@@ -282,7 +282,8 @@ export class ActionState {
 
   accept(request, receipt) {
     if (!sameReceipt(request, receipt)) throw new Error("Receipt does not match this request.");
-    if (receipt.status !== "recorded" || request.kind === "permission") {
+    const settled = request.kind === "permission" ? receipt.notification !== "unknown" : receipt.status !== "recorded";
+    if (settled) {
       const rows = this.pending.filter(p => p.request_id !== request.request_id
         || rowKey(p) !== rowKey(request));
       this.storage.setItem(this.key, JSON.stringify(rows));

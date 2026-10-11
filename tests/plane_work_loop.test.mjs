@@ -1533,3 +1533,20 @@ test('changing task access during permission preparation prevents send; a new ta
  j.get('task-detail-close').onclick();await settle();response.resolve(permissionReceipt(j.sends[0]));await sending;
  assert.equal(new ActionState(j.storage,'plane.pending-permissions.v1').pending.length,1);
 });
+
+test('recorded permission keeps an uncertain notification receipt across reload without blocking revocation',async()=>{
+ const storage=store(),unknown=request=>({...permissionReceipt(request),notification:'unknown'});
+ const h=harness(permissionOptions({storage,sendAction:unknown})),panel=await openPermission(h);
+ selectPermission(h,panel,'approve');await h.get('permission-decision-form').onsubmit({preventDefault(){}});
+ const original=JSON.parse(storage.getItem('plane.pending-permissions.v1'))[0];
+ assert.ok(original.request_id);assert.match(panel.innerHTML,/notification is unconfirmed/);
+ const approved={...ownerPermission,permissions:[permissionReceipt(h.sends[0]).permission]};
+ const restored=harness(permissionOptions({storage,permissionContext:()=>approved,
+   actionReceipt:request=>({...permissionReceipt(request),notification:'received'})})),next=await openPermission(restored);
+ assert.equal(next.querySelectorAll('[data-permission-decision]')[0].disabled,false);
+ selectPermission(restored,next,'revoke');assert.equal(restored.sends.length,0);
+ next.onclick({target:next.querySelectorAll('[data-permission-receipt]')[0]});await settle();
+ assert.equal(restored.lookups[0].request_id,original.request_id);assert.equal(restored.sends.length,0);
+ assert.match(next.innerHTML,/requesting bot received the notice/);
+ assert.equal(storage.getItem('plane.pending-permissions.v1'),'[]');
+});

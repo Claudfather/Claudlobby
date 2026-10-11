@@ -11,7 +11,8 @@ export function createPermissionPanel({api, storage}) {
   const draftRow = (p, decision) => ({version:2, kind:'permission', scope:context.scope, target:target(p), decision});
   const visible = row => context && row.target.task_id === task.task_id
     && ['workspace','host','fleet'].every(k => row.scope[k] === context.scope[k]);
-  const pending = p => state.pending.some(row => visible(row) && row.target.permission_id === p.permission_id);
+  const pending = p => state.pending.some(row => visible(row) && row.target.permission_id === p.permission_id
+    && (p.state !== 'approved' || row.decision === 'revoke'));
   function paint() {
     if (!element) return;
     if (!context) {
@@ -40,7 +41,7 @@ export function createPermissionPanel({api, storage}) {
       ${cards || '<p class="detail-empty">No proven permission requests in this view.</p>'}
       ${context.has_more ? '<p class="note">More records exist beyond this view. Use the host’s task permission commands to inspect an older request.</p>' : ''}
       <p role="status" aria-live="polite">${esc(note)}</p>
-      ${state.pending.filter(visible).map(row => `<div class="pending-action"><div><b>Decision receipt pending</b><p>${esc(labels[row.decision])} · ${esc(row.target.permission_id)}</p><code>${esc(row.request_id)}</code>
+      ${state.pending.filter(visible).map(row => `<div class="pending-action"><div><b>Saved decision receipt</b><p>${esc(labels[row.decision])} · ${esc(row.target.permission_id)}</p><code>${esc(row.request_id)}</code>
         ${scopeKey(row.scope) !== scopeKey(context.scope) ? '<p class="note">Saved under earlier access. Restore that access to inspect this receipt.</p>' : ''}</div>
         <button class="pill ghost" type="button" data-permission-receipt="${esc(row.request_id)}"${busy || scopeKey(row.scope) !== scopeKey(context.scope) ? ' disabled' : ''}>Check receipt</button>
         <button class="pill ghost" type="button" data-permission-discard="${esc(row.request_id)}"${busy ? ' disabled' : ''}>Remove saved receipt</button></div>`).join('')}
@@ -63,7 +64,8 @@ export function createPermissionPanel({api, storage}) {
     form = null;
     const delivery = receipt.notification === 'received' ? 'The requesting bot received the notice.'
       : receipt.notification === 'not_requested' ? 'This host did not request a bot notification.'
-      : `Bot notification is unconfirmed. Decision receipt: ${request.request_id}.`;
+      : receipt.notification === 'failed' ? 'The bot’s copy of the notice was altered or truncated.'
+      : 'Bot notification is unconfirmed. Its saved receipt remains available to check; nothing will be resent.';
     note = `Decision recorded. Permission is currently ${receipt.permission.state}. ${delivery} Check task reports for execution results.`;
   }
   async function send(event) {

@@ -113,3 +113,7 @@ metadata in session storage. The reason stays in memory. An uncertain response
 leaves a **Check receipt** action; inspection never resubmits the decision. A
 recorded approval can show a later revocation. The panel reports the current
 permission state without claiming that the requested action was executed.
+If the decision is recorded but bot notification is still unknown, its saved
+UUID remains available after reload for receipt inspection. A confirmed approval
+can still be revoked while that earlier notification is unconfirmed. Nothing
+automatically resends either notice.

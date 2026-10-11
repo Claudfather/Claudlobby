@@ -298,7 +298,11 @@ test('permission decisions retain exact intent without reason and recover a late
   permission:{...p,state:'revoked',decided_by:{uid:'actor_'+'7'.repeat(32),alias:'Owner'},decision_reason:'Revoked later'}};
  for(const patch of [{status:'unknown',permission:null},{decision:'decline'},{scope:{...original.scope,host:'host_'+'8'.repeat(32)}},
   {semantic_sha256:'c'.repeat(64)},{notification:'submitted'},{target:{...t,release_id:'r-'+'9'.repeat(64)}}])assert.throws(()=>restored.accept(original,{...receipt,...patch}),/does not match/);
- for(const notification of ['received','unknown','failed','not_requested']) {
+ restored.accept(original,{...receipt,notification:'unknown'});
+ assert.equal(new ActionState(saved,'permissions').pending[0].request_id,id);
+ const approved={...c,permissions:[{...receipt.permission,state:'approved'}]};
+ assert.equal(restored.prepare(approved,t,'Revoke now','22222222-2222-4222-8222-222222222222','revoke').decision,'revoke');
+ for(const notification of ['received','failed','not_requested']) {
   restored.accept(original,{...receipt,notification});assert.equal(restored.pending.length,0);
  }
 });
