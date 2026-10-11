@@ -15,7 +15,8 @@ from ..operation_context import bind_task_context, OperationContextError
 from ..request_queries import read_request
 from ..request_receipts import ReceiptConflict
 from ..runtime_admission import RuntimeIdentity, mutation_admission
-from ..task_permissions import (decide_permission, list_task_permissions,
+from ..commands.task_permissions import decide_and_notify_permission, inspect_permission_notification
+from ..task_permissions import (list_task_permissions,
                                permission_decision_digest, read_permission)
 from ..task_queries import TaskQueryError
 from .db import connect_ro, db_file
@@ -192,9 +193,10 @@ class OwnerPermissionActions:
                     def admitted(conn):
                         admit_source(conn, ctx.host_uid)
                         self._recheck(reader, context, grant, release=True)
-                    decide_permission(ctx, payload["request_id"], permission.permission_id,
+                    decide_and_notify_permission(ctx, self.package, payload["request_id"], permission.permission_id,
                         decision=payload["decision"], scope_sha256=payload["target"]["scope_sha256"],
-                        reason=payload["body"], admit_read=admitted, release_id=payload["target"]["release_id"])
+                        reason=payload["body"], admit_read=admitted, release_id=payload["target"]["release_id"],
+                        admit_notification=lambda: self._recheck(reader, context, grant, release=True))
             except (AccessDenied, AccessUnavailable):
                 raise
             except ReceiptConflict:
@@ -225,5 +227,10 @@ class OwnerPermissionActions:
         except Exception:
             pass
         self._recheck(reader, context, grant)
+        notification = "unknown"
+        if status == "recorded":
+            _, _, ctx = self._context(reader, context["room"])
+            notification = inspect_permission_notification(ctx, payload["request_id"], permission, payload["decision"])
+            self._recheck(reader, context, grant)
         return {key: payload[key] for key in fields} | {"status": status,
-            "permission": current_permission, "execution": "not_requested", "notification": "not_requested"}
+            "permission": current_permission, "execution": "not_requested", "notification": notification}

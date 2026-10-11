@@ -95,7 +95,8 @@ export function samePermissionReceipt(request, receipt, allowUnknown = false) {
   if (!exact(receipt, [...permissionKeys, "status", "permission", "execution", "notification"])
       || !validPermissionRow(Object.fromEntries(permissionKeys.map(k => [k, receipt[k]])))
       || receipt.request_id !== request.request_id || receipt.semantic_sha256 !== request.semantic_sha256
-      || rowKey(receipt) !== rowKey(request) || receipt.execution !== "not_requested" || receipt.notification !== "not_requested") return false;
+      || rowKey(receipt) !== rowKey(request) || receipt.execution !== "not_requested"
+      || !["not_requested", "received", "unknown", "failed"].includes(receipt.notification)) return false;
   if (receipt.status === "unknown") return allowUnknown && receipt.permission === null;
   return receipt.status === "recorded" && validPermissionRecord(receipt.permission)
     && ({approve:["approved","revoked"],decline:["declined"],revoke:["revoked"]}[request.decision] || []).includes(receipt.permission.state)

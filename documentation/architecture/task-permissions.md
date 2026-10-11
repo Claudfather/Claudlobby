@@ -52,8 +52,8 @@ adapters. An adapter must construct the scope from its actual operation inputs,
 check it at admission, and enforce the stated constraints. A user-supplied
 scope digest alone is not sufficient. Revocation stops subsequent admission;
 it cannot undo an effect already admitted. Arbitrary shell commands are not
-intercepted by this module. Browser decision grants, the shared decision UI and
-specific effect adapters must be wired before claiming the complete user flow.
+intercepted by this module. Specific effect adapters must enforce the scope
+before claiming the complete execution flow.
 
 Requests and decisions use existing immutable Plane system events, request
 receipts and task locks. There is no new website permission database. Incomplete,
@@ -93,9 +93,15 @@ submits, repairs or retries: it proves the original recorded decision and report
 the permission's *current* state, including a later revocation. An uncertain
 response keeps the original UUID; it does not authorize another decision.
 
-These endpoints do not execute approved effects or notify a bot. Targeted
-notification remains a separate integration step. The canonical records remain
-on the host; no website permission database is required.
+After the first recorded decision, the CLI and HTTP adapter attempt a notice to
+the original requesting bot through canonical messaging. The decision UUID
+determines a separate durable message request. The independent permission grant
+authorizes this fixed notice; it does not grant ordinary messaging. Delivery is
+reported separately as `received`, `unknown`, or `failed`. Only matching receiver
+byte evidence confirms receipt. An unreachable bot does not undo the decision.
+Replay and receipt inspection never resend or fill a crash gap between recording
+and notification. The notice names the record; it is not an execution ticket.
+These endpoints execute no approved effects. All records remain on the host.
 
 The shared task detail panel displays the requested action, target and limits.
 An admitted owner can approve or decline a pending request, or revoke an approved

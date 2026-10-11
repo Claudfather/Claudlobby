@@ -143,6 +143,11 @@ def test_cli_request_show_and_operator_decision_use_canonical_owner(active, monk
     import json
     from claudlobby.commands import host_owner
     from tests.test_task_write_cli import _call
+    from tests.test_plane_owner_messages import native_receiver
+    from claudlobby import message_operations
+
+    calls = native_receiver(monkeypatch)
+    monkeypatch.setattr(message_operations, 'read_recipient_box', lambda *a, **k: None)
 
     root, release = active
     task = _call(capsys, root, "task", "admit", "--title", "Improve signup", "--request-id", str(uuid4()))
@@ -179,6 +184,8 @@ def test_cli_request_show_and_operator_decision_use_canonical_owner(active, monk
     monkeypatch.setattr(host_owner, "_terminal", terminal)
     decided = _call(capsys, root, *decision)["data"]
     assert decided["state"] == "approved" and decided["execution"] == "not_requested"
+    assert decided["notification"] == "received" and len(calls) == 1
+    assert _call(capsys, root, *decision)["data"]["notification"] == "received" and len(calls) == 1
     shown = _call(capsys, root, "task", "permission", "show", pid)["data"]
     assert shown["scope"] == requested["scope"] and shown["decided_by"]["alias"].startswith("human:")
     for key, value in env.items():
