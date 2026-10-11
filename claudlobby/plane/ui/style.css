@@ -112,6 +112,7 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
                         font-size: 12px; overflow-wrap: anywhere; }
 .report-evidence li + li { margin-top: 4px; }
 .report-evidence span { color: var(--dim); }
+.report-evidence a { color: var(--accent); text-underline-offset: 2px; }
 .msg .delivery { font-size: 11px; margin-top: 3px; }
 .delivery.ok { color: var(--ok); }
 .delivery.pend { color: var(--warn); }
