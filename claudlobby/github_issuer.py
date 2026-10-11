@@ -112,7 +112,8 @@ class GrantStore:
                 last_token_expires_at REAL
             )""")
 
-    def approve(self, grant, credential):
+    @staticmethod
+    def validate_grant(grant):
         expected = {"grant_id", "workspace_id", "deployment_id", "binding", "repository_id", "expires_at"}
         if not isinstance(grant, dict) or set(grant) != expected:
             raise IssuanceDenied("invalid issuer grant")
@@ -121,20 +122,31 @@ class GrantStore:
                 raise IssuanceDenied("invalid grant identity")
         if not _positive(grant["repository_id"]) or type(grant["expires_at"]) not in (int, float) or not time.time() < grant["expires_at"] < time.time() + 366 * 86400:
             raise IssuanceDenied("grant needs a repository ID and an expiry within one year")
-        binding = _json(_binding(grant["binding"]))
+        _binding(grant["binding"])
+        return json.loads(_json(grant))
+
+    @staticmethod
+    def approve_in_transaction(db, grant, digest):
+        # Also used after browser consent, in the same transaction that
+        # consumes its one-time authorization attempt.
+        binding = _json(grant["binding"])
+        if db.execute("SELECT 1 FROM github_grants WHERE credential_digest=? AND (workspace_id!=? OR deployment_id!=?)",
+                      (digest, grant["workspace_id"], grant["deployment_id"])).fetchone():
+            raise IssuanceDenied("credential already belongs to another deployment")
+        try:
+            db.execute("INSERT INTO github_grants (grant_id,credential_digest,workspace_id,deployment_id,binding,repository_id,expires_at) VALUES (?,?,?,?,?,?,?)",
+                       (grant["grant_id"], digest, grant["workspace_id"], grant["deployment_id"], binding, grant["repository_id"], grant["expires_at"]))
+        except sqlite3.IntegrityError as exc:
+            raise IssuanceDenied("grant ID already exists; revoked grants cannot be restored") from exc
+
+    def approve(self, grant, credential):
+        grant = self.validate_grant(grant)
         digest = _credential_digest(credential)
         self.initialize()
         with self.transaction() as db:
             # An issuer credential represents one deployment/workspace, even
             # when several independently approved bot bindings share it.
-            if db.execute("SELECT 1 FROM github_grants WHERE credential_digest=? AND (workspace_id!=? OR deployment_id!=?)",
-                          (digest, grant["workspace_id"], grant["deployment_id"])).fetchone():
-                raise IssuanceDenied("credential already belongs to another deployment")
-            try:
-                db.execute("INSERT INTO github_grants (grant_id,credential_digest,workspace_id,deployment_id,binding,repository_id,expires_at) VALUES (?,?,?,?,?,?,?)",
-                           (grant["grant_id"], digest, grant["workspace_id"], grant["deployment_id"], binding, grant["repository_id"], grant["expires_at"]))
-            except sqlite3.IntegrityError as exc:
-                raise IssuanceDenied("grant ID already exists; revoked grants cannot be restored") from exc
+            self.approve_in_transaction(db, grant, digest)
         return {"grant_id": grant["grant_id"], "new_issuance": "allowed", "expires_at": grant["expires_at"]}
 
     def revoke(self, grant_id):
@@ -231,7 +243,7 @@ class GithubMinter:
             raise IssuerUnavailable("GitHub issuance unavailable; check installation access and issuer configuration") from exc
 
 
-def create_app(store, mint):
+def create_app(store, mint, consent=None):
     import asyncio
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
@@ -259,4 +271,7 @@ def create_app(store, mint):
         except (IssuerUnavailable, OSError, sqlite3.Error, asyncio.TimeoutError):
             return respond({"error": "issuer_unavailable"}, 503)
 
-    return Starlette(routes=[Route("/v1/github/token", issue, methods=["POST"])])
+    routes = [Route("/v1/github/token", issue, methods=["POST"])]
+    if consent is not None:
+        routes.extend(consent.routes())
+    return Starlette(routes=routes)

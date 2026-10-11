@@ -30,6 +30,140 @@ def _issuer_token():
             "repositories": [{"id": 123, "full_name": "example/service"}], "permissions": {"contents": "read", "metadata": "read"}}
 
 
+def _consent_flow(tmp_path):
+    from claudlobby.github_consent import ConsentFlow, GithubConsentProvider
+    from claudlobby.github_issuer import GrantStore
+
+    tmp_path.chmod(0o700)
+    secret = tmp_path / "client-secret"
+    secret.write_text("example-client-secret")
+    secret.chmod(0o600)
+    provider = GithubConsentProvider({"app_id": 12, "client_id": "Iv1.example",
+                                     "client_secret_path": str(secret), "origin": "https://issuer.example.invalid"})
+    return ConsentFlow(GrantStore(tmp_path / "grants.db"), provider)
+
+
+def test_issuer_browser_consent_only_grants_after_same_browser_callback(tmp_path, capsys):
+    from urllib.parse import parse_qs, urlsplit
+    from fastapi.testclient import TestClient
+    from claudlobby.github_issuer import create_app, IssuanceDenied
+
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    for name, content in (("grant.json", json.dumps(grant)), ("credential", credential),
+                          ("consent.json", json.dumps(flow.provider.config))):
+        path = tmp_path / name
+        path.write_text(content)
+        path.chmod(0o600)
+    assert main(["host", "github-app", "issuer", "invite", "--json", "--store", str(flow.store.path),
+                 "--grant-file", str(tmp_path / "grant.json"), "--credential-file", str(tmp_path / "credential"),
+                 "--consent-config", str(tmp_path / "consent.json")]) == 0
+    output = capsys.readouterr().out
+    assert credential not in output and json.loads(output)["command"] == "host.github-app.issuer.invite"
+    invitation = json.loads(output)["data"]
+    calls = []
+    def verify(code, verifier, selected):
+        calls.append((code, verifier, selected))
+        return 456
+    flow.provider.verify = verify
+    app = create_app(flow.store, lambda *_: _issuer_token(), flow)
+    client = TestClient(app, base_url=flow.provider.origin, follow_redirects=False)
+    with pytest.raises(IssuanceDenied):
+        flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: pytest.fail("invitation minted"))
+    page = client.get(invitation["authorization_url"])
+    assert page.status_code == 200 and "example/service" in page.text and "engineer" in page.text
+    assert all(flag in page.headers["set-cookie"] for flag in ("Secure", "HttpOnly", "SameSite=lax"))
+    assert client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": "https://other.example"}).status_code == 403
+    start = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    assert start.status_code == 303 and query["code_challenge_method"] == ["S256"]
+    callback = "/v1/github/callback?" + "state=" + query["state"][0] + "&code=example-code"
+    stranger = TestClient(app, base_url=flow.provider.origin, follow_redirects=False)
+    assert stranger.get(callback).status_code == 403 and calls == []
+    complete = client.get(callback)
+    assert complete.status_code == 303 and complete.headers["location"] == invitation["authorization_url"]
+    assert "GitHub is connected" in client.get(complete.headers["location"]).text
+    assert client.get(callback).status_code == 403 and len(calls) == 1
+    assert calls[0][0] == "example-code" and calls[0][2] == grant
+    from hashlib import sha256
+    from base64 import urlsafe_b64encode
+    assert query["code_challenge"] == [urlsafe_b64encode(sha256(calls[0][1].encode()).digest()).decode().rstrip("=")]
+    result = flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: _issuer_token())
+    assert result["token"] == "ghs_example_only"
+    saved = flow.store.path.read_bytes()
+    assert credential.encode() not in saved and b"example-code" not in saved
+    with flow.store.transaction() as db:
+        assert tuple(db.execute("SELECT verifier,state_digest,browser_digest FROM github_consent").fetchone()) == (None, None, None)
+    flow.store.revoke(grant["grant_id"])
+    assert "Connection removed" in client.get(invitation["authorization_url"]).text
+
+
+def test_issuer_consent_cancel_and_failed_verification_never_activate(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from claudlobby.github_issuer import IssuanceDenied
+
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    invitation = flow.invite(grant, credential)
+    ticket = invitation["ticket"]
+    def begin():
+        _, cookie = flow.page(ticket)
+        query = parse_qs(urlsplit(flow.begin(ticket, cookie)).query)
+        return query["state"][0], cookie
+    state, cookie = begin()
+    flow.provider.verify = lambda *_: (_ for _ in ()).throw(IssuanceDenied("not an administrator"))
+    flow.complete(state, cookie, "denied-code")
+    assert flow.page(ticket)[0]["status"] == "invited"
+    with pytest.raises(IssuanceDenied):
+        flow.complete(state, cookie, "replay-code")
+    state, cookie = begin()
+    def cancelled(*_):
+        flow.cancel(ticket)  # cancellation commits while the provider is in flight
+        return 456
+    flow.provider.verify = cancelled
+    flow.complete(state, cookie, "cancelled-code")
+    assert flow.page(ticket)[0]["status"] == "cancelled"
+    with pytest.raises(IssuanceDenied):
+        flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: pytest.fail("cancelled consent minted"))
+
+
+def test_issuer_consent_verifies_provider_user_installation_and_repo_admin(tmp_path, monkeypatch):
+    from copy import deepcopy
+    import httpx
+    from claudlobby.github_issuer import IssuanceDenied
+
+    flow, grant = _consent_flow(tmp_path), _issuer_grant()
+    installation = {"id": 34, "app_id": 12, "permissions": {"contents": "read"}, "suspended_at": None}
+    repository = {"id": 123, "full_name": "example/service", "permissions": {"admin": True}}
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs == {"trust_env": False, "follow_redirects": False, "timeout": 15}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, url, *, headers, data):
+            assert url == "https://github.com/login/oauth/access_token"
+            assert data == {"client_id": "Iv1.example", "client_secret": "example-client-secret",
+                            "redirect_uri": flow.provider.origin + "/v1/github/callback", "code": "example-code",
+                            "code_verifier": "v" * 43, "repository_id": 123}
+            return httpx.Response(200, json={"access_token": "ghu_example", "refresh_token": "unused"}, request=httpx.Request("POST", url))
+        def get(self, url, *, headers):
+            assert headers["Authorization"] == "Bearer ghu_example"
+            bodies = {"https://api.github.com/user": {"id": 456},
+                      "https://api.github.com/user/installations?per_page=100&page=1": {"installations": [installation]},
+                      "https://api.github.com/user/installations/34/repositories?per_page=100&page=1": {"repositories": [repository]},
+                      "https://api.github.com/repos/example/service": repository}
+            return httpx.Response(200, json=bodies[url], request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "Client", Client)
+    assert flow.provider.verify("example-code", "v" * 43, grant) == 456
+    for target, changes in ((installation, {"app_id": 13}), (installation, {"permissions": {}}),
+                            (repository, {"id": 124}), (repository, {"full_name": "other/service"}),
+                            (repository, {"permissions": {"admin": False}})):
+        before = deepcopy(target)
+        target.update(changes)
+        with pytest.raises(IssuanceDenied):
+            flow.provider.verify("example-code", "v" * 43, grant)
+        target.clear()
+        target.update(before)
+
+
 def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):
     from copy import deepcopy
     from datetime import datetime, timezone

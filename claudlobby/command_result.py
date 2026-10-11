@@ -64,7 +64,7 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
 _PUBLIC.update({("host", "github-app", "issuer", action): f"host.github-app.issuer.{action}"
-                for action in ("approve", "revoke", "serve")})
+                for action in ("approve", "invite", "cancel", "revoke", "serve")})
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
                 for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
                                "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",

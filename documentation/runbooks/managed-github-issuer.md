@@ -6,13 +6,12 @@ issuer credential bound to their approved workspace and deployment. The website
 does not mint tokens or proxy repository data. Independent App connections
 continue to mint locally without this service.
 
-This is the service/operator interface. Hosted App installation consent,
-owner-to-installation verification and guided credential delivery still need to
-be connected before self-service onboarding. The HTTP endpoint cannot approve
-its own callers. Do not turn a client-provided binding or website login into an
-issuer grant without independently confirming the owner, deployment,
-installation and selected repository. No public service is enabled by installing
-the package.
+This is the service/operator interface. Browser GitHub consent can verify the
+person's App installation and selected repository access. Website-account
+enrollment and guided host credential delivery still need to be connected before
+self-service onboarding. The HTTP endpoint cannot register its own callers:
+the operator stages the workspace/deployment grant before asking for GitHub
+consent. No public service is enabled by installing the package.
 
 ## Provision an approved connection
 
@@ -87,3 +86,58 @@ credentials or another App. The issuer retains only authorization references,
 a credential hash and last token expiry, not tasks, conversations or checkouts.
 Preserve this private store across service restarts; loss requires explicit
 reapproval, not automatic reconstruction from customer requests.
+
+## Verify the repository owner through GitHub
+
+Use `invite` instead of manual `approve` to require browser consent and provider
+verification. First configure the managed App's OAuth callback as the issuer's
+exact HTTPS origin plus `/v1/github/callback`, and save a private consent config:
+
+```json
+{
+  "app_id": 12345,
+  "client_id": "Iv1.example",
+  "client_secret_path": "/private/issuer/client-secret.txt",
+  "origin": "https://issuer.example.invalid"
+}
+```
+
+The client secret is separate from the App signing key. Its file and this
+configuration must be mode 0600. Add `--consent-config` to `serve`, then stage an
+invitation using the same reviewed grant and deployment credential:
+
+```sh
+claudlobby host github-app issuer invite --store /private/issuer/grants.db \
+  --grant-file /private/issuer/grant.json \
+  --credential-file /private/issuer/deployment-credential.txt \
+  --consent-config /private/issuer/consent.json
+```
+
+Open the returned authorization link. It expires in 15 minutes and shows the
+selected bot, repository, permissions, workspace and computer before continuing
+to GitHub. The invitation itself allows no token issuance. The browser callback
+must return with its original cookie and one-time OAuth state; the exchange also
+uses PKCE. Personal access and refresh tokens are never persisted or returned
+to the browser.
+
+The core verifies the consenting GitHub user, exact App/installation, current
+repository ID and name, and requested installation permissions. This initial
+owner path requires repository administrator permission because it authorizes
+independent App tokens, which could otherwise exceed a collaborator's access.
+The App must already be installed on that repository; pending organization
+approval, missing access, revocation, cancellation or SSO refusal does not grant
+access. Retry from the invitation link to start a new authorization attempt.
+After success, that link displays the completed result without granting twice.
+See [GitHub's user-authorization contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app).
+
+Cancel an unfinished invitation with `issuer cancel --store PATH --ticket TICKET`.
+Cancellation during provider verification prevents the eventual grant. Once
+approved, use `issuer revoke --grant-id GRANT_ID` instead. Configure the reverse
+proxy to preserve the issuer Host header and not log callback queries, cookies
+or response bodies. OAuth callbacks contain temporary authorization codes.
+
+This flow verifies access at approval time. It does not yet consume GitHub
+authorization-revocation webhooks or prove continuing personal access; that
+source integration remains required before public self-service launch. App
+installation/repository revocation still prevents GitHub from issuing a token.
+No real App consent or host credential handoff has been accepted yet.

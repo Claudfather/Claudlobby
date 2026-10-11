@@ -41,10 +41,18 @@ def _issuer(args) -> CommandOutput:
 
     try:
         store = GrantStore(args.store)
-        if args.issuer_command == "approve":
+        consent = None
+        if getattr(args, "consent_config", None):
+            from ..github_consent import ConsentFlow, GithubConsentProvider
+            config = json.loads(_private_file(args.consent_config).read_text())
+            consent = ConsentFlow(store, GithubConsentProvider(config))
+        if args.issuer_command in ("approve", "invite"):
             grant = json.loads(_private_file(args.grant_file).read_text())
             credential = _private_file(args.credential_file).read_text().strip()
-            result = store.approve(grant, credential)
+            result = consent.invite(grant, credential) if args.issuer_command == "invite" else store.approve(grant, credential)
+        elif args.issuer_command == "cancel":
+            from ..github_consent import ConsentFlow
+            result = ConsentFlow(store, None).cancel(args.ticket)
         elif args.issuer_command == "revoke":
             result = store.revoke(args.grant_id)
         else:
@@ -58,7 +66,9 @@ def _issuer(args) -> CommandOutput:
                     raise ValueError("invalid App key mapping")
                 keys[int(app_id)] = _private_file(path)
             _private_file(store.path)
-            uvicorn.run(create_app(store, GithubMinter(keys)), host="127.0.0.1", port=args.port,
+            if consent and consent.provider.app_id not in keys:
+                raise ValueError("consent App has no issuer key")
+            uvicorn.run(create_app(store, GithubMinter(keys), consent), host="127.0.0.1", port=args.port,
                         access_log=False, date_header=False)
             result = {"issuer": "stopped"}
     except ImportError as exc:
