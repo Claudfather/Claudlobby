@@ -51,7 +51,8 @@ from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
 from ..task_state import TASK_EMITTER, TaskStateError, read_tasks
 from ..report_payload import decode_report_body
-from ..task_queries import task_escalations_from_snapshot
+from ..task_queries import TaskQueryError, task_escalations_from_snapshot
+from ..task_permissions import EMITTER as PERMISSION_EMITTER, list_task_permissions
 
 try:  # §14: optional UI features degrade without disabling the core ledger
     from fastapi import FastAPI, Request
@@ -775,7 +776,25 @@ def _detail_attention(conn, snapshot, task):
             "attention_act_reason": arm[lead + "_reason"] if lead and not escalation else None}
 
 
-def _fetch_task_detail(conn, task_id, fleet, names=None):
+def _add_permission_attention(conn, root, task, card):
+    """Discovery only: decisions and authority remain in the permission owner."""
+    try:
+        items, truncated = list_task_permissions(conn, task.task_id, root=root,
+            host_uid=task.host_uid, fleet_uid=task.fleet_uid)
+        pending = sum(item["state"] == "pending" for item in items)
+        incomplete = truncated or any(item["state"] == "unavailable" for item in items)
+    except (TaskQueryError, TaskStateError):
+        pending, incomplete = 0, True
+    card["permission_pending"] = pending
+    card["permission_incomplete"] = incomplete
+    if pending:
+        card["attention_reason"].append("permission_pending")
+    if incomplete:
+        card["attention_reason"].append("permission_unavailable")
+    card["attention"] = card["attention"] or bool(pending) or incomplete
+
+
+def _fetch_task_detail(conn, task_id, fleet, names=None, *, root):
     """One opaque ID, one recorded fleet UID, one canonical read projection.
 
     Task bodies are stored work-item content; missing content is not invented
@@ -834,6 +853,7 @@ def _fetch_task_detail(conn, task_id, fleet, names=None):
         issues_window=_detail_window(task.issues, _TASK_DETAIL_ISSUES),
         display_ids_window=_detail_window(task.display_ids, _TASK_DETAIL_ISSUES))
     result.update(_detail_attention(conn, snapshot, task))
+    _add_permission_attention(conn, root, task, result)
     message_id = None
     if task.current_assignment:
         row = conn.execute(ASSIGNMENT_DELIVERY_MSG_SQL.format(ph="?"),
@@ -865,7 +885,7 @@ def _fetch_task_detail(conn, task_id, fleet, names=None):
     return data
 
 
-def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
+def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
     """Recent fleet-owned Tasks, with current-assignment evidence kept separate.
 
     The work-item query enforces the 200-card cap before any board projection;
@@ -947,6 +967,16 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
             if msg_ids:
                 delivery = {row["msg_id"]: row["delivery"] for row in conn.execute(
                     DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(msg_ids))), msg_ids)}
+        # Only a candidate filter: raw events never establish permission state.
+        # Batch once so tasks without requests do not repeat canonical reduction.
+        permission_tasks = set()
+        if selected:
+            permission_tasks = {tuple(row) for row in conn.execute(
+                "SELECT DISTINCT host_uid, fleet_uid, json_extract(detail, '$.task_id') "
+                "FROM events WHERE kind='system' AND emitter=? AND event='permission_requested' "
+                "AND detail_truncated=0 AND CASE WHEN json_valid(detail) "
+                "THEN json_extract(detail, '$.task_id') END IN ("
+                + ",".join("?" * len(selected)) + ")", (PERMISSION_EMITTER, *selected))}
         cards = []
         for task_id, _uid in candidates:
             task = by_id.get(task_id)
@@ -1002,6 +1032,8 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                 "nudged_at": nudge["nudged_at"] if nudge else None,
                 "nudged_by": nudge["nudged_by"] if nudge else None,
             }
+            if (task.host_uid, task.fleet_uid, task.task_id) in permission_tasks:
+                _add_permission_attention(conn, root, task, card)
             cards.append(card)
         rendered_issues = [(_task_issue(issue) if not isinstance(issue, dict) else issue)
                            for issue in issues]
@@ -1463,7 +1495,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
       separate from the work-ownership axis below (`open_scope`).
     * `attention` / `overdue` — the board's own cards for the tasks this
       fleet OWNS (`_fetch_tasks`, the one counting owner, whose reasons come
-      from `ATTENTION_ARMS_SQL`); overdue is cards led or joined by the
+      from `ATTENTION_ARMS_SQL` and canonical permission reads); overdue is cards led or joined by the
       deadline arm. `attention_truncated` discloses the board's card cap.
     * `orphaned` — the watchdog's split (#835): an id'd overdue dispatch
       older than the bot's `.spawn` was lost to a restart. It needs the
@@ -1515,7 +1547,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         # attention / overdue are the fleet's OWN work, counted by the board's
         # card builder (one counting owner): the board groups by owning fleet,
         # so an assignee-axis count here disagreed with it for cross-fleet work
-        board = _fetch_tasks(conn, alias)
+        board = _fetch_tasks(conn, alias, root=root)
         attention = board["attention_count"]
         overdue = sum(1 for card in board["tasks"]
                       if "overdue" in card["attention_reason"])
@@ -1849,13 +1881,13 @@ def create_app(
 
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):
-        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet)))
+        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet, root=root)))
 
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str, fleet: str | None = None):
         # The same snapshot also supplies provenance for ordinary local views.
         names = _channel_names(root)
-        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet, names),
+        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet, names, root=root),
                                      snapshot=True))
 
     @app.get("/api/identities")

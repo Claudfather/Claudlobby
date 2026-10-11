@@ -365,3 +365,27 @@ test('unavailable report content does not become status or evidence, legacy rema
   assert.match(visible(html(reportedThread({report:{state:'legacy'},body_words:'Historical report'}))),/Historical report/);
   assert.doesNotMatch(visible(html(reportedThread({report:undefined}))),/Completion reported|PR reviewed/);
 });
+
+
+test('permission attention opens the existing task and clears after a fresh decided read', () => {
+  const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
+  const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
+  const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
+    ...panel, renderState: () => false, document: {
+      getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
+    },
+  });
+  const row = {task_id: 'workshop::' + wi, fleet: 'web', title: 'Release signup', state: 'queued', resolved: true,
+    attention: true, attention_reason: ['permission_pending'], permission_pending: 2};
+  board.renderTasks({data: {tasks: [row]}});
+  assert.match(nodes.attention.innerHTML, /2 permission requests need review/);
+  assert.match(nodes.attention.innerHTML, /data-task-open="workshop::wi_/);
+  assert.match(nodes.attention.innerHTML, /data-task-fleet="web"/);
+  assert.equal(nodes['attn-count'].textContent, 1);
+  board.renderTasks({data: {tasks: [{...row, attention_reason: ['permission_unavailable'], permission_pending: 0}]}});
+  assert.match(nodes.attention.innerHTML, /permission history is incomplete/);
+  assert.doesNotMatch(nodes.attention.innerHTML, /nothing needs you/);
+  board.renderTasks({data: {tasks: [{...row, attention: false, attention_reason: [], permission_pending: 0}]}});
+  assert.match(nodes.attention.innerHTML, /nothing needs you/);
+  assert.doesNotMatch(nodes.tasks.innerHTML, /permission requests need review/);
+});
