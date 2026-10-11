@@ -653,6 +653,11 @@ test('connected permission decisions unwrap only their host and inspect the orig
   scope_sha256:'4'.repeat(64),reason:'Review release',state:'pending',decided_by:null,decision_reason:null};
  const capability={version:2,room:'team',scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'permission-grant'},
   simulation:false,actions:['permission'],release_id:'r-'+'5'.repeat(64),task_id:wi,permissions:[permission],has_more:false};
+ // A full page of valid quoted text exceeds the old 512 KiB context cap.
+ capability.permissions=Array.from({length:50},(_,i)=>({...permission,permission_id:'perm_'+i.toString(16).padStart(32,'0'),
+  scope:{...permission.scope,target:'"'.repeat(1024),constraints:'"'.repeat(4096)},reason:'"'.repeat(2048)}));
+ capability.permissions[0]=permission;capability.has_more=true;
+ assert.ok(new TextEncoder().encode(JSON.stringify(capability)).length>524288);
  const url=refs[0].endpoint_origin+'/api/owner/connected/actions/';let sent;
  h.overrides.set(url+'context',init=>{assert.deepEqual(JSON.parse(init.body),{room:'team',kind:'permission',task_id:wi});return reply(200,capability);});
  h.overrides.set(url+'prepare',init=>{const {body,...metadata}=JSON.parse(init.body);assert.equal(metadata.target.task_id,wi);assert.equal(metadata.target.permission_id,permission.permission_id);return reply(200,{...metadata,semantic_sha256:'6'.repeat(64)});});
