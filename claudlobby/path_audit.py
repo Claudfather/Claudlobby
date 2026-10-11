@@ -143,6 +143,12 @@ def _fleet_layout_needles(paths: Paths) -> list[str]:
     Each fragment is gated on this fleet's own directory name or the runtime
     marker, so a bare ``local`` segment (``/usr/local/bin``) or a package token
     never matches; the leading/trailing ``/`` enforce the segment boundary.
+
+    They are read only on what a path adds to the longest composer anchor it
+    lies under (``_anchor_tail``), never on the anchor's own value: a data root
+    or selected package installed inside a bot runtime tree (a bot's own
+    checkout, ``…/runtime/bots/<bot>/projects/…``) carries a fragment by
+    location alone. A path under no anchor is read whole.
     """
     fleet_cfg = paths.fleet_config_dir
     needles = {f"/local/{fleet_cfg.name}/", "/runtime/bots/"}
@@ -157,6 +163,16 @@ def _traverses_fleet_layout(path: str, needles: list[str]) -> bool:
     """True if *path* contains any fleet-layout fragment at a segment boundary."""
     hay = path + "/"
     return any(n in hay for n in needles)
+
+
+def _anchor_tail(path: str, anchors: list[str]) -> str | None:
+    """What *path* adds to the first of *anchors* it lies under, at a segment
+    boundary (``""`` for the anchor itself), or None when it lies under none.
+    *anchors* are normalized and longest first, so the deepest one wins."""
+    for anchor in anchors:
+        if path == anchor or path.startswith(anchor + os.sep):
+            return path[len(anchor):]
+    return None
 
 
 def _normalize_rule_path(path: str) -> str:
@@ -201,11 +217,22 @@ def improper_fleet_paths(
     (``claudron_vault_path``, already L1-exempt as declared-by-construction): the
     sanctioned shared parent the fleet belongs to, not a leak. The rule is
     correctness, not "no absolutes".
+
+    Shape is read only on what a path adds to the longest composer anchor it
+    lies under (``_anchor_tail``). An anchor's own value is never evidence of
+    fleet layout, so a data root or selected package installed inside a bot
+    runtime tree, as a bot's own checkout is, passes, while a fleet-shaped tail
+    appended to it is still flagged. The content-root test is not shape: it
+    applies to an anchored path as to any other.
     """
     anchor_values = _anchor_values(bot, paths)
     resolved = _resolve_anchor_tokens(text, anchor_values)
     content_roots = _fleet_content_roots(paths)
     layout_needles = _fleet_layout_needles(paths)
+    anchors = sorted(
+        {os.path.normpath(v) for v in anchor_values.values() if os.path.isabs(v)},
+        key=len, reverse=True,
+    )
     fleet_root = str(paths.fleet_config_dir)
     # The fleet's own sanctioned vault root(s), normalized (fleet_root is not:
     # neither the .claudron bridge string nor the fleet.yaml declaration is
@@ -242,9 +269,13 @@ def improper_fleet_paths(
         under_content_root = any(
             p == r or p.startswith(r + os.sep) for r in content_roots
         )
-        if not (under_content_root or _traverses_fleet_layout(p, layout_needles)):
-            continue  # not fleet-owned (system path, $HOME, /tmp, package token, …)
+        # Matched on the normalized spelling, as the fleet-root test below is,
+        # so a permission rule's // prefix still finds its anchor.
         norm = _normalize_rule_path(p)
+        tail = _anchor_tail(norm, anchors)
+        shaped = p if tail is None else tail
+        if not (under_content_root or _traverses_fleet_layout(shaped, layout_needles)):
+            continue  # not fleet-owned (system path, $HOME, /tmp, package token, …)
         if norm == fleet_root or norm.startswith(fleet_root + os.sep):
             continue  # resolves inside the fleet's real overlay root — correct
         if norm in vault_roots:
