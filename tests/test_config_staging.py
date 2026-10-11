@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -129,6 +130,137 @@ def _files(plan, change):
     assert change.after["kind"] == "tree"
     return {name: plan.blob(entry["sha256"])
             for name, entry in change.after["files"].items()}
+
+
+def _published_activation(root, plan, activation_id="previous", *, rolled_back=False):
+    record = {"schema": 1, "activation_id": activation_id, "root": str(root.resolve()),
+              "status": "active", "intent": {"plan_id": plan.plan_id},
+              "completed": ["selection_switched"]}
+    if rolled_back:
+        record["forward"] = {"completed": ["selection_switched"]}
+        record["status"] = "rolled_back"
+        record["completed"] = []
+    digest = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    _write(root / f"state/activations/{activation_id}/activation.json",
+           json.dumps({"record": record, "sha256": digest}))
+
+
+def test_named_github_identity_cannot_be_reused_after_removal(staging_case):
+    import yaml
+
+    case = staging_case
+    document = yaml.safe_load(case.paths.fleet_yaml.read_text())
+    connection = {"name": "Project App", "mode": "independent", "app_id": 123,
+                  "installation_id": 456, "permissions": {"contents": "read"},
+                  "credential_refs": {"private_key_path_env": "PROJECT_APP_KEY"}}
+    document["fleet"]["github"]["connections"] = {"project-app": connection}
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(document))
+    previous = config_staging.stage_configuration([case.paths], case.release)
+    _published_activation(case.root, previous)
+
+    # A removed connection must not erase its published identity history.
+    document["fleet"]["github"]["connections"] = {}
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(document))
+    config_staging.stage_configuration([case.paths], case.release)
+    document["fleet"]["github"]["connections"] = {
+        "project-app": {**connection, "installation_id": 789}}
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(document))
+    with pytest.raises(PlanError, match="identity is immutable"):
+        config_staging.stage_configuration([case.paths], case.release)
+
+    document["fleet"]["github"]["connections"] = {"replacement-app": {
+        **connection, "installation_id": 789}}
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(document))
+    replacement = config_staging.stage_configuration([case.paths], case.release)
+    assert str(case.root / "state/selected-release.json") in replacement.inputs
+    _write(case.root / "state/selected-release.json", "{}")
+    with pytest.raises(PlanError, match="input changed"):
+        replacement.check_fresh()
+
+
+def test_github_identity_history_is_scoped_to_each_fleet(staging_case):
+    import yaml
+
+    case = staging_case
+    secondary = _fleet(case.root, case.root / "local/secondary", "secondary", case.package)
+    for paths, app_id in ((case.paths, 123), (secondary, 789)):
+        doc = yaml.safe_load(paths.fleet_yaml.read_text())
+        doc["fleet"]["github"]["connections"] = {"shared-label": {
+            "mode": "independent", "app_id": app_id, "installation_id": app_id + 1,
+            "permissions": {"contents": "read"},
+            "credential_refs": {"private_key_path_env": "PROJECT_APP_KEY"}}}
+        paths.fleet_yaml.write_text(yaml.safe_dump(doc))
+    previous = config_staging.stage_configuration([case.paths, secondary], case.release)
+    _published_activation(case.root, previous)
+    config_staging.stage_configuration([case.paths, secondary], case.release)
+
+
+def test_github_history_reads_only_frozen_policy_and_identifies_unreadable_activation(staging_case):
+    import yaml
+    from claudlobby.config_plan import ConfigPlanBuilder
+
+    case = staging_case
+    current = yaml.safe_load(case.paths.fleet_yaml.read_text())
+    policy = {"connections": {"stable": {
+        "mode": "independent", "app_id": 123, "installation_id": 456,
+        "permissions": {"contents": "read"},
+        "credential_refs": {"private_key_path_env": "PROJECT_APP_KEY"}}}}
+    current["fleet"]["github"] = policy
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(current))
+    legacy = ConfigPlanBuilder(case.root, case.release.release_id,
+                               case.release.seal_sha256, ("primary",), effects={}).seal()
+    _published_activation(case.root, legacy, "before-frozen-sources")
+    # Old bot/default fields need not be accepted by the candidate's parser.
+    historical = _write(case.root / "state/historical-fleet.yaml", yaml.safe_dump({
+        "fleet": {"name": "primary", "github": policy, "bots": "old unrelated shape"}}))
+    projects = case.root / "state/historical-projects.yaml"
+    builder = ConfigPlanBuilder(case.root, case.release.release_id,
+                               case.release.seal_sha256, ("primary",), effects={})
+    _, fleet_digest = builder.input_snapshot(historical)
+    _, project_digest = builder.input_snapshot(projects)
+    builder.effects["fleet_sources"] = {"primary": {
+        "fleet": {"path": str(historical), "sha256": fleet_digest},
+        "projects": {"path": str(projects), "sha256": project_digest}}}
+    previous = builder.seal()
+    _published_activation(case.root, previous, "frozen-policy")
+    config_staging.stage_configuration([case.paths], case.release)
+    # Current mutable bytes cannot replace the retained policy; missing retained
+    # bytes refuse with the activation that an operator must inspect.
+    historical.write_text("unrelated mutable source")
+    config_staging.stage_configuration([case.paths], case.release)
+    (previous.directory / "files" / fleet_digest).unlink()
+    with pytest.raises(PlanError, match="activation 'frozen-policy'"):
+        config_staging.stage_configuration([case.paths], case.release)
+
+
+def test_admission_rechecks_identity_after_new_activation_and_restored_inputs(staging_case):
+    import yaml
+    from claudlobby.activation_state import ActivationError, locked_activation
+
+    case = staging_case
+    doc = yaml.safe_load(case.paths.fleet_yaml.read_text())
+    connection = {"mode": "independent", "app_id": 123, "installation_id": 456,
+                  "permissions": {"contents": "read"},
+                  "credential_refs": {"private_key_path_env": "PROJECT_APP_KEY"}}
+    doc["fleet"]["github"]["connections"] = {"stable": connection}
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(doc))
+    original = case.paths.fleet_yaml.read_bytes()
+    candidate = config_staging.stage_configuration([case.paths], case.release)
+    doc["fleet"]["github"]["connections"]["stable"]["app_id"] = 789
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(doc))
+    intervening = config_staging.stage_configuration([case.paths], case.release)
+    # Simulate an intervening published activation followed by rollback. Its
+    # journal did not exist when the candidate recorded reviewed inputs.
+    _published_activation(case.root, intervening, "intervening", rolled_back=True)
+    case.paths.fleet_yaml.write_bytes(original)
+    assert not (case.root / "state/selected-release.json").exists()
+    assert str(case.root / "state/activations/intervening/activation.json") not in candidate.inputs
+    with locked_activation(case.root) as store:
+        candidate.check_fresh()  # Every old fingerprint was restored successfully.
+        with pytest.raises(ActivationError, match="intervening.*identity is immutable"):
+            store.prepare("reused", candidate, recovery_release_id=candidate.release_id,
+                          enrollment_digest="1" * 64)
+    assert not (case.root / "state/activations/reused/activation.json").exists()
 
 
 def test_selected_account_plugins_are_frozen_as_plan_input(staging_case):

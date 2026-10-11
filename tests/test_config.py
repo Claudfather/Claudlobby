@@ -1032,3 +1032,191 @@ class TestGitCredentialsParsing:
         )
         with pytest.raises(ValueError, match="fleet defaults"):
             load_fleet(root / "fleet.yaml")
+
+
+class TestGithubConnections:
+    """Assignments join registered projects, never ambient bot scope or tokens."""
+
+    @staticmethod
+    def _raw():
+        return {
+            "name": "connections-test", "manager": "alice",
+            "system_defaults": {"enabled": False},
+            "github": {
+                "connections": {
+                    "app-one": {"mode": "independent", "app_id": 101,
+                        "installation_id": 201, "permissions": {"contents": "write"},
+                        "credential_refs": {"private_key_path_env": "APP_ONE_KEY"}},
+                    "app-two": {"mode": "managed", "app_id": 102,
+                        "installation_id": 202, "permissions": {"contents": "read"},
+                        "credential_refs": {"issuer_url_env": "APP_ISSUER_URL",
+                                            "issuer_token_env": "APP_ISSUER_TOKEN"}},
+                },
+                "attachments": {
+                    "attached-one": {"connection": "app-one"},
+                    "attached-two": {"connection": "app-two"},
+                },
+            },
+            "bots": {
+                "alice": {"expertise": ["software-engineering"],
+                    "github_assignments": {"work-one": {
+                        "attachment": "attached-one", "project": "first"}}},
+                "bob": {"expertise": ["software-engineering"],
+                    "github_assignments": {"work-two": {
+                        "attachment": "attached-two", "project": "first"}}},
+            },
+        }
+
+    @staticmethod
+    def _load(tmp_path, raw):
+        manifest = tmp_path / "fleet.yaml"
+        manifest.write_text(yaml.safe_dump({"fleet": raw}))
+        projects = tmp_path / "projects.yaml"
+        projects.write_text(yaml.safe_dump({"projects": {
+            "first": {"title": "First", "repos": ["example/first"]},
+            "second": {"title": "Second", "repos": ["example/second"]},
+        }}))
+        return load_fleet(manifest, projects_yaml=projects)[0]
+
+    def test_two_bots_use_different_apps_on_same_registered_repo(self, tmp_path):
+        from claudlobby.github_connections import resolve_github_binding
+        fleet = self._load(tmp_path, self._raw())
+        first = resolve_github_binding(fleet, "alice", "Example/First")
+        second = resolve_github_binding(fleet, "bob", "example/first")
+        assert (first.app_id, second.app_id) == (101, 102)
+        assert first.repo == second.repo == "example/first"
+        assert dict(first.permissions) == {"contents": "write"}
+        assert dict(second.permissions) == {"contents": "read"}
+
+    def test_one_bot_uses_two_apps_for_two_registered_repos(self, tmp_path):
+        from claudlobby.github_connections import github_bindings_for_bot
+        raw = self._raw()
+        raw["bots"]["alice"]["github_assignments"]["work-second"] = {
+            "attachment": "attached-two", "project": "second"}
+        bindings = github_bindings_for_bot(self._load(tmp_path, raw), "alice")
+        assert [(b.repo, b.app_id) for b in bindings] == [
+            ("example/first", 101), ("example/second", 102)]
+
+    def test_attachment_and_scope_alone_grant_nothing(self, tmp_path):
+        from claudlobby.github_connections import GithubBindingError, resolve_github_binding
+        raw = self._raw()
+        raw["bots"]["alice"]["github_assignments"] = {}
+        raw["bots"]["alice"]["scope"] = {"org": "example", "repos": ["first"]}
+        with pytest.raises(GithubBindingError, match="missing GitHub assignment"):
+            resolve_github_binding(self._load(tmp_path, raw), "alice", "example/first")
+
+    @pytest.mark.parametrize("disabled_tier", ["connection", "attachment", "assignment"])
+    def test_disabled_route_refuses(self, tmp_path, disabled_tier):
+        from claudlobby.github_connections import GithubBindingError, resolve_github_binding
+        raw = self._raw()
+        tiers = {"connection": raw["github"]["connections"]["app-one"],
+                 "attachment": raw["github"]["attachments"]["attached-one"],
+                 "assignment": raw["bots"]["alice"]["github_assignments"]["work-one"]}
+        tiers[disabled_tier]["enabled"] = False
+        with pytest.raises(GithubBindingError, match="disabled GitHub binding"):
+            resolve_github_binding(self._load(tmp_path, raw), "alice", "example/first")
+
+    def test_disabled_overlap_cannot_fall_back_to_enabled_assignment(self, tmp_path):
+        from claudlobby.github_connections import GithubBindingError, resolve_github_binding
+        raw = self._raw()
+        raw["bots"]["alice"]["github_assignments"]["deny"] = {
+            "attachment": "attached-two", "project": "first", "enabled": False}
+        with pytest.raises(GithubBindingError, match="overlapping"):
+            resolve_github_binding(self._load(tmp_path, raw), "alice", "example/first")
+
+    @pytest.mark.parametrize("replacement, refusal", [
+        ({"attachment": "missing", "project": "first"}, "missing attachment"),
+        ({"attachment": "attached-one", "project": "missing"}, "unregistered project"),
+        ({"attachment": "attached-one", "project": "first", "repos": ["example/other"]}, "registered project"),
+        ({"attachment": "attached-two", "project": "first", "permissions": {"contents": "write"}}, "exceeds connection policy"),
+    ])
+    def test_invalid_reference_or_authority_is_a_validation_error(self, tmp_path, replacement, refusal):
+        from claudlobby.github_connections import github_policy_errors
+        raw = self._raw()
+        raw["bots"]["alice"]["github_assignments"]["work-one"] = replacement
+        assert any(refusal in e for e in github_policy_errors(self._load(tmp_path, raw)))
+
+    def test_bot_disabled_override_preserves_default_assignment_denial(self, tmp_path):
+        from claudlobby.github_connections import GithubBindingError, resolve_github_binding
+        raw = self._raw()
+        assignment = raw["bots"]["alice"]["github_assignments"]["work-one"]
+        raw["defaults"] = {"github_assignments": {"work-one": dict(assignment)}}
+        assignment["enabled"] = False
+        raw["bots"]["bob"]["github_assignments"] = {}
+        fleet = self._load(tmp_path, raw)
+        with pytest.raises(GithubBindingError, match="disabled"):
+            resolve_github_binding(fleet, "alice", "example/first")
+        assert resolve_github_binding(fleet, "bob", "example/first").app_id == 101
+
+    def test_history_identity_is_immutable_but_names_and_token_refresh_are_not_revisions(self, tmp_path, monkeypatch):
+        from claudlobby.github_connections import (
+            GithubBindingError, resolve_github_binding, validate_github_connection_history)
+        raw = self._raw()
+        before = self._load(tmp_path, raw)
+        initial = resolve_github_binding(before, "bob", "example/first")
+        raw["github"]["connections"]["app-two"]["name"] = "Renamed display label"
+        monkeypatch.setenv("APP_ISSUER_TOKEN", "dummy-refresh-value")
+        renamed = self._load(tmp_path, raw)
+        validate_github_connection_history(before, renamed)
+        assert resolve_github_binding(renamed, "bob", "example/first").revision == initial.revision
+        raw["github"]["connections"]["app-two"]["installation_id"] = 999
+        with pytest.raises(GithubBindingError, match="immutable"):
+            validate_github_connection_history(before, self._load(tmp_path, raw))
+
+    def test_revision_tracks_effective_permissions_and_registered_scope(self, tmp_path):
+        from claudlobby.github_connections import resolve_github_binding
+        raw = self._raw()
+        before = resolve_github_binding(self._load(tmp_path, raw), "alice", "example/first")
+        raw["bots"]["alice"]["github_assignments"]["work-one"]["permissions"] = {"contents": "read"}
+        after = resolve_github_binding(self._load(tmp_path, raw), "alice", "example/first")
+        assert before.revision != after.revision
+        fleet = self._load(tmp_path, raw)
+        fleet.projects["first"].repos.append("example/third")
+        assert resolve_github_binding(fleet, "alice", "example/first").revision != after.revision
+
+    def test_organization_permission_cannot_escape_repository_assignment(self, tmp_path):
+        raw = self._raw()
+        raw["github"]["connections"]["app-one"]["permissions"] = {
+            "contents": "read", "organization_members": "write"}
+        with pytest.raises(ValueError, match="unsupported repository permission"):
+            self._load(tmp_path, raw)
+
+    def test_existing_github_mention_allowlist_remains_compatible(self, tmp_path):
+        raw = self._raw()
+        raw["github"] = {"mention_allowlist": ["example-bot"]}
+        for bot in raw["bots"].values():
+            bot.pop("github_assignments")
+        fleet = self._load(tmp_path, raw)
+        assert not fleet.github_connections
+        assert not fleet.github_connections_enabled
+
+    def test_disabled_connection_composes_no_authority_but_resolve_refuses(self, tmp_path):
+        from claudlobby.github_connections import (
+            GithubBindingError, github_bindings_for_bot, resolve_github_binding)
+        raw = self._raw()
+        raw["github"]["connections"]["app-one"]["enabled"] = False
+        fleet = self._load(tmp_path, raw)
+        assert github_bindings_for_bot(fleet, "alice") == ()
+        with pytest.raises(GithubBindingError, match="disabled GitHub binding"):
+            resolve_github_binding(fleet, "alice", "example/first")
+
+    @pytest.mark.parametrize("declaration", [{"connections": {}}, {"attachments": {}}])
+    def test_empty_named_declaration_opts_fleet_into_strict_mode(self, tmp_path, declaration):
+        from claudlobby.github_connections import github_bindings_for_bot
+        raw = self._raw()
+        raw["github"] = declaration
+        for bot in raw["bots"].values():
+            bot.pop("github_assignments")
+        fleet = self._load(tmp_path, raw)
+        assert fleet.github_connections_enabled
+        assert github_bindings_for_bot(fleet, "alice") == ()
+
+    @pytest.mark.parametrize("token_prefix", ["ghp_", "github_pat_"])
+    def test_pasted_token_reference_is_rejected_without_echoing_value(self, tmp_path, token_prefix):
+        raw = self._raw()
+        pasted = token_prefix + "mistaken_value"
+        raw["github"]["connections"]["app-one"]["credential_refs"] = {
+            "private_key_path_env": pasted}
+        with pytest.raises(ValueError, match="TOKEN VALUE") as error:
+            self._load(tmp_path, raw)
+        assert pasted not in str(error.value)

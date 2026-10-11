@@ -290,3 +290,48 @@ def test_declarations_come_from_the_shipped_walk_not_a_private_scan(world) -> No
     miss ones it does — the exact class of defect creds-reconcile already hit."""
     src = Path(reg.__file__).read_text()
     assert "collect_env_contracts" in src
+
+
+@pytest.mark.parametrize("mode, refs", [
+    ("independent", {"private_key_path_env": "TEAM_APP_KEY_PATH"}),
+    ("managed", {"issuer_url_env": "TEAM_ISSUER_URL", "issuer_token_env": "TEAM_ISSUER_TOKEN"}),
+])
+def test_named_github_requirements_register_and_reconciler_share_selected_refs(world, mode, refs):
+    import yaml
+    from claudlobby.config import ProjectConfig
+    from claudlobby.credentials import declared_for_fleet
+    from claudlobby.mcp_resolve import required_vars
+
+    _fleet, paths, fleet_dir, _home = world
+    manifest = yaml.safe_load((fleet_dir / "fleet.yaml").read_text())
+    raw = manifest["fleet"]
+    raw["github"] = {
+        "connections": {"selected": {
+            "mode": mode, "app_id": 101, "installation_id": 201,
+            "permissions": {"contents": "read"}, "credential_refs": refs}},
+        "attachments": {"attached": {"connection": "selected"}},
+    }
+    raw["bots"]["solo"]["github_assignments"] = {
+        "assigned": {"attachment": "attached", "project": "demo"}}
+    (fleet_dir / "fleet.yaml").write_text(yaml.safe_dump(manifest))
+    fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+    fleet.projects["demo"] = ProjectConfig(key="demo", title="Demo", repos=["example/demo"])
+
+    needed = required_vars(fleet.bots["solo"], paths, fleet=fleet)
+    assert {r.name for r in needed} == set(refs.values())
+    assert all(r.origin == "github-connection/selected" for r in needed)
+    assert {r.name for r in needed if r.secret} == {
+        env_name for role, env_name in refs.items() if role != "issuer_url_env"}
+    declarations, _ = declared_for_fleet(fleet, paths)
+    assert {d.var for d in declarations} == set(refs.values())
+    assert all(d.kind == "github-connection" and d.source == "selected" for d in declarations)
+    register = reg.build(fleet, paths, bot="solo")
+    assert {row.name for row in register.rows} == set(refs.values())
+    assert all(row.declared_by == "github-connection/selected" for row in register.rows)
+
+    # Revocation and unattached bots must never demand a legacy PAT instead.
+    fleet.github_connections["selected"] = replace(fleet.github_connections["selected"], enabled=False)
+    assert required_vars(fleet.bots["solo"], paths, fleet=fleet) == []
+    assert reg.build(fleet, paths, bot="solo").rows == ()
+    fleet.bots["solo"].github_assignments.clear()
+    assert required_vars(fleet.bots["solo"], paths, fleet=fleet) == []

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from .config import BotConfig, McpEntry
+    from .config import BotConfig, FleetConfig, McpEntry
     from .paths import Paths
 
 _log = logging.getLogger(__name__)
@@ -165,12 +165,12 @@ def iter_operator_contract_vars(
                     source,
                 )
         else:
-            yield ContractVar(
-                var_name, default_tier, None, description, secret, source
-            )
+            yield ContractVar(var_name, default_tier, None, description, secret, source)
 
 
-def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
+def required_vars(
+    bot: BotConfig, paths: Paths, *, fleet: FleetConfig | None = None
+) -> list[RequiredVar]:
     """Return the :class:`RequiredVar` records this bot needs.
 
     Walks MCP fragments and integration docs, applying instance-scope
@@ -180,12 +180,41 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
     provenance slot is ``origin`` and ``source`` now means the resolver.
     """
     from .loader import parse_frontmatter
+    from .github_connections import uses_named_github, LEGACY_GITHUB_EQUIPMENT
 
     out: list[RequiredVar] = []
+    strict_github = uses_named_github(fleet, bot)
+    if strict_github:
+        from .github_connections import GithubBindingError, github_bindings_for_bot
+
+        if fleet is None:
+            raise GithubBindingError(
+                "named GitHub credential requirements need fleet context"
+            )
+        seen_refs: set[tuple[str, str]] = set()
+        for binding in github_bindings_for_bot(fleet, bot.bot_id):
+            for role, env_name in binding.credential_refs:
+                identity = (binding.connection_id, env_name)
+                if identity in seen_refs:
+                    continue
+                seen_refs.add(identity)
+                out.append(
+                    RequiredVar(
+                        env_name,
+                        "fleet",
+                        None,
+                        f"Named GitHub connection {binding.connection_id}: {role}",
+                        role != "issuer_url_env",
+                        None,
+                        f"github-connection/{binding.connection_id}",
+                    )
+                )
 
     # --- MCP fragment contracts ---
     seen_mcp: set[str] = set()
     for entry in bot.mcp:
+        if strict_github and entry.name in LEGACY_GITHUB_EQUIPMENT:
+            continue
         if entry.name in seen_mcp:
             continue
         seen_mcp.add(entry.name)
@@ -214,6 +243,8 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
     ]
     seen_int: set[str] = set()
     for int_name in integration_names:
+        if strict_github and int_name in LEGACY_GITHUB_EQUIPMENT:
+            continue
         if int_name in seen_int:
             continue
         seen_int.add(int_name)

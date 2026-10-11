@@ -131,3 +131,52 @@ class TestFragmentContract:
         )
         mcp = compose_mcp_json(bot, _paths())
         assert set(mcp["mcpServers"]) == {"github", "github-app"}
+
+
+class TestNamedConnectionComposition:
+    def test_separate_repository_instances_preserve_distinct_permissions(self, monkeypatch):
+        from claudlobby import composer
+        rows = [
+            {'assignment_id': 'read', 'repo': 'example/one', 'revision': 'rev-read', 'connection_id': 'first'},
+            {'assignment_id': 'write', 'repo': 'example/two', 'revision': 'rev-write', 'connection_id': 'second'},
+        ]
+        monkeypatch.setattr(composer, '_named_github_rows', lambda *args: rows)
+        original_fragment = composer._load_mcp_fragment
+        monkeypatch.setattr(composer, '_load_mcp_fragment', lambda name, paths:
+                            {'github-metrics': {'command': 'metrics-cli'}} if name == 'github-metrics'
+                            else original_fragment(name, paths))
+        bot = _bot()
+        fleet = FleetConfig(manager='worker', name='t', service_prefix='p', bots={'worker': bot},
+                            github_connections_enabled=True)
+        bot.mcp.extend([McpEntry(name='github'), McpEntry(name='github-metrics')])
+        mcp = composer.compose_mcp_json(bot, _paths(), fleet=fleet)
+        assert composer.mcp_launch_plan(bot, _paths(), fleet=fleet)[0] == mcp
+        assert mcp['mcpServers']['github-metrics'] == {'command': 'metrics-cli'}
+        servers = {name: value for name, value in mcp['mcpServers'].items() if name != 'github-metrics'}
+        assert len(servers) == 2
+        assert {s['env']['CLAUDLOBBY_GITHUB_REPO'] for s in servers.values()} == {'example/one', 'example/two'}
+        assert {s['env']['CLAUDLOBBY_GITHUB_REVISION'] for s in servers.values()} == {'rev-read', 'rev-write'}
+        assert all('GITHUB_PAT' not in s['env'] for s in servers.values())
+        assert all(name.startswith('github-app-') for name in servers)
+        settings = composer.compose_settings_local(bot, fleet, _paths())
+        assert settings['enabledMcpjsonServers'] == sorted(mcp['mcpServers'])
+        assert all(any(grant.startswith('mcp__' + name + '__')
+                       for grant in settings['permissions']['allow']) for name in servers)
+
+    def test_named_fleet_unassigned_bot_has_deny_all_consumers(self, tmp_path):
+        from claudlobby import composer
+        bot = BotConfig(bot_id='worker', name='worker', expertise=['software-engineering'],
+                        mcp=[McpEntry(name='github')], git_credentials={'example': 'GITHUB_PAT'})
+        fleet = FleetConfig(manager='worker', name='t', service_prefix='p',
+                            bots={'worker': bot}, github_connections_enabled=True)
+        assert composer.compose_mcp_json(bot, _paths(), fleet=fleet)['mcpServers'] == {}
+        assert composer.collect_env_contracts(fleet, _paths()) == []
+        files = composer.render_bot_files(bot, fleet, make_paths(tmp_path), boot_delay_s=0, cascade={})
+        config = json.loads(files['github-bindings.json'].content)
+        assert config['bindings'] == []
+        assert json.loads(files['.mcp.json'].content)['mcpServers'] == {}
+        assert 'CLAUDLOBBY_GITHUB_STRICT=1' in files['bot.conf'].content
+        assert 'github-binding-runtime.py' in files['tools/gh'].content
+        assert 'GITHUB_PAT' not in files['.gitconfig'].content
+        assert 'auth git-credential' not in files['.gitconfig'].content
+        assert 'cache --timeout' not in files['.gitconfig'].content

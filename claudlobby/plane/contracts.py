@@ -665,6 +665,7 @@ class _BotPosture(_Strict):
     rc_enabled: bool = False
     telegram: dict = {}
     git_credentials_profile: Optional[str] = None
+    github_access: Optional[dict] = None
 
 
 class BotPayload(_Strict):

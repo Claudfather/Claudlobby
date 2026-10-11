@@ -25,6 +25,81 @@ from .runtime_admission import RESIDENT_UNIT_PHASES
 from .validator import validate
 
 
+def _frozen_github_connections(plan, name):
+    """Only the GitHub block is interpreted by the candidate release."""
+    import yaml
+
+    from .github_connections import parse_github_policy
+
+    _, content = plan.frozen_input(plan.effects["fleet_sources"][name]["fleet"], required=True)
+    doc = yaml.safe_load(content)
+    if not isinstance(doc, dict) or not isinstance(doc.get("fleet"), dict):
+        raise PlanError(f"frozen manifest for fleet {name!r} is invalid")
+    if doc["fleet"].get("name", "unnamed-fleet") != name:
+        raise PlanError(f"frozen manifest does not name fleet {name!r}")
+    return parse_github_policy(doc["fleet"].get("github"))[0]
+
+
+def _check_github_identity_history(root, candidates, *, record_input=None):
+    """Re-read every published identity, including completed rollbacks."""
+    import yaml
+
+    from .activation_state import ActivationError, read_activation
+    from .config_plan import read_plan
+    from .github_connections import validate_github_connection_identities
+
+    if not candidates:
+        return
+    for path in sorted((root / "state/activations").glob("*/activation.json")):
+        activation_id = path.parent.name
+        try:
+            if record_input is not None:
+                record_input(path)
+            record = read_activation(root, activation_id)
+            forward = record.body.get("forward", record.body)
+            if "selection_switched" not in forward.get("completed", []):
+                continue
+            plan = read_plan(root, record.body["intent"]["plan_id"])
+            if "fleet_sources" not in plan.effects:
+                continue  # These plans predate named connections.
+            for name in candidates.keys() & set(plan.fleets):
+                validate_github_connection_identities(
+                    _frozen_github_connections(plan, name), candidates[name]
+                )
+        except (ActivationError, OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+            raise PlanError(
+                f"cannot preserve GitHub connection identity from activation {activation_id!r}: {exc}"
+            ) from exc
+
+
+def _github_identity_history(builder, contexts, package) -> None:
+    """Bind staging's history observation; activation repeats it under lock."""
+    candidates = {c.fleet.name: c.fleet.github_connections for c in contexts
+                  if c.fleet.github_connections}
+    if candidates:
+        builder.input(builder.root / "state/selected-release.json")
+        _check_github_identity_history(builder.root, candidates, record_input=builder.input)
+
+
+def validate_github_identity_history(plan) -> None:
+    """Admission calls this under its existing lock before writing an intent.
+
+    New journals after staging are visible even if rollback restored all of the
+    candidate's reviewed source and selected-release bytes.
+    """
+    import yaml
+
+    if "fleet_sources" not in plan.effects:
+        return  # Pre-frozen-source plans predate named connections.
+    try:
+        candidates = {name: _frozen_github_connections(plan, name) for name in plan.fleets}
+    except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+        raise PlanError(f"cannot read candidate GitHub identity policy: {exc}") from exc
+    _check_github_identity_history(plan.data_root, {
+        name: connections for name, connections in candidates.items() if connections
+    })
+
+
 def _snapshot(source: Path) -> dict[str, tuple[bytes, int]]:
     """Freeze authored files; reject cycles/special files rather than hanging."""
     files = {}
@@ -182,6 +257,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     prefixes = [context.fleet.service_prefix for context in contexts]
     if len(set(names)) != len(names) or len(set(prefixes)) != len(prefixes):
         raise PlanError("fleet names and service prefixes must be unique on the selected host")
+    _github_identity_history(builder, contexts, package)
     builder.fleets = tuple(sorted(names))
     builder.effects = {
         "fleet_manifests": {c.fleet.name: str(c.paths.fleet_yaml) for c in contexts},

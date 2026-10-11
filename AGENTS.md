@@ -158,8 +158,9 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `vault-sync.sh` — scheduled vault sync that reports what happened (opt-in)
 
 **GitHub identity and tool-call guards**
-- `git-credential-github-app` — git credential helper that mints GitHub App installation tokens
-- `mint-github-token.sh` — private helper printing a fresh App token for hot-path scripts; never export it at boot
+- `git-credential-github-app` — GitHub App credential helper
+- `github-binding-runtime.py` — enforce named GitHub bindings
+- `mint-github-token.sh` — mint App tokens at use time, never at boot
 - `github-app-mcp-wrapper.py` — runs the GitHub MCP server with auto-refreshed App tokens
 - `setup-github-app.sh` — one-time App validation and config write
 - `gh-mention-guard.sh` — PreToolUse hook: rewrites `@<botname>` out of GitHub-bound text

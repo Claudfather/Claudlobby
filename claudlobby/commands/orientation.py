@@ -229,6 +229,8 @@ def _bot(context, bot_id, *, capabilities=False):
                       "CLAUDE.md", "bot.conf", ".mcp.json", ".claude/settings.local.json")}},
               "runtime_observed": {"session": "not_probed", "release": "unknown",
                                    "permission_enforcement": "unknown"}}
+    if "github_access" in projection["posture"]:
+        result["effective_configuration"]["github_access"] = projection["posture"]["github_access"]
     if capabilities:
         result["permissions"] = _permissions(context, bot, directory / ".claude/settings.local.json")
     return result
@@ -276,6 +278,11 @@ def dispatch(args) -> CommandOutput:
         equipment = data["bot"]["effective_configuration"]["equipment"]
         lines.extend(f"Effective {kind}: {', '.join(equipment[kind]) or 'none'}"
                      for kind in ("expertise", "skills", "tools", "mcp"))
+        access = data["bot"]["effective_configuration"].get("github_access")
+        if access is not None:
+            routes = [f"{row['repo']} via {row['connection_name']}" for row in access["bindings"]]
+            lines.append("Declared GitHub access: " + ("; ".join(routes) or "none")
+                         + ". Provider access not checked.")
         if command == "bot.capabilities":
             composed = data["bot"]["permissions"]["composed"]
             lines.append(f"Composed permission settings: {composed['state']}; "

@@ -74,7 +74,7 @@ class Declaration:
 
     var: str
     source: str  # "railway", "github" ...
-    kind: str  # "integration" | "mcp"
+    kind: str  # "integration" | "mcp" | "github-connection"
     equipped_by: list[str] = field(default_factory=list)
 
 
@@ -153,15 +153,18 @@ def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
     arrive already canonicalised and instance-prefixed.
     """
     from .mcp_resolve import required_vars
+    from .github_connections import uses_named_github, LEGACY_GITHUB_EQUIPMENT
 
     by_var: dict[tuple[str, str], Declaration] = {}
     integrations: set[str] = set()
 
     for bot_name, bot in getattr(fleet, "bots", {}).items():
+        strict_github = uses_named_github(fleet, bot)
         for name in getattr(bot, "integrations", []) or []:
-            integrations.add(name)
+            if not (strict_github and name in LEGACY_GITHUB_EQUIPMENT):
+                integrations.add(name)
         try:
-            needed = required_vars(bot, paths)
+            needed = required_vars(bot, paths, fleet=fleet)
         except Exception:  # noqa: BLE001 - one bad bot must not void the inventory
             continue
         for req in needed:
@@ -172,7 +175,7 @@ def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
             # a bare name. Read `.origin`, never `.source` — since #1214 the
             # latter is the resolver descriptor and would partition to garbage.
             kind, _, short = req.origin.partition("/")
-            if kind not in ("integration", "mcp"):
+            if kind not in ("integration", "mcp", "github-connection"):
                 kind, short = "mcp", req.origin
             key = (req.name, short)
             decl = by_var.get(key)

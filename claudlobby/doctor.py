@@ -343,7 +343,7 @@ def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> 
     fixable = False
     try:
         for bot in armed:
-            _merged, fallbacks = mcp_launch_plan(bot, paths)
+            _merged, fallbacks = mcp_launch_plan(bot, paths, fleet=fleet)
             for name, _spec, why in fallbacks:
                 left.append(f"{bot.bot_id}/{name} ({why})")
                 fixable = fixable or why == mcp_direct.NOT_INSTALLED

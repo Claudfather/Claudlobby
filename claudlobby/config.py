@@ -26,6 +26,13 @@ from .known_values import (
     closest_match,
 )
 from .path_audit import ExternalDecl, parse_external_decls
+from .github_connections import (
+    GithubConnection,
+    GithubAttachment,
+    GithubAssignment,
+    parse_github_policy,
+    parse_github_assignments,
+)
 
 log = logging.getLogger(__name__)
 
@@ -694,6 +701,7 @@ class BotConfig:
     # field, never a git_credentials value form — that parser hard-rejects
     # non-identifier values by design). None = App mode off for this bot.
     github_app: GithubAppConfig | None = None
+    github_assignments: dict[str, GithubAssignment] = field(default_factory=dict)
     # env var NAME -> credential source identifier. The per-scope override the
     # tier ruling requires (#1214 F6c): a contract declares where a value comes
     # from BY DEFAULT, and a fleet or a single bot may say otherwise for itself
@@ -907,6 +915,10 @@ class FleetConfig:
     # framework's default, not the operator's declaration, and a reader who
     # cannot tell them apart cannot know whether the closure bar was chosen.
     projects_derived: bool = False
+    # Presence, including empty declarations, opts the entire fleet into strict routing.
+    github_connections_enabled: bool = False
+    github_connections: dict[str, GithubConnection] = field(default_factory=dict)
+    github_attachments: dict[str, GithubAttachment] = field(default_factory=dict)
     # Fleet-level mission: `mission` is the one-paragraph anchor EVERY bot
     # receives; `mission_file` points at a fuller charter (fleet-relative)
     # composed for managers only; mission_file REQUIRES mission (validator-
@@ -1830,6 +1842,14 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         github_app=_merge_github_app(
             defaults.get("github_app"), raw.get("github_app"), bot_name=name
         ),
+        github_assignments={
+            **parse_github_assignments(
+                defaults.get("github_assignments"), where="fleet defaults"
+            ),
+            **parse_github_assignments(
+                raw.get("github_assignments"), where=f"bot '{name}'"
+            ),
+        },
         credential_sources={
             **_parse_credential_sources(
                 defaults.get("credential_sources"), where="fleet defaults"
@@ -2428,6 +2448,8 @@ def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig
     if projects_derived:
         projects = derive_projects(bots)
 
+    github_connections, github_attachments = parse_github_policy(fleet.get("github"))
+
     fleet_cfg = FleetConfig(
         name=fleet.get("name", "unnamed-fleet"),
         service_prefix=fleet.get("service_prefix", "claudlobby"),
@@ -2445,6 +2467,11 @@ def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig
         fleet_pulse=_coerce_fleet_pulse(fleet.get("fleet_pulse")),
         projects=projects,
         projects_derived=projects_derived,
+        github_connections_enabled=bool(
+            {"connections", "attachments"} & (fleet.get("github") or {}).keys()
+        ),
+        github_connections=github_connections,
+        github_attachments=github_attachments,
         mission=_shaped(
             "fleet.mission", fleet.get("mission"), str, "mission: one paragraph"
         )

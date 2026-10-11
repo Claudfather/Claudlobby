@@ -75,6 +75,10 @@ def build(fleet: FleetConfig, paths: Paths, bot: str | None = None,
     from .composer import collect_env_contracts
 
     declared = {ev.name: ev for ev in collect_env_contracts(fleet, paths)}
+    if bot is not None:
+        declared = {name: ev for name, ev in declared.items()
+                    if not ev.source.startswith("github-connection/")
+                    or not ev.bot_attached or bot in ev.bot_attached}
     resolved = resolve(paths, bot_name=bot)
     if key is not None and key not in declared and key not in resolved:
         raise KeyError(key)
