@@ -61,14 +61,18 @@ class OwnerActions:
         self.authorization = action_authorization(self.root, authorization)
         from .owner_nudge_actions import OwnerNudgeActions
         from .owner_feedback_actions import OwnerFeedbackActions
+        from .owner_permission_actions import OwnerPermissionActions
         self.nudges = OwnerNudgeActions(self.root, package=self.package, authorization=self.authorization)
         self.feedback = OwnerFeedbackActions(self.root, package=self.package, authorization=self.authorization)
+        self.permissions = OwnerPermissionActions(self.root, package=self.package, authorization=self.authorization)
 
     def _task_action(self, kind):
         if kind == "nudge":
             return self.nudges
         if kind == "feedback":
             return self.feedback
+        if kind == "permission":
+            return self.permissions
         raise AccessDenied("unsupported_owner_action")
 
     def _context(self, reader: VerifiedReader, room: str):
@@ -170,7 +174,7 @@ class OwnerActions:
         return fields, context, grant, adapter, options
 
     def operation(self, action, reader, payload):
-        if type(payload) is dict and payload.get("kind") in ("nudge", "feedback"):
+        if type(payload) is dict and payload.get("kind") in ("nudge", "feedback", "permission"):
             return self._task_action(payload["kind"]).operation(action, reader, payload)
         try:
             fields, context, grant, adapter, options = self._prepare_operation(action, reader, payload)

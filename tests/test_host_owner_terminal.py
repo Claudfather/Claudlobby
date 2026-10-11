@@ -217,27 +217,28 @@ def test_nudge_registration_and_independent_grant_through_actual_terminal(active
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
-def test_feedback_registration_and_independent_grant_through_actual_terminal(active):
+@pytest.mark.parametrize("capability,kind", [("feedback", "feedback"), ("permissions", "permission")])
+def test_action_registration_and_independent_grant_through_actual_terminal(active, capability, kind):
     from claudlobby.activation_identity import read_selected_identity_bindings
     root, host = active
     store = OwnerAccess.initialize(root)
     principal = PrincipalRef("test-verifier", "human-001")
     challenge = store.begin_pairing(principal)
     owner = store.confirm_pairing(challenge.token, expected_principal=principal)
-    code, output = _command(root, "allow-feedback", [("Type REGISTER", "REGISTER"),
-        ("Type ALLOW-FEEDBACK", "ALLOW-FEEDBACK")],
+    code, output = _command(root, "allow-" + capability, [("Type REGISTER", "REGISTER"),
+        ("Type ALLOW-" + capability.upper(), "ALLOW-" + capability.upper())],
         args=("--target-fleet", "example", "--actor", "human:terminal-feedback", "--register-actor"),
         bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
-    assert "task-linked comments" in output
+    assert ("task-linked comments" if capability == "feedback" else "approve, decline and revoke") in output
     fleet = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
-    grant = store.current_feedback_grant(expected_owner=owner, fleet_uid=fleet)
+    grant = getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)
     assert grant.actor_alias == "human:terminal-feedback"
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
     (root / "state/selected-release.json").unlink()
-    code, output = _command(root, "revoke-feedback", [("Type REVOKE-FEEDBACK", "REVOKE-FEEDBACK")],
+    code, output = _command(root, "revoke-" + capability, [("Type REVOKE-" + capability.upper(), "REVOKE-" + capability.upper())],
                             args=("--fleet-uid", fleet))
     assert code == 0, output
-    with pytest.raises(AccessDenied, match="feedback_not_allowed"):
-        store.current_feedback_grant(expected_owner=owner, fleet_uid=fleet)
+    with pytest.raises(AccessDenied, match=capability + "_not_allowed"):
+        getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)
