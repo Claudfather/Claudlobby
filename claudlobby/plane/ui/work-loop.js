@@ -10,6 +10,7 @@ import { esc, ago, stateBlock } from "./panel-state.js";
 const LINK_TASK = /^(?:([a-z][a-z0-9-]*)::)?wi_[0-9a-f]{32}$/;
 const LINK_FLEET = /^(?:([a-z][a-z0-9-]*)::)?fleet_[0-9a-f]{32}$/;
 const LINK_HOST = /^(?:([a-z][a-z0-9-]*)::)?host_[0-9a-f]{32}$/;
+const LINK_ACTOR = /^(?:([a-z][a-z0-9-]*)::)?actor_[0-9a-f]{32}$/;
 export function conversationTaskLink(thread) {
   const link = thread?.task_link;
   if (!link || typeof thread.key !== "string" || !thread.key || thread.key.length > 240
@@ -78,10 +79,12 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // No context probe, task preparation, submission or receipt lookup lives here.
   function canSelectMessageRecipient(identity) {
     const message = contextsByKind.get("message");
+    const actor = typeof identity?.uid === 'string' && identity.uid.match(LINK_ACTOR);
+    const fleet = typeof identity?.fleet_uid === 'string' && identity.fleet_uid.match(LINK_FLEET);
     return !!message && message.version === 1 && message.actions.includes("message")
       && identity?.current === true && identity.provisional === false
-      && /^actor_[0-9a-f]{32}$/.test(identity.uid)
-      && /^fleet_[0-9a-f]{32}$/.test(identity.fleet_uid)
+      && !!actor && !!fleet && actor[1] === fleet[1]
+      && (!actor[1] || room?.startsWith(actor[1] + ' / '))
       && typeof identity.alias === "string" && identity.alias.length > 0
       && identity.fleet === room && message.room === room && message.scope.fleet === room
       && message.recipients.some(recipient => recipient.id === identity.uid);

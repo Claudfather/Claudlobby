@@ -194,12 +194,12 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
   h.metadataStatus=403;await h.api.checkAccount();children[0].onmessage({data:'late'});children[0].onopen?.({});assert.equal(messages,1);assert.equal(children[0].closed,true);h.api.dispose();
 });
 
-test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
+test('controls retain focus, allow team inspection and disable unsupported navigation honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  for(const n of h.ui.nav)assert.equal(n.disabled,n.dataset.view!=='channel');assert.equal(h.ui.get('search').disabled,true);
+  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','fleet'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[2],check=root.children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[1],check);
   const connect=row.children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1],connect);
-  const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';h.ui.get('fleet').append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
+  const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';h.ui.get('fleet').append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,false);
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
@@ -479,8 +479,15 @@ test('overview completed before source loss cannot consume the later recovery re
   stream.close();h.api.dispose();
 });
 
-test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
+test('setup-only computer opens its launched team, keeps other hosts separate and fences account loss',async t=>{
   const h=harness(),a=refs[0].endpoint_origin;
+  const previous=Object.getOwnPropertyDescriptor(globalThis,'localStorage'),saved=new Map();
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)}});
+  t.after(()=>{h.api.dispose();if(previous)Object.defineProperty(globalThis,'localStorage',previous);else delete globalThis.localStorage;});
+  const opened=[];h.mount({onOpenTeam(room,roster){opened.push(room);assert.equal(roster.state,'ok');return true;}});
+  const original={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
+  const approved={version:1,template:'revenue-web-app',fleet:'team',repository:'example-org/shop',release_id:'r-'+'b'.repeat(64),
+    release_seal:'c'.repeat(64),generation:id(9),expires_at:1800003600,request:original};
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
     setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
@@ -489,7 +496,27 @@ test('setup-only computer stays visible without blocking the other admitted dash
   const fleets=await h.api.jget('/api/fleets');
   assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
-  h.api.dispose();
+  h.overrides.set(a+'/api/owner/connected/setup/context',()=>reply(200,approved));
+  h.overrides.set(a+'/api/owner/connected/setup/receipt',()=>reply(200,{...original,version:1,state:'active'}));
+  const panel=h.ui.get('owner-session').children[2].children.find(e=>e.attributes['aria-label']?.startsWith('First-team setup'));
+  const click=async title=>{panel.children.find(e=>e.textContent===title).click();await flush();};
+  const open=panel.children.find(e=>e.textContent==='Open team');assert.equal(open.disabled,true);
+  await click('Check computer setup');await click('Check launch status');assert.equal(open.disabled,false);
+  h.overrides.set(a+'/api/owner/connected/status',()=>reply(200,{version:1,state:'ready',expires_in:900,
+    read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
+  const roster={fleets:[{alias:'team',uid:fleetUID,bots:3,provisional:0}]};
+  const fleetDoor=a+'/api/owner/connected/read/fleets';h.overrides.set(fleetDoor,()=>reply(200,ok(roster)));
+  await click('Open team');assert.deepEqual(opened,[sourceA+' / team']);
+  assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(open.disabled,false);
+  const checks=h.calls.filter(c=>c.url===a+'/api/owner/connected/status').length;
+  // A healthy second computer cannot make an unavailable first computer's team open.
+  h.overrides.set(fleetDoor,()=>reply(503,{}));await click('Open team');assert.equal(opened.length,1);
+  assert.equal(h.calls.filter(c=>c.url===a+'/api/owner/connected/status').length,checks,'opening an admitted team must not reconnect its stream');
+  const held=deferred();h.overrides.set(fleetDoor,()=>held.promise);open.click();await flush();
+  h.metadataStatus=401;await h.api.checkAccount();held.resolve(reply(200,ok(roster)));await flush();
+  assert.equal(opened.length,1);
+  assert.equal(h.calls.filter(c=>/\/setup\/(launch|repository)$|\/actions\/(prepare|send)$/.test(c.url)).length,0);
 });
 
 const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
@@ -504,7 +531,7 @@ function setupHarness(options={}) {
     async setupLaunch(input){assert.equal(saved.has('test'),true);calls.push(['launch',input]);throw new Error('lost');},
     async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:1,state:'active',recorded_activation:{}};},...options.client};
   const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
-  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:()=>1800000000});
+  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:options.now??(()=>1800000000)});
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
 }
@@ -530,10 +557,12 @@ test('changed connection fences held preview, preserves goal and never launches'
 });
 test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  h.context.github={name:'Team App',mode:'independent',repository:h.context.repository,permissions:{contents:'write',pull_requests:'write'}};
   const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
   assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
+  assert.ok(panel.children.some(e=>e.textContent.includes('GitHub: Team App') && e.textContent.includes('pull requests write')));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
@@ -571,4 +600,23 @@ test('expired or revoked browser receipt retains original identifiers with local
   assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+
+
+test('repository preparation requires approved active launch and retries without a second activation',async()=>{
+  let clock=1800000000;
+  const h=setupHarness({now:()=>clock}),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const button=panel.children.find(e=>e.textContent==='Prepare repository');
+  h.context.can_prepare_repository=true;h.context.repository='Example-Org/Shop';h.preview.repository=h.context.repository;
+  h.client.setupRepository=async input=>{h.calls.push(['repository',input]);return {...input,version:1,repository:h.context.repository,
+    checkouts:['lead','engineer','reviewer'].map(bot=>({bot,repository:h.context.repository.toLowerCase(),state:'existing'}))};};
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(button.disabled,true);assert.equal(await h.api.run('repository'),false);
+  await h.api.run('receipt');assert.equal(button.disabled,false);
+  assert.equal(await h.api.run('repository'),true);assert.match(h.api.snapshot().note,/Working copies are available/);
+  assert.equal(await h.api.run('repository'),true);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  assert.ok(h.calls.filter(c=>c[0]==='repository').every(c=>JSON.stringify(c[1])===JSON.stringify(h.pending)));
+  clock=h.context.expires_at;await h.api.run('receipt');
+  assert.equal(button.disabled,true);assert.equal(await h.api.run('repository'),false);h.api.dispose();
 });

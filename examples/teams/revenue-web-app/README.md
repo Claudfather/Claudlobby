@@ -19,10 +19,29 @@ Follow the maintained [getting-started instructions](../../../documentation/gett
 
 To prepare for inspection without activating, add `--plan-only` and omit `--install-directory`. This still installs the authored declaration and stages the whole host configuration through the sealed release owner; it does not change native supervision, select a release or start bots. Inspect the returned exact `plan_id` with `"$RELEASE_CLI" --root "$DATA" config diff PLAN_ID`. If approved, use `"$RELEASE_CLI" --root "$DATA" host activate PLAN_ID --install-directory "$USER_UNIT_DIR"` for that same plan, rather than rerunning setup and silently creating another plan. Activation's existing freshness check refuses changed declarations, project inputs or release bytes. Preparation does not establish runtime/provider/GitHub readiness, owner access or approval to launch.
 
-Replace the example repository and goal with the human's approved choices. This activates the fleet and can start supervised processes and consume agreed provider usage; it is an operator action, not template validation. An equivalent manifest is reused, and canonical activation handles an already active plan. Different existing configuration still requires explicit `--replace-config`; template mode refuses any adjacent `projects.yaml`, including redirected or non-file declarations, rather than silently adopting project policy. Existing authored `--config` behavior is unchanged, and template selection grants neither GitHub access nor browser launch authority.
+To attach an existing named GitHub connection, add `--github-config connections.yaml --github-connection team-app`. The local file uses the existing `fleet.github.connections` [schema](../../../documentation/fleet-yaml-schema.md#fleetgithub--github_assignments--named-github-connections); it contains environment reference names, never secret values. Only the selected connection is copied, and all three bots receive explicit assignments for the chosen repository. Other repositories allowed by the installation remain unassigned. Git, CLI and MCP then use the same named connection. Omitting these flags retains the template's existing credential requirements. Selection does not verify the App installation or provider credentials.
+
+Replace the example repository and goal with the human's approved choices. This activates the fleet and can start supervised processes and consume agreed provider usage; it is an operator action, not template validation. An equivalent manifest is reused, and canonical activation handles an already active plan. Different existing configuration still requires explicit `--replace-config`; template mode refuses any adjacent `projects.yaml`, including redirected or non-file declarations, rather than silently adopting project policy. Existing authored `--config` behavior is unchanged. Template selection alone grants neither GitHub access nor browser launch authority; named connection assignment is an explicit additional selection.
 
 The common mission requires human permission for merges, deployment, new spending beyond agreed provider usage and destructive data changes. Shipped `merge-policy-human`, `no-push-main`, `no-merge-own-pr`, `no-merge-admin` and `no-destructive-git` policies reinforce the Git boundary, and native permission bypass is disabled. The orchestration role still contains auto-merge/re-merge guidance; the lead's mission explicitly gives the human-merge guardrail precedence, states that reviewer approval alone is insufficient and leaves the merge itself to the human. This resolves instruction priority for the candidate, not through text removal or a technical approval gate for arbitrary shell commands, cloud deployment or data mutation. The candidate creates no standing external grant and does not claim that such effects are mechanically prevented.
 
 Without an adjacent `projects.yaml`, the existing project owner derives review-tier projects from repository scope. `fleet setup` installs only `fleet.yaml`; it does not install adjacent project or mission files. Revenue-facing preview/acknowledgment policy requires a separately authored [project declaration](../../../projects.yaml.example), using the authored config/configuration-owner path rather than template mode. This candidate uses an inline fleet mission and does not pretend to include that richer bundle. Revenue metrics are not supplied.
 
 Static configuration/composition proof does not establish runtime behavior, provider readiness or useful work. Independent canary validation and the later cold-host/business trial remain required before those claims. Browser-guided team creation, repository preparation, credential delivery and launch authorization remain separate setup capabilities; this recipe does not complete that journey.
+
+## Prepare working copies
+
+After activation with a named connection, prepare each bot's assigned repository:
+
+```bash
+claudlobby --root /path/to/data --fleet web-app bot prepare-repository lead --repository example-org/web-app
+claudlobby --root /path/to/data --fleet web-app bot prepare-repository engineer --repository example-org/web-app
+claudlobby --root /path/to/data --fleet web-app bot prepare-repository reviewer --repository example-org/web-app
+```
+
+This clones into each bot's `projects/REPO` using its selected GitHub
+connection. A matching checkout is reused without fetching or changing work.
+Application scripts and dependency installation remain a separate task for the
+team. In guided setup, a newly approved named connection enables the equivalent
+**Prepare repository** step after launch. Then open the team dashboard and give
+the lead its first bounded task using the existing approved message flow.

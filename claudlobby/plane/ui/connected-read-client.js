@@ -396,7 +396,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   async function setupRequest(operation, input) {
     if (!valid(true)) throw new Error('Setup outcome unknown. Check the original activation receipt.');
     const result = await http(ref.endpoint_origin + '/api/owner/connected/setup/' + operation,
-      {method:'POST',body:input,timeout:operation === 'launch' ? 45000 : 15000,limit:131072});
+      {method:'POST',body:input,timeout:operation === 'repository' ? 600000 : operation === 'launch' ? 45000 : 15000,limit:131072});
     if (result.status !== 200) throw new Error('Setup unavailable or refused. A lost launch must be inspected, never repeated.');
     return result.data;
   }
@@ -408,6 +408,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     renew: () => lifecycle('renew'), logout: () => lifecycle('logout'),
     setupContext: () => setupRequest('context',{}), setupPreview: input => setupRequest('preview',input),
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
+    setupRepository: input => setupRequest('repository',input),
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');
       actionSourceChanged = onSourceChange;

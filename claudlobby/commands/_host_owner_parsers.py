@@ -51,6 +51,8 @@ def register_host_owner(hosts):
     allow.add_argument("--template", required=True, choices=["revenue-web-app"])
     allow.add_argument("--target-fleet", required=True)
     allow.add_argument("--repository", required=True, metavar="OWNER/REPO")
+    allow.add_argument("--github-config", type=Path, metavar="FILE", help="Local fleet YAML containing the approved GitHub connection")
+    allow.add_argument("--github-connection", metavar="ID", help="Freeze this connection into the setup approval")
     allow.add_argument("--release", required=True)
     allow.add_argument("--install-directory", required=True, type=Path)
     allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")

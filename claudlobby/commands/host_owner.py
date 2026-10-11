@@ -324,12 +324,18 @@ def dispatch(args):
                     directory = args.install_directory
                     if directory not in directories:
                         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
+                    from .setup import _template_github
+                    github_policy = _template_github(getattr(args,"github_config",None),getattr(args,"github_connection",None))
                     grant = setup.candidate(_active_owner(store).principal, template=args.template,
                         fleet=args.target_fleet, repository=args.repository, release_id=args.release,
-                        release_seal=release.seal_sha256, install_directory=str(directory))
+                        release_seal=release.seal_sha256, install_directory=str(directory),github_policy=github_policy)
                     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
                         "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
-                        "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
+                        "This can enroll/start native services and consume provider usage.\n")
+                    terminal.write("The selected GitHub connection will be assigned to the lead, engineer and reviewer for this repository.\n"
+                        if github_policy else "No named GitHub connection selected; existing template credential requirements still apply.\n")
+                    if github_policy:
+                        terminal.write("After launch, the browser may prepare each bot's working copy of this repository. Existing work and application setup scripts are left untouched.\n")
                     terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
                     _approve(terminal, "ALLOW-SETUP")
                     fresh_owner_setup(paths.root)

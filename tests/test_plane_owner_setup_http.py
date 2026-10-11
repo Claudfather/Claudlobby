@@ -85,6 +85,8 @@ def test_http_plan_exact_launch_pure_original_receipt_and_partial_source_transit
         assert status.status_code==200 and status.json()['state']=='setup_only' and 'read_profile' not in status.json()
         assert post(client,'receipt',token,request).json()==result.json()
         assert post(client,'launch',token,request).json()==result.json() and len(calls)==1
+        assert post(client,'repository',token,request).status_code==403  # Legacy grant never acquired clone authority.
+        assert post(client,'repository',token,{**request,'repository':'other/repo'}).status_code==403
         assert post(client,'receipt',token,{**request,'request_id':str(uuid4())}).status_code==403
         assert post(client,'preview',token,{'generation':grant.generation,'goal':'Another goal'}).status_code==403
         assert client.get('/api/owner/connected/read/overview',headers=headers(token)).status_code in (403,503)
@@ -107,6 +109,7 @@ def test_strict_unknown_duplicate_json_and_preflight_no_effect_claim(setup_http)
     with TestClient(app,base_url=HOST) as client:
         s=session(client,setup_http)
         assert post(client,'preview',s['token'],{'generation':grant.generation,'goal':'Improve tests','install_directory':'/browser-chosen'}).status_code==403
+        assert post(client,'preview',s['token'],{'generation':grant.generation,'goal':'Improve tests','github_policy':'browser-chosen'}).status_code==403
         assert client.post(PREFIX+'preview',content='{"goal":"a","goal":"b"}',headers={**headers(s['token']),'Content-Type':'application/json','X-Claudlobby-Owner':'1'}).status_code==403
         preflight=client.options(PREFIX+'launch',headers={'Origin':ORIGIN,'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'Authorization,Content-Type,X-Claudlobby-Owner'})
         assert preflight.status_code==204 and not preflight.content

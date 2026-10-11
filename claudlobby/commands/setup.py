@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import re
 import shlex
@@ -128,7 +129,31 @@ def _authored_config(source: Path, fleet: str) -> bytes:
     return content
 
 
-def _template_config(template: str, fleet: str, repository: str | None, goal: str | None) -> bytes:
+def _template_github(config_path, connection_id):
+    """Select one canonical connection without copying unrelated fleet inputs."""
+    if config_path is None and connection_id is None:
+        return None
+    if config_path is None or connection_id is None:
+        raise CommandFailure("invalid_argument", "--github-config and --github-connection are required together")
+    import yaml
+    from ..github_connections import parse_github_policy
+
+    try:
+        document = yaml.safe_load(Path(config_path).expanduser().read_bytes())
+        policy = document["fleet"]["github"]
+        connections, _ = parse_github_policy(policy)
+        selected = connections[connection_id]
+        if not selected.enabled:
+            raise ValueError("disabled connection")
+        return json.dumps({"connections": {connection_id: policy["connections"][connection_id]},
+                           "attachments": {"team": {"connection": connection_id}}},
+                          sort_keys=True, separators=(",", ":"))
+    except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+        raise CommandFailure("invalid_argument", "selected GitHub connection is missing, disabled or invalid") from exc
+
+
+def _template_config(template: str, fleet: str, repository: str | None, goal: str | None,
+                     *, github_policy: str | None = None) -> bytes:
     """Materialize the one package-owned candidate; never use a source checkout."""
     import yaml
 
@@ -157,8 +182,25 @@ def _template_config(template: str, fleet: str, repository: str | None, goal: st
         body["mission"] = f"Approved goal: {goal}. {body['mission']}"
         scope = ScopeConfig(org=parts[0], repos=[repository])
         body["defaults"]["scope"] = {"org": scope.org, "repos": scope.repos}
+        if github_policy is not None:
+            from ..github_connections import resolve_github_binding
+
+            # Let the existing registry derive the project key, including its
+            # collision/slug rules. Scope alone still grants no GitHub access.
+            unbound = yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+            candidate, _ = load_fleet_snapshot(source, unbound, None)
+            project = next(key for key, value in candidate.projects.items() if repository in value.repos)
+            body["github"] = json.loads(github_policy)
+            body["defaults"]["github_assignments"] = {
+                "team-project": {"attachment": "team", "project": project, "repos": [repository]}}
         content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True).encode("utf-8")
-        load_fleet_snapshot(source, content, None)
+        candidate, _ = load_fleet_snapshot(source, content, None)
+        if github_policy is not None:
+            try:
+                for name in candidate.bots:
+                    resolve_github_binding(candidate, name, repository)
+            except ValueError as exc:
+                raise CommandFailure("invalid_argument", "selected GitHub connection does not authorize this team's repository") from exc
         return content
     except (RuntimeError, OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
         raise CommandFailure("unavailable", "unavailable: installed team template; use a compatible sealed release") from exc
@@ -277,12 +319,20 @@ def _fleet_setup(args) -> CommandOutput:
         raise CommandFailure("release_mismatch", "release mismatch: fleet setup requires a sealed release CLI")
     _release(root, executing)
     template = getattr(args, "template", None)
+    github_config = getattr(args, "github_config", None)
+    github_connection = getattr(args, "github_connection", None)
+    github_policy = getattr(args, "github_policy", None)
     if template is not None:
         if args.config is not None:
             raise CommandFailure("invalid_argument", "invalid argument: --config and --template are mutually exclusive")
-        content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None))
+        if github_policy is None:
+            github_policy = _template_github(github_config, github_connection)
+        content = _template_config(template, args.fleet, getattr(args, "repository", None),
+                                   getattr(args, "goal", None), github_policy=github_policy)
         source = "the selected installed template"
     else:
+        if github_config is not None or github_connection is not None or github_policy is not None:
+            raise CommandFailure("invalid_argument", "GitHub connection selection requires --template")
         if getattr(args, "repository", None) is not None or getattr(args, "goal", None) is not None:
             raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")
         source = Path(args.config).expanduser().resolve(strict=True)
