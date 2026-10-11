@@ -327,6 +327,17 @@ by `claudlobby.activation_state.read_activation(ROOT, REQUEST_UUID)`. A new
 approval does not authorize the browser to inspect the previous generation's
 journal. No receipt should be inferred from a new empty grant.
 
+The same approval accepts `--github-config FILE --github-connection ID` to select
+one connection from a local fleet YAML's canonical `fleet.github.connections`.
+It freezes that nonsecret policy in the approval; later edits to the input file
+cannot change a browser preview. Claudlobby's template command assigns the chosen
+repository to the lead, engineer and reviewer through the existing project
+registry. Context shows the connection name, mode, repository and permissions;
+credential references and App identifiers stay out of that browser summary.
+The browser cannot supply or replace a connection. Changes require a fresh local
+approval. Without these flags, existing template credential requirements apply.
+Neither approval nor an active launch proves provider access.
+
 The finite connected setup routes are POST `context`, `preview`, `launch` and
 `receipt` under `/api/owner/connected/setup/`, with the existing exact Origin,
 header-only session and private/no-store boundary. Optional setup tables are

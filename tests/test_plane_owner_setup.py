@@ -68,6 +68,32 @@ def test_preview_uses_canonical_plan_no_activation_and_can_change_owned_goal(set
     assert not setup_authority[-1]
 
 
+def test_setup_uses_locally_frozen_connection_without_exposing_credential_refs(setup_authority):
+    import json
+    from claudlobby.commands.setup import _template_github
+    from claudlobby.config import load_fleet
+    from claudlobby.github_connections import resolve_github_binding
+
+    store,access,original,reader,clock,effects=setup_authority
+    source=access.root.parent/'connections.yaml'
+    connection={"name":"Team App","mode":"independent","app_id":123,"installation_id":456,
+        "permissions":{"contents":"write"},"credential_refs":{"private_key_path_env":"TEAM_APP_KEY"}}
+    source.write_text(json.dumps({"fleet":{"github":{"connections":{"team-app":connection}}}}))
+    grant=store.candidate(OWNER,template=original.template,fleet=original.fleet,repository=original.repository,
+        release_id=original.release_id,release_seal=original.release_seal,install_directory=original.install_directory,
+        github_policy=_template_github(source,"team-app"))
+    store.allow(grant)
+    source.write_text('changed after approval')
+    engine=SetupEngine(access)
+    context=engine.context(reader)
+    assert context['github']['name']=='Team App' and context['github']['repository']==grant.repository
+    assert 'TEAM_APP_KEY' not in json.dumps(context) and 'credential_refs' not in json.dumps(context)
+    engine.preview(reader,grant.generation,'Improve signup')
+    fleet,_=load_fleet(access.root/'local/shop/fleet.yaml')
+    assert all(resolve_github_binding(fleet,name,grant.repository).app_id==123 for name in fleet.bots)
+    assert not effects
+
+
 @pytest.mark.parametrize('other',['other-fleet','other-runtime','target-library','projects'])
 def test_whole_host_plan_cannot_include_unapproved_inputs(setup_authority,other):
     engine,grant,reader=allow(setup_authority)
