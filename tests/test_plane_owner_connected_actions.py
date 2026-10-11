@@ -64,3 +64,19 @@ def test_carrier_purpose_and_full_binding_scope_are_pinned(connected):
         with pytest.raises(AccessDenied):wrong.authorize_read(renewed.token,OWNER,host_uid=binding.owner.host_uid)
     workspace.revoke(expected_binding=binding,expected_owner=binding.owner)
     with pytest.raises(AccessDenied):policy.scope_binding(VerifiedReader(OWNER,renewed.token),binding.owner.host_uid)
+
+
+def test_connected_permission_authority_is_explicit_and_generation_bound(connected):
+    store, access, _, binding, clock = connected
+    token = store.issue(evidence(store, clock), OWNER).token
+    policy = ConnectedActionAuthorization(access, ISSUER, ORIGIN)
+    target = dict(host_uid=binding.owner.host_uid, fleet_uid=FLEET)
+    with pytest.raises(AccessDenied, match='permissions_not_allowed'):
+        policy.authorize_permission(token, OWNER, **target)
+    grant = access.allow_permissions(expected_owner=binding.owner, fleet_uid=FLEET,
+        actor_uid=ACTOR, actor_alias='human:operator')
+    assert policy.authorize_permission(token, OWNER, **target) == grant
+    access.revoke_permissions(expected_owner=binding.owner, fleet_uid=FLEET, expected_grant=grant)
+    with pytest.raises(AccessDenied, match='permissions_not_allowed'):
+        policy.authorize_permission(token, OWNER, **target)
+    assert policy.authorize_read(token, OWNER, host_uid=binding.owner.host_uid) == binding.owner

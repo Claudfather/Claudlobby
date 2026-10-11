@@ -4,10 +4,11 @@ const VERBS = new Set(["message", "feedback", "nudge"]);
 const FIELDS = ["workspace", "host", "fleet", "viewer"];
 const bounded = value => typeof value === "string" && value.length > 0 && value.length <= 240;
 export const scopeKey = scope => JSON.stringify(FIELDS.map(key => scope?.[key]));
-const targetKey = (target, version) => JSON.stringify(version === 2
+const targetKey = (target, version) => JSON.stringify(target?.permission_id
+  ? [target.permission_id, target.task_id, target.scope_sha256, target.release_id] : version === 2
   ? [target?.recipient, target?.task_id, target?.assignment_id, target?.release_id]
   : [target?.recipient, target?.task_id || ""]);
-export const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target, row.version)]);
+export const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target, row.version), ...(row.kind === "permission" ? [row.decision] : [])]);
 const validScope = scope => scope && FIELDS.every(key => bounded(scope[key]));
 const validTarget = target => target && bounded(target.recipient)
   && (target.task_id === null || bounded(target.task_id));
@@ -36,8 +37,10 @@ const taskKinds = new Set(["nudge", "feedback"]);
 const validTaskActionRow = row => row?.version === 2 && taskKinds.has(row.kind) && uuid(row.request_id)
   && exact(row.scope, FIELDS) && validScope(row.scope) && validTaskActionTarget(row.target) && timestamp(row.submitted_at)
   && typeof row.semantic_sha256 === "string" && /^[0-9a-f]{64}$/.test(row.semantic_sha256);
-const validRow = row => row?.version === 2 ? exact(row, taskActionKeys) && validTaskActionRow(row) : validLegacyRow(row);
-const logicalKey = row => row.version === 2
+const validRow = row => row?.kind === "permission" ? validPermissionRow(row)
+  : row?.version === 2 ? exact(row, taskActionKeys) && validTaskActionRow(row) : validLegacyRow(row);
+const logicalKey = row => row.kind === "permission"
+  ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.permission_id, row.decision === "revoke" ? "revoke" : "decide"]) : row.version === 2
   ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.recipient, row.target.task_id]) : rowKey(row);
 export function validTaskActionContext(context, kind = context?.actions?.[0]) {
   return taskKinds.has(kind) && context?.version === 2 && context.simulation === false && validScope(context.scope)
@@ -50,7 +53,60 @@ export function validTaskActionContext(context, kind = context?.actions?.[0]) {
 }
 export const validNudgeContext = context => validTaskActionContext(context, "nudge");
 export const validFeedbackContext = context => validTaskActionContext(context, "feedback");
+const permissionKeys = ["version", "request_id", "kind", "scope", "target", "decision", "semantic_sha256"];
+const digest = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+const text = (value, cap) => typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= cap;
+const sameSource = (...values) => values.every(v => v && v.source === values[0]?.source);
+export function validPermissionTarget(target) {
+  return exact(target, ["permission_id", "task_id", "scope_sha256", "release_id"])
+    && sameSource(canonicalPart(target.permission_id, "perm"), canonicalPart(target.task_id, "wi"))
+    && digest(target.scope_sha256) && release(target.release_id);
+}
+export function validPermissionRecord(value) {
+  const task = canonicalPart(value?.task_id, "wi"), permission = canonicalPart(value?.permission_id, "perm");
+  if (!sameSource(task, permission)) return false;
+  if (value.state === "unavailable") return exact(value, ["permission_id", "task_id", "state"]);
+  const actor = who => who && exact(who, ["uid", "alias"]) && sameSource(task, canonicalPart(who.uid, "actor")) && text(who.alias, 512);
+  return ["pending", "approved", "declined", "revoked"].includes(value.state)
+    && sameSource(task, canonicalPart(value.request_event_id, "ev"), value.assignment_id === null ? task : canonicalPart(value.assignment_id, "asg"))
+    && actor(value.requester) && digest(value.scope_sha256) && text(value.reason, 2048)
+    && exact(value.scope, ["action", "target", "constraints"]) && ["merge", "deploy", "spend", "delete"].includes(value.scope.action)
+    && text(value.scope.target, 1024) && text(value.scope.constraints, 4096)
+    && (value.state === "pending" ? value.decided_by === null && value.decision_reason === null
+      : actor(value.decided_by) && text(value.decision_reason, 2048));
+}
+export function validPermissionContext(context) {
+  const task = canonicalPart(context?.task_id, "wi"), host = canonicalPart(context?.scope?.host, "host");
+  return context?.version === 2 && context.simulation === false && exact(context.scope, FIELDS) && validScope(context.scope)
+    && bounded(context.room) && context.room === context.scope.fleet && release(context.release_id)
+    && sameSource(task, host) && (!task.source || context.room.startsWith(task.source + " / "))
+    && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === "permission"
+    && typeof context.has_more === "boolean" && Array.isArray(context.permissions) && context.permissions.length <= 50
+    && context.permissions.every(p => validPermissionRecord(p) && p.task_id === context.task_id)
+    && new Set(context.permissions.map(p => p.permission_id)).size === context.permissions.length;
+}
+export function validPermissionRow(row) {
+  return exact(row, permissionKeys) && row.version === 2 && row.kind === "permission" && uuid(row.request_id)
+    && exact(row.scope, FIELDS) && validScope(row.scope) && validPermissionTarget(row.target)
+    && sameSource(canonicalPart(row.scope.host, "host"), canonicalPart(row.target.task_id, "wi"))
+    && ["approve", "decline", "revoke"].includes(row.decision) && digest(row.semantic_sha256);
+}
+export function samePermissionReceipt(request, receipt, allowUnknown = false) {
+  if (!exact(receipt, [...permissionKeys, "status", "permission", "execution", "notification"])
+      || !validPermissionRow(Object.fromEntries(permissionKeys.map(k => [k, receipt[k]])))
+      || receipt.request_id !== request.request_id || receipt.semantic_sha256 !== request.semantic_sha256
+      || rowKey(receipt) !== rowKey(request) || receipt.execution !== "not_requested"
+      || !["not_requested", "received", "unknown", "failed"].includes(receipt.notification)) return false;
+  if (receipt.status === "unknown") return allowUnknown && receipt.permission === null;
+  return receipt.status === "recorded" && validPermissionRecord(receipt.permission)
+    && ({approve:["approved","revoked"],decline:["declined"],revoke:["revoked"]}[request.decision] || []).includes(receipt.permission.state)
+    && receipt.permission.permission_id === request.target.permission_id
+    && receipt.permission.task_id === request.target.task_id && receipt.permission.scope_sha256 === request.target.scope_sha256;
+}
+
 export function samePreparation(request, prepared) {
+  if (request?.kind === "permission") return validPermissionRow(prepared) && prepared.request_id === request.request_id
+    && rowKey(prepared) === rowKey(request);
   return exact(prepared, taskActionKeys) && validTaskActionRow(prepared)
     && prepared.request_id === request.request_id && prepared.submitted_at === request.submitted_at
     && rowKey(prepared) === rowKey(request);
@@ -69,6 +125,7 @@ export function validContext(context) {
 }
 
 export function sameReceipt(request, receipt) {
+  if (request?.kind === "permission") return samePermissionReceipt(request, receipt);
   if (request?.version === 2) return exact(receipt, [...taskActionKeys, "status"]) && receipt.version === 2 && validTaskActionRow(receipt)
     && receipt.request_id === request.request_id && receipt.submitted_at === request.submitted_at
     && receipt.semantic_sha256 === request.semantic_sha256 && rowKey(receipt) === rowKey(request)
@@ -106,6 +163,8 @@ export class ActionState {
   }
 
   metadata(row) {
+    if (row.kind === "permission") return {version: 2, request_id: row.request_id, kind: "permission", decision: row.decision,
+      scope: {...row.scope}, target: {...row.target}, semantic_sha256: row.semantic_sha256};
     return { ...(row.version === 2 ? { version: 2, semantic_sha256: row.semantic_sha256 } : {}),
       request_id: row.request_id, kind: row.kind,
       scope: Object.fromEntries(FIELDS.map(key => [key, row.scope[key]])),
@@ -153,7 +212,23 @@ export class ActionState {
     return { ...this.metadata(request), body };
   }
 
-  prepare(context, target, body, requestId) {
+  prepare(context, target, body, requestId, decision) {
+    if (context?.actions?.[0] === "permission") {
+      const permission = context.permissions?.find(p => p.permission_id === target?.permission_id);
+      if (!validPermissionContext(context) || !validPermissionTarget(target) || !permission
+          || permission.task_id !== target.task_id || permission.scope_sha256 !== target.scope_sha256
+          || target.release_id !== context.release_id || !["approve", "decline", "revoke"].includes(decision)
+          || permission.state !== (decision === "revoke" ? "approved" : "pending"))
+        throw new Error("This permission changed. Refresh its details before deciding.");
+      if (!text(body, 2048) || /[\u0000-\u0008\u000b-\u001f]/.test(body)
+          || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body)) throw new Error("Enter a reason of up to 2,048 bytes.");
+      const request = {version: 2, kind: "permission", scope: {...context.scope}, target: {...target}, request_id: requestId, decision, body};
+      if (!uuid(requestId)) throw new Error("A safe request ID is unavailable. Nothing was sent.");
+      if (this.unresolved(request)) throw new Error("Check the original receipt before deciding again.");
+      if (this.storageError || this.pending.length >= 20 || this.pending.some(p => p.request_id === requestId) || this.discarded.has(requestId))
+        throw new Error("This decision cannot be saved safely. Nothing was sent.");
+      return request;
+    }
     if (!validTaskActionContext(context) || !validTaskActionTarget(target)
         || target.recipient !== context.recipients[0].id || target.release_id !== context.release_id)
       throw new Error("This task action is unavailable. Refresh the task and select it again.");
@@ -174,7 +249,7 @@ export class ActionState {
     if (!samePreparation(request, prepared) || request.kind !== context?.actions?.[0]
         || scopeKey(request.scope) !== scopeKey(context.scope)) throw new Error("Task action preparation did not match. Nothing was sent.");
     // Recheck the capability and logical pending block after the async prepare.
-    this.prepare(context, request.target, request.body, request.request_id);
+    this.prepare(context, request.target, request.body, request.request_id, request.decision);
     const row = this.metadata(prepared);
     this.persist([...this.pending, row]);
     this.sentBodies.set(row.request_id, request.body);
@@ -207,7 +282,8 @@ export class ActionState {
 
   accept(request, receipt) {
     if (!sameReceipt(request, receipt)) throw new Error("Receipt does not match this request.");
-    if (receipt.status !== "recorded") {
+    const settled = request.kind === "permission" ? receipt.notification !== "unknown" : receipt.status !== "recorded";
+    if (settled) {
       const rows = this.pending.filter(p => p.request_id !== request.request_id
         || rowKey(p) !== rowKey(request));
       this.storage.setItem(this.key, JSON.stringify(rows));
@@ -218,9 +294,9 @@ export class ActionState {
     }
     // A new draft typed while an old request was pending must not be cleared.
     const body = request.body ?? this.sentBodies.get(request.request_id);
-    if (receipt.status === "delivered" && body !== undefined
+    if ((receipt.status === "delivered" || request.kind === "permission") && body !== undefined
         && this.draft(request) === body) this.draft(request, "");
-    if (receipt.status !== "recorded") this.sentBodies.delete(request.request_id);
+    if (receipt.status !== "recorded" || request.kind === "permission") this.sentBodies.delete(request.request_id);
     return receipt.status;
   }
 }

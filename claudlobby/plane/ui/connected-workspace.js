@@ -227,10 +227,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const row = route && clients.find(row => row.key === route.key);
     return row ? {row,fleet:route.fleet} : null;
   }
-  async function actionContext(room,kind) {
+  async function actionContext(room,kind,task) {
     const source = actionSource(room); if (!source) return null;
     const ticket = sequence;
-    const value = await source.row.actions[kind](source.fleet);
+    const value = await source.row.actions[kind](source.fleet,task);
     return disposed || phase !== 'ready' || ticket !== sequence ? null : value;
   }
   async function actionOperation(name,value) {
@@ -373,6 +373,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   return Object.freeze({jget,roomLabel:room => transport?.roomLabel(room) || room,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
     interactionContext:room => actionContext(room,'interactionContext'),
     nudgeContext:room => actionContext(room,'nudgeContext'),feedbackContext:room => actionContext(room,'feedbackContext'),
+    permissionContext:(room,task) => actionContext(room,'permissionContext',task),
     prepareAction:value => actionOperation('prepareAction',value),sendAction:value => actionOperation('sendAction',value),actionReceipt:value => actionOperation('actionReceipt',value),
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }});
 }

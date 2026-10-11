@@ -12,6 +12,7 @@ const channel = { children: [], querySelectorAll() { return this.children; },
   replaceChildren(fragment) { this.children = fragment.children; } };
 const workLoop = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8');
 const controller = workLoop.replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+  .replaceAll('from "./permission-panel.js"', `from "${new URL('../claudlobby/plane/ui/permission-panel.js', import.meta.url)}"`)
   .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const {conversationTaskLink} = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
 const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel})`, {

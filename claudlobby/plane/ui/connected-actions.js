@@ -1,4 +1,4 @@
-import { scopeKey, validContext, validTaskActionContext, validTaskActionTarget, samePreparation, sameReceipt } from "./action-state.js";
+import { scopeKey, validContext, validTaskActionContext, validTaskActionTarget, samePreparation, sameReceipt, validPermissionContext, validPermissionTarget, samePermissionReceipt } from "./action-state.js";
 
 const unknown = () => new Error('Action outcome unknown. Check the original receipt.');
 const uid = (value, prefix) => typeof value === 'string' && value.length === prefix.length + 33
@@ -17,7 +17,17 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
   }
   const room = value => key + ' / ' + value;
   function scope(value) { return {...value,host:qualify(value.host),fleet:room(value.fleet)}; }
+  function permission(value) {
+    if (!value) return value;
+    const result = {...value, permission_id:qualify(value.permission_id), task_id:qualify(value.task_id)};
+    if (value.state === 'unavailable') return result;
+    return {...result, request_event_id:qualify(value.request_event_id),
+      assignment_id:value.assignment_id === null ? null : qualify(value.assignment_id),
+      requester:{...value.requester,uid:qualify(value.requester.uid)},
+      decided_by:value.decided_by === null ? null : {...value.decided_by,uid:qualify(value.decided_by.uid)}};
+  }
   function target(value) {
+    if (value.permission_id) return {...value, permission_id:qualify(value.permission_id), task_id:qualify(value.task_id)};
     return {...value,recipient:qualify(value.recipient),task_id:value.task_id === null ? null : qualify(value.task_id),
       ...(Object.hasOwn(value,'assignment_id') ? {assignment_id:value.assignment_id === null ? null : qualify(value.assignment_id)} : {})};
   }
@@ -36,9 +46,29 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
       recipients:Object.freeze(raw.recipients.map(r => Object.freeze({...r,id:qualify(r.id)})))});
     contexts.set(kind,{raw,ui}); return ui;
   }
+  async function permissionContext(rawRoom, selectedTask) {
+    if (snapshot().state !== 'ready') return null;
+    const task = bare(selectedTask,'wi'), before = stamp(), ticket = {};
+    contextRequests.set('permission',ticket);
+    const value = await owner.permissionContext(rawRoom,task);
+    if (contextRequests.get('permission') !== ticket || before !== stamp() || snapshot().state !== 'ready'
+        || !validPermissionContext(value) || value.scope.host !== snapshot().read_profile?.host_uid
+        || value.room !== rawRoom || value.task_id !== task) return null;
+    const raw = JSON.parse(JSON.stringify(value));
+    const ui = Object.freeze({...raw,room:room(rawRoom),scope:Object.freeze(scope(raw.scope)),
+      task_id:qualify(raw.task_id),permissions:raw.permissions.map(permission)});
+    contexts.set('permission',{raw,ui}); return ui;
+  }
   function request(value, receipt) {
     const capability = contexts.get(value?.kind);
     if (!capability || snapshot().state !== 'ready' || scopeKey(value.scope) !== scopeKey(capability.ui.scope)) throw unknown();
+    if (value.kind === 'permission') {
+      if (!validPermissionTarget(value.target)) throw unknown();
+      const rawTarget = {...value.target,permission_id:bare(value.target.permission_id,'perm'),task_id:bare(value.target.task_id,'wi')};
+      if (rawTarget.task_id !== capability.raw.task_id || !receipt && (rawTarget.release_id !== capability.raw.release_id
+          || !capability.raw.permissions.some(p => p.permission_id === rawTarget.permission_id && p.scope_sha256 === rawTarget.scope_sha256))) throw unknown();
+      return {...value,scope:{...capability.raw.scope},target:rawTarget};
+    }
     const v2 = value.version === 2;
     if (v2 ? !validTaskActionTarget(value.target) : value.version !== undefined || value.kind !== 'message' || value.target?.task_id !== null) throw unknown();
     const rawTarget = {...value.target,recipient:bare(value.target.recipient,'actor'),
@@ -53,11 +83,14 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
     const raw = request(value,receipt), before = stamp();
     const result = await owner[name](raw);
     if (before !== stamp() || snapshot().state !== 'ready') throw unknown();
-    if (preparing ? !samePreparation(raw,result) : !sameReceipt(raw,{...result,status:result?.status === 'unknown' ? 'recorded' : result?.status})) throw unknown();
-    return {...result,scope:scope(result.scope),target:target(result.target)};
+    if (preparing ? !samePreparation(raw,result) : raw.kind === 'permission' ? !samePermissionReceipt(raw,result,true)
+      : !sameReceipt(raw,{...result,status:result?.status === 'unknown' ? 'recorded' : result?.status})) throw unknown();
+    return {...result,scope:scope(result.scope),target:target(result.target),
+      ...(raw.kind === 'permission' && !preparing ? {permission:permission(result.permission)} : {})};
   }
   return Object.freeze({
     interactionContext:fleet => context(fleet,'message'),nudgeContext:fleet => context(fleet,'nudge'),feedbackContext:fleet => context(fleet,'feedback'),
+    permissionContext,
     prepareAction:value => operation('prepareAction',value),sendAction:value => operation('sendAction',value),actionReceipt:value => operation('actionReceipt',value),
     invalidate() { contexts.clear(); contextRequests.clear(); },
     pause(rawScope,kind,recipient) {

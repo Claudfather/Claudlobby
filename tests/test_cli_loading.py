@@ -84,6 +84,8 @@ def _run(code, *argv, tmp_path):
     (("fleet", "uptime", "--help"), "30d"),
     (("assignment", "deliver", "--help"), "--file"),
     (("request", "show", "--help"), "REQUEST_ID"),
+    (("task", "permission", "show", "--help"), "permission_id"),
+    (("task", "permission", "approve", "--help"), "--scope-sha256"),
     (("workstream", "open", "--help"), "--request-id"),
     (("checkin", "record", "--help"), "--selection-file"),
 ])

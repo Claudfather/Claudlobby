@@ -149,12 +149,24 @@ class OwnerFeedbackGrant:
     generation: str
 
 
+@dataclass(frozen=True)
+class OwnerPermissionGrant:
+    """Explicit local authority to decide exact task permission requests."""
+
+    owner: OwnerGrant
+    fleet_uid: str
+    actor_uid: str
+    actor_alias: str
+    generation: str
+
+
 # Fixed internal namespaces. No request or caller chooses a table or grant type.
 _ACTION_GRANTS = {"message": ("message_grants", OwnerMessageGrant),
                   "nudge": ("nudge_grants", OwnerNudgeGrant),
-                  "feedback": ("feedback_grants", OwnerFeedbackGrant)}
+                  "feedback": ("feedback_grants", OwnerFeedbackGrant),
+                  "permission": ("permission_grants", OwnerPermissionGrant)}
 ACTION_DENIALS = {"message": "messages_not_allowed", "nudge": "nudges_not_allowed",
-                  "feedback": "feedback_not_allowed"}
+                  "feedback": "feedback_not_allowed", "permission": "permissions_not_allowed"}
 
 
 @dataclass(frozen=True)
@@ -163,6 +175,7 @@ class OwnerLocalStatus:
     message_grants: tuple[OwnerMessageGrant, ...]
     nudge_grants: tuple[OwnerNudgeGrant, ...]
     feedback_grants: tuple[OwnerFeedbackGrant, ...]
+    permission_grants: tuple[OwnerPermissionGrant, ...]
 
 
 @dataclass(frozen=True)
@@ -197,7 +210,8 @@ class OwnerAccess:
     delivery; never cache its result. Ordinary messages require a separate,
     explicit local grant and ``authorize_message`` admission. Task nudges need
     their distinct grant and ``authorize_nudge``; task comments require a feedback
-    grant and ``authorize_feedback``. This class grants no other
+    grant and ``authorize_feedback``. Permission decisions require their own
+    grant and ``authorize_permission``. This class grants no other
     actions or website membership and performs no delivery. The optional
     ``workspace()`` door binds local workspace metadata but issues no session.
     Same-UID processes/root can alter its files and are outside this boundary.
@@ -413,7 +427,8 @@ class OwnerAccess:
                 fleets = conn.execute(f"SELECT fleet_uid FROM {table} "
                     "WHERE owner_revision = ? ORDER BY fleet_uid", (owner.revision,)).fetchall()
                 return tuple(self._action_grant(conn, owner, row["fleet_uid"], action) for row in fleets)
-            return OwnerLocalStatus(owner, retained("message"), retained("nudge"), retained("feedback"))
+            return OwnerLocalStatus(owner, retained("message"), retained("nudge"), retained("feedback"),
+                                    retained("permission"))
 
     def local_status(self) -> tuple[OwnerGrant | None, tuple[OwnerMessageGrant, ...]]:
         """Compatibility read of pairing and its retained ordinary-message grants."""
@@ -621,6 +636,24 @@ class OwnerAccess:
                            host_uid: str, fleet_uid: str) -> OwnerFeedbackGrant:
         """Admit task comments only; target/release/source belong to caller."""
         return self._authorize_action("feedback", token, principal, host_uid, fleet_uid)
+
+    def allow_permissions(self, *, expected_owner: OwnerGrant, fleet_uid: str,
+                          actor_uid: str, actor_alias: str) -> OwnerPermissionGrant:
+        """Local approval of permission decisions, independent of other actions."""
+        return self._allow_action("permission", expected_owner, fleet_uid, actor_uid, actor_alias)
+
+    def current_permission_grant(self, *, expected_owner: OwnerGrant,
+                                 fleet_uid: str) -> OwnerPermissionGrant:
+        return self._current_action("permission", expected_owner, fleet_uid)
+
+    def revoke_permissions(self, *, expected_owner: OwnerGrant, fleet_uid: str,
+                           expected_grant: OwnerPermissionGrant | None = None) -> None:
+        self._revoke_action("permission", expected_owner, fleet_uid, expected_grant)
+
+    def authorize_permission(self, token: str, principal: PrincipalRef, *,
+                             host_uid: str, fleet_uid: str) -> OwnerPermissionGrant:
+        """Admit decisions only; this grant never executes the requested effect."""
+        return self._authorize_action("permission", token, principal, host_uid, fleet_uid)
 
     def renew_session(self, token: str, principal: PrincipalRef) -> ReaderSession:
         """Atomically rotate a still-valid session; old token cannot be replayed."""
