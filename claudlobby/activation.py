@@ -22,7 +22,7 @@ import sys
 import time
 
 from .activation_state import (ACTIVATION_WAIT_S, ActivationError, ActivationRecord, ActivationRefusal,
-                               CandidateDisabledOverride, STEPS, lock_busy,
+                               CandidateDisabledOverride, RESET_REPAIRABLE_STEPS, STEPS, lock_busy,
                                locked_activation, read_activation, read_selection)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
@@ -1135,42 +1135,162 @@ def _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, w
                 or effect["sha256"] != entry["after"]["sha256"] or effect["sha256"] != item["sha256"]
                 or not isinstance(effect.get("fence"), dict)):
             raise ActivationRefusal("recorded start intent differs from frozen publication")
-        # Native ancestry over this activation's recorded placements, as activation
-        # itself checks; ordinary inventory cannot classify a partial start.
-        for phase in enrollment.PHASES:
-            for placement in enrollment.candidate_entries(store, activation_id, phase):
-                if adapter.call("svc_activation_assert_external", placement["installed"],
-                                placement["target"], str(os.getpid())).returncode:
-                    raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
-                                            "use an operator shell")
-        installed = Path(entry["installed"])
-        try:
-            content = installed.read_bytes()
-            source_bytes = declaration.source.read_bytes()
-        except OSError as exc:
-            raise ActivationRefusal("source or installed bot unit is unreadable") from exc
-        if (hashlib.sha256(content).hexdigest() != effect["sha256"]
-                or hashlib.sha256(source_bytes).hexdigest() != effect["sha256"]):
-            raise ActivationRefusal("source or installed bot unit differs from the frozen start")
-        socket_path = (Path(_published_tmux_dir(installed, content)) / f"tmux-{os.getuid()}"
-                       / declaration.source.stem)
-        try:
-            dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
-                                    socket_path=socket_path)
-        except ActivationError as exc:
-            if "socket" in getattr(exc, "detail", ""):
-                raise ActivationRefusal("named bot's private tmux server still accepts or cannot be "
-                                        "observed; inspect that server before repair") from exc
-            raise ActivationRefusal("named bot's unit is not verified inactive; if it is active "
-                                    "(exited) or restarting, explicitly stop that exact verified "
-                                    "bot unit, then retry") from exc
-        if dead.details["socket_state"] not in {"absent", "refused"}:
-            raise ActivationRefusal("named bot's private tmux server is not verified absent")
+        _assert_external_caller(store, activation_id, adapter)
+        dead = _verified_dead_start(adapter, declaration, entry, effect, "named bot")
         writing.append(True)
         return store.archive_failed_bot_start(
             activation_id, source=source, target=entry["target"], sha256=effect["sha256"],
             fence=effect["fence"], evidence={"details": dead.details, "digest": dead.digest},
             reason=reason.strip(), repair_artifact=package.artifact_id)
+
+
+def _assert_external_caller(store, activation_id, adapter) -> None:
+    """Native ancestry over this activation's recorded placements, as activation
+    itself checks; ordinary inventory cannot classify a partial start."""
+    for phase in enrollment.PHASES:
+        for placement in enrollment.candidate_entries(store, activation_id, phase):
+            if adapter.call("svc_activation_assert_external", placement["installed"],
+                            placement["target"], str(os.getpid())).returncode:
+                raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
+                                        "use an operator shell")
+
+
+def _verified_dead_start(adapter, declaration, entry, effect, who: str) -> RuntimeEvidence:
+    """Prove one recorded candidate start's unit inactive, with matching frozen bytes.
+
+    A bot's private tmux server must also be absent or refuse connections.
+    ``who`` names the start in each refusal.
+    """
+    installed = Path(entry["installed"])
+    try:
+        content = installed.read_bytes()
+        source_bytes = declaration.source.read_bytes()
+    except OSError as exc:
+        raise ActivationRefusal(f"{who}: source or installed unit is unreadable") from exc
+    if (hashlib.sha256(content).hexdigest() != effect["sha256"]
+            or hashlib.sha256(source_bytes).hexdigest() != effect["sha256"]):
+        raise ActivationRefusal(f"{who}: source or installed unit differs from the frozen start")
+    bot = effect["phase"] == "bots"
+    socket_path = (Path(_published_tmux_dir(installed, content)) / f"tmux-{os.getuid()}"
+                   / declaration.source.stem) if bot else None
+    try:
+        dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
+                                socket_path=socket_path)
+    except ActivationError as exc:
+        if "socket" in getattr(exc, "detail", ""):
+            raise ActivationRefusal(f"{who}'s private tmux server still accepts or cannot be "
+                                    "observed; inspect that server before repair") from exc
+        raise ActivationRefusal(f"{who}'s unit is not verified inactive; if it is active "
+                                "(exited), failed or restarting, explicitly stop that exact verified "
+                                "unit (and reset-failed it), then retry") from exc
+    if bot and dead.details["socket_state"] not in {"absent", "refused"}:
+        raise ActivationRefusal(f"{who}'s private tmux server is not verified absent")
+    return dead
+
+
+def _host_boot() -> dict | None:
+    """This boot's identity, recorded beside a host-reset repair for the audit trail."""
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+    return {"boot_id": boot_id, "booted_at": datetime.fromtimestamp(btime, timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def repair_starts_after_host_reset(root: Path, activation_id: str, *, reason: str,
+                                   adapter: Adapter | None = None) -> ActivationRecord:
+    """Archive every verified-dead candidate start after a host reset; never start anything.
+
+    A host that resets during ``ingest_started``, ``bots_started`` or
+    ``verified`` loses every started candidate at once, and the resume only
+    re-observes recorded starts, so it cannot continue. This proves each
+    recorded start dead (its unit inactive, a bot's private tmux server gone,
+    the plane not answering), then archives them all and reopens
+    ``ingest_started`` in one write. The sealed candidate's ``--resume`` then
+    starts the plane daemon and every bot fresh. Like ``repair-start`` it may
+    run from a newer CLI: it only reads the frozen plan/release and observes
+    units through its own adapter.
+
+    Every failure before the single journal write is an ``ActivationRefusal``
+    (nothing changed); a failure after entering the write keeps its own type,
+    because the atomic replace may already have landed.
+    """
+    writing = []
+    try:
+        return _repair_starts_after_host_reset(root, activation_id, reason, adapter, writing)
+    except ActivationRefusal:
+        raise
+    except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        if writing:
+            raise
+        if lock_busy(str(exc)):
+            raise ActivationRefusal(str(exc)) from exc
+        raise ActivationRefusal("host-reset repair could not verify the recorded activation "
+                                f"({type(exc).__name__})") from exc
+
+
+def _repair_starts_after_host_reset(root, activation_id, reason, adapter, writing):
+    root = Path(root).expanduser()
+    if not root.is_absolute() or not root.is_dir():
+        raise ActivationRefusal("host-reset repair requires an explicit existing absolute data root")
+    root = root.resolve()
+    if (not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+            or not reason.isprintable()):
+        raise ActivationRefusal("host-reset repair requires a short reason on one printable line")
+    package = get_resources()
+    adapter = adapter if adapter is not None else Adapter(package)
+    with locked_activation(root) as store:
+        record = read_activation(root, activation_id)
+        intent = record.body["intent"]
+        if resumable_running_step(record) not in RESET_REPAIRABLE_STEPS:
+            raise ActivationRefusal("host-reset repair requires an activation stopped at ingest_started, "
+                                    "bots_started or verified")
+        plan = read_plan(root, intent["plan_id"])
+        release = read_release(root, intent["release_id"])
+        if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
+            raise ActivationRefusal("activation plan differs from its sealed release")
+        if read_selection(root) != {"schema": 1, "activation_id": activation_id,
+                                    "release_id": release.release_id, "plan_id": plan.plan_id}:
+            raise ActivationRefusal("host selection is not this activation's candidate")
+        effects = record.body["start_effects"]
+        if not effects:
+            raise ActivationRefusal("no candidate start is recorded; resume directly")
+        if any(effect["phase"] not in ("ingest", "bots") for effect in effects.values()):
+            raise ActivationRefusal("a producer start is recorded; host-reset repair covers only "
+                                    "ingest and bot starts")
+        manager = _catalog(units.load_unit_pause(store, activation_id).enrollment["catalog"])[0]
+        planned = {str(declaration.source): (declaration, item)
+                   for declaration, item in planned_units(plan, manager) if item["enroll"]}
+        entries = {entry["source"]: entry for phase in ("ingest", "bots")
+                   for entry in enrollment.candidate_entries(store, activation_id, phase)}
+        _assert_external_caller(store, activation_id, adapter)
+        evidence = {}
+        for source, effect in sorted(effects.items()):
+            if source not in planned or source not in entries:
+                raise ActivationRefusal(f"recorded start {source} is not a frozen candidate unit")
+            declaration, item = planned[source]
+            entry = entries[source]
+            if (effect["phase"] != item["phase"] or effect["target"] != entry["target"]
+                    or effect["sha256"] != entry["after"]["sha256"] or effect["sha256"] != item["sha256"]
+                    or effect["phase"] == "bots" and not isinstance(effect.get("fence"), dict)):
+                raise ActivationRefusal(f"recorded start of {entry['target']} differs from frozen publication")
+            dead = _verified_dead_start(adapter, declaration, entry, effect, entry["target"])
+            evidence[source] = {"details": dead.details, "digest": dead.digest}
+        try:
+            answering = _probe(root) is not None
+        except Exception as exc:
+            raise ActivationRefusal("the plane daemon's socket cannot be observed; inspect it "
+                                    "before repair") from exc
+        if answering:
+            raise ActivationRefusal("the plane daemon still answers; stop it, or this is not a "
+                                    "host reset")
+        writing.append(True)
+        return store.archive_starts_after_host_reset(
+            activation_id, attempts=effects, evidence=evidence, reason=reason.strip(),
+            repair_artifact=package.artifact_id, host_boot=_host_boot())
 
 
 def _frozen_unit(row: dict) -> EnrolledUnit:

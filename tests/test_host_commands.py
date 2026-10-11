@@ -113,6 +113,46 @@ def test_repair_start_routes_through_environment_guard_and_discloses_unknown_wri
     assert body["data"]["recording"] == "unknown" and "inspect" in body["error"]["hint"]
 
 
+def test_repair_after_reset_routes_through_environment_guard_and_names_the_resume(
+        candidate, monkeypatch, capsys):
+    from claudlobby.commands import operator_context
+    from claudlobby.activation_state import ActivationRefusal
+    root, release, plan, directory = candidate
+    argv = ["--root", str(root), "--json", "host", "repair-after-reset", "act-1",
+            "--reason", "watchdog reset during bots_started"]
+    calls, guarded = [], []
+    batch = [{"attempt": {"target": target}, "kind": "host_reset", "reason": "watchdog reset during bots_started",
+              "host_boot": {"boot_id": "b"}} for target in ("claudlobby-plane-daemon.service",
+                                                            "com.example.worker.service")]
+
+    def repair(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 2:
+            raise ActivationRefusal("the plane daemon still answers; stop it, or this is not a host reset")
+        return SimpleNamespace(body={"intent": {"release_id": release.release_id, "plan_id": plan.plan_id,
+                                                "install_directory": str(directory)},
+                                     "pending": "ingest_started",
+                                     "start_repairs": [{"attempt": {"target": "older"}, "reason": "x"}, *batch]})
+
+    monkeypatch.setattr(activation, "repair_starts_after_host_reset", repair)
+    monkeypatch.setenv("BOT_ID", "worker")
+    assert main(argv) != 0  # A bot caller is refused before any repair owner runs.
+    body = json.loads(capsys.readouterr().out)
+    assert body["command"] == "host.repair-after-reset" and body["error"]["code"] == "conflict"
+    assert calls == []
+    monkeypatch.delenv("BOT_ID")
+    monkeypatch.setattr(operator_context, "require_operator_context", guarded.append)
+    body = call(capsys, argv)
+    assert guarded == [None] and calls[0][0] == (root, "act-1")
+    assert calls[0][1] == {"reason": "watchdog reset during bots_started"}
+    assert body["data"]["recording"] == "committed" and body["data"]["pending"] == "ingest_started"
+    assert body["data"]["archived_targets"] == ["claudlobby-plane-daemon.service", "com.example.worker.service"]
+    assert main(argv) != 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["error"]["code"] == "conflict" and body["data"]["recording"] == "unchanged"
+    assert "still answers" in body["error"]["message"]
+
+
 def test_supervision_reap_requires_an_explicit_mode_with_full_schema_command(tmp_path):
     result = _run(PARSE, "--json", "host", "supervision", "reap-orphans",
                   tmp_path=tmp_path)

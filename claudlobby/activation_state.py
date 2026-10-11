@@ -33,6 +33,9 @@ STEPS = (
     "selection_switched", "configuration_applied", "ingest_started",
     "bots_started", "verified", "producers_resumed",
 )
+# Pending steps a host reset can strand with every started candidate dead:
+# ``host repair-after-reset`` reopens them from ``ingest_started``.
+RESET_REPAIRABLE_STEPS = ("ingest_started", "bots_started", "verified")
 ROLLBACK_STEPS = (
     "producers_paused", "sessions_quiesced", "ingest_quiesced",
     "compatibility_verified", "candidate_units_removed", "configuration_restored",
@@ -446,6 +449,49 @@ class ActivationStore:
         repairs.append({"source": source, "attempt": effect, "dead_evidence": evidence,
                         "reason": reason, "repair_artifact": repair_artifact})
         del body["start_effects"][source]
+        return self._save(record)
+
+    def archive_starts_after_host_reset(self, activation_id: str, *, attempts: dict, evidence: dict,
+                                        reason: str, repair_artifact: str,
+                                        host_boot: dict | None) -> ActivationRecord:
+        """Archive every verified-dead candidate start and reopen ``ingest_started``.
+
+        For a host that lost every started candidate process at once (a reset
+        or power loss while ``ingest_started``, ``bots_started`` or
+        ``verified`` is next; ``verified`` can be next with nothing pending). Each attempt and its dead evidence move into
+        ``start_repairs``, the start steps the resume must redo leave
+        ``completed`` with their evidence, and ``ingest_started`` becomes
+        pending, all in one atomic write. The sealed candidate's resume then
+        starts the plane daemon and every bot fresh, as on a first start.
+        ``attempts`` must be exactly the recorded start effects, so none stays
+        behind unverified. Selection, publication and identity bindings stay.
+        """
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        effects = body.get("start_effects")
+        repairs = body.setdefault("start_repairs", [])
+        reopen = STEPS[STEPS.index("ingest_started"):]
+        completed = body["completed"]
+        if (record.status != "activating" or completed != list(STEPS[:len(completed)])
+                or len(completed) >= len(STEPS) or STEPS[len(completed)] not in RESET_REPAIRABLE_STEPS
+                or body["pending"] not in (None, STEPS[len(completed)])
+                or "configuration_applied" not in completed
+                or not isinstance(effects, dict) or not effects or attempts != effects
+                or set(evidence) != set(effects) or not isinstance(repairs, list)
+                or any(effect["phase"] not in ("ingest", "bots") for effect in effects.values())
+                or not isinstance(reason, str) or not reason.strip() or not reason.isprintable()):
+            # Raised before the single write, so nothing changed.
+            raise ActivationRefusal("host-reset repair is not the admitted set of dead candidate starts")
+        for source in sorted(effects):
+            repairs.append({"source": source, "attempt": effects[source], "dead_evidence": evidence[source],
+                            "reason": reason, "repair_artifact": repair_artifact,
+                            "kind": "host_reset", "host_boot": host_boot})
+        body["start_effects"] = {}
+        body["completed"] = [step for step in completed if step not in reopen]
+        for step in reopen:
+            body["evidence"].pop(step, None)
+        body["pending"] = "ingest_started"
         return self._save(record)
 
     def record_identity_bindings(self, activation_id: str, bindings: dict, *, package) -> ActivationRecord:

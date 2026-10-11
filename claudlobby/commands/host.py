@@ -393,12 +393,64 @@ def _repair_start(args, root):
         f"Next, with release {intent['release_id']}'s sealed CLI: {resume}"))
 
 
+def _repair_after_reset(args, root):
+    """Archive every verified-dead start after a host reset; the sealed resume restarts them."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.reset_activation_id):
+        raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
+    executing = _executing_release(root)
+    data = {"activation_id": args.reset_activation_id, "executing_release_id": executing,
+            "recorded_activation": None, "recording": "unchanged"}
+    from ..activation import repair_starts_after_host_reset
+    from ..activation_state import ANOTHER_ACTIVATION, ActivationError, ActivationRefusal, lock_busy
+    try:
+        record = repair_starts_after_host_reset(root, args.reset_activation_id, reason=args.reason)
+    except ActivationRefusal as exc:
+        # The backend raises every failure before its single journal write as a refusal.
+        held = lock_busy(str(exc))
+        raise CommandFailure("conflict", "conflict: host activation lock is held; no change recorded"
+                             if str(exc) == ANOTHER_ACTIVATION else
+                             f"conflict: {exc}; no change recorded" if held
+                             else f"conflict: host-reset repair refused: {exc}; no change recorded",
+                             data={**data, "recorded_activation": _recorded(root, args.reset_activation_id)},
+                             release_id=executing,
+                             hint="inspect running host operations and activation.lock holders before retrying"
+                             if held else _hint(root)) from exc
+    except (ActivationError, ValueError, OSError) as exc:
+        # The atomic replace may have landed before its fsync or reread failed.
+        raise CommandFailure("unavailable", "unavailable: host-reset repair outcome is unknown",
+                             data={**data, "recording": "unknown",
+                                   "recorded_activation": _recorded(root, args.reset_activation_id)},
+                             release_id=executing,
+                             hint="inspect the activation record's pending step, start_effects and "
+                                  "start_repairs before any further repair or resume") from exc
+    repairs = record.body["start_repairs"]
+    batch = (repairs[-1]["reason"], repairs[-1].get("host_boot"))
+    archived = []  # This write's entries: the trailing run of one host-reset batch.
+    for repair in reversed(repairs):
+        if repair.get("kind") != "host_reset" or (repair["reason"], repair.get("host_boot")) != batch:
+            break
+        archived.append(repair)
+    intent = record.body["intent"]
+    data.update(recorded_activation=_recorded(root, args.reset_activation_id), recording="committed",
+                target_release_id=intent["release_id"], plan_id=intent["plan_id"],
+                pending=record.body["pending"],
+                archived_targets=sorted(repair["attempt"]["target"] for repair in archived))
+    resume = (f"claudlobby --root {shlex.quote(str(root))} host activate {intent['plan_id']} "
+              f"--install-directory {shlex.quote(intent['install_directory'])} "
+              f"--resume {args.reset_activation_id}")
+    return CommandOutput(data, executing, (
+        f"Archived {len(archived)} dead candidate start(s) and reopened ingest_started; "
+        "nothing was started.",
+        f"Next, with release {intent['release_id']}'s sealed CLI: {resume}"))
+
+
 def dispatch(args):
     activating = args.public_command == "host.activate"
     repairing = args.public_command == "host.repair-start"
+    resetting = args.public_command == "host.repair-after-reset"
     aborting = args.public_command == "host.abort-adoption"
     try:
-        if activating or repairing or aborting:
+        if activating or repairing or resetting or aborting:
             _operator_shell()  # refuses bot callers; activation also checks native ancestry
         if args.root is None:
             raise CommandFailure("invalid_argument", "invalid argument: an explicit --root is required",
@@ -408,6 +460,8 @@ def dispatch(args):
         root = _host_root(args)
         if repairing:
             return _repair_start(args, root)  # The backend checks recorded native ancestry.
+        if resetting:
+            return _repair_after_reset(args, root)  # The backend checks recorded native ancestry.
         if aborting:
             return _abort(args, root)
         return _activate(args, root)
