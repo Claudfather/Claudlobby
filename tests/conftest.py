@@ -495,6 +495,19 @@ def sysbin_excluding(tmp_path_factory):
     return _build
 
 
+@pytest.fixture(scope="session")
+def native_stand_ins(tmp_path_factory):
+    """`bun` and `claude` stand-ins for node, built once per session and shared by
+    every test that needs a native process by those names
+    (tests/stand_in_fixtures.py). A test keeps its own scripts and state under
+    its own tmp_path."""
+    from tests.stand_in_fixtures import NODE, make_stand_ins
+
+    if NODE is None:
+        pytest.skip("native stand-ins need node (a claudlobby prerequisite)")
+    return make_stand_ins(tmp_path_factory.mktemp("native-bins"), NODE)
+
+
 def call_lib_fn(fn: str, value: str) -> str:
     """Source lib-common.sh and call one function on a single value, returning
     stdout. The value travels as a positional arg so the shell never

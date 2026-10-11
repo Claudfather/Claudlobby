@@ -69,6 +69,20 @@ check "ascii glyph with text" 0 "$(printf '> continue the review\n')"
 check "a second menu option selected" 1 \
     "$(printf '    1. Yes\n  \342\235\257 2. No, and tell Claude what to do differently\n\n  Esc to cancel\n')"
 
+# Authored words must not masquerade as a menu footer, including a wrapped
+# draft whose entire next line happens to be the exit label.
+for loc in "" C; do
+    for phrase in 'Esc to cancel' 'Esc to go back'; do
+        check "draft mentions $phrase" 0 "$(printf '> Please explain %s\n' "$phrase")" "$loc"
+        check "wrapped draft contains $phrase" 0 "$(printf '> Draft reason\n  %s\n' "$phrase")" "$loc"
+        check "draft is exactly $phrase" 0 "$(printf '> %s\n' "$phrase")" "$loc"
+        check "bordered draft contains $phrase" 0 \
+            "$(printf '> Draft reason\n  %s\n────────────────────\n  auto mode on\n' "$phrase")" "$loc"
+        check "actual footer outside box: $phrase" 1 \
+            "$(printf '> selected control\n────────────────────\n  %s\n' "$phrase")" "$loc"
+    done
+done
+
 echo ""
 echo "=== $passed/$total passed, $failed failed ==="
 

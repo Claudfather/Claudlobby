@@ -95,6 +95,44 @@ def test_no_write_routes_exist(tmp_path):
             assert methods <= {"GET", "HEAD"}, (route.path, methods)
 
 
+def test_channel_shows_bounded_checkin_history_without_a_telegram_conversation(tmp_path):
+    from tests.test_checkins_cli import _decision, _query, F
+
+    for i in range(12):
+        _decision(tmp_path, "lead", f"ck_{i:032x}", age_h=i,
+                  action="ask", raise_={"decided": True, "reason": "Which goal next?", "held": []})
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    data = client.get("/api/channel", params={"fleet": F}).json()["data"]
+    assert data["threads"] == []
+    assert data["checkins_state"] == "ok" and data["checkins_truncated"]
+    assert len(data["checkins"]) == data["checkins_limit"] == 10
+    canonical = _query(tmp_path, limit=10)
+    assert [r["checkin_id"] for r in data["checkins"]] == [r["checkin_id"] for r in canonical]
+    assert data["checkins"][0]["actor_uid"] == canonical[0]["actor_uid"]
+    assert data["checkins"][0]["actor_alias"] == f"bot:{F}/lead"
+    assert data["checkins"][0]["reason"] == "Which goal next?"
+    assert client.get("/api/channel").json()["data"]["checkins"] == data["checkins"]
+    assert client.get("/api/channel?fleet=other").json()["state"] == "unknown"
+
+
+def test_checkin_read_failure_does_not_hide_conversations_or_claim_no_decisions(tmp_path, monkeypatch):
+    from claudlobby.commands import checkins
+    from tests.test_checkins_cli import _decision, CK1
+
+    _seed_conversation(tmp_path)
+    _decision(tmp_path, "lead", CK1, age_h=0)
+    original = checkins.collect_checkins
+    def unavailable(*args, **kwargs):
+        assert kwargs["include_dispatches"] is False
+        if args[1] == "f":
+            raise ValueError("unreadable recorded detail")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(checkins, "collect_checkins", unavailable)
+    data = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()["data"]
+    assert data["threads"] and data["checkins_state"] == "unavailable"
+    assert [r["checkin_id"] for r in data["checkins"]] == [CK1]
+
+
 def test_connections_are_query_only(tmp_path):
     import sqlite3
 
@@ -190,6 +228,58 @@ def test_channel_threads_the_whole_conversation(tmp_path):
     assert t["delivered"] is True
     assert t["terminal"] == "completed"
     assert "recipient_raw" not in dispatch            # §11: raw id stays home
+
+
+def test_channel_projects_canonical_report_content_without_promoting_other_messages(tmp_path):
+    from uuid import uuid4
+    from claudlobby.report_payload import ReportPayload, encode_report_facts
+
+    report = ReportPayload("completed", summary="Ready for review <please>",
+        pr_url="https://github.com/example/project/pull/1", pr_role="authored",
+        artifacts=("https://example.org/result", "s3://example/result"),
+        issues=("https://github.com/example/project/issues/2",))
+    for mode in ("full", "metadata"):
+        root = tmp_path / mode
+        initialize_plane(root)
+        (root / "state/plane/capture.json").write_text(json.dumps({"*": mode}))
+        facts = encode_report_facts(report, fleet="f", sender="bot:f/worker",
+            recipient="bot:f/manager", msg_id="msg_" + uuid4().hex,
+            event_ids=("ev_" + uuid4().hex, "ev_" + uuid4().hex),
+            occurred_at="2026-10-10T00:00:00Z")
+        emit_batch(root, list(facts), require_commit=True)
+        response = TestClient(create_app(root, package=source_package())).get("/api/channel").json()
+        message = response["data"]["threads"][0]["messages"][0]
+        if mode == "full":
+            assert message["body"] == report.to_body()
+            assert message["body_words"] == report.summary
+            assert message["report"] == dict(state="captured", status="completed", percent=None,
+                pr_url=report.pr_url, pr_role="authored", artifacts=list(report.artifacts),
+                issues=list(report.issues), skill=None)
+        else:
+            assert message["report"] == {"state": "withheld"}
+        assert response["data"]["threads"][0]["terminal"] is None
+
+    # An ordinary chat or foreign emitter must not become a typed result.
+    for field, value in (("message_class", "chat"), ("emitter", "other-producer")):
+        raw = json.loads(json.dumps(facts[0]))
+        raw["event_id"] = "ev_" + uuid4().hex
+        raw["payload"]["msg_id"] = "msg_" + uuid4().hex
+        (raw["payload"] if field == "message_class" else raw)[field] = value
+        emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    messages = [m for t in rows["data"]["threads"] for m in t["messages"]]
+    assert sum("report" in m for m in messages) == 1
+    assert all(m["body_words"] == report.to_body() for m in messages if "report" not in m)
+
+    failed = ReportPayload("failed", reason="Repository preparation needs attention")
+    raw = json.loads(json.dumps(facts[0]))
+    raw["event_id"] = "ev_" + uuid4().hex
+    raw["payload"].update(msg_id="msg_" + uuid4().hex, body=failed.to_body())
+    emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    message = next(m for t in rows["data"]["threads"] for m in t["messages"]
+                   if m["msg_id"] == raw["payload"]["msg_id"])
+    assert message["body_words"] == failed.reason and message["report"]["status"] == "failed"
 
 
 def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
@@ -303,6 +393,263 @@ def test_one_sided_work_item_still_one_thread(tmp_path, tagged_side):
     assert len(threads[0]["messages"]) == 2
 
 
+def _lineage_id(kind, number):
+    return f"{kind}_{number:032x}"
+
+
+def _seed_reply_lineage(root, *, depth=1, padding=120):
+    """A recent answer whose exact task-linked ancestors have old bodies."""
+    _full_capture(root)
+    initialize_plane(root)
+    task = _lineage_id("wi", 1)
+    rows = [{"event_type": "work_item", "emitter": "t", "fleet": "f",
+             "payload": {"work_item_id": task, "title": "Recorded task",
+                         "created_by": "bot:f/mgr"}}]
+    for number in range(depth):
+        rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+            "payload": {"msg_id": _lineage_id("msg", number + 1),
+                "sender": "human:operator" if number == 0 else "bot:f/mgr",
+                "recipient": "bot:f/mgr" if number == 0 else "human:operator",
+                "message_class": "chat" if number == 0 else "answer",
+                "body": "HISTORIC BODY MUST NOT BE FETCHED",
+                **({"work_item_id": task} if number == 0 else
+                   {"reply_to_msg_id": _lineage_id("msg", number)})}})
+    for number in range(padding):
+        rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+            "payload": {"msg_id": _lineage_id("msg", 1000 + number),
+                "sender": "bot:f/mgr", "recipient": "human:operator",
+                "message_class": "chat", "body": "Unrelated ordinary conversation"}})
+    answer = _lineage_id("msg", depth + 1)
+    rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+        "payload": {"msg_id": answer, "sender": "bot:f/mgr",
+                    "recipient": "human:operator", "message_class": "answer",
+                    "body": "Recent answer", "reply_to_msg_id": _lineage_id("msg", depth)}})
+    emit_batch(root, rows, require_commit=True)
+    return task, answer
+
+
+def _recent_answer(root, *, limit=120, fleet="f"):
+    result = TestClient(create_app(root, package=source_package())).get(
+        "/api/channel", params={"fleet": fleet, "limit": limit}).json()
+    assert result["state"] == "ok", result
+    thread = next(t for t in result["data"]["threads"]
+                  if any(m["body"] == "Recent answer" for m in t["messages"]))
+    return result, thread
+
+
+@pytest.mark.parametrize("depth", [1, 3, 32])
+def test_recent_reply_inherits_exact_outside_window_task_without_old_bodies(tmp_path, depth):
+    task, answer = _seed_reply_lineage(tmp_path, depth=depth)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task
+    assert thread["title"] == "Recorded task"
+    assert [m["msg_id"] for m in thread["messages"]] == [answer]
+    assert "HISTORIC BODY MUST NOT BE FETCHED" not in json.dumps(result)
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_in_window_lineage_control_keeps_both_messages(tmp_path):
+    task, answer = _seed_reply_lineage(tmp_path, padding=0)
+    _, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task
+    assert [m["msg_id"] for m in thread["messages"]] == [_lineage_id("msg", 1), answer]
+
+
+@pytest.mark.parametrize("fault", ["missing", "cycle", "conflict", "foreign_host", "foreign_task_host", "wrong_fleet", "foreign_owner", "missing_task"])
+def test_unresolved_reply_lineage_never_assigns_task(tmp_path, fault):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    if fault in {"conflict", "wrong_fleet"}:
+        emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t",
+            "fleet": "g" if fault == "wrong_fleet" else "f",
+            "payload": {"work_item_id": _lineage_id("wi", 2),
+                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr"}}],
+            require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        if fault == "missing":
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?", (_lineage_id("msg", 9999), answer))
+        elif fault == "cycle":
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?", (answer, _lineage_id("msg", 1)))
+        elif fault == "conflict":
+            conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (_lineage_id("wi", 2), answer))
+        elif fault == "foreign_host":
+            conn.execute("UPDATE communications SET host_uid=? WHERE msg_id=?", ("host_" + "f" * 32, _lineage_id("msg", 1)))
+        elif fault == "foreign_task_host":
+            conn.execute("UPDATE work_items SET host_uid=? WHERE work_item_id=?", ("host_" + "f" * 32, task))
+        elif fault == "foreign_owner":
+            conn.execute("UPDATE identity_registry SET parent_uid=? WHERE uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
+                         ("host_" + "f" * 32, task))
+        elif fault == "wrong_fleet":
+            conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (_lineage_id("wi", 2), _lineage_id("msg", 1)))
+        else:
+            conn.execute("DELETE FROM work_items WHERE work_item_id=?", (task,))
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert thread["task_events"] == [] and thread["title"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] >= 1
+    assert "Must not inherit this unrelated task" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("sibling_task", [None, 2])
+def test_incomplete_lineage_keeps_only_a_messages_own_valid_task(tmp_path, sibling_task):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    sibling, missing = _lineage_id("msg", 5000), _lineage_id("msg", 9999)
+    rows = [{"event_type": "communication", "emitter": "t", "fleet": "f",
+             "payload": {"msg_id": sibling, "sender": "bot:f/mgr",
+                         "recipient": "human:operator", "message_class": "answer",
+                         "body": "Untagged sibling"}}]
+    if sibling_task:
+        rows.insert(0, {"event_type": "work_item", "emitter": "t", "fleet": "f",
+            "payload": {"work_item_id": _lineage_id("wi", sibling_task),
+                        "title": "Other task", "created_by": "bot:f/mgr"}})
+    emit_batch(tmp_path, rows, require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
+                     (missing, task, answer))
+        conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
+                     (missing, sibling_task and _lineage_id("wi", sibling_task), sibling))
+    result, thread = _recent_answer(tmp_path)
+    other = next(t for t in result["data"]["threads"]
+                 if any(m["msg_id"] == sibling for m in t["messages"]))
+    assert other["work_item_id"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] == 1
+    if sibling_task:
+        # Contradictory siblings stay fail-closed: neither direct tag is trusted.
+        assert thread["work_item_id"] is None
+        assert result["data"]["lineage"]["reasons"] == {"conflicting_tasks": 1}
+    else:
+        assert thread["work_item_id"] == task and thread["title"] == "Recorded task"
+        assert [m["msg_id"] for m in thread["messages"]] == [answer]
+        assert result["data"]["lineage"]["reasons"] == {"missing_parent": 1}
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_reply_lineage_emitting_fleet_cannot_authorize_task(tmp_path, incomplete):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _, answer = _seed_reply_lineage(tmp_path)
+    task = _lineage_id("wi", 2)
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
+        "payload": {"work_item_id": task, "title": "Unrelated emitting-fleet task",
+                    "created_by": "bot:g/mgr"}}], require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        # Both recorded parties remain in f. Only the emitting fleet matches g.
+        conn.execute("UPDATE communications SET fleet_uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
+                     (task,))
+        tagged = answer if incomplete else _lineage_id("msg", 1)
+        conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (task, tagged))
+        if incomplete:
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?",
+                         (_lineage_id("msg", 9999), answer))
+    result, thread = _recent_answer(tmp_path, fleet="g")
+    assert thread["work_item_id"] is None
+    assert thread["title"] is None and thread["task_events"] == []
+    assert "Unrelated emitting-fleet task" not in json.dumps(result)
+    assert result["data"]["lineage"]["unresolved_threads"] >= 1
+
+
+def test_reply_lineage_hop_exhaustion_is_bounded_and_unlinked(tmp_path):
+    _seed_reply_lineage(tmp_path, depth=33)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert result["data"]["lineage"]["reasons"]["hop_limit"] == 1
+
+
+def test_reply_lineage_unique_lookup_budget_does_not_guess(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    monkeypatch.setattr(view, "_CHANNEL_LINEAGE_ANCESTORS", 2, raising=False)
+    _seed_reply_lineage(tmp_path, depth=3)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert result["data"]["lineage"]["ancestor_lookups"] == 2
+    assert result["data"]["lineage"]["reasons"]["lookup_limit"] == 1
+
+
+@pytest.mark.parametrize("room", ["engineering", "data"])
+def test_outside_window_reply_keeps_legitimate_cross_fleet_task_owner(tmp_path, room):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _seed_cross_fleet(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DELETE FROM communications WHERE msg_id=?", ("msg_" + "d" * 32,))
+        conn.execute("UPDATE communications SET work_item_id=NULL,body='Recent answer' WHERE msg_id=?", ("msg_" + "f" * 32,))
+    result, thread = _recent_answer(tmp_path, limit=1, fleet=room)
+    assert thread["work_item_id"] == "wi_" + "e" * 32
+    assert thread["cross_fleet"] is True
+    assert thread["messages"][0]["sender_short"] == "data/worker"
+    assert thread["messages"][0]["recipient_short"] == "engineering/lead"
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_reply_lineage_metadata_queries_are_indexed_batched_and_body_free(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    _seed_reply_lineage(tmp_path, depth=3, padding=500)
+    original = view._ro_conn
+    queries = []
+    class BoundedReader:
+        def __init__(self, conn): self.conn = conn
+        def execute(self, sql, parameters=()):
+            if "s.parent_uid AS sender_fleet_uid" in sql:
+                assert len(parameters) <= 400
+                assert "body" not in sql.partition("FROM")[0]
+                plan = self.conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+                assert any("SEARCH c USING INDEX" in row[3] for row in plan)
+                assert not any("SCAN c" in row[3] for row in plan)
+                queries.append(sql)
+            return self.conn.execute(sql, parameters)
+        def __getattr__(self, name): return getattr(self.conn, name)
+    monkeypatch.setattr(view, "_ro_conn", lambda db: BoundedReader(original(db)))
+    result, thread = _recent_answer(tmp_path, limit=500)
+    assert thread["work_item_id"] == _lineage_id("wi", 1)
+    assert queries and "HISTORIC BODY MUST NOT BE FETCHED" not in json.dumps(result)
+
+
+def test_reply_lineage_does_not_infer_task_from_body_or_actor_alias(tmp_path):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET reply_to_msg_id=NULL,body=? WHERE msg_id=?",
+                     (json.dumps({"work_item_id": task, "sender": "bot:f/mgr"}), answer))
+    result = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel?limit=1&fleet=f").json()
+    assert result["data"]["threads"][0]["work_item_id"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_reply_lineage_read_preserves_database_bytes(tmp_path):
+    import hashlib
+    from claudlobby.plane.db import db_file
+    _seed_reply_lineage(tmp_path)
+    before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    _recent_answer(tmp_path)
+    assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
+
+
+def test_channel_reply_lineage_and_provenance_share_snapshot(tmp_path, monkeypatch):
+    import sqlite3
+    from claudlobby.plane import view
+    from claudlobby.plane.db import db_file
+    task, _ = _seed_reply_lineage(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn: conn.execute("PRAGMA journal_mode=WAL")
+    original = view._fetch_channel
+    heads = []
+    def concurrent(conn, *args):
+        assert conn.in_transaction
+        heads.append(conn.execute("SELECT MAX(ingest_seq) FROM ingest_ledger").fetchone()[0])
+        with sqlite3.connect(db_file(tmp_path)) as writer:
+            writer.execute("UPDATE communications SET work_item_id=NULL WHERE msg_id=?", (_lineage_id("msg", 1),))
+            writer.execute("UPDATE work_items SET title='later title' WHERE work_item_id=?", (task,))
+            writer.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at) VALUES('later','events','later')")
+        return original(conn, *args)
+    monkeypatch.setattr(view, "_fetch_channel", concurrent)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task and thread["title"] == "Recorded task"
+    assert result["provenance"]["last_ingest_seq"] == heads[0]
+
+
 def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
     """The reducer's rule: a late terminal never rewrites — the channel must
     agree with TASK_STATUS_SQL (the client copy took the LAST terminal and
@@ -398,13 +745,74 @@ def test_index_served_from_package_data(tmp_path):
     assert r.headers.get("cache-control") == "no-store"
     # asset refs carry the cache-bust token (defeats a pinned ES module)
     assert "/app.js?v=" in r.text
+    assert "/workspace.css?v=" in r.text
 
 
 def test_app_js_import_is_cache_busted(tmp_path):
-    r = TestClient(create_app(tmp_path, package=source_package())).get("/app.js")
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    r = client.get("/app.js")
     assert r.status_code == 200
     assert r.headers.get("cache-control") == "no-store"
-    assert "/panel-state.js?v=" in r.text  # intra-module import busts too
+    assert 'from "./panel-state.js?v=' in r.text  # intra-module import busts too
+    assert 'from "./api-client.js?v=' in r.text
+    assert 'from "./work-loop.js?v=' in r.text
+    work_loop = client.get("/work-loop.js")
+    assert work_loop.status_code == 200
+    assert work_loop.headers.get("cache-control") == "no-store"
+    assert 'from "./action-state.js?v=' in work_loop.text
+    assert 'from "./panel-state.js?v=' in work_loop.text
+    assert 'from "./permission-panel.js?v=' in work_loop.text
+    permissions = client.get("/permission-panel.js")
+    assert permissions.status_code == 200 and permissions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in permissions.text
+    assert 'from "./panel-state.js?v=' in permissions.text
+    transport = client.get("/api-client.js")
+    assert transport.status_code == 200
+    assert transport.headers.get("cache-control") == "no-store"
+
+
+def test_connected_reader_asset_uses_same_versioned_owner_graph(tmp_path, monkeypatch):
+    import os
+    import shutil
+    from claudlobby.plane import view
+    ui = tmp_path / "ui"
+    shutil.copytree(view.UI_DIR, ui)
+    monkeypatch.setattr(view, "UI_DIR", ui)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    before = client.get("/connected-read-client.js")
+    assert before.status_code == 200
+    assert before.headers["cache-control"] == "no-store"
+    assert 'from "./owner-api-client.js?v=' in before.text
+    assert 'from "./connected-actions.js?v=' in before.text
+    actions = client.get("/connected-actions.js")
+    assert actions.status_code == 200 and actions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in actions.text
+    module = ui / "connected-read-client.js"
+    info = module.stat()
+    os.utime(module, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    after = client.get("/connected-read-client.js")
+    assert before.text != after.text
+
+
+def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path):
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    api = client.get("/api-client.js")
+    assert api.status_code == 200 and api.headers["cache-control"] == "no-store"
+    assert 'from "./connected-workspace.js?v=' in api.text
+    head = client.head("/api-client.js")
+    assert head.status_code == 200 and head.content == b""
+    assert head.headers["content-length"] == api.headers["content-length"]
+    assert head.headers["cache-control"] == "no-store"
+    workspace = client.get("/connected-workspace.js")
+    assert workspace.status_code == 200
+    assert 'from "./workspace-enrollment.js?v=' in workspace.text
+    assert workspace.headers["cache-control"] == "no-store"
+    enrollment = client.get("/workspace-enrollment.js")
+    assert enrollment.status_code == 200 and enrollment.headers["cache-control"] == "no-store"
+    assert 'from "./connected-read-client.js?v=' in workspace.text
+    assert 'from "./two-source-read.js?v=' in workspace.text
+    assert "import(" not in workspace.text
+    assert "<!--CONNECTED_CONTEXT-->" in client.get("/").text
 
 
 def test_stream_defaults_to_head_never_replays(tmp_path):
@@ -1529,7 +1937,7 @@ def test_every_arm_carries_its_own_date_column(tmp_path):
 
 
 def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
-    """Attention names SQL arms; lifecycle labels name only reducer states."""
+    """Attention names canonical work/permission reasons; lifecycle stays unchanged."""
     import re
     from pathlib import Path as _P
 
@@ -1539,7 +1947,8 @@ def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
            / "app.js").read_text()
     why = src.split("const WHY = {", 1)[1].split("\n};", 1)[0]
     assert set(re.findall(r"^  (\w+):", why, re.M)) == \
-        {name for name, _s, _a, _w in ATTENTION_ARMS}
+        ({name for name, _s, _a, _w in ATTENTION_ARMS}
+         | {"permission_pending", "permission_unavailable"})
     status = src.split("const TASK_STATUS = {", 1)[1].split("\n};", 1)[0]
     labelled = set(re.findall(r"^  (\w+):", status, re.M))
     assert labelled == {"queued", "assigned", "active", "blocked",

@@ -310,6 +310,18 @@ SWITCHES: tuple[Switch, ...] = (
              "extra; fronting it with Tailscale Serve stays yours)",
     ),
     Switch(
+        key="plane-owner",
+        scope=HOST_SERVICE,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="plane-owner",
+        config_extra="origin, tailscale and optional socket/workspace origins",
+        requires_extra="plane-ui",
+        plane=True,
+        why_opt_in="private write-capable endpoint can spend model budget and mutate operator configuration",
+        what="private owner server under native supervision; grants and Tailscale Serve stay separate",
+    ),
+    Switch(
         key="plane-host-probe",
         scope=HOST_JOB,
         polarity=OPT_OUT,
@@ -537,6 +549,23 @@ SWITCHES: tuple[Switch, ...] = (
         why_opt_in="model spend (a Haiku pass per finished session)",
         what="distil each finished session into one structured JSONL row for "
              "the fleet monitor",
+    ),
+    Switch(
+        key="keepalive-limit-resume",
+        scope=DOOR,
+        polarity=OPT_IN,
+        # keepalive reads each bot's bot.conf on its tick, so this one bot's
+        # conf arms it there and nowhere else; a .env tier never reaches it.
+        carrier=BOT_CONF,
+        env="KEEPALIVE_LIMIT_RESUME_ENABLED",
+        why_opt_in="no deployment gate: claudlobby/_runtime_scripts/ is in "
+                   "force on every bot at activation, and this door types into "
+                   "a bot's pane, so one armed bot is the only canary",
+        what="once a usage limit's printed reset has passed, confirm the limit "
+             "menu's \"Stop and wait for limit to reset\" by its label if the "
+             "menu is up, then submit one resume prompt: one action per limit "
+             "(#996). Off, keepalive still names the stop (LIMIT) and "
+             "fleet-pulse pages usage_limit_held after the reset",
     ),
     Switch(
         key="code-audit-sweep",

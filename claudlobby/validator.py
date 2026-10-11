@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 from . import dotenv, tool_resolve
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import (
+    _RETIRED_BOT_KEYS,
     _RETIRED_OBSERVABILITY_KEYS,
     _PROJECT_VALIDATION_KEYS,
     _qualified_repo,
@@ -1260,6 +1261,39 @@ def _validate_bots(
                 f"1..10 (got {obs.bridge_heal_max_attempts})"
             )
 
+        # #2145 F11: the vocabulary ships now; only the Claude adapter exists.
+        if bot.agent_cli != "claude":
+            report.errors.append(
+                f"bot '{bot_name}': agent_cli '{bot.agent_cli}' — execution adapter not shipped. "
+                f"This release composes and launches Claude Code bots only; the Codex adapter is the "
+                f"companion epic (#2149). Set agent_cli: claude, or remove the bot until it lands."
+            )
+
+        # A key nothing reads, in the bot's stanza or under `defaults:` (#2145
+        # Q1: `runtime:` is the draft spelling of `agent_cli:`). Said, never
+        # silently ignored; and refused when its value names a CLI other than
+        # the one the bot will run — `runtime: codex` must not quietly run claude.
+        for key, read_instead in _RETIRED_BOT_KEYS.items():
+            own = key in bot.retired_keys
+            if not own and key not in fleet.defaults:
+                continue
+            value = bot.retired_keys[key] if own else fleet.defaults[key]
+            where = f"bot '{bot_name}': {key}" if own else f"defaults.{key}"
+            if value is not None and value != getattr(bot, read_instead):
+                refusal = (
+                    f"{where} is {value!r}, but nothing reads it — the key is {read_instead}:, "
+                    f"so this would run {getattr(bot, read_instead)!r}. Rename it to {read_instead}: "
+                    f"(#2145)."
+                )
+                if refusal not in report.errors:
+                    report.errors.append(refusal)
+            elif own:
+                report.warn("retired-key", f"{where} has no reader — the key is {read_instead}: (#2145); "
+                                           f"rename or remove it")
+            else:
+                shared.add("retired-key", f"{where} has no reader — the key is {read_instead}: (#2145); "
+                                          f"rename or remove it", bot_name)
+
         # Model validation (warn + pass-through)
         if bot.model and bot.model not in KNOWN_MODELS:
             suggestion = closest_match(bot.model, KNOWN_MODELS)
@@ -2122,9 +2156,10 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         if not in_range:
             report.warn(
                 "obs-range",
-                f"jobs.{name}.startup_delay must be 1-3600 seconds (got {delay!r}): 0 starts "
-                "the job with every other producer, and a long delay postpones its first "
-                "run after every manager restart",
+                f"jobs.{name}.startup_delay must be 1-3600 seconds (got {delay!r}): for an "
+                "interval that keeps OnUnitActiveSec= (one that does not divide an hour or a "
+                "day), 0 starts the job with every other producer, and a long delay postpones "
+                "its first run after every manager restart",
             )
 
     # An armed beat on a leafless fleet warns rather than staying silent. The

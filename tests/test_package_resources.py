@@ -287,6 +287,9 @@ import importlib.metadata, pathlib, plistlib, shlex, sys
 import claudlobby
 from claudlobby.context import resolve_context
 from claudlobby.composer import compose_fleet
+from claudlobby.plane.owner_access import VerifiedReader
+from claudlobby.plane.owner_messages import OwnerMessages
+assert "starlette" not in sys.modules
 from claudlobby.resources import get_resources, selected_cli
 root, package, cli = map(pathlib.Path, sys.argv[1:4])
 assert pathlib.Path(claudlobby.__file__).resolve().parent == package.resolve()

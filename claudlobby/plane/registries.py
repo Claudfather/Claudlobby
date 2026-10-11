@@ -139,11 +139,30 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #2243: a declared bot with no unit file and no stop record, a unit lost with
+    # nobody having stopped it (a botched disenroll, a broken activation, a deleted
+    # unit directory). Critical so the escalation counts it: one cause, in place of
+    # the service_down and session_missing such a bot raised before.
+    "unit_missing": "critical",
     # #2070: a bot whose input box holds text that was never submitted, with no
     # turn running (keepalive's HELD verdict), paged in place of activity_stuck.
     # Critical like the page it replaces; the remedy is an operator Enter, not
     # a restart, so it is not one of fleet-pulse's Telegram escalation types.
     "input_held": "critical",
+    # #996: a bot a claude.ai usage limit still holds after the limit's printed
+    # reset (keepalive's LIMIT verdict, past its resume window), paged in place
+    # of activity_stuck. Critical like input_held, and like it not one of
+    # fleet-pulse's Telegram escalation types: the remedy is a prompt to the bot.
+    "usage_limit_held": "critical",
+    # #996: the bot's own StopFailure hook recording a usage-limit stop (the
+    # limit line in data.limit_line), and keepalive's one resume for a reset
+    # (data.menu, data.outcome).
+    "usage_limit_hit": "notice",
+    "keepalive_limit_resume": "notice",
+    # #2243: the stop door's audit rows, who stopped or started a bot and why
+    # (data.by, data.reason). fleet-pulse reads the stop door's local record, never these.
+    "bot_stopped": "notice",
+    "bot_started": "notice",
     # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",

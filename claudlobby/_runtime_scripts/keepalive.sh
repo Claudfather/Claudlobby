@@ -427,6 +427,193 @@ classify_pane() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Usage limit (#996)
+# ---------------------------------------------------------------------------
+# A claude.ai usage limit stops a turn with one line in the transcript, and on
+# this estate nothing resumes it: every bot runs with --remote-control, and
+# while that bridge is up Claude Code arms neither its own automatic continue
+# nor its limit menu (2.1.291 and 2.1.292 check the bridge first). The pane is
+# left at an empty prompt, which read as IDLE: data/.idle kept activity_stuck
+# quiet, and the bot sat until someone noticed (#996: 75 and 85 minutes).
+#
+# LIMIT names that frame. It takes two facts, never one:
+#   - data/.usage-limit, written by usage-limit-hook.sh when Claude Code ends
+#     a turn with StopFailure error=rate_limit, and no older than the last tool
+#     call: the bot's own record of the stop, which a limit line quoted in a
+#     bot's own message never writes;
+#   - usage-limit.py over the WHOLE pane (the line sits above tail -10): the
+#     limit line is still the bot's last word, and it says what holds the
+#     screen now (the input box, the usage-limit menu, or another dialog).
+# LIMIT writes data/.limit (fleet-pulse pages usage_limit_held from it once the
+# reset has passed), never data/.idle, and sends no reload and no bridge heal.
+#
+# The resume is opt-in per bot (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its
+# bot.conf; claudlobby/switches.py says why). Once the printed reset minute,
+# plus 60 s (the print drops the seconds), plus KEEPALIVE_LIMIT_RESUME_GRACE_S
+# (default 120) has passed, it takes ONE action for that reset: if the
+# usage-limit menu is up with its pointer on the exact label "Stop and wait for
+# limit to reset", one Enter (by label, never by position: a server flag can put
+# credits first, and a pointer anywhere else gets no keys); then the resume
+# prompt, through pane_send_verified. Any other menu or dialog, a box holding
+# text, a running turn, or a frame the reader does not know gets no keys. The
+# action is recorded in data/.limit-resumed before its first key and emitted
+# as keepalive_limit_resume, so no later tick acts on the same reset again.
+_LIMIT_RESUME_PROMPT="Your usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete. (keepalive, #996)"
+_ul_verdict=""
+_ul_hit=""
+# fleet-pulse's _HELD_FRESH_S: a data/.limit older than this is no hold.
+_LIMIT_HOLD_FRESH_S=300
+
+# usage_limit_read <pane> <anchor>
+# usage-limit.py's one-line verdict for a whole pane capture: screen, reset
+# epoch, menu pointer, Claude Code's own continue, limit name, reset text
+# (tab-separated). Empty when the reader cannot run, which reads as no limit.
+usage_limit_read() {
+    printf '%s' "$1" | python3 -S -E "$LIB_DIR/usage-limit.py" read --anchor "$2" --tz "${TZ:-}" 2>/dev/null || true
+}
+
+# usage_limit_keep_anchor <pane>
+# A hit that prints the same limit and the same reset text as the hold it lands
+# in is that hold's limit, still up: the resumed turn, or a message, met it again
+# after the reset. Its hook record moves the anchor past the reset, and a reset
+# with no date read from there is tomorrow's: no resume and no page for a day.
+# So while data/.limit is fresh (re-stamped every LIMIT tick) and names this
+# limit and this reset text, the reset is read from the hit the hold first read
+# it from. Any other text is a new reset, read from its own hit: read from the
+# hold's first hit, a reset nearly 24 hours after the new one reads a day early.
+usage_limit_keep_anchor() {
+    local a0="" name="" text="" vname="" vtext=""
+    marker_age_within "$BOT_DIR/data/.limit" "$_LIMIT_HOLD_FRESH_S" || return 0
+    { read -r _ _ _ _ a0 _; read -r name; read -r text; } 2>/dev/null < "$BOT_DIR/data/.limit" || return 0
+    case "$a0" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$a0" != "$_ul_hit" ] || return 0
+    IFS=$'\t' read -r _ _ _ _ vname vtext <<< "$_ul_verdict"
+    [ -n "$vtext" ] && [ "$vname" = "$name" ] && [ "$vtext" = "$text" ] || return 0
+    _ul_hit=$a0
+    _ul_verdict=$(usage_limit_read "$1" "$_ul_hit")
+}
+
+# _limit_resumed_record <reset> <stage>: the one action for <reset>, recorded.
+_limit_resumed_record() {
+    local tmp
+    tmp="$(safe_mktemp)"
+    printf '%s %s %s\n' "$1" "$(date +%s)" "$2" > "$tmp" && mv "$tmp" "$BOT_DIR/data/.limit-resumed"
+}
+
+# _limit_resumed_for <reset>: whether the one action for <reset> was taken.
+_limit_resumed_for() {
+    local done_reset=""
+    read -r done_reset _ 2>/dev/null < "$BOT_DIR/data/.limit-resumed" || true
+    [ -n "$done_reset" ] && [ "$done_reset" = "$1" ]
+}
+
+# _limit_resume_event <reset> <text> <name> <menu> <outcome>
+_limit_resume_event() {
+    echo "$(ts_iso) LIMIT RESUME — reset $2 ($1), menu $4, outcome $5" >> "$LOG"
+    emit_fleet_event keepalive_limit_resume keepalive \
+        "{\"reset_epoch\":$1,\"reset\":\"$(json_escape "$2")\",\"limit\":\"$(json_escape "$3")\",\"menu\":\"$4\",\"outcome\":\"$5\"}" \
+        "$BOT_DIR" "$BOT_NAME" || true
+}
+
+# _limit_resume <reset> <name> <text>
+# The ONE action for a reset. The pane is read again now, and must still show
+# this reset:
+#   the usage-limit menu, pointer on the wait label  one Enter, then the box
+#   the input box, empty, no turn running            the resume prompt
+#   anything else                                     no keys, logged
+_limit_resume() {
+    local reset="$1" name="$2" text="$3" pane v ustate vreset pointer menu=none rc=0
+    pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
+    v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
+    IFS=$'\t' read -r ustate vreset pointer _ <<< "$v"
+    # Busy and held are read where classify_pane reads them, the last 10 lines:
+    # an answer higher up that ends in an ellipsis is not a running turn.
+    if [ "$vreset" != "$reset" ] || pane_is_busy "$(printf '%s\n' "$pane" | tail -10)"; then
+        echo "$(ts_iso) LIMIT — the pane changed before the resume (now: ${ustate:-unread}); no keys this tick" >> "$LOG"
+        return 0
+    fi
+    case "$ustate" in
+        menu)
+            if [ "$pointer" != wait ]; then
+                echo "$(ts_iso) LIMIT — reset passed, but the usage-limit menu's pointer is not on \"Stop and wait for limit to reset\"; no keys (an operator chooses that option)" >> "$LOG"
+                return 0
+            fi
+            _limit_resumed_record "$reset" menu
+            if ! pane_send_key "$TMUX_SOCKET" "$TMUX_SESSION" Enter limit-menu; then
+                _limit_resume_event "$reset" "$text" "$name" none menu-key-not-sent
+                return 0
+            fi
+            menu=confirmed
+            sleep "${KEEPALIVE_LIMIT_MENU_SETTLE_S:-2}"
+            pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
+            v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
+            IFS=$'\t' read -r ustate _ <<< "$v"
+            if [ "$ustate" != limit ]; then
+                _limit_resume_event "$reset" "$text" "$name" "$menu" "no-box-after-menu"
+                return 0
+            fi
+            ;;
+        limit) ;;
+        *)
+            echo "$(ts_iso) LIMIT — reset passed, but a dialog other than the usage-limit menu holds the screen ($ustate); no keys (an operator looks)" >> "$LOG"
+            return 0
+            ;;
+    esac
+    if pane_is_held "$(printf '%s\n' "$pane" | tail -10)"; then
+        echo "$(ts_iso) LIMIT — reset passed, but the input box holds text; no keys (an operator Enter submits it)" >> "$LOG"
+        [ "$menu" = none ] || _limit_resume_event "$reset" "$text" "$name" "$menu" box-held
+        return 0
+    fi
+    _limit_resumed_record "$reset" prompt
+    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_LIMIT_RESUME_PROMPT" || rc=$?
+    case "$rc" in
+        0) _limit_resume_event "$reset" "$text" "$name" "$menu" submitted ;;
+        3) _limit_resume_event "$reset" "$text" "$name" "$menu" unsubmitted ;;
+        *) _limit_resume_event "$reset" "$text" "$name" "$menu" send-failed ;;
+    esac
+}
+
+# usage_limit_tick <verdict>
+# One LIMIT tick: stamp data/.limit (first seen, reset epoch, screen, Claude
+# Code's own continue, the hit the reset was read from; then the limit name and
+# the reset text), log the state with its reset time, and resume once the reset
+# has passed, when armed.
+usage_limit_tick() {
+    local ustate reset pointer native name text now first="" prev_reset="" tmp grace due plan
+    IFS=$'\t' read -r ustate reset pointer native name text <<< "$1"
+    now=$(date +%s)
+    read -r first prev_reset _ 2>/dev/null < "$BOT_DIR/data/.limit" || true
+    [ "$prev_reset" = "$reset" ] || first=""
+    case "$first" in ''|*[!0-9]*) first=$now ;; esac
+    tmp="$(safe_mktemp)"
+    printf '%s %s %s %s %s\n%s\n%s\n' "$first" "$reset" "$ustate" "$native" "$_ul_hit" "$name" "$text" > "$tmp" \
+        && mv "$tmp" "$BOT_DIR/data/.limit"
+    grace="${KEEPALIVE_LIMIT_RESUME_GRACE_S:-120}"
+    case "$grace" in ''|*[!0-9]*) grace=120 ;; esac
+    if [ "$reset" = "-" ]; then
+        plan="no reset time it can read, so no resume: an operator sends a prompt once the limit has reset"
+    else
+        due=$(( reset + 60 + grace ))
+        if [ "$now" -lt "$due" ]; then
+            plan="resume due $(epoch_to_iso_utc "$due")"
+            [ "${KEEPALIVE_LIMIT_RESUME_ENABLED:-0}" = 1 ] || plan="no resume here (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env arms it)"
+        elif [ "${KEEPALIVE_LIMIT_RESUME_ENABLED:-0}" != 1 ]; then
+            plan="reset passed; resume OFF here (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env arms it), so an operator sends a prompt"
+        elif _limit_resumed_for "$reset"; then
+            plan="reset passed; already resumed once for this reset, so no more keys: an operator looks"
+        else
+            echo "$(ts_iso) LIMIT — held by a usage limit ($name), resets $text [$(epoch_to_iso_utc "$reset")]; reset passed, resuming" >> "$LOG"
+            _limit_resume "$reset" "$name" "$text"
+            return 0
+        fi
+    fi
+    if [ "$native" = armed ]; then plan="$plan; Claude Code's own continue is armed"; fi
+    local when=""
+    [ "$reset" = "-" ] || when=" [$(epoch_to_iso_utc "$reset")]"
+    echo "$(ts_iso) LIMIT — held by a usage limit ($name), resets ${text:-unknown}$when; screen: $ustate; $plan" >> "$LOG"
+}
+
 # Liveness = active recently OR active now (err toward BUSY; see header). Primary:
 # a data/.last-tool-call marker within the recency window — rendering-immune, and
 # a short-circuit so a busy bot skips the pane capture entirely. Fallback: the
@@ -438,6 +625,21 @@ else
     pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
     last_lines=$(echo "$pane_content" | tail -10)
     state=$(classify_pane "$last_lines")
+    # #996: an IDLE or UNKNOWN pane is LIMIT when the bot's own hook recorded a
+    # usage-limit stop with no tool call since, and the whole pane still shows
+    # that limit as its last word (see "Usage limit" above).
+    if [ "$state" = IDLE ] || [ "$state" = UNKNOWN ]; then
+        if [ -f "$BOT_DIR/data/.usage-limit" ] \
+            && marker_is_newer "$BOT_DIR/data/.usage-limit" "$BOT_DIR/data/.last-tool-call"; then
+            _ul_hit=$(head -n 1 "$BOT_DIR/data/.usage-limit" 2>/dev/null | tr -cd '0-9' || true)
+            [ -n "$_ul_hit" ] || _ul_hit=$(date +%s)
+            _ul_verdict=$(usage_limit_read "$pane_content" "$_ul_hit")
+            usage_limit_keep_anchor "$pane_content"
+            case "${_ul_verdict%%$'\t'*}" in
+                limit|menu|modal) state=LIMIT ;;
+            esac
+        fi
+    fi
 fi
 UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
 UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
@@ -447,7 +649,15 @@ case "$state" in
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
-        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held"
+        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
+        ;;
+    LIMIT)
+        # #996: held by a usage limit. Named, never IDLE: no data/.idle (so
+        # fleet-pulse pages usage_limit_held instead of staying quiet), no
+        # reload and no bridge heal into the pane. The one key path is
+        # usage_limit_tick's resume, once per reset, when armed.
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held"
+        usage_limit_tick "$_ul_verdict"
         ;;
     HELD)
         # #2070: text sits in the input box and no turn runs. Name it, so the
@@ -468,7 +678,7 @@ case "$state" in
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
-        rm -f "$BOT_DIR/data/.held"
+        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then
         # clear the marker. This is the one place keepalive presses Enter on an
@@ -493,7 +703,7 @@ case "$state" in
         ;;
     *)
         # Track consecutive UNKNOWN runs
-        rm -f "$BOT_DIR/data/.held"
+        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
         prev=0
         [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
         count=$((prev + 1))

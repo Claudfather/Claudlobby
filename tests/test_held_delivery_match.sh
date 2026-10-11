@@ -93,6 +93,17 @@ check "not-held: the queued-message hint" 1 not-held "$(tail -10 "$FIXTURE_DIR/i
 check "not-held: Esc to cancel under the box" 1 not-held \
     "$(box "$ENVELOPE body" "$TRAILER"; printf '%s\n' "  Enter to confirm · Esc to cancel")"
 
+# A new-send refusal calls these frames held, safely refusing to append. Repair
+# must instead veto any exit words, even when the footer shape is ambiguous.
+for footer in 'Esc to cancel · Tab to amend' 'Enter to select · Esc to cancel' 'Esc to go back · Tab to amend'; do
+    check "not-held: ambiguous repair footer $footer" 1 not-held \
+        "$(box "$ENVELOPE body" "$TRAILER"; printf '%s\n' "  $footer")"
+done
+check "not-held: exit footer without a separating rule" 1 not-held \
+    "$(printf '%s\n' "❯${NBSP}${ENVELOPE} body" '  Esc to cancel' "  $TRAILER")"
+check "not-held: authored exit words cannot license repair Enter" 1 not-held \
+    "$(box "$ENVELOPE Esc to cancel is literal body text" "$TRAILER")"
+
 # --- the box holds something else, or more than this message ---------------------
 check "not-shown: another message's delivery" 1 not-shown \
     "$(box "[Claudlobby ordinary message] Message: $OTHER body" "⟦plane:${OTHER}⟧")"

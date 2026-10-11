@@ -52,7 +52,8 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 | Event type | Action |
 |------------|--------|
 | `session_missing` | After checking this bot is meant to run, `claudlobby --json bot start BOT_ID` with its literal declared ID. |
-| `service_down` | After checking this bot is meant to run, `claudlobby --json bot start BOT_ID` with its literal declared ID. |
+| `service_down` | After checking this bot is meant to run, `claudlobby --json bot start BOT_ID` with its literal declared ID. Its `session` field says whether the tmux session is up. |
+| `unit_missing` | Its unit file is gone and no stop was recorded. If it is meant to run, `claudlobby --json bot start BOT_ID`; if it was stopped on purpose, `claudlobby --json bot stop BOT_ID --reason TEXT` records that and the alert ends. |
 | `pane_stuck` (>5 min) | Read `claudlobby --json bot session BOT_ID` and `claudlobby --json bot logs BOT_ID --lines 50` with its literal declared ID, and inspect for genuine stuck state. If confirmed stuck, restart the bot. If output shows active work, or the reads refuse or are unknown, skip and report it. Do not use `tmux` directly: bots run on the fleet's private socket. |
 | `compaction` | Informational, no action. A `bot compact` you sent appears here once the pulse records it (`trigger: manual`, `pre_tokens` to `post_tokens`); `claudlobby --json fleet compactions record` records it at once. An `auto` one means the bot reached Claude Code's own limit. |
 | `wip_uncommitted` | **Read `paths`, not `dirty_files`.** The count cannot tell a mid-edit from a virtualenv — `M lib/foo.py` and `?? .venv/` are both `1`. Any path that is source, config or content: do NOT restart, task in flight. Only artifact paths you recognise (`.venv/`, `node_modules/`, a build dir): not work in flight — say which paths you saw and why you judged them artifacts. `unchanged_for_s` past ~2h on a *source* path is stale WIP: flag to the human. Never read it as a licence to restart, because a brand-new source file is untracked too. |
@@ -64,7 +65,9 @@ when `ok` is true, `data.state` is `running`, `data.native_outcome` is
 bridge delivery; `session_ready` is for a non-channel or intentionally
 tokenless bot. If the command refuses or readiness is unknown, report the
 exact failure and stop; do not invoke a raw launcher. A deliberately stopped
-bot is not revived from an alert alone.
+bot is not revived from an alert alone. A bot stopped through `bot stop` raises
+no alert at all (#2243): the summary shows it as `stopped`, with who and since,
+and the manager gets a reminder once it has been stopped for days.
 
 ## Report Format
 

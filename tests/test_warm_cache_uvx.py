@@ -10,11 +10,12 @@ The measurement that motivates it (clog, idle host, no contention): a cold
 3.4s and 2.9s. So a uvx server loses *deterministically* on a cold cache —
 boot-storm contention is not needed, which is what refines the framing in #1497.
 
-The three shipped uvx fragments have two arg shapes and neither is npx's:
+The four shipped uvx fragments have two arg shapes and neither is npx's:
 
     gws                     ["workspace-mcp", "--tools", "gmail", "calendar"]
     google-analytics        ["--from", "google-analytics-mcp==2.8.1", "ga4-mcp-server"]
     google-search-console   ["--from", "mcp-search-console==0.3.2", "mcp-search-console"]
+    homeassistant           ["--from", "hass-mcp==0.6.0", "hass-mcp"]
 
 The `--from` shape is the load-bearing one: the package to download and the
 entry point to run are *different tokens*, so a warm rebuilt from the package

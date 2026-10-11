@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -236,6 +238,51 @@ def test_bootstrap_resume_from_quiesced_queue_reuses_same_id(cold, monkeypatch):
     monkeypatch.setattr(activation, "build_migration_manifest", original)
     resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert resumed.status == "active" and resumed.activation_id == "cold"
+
+
+def _job_holding_the_lock(root, seconds):
+    """A timer job's hold on the activation lock (shared), let go after *seconds*."""
+    fd = os.open(root / "state/activation.lock", os.O_RDONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    job = threading.Timer(seconds, os.close, (fd,))
+    job.start()
+    return job
+
+
+def test_bootstrap_and_upgrade_wait_for_a_running_job_instead_of_refusing(cold, monkeypatch):
+    root, source, source_plan, host = cold
+    job = _job_holding_the_lock(root, 1.0)
+    record = activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    job.join()
+    assert record.status == "active"
+
+    class PastTheLock(Exception):
+        pass
+
+    def enrollment(*_args, **_kwargs):
+        raise PastTheLock  # the upgrade's first step under the lock
+
+    monkeypatch.setattr(activation, "collect_enrollment", enrollment)
+    plan = ConfigPlanBuilder(root, source.release_id, source.seal_sha256, ("example",), effects={}).seal()
+    job = _job_holding_the_lock(root, 1.0)
+    with pytest.raises(PastTheLock):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    job.join()
+
+
+def test_resume_waits_for_a_running_job_instead_of_refusing(cold, monkeypatch):
+    root, _, plan, host = cold
+    original = activation.build_migration_manifest
+    def interrupted(*_args, **_kwargs):
+        raise state.ActivationError("fixture interrupted after empty native pause")
+    monkeypatch.setattr(activation, "build_migration_manifest", interrupted)
+    with pytest.raises(state.ActivationError, match="fixture interrupted"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation, "build_migration_manifest", original)
+    job = _job_holding_the_lock(root, 1.0)
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    job.join()
+    assert resumed.status == "active"
 
 
 def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(cold):
@@ -483,6 +530,9 @@ def cold(installed, monkeypatch, tmp_path):
     builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
                                 effects={"fleet_manifests": {"example": str(manifest)}, "units": []})
     projects = root / "projects.yaml"
+    from claudlobby.config import host_override_path
+    for source in (host_override_path(), *(root / name for name in ("library", "voices", "templates"))):
+        builder.input(source)
     builder.effects["fleet_sources"] = {"example": {
         "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
         "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
@@ -536,6 +586,118 @@ def cold(installed, monkeypatch, tmp_path):
     # output fixture checks ordering and the real operation-context SQL reader.
     monkeypatch.setattr(activation, "_registry_scan", host.registry_scan)
     return root, release, plan, host
+
+
+def test_backup_restore_preserves_work_and_activates_without_reviving_owner_access(cold, monkeypatch, tmp_path, capsys):
+    from claudlobby.host_backup import create_backup, restore_backup, restored_bootstrap
+    from claudlobby.plane.owner_source import bind_source, inspect_source, SourceNeedsBinding
+    from claudlobby.plane.ids import read_host_uid
+    from tests.test_task_audit import _task
+
+    root, release, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    host_uid = read_host_uid(root / "state")
+    with sqlite3.connect(db_file(root)) as conn:
+        fleet = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet'").fetchone()[0]
+        _task(conn, "wi_history", fleet=fleet)
+        conn.execute("UPDATE work_items SET host_uid=?", (host_uid,))
+        identities = conn.execute("SELECT * FROM identity_registry ORDER BY uid").fetchall()
+    bind_source(root)
+    (root / ".env").write_text("EXAMPLE_SECRET=excluded\n")
+    (db_file(root).parent / "owner-access.db").write_bytes(b"excluded owner credentials")
+    (root / "runtime/bots/worker/memory").mkdir()
+    (root / "runtime/bots/worker/memory/private.md").write_text("separate owner backup needed")
+    frozen = (root / "fleet.yaml").read_bytes()
+    (root / "fleet.yaml").write_text("unactivated edit must not replace the selected configuration")
+    bundle = tmp_path / "backup"
+    manifest = create_backup(root, bundle)
+    from claudlobby.__main__ import main
+    assert main(["host", "backup", "inspect", str(bundle), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["command"] == "host.backup.inspect"
+    assert not any(".env" in name or "owner-access" in name or "runtime" in name for name in manifest["files"])
+    replacement = tmp_path / "r"  # Keep the existing activation socket under AF_UNIX's path limit.
+    replacement.mkdir()
+    restored = replacement / "data"
+    restore_backup(bundle, restored, replacing_retired_host=True)
+    assert (restored / "fleet.yaml").read_bytes() == frozen
+    assert not (restored / ".env").exists() and not (restored / "runtime").exists()
+    assert not (db_file(restored).parent / "owner-access.db").exists()
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(restored)
+    assert restored_bootstrap(restored, release)
+    # Reinstall the same fixture release at the new root and use the existing
+    # activation owner. Only native manager observations are authored here.
+    candidate = installed.__wrapped__(replacement)
+    new_root, new_release, new_plan, new_host = globals()["cold"].__wrapped__(candidate, monkeypatch, replacement)
+    record = activation.bootstrap_activation(new_root, "cold", new_plan.plan_id, new_host.directory, adapter=new_host)
+    assert record.status == "active" and read_migration(new_root, "cold")["manifest"]["database"]["initialize_empty"] is False
+    assert read_host_uid(new_root / "state") == host_uid
+    with sqlite3.connect(db_file(new_root)) as conn:
+        assert conn.execute("SELECT title FROM work_items WHERE work_item_id='wi_history'").fetchone() == ("Historical work",)
+        assert conn.execute("SELECT * FROM identity_registry ORDER BY uid").fetchall() == identities
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(new_root)
+
+
+def test_backup_refuses_config_drift_tamper_and_existing_restore_target(cold, tmp_path):
+    from claudlobby.host_backup import create_backup, inspect_backup, restore_backup
+    root, _, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    (root / "library").mkdir()
+    with pytest.raises(state.ActivationRefusal, match="configuration changed"):
+        create_backup(root, tmp_path / "changed")
+    assert not (tmp_path / "changed").exists()
+    (root / "library").rmdir()
+    bundle = tmp_path / "backup"
+    create_backup(root, bundle)
+    with pytest.raises(state.ActivationRefusal, match="retired host"):
+        restore_backup(bundle, tmp_path / "restored", replacing_retired_host=False)
+    with pytest.raises(state.ActivationRefusal, match="new absolute"):
+        restore_backup(bundle, root, replacing_retired_host=True)
+    (bundle / "configuration/fleet.yaml").write_text("tampered")
+    with pytest.raises(state.ActivationRefusal, match="digest"):
+        inspect_backup(bundle)
+
+
+def test_restored_activation_refuses_wrong_release_and_post_restore_writes(cold, tmp_path, capsys):
+    from claudlobby.host_backup import create_backup, restore_backup, restored_bootstrap
+    root, release, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    bundle, restored = tmp_path / "backup", tmp_path / "restored"
+    create_backup(root, bundle)
+    restore_backup(bundle, restored, replacing_retired_host=True)
+    with pytest.raises(state.ActivationRefusal, match="original release"):
+        restored_bootstrap(restored, SimpleNamespace(release_id="r-" + "0" * 64))
+    with sqlite3.connect(db_file(restored)) as conn:
+        conn.execute("CREATE TABLE unexpected_write(value)")
+    with pytest.raises(state.ActivationRefusal, match="changed before activation"):
+        restored_bootstrap(restored, release)
+    from claudlobby.__main__ import main
+    (restored / "state/restored-backup.json").write_text("corrupt")
+    assert main(["--root", str(restored), "host", "status", "--json"]) == 6
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "unavailable"
+    assert result["data"]["restored_backup"] == {"state": "unavailable"}
+
+
+@pytest.mark.parametrize("linked", ["fleet.yaml", "projects.yaml"])
+def test_backup_refuses_recorded_linked_configuration(tmp_path, linked):
+    from claudlobby.host_backup import _source_files
+    root = tmp_path / "host"
+    root.mkdir()
+    outside = tmp_path / "external.yaml"
+    outside.write_text("fleet: {name: example}\n")
+    for name in ("fleet.yaml", "projects.yaml"):
+        if name == linked:
+            (root / name).symlink_to(outside)
+        else:
+            (root / name).write_text("{}\n")
+    builder = ConfigPlanBuilder(root, "r-" + "0" * 64, "1" * 64, ("example",), effects={})
+    builder.effects["fleet_sources"] = {"example": {
+        key: {"path": str(root / name), "sha256": builder.input_content(root / name)}
+        for key, name in (("fleet", "fleet.yaml"), ("projects", "projects.yaml"))}}
+    with pytest.raises(state.ActivationRefusal, match="linked fleet or project"):
+        _source_files(builder.seal())
 
 
 @pytest.mark.parametrize("ready_kind", ["bridge-ready", "session-ready"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -83,6 +84,8 @@ def _run(code, *argv, tmp_path):
     (("fleet", "uptime", "--help"), "30d"),
     (("assignment", "deliver", "--help"), "--file"),
     (("request", "show", "--help"), "REQUEST_ID"),
+    (("task", "permission", "show", "--help"), "permission_id"),
+    (("task", "permission", "approve", "--help"), "--scope-sha256"),
     (("workstream", "open", "--help"), "--request-id"),
     (("checkin", "record", "--help"), "--selection-file"),
 ])
@@ -158,6 +161,16 @@ def test_converter_syntax_error_uses_public_result_without_echoing_values(tmp_pa
     assert "private-value" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("action", ["allow-nudges", "revoke-nudges", "allow-feedback", "revoke-feedback", "allow-permissions", "revoke-permissions"])
+def test_owner_nudge_syntax_error_names_exact_command_and_help(action, tmp_path):
+    result = _run(PARSE, "--json", "host", "owner", action, tmp_path=tmp_path)
+    assert result.returncode == 2 and result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["command"] == f"host.owner.{action}"
+    assert payload["error"]["code"] == "invalid_argument"
+    assert payload["error"]["hint"] == f"inspect claudlobby host owner {action} --help"
+
+
 def test_selected_import_failure_is_reported_by_common_result(tmp_path):
     result = _run("""
         from claudlobby.__main__ import main
@@ -179,3 +192,13 @@ def test_new_parser_modules_keep_domain_imports_lazy(argv, module, tmp_path):
         assert blocked == [module], blocked
     """, *argv, module, tmp_path=tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+def test_feedback_syntax_error_names_exact_command_and_required_selection(tmp_path):
+    result = _run(PARSE, '--json', 'task', 'feedback', 'private-task-value', tmp_path=tmp_path)
+    assert result.returncode == 2 and result.stderr == ''
+    payload = json.loads(result.stdout)
+    assert payload['command'] == 'task.feedback'
+    assert payload['error']['code'] == 'invalid_argument'
+    assert payload['error']['hint'] == 'inspect claudlobby task feedback --help'
+    assert 'private-task-value' not in result.stdout

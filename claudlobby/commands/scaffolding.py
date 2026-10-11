@@ -22,6 +22,7 @@ def cmd_new_bot(args):
                           interactive_collect, materialize_voice, render_stanza,
                           write_token_to_env)
     from ..paths import InvalidPathSelector
+    from .setup import _write_config
 
     if args.seed:
         raise CommandFailure("conflict", "seed fleet source cannot be edited")
@@ -125,7 +126,9 @@ def cmd_new_bot(args):
             materialize_voice(paths, inp.name, None, inp.voice_text)
         if inp.telegram_token:
             write_token_to_env(paths.env_file, inp.token_env, inp.telegram_token)
-        paths.fleet_yaml.write_text(new_text)
+        # A temporary file beside it, then a rename: a reader or a crash never
+        # meets a truncated manifest.
+        _write_config(paths.fleet_yaml, new_text.encode("utf-8"), replace=True)
     except OSError as exc:
         raise CommandFailure("unavailable", "bot source write did not complete; inspect authored files") from exc
     data["written"] = True

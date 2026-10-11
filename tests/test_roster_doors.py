@@ -59,7 +59,7 @@ def estate(tmp_path: Path) -> Path:
 
 
 def _strict_names(root: Path) -> list[str]:
-    out = _run(root, "declared_bots_strict /dev/null | cut -f1 | sort")
+    out = _run(root, "declared_bots_strict --bad-out /dev/null | cut -f1 | sort")
     return [ln for ln in out.stdout.split() if ln]
 
 
@@ -89,7 +89,7 @@ def test_strict_door_is_loud_where_the_soft_door_is_silent(estate: Path):
         f"four supervision scripts depend on it: {soft.stdout!r}"
     )
 
-    strict = _run(estate, 'declared_bots_strict /dev/null >/dev/null; echo "rc=$?"')
+    strict = _run(estate, 'declared_bots_strict --bad-out /dev/null >/dev/null; echo "rc=$?"')
     assert "rc=1" in strict.stdout, (
         f"declared_bots_strict must fail loudly on the same input: {strict.stdout!r}"
     )
@@ -99,7 +99,7 @@ def test_the_broken_manifest_is_named_not_merely_counted(estate: Path, tmp_path:
     broken = estate / "local" / "home" / "beta" / "fleet.yaml"
     broken.write_text("fleet:\n  name: beta\n")
     report = tmp_path / "bad.txt"
-    _run(estate, f'declared_bots_strict "{report}" >/dev/null')
+    _run(estate, f'declared_bots_strict --bad-out "{report}" >/dev/null')
     text = report.read_text()
     assert "beta/fleet.yaml" in text, text
     assert "bots:" in text, f"the reason must be stated, not just the path: {text!r}"
@@ -116,3 +116,34 @@ def test_a_partial_roster_is_still_emitted_so_the_caller_decides(estate: Path):
         "fleet:\n  name: beta\n"
     )
     assert _strict_names(estate) == ["one", "two"]
+
+
+def test_a_manifest_passed_as_argument_one_survives_and_the_call_fails(estate: Path):
+    """#1131: the helper finds every manifest itself and takes none.
+
+    Its one option names an OUTPUT for the broken-manifest lines, so a manifest
+    passed in that place, read as the thing to check, was emptied when every
+    manifest parsed and overwritten with diagnostics when one did not. Any
+    positional argument is refused, loudly, before anything is read or written.
+    """
+    manifest = estate / "local" / "home" / "alpha" / "fleet.yaml"
+    before = manifest.read_bytes()
+    out = _run(estate, f'declared_bots_strict "{manifest}"; echo "rc=$?"')
+    assert manifest.read_bytes() == before, "the manifest passed as argument 1 was rewritten"
+    assert out.stdout.splitlines()[-1:] == ["rc=2"], f"the call must fail: {out.stdout!r}"
+    assert "--bad-out" in out.stderr, f"the refusal must name the option: {out.stderr!r}"
+
+
+def test_the_bad_out_file_is_only_ever_appended_to(estate: Path, tmp_path: Path):
+    """An all-good run leaves FILE empty; a FILE that holds content is refused and kept."""
+    fresh = tmp_path / "fresh.txt"
+    out = _run(estate, f'declared_bots_strict --bad-out "{fresh}" >/dev/null; echo "rc=$?"')
+    assert out.stdout.strip() == "rc=0", out.stdout
+    assert fresh.read_bytes() == b""
+
+    kept = tmp_path / "kept.txt"
+    kept.write_text("a caller's file\n")
+    out = _run(estate, f'declared_bots_strict --bad-out "{kept}"; echo "rc=$?"')
+    assert out.stdout.strip() == "rc=2", f"a refusal emits no roster: {out.stdout!r}"
+    assert kept.read_text() == "a caller's file\n"
+    assert "holds content" in out.stderr, out.stderr

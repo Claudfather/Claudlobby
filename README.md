@@ -1,6 +1,6 @@
 # claudlobby
 
-A **compositor** for Claude Code agent fleets. One repo, one `fleet.yaml`, N bots — composed at runtime from a library of personas, skills, MCP fragments, guardrails, and protocols.
+A **compositor** for agent-CLI fleets (Claude Code today; Codex through #2149). One repo, one `fleet.yaml`, N bots — composed at runtime from a library of personas, skills, MCP fragments, guardrails, and protocols.
 
 ```
 library/  ← composable building blocks (sources of truth, in git)
@@ -9,7 +9,7 @@ fleet.yaml ← the recipe (which bots, which pieces, which Telegram groups)
 runtime/  ← what gets generated (gitignored)
 ```
 
-Runs anywhere Claude Code does: Mac mini, Linux box, Raspberry Pi 5.
+Runs anywhere the composed CLI does: Mac mini, Linux box, Raspberry Pi 5.
 
 ## Why a compositor
 

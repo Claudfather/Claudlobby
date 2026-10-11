@@ -392,6 +392,7 @@ class TestGrantUnion:
                 "bot create new", "library create skill new", "fleet setup new", "fleet move other",
                 "config plan", "config diff plan", "migration apply plan", "plane emit --file request.json",
                 "plane emit-batch --file request.json", "_task-recheck-tick",
+                "host owner initialize", "host owner confirm", "host owner revoke", "host owner status",
             )
             patterns = [rule[5:-1] for rule in allow if rule.startswith("Bash(") and rule.endswith(")")]
             for command in operator_commands:
@@ -412,6 +413,7 @@ class TestGrantUnion:
                     "Bash(claudlobby --json bot start worker-1)",
                     "Bash(claudlobby --json bot stop worker-1)",
                     "Bash(claudlobby --json bot restart worker-1)",
+                    "Bash(claudlobby --json bot stop worker-1 --reason *)",
                     "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
                 }
             else:
@@ -811,6 +813,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot start worker-1)",
         "Bash(claudlobby --json bot stop worker-1)",
         "Bash(claudlobby --json bot restart worker-1)",
+        "Bash(claudlobby --json bot stop worker-1 --reason *)",
         "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
         "Bash(claudlobby --json bot session lead)",
         "Bash(claudlobby --json bot logs lead)",

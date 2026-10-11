@@ -67,6 +67,44 @@ _RENOTIFY_AFTER_S="${FLEET_PULSE_RENOTIFY_AFTER_S:-21600}"  # 6h
 # keepalive re-stamps data/.held on every HELD tick (one a minute), so a marker
 # older than five ticks means keepalive stopped seeing a held box (#2070).
 _HELD_FRESH_S=300
+# A bot stopped on purpose gets a reminder, never a page (#2243 F5): one push to
+# its manager once it has been stopped this many days, then one every as many
+# days again. 0 turns the reminder off.
+_STOPPED_REMIND_DAYS="${FLEET_PULSE_STOPPED_REMIND_DAYS:-3}"
+case "$_STOPPED_REMIND_DAYS" in ''|*[!0-9]*) _STOPPED_REMIND_DAYS=3 ;; esac
+# A stop record beside an installed unit is left from a stop that is over
+# (#2243): the unit came back through a door that does not clear the record
+# (spin-up-bot.sh, reconcile-fleet.sh --enroll, a hand install), a start or a
+# stop failed partway, or bot start could not remove it. Left there, it would
+# keep a later loss of the unit silent, so a sweep removes a record that has
+# sat beside an installed unit this long. The stop door writes its record just
+# before it removes the unit file, which takes seconds (the unit's stop
+# timeout bounds it), so no stop in progress is this old.
+_STOP_RECORD_STALE_S=900
+
+# _stop_record_read <bot_dir>: the stop door's record of a deliberate stop
+# (#2243), into _STOP_EPOCH and _STOP_BY; rc 1 when there is none. `bot stop`
+# writes it as one JSON line (claudlobby/stop_record.py) and holds the caller to
+# a plain alias, so two seds read it. A record that cannot be read still counts:
+# its presence is what says the stop was meant, and the file's own time stands
+# in for the stamp it lost.
+_stop_record_read() {
+    local record="$1/data/.stopped" line=""
+    _STOP_EPOCH=""; _STOP_BY=""
+    [ -f "$record" ] || return 1
+    line=$(head -n 1 "$record" 2>/dev/null) || line=""
+    # At most 12 digits, so no sum below can overflow: a longer stamp is one
+    # that cannot be read, and the file's own time stands in for it.
+    _STOP_EPOCH=$(printf '%s' "$line" | sed -n 's|.*"stopped_epoch": *\([0-9]\{1,12\}\)[^0-9].*|\1|p')
+    _STOP_BY=$(printf '%s' "$line" | sed -n 's|.*"by": *"\([A-Za-z0-9:/._@-]*\)".*|\1|p')
+    [ -n "$_STOP_EPOCH" ] || _STOP_EPOCH=$(stat_mtime "$record" 2>/dev/null || date +%s)
+    # Base 10 whatever its zeros. Bash reads a leading 0 as octal, where an 08
+    # is an error that ends the whole bot loop: every later bot goes unjudged
+    # and the sweep still exits 0. The stop door never writes one; a hand can.
+    _STOP_EPOCH=$(( 10#$_STOP_EPOCH ))
+    [ -n "$_STOP_BY" ] || _STOP_BY=unknown
+    return 0
+}
 
 # Dispatch watchdog inputs: the plane, through the matcher (F18 R2a) — no
 # ledger files; a matcher that cannot reach the plane refuses, and the
@@ -474,6 +512,89 @@ for bot_dir in "$BOTS_DIR"/*/; do
         _pane_buf=$(bot_tmux "$_bot_socket" capture-pane -t "$session_name" -p 2>/dev/null || true)
     fi
 
+    # --- No installed unit: stopped on purpose, or a unit gone missing (#2243) ---
+    # The unit file is the framework's fact that a bot is stopped: activation,
+    # keepalive and reconcile read it, through svc_is_registered here. The stop
+    # door's record says whether that stop was meant. A recorded stop is silent:
+    # no supervision row, no push, no escalation, and a reminder only once it is
+    # old (F5). No unit file and no record is its own fault, unit_missing: a unit
+    # lost with nobody having stopped it (a botched disenroll, a broken
+    # activation, a deleted unit directory). It records one row a sweep, so the
+    # escalation counts it, and pushes once an episode, in place of the
+    # service_down and session_missing such a bot raised: two alerts, one fault.
+    # A bot with no service configured has no unit to lose; Check 1 keeps it.
+    # Only where the adapter knows the unit file (svc_is_registered answers 1 on
+    # any other OS, which would read every bot as missing its unit).
+    # A record beside an installed unit is from a stop that is over once it is
+    # older than any stop takes (_STOP_RECORD_STALE_S): it is removed, so the
+    # only record the branch above ever reads is one made since the unit went.
+    # One the sweep cannot remove is pushed until it is gone.
+    _stopped=0
+    _unit_missing=0
+    _record_kept=0
+    if [ -n "$BOT_SERVICE" ] && { [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; }; then
+        if ! svc_is_registered "$bot_dir" "$BOT_SERVICE"; then
+            if _stop_record_read "$bot_dir"; then
+                _stopped=1
+            else
+                _unit_missing=1
+            fi
+        elif _stop_record_read "$bot_dir" \
+            && [ $(( $(date +%s) - _STOP_EPOCH )) -ge "$_STOP_RECORD_STALE_S" ]; then
+            if rm -f -- "$bot_dir/data/.stopped" 2>/dev/null; then
+                echo "fleet-pulse: $bot_id: removed the stop record of $(epoch_to_iso_utc "$_STOP_EPOCH" || true) by $_STOP_BY: its unit is installed again" >&2
+            else
+                _record_kept=1
+            fi
+        fi
+    fi
+    # Checks 0 to 2 judge an installed unit, so neither case reaches them.
+    _svc_checked=0
+    if [ -n "$BOT_SERVICE" ] && [ "$_stopped" -eq 0 ] && [ "$_unit_missing" -eq 0 ]; then
+        _svc_checked=1
+    fi
+    if [ "$_stopped" -eq 1 ]; then
+        # Nothing about its supervision is a fault now: close what was open, so
+        # a start that brings the unit back opens fresh episodes.
+        for _ep in session_alerted service_alerted crashloop_alerted unit_alerted; do
+            debounce_clear "$state_dir" "$bot_id" "$_ep"
+        done
+        if [ "$_session_alive" -eq 0 ]; then
+            for _ep in bridge_alerted activity_alerted held_alerted limit_alerted; do
+                debounce_clear "$state_dir" "$bot_id" "$_ep"
+            done
+        fi
+        if [ "$_STOPPED_REMIND_DAYS" -gt 0 ]; then
+            _remind_s=$(( _STOPPED_REMIND_DAYS * 86400 ))
+            _stopped_for=$(( $(date +%s) - _STOP_EPOCH ))
+            if [ "$_stopped_for" -ge "$_remind_s" ]; then
+                debounce_notify "$state_dir" "$bot_id" "stopped_reminded" _notify_current_bot \
+                    "$bot_id stopped — on purpose since $(epoch_to_iso_utc "$_STOP_EPOCH" || true) by $_STOP_BY, $(( _stopped_for / 86400 )) days ago. A reminder, not an outage: if it should run again, the manager runs claudlobby --json bot start $bot_id." "$_mgr_token" "$_remind_s"
+            fi
+        fi
+    else
+        debounce_clear "$state_dir" "$bot_id" "stopped_reminded"
+    fi
+    if [ "$_unit_missing" -eq 1 ]; then
+        # one cause now: the episodes of the causes it replaces close
+        for _ep in session_alerted service_alerted crashloop_alerted; do
+            debounce_clear "$state_dir" "$bot_id" "$_ep"
+        done
+        _um_session=missing
+        if [ "$_session_alive" -eq 1 ]; then _um_session=up; fi
+        emit_fleet_event "unit_missing" "pulse" '{"unit":"'"$BOT_SERVICE"'","session":"'"$_um_session"'"}' "$bot_dir" "$bot_id"
+        debounce_notify "$state_dir" "$bot_id" "unit_alerted" _notify_current_bot \
+            "$bot_id unit_missing — unit '$BOT_SERVICE' is not installed and no stop was recorded (session $_um_session). If it should run, the manager runs claudlobby --json bot start $bot_id; if it was stopped on purpose, claudlobby --json bot stop $bot_id records that." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+    else
+        debounce_clear "$state_dir" "$bot_id" "unit_alerted"
+    fi
+    if [ "$_record_kept" -eq 1 ]; then
+        debounce_notify "$state_dir" "$bot_id" "stop_record_alerted" _notify_current_bot \
+            "$bot_id stop_record_kept — unit '$BOT_SERVICE' is installed again, but the record of its stop at $(epoch_to_iso_utc "$_STOP_EPOCH" || true) by $_STOP_BY could not be removed: $bot_dir/data/.stopped. Remove it: while it stays, a loss of this unit reads as a deliberate stop and pages no one." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+    else
+        debounce_clear "$state_dir" "$bot_id" "stop_record_alerted"
+    fi
+
     # --- Boot gate: is this bot's supervised start still in flight? ---
     # A bot whose unit is mid-start has no tmux session and no active unit YET,
     # which is indistinguishable from a dead one by state alone — so Checks 1
@@ -495,13 +616,22 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # the shared fact (keepalive reads it too, and draws a different action).
     _svc_crashloop=0
     _svc_loop_verdict=""
-    if [ -n "$BOT_SERVICE" ]; then
+    if [ "$_svc_checked" -eq 1 ]; then
         service_is_crash_looping "$BOT_SERVICE" && _svc_crashloop=1
         _svc_loop_verdict=$CRASH_LOOP_VERDICT
     fi
     _svc_starting=0
-    if [ "$_svc_crashloop" -eq 0 ] && [ -n "$BOT_SERVICE" ] && service_is_starting "$BOT_SERVICE"; then
+    if [ "$_svc_crashloop" -eq 0 ] && [ "$_svc_checked" -eq 1 ] && service_is_starting "$BOT_SERVICE"; then
         _svc_starting=1
+    fi
+    # Whether the unit is down, read once for Checks 1 and 2 (#2243 F6): a down
+    # unit is ONE fault, which service_down says, carrying the session's state.
+    # session_missing is for a session gone under an active unit (the case
+    # keepalive heals) or on a bot with no service configured.
+    _svc_down=0
+    if [ "$_svc_checked" -eq 1 ] && [ "$_svc_starting" -eq 0 ] && [ "$_svc_crashloop" -eq 0 ] \
+        && ! service_is_active "$BOT_SERVICE"; then
+        _svc_down=1
     fi
 
     # --- Check 0: crash loop (#1769) ---
@@ -524,28 +654,39 @@ for bot_dir in "$BOTS_DIR"/*/; do
         : # boot in flight — the session is expected to be absent
     elif [ "$_svc_crashloop" -eq 1 ]; then
         : # crash loop — Check 0 owns this bot's verdict
-    elif [ "$_session_alive" -eq 0 ]; then
+    elif [ "$_stopped" -eq 1 ] || [ "$_unit_missing" -eq 1 ]; then
+        : # no installed unit — stopped on purpose, or unit_missing above (#2243)
+    elif [ "$_session_alive" -eq 1 ]; then
+        debounce_clear "$state_dir" "$bot_id" "session_alerted"
+    elif [ "$_svc_down" -eq 1 ]; then
+        # the unit is down — Check 2's service_down carries the session (#2243),
+        # and a session gone again under a unit back up is a new episode
+        debounce_clear "$state_dir" "$bot_id" "session_alerted"
+    else
         emit_fleet_event "session_missing" "pulse" '{"session":"'"$session_name"'"}' "$bot_dir" "$bot_id"
         debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
             "$bot_id session_missing — tmux session '$session_name' is gone" "$_mgr_token" "$_RENOTIFY_AFTER_S"
-    else
-        debounce_clear "$state_dir" "$bot_id" "session_alerted"
     fi
 
     # --- Check 2: supervised service state (systemd on Linux, launchd on macOS) ---
     # Liveness via service_is_active (the OS dispatch lives there). The payload
     # state string stays per-OS: systemd exposes ActiveState; launchd print has no
     # cheap sub-state, so a confirmed-down job is labeled not-loaded.
-    if [ -n "$BOT_SERVICE" ] && [ "$_svc_starting" -eq 0 ] && [ "$_svc_crashloop" -eq 0 ]; then
-        if ! service_is_active "$BOT_SERVICE"; then
+    if [ "$_svc_checked" -eq 1 ] && [ "$_svc_starting" -eq 0 ] && [ "$_svc_crashloop" -eq 0 ]; then
+        if [ "$_svc_down" -eq 1 ]; then
             if [ "$_OS" = "Darwin" ]; then
                 state="not-loaded"
             else
                 state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
             fi
-            emit_fleet_event "service_down" "pulse" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}' "$bot_dir" "$bot_id"
+            if [ "$_session_alive" -eq 1 ]; then
+                _sd_session=up; _sd_text="tmux session '$session_name' is up"
+            else
+                _sd_session=missing; _sd_text="tmux session '$session_name' is gone"
+            fi
+            emit_fleet_event "service_down" "pulse" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'","session":"'"$_sd_session"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "service_alerted" _notify_current_bot \
-                "$bot_id service_down — unit '$BOT_SERVICE' state=$state" "$_mgr_token" "$_RENOTIFY_AFTER_S"
+                "$bot_id service_down — unit '$BOT_SERVICE' state=$state; $_sd_text" "$_mgr_token" "$_RENOTIFY_AFTER_S"
         else
             debounce_clear "$state_dir" "$bot_id" "service_alerted"
         fi
@@ -656,8 +797,12 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # (a stale one says nothing about the box now), and only once it has held
     # for the threshold, since a send in flight holds its text for a moment.
     held_marker="$bot_dir/data/.held"
+    # A bot stopped on purpose, with no session, has no turn to be stuck in: its
+    # markers stopped at the stop, and reading them would call the stop a hang.
+    _no_turn=0
+    if [ "$_stopped" -eq 1 ] && [ "$_session_alive" -eq 0 ]; then _no_turn=1; fi
     _held=0
-    if [ -f "$held_marker" ] \
+    if [ "$_no_turn" -eq 0 ] && [ -f "$held_marker" ] \
         && marker_age_within "$held_marker" "$_HELD_FRESH_S" \
         && { [ ! -f "$marker" ] || marker_is_newer "$held_marker" "$marker"; }; then
         _held=1
@@ -678,7 +823,66 @@ for bot_dir in "$BOTS_DIR"/*/; do
     else
         debounce_clear "$state_dir" "$bot_id" "held_alerted"
     fi
-    if [ "$_held" = 0 ] && [ -f "$marker" ]; then
+    # #996: keepalive writes data/.limit while a claude.ai usage limit holds the
+    # bot (its LIMIT verdict: the bot's own StopFailure record, and the limit
+    # still its last word on screen), re-stamped every tick. Held is expected
+    # until the reset; still held a while after it, with no tool call since, is
+    # the outage #996 lost hours to, which read as idle and paged nobody. So it
+    # pages usage_limit_held, naming the limit, its reset and the remedy, in
+    # place of activity_stuck. The while: the printed minute, plus 60 s (the
+    # print drops the seconds), plus keepalive's resume grace, plus
+    # OBSERVABILITY_USAGE_LIMIT_SLACK_S (default 300 s) for that resume to
+    # land. A reset the reader could not parse pages after the activity_stuck
+    # threshold instead, counted from the first tick that saw the limit.
+    limit_marker="$bot_dir/data/.limit"
+    _limited=0
+    if [ "$_no_turn" -eq 0 ] && [ -f "$limit_marker" ] \
+        && marker_age_within "$limit_marker" "$_HELD_FRESH_S" \
+        && { [ ! -f "$marker" ] || marker_is_newer "$limit_marker" "$marker"; }; then
+        _limited=1
+    fi
+    if [ "$_limited" = 1 ]; then
+        debounce_clear "$state_dir" "$bot_id" "activity_alerted"
+        _l_first="" _l_reset="" _l_screen="" _l_name="" _l_text=""
+        { read -r _l_first _l_reset _l_screen _; read -r _l_name; read -r _l_text; } 2>/dev/null < "$limit_marker" || true
+        now_epoch=$(date +%s)
+        case "$_l_first" in ''|*[!0-9]*) _l_first=$now_epoch ;; esac
+        case "$_l_reset" in
+            ''|*[!0-9]*)
+                _l_reset=null
+                _l_stuck=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
+                case "$_l_stuck" in ''|*[!0-9]*) _l_stuck=1800 ;; esac
+                _l_due=$(( _l_first + _l_stuck ))
+                ;;
+            *)
+                _l_grace=$(bot_conf_get "$bot_dir" KEEPALIVE_LIMIT_RESUME_GRACE_S 120)
+                case "$_l_grace" in ''|*[!0-9]*) _l_grace=120 ;; esac
+                _l_slack=$(bot_conf_get "$bot_dir" OBSERVABILITY_USAGE_LIMIT_SLACK_S 300)
+                case "$_l_slack" in ''|*[!0-9]*) _l_slack=300 ;; esac
+                _l_due=$(( _l_reset + 60 + _l_grace + _l_slack ))
+                ;;
+        esac
+        if [ "$now_epoch" -ge "$_l_due" ]; then
+            _l_resume=off
+            [ "$(bot_conf_get "$bot_dir" KEEPALIVE_LIMIT_RESUME_ENABLED 0)" = 1 ] && _l_resume=armed
+            _l_done=""
+            read -r _l_done _ _ 2>/dev/null < "$bot_dir/data/.limit-resumed" || true
+            [ -n "$_l_done" ] && [ "$_l_done" = "$_l_reset" ] && _l_resume=tried
+            emit_fleet_event "usage_limit_held" "pulse" \
+                '{"since_epoch":'"$_l_first"',"reset_epoch":'"$_l_reset"',"screen":"'"$(json_escape "$_l_screen")"'","limit":"'"$(json_escape "$_l_name")"'","reset":"'"$(json_escape "$_l_text")"'","resume":"'"$_l_resume"'"}' \
+                "$bot_dir" "$bot_id"
+            case "$_l_resume" in
+                tried) _l_remedy="keepalive already resumed it once for this reset and it is held again: look at its pane before sending anything more" ;;
+                armed) _l_remedy="keepalive's resume has not landed (see its keepalive.log): send it any prompt" ;;
+                *) _l_remedy="send it any prompt (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env lets keepalive do this once per limit)" ;;
+            esac
+            debounce_notify "$state_dir" "$bot_id" "limit_alerted" _notify_current_bot \
+                "$bot_id usage_limit_held — stopped by a usage limit (${_l_name:-limit}) since $(epoch_to_iso_utc "$_l_first"); it resets ${_l_text:-at a time keepalive could not read}, and the bot has not resumed. Remedy: $_l_remedy. If a menu is up, choose \"Stop and wait for limit to reset\" by its label, never usage credits. No restart is needed." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+        fi
+    else
+        debounce_clear "$state_dir" "$bot_id" "limit_alerted"
+    fi
+    if [ "$_held" = 0 ] && [ "$_limited" = 0 ] && [ "$_no_turn" -eq 0 ] && [ -f "$marker" ]; then
         # If idle marker is newer than tool-call marker, bot is idle — skip
         if ! marker_is_newer "$idle_marker" "$marker"; then
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
@@ -846,8 +1050,8 @@ _rb_cache=$(safe_mktemp)     # the summary's read-back span
 # The summary's ALERTS column is one line per bot: the state of its session,
 # unit, bridge and pane. overdue_dispatch is a task's state rather than the
 # bot's (the manager push carries it), and script_error is left out too.
-_CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout crash_loop"
-_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck input_held rc_timeout crash_loop"
+_CRITICAL_ESCALATION_TYPES="service_down session_missing unit_missing bridge_down rc_timeout crash_loop"
+_CRITICAL_SUMMARY_TYPES="session_missing service_down unit_missing bridge_down activity_stuck input_held usage_limit_held rc_timeout crash_loop"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
@@ -1029,6 +1233,12 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
         if _events_readable; then
             _plane_critical "$_window_start" "$_esc_cache" && _esc_ok=1
         fi
+        # Every cause over its threshold in this sweep goes out as ONE message
+        # (#2243 F7 b): a fleet-wide fault shows on several causes at once, and
+        # a page per cause read as several outages. Each cause keeps its own
+        # debounce marker, so what a repeat says is still per cause (#1089).
+        _esc_fire_types=""
+        _esc_fire_parts=""
         for _crit_type in $_CRITICAL_ESCALATION_TYPES; do
             _affected_bots=""
             _affected_count=0
@@ -1053,33 +1263,39 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     [ "$_marker_age" -lt 600 ] && _should_fire=0
                 fi
                 if [ "$_should_fire" -eq 1 ]; then
-                    _msg="FLEET ALERT: $_crit_type on ${_affected_count} bots (${_affected_bots# }). Check ${fleet} fleet health immediately."
-                    _esc_rc=0
-                    _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
-                    TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
-                    TELEGRAM_BOT_TOKEN="${_ESCALATION_TOKEN:-}" \
-                        "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
-                    if [ "$_esc_rc" -eq 0 ]; then
-                        touch "$_esc_marker"
-                    else
-                        # DO NOT touch the marker. It is what suppresses re-firing
-                        # for the whole debounce window, so touching it on failure
-                        # means a send that reached nobody buys itself silence --
-                        # and the condition is never raised again while it lasts.
-                        # Leaving it absent makes the next pass retry, which is the
-                        # only rung here that repairs itself once a token is fixed.
-                        printf '%s ALERT-DELIVERY-FAILED escalation %s: tg-post exit %s (%s) -- debounce marker NOT set, will retry next pass\n' \
-                            "$(ts_iso)" "$_crit_type" "$_esc_rc" "$(printf '%s' "$_esc_err" | tr '\n' ' ' | cut -c1-200)" >&2
-                        emit_fleet_event "alert_delivery_failed" "pulse" \
-                            "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"debounced":false}' \
-                                "$(json_escape "$_crit_type")" "$_esc_rc")" "" fleet
-                    fi
+                    _esc_fire_types="$_esc_fire_types $_crit_type"
+                    _esc_fire_parts="${_esc_fire_parts:+$_esc_fire_parts; }$_crit_type on ${_affected_count} bots (${_affected_bots# })"
                 fi
             else
                 # Condition cleared — remove debounce marker
                 rm -f "$_esc_marker" 2>/dev/null || true
             fi
         done
+        if [ -n "$_esc_fire_types" ]; then
+            _msg="FLEET ALERT: ${_esc_fire_parts}. Check ${fleet} fleet health immediately."
+            _esc_rc=0
+            _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
+            TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+            TELEGRAM_BOT_TOKEN="${_ESCALATION_TOKEN:-}" \
+                "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
+            for _crit_type in $_esc_fire_types; do
+                if [ "$_esc_rc" -eq 0 ]; then
+                    touch "$state_dir/${fleet}.escalation_${_crit_type}"
+                else
+                    # DO NOT touch the marker. It is what suppresses re-firing
+                    # for the whole debounce window, so touching it on failure
+                    # means a send that reached nobody buys itself silence --
+                    # and the condition is never raised again while it lasts.
+                    # Leaving it absent makes the next pass retry, which is the
+                    # only rung here that repairs itself once a token is fixed.
+                    printf '%s ALERT-DELIVERY-FAILED escalation %s: tg-post exit %s (%s) -- debounce marker NOT set, will retry next pass\n' \
+                        "$(ts_iso)" "$_crit_type" "$_esc_rc" "$(printf '%s' "$_esc_err" | tr '\n' ' ' | cut -c1-200)" >&2
+                    emit_fleet_event "alert_delivery_failed" "pulse" \
+                        "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"debounced":false}' \
+                            "$(json_escape "$_crit_type")" "$_esc_rc")" "" fleet
+                fi
+            done
+        fi
     fi
 fi
 
@@ -1107,7 +1323,20 @@ _summary_tmp=$(safe_mktemp)
         # be probed as a unit.
         _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "")
         _s_svc_status="ok"
-        if [ -n "$_s_svc" ] && ! service_is_active "$_s_svc"; then
+        # No installed unit, by the main loop's two facts (#2243): stopped on
+        # purpose, its own column value in both columns, or unit-missing.
+        _s_stopped=0
+        if [ -n "$_s_svc" ] && { [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; } \
+            && ! svc_is_registered "$_s_bot_dir" "$_s_svc"; then
+            if _stop_record_read "$_s_bot_dir"; then
+                _s_stopped=1
+                _s_svc_status="stopped"
+                [ "$_s_session_status" = "DOWN" ] && _s_session_status="stopped"
+            else
+                _s_svc_status="unit-missing"
+            fi
+            _s_svc=""          # no unit to probe below
+        elif [ -n "$_s_svc" ] && ! service_is_active "$_s_svc"; then
             _s_svc_status="DOWN"
         fi
         # Same boot gate as the main loop, for the same reason and by the same
@@ -1128,7 +1357,11 @@ _summary_tmp=$(safe_mktemp)
         fi
 
         _s_alerts=""
-        if _events_readable; then
+        if [ "$_s_stopped" -eq 1 ]; then
+            # Stopped on purpose is the bot's whole state: the stop door's
+            # record says since when and by whom (#2243 F8).
+            _s_alerts=" stopped since $(epoch_to_iso_utc "$_STOP_EPOCH" || true) by $_STOP_BY"
+        elif _events_readable; then
             # ONE read for the whole summary (the read-back span), on the first bot
             if [ -z "${_rb_read:-}" ]; then
                 _rb_read=1; _rb_ok=0
@@ -1140,7 +1373,7 @@ _summary_tmp=$(safe_mktemp)
                 done
             fi
         fi
-        if [ "$_EVENTS_SOURCE" = unreachable ]; then
+        if [ "$_EVENTS_SOURCE" = unreachable ] && [ "$_s_stopped" -eq 0 ]; then
             _s_alerts=" unknown (events reader unreachable)"    # never "none": an outage is not a quiet bot
         fi
         # A refused overdue reader (rc 3, the plane unreachable or holding no

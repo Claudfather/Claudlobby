@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.stand_in_fixtures import NODE, make_stand_ins
+
 LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # The Linux ownership read uses /proc/<pid>/environ; the macOS branch uses
@@ -100,16 +102,12 @@ def _write_bot_conf(bot_dir: Path, *, handle="b1", state_dir=None, token_env=Non
 
 
 def _fake_bins(tmp_path: Path) -> Path:
-    """Copies of bash named `bun` and `claude` so /proc/<pid>/comm reads as such."""
+    """bash under the names `bun` and `claude`, so /proc/<pid>/comm reads as such."""
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     bash = shutil.which("bash")
     assert bash, "bash not found"
-    for name in ("bun", "claude"):
-        dst = bindir / name
-        shutil.copy(bash, dst)
-        os.chmod(dst, 0o755)
-    return bindir
+    return make_stand_ins(bindir, bash)
 
 
 def _wait_pidfile(pidfile: Path):
@@ -374,8 +372,9 @@ def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path, force_os
 #
 # Two obstacles had to be cleared to test natively:
 #
-#   1. _fake_bins copies /bin/bash. macOS SIGKILLs (exit 137) copies of
-#      Apple-signed binaries, so nothing spawns there. A copy of homebrew
+#   1. _fake_bins stands in for /bin/bash, and off Linux a stand-in is a
+#      copy (tests/stand_in_fixtures.py). macOS SIGKILLs (exit 137) copies
+#      of Apple-signed binaries, so nothing spawns there. A copy of homebrew
 #      python3 runs, but python3 re-execs the framework binary, so `comm`
 #      reports .../Python and can never impersonate bun/claude. node is a
 #      standalone binary whose copy reports its own path — and node is already
@@ -387,27 +386,13 @@ def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path, force_os
 #      FINAL field. The lineage walk asks for `ppid=,comm=`, where comm IS final
 #      and therefore arrives intact; only the executable guard was affected.
 
-_NODE = shutil.which("node")
+# The `bun`/`claude` stand-ins are node, from tests/conftest.py's session
+# fixture `native_stand_ins`: they run natively AND report their own path as
+# `comm` (the note above says why bash and python3 cannot be used), and one
+# set serves every native case.
 requires_node = pytest.mark.skipif(
-    _NODE is None, reason="native live-bridge fixture needs node (a claudlobby prereq)"
+    NODE is None, reason="native live-bridge fixture needs node (a claudlobby prereq)"
 )
-
-
-def _fake_bins_native(tmp_path: Path) -> Path:
-    """`bun`/`claude` stand-ins that run natively AND report their own path as
-    `comm` — see the note above for why bash and python3 cannot be used."""
-    bindir = tmp_path / "nbin"
-    bindir.mkdir(parents=True, exist_ok=True)
-    for name in ("bun", "claude"):
-        dst = bindir / name
-        shutil.copy(_NODE, dst)
-        os.chmod(dst, 0o755)
-    # Homebrew Node may load libnode through an executable-relative rpath.
-    # Preserve that runtime dependency without editing the copied executable.
-    source_lib = Path(_NODE).resolve().parent.parent / "lib"
-    for library in source_lib.glob("libnode*.dylib"):
-        (bindir / library.name).symlink_to(library)
-    return bindir
 
 
 def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
@@ -421,18 +406,21 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
     state_dir.mkdir(parents=True, exist_ok=True)
     bun, claude = bindir / "bun", bindir / "claude"
     pidfile = state_dir / "bot.pid"
+    # The stand-ins are shared by the session; this case's scripts go beside
+    # its state.
+    scripts = state_dir.parent
 
-    leaf = bindir / "leaf.js"
+    leaf = scripts / "leaf.js"
     leaf.write_text(leaf_source if leaf_source is not None else
         "require('fs').writeFileSync(%r, String(process.pid));\n"
         "setTimeout(() => {}, 60000);\n" % str(pidfile)
     )
-    wrapper = bindir / "wrapper.js"
+    wrapper = scripts / "wrapper.js"
     wrapper.write_text(
         "require('child_process').spawnSync(%r, [%r, 'server.ts'], "
         "{stdio: 'inherit'});\n" % (str(bun), str(leaf))
     )
-    tree = bindir / "tree.js"
+    tree = scripts / "tree.js"
     tree.write_text(
         "require('child_process').spawnSync(%r, [%r, 'start'], "
         "{stdio: 'inherit'});\n" % (str(bun), str(wrapper))
@@ -453,7 +441,8 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
 
 @requires_node
 @pytest.mark.parametrize("failure", ["no-pidfile", "early-exit", "pre-yield"])
-def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure):
+def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure,
+                                                  native_stand_ins):
     processes = []
     real_popen = subprocess.Popen
     observed = tmp_path / "observed.pid"
@@ -480,7 +469,7 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure
     monkeypatch.setattr(subprocess, "Popen", capture)
     try:
         with pytest.raises(AssertionError, match=expected_failure):
-            _spawn_bridge_native(_fake_bins_native(tmp_path), tmp_path / "state",
+            _spawn_bridge_native(native_stand_ins, tmp_path / "state",
                                  leaf_source=leaf_source)
         assert observed.exists(), "fixture failed before its leaf process executed"
         if failure == "pre-yield":
@@ -503,7 +492,7 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure
 
 
 @requires_node
-def test_native_host_long_exec_path_reads_up(tmp_path):
+def test_native_host_long_exec_path_reads_up(tmp_path, native_stand_ins):
     """A healthy, owned poller with a long exec path must read `up` on THIS
     host — the regression gate for #973.
 
@@ -512,7 +501,7 @@ def test_native_host_long_exec_path_reads_up(tmp_path):
     forever and keepalive could never heal what was not broken. The assertion
     message reports the host's own comm split so a future failure self-explains.
     """
-    bindir = _fake_bins_native(tmp_path)
+    bindir = native_stand_ins
     sd = tmp_path / "state"
     bot = tmp_path / "bots" / "b1"
     _write_bot_conf(bot, handle="b1", state_dir=sd, token_env="B1_TG_TOKEN")

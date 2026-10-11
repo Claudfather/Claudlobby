@@ -39,7 +39,7 @@ MGR_SOCK="rhpm$$"
 MGR="mgr$$"
 BOTS="$ROOT/local/$FLEET/runtime/bots"
 export TMUX_TMPDIR="$ROOT/tmx"
-mkdir -p "$TMUX_TMPDIR" "$BOTS/w1"
+mkdir -p "$TMUX_TMPDIR" "$BOTS/w1" "$BOTS/w2"
 
 pass=0; fail=0
 check () { # <label> <expected> <actual>
@@ -52,13 +52,20 @@ cleanup () {
 }
 trap cleanup EXIT
 
-# A worker with no tmux session and no real unit: every sweep raises two alerts
-# for it, session_missing and service_down, and pushes both to the one manager.
+# Two workers, one alert each every sweep, both pushed to the one manager: w1
+# names a service with no installed unit and no stop record (unit_missing), and
+# w2 has no service and no tmux session (session_missing). One worker gave two
+# alerts here before #2243, from one fault; that fault is one alert now.
 cat > "$BOTS/w1/bot.conf" <<EOF
 export MANAGER_TMUX=$MGR
 export MANAGER_TMUX_SOCKET=$MGR_SOCK
 export TMUX_SOCKET=rhpw$$
 export BOT_SERVICE=rhpw$$
+EOF
+cat > "$BOTS/w2/bot.conf" <<EOF
+export MANAGER_TMUX=$MGR
+export MANAGER_TMUX_SOCKET=$MGR_SOCK
+export TMUX_SOCKET=rhpv$$
 EOF
 
 start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$STUB $*"; }
@@ -82,7 +89,7 @@ manager_box ()   {
 push_count ()    { printf '%s' "$(mgr_pane)" | grep -c "\\[FLEET-PULSE\\].*$1" || true; }
 # The debounce marker is the window: present, the alert stays quiet until the
 # re-notify age; absent, the next sweep fires it again.
-window ()        { if [ -f "$ROOT/state/pulse/w1.$1" ]; then echo closed; else echo open; fi; }
+window ()        { if [ -f "$ROOT/state/pulse/$1.$2" ]; then echo closed; else echo open; fi; }
 # Each push that waited out the shown budget says so on the sweep's stderr.
 waits ()         { grep -c "never showed the typed payload" "$ROOT/pulse.log" || true; }
 
@@ -133,7 +140,7 @@ run_pulse
 check "a held box gets no copy of an alert" 0 "$(push_count session_missing)"
 check "a held box gets no Enter: its text is still in it" "> a reply being typed" "$(box_line)"
 check "both alerts are skipped, not typed" 2 "$(held_skips)"
-check "a skipped push leaves session_missing's window open" open "$(window session_alerted)"
+check "a skipped push leaves session_missing's window open" open "$(window w2 session_alerted)"
 check "the alert is still recorded for the escalation" 1 "$(( $(recorded session_missing) - seen ))"
 
 echo "--- 2. the box takes no input: one wait, then the floor ---"
@@ -143,8 +150,8 @@ check "the deaf manager is up and shows its box" shown "$(manager_box)"
 run_pulse
 check "one push waits on the box that takes no input" 1 "$(waits)"
 check "the other alert is held back by the floor, not typed" 1 "$(floor_skips)"
-check "a held push leaves session_missing's window open" open "$(window session_alerted)"
-check "a held push leaves service_down's window open"    open "$(window service_alerted)"
+check "a held push leaves session_missing's window open" open "$(window w2 session_alerted)"
+check "a held push leaves unit_missing's window open"    open "$(window w1 unit_alerted)"
 
 echo "--- 3. within the floor: no wait and no typing ---"
 seen=$(recorded session_missing)
@@ -152,7 +159,7 @@ run_pulse
 check "no push waits within the floor" 0 "$(waits)"
 check "both alerts are held back by the floor" 2 "$(floor_skips)"
 check "the alert is still recorded within the floor" 1 "$(( $(recorded session_missing) - seen ))"
-check "session_missing's window stays open within the floor" open "$(window session_alerted)"
+check "session_missing's window stays open within the floor" open "$(window w2 session_alerted)"
 
 echo "--- 4. the floor lapses and the box takes input: the push goes out ---"
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
@@ -161,15 +168,15 @@ check "the restarted manager is up and shows its box" shown "$(manager_box)"
 sleep 2
 run_pulse FLEET_PULSE_HELD_PUSH_FLOOR_S=1
 check "session_missing is pushed and submitted"          1 "$(push_count session_missing)"
-check "service_down is pushed and submitted"             1 "$(push_count service_down)"
-check "a submitted push closes session_missing's window" closed "$(window session_alerted)"
-check "a submitted push closes service_down's window"    closed "$(window service_alerted)"
+check "unit_missing is pushed and submitted"             1 "$(push_count unit_missing)"
+check "a submitted push closes session_missing's window" closed "$(window w2 session_alerted)"
+check "a submitted push closes unit_missing's window"    closed "$(window w1 unit_alerted)"
 check "a submitted push clears the floor" absent "$(ls "$ROOT"/state/pulse/held-push.* >/dev/null 2>&1 && echo present || echo absent)"
 
 echo "--- 5. control: a closed window debounces ---"
 run_pulse
 check "no second session_missing push" 1 "$(push_count session_missing)"
-check "no second service_down push"    1 "$(push_count service_down)"
+check "no second unit_missing push"    1 "$(push_count unit_missing)"
 
 echo "--- 6. the floor belongs to the manager instance: a restarted manager is not held back ---"
 # A restart is a new box: #831's recipient token (session_created, pane_pid)
@@ -190,7 +197,7 @@ check "it reuses its predecessor's session id, so a floor keyed by the id would 
 run_pulse
 check "the new manager is not held back by its predecessor's floor" 0 "$(floor_skips)"
 check "session_missing reaches the new manager" 1 "$(push_count session_missing)"
-check "service_down reaches the new manager"    1 "$(push_count service_down)"
+check "unit_missing reaches the new manager"    1 "$(push_count unit_missing)"
 
 echo "--- 7. a floor marker dated ahead of the clock is expired, not fresh ---"
 # A host with no real-time clock can boot behind real time, so a marker written
@@ -207,7 +214,7 @@ sleep 2
 run_pulse FLEET_PULSE_RENOTIFY_AFTER_S=1
 check "a marker dated ahead holds nothing back" 0 "$(floor_skips)"
 check "session_missing is pushed again" 2 "$(push_count session_missing)"
-check "service_down is pushed again"    2 "$(push_count service_down)"
+check "unit_missing is pushed again"    2 "$(push_count unit_missing)"
 
 echo "--- 8. a restarted manager whose box draws late gets the alert in the same sweep ---"
 # The first tick after a manager restart can reach it before its box is drawn
@@ -219,7 +226,7 @@ tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "sleep 5; $STUB"
 check "the new manager's pane is still blank when the sweep starts" blank "$(mgr_blank)"
 run_pulse FLEET_PULSE_REARM_WINDOW_S=0
 check "session_missing reaches the late manager in the same sweep" 1 "$(took_count session_missing)"
-check "service_down reaches it in the same sweep" 1 "$(took_count service_down)"
+check "unit_missing reaches it in the same sweep" 1 "$(took_count unit_missing)"
 check "no push to it waited out the shown budget" 0 "$(waits)"
 
 echo

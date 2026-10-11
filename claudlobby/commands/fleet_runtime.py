@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
+from .bot_runtime import lifecycle_notes
 
 
 def dispatch(args) -> CommandOutput:
@@ -73,8 +74,10 @@ def dispatch(args) -> CommandOutput:
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "requested": result.action, "workers_only": result.workers_only,
                     "completed": [asdict(bot) for bot in result.completed], "failed_bot": None}
-            lines = tuple(f"{bot.fleet}/{bot.bot}: {bot.state}; readiness={bot.readiness}"
-                          for bot in result.completed)
+            # under each bot, what bot start or stop prints about its record (#2243)
+            lines = tuple(line for bot in result.completed for line in (
+                f"{bot.fleet}/{bot.bot}: {bot.state}; readiness={bot.readiness}",
+                *(f"{bot.fleet}/{bot.bot}: {note}" for note in lifecycle_notes(bot))))
         return CommandOutput(data, release_id=result.release_id, lines=lines)
     except FleetLifecycleError as exc:
         data["completed"] = [asdict(bot) for bot in exc.completed]

@@ -235,6 +235,38 @@ class TestCoerceBot:
         assert bot.preferred_notif_channel == "terminal_bell"
         assert bot.disable_nonessential_traffic is True  # unset → headless default
 
+    def test_agent_cli_defaults_to_claude_and_follows_bot_over_defaults(self):
+        """#2145: `agent_cli` is an inherited scalar with a built-in `claude`. An
+        explicit bot-level null reads as `claude`, never None — the composer always
+        needs a string to write into bot.conf."""
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {}).agent_cli == "claude"
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {"agent_cli": "codex"}).agent_cli == "codex"
+        bot = _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "claude"}, {"agent_cli": "codex"})
+        assert bot.agent_cli == "claude"
+        bot = _coerce_bot("t", {"expertise": ["eng"], "agent_cli": None}, {"agent_cli": "codex"})
+        assert bot.agent_cli == "claude"
+
+    def test_agent_cli_rejects_unknown_values(self):
+        with pytest.raises(ValueError, match=r"Invalid agent_cli 'code'.*Did you mean 'codex'"):
+            _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "code"}, {})
+        with pytest.raises(ValueError, match="Invalid agent_cli"):
+            _coerce_bot("t", {"expertise": ["eng"], "agent_cli": 1}, {})
+        # Only null reads as the default: a falsy value is checked like any other,
+        # never quietly taken for claude.
+        for falsy in ("", 0, False):
+            with pytest.raises(ValueError, match="Invalid agent_cli"):
+                _coerce_bot("t", {"expertise": ["eng"], "agent_cli": falsy}, {})
+            with pytest.raises(ValueError, match="Invalid agent_cli"):
+                _coerce_bot("t", {"expertise": ["eng"]}, {"agent_cli": falsy})
+
+    def test_a_leftover_runtime_key_is_recorded_not_read(self):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:`. It never sets
+        the agent CLI; the bot carries it so `validate` can say so."""
+        bot = _coerce_bot("t", {"expertise": ["eng"], "runtime": "codex"}, {"runtime": "codex"})
+        assert bot.agent_cli == "claude"
+        assert bot.retired_keys == {"runtime": "codex"}
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {"runtime": "codex"}).retired_keys == {}
+
     def test_skip_permission_prompts_default_true(self):
         """G6: both first-run consent skip-flags default True (skip the prompt) so a
         headless bot never hangs on the first-run permission prompt."""
