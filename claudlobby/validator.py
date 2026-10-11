@@ -21,6 +21,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 from . import dotenv, tool_resolve
+from .github_connections import GithubBindingError, github_policy_errors
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import (
     _RETIRED_BOT_KEYS,
@@ -848,7 +849,12 @@ def _validate_bots(
         # `.mcp.json`), and looks across the full 3-tier env (host →
         # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
         # didn't know about instance scoping or bot-tier .env files.
-        for req in _mcp_required_vars(bot, paths):
+        try:
+            required = _mcp_required_vars(bot, paths, fleet=fleet)
+        except GithubBindingError as exc:
+            report.errors.append(f"bot '{bot_name}': {exc}")
+            required = []
+        for req in required:
             if _env_has_value(effective_env, req.name):
                 continue
             inst_note = f" (instance: {req.instance})" if req.instance else ""
@@ -860,12 +866,15 @@ def _validate_bots(
             # and zero holding the literal placeholder. The old wording promised
             # a loud failure that never arrives, which is worse than silence
             # because it talks the reader out of investigating.
-            consequence = (
-                "MCP server will start and serve ANONYMOUSLY (unauthenticated), "
-                "not fail"
-                if req.secret
-                else "MCP server will start with this unset"
-            )
+            if req.origin.startswith("github-connection/"):
+                consequence = "named GitHub credential route will refuse; no token fallback"
+            elif req.secret:
+                consequence = (
+                    "MCP server will start and serve ANONYMOUSLY (unauthenticated), "
+                    "not fail"
+                )
+            else:
+                consequence = "MCP server will start with this unset"
             # Names the CONVENTIONAL tier, and says it is one of four. The old
             # wording — "add to <tier>-tier .env" — read the declared default as
             # THE location, which is the #1226 defect in one sentence: it sends
@@ -2624,6 +2633,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_sweep(fleet, report)
     _validate_reserved_env(fleet, report)
     _validate_projects(fleet, paths, report)
+    report.errors.extend(github_policy_errors(fleet))
     _validate_goal_binding(fleet, paths, report, doors=_ign_doors)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)

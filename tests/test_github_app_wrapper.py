@@ -17,6 +17,7 @@ Pins the plan's contracts:
 """
 
 import os
+import pytest
 import signal
 import subprocess
 import time
@@ -371,3 +372,63 @@ class TestRefreshLoop:
             assert proc.poll() is None
         finally:
             _stop(proc)
+
+
+def test_named_wrapper_missing_binding_never_spawns_pat(tmp_path):
+    env = constructed_env(CLAUDLOBBY_GITHUB_STRICT='1',
+                          CLAUDLOBBY_GITHUB_BINDINGS=str(tmp_path / 'missing.json'),
+                          CLAUDLOBBY_GITHUB_REPO='example/repo',
+                          GITHUB_PAT='ambient-operator', GITHUB_MCP_ONE_SHOT='1')
+    proc = subprocess.run(['python3', str(WRAPPER)], env=env, capture_output=True,
+                          text=True, timeout=5)
+    assert proc.returncode != 0
+    assert 'identity=operator-pat' not in proc.stderr
+    assert 'ambient-operator' not in proc.stderr
+
+
+@pytest.mark.parametrize("renewal_ok", [True, False])
+def test_named_wrapper_refreshes_short_token_before_expiry(monkeypatch, renewal_ok):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('short_token_wrapper', WRAPPER)
+    wrapper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wrapper)
+    real_mint = wrapper.mint_app_once
+    now = [1000.0]
+    waits, spawns = [], []
+    monkeypatch.setattr(wrapper, 'STRICT', True)
+    monkeypatch.setattr(wrapper, 'ONE_SHOT', False)
+    monkeypatch.setattr(wrapper, 'STRICT_DEADLINE', now[0] + 100)
+    monkeypatch.setattr(wrapper.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(wrapper, '_strict_valid', lambda: True)
+    monkeypatch.setattr(wrapper.signal, 'signal', lambda *args: None)
+    monkeypatch.setattr(wrapper, 'acquire_token', lambda: ('first', 'app'))
+    monkeypatch.setattr(wrapper, 'spawn_child', lambda token, identity: spawns.append(token))
+    monkeypatch.setattr(wrapper, '_terminate', lambda child: None)
+
+    def wait(child, seconds):
+        waits.append(seconds)
+        assert 0 < seconds < wrapper.STRICT_DEADLINE - now[0]
+        now[0] += seconds
+        return None if len(waits) == 1 else 0
+
+    def mint(*, deadline):
+        assert deadline == wrapper.STRICT_DEADLINE
+        if not renewal_ok:
+            now[0] = deadline
+            return ''
+        wrapper.STRICT_DEADLINE = now[0] + 100
+        return 'renewed'
+
+    monkeypatch.setattr(wrapper, '_wait_child', wait)
+    monkeypatch.setattr(wrapper, 'mint_app_once', mint)
+    assert wrapper.main() == (0 if renewal_ok else 1)
+    assert spawns == (['first', 'renewed'] if renewal_ok else ['first'])
+    assert waits == ([80.0, 80.0] if renewal_ok else [80.0])
+
+    def stalled(*args, **kwargs):
+        assert kwargs['timeout'] == 4.0
+        raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+
+    monkeypatch.setattr(wrapper.subprocess, 'run', stalled)
+    assert real_mint(deadline=now[0] + 4) == ''

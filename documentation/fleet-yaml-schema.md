@@ -468,6 +468,95 @@ you do not declare keep the host default helper.
 from the process env at push time, so the composed file carries no secret. See the env-name
 contract in [`environment-variables.md`](environment-variables.md).
 
+### `fleet.github` / `github_assignments` — named GitHub connections
+
+This explicit mode separates an App installation, its attachment to a fleet, and
+permission for a bot to work on registered projects. Existing fleets keep their
+current `github_app` / `git_credentials` behavior until they author assignments.
+Presence of `fleet.github.connections` or `fleet.github.attachments`, including
+empty maps, opts the whole fleet into strict routing: bots without assignments
+receive zero GitHub authority. `fleet.github.mention_allowlist` alone retains legacy
+mode. A bot with its own assignments also opts into strict routing.
+A fleet attachment grants no bot access by itself.
+
+```yaml
+fleet:
+  github:
+    connections:
+      connection-a:                 # stable connection ID; never a display label
+        name: Team App
+        mode: independent
+        app_id: 123456
+        installation_id: 654321
+        credential_refs:
+          private_key_path_env: TEAM_APP_PRIVATE_KEY_PATH
+        permissions: {contents: write, pull_requests: write}
+        repos: [example-org/service]  # optional additional restriction
+        enabled: true
+    attachments:
+      attachment-a:                 # stable fleet attachment ID
+        connection: connection-a
+        enabled: true
+  bots:
+    worker:
+      expertise: [software-engineering]
+      github_assignments:
+        assignment-a:               # stable ID within this bot's assignments
+          attachment: attachment-a
+          project: service           # existing projects.yaml / derived project key
+          repos: [example-org/service] # optional subset of that project's repos
+          permissions: {contents: read} # optional narrowing of connection permissions
+          enabled: true
+```
+
+`mode` is required: `independent` means host-owned signing with only a private-key
+path **environment variable name** recorded in `credential_refs`. `managed` means
+an issuer holds the App key; its refs are exactly `issuer_url_env` and
+`issuer_token_env`, both environment variable names. Managed hosts carry no App
+private-key reference. The issuer is a separate service and must independently
+authorize the requested binding. It returns the token, exact repository and
+permissions, binding revision, and `expires_at`, with an HTTP `Date` header proving
+no more than one hour of remaining lifetime. These fields do not implement that service.
+Secrets resolve through the existing environment tiers; never place values here.
+Known GitHub token prefixes in credential references refuse without echoing the value.
+
+Connections require positive integer `app_id` and `installation_id`, plus a
+nonempty `permissions` map with `read` or `write` levels (`metadata` is read only).
+Only the repository permission names supported by `REPOSITORY_PERMISSIONS` in
+`claudlobby/github_connections.py` are accepted; organization and account
+permissions refuse.
+Optional `slug` and positive `bot_user_id` must appear together for App commit
+attribution. Changing App/installation identity or mode requires a new connection
+ID within that fleet; activation compares against that fleet's published history,
+including removal and reintroduction. History reads only the GitHub block from
+verified frozen manifests. Unreadable history refuses and names its activation. `name` is display text and
+may change without changing authority. All three record types default to enabled.
+
+Assignments may be deliberately authored in `fleet.defaults.github_assignments`;
+bot entries merge by assignment ID, with the bot's complete record winning. An
+explicit disabled bot record therefore overrides an inherited grant. An assignment
+selects only `ProjectConfig.repos`; `bot.scope` does not authorize credentials. If
+`repos` is omitted or empty, the assignment selects all registered repositories in
+that project. If permissions are omitted, the connection's permission map applies.
+
+Each bot/repository must resolve to exactly one assignment and enabled attachment
+and connection. Missing references, unregistered projects or repositories,
+overlapping assignments (including disabled declarations), and permission or scope
+expansion refuse. Disabled assignments, attachments, and connections retain their denial and are
+omitted from the usable binding list. Disabling a connection can therefore stage
+zero authority for all its bots in one plan. Different bots may use different Apps on the same repository;
+a bot may use different Apps on different repositories. A bot in strict mode
+cannot simultaneously declare legacy `github_app` or `git_credentials` routing.
+
+The effective per-repository binding preserves connection, attachment, assignment,
+project and bot IDs, App identity, environment references, narrowed permissions,
+and a revision digest. The digest includes enabled flags and repository scope;
+display labels and refreshed credential values are excluded. No actor ID is invented
+from a display name. Git, CLI and MCP consumers use this selected binding without
+ambient-token, PAT, or arbitrary stored-credential fallback.
+The composed session and MCP configuration also pin the exact binding file digest;
+changing a grant stops those consumers until the new configuration is loaded.
+
 ### `fleet.defaults.github_app` / `bots.<name>.github_app`
 
 GitHub App git-auth routing (App-auth P3, epic #1270 — dormant by default; declaring nothing

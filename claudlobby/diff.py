@@ -12,6 +12,8 @@ from pathlib import Path
 from .composer import (
     GH_APP_IDENTITY_FILENAME,
     GITCONFIG_FILENAME,
+    GITHUB_BINDINGS_FILENAME,
+    compose_github_bindings,
     compose_bot_gitconfig_app_identity,
     compose_bot_conf,
     compose_bot_gitconfig,
@@ -93,7 +95,7 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths, *, metadata_only: 
             )
 
     # .mcp.json
-    expected_mcp = compose_mcp_json(bot, paths)
+    expected_mcp = compose_mcp_json(bot, paths, fleet=fleet)
     actual_mcp_path = bot_dir / ".mcp.json"
     actual_mcp = (
         json.loads(actual_mcp_path.read_text()) if actual_mcp_path.is_file() else {}
@@ -136,7 +138,7 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths, *, metadata_only: 
     # session writes HERE rather than to ~/.gitconfig. That edit is silently
     # lost on the next generate, so drift detection is the only thing that
     # surfaces it — omitting it would make the loss undetectable.
-    expected_gitconfig = compose_bot_gitconfig(bot, paths) or ""
+    expected_gitconfig = compose_bot_gitconfig(bot, paths, fleet=fleet) or ""
     actual_gitconfig_path = bot_dir / GITCONFIG_FILENAME
     actual_gitconfig = (
         actual_gitconfig_path.read_text() if actual_gitconfig_path.is_file() else ""
@@ -153,6 +155,21 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths, *, metadata_only: 
                     lineterm="",
                 )
             )
+
+    # Named GitHub authority is plan-owned bytes, including its repository
+    # scope and permissions. Detect edits even if a row kept its old revision.
+    expected_bindings, _digest = compose_github_bindings(bot, fleet)
+    actual_bindings_path = bot_dir / GITHUB_BINDINGS_FILENAME
+    actual_bindings = actual_bindings_path.read_text() if actual_bindings_path.is_file() else ""
+    if (expected_bindings is None and actual_bindings_path.exists()) or (expected_bindings or "") != actual_bindings:
+        parts.append(f"\n=== {GITHUB_BINDINGS_FILENAME} drift in {bot_name} ===")
+        if not metadata_only:
+            parts.extend(difflib.unified_diff(
+                (expected_bindings or "").splitlines(), actual_bindings.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/{GITHUB_BINDINGS_FILENAME} (current)",
+                lineterm="",
+            ))
 
     # .gitconfig-github-app-id — the per-org App identity fragment (#1300),
     # compositor-owned like the .gitconfig it is included from.

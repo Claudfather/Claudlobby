@@ -142,3 +142,46 @@ class TestDiffFleetTimers:
             "a real Paths; any paths.* access beyond root/runtime_fleet AttributeErrors in "
             "diff but not generate"
         )
+
+
+def test_named_github_binding_document_and_gitconfig_drift(fleet_dir):
+    import hashlib
+    from claudlobby.config import ProjectConfig
+    from claudlobby.github_connections import GithubAssignment, GithubAttachment, GithubConnection
+
+    paths = Paths(root=fleet_dir, package=source_package())
+    fleet, _md = load_fleet(paths.fleet_yaml)
+    fleet.github_connections_enabled = True
+    fleet.projects['service'] = ProjectConfig(key='service', title='Service', repos=['example/service'])
+    fleet.github_connections['team'] = GithubConnection(
+        connection_id='team', name='Team', mode='independent', app_id=101, installation_id=201,
+        permissions=(('contents', 'read'),), credential_refs=(('private_key_path_env', 'TEAM_KEY_PATH'),),
+    )
+    fleet.github_attachments['attached'] = GithubAttachment(attachment_id='attached', connection='team')
+    bot = fleet.bots['lead']
+    bot.github_assignments['service'] = GithubAssignment(
+        assignment_id='service', attachment='attached', project='service',
+    )
+    compose_bot(bot, fleet, paths)
+    bot_dir = paths.bot_runtime('lead')
+    assert 'no drift' in diff_bot('lead', fleet, paths)
+    binding_path = bot_dir / 'github-bindings.json'
+    document = binding_path.read_text()
+    digest = hashlib.sha256(document.encode()).hexdigest()
+    assert 'CLAUDLOBBY_GITHUB_BINDING_SHA256=' + digest in (bot_dir / 'bot.conf').read_text()
+    servers = json.loads((bot_dir / '.mcp.json').read_text())['mcpServers']
+    github_servers = [server for name, server in servers.items() if name.startswith('github-app-')]
+    assert len(github_servers) == 1
+    assert github_servers[0]['env']['CLAUDLOBBY_GITHUB_BINDING_SHA256'] == digest
+    changed = json.loads(document)
+    original_revision = changed['bindings'][0]['revision']
+    changed['bindings'][0]['permissions']['contents'] = 'write'
+    binding_path.write_text(json.dumps(changed))
+    assert changed['bindings'][0]['revision'] == original_revision
+    assert 'github-bindings.json drift' in diff_bot('lead', fleet, paths, metadata_only=True)
+    binding_path.write_text(document)
+    gitconfig = bot_dir / '.gitconfig'
+    gitconfig.write_text(gitconfig.read_text() + '\n[credential]\n\thelper = operator-helper\n')
+    result = diff_bot('lead', fleet, paths, metadata_only=True)
+    assert '.gitconfig drift' in result
+    assert 'github-bindings.json drift' not in result

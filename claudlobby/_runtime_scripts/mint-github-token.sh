@@ -22,6 +22,9 @@ set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$LIB_DIR/git-credential-github-app"
+if [ "${CLAUDLOBBY_GITHUB_STRICT:-}" = "1" ] || [ -n "${CLAUDLOBBY_GITHUB_BINDINGS:-}" ]; then
+    exec python3 "$LIB_DIR/github-binding-runtime.py" mint "$@"
+fi
 
 if out="$(printf 'protocol=https\nhost=github.com\n\n' | "$HELPER" get)"; then
     token="$(printf '%s\n' "$out" | sed -n 's/^password=//p')"

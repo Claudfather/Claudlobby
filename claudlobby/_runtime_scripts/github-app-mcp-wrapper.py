@@ -60,6 +60,10 @@ Knobs (env; malformed values log and fall back rather than dying):
 """
 
 import os
+import importlib.util
+import functools
+import json
+import math
 import signal
 import subprocess
 import sys
@@ -74,6 +78,30 @@ MINT_CLI = Path(
     os.environ.get("GITHUB_APP_MINT_CLI")
     or Path(__file__).resolve().parent / "mint-github-token.sh"
 )
+
+STRICT_DEADLINE = 0.0
+STRICT = os.environ.get("CLAUDLOBBY_GITHUB_STRICT") == "1" or bool(os.environ.get("CLAUDLOBBY_GITHUB_BINDINGS"))
+if STRICT:
+    MINT_CLI = Path(__file__).resolve().parent / "mint-github-token.sh"
+
+
+
+@functools.cache
+def _strict_runtime():
+    spec = importlib.util.spec_from_file_location("github_binding_runtime", Path(__file__).with_name("github-binding-runtime.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _strict_valid():
+    try:
+        _strict_runtime().binding(os.environ.get("CLAUDLOBBY_GITHUB_REPO", ""))
+        return True
+    except Exception:
+        _log("named GitHub binding missing, revoked or changed; refusing stale authority")
+        return False
+
 
 # Vars the third-party server process has no business inheriting: it needs
 # exactly GITHUB_PERSONAL_ACCESS_TOKEN. The key path and PAT stay out of the
@@ -115,7 +143,7 @@ def _child_argv() -> list:
     return ["npx", "-y", MCP_PACKAGE] + sys.argv[1:]
 
 
-def mint_app_once() -> str:
+def mint_app_once(*, deadline=None) -> str:
     """One App mint through the CLI door. Returns the token, or '' — NEVER
     the PAT: callers decide whether a bridge identity is permitted, because
     the refresh path must not be able to rotate a child onto the PAT.
@@ -125,18 +153,42 @@ def mint_app_once() -> str:
     helper diagnostics stream; the helper has already emitted its
     auth_mint_failed event by the time this returns.
     """
+    global STRICT_DEADLINE
     try:
+        timeout = 90 if deadline is None else min(90, deadline - time.monotonic())
+        if timeout <= 0:
+            return ""
+        argv = [str(MINT_CLI)]
+        if STRICT:
+            argv += ["--json", os.environ.get("CLAUDLOBBY_GITHUB_REPO", "")]
         proc = subprocess.run(
-            [str(MINT_CLI)],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             text=True,
-            timeout=90,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         _log(f"mint invocation failed: {e}")
         return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    if proc.returncode != 0:
+        return ""
+    if STRICT:
+        try:
+            result = json.loads(proc.stdout)
+            expiry = result["expires_monotonic"]
+            remaining = expiry - time.monotonic()
+            if not math.isfinite(expiry) or not 0 < remaining <= 3600:
+                raise ValueError("expired token")
+            token = result["token"]
+            if not isinstance(token, str) or not token:
+                raise ValueError("missing token")
+            STRICT_DEADLINE = expiry
+            return token
+        except (ValueError, KeyError, TypeError):
+            _log("named mint did not return a token with bounded expiry")
+            return ""
+    return proc.stdout.strip()
 
 
 def acquire_token() -> tuple:
@@ -149,6 +201,8 @@ def acquire_token() -> tuple:
     token = mint_app_once()
     if token:
         return token, "app"
+    if STRICT:
+        raise RuntimeError("named GitHub mint unavailable; no PAT fallback")
     pat = os.environ.get("GITHUB_PAT", "")
     if pat:
         _log(
@@ -181,12 +235,14 @@ def _preexec():  # pragma: no cover — one line of platform glue
 def spawn_child(token: str, identity: str) -> subprocess.Popen:
     """Spawn with the same never-give-up posture as minting (fork ENOMEM on a
     loaded Pi at a refresh boundary must not crash the wrapper)."""
-    env = os.environ.copy()
+    env = _strict_runtime().clean_env() if STRICT else os.environ.copy()
     for k in _SCRUB_FROM_CHILD:
         env.pop(k, None)
     env["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
     delay = RETRY_BASE_SECONDS
     while True:
+        if STRICT and (not _strict_valid() or time.monotonic() >= STRICT_DEADLINE):
+            raise RuntimeError("named GitHub binding changed or token expired before spawn")
         try:
             child = subprocess.Popen(
                 _child_argv(),
@@ -204,17 +260,29 @@ def spawn_child(token: str, identity: str) -> subprocess.Popen:
             delay = min(delay * 2, RETRY_MAX_SECONDS)
 
 
+def _refresh_delay(seconds):
+    if not STRICT:
+        return seconds
+    remaining = max(0.0, STRICT_DEADLINE - time.monotonic())
+    return min(seconds, max(0.0, remaining - min(60.0, remaining * 0.2)))
+
+
 def _wait_child(child: subprocess.Popen, seconds: float):
-    """Chunked liveness poll: child rc, or None when `seconds` elapse."""
+    """Chunked liveness poll, checking named grant drift and actual expiry."""
+    if STRICT:
+        seconds = min(seconds, max(0.0, STRICT_DEADLINE - time.monotonic()))
     deadline = time.monotonic() + seconds
     while True:
+        if STRICT and (not _strict_valid() or time.monotonic() >= STRICT_DEADLINE):
+            _terminate(child)
+            raise RuntimeError("named GitHub binding revoked or changed")
         rc = child.poll()
         if rc is not None:
             return rc
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        time.sleep(min(POLL_SECONDS, remaining))
+        time.sleep(min(POLL_SECONDS, remaining, 2.0) if STRICT else min(POLL_SECONDS, remaining))
 
 
 def _terminate(child: subprocess.Popen) -> None:
@@ -234,6 +302,11 @@ def _terminate(child: subprocess.Popen) -> None:
 
 
 def main() -> int:
+    if ONE_SHOT and STRICT:
+        _log("one-shot mode refused for named bindings")
+        return 1
+    if STRICT and not _strict_valid():
+        return 1
     if ONE_SHOT:
         token, identity = acquire_token()
         os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
@@ -267,7 +340,7 @@ def main() -> int:
         return 0
     # A PAT bridge retries App at the short cadence; a real App token waits
     # out the full refresh window.
-    wait_for = REFRESH_RETRY_SECONDS if identity == "operator-pat" else REFRESH_SECONDS
+    wait_for = REFRESH_RETRY_SECONDS if identity == "operator-pat" else _refresh_delay(REFRESH_SECONDS)
 
     while True:
         rc = _wait_child(child, wait_for)
@@ -283,7 +356,8 @@ def main() -> int:
             _log(f"child exited rc={rc}; respawning in {RESPAWN_PAUSE_SECONDS:.0f}s")
             time.sleep(RESPAWN_PAUSE_SECONDS)
             age = time.monotonic() - minted_at
-            if identity != "app" or age >= REFRESH_SECONDS:
+            if (identity != "app" or age >= REFRESH_SECONDS
+                    or (STRICT and STRICT_DEADLINE - time.monotonic() <= 60)):
                 token, identity = acquire_token()
                 minted_at = time.monotonic()
                 age = 0.0
@@ -294,13 +368,13 @@ def main() -> int:
             wait_for = (
                 REFRESH_RETRY_SECONDS
                 if identity == "operator-pat"
-                else max(5.0, REFRESH_SECONDS - age)
+                else _refresh_delay(max(5.0, REFRESH_SECONDS - age))
             )
         else:
             # Refresh due. App-only mint: rotation may only move TOWARD the
             # App identity, so a failed mint (or a PAT-only fleet) keeps the
             # live child serving — never a pointless or downgrading respawn.
-            fresh = mint_app_once()
+            fresh = mint_app_once(deadline=STRICT_DEADLINE if STRICT else None)
             if fresh:
                 if identity == "operator-pat":
                     _log("App mint healed; upgrading the PAT bridge to App identity")
@@ -313,8 +387,16 @@ def main() -> int:
                 if shutting_down["flag"]:
                     _terminate(child)
                     return 0
-                wait_for = REFRESH_SECONDS
+                wait_for = _refresh_delay(REFRESH_SECONDS)
             else:
+                if STRICT:
+                    if not _strict_valid() or time.monotonic() >= STRICT_DEADLINE:
+                        _terminate(child)
+                        _log("named GitHub mint failed and token expired or binding changed; stopped child")
+                        return 1
+                    _log("named mint unavailable; keeping issued token only until its proven expiry")
+                    wait_for = min(REFRESH_RETRY_SECONDS, max(0.01, STRICT_DEADLINE - time.monotonic()))
+                    continue
                 if identity == "app":
                     _log(
                         "refresh mint failed; keeping live child, retrying in "
@@ -324,4 +406,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (RuntimeError, ValueError, OSError) as error:
+        _log("named GitHub operation refused" if STRICT else str(error))
+        sys.exit(1)

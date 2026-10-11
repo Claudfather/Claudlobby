@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 
-from .config_plan import ConfigPlan, read_plan
+from .config_plan import ConfigPlan, PlanError, read_plan
 from .releases import read_release
 
 
@@ -198,6 +198,15 @@ class ActivationStore:
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
             raise ActivationError("activation plan belongs to different or changed host state")
+        # Staging fingerprints existing journals, but cannot fingerprint a
+        # future activation. Re-read published identities while holding the
+        # host lock, before admitting or resuming this candidate intent.
+        from .config_staging import validate_github_identity_history
+
+        try:
+            validate_github_identity_history(plan)
+        except PlanError as exc:
+            raise ActivationError(str(exc)) from exc
         if not re.fullmatch(r"[0-9a-f]{64}", enrollment_digest):
             raise ActivationError("verified enrollment manifest digest is required")
         existing = read_activation(self.root, activation_id) if path.exists() else None

@@ -31,6 +31,13 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     worker = doc["fleet"]["bots"]["primary-worker"]
     worker["tool_permissions"]["allow"].append("Bash(echo SECRET-orientation-grant)")
     worker["env"] = {"PRIVATE_VALUE": "SECRET-orientation-env"}
+    doc["fleet"]["github"]["connections"] = {"delivery-app": {
+        "name": "Delivery App", "mode": "independent", "app_id": 123,
+        "installation_id": 456, "permissions": {"contents": "read"},
+        "credential_refs": {"private_key_path_env": "DELIVERY_APP_KEY"}}}
+    doc["fleet"]["github"]["attachments"] = {"delivery": {"connection": "delivery-app"}}
+    worker["github_assignments"] = {"delivery-work": {
+        "attachment": "delivery", "project": "delivery"}}
     case.paths.fleet_yaml.write_text(yaml.safe_dump(doc))
     _write(case.root / "projects.yaml", """projects:
   delivery:
@@ -67,6 +74,13 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     assert [(item["bot_id"], item["role"]) for item in listed["items"]] == [
         ("primary-manager", "manager"), ("primary-worker", "worker")]
     detail = _call(capsys, case.root, "bot", "show", "primary-worker")["bot"]
+    access = detail["effective_configuration"]["github_access"]
+    assert access["provider_verification"] == "not_checked"
+    assert [(r["repo"], r["connection_id"]) for r in access["bindings"]] == [
+        ("example/delivery", "delivery-app")]
+    assert "DELIVERY_APP_KEY" not in json.dumps(detail)
+    manager = _call(capsys, case.root, "bot", "show", "primary-manager")["bot"]
+    assert manager["effective_configuration"]["github_access"]["bindings"] == []
     assert detail["effective_configuration"]["equipment"]["skills"] == ["fleet-ops", "stage-skill"]
     capabilities = _call(capsys, case.root, "bot", "capabilities", "primary-worker")["bot"]
     assert capabilities["permissions"]["enforcement"] == "unknown"

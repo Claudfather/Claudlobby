@@ -326,6 +326,8 @@ def _composer():
 
 
 def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
+    from ..github_connections import uses_named_github
+
     tp = bot.tool_permissions
     posture = {
         "permissions_mode": bot.permission_mode or (
@@ -359,6 +361,30 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         "git_credentials_profile": (
             sorted(bot.git_credentials)[0] if bot.git_credentials else None),
     }
+    if uses_named_github(fleet, bot):
+        from ..github_connections import github_bindings_for_bot
+
+        # This is declaration history, never proof of provider access. Explicit
+        # fields keep credential references and values out of the public record.
+        posture["github_access"] = {
+            "mode": "named", "provider_verification": "not_checked",
+            "bindings": [{
+                "connection_id": binding.connection_id,
+                "connection_name": fleet.github_connections[binding.connection_id].name,
+                "attachment_id": binding.attachment_id,
+                "assignment_id": binding.assignment_id,
+                "project": binding.project, "repo": binding.repo,
+                "mode": binding.mode, "app_id": binding.app_id,
+                "installation_id": binding.installation_id,
+                "permissions": dict(binding.permissions), "revision": binding.revision,
+            } for binding in github_bindings_for_bot(fleet, bot.bot_id)],
+            "disabled_assignments": sorted(
+                assignment.assignment_id for assignment in bot.github_assignments.values()
+                if not assignment.enabled
+                or not fleet.github_attachments[assignment.attachment].enabled
+                or not fleet.github_connections[
+                    fleet.github_attachments[assignment.attachment].connection].enabled),
+        }
     group = next(
         (t.name for t in fleet.teams.values()
          if bot.bot_id in t.workers or t.manager == bot.bot_id), None)

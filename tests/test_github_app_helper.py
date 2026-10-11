@@ -370,3 +370,163 @@ class TestSetupScript:
         assert r.returncode == 1, "arg errors follow the script convention usage 1"
         assert "requires a value" in r.stderr
         assert "unbound variable" not in r.stderr
+
+
+class TestNamedBindingConsumer:
+    def _runtime(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'named_github_runtime', REPO_ROOT / 'claudlobby/_runtime_scripts/github-binding-runtime.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _row(self):
+        return {'repo': 'example/service', 'mode': 'independent', 'app_id': '12',
+                'installation_id': '34', 'revision': 'revision-a',
+                'permissions': {'contents': 'read'},
+                'credential_refs': {'private_key_path_env': 'TEAM_APP_KEY'}}
+
+    def test_named_missing_file_refuses_even_with_pat(self, tmp_path):
+        env = constructed_env(CLAUDLOBBY_GITHUB_STRICT='1',
+                              CLAUDLOBBY_GITHUB_BINDINGS=str(tmp_path / 'missing'),
+                              GITHUB_PAT='ambient-operator')
+        result = subprocess.run([str(HELPER), 'get'], input=CTX, text=True,
+                                capture_output=True, env=env)
+        assert result.returncode != 0
+        assert result.stdout == 'quit=1\n'
+        assert 'ambient-operator' not in result.stderr
+
+    def test_named_exchange_narrows_repository_and_permissions(self, monkeypatch, tmp_path):
+        module = self._runtime()
+        row = self._row()
+        config = tmp_path / 'bindings.json'
+        config.write_text(json.dumps({'schema': 1, 'bindings': [row]}))
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDINGS', str(config))
+        import hashlib
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDING_SHA256', hashlib.sha256(config.read_bytes()).hexdigest())
+        monkeypatch.setenv('TEAM_APP_KEY', '/fake-key')
+        monkeypatch.setattr(module.subprocess, 'run', lambda *a, **kw: type('Signed', (), {'stdout': b'signature'})())
+        monkeypatch.setattr(module.time, 'time', lambda: 1893456000)
+        calls = []
+        def exchange(url, token, payload):
+            calls.append((url, payload))
+            return {'token': 'ghs_scoped', 'repositories': [{'id': 5, 'full_name': row['repo']}],
+                    'permissions': {'contents': 'read', 'metadata': 'read'},
+                    'expires_at': '2030-01-01T00:50:00+00:00',
+                    '_issuer_time': '2030-01-01T00:00:00+00:00', '_request_started': module.time.monotonic()}
+        monkeypatch.setattr(module, 'post', exchange)
+        assert module.mint('example/service.git') == 'ghs_scoped'
+        assert calls == [('https://api.github.com/app/installations/34/access_tokens',
+                          {'repositories': ['service'], 'permissions': {'contents': 'read'}})]
+
+    def test_named_excess_scope_refuses(self):
+        module = self._runtime()
+        for result in (
+            {'token': 'ghs_bad', 'repositories': [{'id': 5, 'full_name': 'other/repo'}], 'permissions': {'contents': 'read'}},
+            {'token': 'ghs_bad', 'repositories': [{'id': 5, 'full_name': 'example/service'}], 'permissions': {'contents': 'write'}},
+            {'token': 'ghs_bad', 'repositories': [{'id': 5, 'full_name': 'example/service'}], 'permissions': {'contents': 'read', 'issues': 'write'}},
+        ):
+            with pytest.raises(module.Refused):
+                module.validate_token(self._row(), result)
+
+    def test_named_gh_rejects_foreign_urls_and_account_calls_before_mint(self, monkeypatch):
+        module = self._runtime()
+        monkeypatch.setattr(module, 'mint', lambda repo: pytest.fail('must refuse before mint'))
+        for args in (['api', 'https://foreign.example/repos/example/service'],
+                     ['auth', 'status'], ['pr', 'view', 'https://foreign.example/pull/1'],
+                     ['api', 'repos/example/service', '-H', 'Host: foreign.example']):
+            with pytest.raises(module.Refused):
+                module.gh('/fake/gh', args)
+
+    def test_named_gh_routes_repo_view_and_pr_body_links(self, monkeypatch):
+        module = self._runtime()
+        minted, executed = [], []
+        monkeypatch.setattr(module, 'mint', lambda repo: minted.append(repo) or 'scoped-token')
+        monkeypatch.setattr(module, 'clean_env', lambda: {})
+        monkeypatch.setattr(module.os, 'execve', lambda real, argv, env: executed.append(argv))
+        monkeypatch.setattr(module.subprocess, 'check_output', lambda *a, **k: 'https://github.com/example/service.git')
+        module.gh('/fake/gh', ['repo', 'view'])
+        module.gh('/fake/gh', ['pr', 'create', '-R', 'example/service', '--body', 'See https://example.invalid/spec'])
+        module.gh('/fake/gh', ['repo', 'view', '--json', 'nameWithOwner', 'example/other'])
+        assert minted == ['example/service', 'example/service', 'example/other']
+        assert executed[2] == ['/fake/gh', 'repo', 'view', '--json', 'nameWithOwner', 'example/other']
+        assert executed[0] == ['/fake/gh', 'repo', 'view', 'example/service']
+        assert executed[1][-1] == 'See https://example.invalid/spec'
+
+    def test_named_revoked_revision_and_dynamic_credentials(self, monkeypatch, tmp_path):
+        module = self._runtime()
+        row = self._row()
+        config = tmp_path / 'bindings.json'
+        config.write_text(json.dumps({'schema': 1, 'bindings': [row]}))
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDINGS', str(config))
+        import hashlib
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDING_SHA256', hashlib.sha256(config.read_bytes()).hexdigest())
+        monkeypatch.setenv('TEAM_APP_KEY', 'secret-path')
+        monkeypatch.setenv('GH_TOKEN', 'ambient')
+        env = module.clean_env()
+        assert 'TEAM_APP_KEY' not in env and 'GH_TOKEN' not in env
+        changed = dict(row, permissions={'contents': 'write'})
+        config.write_text(json.dumps({'schema': 1, 'bindings': [changed]}))
+        with pytest.raises(module.Refused, match='session-approved'):
+            module.binding('example/service')
+        config.write_text(json.dumps({'schema': 1, 'bindings': [row]}))
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_REVISION', 'old-revision')
+        with pytest.raises(module.Refused):
+            module.binding('example/service')
+
+    def test_managed_issuer_request_is_binding_and_revision_bound(self, monkeypatch, tmp_path):
+        module = self._runtime()
+        row = self._row()
+        row.update(mode='managed', credential_refs={'issuer_url_env': 'TEAM_ISSUER', 'issuer_token_env': 'TEAM_HOST_AUTH'})
+        config = tmp_path / 'bindings.json'
+        config.write_text(json.dumps({'schema': 1, 'bindings': [row]}))
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDINGS', str(config))
+        import hashlib
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDING_SHA256', hashlib.sha256(config.read_bytes()).hexdigest())
+        monkeypatch.setenv('TEAM_ISSUER', 'https://issuer.example/token')
+        monkeypatch.setenv('TEAM_HOST_AUTH', 'host-grant')
+        monkeypatch.setattr(module.time, 'time', lambda: 1893456000)
+        requests = []
+        def issuer(url, auth, payload):
+            requests.append((url, auth, payload))
+            return {'token': 'ghs_managed', 'revision': row['revision'],
+                    'repositories': [{'id': 5, 'full_name': row['repo']}],
+                    'permissions': {'contents': 'read'}, 'expires_at': '2030-01-01T00:50:00+00:00',
+                    '_issuer_time': '2030-01-01T00:00:00+00:00', '_request_started': module.time.monotonic()}
+        monkeypatch.setattr(module, 'post', issuer)
+        assert module.mint(row['repo']) == 'ghs_managed'
+        assert requests == [('https://issuer.example/token', 'host-grant',
+                             {'schema': 1, 'binding': row, 'revision': row['revision']})]
+        monkeypatch.setenv('TEAM_ISSUER', 'http://issuer.example/token')
+        with pytest.raises(module.Refused):
+            module.mint(row['repo'])
+        assert len(requests) == 1
+
+    @pytest.mark.parametrize('structured', [False, True])
+    def test_mint_requires_proven_expiry(self, monkeypatch, tmp_path, structured):
+        module = self._runtime()
+        row = self._row()
+        row.update(mode='managed', credential_refs={'issuer_url_env': 'TEAM_ISSUER', 'issuer_token_env': 'TEAM_HOST_AUTH'})
+        config = tmp_path / 'bindings.json'
+        config.write_text(json.dumps({'schema': 1, 'bindings': [row]}))
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDINGS', str(config))
+        import hashlib
+        monkeypatch.setenv('CLAUDLOBBY_GITHUB_BINDING_SHA256', hashlib.sha256(config.read_bytes()).hexdigest())
+        monkeypatch.setenv('TEAM_ISSUER', 'https://issuer.example/token')
+        monkeypatch.setenv('TEAM_HOST_AUTH', 'host-grant')
+        response = {'token': 'ghs_managed', 'revision': row['revision'],
+                    'repositories': [{'id': 5, 'full_name': row['repo']}], 'permissions': {'contents': 'read'}}
+        monkeypatch.setattr(module, 'post', lambda *args: response)
+        with pytest.raises(module.Refused):
+            module.mint(row['repo'], structured=structured)
+        response.update(expires_at='2030-01-01T00:50:00+00:00',
+                        _issuer_time='2030-01-01T00:00:00+00:00', _request_started=1000.0)
+        monkeypatch.setattr(module.time, 'monotonic', lambda: 1005.0)
+        assert module.mint(row['repo'], structured=True) == {
+            'token': 'ghs_managed', 'expires_at': response['expires_at'], 'expires_monotonic': 4000.0}
+        assert module.token_expiry('2030-01-01T01:00:30+00:00', '2030-01-01T00:00:30+00:00', 1000.0) == 4600.0
+        with pytest.raises(module.Refused):
+            module.token_expiry('2030-01-01T01:02:00+00:00', response['_issuer_time'], 1000.0)
+        with pytest.raises(module.Refused):
+            module.token_expiry('2030-01-01T00:00:05+00:00', response['_issuer_time'], 1000.0)

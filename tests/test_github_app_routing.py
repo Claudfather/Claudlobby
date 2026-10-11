@@ -505,3 +505,68 @@ class TestGithubAppRoutingResolvesForReal:
             "git consulted the gh fallback after quit=1 — the silent "
             "operator-identity substitution D11 exists to stop"
         )
+
+
+def test_named_git_routing_has_no_cache_or_operator_fallback(monkeypatch):
+    from claudlobby import composer
+    from claudlobby.config import BotConfig, FleetConfig
+    from tests.conftest import make_paths
+    from pathlib import Path
+    monkeypatch.setattr(composer, '_named_github_rows', lambda *args: [
+        {'repo': 'example/one', 'revision': 'rev-one', 'connection_id': 'one', 'slug': 'first-app', 'bot_user_id': '11'},
+        {'repo': 'another/two', 'revision': 'rev-two', 'connection_id': 'two', 'slug': 'second-app', 'bot_user_id': '22'},
+    ])
+    root = Path(__file__).resolve().parents[1]
+    config = composer._named_github_gitconfig(BotConfig(bot_id='worker', name='worker', expertise=[]), FleetConfig(name='fleet', service_prefix='com.fleet', manager='worker', bots={'worker': BotConfig(bot_id='worker', name='worker', expertise=[])}), make_paths(root))
+    assert 'useHttpPath = true' in config
+    assert 'cache --timeout' not in config
+    assert 'auth git-credential' not in config
+    assert 'GITHUB_PAT' not in config
+    assert 'tools/github-identity-one.gitconfig' in config
+    assert 'tools/github-identity-two.gitconfig' in config
+    assert 'https://github.com/[eE][xX][aA][mM][pP][lL][eE]/[oO][nN][eE].git' in config
+
+
+@pytest.mark.parametrize("remote", [
+    "https://github.com/Example/Service.git",
+    "git@github.com:EXAMPLE/Service",
+    "ssh://git@github.com/Example/SERVICE.git",
+])
+def test_named_git_identity_matches_mixed_case_repository(tmp_path, monkeypatch, remote):
+    rows = [{'repo': 'example/service', 'connection_id': 'selected',
+             'slug': 'selected-app', 'bot_user_id': 11}]
+    monkeypatch.setattr(comp, '_named_github_rows', lambda *args: rows)
+    operator = tmp_path / 'operator.gitconfig'
+    operator.write_text('[user]\n\tname = Operator\n\temail = operator@example.invalid\n'
+                        '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n'
+                        '[http "https://github.com/"]\n\textraHeader = Authorization: operator-credential\n')
+    monkeypatch.setattr(comp, '_operator_gitconfig', lambda: operator)
+    bot = BotConfig(bot_id='worker', name='worker', expertise=[])
+    fleet = FleetConfig(manager='worker', name='t', service_prefix='p',
+                        bots={'worker': bot}, github_connections_enabled=True)
+    config = tmp_path / 'composed.gitconfig'
+    config.write_text(comp._named_github_gitconfig(bot, fleet, make_paths(tmp_path)))
+    tools = tmp_path / 'tools'
+    tools.mkdir()
+    for name, content in comp.compose_tool_outputs(bot, fleet, make_paths(tmp_path), tmp_path).items():
+        (tools / name).write_text(content)
+    repo = tmp_path / 'repo'
+    env = git_isolation_env(config, HOME=str(tmp_path))
+    subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(repo), 'config', 'remote.origin.url', remote],
+                   env=env, check=True, capture_output=True)
+    result = subprocess.run(['git', '-C', str(repo), 'config', '--get', 'user.email'],
+                            env=env, text=True, check=True, capture_output=True)
+    assert result.stdout.strip() == '11+selected-app[bot]@users.noreply.github.com'
+    subprocess.run(['git', '-C', str(repo), 'config', 'remote.origin.url',
+                    'https://github.com/example/service-extra.git'],
+                   env=env, check=True, capture_output=True)
+    result = subprocess.run(['git', '-C', str(repo), 'config', '--get', 'user.email'],
+                            env=env, text=True, check=True, capture_output=True)
+    assert result.stdout.strip() == 'worker@bots.invalid'
+    inherited_rewrite = subprocess.run(
+        ['git', '-C', str(repo), 'config', '--get-all', 'url.git@github.com:.insteadOf'],
+        env=env, text=True, capture_output=True,
+    )
+    assert inherited_rewrite.returncode == 1 and inherited_rewrite.stdout == ''
+    assert 'operator-credential' not in config.read_text()
