@@ -339,6 +339,30 @@ class Observations:
 
 
 @pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+@pytest.mark.parametrize("scope", ["host", "fleet", "bot"])
+def test_only_host_services_may_omit_fleet_context(tmp_path, manager, scope):
+    obs = Observations(tmp_path)
+    obs.manager = manager
+    del obs.env["FLEET_ROOT"]
+    target = obs.add("owner.plist" if manager == "Darwin" else "owner.service", scope)
+    if scope != "host":
+        with pytest.raises(InventoryError, match="incomplete declaration"):
+            obs.collect()
+        return
+
+    assert len(obs.collect().require_complete().units) == 1
+    # A loaded service cannot acquire fleet context absent from its reviewed unit.
+    if manager == "Darwin":
+        source = plistlib.loads(target.read_bytes())
+        source["EnvironmentVariables"]["FLEET_ROOT"] = str(obs.root)
+        obs.launchd[target.name] = observed_print("gui/501/owner", source, target)
+    else:
+        obs.properties[target.name]["Environment"] += f" FLEET_ROOT={obs.root}"
+    with pytest.raises(InventoryError):
+        obs.collect().require_complete()
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
 def test_explicit_empty_bootstrap_proves_full_catalog_with_foreign_units(tmp_path, manager):
     obs = Observations(tmp_path)
     obs.manager = manager
