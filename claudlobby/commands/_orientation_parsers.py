@@ -47,6 +47,12 @@ def _bot_runtime_dispatch(args):
                    json_output=args.json)
 
 
+def _project_checkout_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".project_checkout", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _fleet_notify_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".fleet_notify", __package__).dispatch(args),
@@ -146,6 +152,11 @@ def register_orientation_subparsers(sub):
             usage.add_argument("--json", action="store_true", help="One schema-1 result object")
             usage.set_defaults(func=_usage_dispatch, public_command=f"{domain}.usage")
         if domain == "bot":
+            prepare = children.add_parser("prepare-repository", help="Prepare an assigned repository without changing existing work")
+            prepare.add_argument("bot_id", metavar="BOT")
+            prepare.add_argument("--repository", required=True, metavar="OWNER/REPO")
+            prepare.add_argument("--json", action="store_true")
+            prepare.set_defaults(func=_project_checkout_dispatch, public_command="bot.prepare-repository")
             from ._bot_create_parsers import register_bot_create
             register_bot_create(children, _bot_create_dispatch)
             remove = children.add_parser("remove", help="Clean up a bot omitted by an activated configuration")

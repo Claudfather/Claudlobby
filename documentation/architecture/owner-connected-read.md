@@ -338,8 +338,26 @@ The browser cannot supply or replace a connection. Changes require a fresh local
 approval. Without these flags, existing template credential requirements apply.
 Neither approval nor an active launch proves provider access.
 
-The finite connected setup routes are POST `context`, `preview`, `launch` and
-`receipt` under `/api/owner/connected/setup/`, with the existing exact Origin,
+New approvals with a named connection explicitly include repository preparation.
+After the original launch is observed active, **Prepare repository** uses the
+core `bot prepare-repository` owner for each bot in that exact activated team.
+The request carries the original generation, plan and request IDs, never a
+browser-selected repository or destination. Legacy approvals omit this capability.
+The selected activation must still match; expiry and revocation still apply.
+Preparation has a ten-minute response budget for the three bounded clones.
+A disconnected browser may leave preparation running; wait before an explicit
+retry, which reuses completed copies. Each clone uses the assigned connection
+and goes to `projects/REPO` under
+the bot directory. Existing matching working copies are preserved; conflicting
+origins or redirected paths refuse. No application setup scripts, submodules or
+dependency installs run. A lost response permits explicit preparation retry
+without launching again; successful copies are reused. This does not prove write
+access or that the application is ready. Ordinary lead messages still require
+the existing separate message approval.
+
+
+The finite connected setup routes are POST `context`, `preview`, `launch`,
+`receipt` and `repository` under `/api/owner/connected/setup/`, with the existing exact Origin,
 header-only session and private/no-store boundary. Optional setup tables are
 created only by local approval. Preview rejects other fleets and target overlay
 or project declarations; the whole-host plan must contain exactly the approved

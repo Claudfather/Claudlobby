@@ -51,6 +51,9 @@ def test_no_setup_grant_or_optional_schema_never_repairs(setup_authority):
     assert access.path.read_bytes()==before
     store.allow(grant)
     assert store.authorize(reader)==grant
+    assert SetupEngine(access).context(reader)['can_prepare_repository'] is False
+    with pytest.raises(AccessDenied):
+        SetupEngine(access).repository(reader,grant.generation,'p-'+'a'*64,str(uuid4()))
     # A direct cookie cannot be used as a connected setup credential.
     with pytest.raises(AccessDenied): store.authorize(VerifiedReader(OWNER,access.open_session(OWNER).token))
 
@@ -68,7 +71,7 @@ def test_preview_uses_canonical_plan_no_activation_and_can_change_owned_goal(set
     assert not setup_authority[-1]
 
 
-def test_setup_uses_locally_frozen_connection_without_exposing_credential_refs(setup_authority):
+def test_setup_uses_locally_frozen_connection_without_exposing_credential_refs(setup_authority,monkeypatch):
     import json
     from claudlobby.commands.setup import _template_github
     from claudlobby.config import load_fleet
@@ -92,6 +95,30 @@ def test_setup_uses_locally_frozen_connection_without_exposing_credential_refs(s
     fleet,_=load_fleet(access.root/'local/shop/fleet.yaml')
     assert all(resolve_github_binding(fleet,name,grant.repository).app_id==123 for name in fleet.bots)
     assert not effects
+    assert context['can_prepare_repository'] is True
+    # Preparation uses only the original active selection and the canonical owner.
+    from contextlib import nullcontext
+    from claudlobby import active_config, activation_state, runtime_admission, project_checkout
+    from claudlobby.commands import host
+    plan=engine.preview(reader,grant.generation,'Improve signup'); uid=str(uuid4())
+    engine.store.reserve(reader,grant,plan['plan_id'],uid)
+    journal={'verification':'verified','status':'active','plan_id':plan['plan_id'],'release_id':grant.release_id}
+    monkeypatch.setattr(host,'_recorded',lambda *_:journal)
+    selected={'plan_id':plan['plan_id'],'activation_id':uid}
+    monkeypatch.setattr(activation_state,'read_selection',lambda _:selected)
+    monkeypatch.setattr(runtime_admission,'mutation_admission',lambda *a,**k:nullcontext())
+    monkeypatch.setattr(active_config,'resolve_active_context',lambda **kw:SimpleNamespace(fleet=fleet))
+    calls=[]
+    def prepare(context,bot,repository):
+        calls.append((bot,repository))
+        return {'bot':bot,'repository':repository,'state':'prepared'}
+    monkeypatch.setattr(project_checkout,'prepare_checkout',prepare)
+    result=engine.repository(reader,grant.generation,plan['plan_id'],uid)
+    assert {bot for bot,repo in calls}=={'lead','engineer','reviewer'}
+    assert all(repo==grant.repository for bot,repo in calls) and len(result['checkouts'])==3
+    selected['activation_id']=str(uuid4())
+    with pytest.raises(AccessDenied):engine.repository(reader,grant.generation,plan['plan_id'],uid)
+    assert len(calls)==3
 
 
 @pytest.mark.parametrize('other',['other-fleet','other-runtime','target-library','projects'])

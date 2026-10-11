@@ -38,11 +38,13 @@ class SetupGrant:
     created_at: float
     expires_at: float
     github_policy: str | None = None
+    repository_prepare: bool = False
 
 
 def _snapshot(grant):
     values=asdict(grant)
     if values["github_policy"] is None: values.pop("github_policy")
+    if not values["repository_prepare"]: values.pop("repository_prepare")
     return json.dumps(values,sort_keys=True,separators=(",", ":"))
 
 
@@ -50,7 +52,8 @@ def _declaration_scope(grant):
     """Exact local approval inputs; generations/times do not own authored bytes."""
     return {key:value for key,value in asdict(grant).items()
         if key not in {"generation","created_at","expires_at"}
-        and not (key=="github_policy" and value is None)}
+        and not (key=="github_policy" and value is None)
+        and not (key=="repository_prepare" and value is False)}
 
 
 def _uuid(value):
@@ -86,7 +89,7 @@ class OwnerSetup:
             _,binding=self.connected._context(conn,principal)
             now=self.access._now()
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,release_id,release_seal,
-                str(directory),str(uuid4()),now,now+GRANT_SECONDS,github_policy)
+                str(directory),str(uuid4()),now,now+GRANT_SECONDS,github_policy,github_policy is not None)
 
     def allow(self, expected):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
@@ -128,7 +131,8 @@ class OwnerSetup:
     def _grant(row):
         grant=SetupGrant(**json.loads(row["snapshot"]))
         if (not _uuid(grant.generation) or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in (grant.created_at,grant.expires_at))
-                or grant.expires_at-grant.created_at!=GRANT_SECONDS): raise AccessUnavailable()
+                or grant.expires_at-grant.created_at!=GRANT_SECONDS or type(grant.repository_prepare) is not bool
+                or grant.repository_prepare and grant.github_policy is None): raise AccessUnavailable()
         return grant
 
     def revoke(self, expected):
@@ -280,7 +284,8 @@ class SetupEngine:
                     "repository":grant.repository,"permissions":dict(connection.permissions)}
         return {"version":1,"template":grant.template,"fleet":grant.fleet,"repository":grant.repository,
             "release_id":grant.release_id,"release_seal":grant.release_seal,"generation":grant.generation,
-            "expires_at":grant.expires_at,"request":self.store.retained_request(reader),"github":github}
+            "expires_at":grant.expires_at,"request":self.store.retained_request(reader),"github":github,
+            "can_prepare_repository":grant.repository_prepare}
 
     def preview(self,reader,generation,goal):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
@@ -339,3 +344,30 @@ class SetupEngine:
         if record and (record["verification"]!="verified" or record["plan_id"]!=plan_id or record["release_id"]!=grant.release_id): raise AccessUnavailable()
         return {"version":1,"request_id":request_id,"plan_id":plan_id,"generation":generation,
             "state":record["status"] if record else "unknown","recorded_activation":record}
+
+    def repository(self,reader,generation,plan_id,request_id):
+        """Prepare only this approval's launched team, using the core owner."""
+        from ..active_config import resolve_active_context
+        from ..activation_state import read_selection
+        from ..project_checkout import prepare_checkout
+        from ..runtime_admission import mutation_admission
+        if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
+        try:
+            grant=self.store.authorize(reader)
+            if not grant.repository_prepare or grant.generation!=generation: raise AccessDenied("setup_denied")
+            self._release(grant)
+            receipt=self.receipt(reader,generation,plan_id,request_id)
+            if receipt["state"]!="active": raise AccessDenied("setup_not_active")
+            with mutation_admission(self.root,expected_release=grant.release_id):
+                selected=read_selection(self.root)
+                if not selected or selected["plan_id"]!=plan_id or selected["activation_id"]!=request_id: raise AccessDenied("setup_changed")
+                context=resolve_active_context(root=self.root,fleet=grant.fleet)
+                rows=[]
+                for bot in context.fleet.bots:
+                    self.store.authorize(reader,expected=grant)
+                    rows.append(prepare_checkout(context,bot,grant.repository))
+                self.store.authorize(reader,expected=grant)
+            return {"version":1,"generation":generation,"plan_id":plan_id,"request_id":request_id,
+                    "repository":grant.repository,"checkouts":rows}
+        finally:
+            self._effects_lock.release()

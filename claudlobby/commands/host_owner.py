@@ -334,6 +334,8 @@ def dispatch(args):
                         "This can enroll/start native services and consume provider usage.\n")
                     terminal.write("The selected GitHub connection will be assigned to the lead, engineer and reviewer for this repository.\n"
                         if github_policy else "No named GitHub connection selected; existing template credential requirements still apply.\n")
+                    if github_policy:
+                        terminal.write("After launch, the browser may prepare each bot's working copy of this repository. Existing work and application setup scripts are left untouched.\n")
                     terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
                     _approve(terminal, "ALLOW-SETUP")
                     fresh_owner_setup(paths.root)

@@ -28,3 +28,20 @@ The common mission requires human permission for merges, deployment, new spendin
 Without an adjacent `projects.yaml`, the existing project owner derives review-tier projects from repository scope. `fleet setup` installs only `fleet.yaml`; it does not install adjacent project or mission files. Revenue-facing preview/acknowledgment policy requires a separately authored [project declaration](../../../projects.yaml.example), using the authored config/configuration-owner path rather than template mode. This candidate uses an inline fleet mission and does not pretend to include that richer bundle. Revenue metrics are not supplied.
 
 Static configuration/composition proof does not establish runtime behavior, provider readiness or useful work. Independent canary validation and the later cold-host/business trial remain required before those claims. Browser-guided team creation, repository preparation, credential delivery and launch authorization remain separate setup capabilities; this recipe does not complete that journey.
+
+## Prepare working copies
+
+After activation with a named connection, prepare each bot's assigned repository:
+
+```bash
+claudlobby --root /path/to/data --fleet web-app bot prepare-repository lead --repository example-org/web-app
+claudlobby --root /path/to/data --fleet web-app bot prepare-repository engineer --repository example-org/web-app
+claudlobby --root /path/to/data --fleet web-app bot prepare-repository reviewer --repository example-org/web-app
+```
+
+This clones into each bot's `projects/REPO` using its selected GitHub
+connection. A matching checkout is reused without fetching or changing work.
+Application scripts and dependency installation remain a separate task for the
+team. In guided setup, a newly approved named connection enables the equivalent
+**Prepare repository** step after launch. Then open the team dashboard and give
+the lead its first bounded task using the existing approved message flow.
