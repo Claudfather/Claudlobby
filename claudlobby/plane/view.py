@@ -49,7 +49,8 @@ from ..context import resolve_paths
 from .health import staged_summary
 from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
-from ..task_state import TaskStateError, read_tasks
+from ..task_state import TASK_EMITTER, TaskStateError, read_tasks
+from ..report_payload import decode_report_body
 from ..task_queries import task_escalations_from_snapshot
 
 try:  # §14: optional UI features degrade without disabling the core ledger
@@ -585,6 +586,18 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         # server-side — the raw id never rides the wire to the page.
         c.pop("recipient_raw", None)
         c["body_words"] = body_words(c["body"])
+        if c["message_class"] == "report" and c["emitter"] == TASK_EMITTER:
+            decoded = decode_report_body(c["body"], privacy=c["privacy"],
+                                         truncated=bool(c["truncated"]))
+            c["report"] = {"state": decoded.state}
+            if decoded.payload is not None:
+                report = decoded.payload
+                c["body_words"] = report.summary or report.reason
+                # Display reported evidence, never infer task or review approval.
+                c["report"].update(status=report.status, percent=report.percent,
+                                   pr_url=report.pr_url, pr_role=report.pr_role,
+                                   artifacts=list(report.artifacts), issues=list(report.issues),
+                                   skill=report.skill)
         c["tx"] = tx_by_msg.get(c["msg_id"], [])
         # chunk P: the receiver's verdict for THIS message, story-first.
         _dv = delivery_by_msg.get(c["msg_id"], {})

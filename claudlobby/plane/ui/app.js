@@ -158,15 +158,50 @@ function nudgeReason(m, thread) {
   } catch { return null; }
 }
 
+function reportLink(label, value) {
+  // Report evidence also allows non-web URLs (for example s3:); keep those text-only.
+  let clickable = false;
+  try {
+    const url = new URL(value);
+    clickable = /^https?:\/\//i.test(value) && !/[\s\\]/u.test(value)
+      && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+  } catch { /* Unusable URLs remain readable evidence. */ }
+  const text = esc(value);
+  return `<li><span>${esc(label)}:</span> ${clickable
+    ? `<a href="${text}" target="_blank" rel="noopener noreferrer">${text}</a>` : text}</li>`;
+}
+
+function reportEvidence(report) {
+  if (report?.state !== "captured") return "";
+  const links = [report.pr_url ? reportLink(report.pr_role === "reviewed"
+    ? "PR reviewed (reported)" : "PR authored (reported)", report.pr_url) : "",
+    ...report.artifacts.map(url => reportLink("Artifact", url)),
+    ...report.issues.map(url => reportLink("Issue", url))].join("");
+  return links ? `<ul class="report-evidence">${links}</ul>` : "";
+}
+
 function bodyBlock(m, prose = null) {
+  const report = m.report;
+  const unavailable = {withheld: "Report content was withheld by capture policy.",
+    truncated: "Report content is incomplete; structured evidence is unavailable.",
+    invalid: "This report could not be read. Inspect its recorded content in machinery.",
+    unsupported: "This report uses an unsupported format version."};
+  if (report && Object.hasOwn(unavailable, report.state)) {
+    return `<div class="body redacted">${esc(unavailable[report.state])}</div>`;
+  }
+  const labels = {progress: "Progress reported", blocked: "Blocker reported",
+    completed: "Completion reported", failed: "Failure reported"};
+  const status = report?.state === "captured"
+    ? `<div class="report-status ${esc(report.status)}">${esc(labels[report.status])}`
+      + `${report.percent !== null ? ` · ${esc(report.percent)}%` : ""}</div>` : "";
   const words = prose ?? (m.body_words || m.body);
   if (words) {
     const long = words.split("\n").length > CLAMP_LINES || words.length > CLAMP_CHARS;
     const open = long && openBodies.has(m.msg_id);
-    return `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
+    return status + `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
       + `${esc(words)}</div>`
       + (long ? `<button class="more" type="button">`
-                + `${open ? "show less" : "show more"}</button>` : "");
+                + `${open ? "show less" : "show more"}</button>` : "") + reportEvidence(report);
   }
   return `<div class="body redacted">message captured as metadata only`
        + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
@@ -187,7 +222,8 @@ function machineryBlock(m, prose = null) {
   ].filter(Boolean).join(" · ");
   // The verbatim wire body (framing included) lives here — the prose above
   // renders body_words; this expand is the raw-text view of truth.
-  const raw = m.body && m.body !== (prose ?? (m.body_words || ""))
+  const raw = m.body && (m.report && m.report.state !== "legacy"
+    || m.body !== (prose ?? (m.body_words || "")))
     ? `<div class="machinery raw">${esc(m.body)}</div>` : "";
   return `<details><summary>machinery</summary>`
        + `<div class="machinery">${parts}</div>${raw}</details>`;
@@ -231,6 +267,9 @@ function threadTitle(t, reason) {
   if (t.title) return clip(t.title, 100);
   const first = t.messages[0];
   if (reason != null) return clip(reason.split("\n")[0], 100);
+  if (first?.report && !["captured", "legacy"].includes(first.report.state)) {
+    return `Report unavailable from ${first.sender_short}`;
+  }
   if (first && (first.body_words || first.body)) {
     return clip((first.body_words || first.body).split("\n")[0], 100);
   }
