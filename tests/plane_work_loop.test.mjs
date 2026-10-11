@@ -1037,6 +1037,23 @@ test('bot selection uses the exact admitted UID and room, keeps recipient drafts
   assert.equal(h.document.activeElement, h.get('work-body'));
   assert.equal(contextReads, 1); assert.deepEqual(h.sends, []); assert.deepEqual(h.lookups, []); assert.deepEqual(h.preparations, []);
 });
+test('connected bot selection uses the admitted source-qualified identity without sending or losing drafts', async () => {
+  const identity={...inspectedWorker,uid:'mini::'+inspectedWorker.uid,alias:'mini::'+inspectedWorker.alias,
+    fleet:'mini / '+inspectedWorker.fleet,fleet_uid:'mini::'+inspectedWorker.fleet_uid};
+  const capability={...inspectionContext,room:identity.fleet,scope:{...inspectionContext.scope,fleet:identity.fleet},
+    recipients:inspectionContext.recipients.map(r=>({...r,id:'mini::'+r.id}))};
+  const h=harness({interactionContext:()=>capability});h.loop.setRoom(identity.fleet);await settle();
+  h.get('work-body').value='Keep lead draft';h.get('work-body').emit('input');
+  assert.equal(h.loop.selectMessageRecipient({...identity,fleet_uid:'pi::'+inspectedWorker.fleet_uid}),false);
+  assert.equal(h.loop.selectMessageRecipient({...identity,uid:'pi::'+inspectedWorker.uid}),false);
+  assert.equal(h.get('work-body').value,'Keep lead draft');
+  assert.equal(h.loop.selectMessageRecipient(identity),true);assert.equal(h.get('work-recipient').value,identity.uid);
+  h.get('work-body').value='Worker draft';h.get('work-body').emit('input');
+  assert.equal(h.loop.selectMessageRecipient({...identity,uid:capability.recipients[0].id}),true);
+  assert.equal(h.get('work-body').value,'Keep lead draft');assert.equal(h.loop.selectMessageRecipient(identity),true);
+  assert.equal(h.get('work-body').value,'Worker draft');
+  assert.deepEqual(h.sends,[]);assert.deepEqual(h.lookups,[]);assert.deepEqual(h.preparations,[]);
+});
 
 for (const patch of [{ uid: 'actor_' + '9'.repeat(32) }, { fleet: 'other/team' },
   { provisional: true }, { current: false }, { uid: 'Worker' }, { fleet_uid: '' }])

@@ -371,10 +371,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onOpenTeam}) {
     mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onOpenTeam}; paused = true; invoke(onPause); changed();
-    const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
+    const unavailable = 'Unavailable in this connected view. Activity, tasks and team details remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (button.dataset.view === 'channel' && !['denied','disposed'].includes(phase)) continue;
+        if ((['channel','fleet'].includes(button.dataset.view) || button.dataset.botInspect)
+            && !['denied','disposed'].includes(phase)) continue;
         button.disabled = true; button.title = unavailable;
       }
       const search = document.getElementById('search'); if (search) { search.disabled = true; search.title = unavailable; search.value = ''; }

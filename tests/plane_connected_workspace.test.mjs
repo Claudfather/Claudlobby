@@ -194,12 +194,12 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
   h.metadataStatus=403;await h.api.checkAccount();children[0].onmessage({data:'late'});children[0].onopen?.({});assert.equal(messages,1);assert.equal(children[0].closed,true);h.api.dispose();
 });
 
-test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
+test('controls retain focus, allow team inspection and disable unsupported navigation honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  for(const n of h.ui.nav)assert.equal(n.disabled,n.dataset.view!=='channel');assert.equal(h.ui.get('search').disabled,true);
+  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','fleet'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[2],check=root.children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[1],check);
   const connect=row.children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1],connect);
-  const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';h.ui.get('fleet').append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
+  const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';h.ui.get('fleet').append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,false);
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
