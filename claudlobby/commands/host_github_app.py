@@ -21,6 +21,8 @@ def dispatch(args) -> CommandOutput:
     _operator_shell()
     if args.seed or args.fleet:
         raise CommandFailure("invalid_argument", "GitHub App host commands do not select a fleet")
+    if args.public_command.startswith("host.github-app.issuer."):
+        return _issuer(args)
     try:
         paths = resolve_paths(root=args.root)
     except InvalidPathSelector as exc:
@@ -30,6 +32,41 @@ def dispatch(args) -> CommandOutput:
     if args.public_command == "host.github-app.token":
         return _token(paths.root, paths.lib)
     raise CommandFailure("invalid_argument", "unsupported GitHub App command")
+
+
+def _issuer(args) -> CommandOutput:
+    import json
+    import sqlite3
+    from ..github_issuer import GrantStore, GithubMinter, IssuanceDenied, IssuerUnavailable, _private_file, create_app
+
+    try:
+        store = GrantStore(args.store)
+        if args.issuer_command == "approve":
+            grant = json.loads(_private_file(args.grant_file).read_text())
+            credential = _private_file(args.credential_file).read_text().strip()
+            result = store.approve(grant, credential)
+        elif args.issuer_command == "revoke":
+            result = store.revoke(args.grant_id)
+        else:
+            import uvicorn
+            if not 1 <= args.port <= 65535:
+                raise ValueError("invalid port")
+            keys = {}
+            for declaration in args.app_key:
+                app_id, separator, path = declaration.partition("=")
+                if not separator or not app_id.isdecimal() or int(app_id) <= 0 or int(app_id) in keys:
+                    raise ValueError("invalid App key mapping")
+                keys[int(app_id)] = _private_file(path)
+            _private_file(store.path)
+            uvicorn.run(create_app(store, GithubMinter(keys)), host="127.0.0.1", port=args.port, access_log=False)
+            result = {"issuer": "stopped"}
+    except ImportError as exc:
+        raise CommandFailure("unavailable", "Install the plane-ui extra to run the issuer") from exc
+    except (IssuanceDenied, ValueError) as exc:
+        raise CommandFailure("invalid_argument", "Invalid issuer request; check the grant, expiry and credential files") from exc
+    except (IssuerUnavailable, OSError, sqlite3.Error) as exc:
+        raise CommandFailure("unavailable", "Issuer state unavailable; check private files and store") from exc
+    return CommandOutput(result, lines=(json.dumps(result, sort_keys=True),))
 
 
 def _invoke(script: Path, argv: list[str], root: Path, *, timeout: int) -> subprocess.CompletedProcess[str]:
