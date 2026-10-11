@@ -4,11 +4,594 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from claudlobby.__main__ import main
+
+
+def _issuer_grant():
+    return {"grant_id": "grant-example", "workspace_id": "workspace-example",
+            "deployment_id": "host-example", "repository_id": 123,
+            "expires_at": time.time() + 86400,
+            "binding": {"connection_id": "app", "attachment_id": "app",
+                        "assignment_id": "project", "bot_id": "engineer", "project": "service",
+                        "repo": "example/service", "mode": "managed", "app_id": 12,
+                        "installation_id": 34, "permissions": {"contents": "read"},
+                        "credential_refs": {"issuer_url_env": "ISSUER_URL", "issuer_token_env": "ISSUER_TOKEN"},
+                        "revision": "a" * 64, "slug": None, "bot_user_id": None}}
+
+
+def _issuer_token():
+    from datetime import datetime, timezone
+    return {"token": "ghs_example_only", "expires_at": datetime.fromtimestamp(time.time() + 300, timezone.utc).isoformat(),
+            "repositories": [{"id": 123, "full_name": "example/service"}], "permissions": {"contents": "read", "metadata": "read"}}
+
+
+def _consent_flow(tmp_path):
+    from claudlobby.github_consent import ConsentFlow, GithubConsentProvider
+    from claudlobby.github_issuer import GrantStore
+
+    tmp_path.chmod(0o700)
+    secret = tmp_path / "client-secret"
+    secret.write_text("example-client-secret")
+    secret.chmod(0o600)
+    provider = GithubConsentProvider({"app_id": 12, "client_id": "Iv1.example",
+                                     "client_secret_path": str(secret), "origin": "https://issuer.example.invalid"})
+    return ConsentFlow(GrantStore(tmp_path / "grants.db"), provider)
+
+
+
+def _enrollment_request():
+    from claudlobby.github_enrollment import prepare_request
+    return prepare_request(request_id="00000000-0000-4000-8000-000000000001",
+        workspace_id="00000000-0000-4000-8000-000000000002", host_uid="host_" + "a" * 32,
+        nonce="A" * 43, binding=_issuer_grant()["binding"], repository_id=123, credential="c" * 43)
+
+
+def _enrollment_proof(request, **overrides):
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from claudlobby.github_enrollment import PURPOSE, request_digest
+    key = Ed25519PrivateKey.generate()
+    public = json.loads(jwt.algorithms.OKPAlgorithm.to_jwk(key.public_key()))
+    public["kid"] = "enrollment-test"
+    now = int(time.time())
+    claims = dict(iss="https://website.example.invalid", sub="00000000-0000-4000-8000-000000000003",
+        workspace_id=request["workspace_id"], host_uid=request["host_uid"], nonce=request["nonce"],
+        operational_origin="https://plane.example.invalid", binding_revision=1,
+        binding_generation="00000000-0000-4000-8000-000000000004", iat=now, nbf=now, exp=now+120,
+        jti="00000000-0000-4000-8000-000000000005", purpose=PURPOSE,
+        aud="urn:claudfather:github-enrollment:https://issuer.example.invalid:v1",
+        request_digest=request_digest(request), credential_digest=request["credential_digest"])
+    claims.update(overrides)
+    return jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": public["kid"]}), json.dumps({"keys": [public]}).encode()
+
+
+def test_account_enrollment_stages_retryable_consent_without_approving_access(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from fastapi.testclient import TestClient
+    from claudlobby.github_enrollment import GithubEnrollment
+    from claudlobby.github_issuer import create_app, IssuanceDenied
+    flow, request = _consent_flow(tmp_path), _enrollment_request()
+    enrollment = GithubEnrollment(flow, {"website_origin": "https://website.example.invalid",
+                                        "operational_origin": "https://plane.example.invalid"})
+    assertion, keys = _enrollment_proof(request)
+    async def keyset(_): return keys
+    enrollment.keys.get = keyset
+    flow.provider.verify = lambda *_: 456
+    flow.store.initialize()
+    client = TestClient(create_app(flow.store, lambda *_: _issuer_token(), flow, enrollment=enrollment),
+                        base_url=flow.provider.origin, follow_redirects=False)
+    payload = {"request": request, "assertion": assertion}
+    assert client.post("/v1/github/enroll", json=payload, headers={"Origin": "https://plane.example.invalid"}).status_code == 403
+    response = client.post("/v1/github/enroll", json=payload)
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    invitation = response.json()
+    assert invitation["new_issuance"] == "not_allowed"
+    assert client.post("/v1/github/enroll", json=payload).json() == invitation
+    duplicate = {**request, "request_id": "00000000-0000-4000-8000-000000000006"}
+    duplicate_assertion, duplicate_keys = _enrollment_proof(duplicate)
+    keys = duplicate_keys
+    duplicate_payload = {"request": duplicate, "assertion": duplicate_assertion}
+    pending = client.post("/v1/github/enroll", json=duplicate_payload).json()
+    issue = {"schema": 1, "binding": request["binding"], "revision": "a" * 64}
+    with pytest.raises(IssuanceDenied): flow.store.issue("c" * 43, issue, lambda *_: pytest.fail("unapproved mint"))
+    assert client.get(invitation["authorization_url"]).status_code == 200
+    begin = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
+    state = parse_qs(urlsplit(begin.headers["location"]).query)["state"][0]
+    assert client.get("/v1/github/callback?state=" + state + "&code=example-code").status_code == 303
+    # A separately staged invitation cannot create a second active binding,
+    # even when it finishes after the first consent succeeds.
+    assert client.get(pending["authorization_url"]).status_code == 200
+    begin = client.post("/v1/github/connect", data={"ticket": pending["ticket"]}, headers={"Origin": flow.provider.origin})
+    state = parse_qs(urlsplit(begin.headers["location"]).query)["state"][0]
+    assert client.get("/v1/github/callback?state=" + state + "&code=second-code").status_code == 303
+    assert flow.page(pending["ticket"])[0]["status"] == "needs_operator"
+    assert client.post("/v1/github/enroll", json=duplicate_payload).status_code == 409
+    assert flow.store.issue("c" * 43, issue, lambda *_: _issuer_token())["token"] == "ghs_example_only"
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_enrollments").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM github_consent").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM github_grants WHERE revoked=0").fetchone()[0] == 1
+        db.execute("UPDATE github_consent SET expires_at=0 WHERE ticket=?", (invitation["ticket"],))
+    assertion, keys = _enrollment_proof(request)
+    response = client.post("/v1/github/enroll", json={"request": request, "assertion": assertion})
+    assert response.status_code == 409 and response.json()["error"] == "enrollment_restart_required"
+    saved = flow.store.path.read_bytes()
+    assert b"c" * 43 not in saved and assertion.encode() not in saved
+
+
+def test_account_enrollment_binds_exact_request_and_refuses_session_token_reuse(tmp_path):
+    from claudlobby.github_enrollment import GithubEnrollment
+    from claudlobby.github_issuer import IssuanceDenied
+    from claudlobby.plane.workspace_assertion import AssertionRefused
+    flow, request = _consent_flow(tmp_path), _enrollment_request()
+    flow.store.initialize()
+    enrollment = GithubEnrollment(flow, {"website_origin": "https://website.example.invalid",
+                                        "operational_origin": "https://plane.example.invalid"})
+    assertion, keys = _enrollment_proof(request)
+    for changed in ({**request, "credential_digest": "b" * 64}, {**request, "repository_id": 456}):
+        with pytest.raises(AssertionRefused): enrollment.enroll(changed, assertion, keys)
+    wrong, wrong_keys = _enrollment_proof(request, purpose="claudfather-workspace-host-session-v1")
+    with pytest.raises(AssertionRefused): enrollment.enroll(request, wrong, wrong_keys)
+    enrollment.enroll(request, assertion, keys)
+    changed = {**request, "repository_id": 456}
+    changed_assertion, changed_keys = _enrollment_proof(changed)
+    with pytest.raises(IssuanceDenied, match="changed"):
+        enrollment.enroll(changed, changed_assertion, changed_keys)
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_consent").fetchone()[0] == 1
+
+
+def test_issuer_browser_consent_only_grants_after_same_browser_callback(tmp_path, capsys):
+    from urllib.parse import parse_qs, urlsplit
+    from fastapi.testclient import TestClient
+    from claudlobby.github_issuer import create_app, IssuanceDenied
+
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    for name, content in (("grant.json", json.dumps(grant)), ("credential", credential),
+                          ("consent.json", json.dumps(flow.provider.config))):
+        path = tmp_path / name
+        path.write_text(content)
+        path.chmod(0o600)
+    assert main(["host", "github-app", "issuer", "invite", "--json", "--store", str(flow.store.path),
+                 "--grant-file", str(tmp_path / "grant.json"), "--credential-file", str(tmp_path / "credential"),
+                 "--consent-config", str(tmp_path / "consent.json")]) == 0
+    output = capsys.readouterr().out
+    assert credential not in output and json.loads(output)["command"] == "host.github-app.issuer.invite"
+    invitation = json.loads(output)["data"]
+    calls = []
+    def verify(code, verifier, selected):
+        calls.append((code, verifier, selected))
+        return 456
+    flow.provider.verify = verify
+    app = create_app(flow.store, lambda *_: _issuer_token(), flow)
+    client = TestClient(app, base_url=flow.provider.origin, follow_redirects=False)
+    with pytest.raises(IssuanceDenied):
+        flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: pytest.fail("invitation minted"))
+    page = client.get(invitation["authorization_url"])
+    assert page.status_code == 200 and "example/service" in page.text and "engineer" in page.text
+    assert all(flag in page.headers["set-cookie"] for flag in ("Secure", "HttpOnly", "SameSite=lax"))
+    assert client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": "https://other.example"}).status_code == 403
+    start = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    assert start.status_code == 303 and query["code_challenge_method"] == ["S256"]
+    abandoned = query["state"][0]
+    returned = client.get(invitation["authorization_url"])
+    assert "Authorize with GitHub" in returned.text and "set-cookie" not in returned.headers
+    stranger = TestClient(app, base_url=flow.provider.origin, follow_redirects=False)
+    stranger.get(invitation["authorization_url"])
+    assert stranger.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin}).status_code == 403
+    retry = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
+    query = parse_qs(urlsplit(retry.headers["location"]).query)
+    assert query["state"][0] != abandoned
+    assert client.get("/v1/github/callback?state=" + abandoned + "&code=old-code").status_code == 403 and calls == []
+    callback = "/v1/github/callback?" + "state=" + query["state"][0] + "&code=example-code"
+    assert stranger.get(callback).status_code == 403 and calls == []
+    # A second bot's consent may be open while the first is at GitHub. Its
+    # browser cookie and completion must not invalidate the first invitation.
+    other_grant = {**grant,"grant_id":"second-bot","binding":{**grant["binding"],"bot_id":"reviewer","revision":"b"*64}}
+    other = flow.invite(other_grant,credential)
+    client.get(other["authorization_url"])
+    other_start = client.post("/v1/github/connect",data={"ticket":other["ticket"]},headers={"Origin":flow.provider.origin})
+    other_state = parse_qs(urlsplit(other_start.headers["location"]).query)["state"][0]
+    complete = client.get(callback)
+    assert complete.status_code == 303 and complete.headers["location"] == invitation["authorization_url"]
+    assert "GitHub is connected" in client.get(complete.headers["location"]).text
+    assert client.get(callback).status_code == 403 and len(calls) == 1
+    assert calls[0][0] == "example-code" and calls[0][2] == grant
+    from hashlib import sha256
+    from base64 import urlsafe_b64encode
+    assert query["code_challenge"] == [urlsafe_b64encode(sha256(calls[0][1].encode()).digest()).decode().rstrip("=")]
+    other_complete = client.get("/v1/github/callback?state="+other_state+"&code=other-code")
+    assert other_complete.status_code == 303 and other_complete.headers["location"] == other["authorization_url"]
+    assert calls[1][2] == other_grant and "GitHub is connected" in client.get(other["authorization_url"]).text
+    result = flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: _issuer_token())
+    assert result["token"] == "ghs_example_only"
+    saved = flow.store.path.read_bytes()
+    assert credential.encode() not in saved and b"example-code" not in saved
+    with flow.store.transaction() as db:
+        assert tuple(db.execute("SELECT verifier,state_digest,browser_digest FROM github_consent").fetchone()) == (None, None, None)
+    flow.store.revoke(grant["grant_id"])
+    assert "Connection removed" in client.get(invitation["authorization_url"]).text
+
+
+def test_issuer_consent_cancel_and_failed_verification_never_activate(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from claudlobby.github_issuer import IssuanceDenied
+
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    invitation = flow.invite(grant, credential)
+    ticket = invitation["ticket"]
+    def begin():
+        _, cookie = flow.page(ticket)
+        query = parse_qs(urlsplit(flow.begin(ticket, cookie)).query)
+        return query["state"][0], cookie
+    state, cookie = begin()
+    flow.provider.verify = lambda *_: (_ for _ in ()).throw(IssuanceDenied("not an administrator"))
+    flow.complete(state, cookie, "denied-code")
+    assert flow.page(ticket)[0]["status"] == "invited"
+    with pytest.raises(IssuanceDenied):
+        flow.complete(state, cookie, "replay-code")
+    state, cookie = begin()
+    def cancelled(*_):
+        flow.cancel(ticket)  # cancellation commits while the provider is in flight
+        return 456
+    flow.provider.verify = cancelled
+    flow.complete(state, cookie, "cancelled-code")
+    assert flow.page(ticket)[0]["status"] == "cancelled"
+    with pytest.raises(IssuanceDenied):
+        flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a" * 64}, lambda *_: pytest.fail("cancelled consent minted"))
+
+
+def test_issuer_consent_verifies_provider_user_installation_and_repo_admin(tmp_path, monkeypatch):
+    from copy import deepcopy
+    import httpx
+    from claudlobby.github_issuer import IssuanceDenied
+
+    flow, grant = _consent_flow(tmp_path), _issuer_grant()
+    installation = {"id": 34, "app_id": 12, "permissions": {"contents": "read"}, "suspended_at": None}
+    repository = {"id": 123, "full_name": "example/service", "permissions": {"admin": True}}
+    discovery = False
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs == {"trust_env": False, "follow_redirects": False, "timeout": 15}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, url, *, headers, data):
+            assert url == "https://github.com/login/oauth/access_token"
+            expected = {"client_id": "Iv1.example", "client_secret": "example-client-secret",
+                            "redirect_uri": flow.provider.origin + "/v1/github/callback", "code": "example-code",
+                            "code_verifier": "v" * 43, "repository_id": 123}
+            if discovery: expected.pop("repository_id")
+            assert data == expected
+            return httpx.Response(200, json={"access_token": "ghu_example", "refresh_token": "unused"}, request=httpx.Request("POST", url))
+        def get(self, url, *, headers):
+            assert headers["Authorization"] == "Bearer ghu_example"
+            bodies = {"https://api.github.com/user": {"id": 456},
+                      "https://api.github.com/user/installations?per_page=100&page=1": {"installations": [installation]},
+                      "https://api.github.com/user/installations/34/repositories?per_page=100&page=1": {"repositories": [repository]},
+                      "https://api.github.com/repos/example/service": repository}
+            return httpx.Response(200, json=bodies[url], request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "Client", Client)
+    assert flow.provider.verify("example-code", "v" * 43, grant) == 456
+    for target, changes in ((installation, {"app_id": 13}), (installation, {"permissions": {}}),
+                            (repository, {"id": 124}), (repository, {"full_name": "other/service"}),
+                            (repository, {"permissions": {"admin": False}})):
+        before = deepcopy(target)
+        target.update(changes)
+        with pytest.raises(IssuanceDenied):
+            flow.provider.verify("example-code", "v" * 43, grant)
+        target.clear()
+        target.update(before)
+    from claudlobby.github_selection import PERMISSIONS
+    discovery = True
+    installation['permissions'] = dict(PERMISSIONS)
+    selected = flow.provider.resolve_repository('example-code','v'*43,'https://github.com/Example/Service.git')
+    assert selected == {'version':1,'app_id':12,'installation_id':34,'repository_id':123,
+        'repository':'example/service','issuer_origin':flow.provider.origin,'permissions':PERMISSIONS}
+    repository['permissions']['admin'] = False
+    with pytest.raises(IssuanceDenied):
+        flow.provider.resolve_repository('example-code','v'*43,'example/service')
+
+
+def test_repository_selection_is_same_browser_configuration_and_never_a_grant(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from starlette.testclient import TestClient
+    from claudlobby.github_issuer import create_app
+    from claudlobby.github_selection import PERMISSIONS, read_selection
+    flow = _consent_flow(tmp_path)
+    flow.store.initialize()
+    selected = {'version':1,'app_id':12,'installation_id':34,'repository_id':123,
+        'repository':'example/service','issuer_origin':flow.provider.origin,'permissions':dict(PERMISSIONS)}
+    calls=[]
+    def resolve(code, verifier, repository):
+        calls.append((code, repository)); return selected
+    flow.provider.resolve_repository = resolve
+    app = create_app(flow.store,lambda *_:pytest.fail('discovery minted a token'),flow)
+    client = TestClient(app,base_url=flow.provider.origin,follow_redirects=False)
+    stranger = TestClient(app,base_url=flow.provider.origin,follow_redirects=False)
+    location=client.get('/v1/github/repositories').headers['location']
+    ticket=parse_qs(urlsplit(location).query)['ticket'][0]
+    assert 'Choose your repository' in client.get(location).text
+    data={'ticket':ticket,'repository':'https://github.com/Example/Service.git/'}
+    assert client.post('/v1/github/connect',data=data,headers={'Origin':'https://other.example'}).status_code==403
+    start=client.post('/v1/github/connect',data=data,headers={'Origin':flow.provider.origin})
+    state=parse_qs(urlsplit(start.headers['location']).query)['state'][0]
+    callback='/v1/github/callback?state='+state+'&code=selection-code'
+    assert stranger.get(callback).status_code==403 and calls==[]
+    assert client.get(callback).status_code==303
+    assert client.get(callback).status_code==403 and calls==[('selection-code','example/service')]
+    assert stranger.get(location).status_code==403
+    download=location+'&download=1'
+    assert stranger.get(download).status_code==403
+    assert 'Repository selected' in client.get(location).text
+    response=client.get(download)
+    assert response.status_code==200 and response.json()==selected
+    assert response.headers['cache-control']=='no-store' and 'attachment' in response.headers['content-disposition']
+    file=tmp_path/'selection.json';file.write_bytes(response.content)
+    repo,policy,enrollment=read_selection(file,flow.provider.origin)
+    assert repo=='example/service' and enrollment=={'issuer_origin':flow.provider.origin,'repository_id':123}
+    assert json.loads(policy)['connections']['managed']['repos']==[repo]
+    with pytest.raises(ValueError):read_selection(file,'https://other.example')
+    with flow.store.transaction() as db:
+        assert db.execute('SELECT count(*) FROM github_grants').fetchone()[0]==0
+        assert tuple(db.execute('SELECT status,verifier,state_digest FROM github_consent').fetchone())==('selected',None,None)
+        db.execute('UPDATE github_consent SET expires_at=0 WHERE ticket=?',(ticket,))
+    assert client.get(download).status_code==403
+
+
+def test_issuer_consent_conflicts_fail_before_login_or_require_new_invitation(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from claudlobby.github_consent import _page
+    from claudlobby.github_issuer import GrantConflict
+
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    invitation = flow.invite(grant, credential)
+    _, cookie = flow.page(invitation["ticket"])
+    state = parse_qs(urlsplit(flow.begin(invitation["ticket"], cookie)).query)["state"][0]
+    # The operator creates a conflicting grant while GitHub verification is in flight.
+    def verify(*_):
+        flow.store.approve(grant, credential)
+        flow.store.revoke(grant["grant_id"])
+        return 456
+    flow.provider.verify = verify
+    flow.complete(state, cookie, "example-code")
+    row, _ = flow.page(invitation["ticket"])
+    assert row["status"] == "needs_operator" and "new invitation" in _page(row)
+    with pytest.raises(GrantConflict, match="grant ID already exists"):
+        flow.invite(grant, credential)
+    with pytest.raises(GrantConflict, match="another deployment"):
+        flow.invite({**grant, "grant_id": "new-grant", "deployment_id": "different-host"}, credential)
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_consent").fetchone()[0] == 1
+        assert db.execute("SELECT revoked FROM github_grants").fetchone()[0] == 1
+
+
+def _approve_consent(flow, grant, credential, user_id=456):
+    from urllib.parse import parse_qs, urlsplit
+    ticket = flow.invite(grant, credential)["ticket"]
+    _, cookie = flow.page(ticket)
+    state = parse_qs(urlsplit(flow.begin(ticket, cookie)).query)["state"][0]
+    flow.provider.verify = lambda *_: user_id
+    flow.complete(state, cookie, "example-code")
+    return ticket
+
+
+def _webhook(flow, tmp_path):
+    from claudlobby.github_webhooks import GithubWebhooks
+    secret = tmp_path / "webhook-secret"
+    secret.write_bytes(b"example-webhook-secret-for-tests-only")
+    secret.chmod(0o600)
+    return GithubWebhooks(flow.store, {12: secret})
+
+
+def _signed_event(payload):
+    import hashlib
+    import hmac
+    raw = json.dumps(payload).encode()
+    signature = "sha256=" + hmac.new(b"example-webhook-secret-for-tests-only", raw, hashlib.sha256).hexdigest()
+    return raw, signature
+
+
+def test_issuer_signed_user_revocation_and_replay_preserve_other_grants(tmp_path):
+    from fastapi.testclient import TestClient
+    from claudlobby.github_issuer import create_app, IssuanceDenied
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    ticket = _approve_consent(flow, grant, credential)
+    other = {**grant, "grant_id": "other-user", "binding": {**grant["binding"], "bot_id": "reviewer"}}
+    _approve_consent(flow, other, credential, user_id=457)
+    hook = _webhook(flow, tmp_path)
+    client = TestClient(create_app(flow.store, lambda *_: _issuer_token(), flow, hook))
+    raw, signature = _signed_event({"action": "revoked", "sender": {"id": 456}})
+    headers = {"content-type": "application/json", "x-github-event": "github_app_authorization", "x-hub-signature-256": signature,
+               "x-github-delivery": "00000000-0000-4000-8000-000000000001"}
+    assert client.post("/v1/github/webhook/12", content=raw+b" ", headers=headers).status_code == 403
+    assert client.post("/v1/github/webhook/13", content=raw, headers=headers).status_code == 403
+    assert client.post("/v1/github/webhook/12", content=raw, headers=headers).json() == {"received": True}
+    assert flow.page(ticket)[0]["status"] == "revoked"
+    with pytest.raises(IssuanceDenied):
+        flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a"*64}, lambda *_: pytest.fail("revoked grant minted"))
+    assert flow.store.issue(credential, {"schema": 1, "binding": other["binding"], "revision": "a"*64}, lambda *_: _issuer_token())
+    fresh = {**grant, "grant_id": "fresh-consent"}
+    fresh_ticket = _approve_consent(flow, fresh, credential)
+    assert client.post("/v1/github/webhook/12", content=raw, headers=headers).status_code == 200
+    assert flow.page(fresh_ticket)[0]["status"] == "approved"
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_revocations").fetchone()[0] == 1
+    # A later genuine revocation may have identical body bytes but a new delivery ID.
+    assert client.post("/v1/github/webhook/12", content=raw, headers={**headers, "x-github-delivery": "00000000-0000-4000-8000-000000000002"}).status_code == 200
+    assert flow.page(fresh_ticket)[0]["status"] == "revoked"
+
+
+def test_issuer_installation_and_repository_revocations_are_scoped(tmp_path):
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    flow.store.approve(grant, credential)
+    other = {**grant, "grant_id": "other-repo", "repository_id": 124,
+             "binding": {**grant["binding"], "repo": "example/other"}}
+    flow.store.approve(other, credential)
+    hook = _webhook(flow, tmp_path)
+    def event(kind, payload):
+        import uuid
+        raw, signature = _signed_event(payload)
+        hook.receive(12, kind, str(uuid.uuid4()), signature, raw)
+    event("installation_repositories", {"action": "removed", "installation": {"id": 34, "app_id": 12}, "repositories_removed": [{"id": 123}]})
+    with flow.store.transaction() as db:
+        assert dict(db.execute("SELECT grant_id,revoked FROM github_grants")) == {"grant-example": 1, "other-repo": 0}
+    event("installation", {"action": "suspend", "installation": {"id": 34, "app_id": 12}})
+    event("installation", {"action": "unsuspend", "installation": {"id": 34, "app_id": 12}})
+    with flow.store.transaction() as db:
+        assert all(row[0] == 1 for row in db.execute("SELECT revoked FROM github_grants"))
+    with pytest.raises(ValueError):
+        event("installation", {"action": "deleted", "installation": {"id": 34, "app_id": 13}})
+
+
+def test_issuer_revocation_during_consent_prevents_late_approval(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    invitation = flow.invite(grant, credential)
+    _, cookie = flow.page(invitation["ticket"])
+    state = parse_qs(urlsplit(flow.begin(invitation["ticket"], cookie)).query)["state"][0]
+    hook = _webhook(flow, tmp_path)
+    def verify(*_):
+        raw, signature = _signed_event({"action": "revoked", "sender": {"id": 456}})
+        hook.receive(12, "github_app_authorization", "00000000-0000-4000-8000-000000000001", signature, raw)
+        return 456
+    flow.provider.verify = verify
+    flow.complete(state, cookie, "example-code")
+    assert flow.page(invitation["ticket"])[0]["status"] == "needs_operator"
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_grants").fetchone()[0] == 0
+    fresh_ticket = _approve_consent(flow, {**grant, "grant_id": "new-grant"}, credential)
+    assert flow.page(fresh_ticket)[0]["status"] == "approved"
+
+
+def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):
+    from copy import deepcopy
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    from fastapi.testclient import TestClient
+    from claudlobby.github_issuer import GrantStore, create_app
+
+    tmp_path.chmod(0o700)
+    grant, credential = _issuer_grant(), "example_" + "a" * 43
+    for name, text in (("grant.json", json.dumps(grant)), ("credential", credential)):
+        path = tmp_path / name
+        path.write_text(text)
+        path.chmod(0o600)
+    store = GrantStore(tmp_path / "grants.db")
+    assert main(["host", "github-app", "issuer", "approve", "--json", "--store", str(store.path),
+                 "--grant-file", str(tmp_path / "grant.json"), "--credential-file", str(tmp_path / "credential")]) == 0
+    output = capsys.readouterr()
+    assert credential not in output.out + output.err
+    assert json.loads(output.out)["command"] == "host.github-app.issuer.approve"
+    calls, provider_expiries = [], []
+    def mint(binding, repository_id):
+        calls.append((binding, repository_id))
+        result = _issuer_token()
+        result["_provider_expires_at"] = datetime.fromisoformat(result["expires_at"]).timestamp() + 45
+        provider_expiries.append(datetime.fromtimestamp(result["_provider_expires_at"], timezone.utc).isoformat())
+        return result
+    client = TestClient(create_app(store, mint))
+    payload = {"schema": 1, "binding": grant["binding"], "revision": grant["binding"]["revision"]}
+    headers = {"Authorization": "Bearer " + credential}
+    result = client.post("/v1/github/token", json=payload, headers=headers)
+    assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
+    assert result.json()["revision"] == payload["revision"]
+    assert 0 < (datetime.fromisoformat(result.json()["expires_at"]) - parsedate_to_datetime(result.headers["date"])).total_seconds() <= 3600
+    assert calls == [(grant["binding"], 123)]
+    # A valid credential cannot assert authority over another bot/repo/App/scope.
+    for key, value in (("bot_id", "other"), ("repo", "other/service"), ("installation_id", 35),
+                       ("app_id", 13), ("permissions", {"contents": "write"}), ("revision", "b" * 64)):
+        changed = deepcopy(payload)
+        changed["binding"][key] = value
+        changed["revision"] = changed["binding"]["revision"]
+        assert client.post("/v1/github/token", json=changed, headers=headers).status_code == 403
+    assert client.post("/v1/github/token", json=payload).status_code == 403
+    assert client.post("/v1/github/token", json=payload, headers={**headers, "Origin": "https://example.invalid"}).status_code == 403
+    assert len(calls) == 1
+    assert main(["host", "github-app", "issuer", "revoke", "--json", "--store", str(store.path), "--grant-id", grant["grant_id"]]) == 0
+    revoked = json.loads(capsys.readouterr().out)["data"]
+    assert revoked["new_issuance"] == "blocked" and revoked["host_enforcement"] == "unconfirmed"
+    assert revoked["residual_token_expires_at"] == provider_expiries[0]
+    assert client.post("/v1/github/token", json=payload, headers=headers).status_code == 403
+    assert len(calls) == 1
+    assert credential.encode() not in store.path.read_bytes()
+    assert b"ghs_example_only" not in store.path.read_bytes()
+
+
+def test_issuer_scope_checks_and_revoke_serializes_with_mint(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from claudlobby.github_issuer import GrantStore, IssuanceDenied, IssuerUnavailable
+
+    tmp_path.chmod(0o700)
+    store, grant, credential = GrantStore(tmp_path / "grants.db"), _issuer_grant(), "a" * 43
+    store.approve(grant, credential)
+    payload = {"schema": 1, "binding": grant["binding"], "revision": grant["binding"]["revision"]}
+    for changed in ({"repositories": [{"id": 456, "full_name": "example/service"}]},
+                    {"permissions": {"contents": "write"}}, {"expires_at": "invalid"}):
+        with pytest.raises(IssuerUnavailable):
+            store.issue(credential, payload, lambda *_: {**_issuer_token(), **changed})
+    with pytest.raises(IssuanceDenied):
+        store.approve({**grant, "grant_id": "other", "deployment_id": "another-host"}, credential)
+    started, release, revoking = Event(), Event(), Event()
+    def mint(*_):
+        started.set()
+        assert release.wait(5)
+        return _issuer_token()
+    def revoke():
+        revoking.set()
+        return store.revoke(grant["grant_id"])
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        issued = executor.submit(store.issue, credential, payload, mint)
+        assert started.wait(5)
+        revoked = executor.submit(revoke)
+        assert revoking.wait(5)
+        assert not revoked.done()
+        release.set()
+        result = issued.result(5)
+        assert revoked.result(5)["residual_token_expires_at"] == result["expires_at"]
+    with pytest.raises(IssuanceDenied):
+        store.issue(credential, payload, lambda *_: pytest.fail("revoked grant minted"))
+    with pytest.raises(IssuanceDenied):
+        store.approve(grant, credential)
+
+
+def test_issuer_minter_uses_server_key_repository_id_and_no_proxy(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from email.utils import formatdate
+    import httpx
+    import jwt
+    from claudlobby.github_issuer import GithubMinter
+
+    # GitHub is 45 seconds ahead of the issuer. A full-lifetime token must
+    # still work, while retaining the actual provider expiry for revocation.
+    provider_now = int(time.time()) + 45
+    raw = {**_issuer_token(), "expires_at": datetime.fromtimestamp(provider_now + 3600, timezone.utc).isoformat()}
+
+    key = tmp_path / "app.pem"
+    key.write_bytes(b"test-key-only")
+    key.chmod(0o600)
+    monkeypatch.setattr(jwt, "encode", lambda claims, contents, algorithm: "test-jwt" if contents == b"test-key-only" and claims["iss"] == "12" and algorithm == "RS256" else pytest.fail("wrong key"))
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs == {"trust_env": False, "follow_redirects": False, "timeout": 15}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, url, *, headers, json):
+            assert url == "https://api.github.com/app/installations/34/access_tokens"
+            assert headers["Authorization"] == "Bearer test-jwt"
+            assert json == {"repository_ids": [123], "permissions": {"contents": "read"}}
+            return httpx.Response(201, json=raw, headers={"Date": formatdate(provider_now, usegmt=True)}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx, "Client", Client)
+    result = GithubMinter({12: key})(_issuer_grant()["binding"], 123)
+    assert result["token"] == "ghs_example_only"
+    assert 3590 < datetime.fromisoformat(result["expires_at"]).timestamp() - time.time() < 3600
+    assert result["_provider_expires_at"] == provider_now + 3600
 
 
 def test_setup_uses_packaged_native_owner_and_does_not_echo_secret(tmp_path, monkeypatch, capsys):

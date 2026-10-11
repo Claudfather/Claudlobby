@@ -167,3 +167,103 @@ def test_ready_never_labels_unadmitted_source_setup_only(setup_http,monkeypatch,
         monkeypatch.setattr(app.connected_reads,'_setup_source',setup_source)
         response=client.get('/api/owner/connected/status',headers=headers(s['token']))
         assert response.status_code==status and response.json()['state']!='setup_only'
+
+
+def test_managed_setup_retains_host_secret_and_checks_each_canonical_bot(setup_http, monkeypatch):
+    """Real setup HTTP and private store; only the remote issuer is synthetic."""
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from email.utils import formatdate
+    import httpx
+    import time
+    from claudlobby.commands.setup import _template_github
+    from claudlobby.dotenv import read
+    from claudlobby.github_issuer import _binding
+    from claudlobby.github_enrollment import request_digest
+    from claudlobby.plane.owner_setup import SetupEngine
+
+    app, access, _, _, _, original = setup_http
+    source = access.root.parent / 'managed.yaml'
+    source.write_text(json.dumps({'fleet': {'github': {'connections': {'team': {
+        'name': 'Team App', 'mode': 'managed', 'app_id': 123, 'installation_id': 456,
+        'permissions': {'contents': 'write'}, 'credential_refs': {
+            'issuer_url_env': 'TEAM_ISSUER_URL', 'issuer_token_env': 'TEAM_ISSUER_TOKEN'}}}}}}))
+    grant = replace(original, github_policy=_template_github(source, 'team'), repository_prepare=True,
+        github_enrollment={'issuer_origin': 'https://issuer.example.test', 'repository_id': 789})
+    engine = app.connected_setup.engine
+    engine.store.allow(grant)
+    requests, credentials = [], []
+    approved, lose_reply = set(), [True]
+    issuer_now = time.time() + 900  # Provider clock ahead of the host.
+    def reply(status,body,headers=None):
+        return httpx.Response(status,stream=httpx.ByteStream(json.dumps(body).encode()),headers=headers)
+    def issuer(request):
+        payload = json.loads(request.content)
+        if request.url.path == '/v1/github/enroll':
+            row = payload['request']; _binding(row['binding']); requests.append(row)
+            assert payload['assertion'] == 'e30.e30.AAAA'
+            if lose_reply[0]:
+                lose_reply[0] = False
+                raise httpx.ReadTimeout('synthetic lost reply')
+            return reply(200, {'ticket':'A'*43, 'grant_id':'enrollment-'+row['request_id'],
+                'new_issuance':'not_allowed','authorization_url':'https://issuer.example.test/v1/github/connect?ticket='+'A'*43})
+        assert request.url.path == '/v1/github/token'
+        row = payload['binding']; _binding(row); credentials.append(request.headers['Authorization'])
+        assert row == engine.github.bindings(grant)[row['bot_id']]
+        if row['bot_id'] not in approved:
+            return reply(403, {'error':'issuance_denied'})
+        return reply(200, {
+            'token':'synthetic-installation-token','expires_at':datetime.fromtimestamp(issuer_now+3500,timezone.utc).isoformat(),
+            'repositories':[{'id':789,'full_name':'example-org/shop'}], 'permissions':row['permissions'], 'revision':row['revision']},
+            headers={'Date':formatdate(issuer_now,usegmt=True)})
+    original_client = httpx.Client
+    with TestClient(app,base_url=HOST) as client:
+        token = session(client,setup_http)['token']
+        monkeypatch.setattr(httpx,'Client',lambda **kw:original_client(transport=httpx.MockTransport(issuer),**kw))
+        payload = {'generation':grant.generation,'bot':'lead'}
+        challenge = post(client,'github_prepare',token,payload).json()
+        assert challenge['version'] == 1
+        assert post(client,'github_prepare',token,{**payload,'issuer_origin':'https://other.example.test'}).status_code == 403
+        assert post(client,'github_prepare',token,{**payload,'bot':'other'}).status_code == 403
+        assert post(client,'preview',token,{'generation':grant.generation,'goal':'Improve signup'}).status_code == 403
+        submission = {'generation':grant.generation,'request_id':challenge['request_id'],'assertion':'e30.e30.AAAA'}
+        assert post(client,'github_submit',token,submission).status_code == 503
+        assert post(client,'github_prepare',token,payload).json() == challenge
+        result = post(client,'github_submit',token,submission)
+        assert result.status_code == 200, result.text
+        assert result.json()['state'] == 'awaiting_consent' and requests[0] == requests[1]
+        assert challenge['request_digest'] == request_digest(requests[-1])
+        approved.add('lead')
+        partial = post(client,'github_check',token,{'generation':grant.generation})
+        assert partial.status_code == 200,partial.text
+        assert partial.json()['state'] == 'needs_authorization'
+        assert {r['bot']:r['state'] for r in partial.json()['bots']} == {
+            'lead':'approved','engineer':'needs_consent','reviewer':'needs_consent'}
+        env = access.root / 'local/shop/.env'
+        assert not env.exists()
+        approved.update({'engineer','reviewer'})
+        checked = post(client,'github_check',token,{'generation':grant.generation})
+        assert checked.status_code == 200,checked.text
+        assert checked.json()['state'] == 'credentials_ready'
+        private = read(env)
+        assert set(private) == {'TEAM_ISSUER_URL','TEAM_ISSUER_TOKEN'}
+        assert set(credentials) == {'Bearer '+private['TEAM_ISSUER_TOKEN']}
+        assert env.stat().st_mode & 0o777 == 0o600
+        context = post(client,'context',token)
+        assert context.json()['github_enrollment']['credentials_ready'] is True
+        assert private['TEAM_ISSUER_TOKEN'] not in context.text + result.text + checked.text + json.dumps(challenge)
+        assert 'synthetic-installation-token' not in checked.text
+        preview = post(client,'preview',token,{'generation':grant.generation,'goal':'Improve signup'})
+        assert preview.status_code == 200,preview.text
+        # A fresh engine/process and same-scope terminal reapproval keep the credential.
+        engine.store.revoke(grant)
+        newer = replace(grant,generation=str(uuid4()))
+        engine.store.allow(newer)
+        assert SetupEngine(access).github.owns_env(newer)
+        refreshed = post(client,'github_prepare',token,{'generation':newer.generation,'bot':'lead'}).json()
+        assert refreshed['credential_digest'] == challenge['credential_digest']
+        assert refreshed['request_id'] == challenge['request_id']
+        # Existing operator changes never get rewritten by a check.
+        env.write_text('export OPERATOR_VALUE=keep\n')
+        assert post(client,'github_check',token,{'generation':newer.generation}).status_code == 403
+        assert env.read_text() == 'export OPERATOR_VALUE=keep\n'

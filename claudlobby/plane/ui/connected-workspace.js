@@ -135,7 +135,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         const row = {reference,key:'c-' + BigInt('0x' + reference.reference_id.replaceAll('-','')).toString(36), client:createClient({reference,
         documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
-        currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})};
+        currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options),
+        obtainGithubAssertion:(input,options) => accountAssertion('/api/plane/github-enrollment-assertion',input,options),
+        documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
         row.setup = createGuidedSetup({client:row.client,now,onOpenTeam:fleet => openTeam(row,fleet),storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
         row.actions = row.client.createActions({key:row.key,

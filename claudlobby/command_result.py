@@ -63,6 +63,8 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("event", ("list", "show"))) for verb in verbs})
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
+_PUBLIC.update({("host", "github-app", "issuer", action): f"host.github-app.issuer.{action}"
+                for action in ("approve", "invite", "cancel", "revoke", "serve")})
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
                 for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
                                "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
@@ -183,8 +185,11 @@ def _command_from_argv(tokens: list[str]) -> str | None:
             index += 1
             continue
         if token in {part[0] for part in _PUBLIC}:
-            return _PUBLIC.get(tuple(tokens[index:index + 3]),
-                               _PUBLIC.get(tuple(tokens[index:index + 2]), token))
+            for width in (4, 3, 2):
+                route = _PUBLIC.get(tuple(tokens[index:index + width]))
+                if route:
+                    return route
+            return token
         return None
     return None
 

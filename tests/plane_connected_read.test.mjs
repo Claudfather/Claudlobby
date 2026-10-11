@@ -419,3 +419,30 @@ test('ordinary check still fences retired document context without a network req
   assert.equal(await h.api.readHandle.jget('/api/summary'),null);
   assert.equal(h.calls.length,count);h.api.dispose();
 });
+
+test('managed enrollment signs only host digests and fences a changed connection before submission',async()=>{
+  const signing=deferred(), signed=[];
+  const h=harness({obtainGithubAssertion:(input,options)=>{signed.push({input,options});return signing.promise;}});
+  await h.api.connect();
+  const generation=uuid(8), request_id=uuid(9), issuer_origin='https://issuer.example.test';
+  const challenge={version:1,generation,bot:'lead',request_id,request_digest:'a'.repeat(64),credential_digest:'b'.repeat(64),
+    nonce:NONCE,host_uid:HOST,workspace_id:doc.workspace_id,...binding,issuer_origin};
+  h.overrides.set('setup/github_prepare',()=>reply(200,challenge));
+  let submissions=0;
+  h.overrides.set('setup/github_submit',init=>{
+    submissions++; assert.deepEqual(JSON.parse(init.body),{generation,request_id,assertion:'e30.e30.AAAA'});
+    return reply(200,{version:1,generation,request_id,bot:'lead',state:'awaiting_consent',authorization_url:issuer_origin+'/v1/github/connect?ticket='+NONCE});
+  });
+  const pending=h.api.setupGithubAuthorize({generation,bot:'lead',issuer_origin});
+  await flush();
+  assert.equal(signed.length,1);
+  assert.deepEqual(signed[0].input,{workspace_id:doc.workspace_id,host_uid:HOST,nonce:NONCE,operational_origin:doc.operational_origin,
+    ...binding,reference_id:ref.reference_id,expected_context_generation:doc.context_generation,request_digest:'a'.repeat(64),credential_digest:'b'.repeat(64)});
+  const rejected=assert.rejects(pending);
+  await h.api.logout();
+  signing.resolve({version:1,assertion:'e30.e30.AAAA',expires_at:1800000120});
+  await rejected; assert.equal(submissions,0);
+  await h.api.connect();
+  assert.equal((await h.api.setupGithubAuthorize({generation,bot:'lead',issuer_origin})).state,'awaiting_consent');
+  assert.equal(submissions,1);h.api.dispose();
+});

@@ -229,7 +229,8 @@ def test_local_withdrawal_and_reapproval_of_stale_workspace_grant(setup_authorit
     assert store.local()==next_grant
 
 
-def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_authority,monkeypatch):
+@pytest.mark.parametrize('selection_file',[False,True])
+def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_authority,monkeypatch,selection_file):
     from claudlobby.__main__ import main
     from claudlobby import supervision_inventory
     from tests.test_host_owner import terminal
@@ -237,12 +238,25 @@ def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_aut
     monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{grant.install_directory}\n'))
     flags=['--root',str(access.root),'host','owner','allow-setup','--template',grant.template,'--target-fleet',grant.fleet,
         '--repository',grant.repository,'--release',grant.release_id,'--install-directory',grant.install_directory]
+    if selection_file:
+        import json
+        from claudlobby.github_selection import PERMISSIONS
+        path=access.root/'selection.json';path.write_text(json.dumps({'version':1,'app_id':12,'installation_id':34,
+            'repository':grant.repository,'repository_id':123,'permissions':PERMISSIONS,'issuer_origin':'https://issuer.example.invalid'}))
+        offset=flags.index('--repository');del flags[offset:offset+2]
+        flags+=['--github-selection',str(path),'--github-issuer-origin','https://issuer.example.invalid']
+        terminal(monkeypatch,iter(['ALLOW-SETUP']))
+        bad=flags.copy();bad[-1]='https://different.example.invalid'
+        assert main(bad)!=0 and store.local() is None
     terminal(monkeypatch,iter(['NO']))
     assert main(flags)!=0
     assert store.local() is None
     terminal(monkeypatch,iter(['ALLOW-SETUP']))
     assert main(flags)==0
     retained=store.local(); assert retained.repository==grant.repository and retained.release_seal==grant.release_seal
+    if selection_file:
+        assert retained.github_enrollment=={'issuer_origin':'https://issuer.example.invalid','repository_id':123}
+        assert json.loads(retained.github_policy)['connections']['managed']['repos']==[grant.repository]
     terminal(monkeypatch,iter(['REVOKE-SETUP']))
     assert main(['--root',str(access.root),'host','owner','revoke-setup'])==0
     assert store.local() is None

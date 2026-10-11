@@ -31,7 +31,7 @@ const cursor = v => typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v)
  * No credentials, assertion data, global controls or actions are exported.
  */
 export function createConnectedReadClient({ reference, documentContext, currentContext,
-  obtainSessionAssertion, fetch = globalThis.fetch.bind(globalThis),
+  obtainSessionAssertion, obtainGithubAssertion, fetch = globalThis.fetch.bind(globalThis),
   documentOrigin = globalThis.location?.origin,
   monotonicNow = () => globalThis.performance.now(),
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
@@ -396,9 +396,42 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   async function setupRequest(operation, input) {
     if (!valid(true)) throw new Error('Setup outcome unknown. Check the original activation receipt.');
     const result = await http(ref.endpoint_origin + '/api/owner/connected/setup/' + operation,
-      {method:'POST',body:input,timeout:operation === 'repository' ? 600000 : operation === 'launch' ? 45000 : 15000,limit:131072});
+      {method:'POST',body:input,timeout:operation === 'repository' ? 600000 : operation === 'github_check' ? 60000
+        : operation === 'launch' ? 45000 : operation === 'github_submit' ? 25000 : 15000,limit:131072});
     if (result.status !== 200) throw new Error('Setup unavailable or refused. A lost launch must be inspected, never repeated.');
     return result.data;
+  }
+  async function setupGithubAuthorize({generation,bot,issuer_origin}) {
+    if (!valid(true) || !uuid(generation) || !origin(issuer_origin) || typeof bot !== 'string'
+        || typeof obtainGithubAssertion !== 'function') throw new Error('GitHub connection unavailable.');
+    const gen = epoch;
+    const challenge = await setupRequest('github_prepare',{generation,bot});
+    const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+    if (gen !== epoch || !valid(true) || !keys(challenge,['version','generation','bot','request_id','request_digest',
+          'credential_digest','nonce','host_uid','workspace_id','binding_revision','binding_generation','issuer_origin'])
+        || challenge.version !== 1 || challenge.generation !== generation || challenge.bot !== bot
+        || challenge.issuer_origin !== issuer_origin || !uuid(challenge.request_id)
+        || !secret(challenge.nonce) || !digest(challenge.request_digest) || !digest(challenge.credential_digest)
+        || challenge.host_uid !== hostUID || challenge.workspace_id !== doc.workspace_id
+        || challenge.binding_revision !== binding?.binding_revision || challenge.binding_generation !== binding?.binding_generation)
+      throw new Error('GitHub connection changed.');
+    const signing = new AbortController(); requests.add(signing);
+    const timer = setTimeout(() => signing.abort(),15000);
+    let evidence;
+    try {
+      evidence = await Promise.race([
+        obtainGithubAssertion({workspace_id:doc.workspace_id,host_uid:hostUID,nonce:challenge.nonce,
+          operational_origin:doc.operational_origin,...binding,reference_id:ref.reference_id,
+          expected_context_generation:doc.context_generation,request_digest:challenge.request_digest,
+          credential_digest:challenge.credential_digest},{signal:signing.signal}),
+        new Promise((_,reject) => signing.signal.addEventListener('abort',() => reject(new Error()),{once:true})),
+      ]);
+    } finally { clearTimeout(timer); requests.delete(signing); }
+    if (gen !== epoch || !valid(true) || !keys(evidence,['version','assertion','expires_at']) || evidence.version !== 1
+        || typeof evidence.assertion !== 'string' || evidence.assertion.length > 8192
+        || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(evidence.assertion) || !positive(evidence.expires_at))
+      throw new Error('GitHub authorization could not be confirmed.');
+    return setupRequest('github_submit',{generation,request_id:challenge.request_id,assertion:evidence.assertion});
   }
   function dispose() {
     if (disposed) return;
@@ -409,6 +442,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     setupContext: () => setupRequest('context',{}), setupPreview: input => setupRequest('preview',input),
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
     setupRepository: input => setupRequest('repository',input),
+    setupGithubAuthorize, setupGithubCheck: input => setupRequest('github_check',input),
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');
       actionSourceChanged = onSourceChange;

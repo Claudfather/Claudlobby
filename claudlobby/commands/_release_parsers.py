@@ -159,6 +159,29 @@ def register_release_subparsers(sub):
     token = github_actions.add_parser("token", help="Print one fresh App installation token")
     token.add_argument("--json", action="store_true", help="One schema-1 result object containing the token")
     token.set_defaults(func=_dispatch_host_github_app, public_command="host.github-app.token")
+    issuer = github_actions.add_parser("issuer", help="Operate the managed GitHub token issuer")
+    issuer_actions = issuer.add_subparsers(dest="issuer_command", required=True)
+    for action in ("approve", "invite", "cancel", "revoke", "serve"):
+        route = issuer_actions.add_parser(action)
+        route.add_argument("--store", required=True, metavar="PATH")
+        route.set_defaults(func=_dispatch_host_github_app, public_command=f"host.github-app.issuer.{action}")
+        if action in ("approve", "invite"):
+            route.add_argument("--grant-file", required=True, metavar="PATH")
+            route.add_argument("--credential-file", required=True, metavar="PATH")
+            if action == "invite":
+                route.add_argument("--consent-config", required=True, metavar="PATH")
+        elif action == "cancel":
+            route.add_argument("--ticket", required=True)
+        elif action == "revoke":
+            route.add_argument("--grant-id", required=True)
+        else:
+            route.add_argument("--app-key", action="append", required=True, metavar="APP_ID=PATH")
+            route.add_argument("--port", type=int, default=8091)
+            route.add_argument("--consent-config", metavar="PATH")
+            route.add_argument("--webhook-secret", action="append", default=[], metavar="APP_ID=PATH")
+            route.add_argument("--enrollment-config", metavar="PATH")
+        if action != "serve":
+            route.add_argument("--json", action="store_true", help="One schema-1 result object")
     update = hosts.add_parser("update", help="Run selected host runtime or sibling update owners")
     updates = update.add_subparsers(dest="update_command", required=True)
     runtime = updates.add_parser("runtime", help="Run the configured Claude Code binary update once")

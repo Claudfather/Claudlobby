@@ -326,9 +326,27 @@ def dispatch(args):
                         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
                     from .setup import _template_github
                     github_policy = _template_github(getattr(args,"github_config",None),getattr(args,"github_connection",None))
+                    issuer = getattr(args,"github_issuer_origin",None)
+                    repository_id = getattr(args,"github_repository_id",None)
+                    enrollment = None if issuer is None and repository_id is None else {
+                        "issuer_origin":issuer,"repository_id":repository_id}
+                    repository = args.repository
+                    selection_file = getattr(args,"github_selection",None)
+                    if selection_file is not None:
+                        from ..github_selection import read_selection, repository_input
+                        if github_policy is not None or repository_id is not None:
+                            raise CommandFailure("invalid_argument", "--github-selection cannot be combined with configured GitHub connection or repository ID flags")
+                        try:
+                            selected_repository,github_policy,enrollment = read_selection(selection_file,issuer)
+                            if repository is not None and repository_input(repository) != selected_repository:
+                                raise ValueError("repository differs")
+                            repository = selected_repository
+                        except (OSError,ValueError,TypeError,KeyError) as exc:
+                            raise CommandFailure("invalid_argument", "invalid GitHub selection; verify the file, repository and explicit trusted --github-issuer-origin") from exc
                     grant = setup.candidate(_active_owner(store).principal, template=args.template,
-                        fleet=args.target_fleet, repository=args.repository, release_id=args.release,
-                        release_seal=release.seal_sha256, install_directory=str(directory),github_policy=github_policy)
+                        fleet=args.target_fleet, repository=repository, release_id=args.release,
+                        release_seal=release.seal_sha256, install_directory=str(directory),github_policy=github_policy,
+                        github_enrollment=enrollment)
                     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
                         "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
                         "This can enroll/start native services and consume provider usage.\n")
@@ -336,6 +354,8 @@ def dispatch(args):
                         if github_policy else "No named GitHub connection selected; existing template credential requirements still apply.\n")
                     if github_policy:
                         terminal.write("After launch, the browser may prepare each bot's working copy of this repository. Existing work and application setup scripts are left untouched.\n")
+                    if enrollment:
+                        terminal.write("The host will retain a private issuer credential. The browser may request consent for each bot, check repository access and install those credentials in this new team's private .env.\n")
                     terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
                     _approve(terminal, "ALLOW-SETUP")
                     fresh_owner_setup(paths.root)

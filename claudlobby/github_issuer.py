@@ -1,0 +1,342 @@
+"""Managed GitHub issuance, with issuer-owned grants and no operational replica.
+
+Local operator approval or verified browser consent establishes grants. The
+HTTP token door mints only for an exact approved binding; a customer configuration
+is never its own authority.
+The SQLite write transaction serializes issuance with confirmed revocation.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import fields
+from datetime import datetime, timezone
+from email.utils import formatdate, parsedate_to_datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import stat
+import time
+
+from .github_connections import (
+    GithubBinding, _ENV, _identifier, _permissions, canonical_github_repo,
+)
+
+
+class IssuanceDenied(ValueError):
+    """No current issuer-side authorization for this request."""
+
+
+class GrantConflict(IssuanceDenied):
+    """The staged grant conflicts with existing issuer-owned authorization."""
+
+
+class IssuerUnavailable(RuntimeError):
+    """Issuance could not be confirmed; no broader credential is substituted."""
+
+
+def _json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _positive(value):
+    return type(value) is int and value > 0
+
+
+def _binding(value):
+    """Accept the composed wire shape, including its exact revision and identity."""
+    required = {field.name for field in fields(GithubBinding)}
+    if not isinstance(value, dict) or set(value) != required:
+        raise IssuanceDenied("invalid managed binding")
+    if value["mode"] != "managed" or not all(_positive(value[k]) for k in ("app_id", "installation_id")):
+        raise IssuanceDenied("invalid managed binding")
+    if not isinstance(value["revision"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["revision"]):
+        raise IssuanceDenied("invalid managed revision")
+    for key in ("connection_id", "attachment_id", "assignment_id", "bot_id", "project"):
+        _identifier(value[key], key)
+    if canonical_github_repo(value["repo"]) != value["repo"]:
+        raise IssuanceDenied("repository must be canonical")
+    _permissions(value["permissions"], "managed binding permissions")
+    refs = value["credential_refs"]
+    if not isinstance(refs, dict) or set(refs) != {"issuer_url_env", "issuer_token_env"} or any(
+        not isinstance(v, str) or not _ENV.fullmatch(v) for v in refs.values()
+    ):
+        raise IssuanceDenied("invalid credential references")
+    return value
+
+
+def _credential_digest(secret):
+    if not isinstance(secret, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43,256}", secret):
+        raise IssuanceDenied("invalid issuer credential")
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def _private_file(path):
+    path = Path(path)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise IssuerUnavailable("issuer files must be private regular files owned by this user")
+    return path
+
+
+class GrantStore:
+    def __init__(self, path):
+        self.path = Path(path)
+
+    @contextmanager
+    def transaction(self):
+        _private_file(self.path)
+        db = sqlite3.connect(self.path, timeout=30)
+        try:
+            with db:
+                db.row_factory = sqlite3.Row
+                db.execute("BEGIN IMMEDIATE")
+                yield db
+        finally:
+            db.close()
+
+    def initialize(self):
+        # The directory is also private: SQLite journals contain grant data.
+        parent = self.path.parent.stat()
+        if parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & 0o077:
+            raise IssuerUnavailable("use a private issuer directory (mode 0700)")
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+        with self.transaction() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS github_grants (
+                grant_id TEXT PRIMARY KEY, credential_digest TEXT NOT NULL,
+                workspace_id TEXT NOT NULL, deployment_id TEXT NOT NULL,
+                binding TEXT NOT NULL, repository_id INTEGER NOT NULL,
+                expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
+                last_token_expires_at REAL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS github_consent (
+                ticket TEXT PRIMARY KEY, grant_json TEXT NOT NULL,
+                credential_digest TEXT NOT NULL, expires_at REAL NOT NULL,
+                status TEXT NOT NULL, browser_digest TEXT, state_digest TEXT UNIQUE,
+                verifier TEXT, github_user_id INTEGER
+            )""")
+            if "revocation_seq" not in {row[1] for row in db.execute("PRAGMA table_info(github_consent)")}:
+                db.execute("ALTER TABLE github_consent ADD COLUMN revocation_seq INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS github_revocations (
+                seq INTEGER PRIMARY KEY, app_id INTEGER NOT NULL,
+                delivery_id TEXT NOT NULL, body_digest TEXT NOT NULL, selector TEXT NOT NULL,
+                UNIQUE(app_id,delivery_id)
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS github_enrollments (
+                request_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL,
+                issuer TEXT NOT NULL, subject TEXT NOT NULL, result TEXT NOT NULL
+            )""")
+
+    @staticmethod
+    def validate_grant(grant):
+        expected = {"grant_id", "workspace_id", "deployment_id", "binding", "repository_id", "expires_at"}
+        if not isinstance(grant, dict) or set(grant) != expected:
+            raise IssuanceDenied("invalid issuer grant")
+        for key in ("grant_id", "workspace_id", "deployment_id"):
+            if not isinstance(grant[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", grant[key]):
+                raise IssuanceDenied("invalid grant identity")
+        if not _positive(grant["repository_id"]) or type(grant["expires_at"]) not in (int, float) or not time.time() < grant["expires_at"] < time.time() + 366 * 86400:
+            raise IssuanceDenied("grant needs a repository ID and an expiry within one year")
+        _binding(grant["binding"])
+        return json.loads(_json(grant))
+
+    @staticmethod
+    def check_grant_available(db, grant, digest):
+        if db.execute("SELECT 1 FROM github_grants WHERE credential_digest=? AND (workspace_id!=? OR deployment_id!=?)",
+                      (digest, grant["workspace_id"], grant["deployment_id"])).fetchone():
+            raise GrantConflict("credential already belongs to another deployment")
+        if db.execute("SELECT 1 FROM github_grants WHERE grant_id=?", (grant["grant_id"],)).fetchone():
+            raise GrantConflict("grant ID already exists; revoked grants cannot be restored")
+        if db.execute("SELECT 1 FROM github_grants WHERE credential_digest=? AND binding=? AND revoked=0 AND expires_at>?",
+                      (digest, _json(grant["binding"]), time.time())).fetchone():
+            raise GrantConflict("binding already has active approval")
+
+    @staticmethod
+    def approve_in_transaction(db, grant, digest):
+        # Check again under the same write lock that consumes browser consent.
+        GrantStore.check_grant_available(db, grant, digest)
+        db.execute("INSERT INTO github_grants (grant_id,credential_digest,workspace_id,deployment_id,binding,repository_id,expires_at) VALUES (?,?,?,?,?,?,?)",
+                   (grant["grant_id"], digest, grant["workspace_id"], grant["deployment_id"], _json(grant["binding"]), grant["repository_id"], grant["expires_at"]))
+
+    def approve(self, grant, credential):
+        grant = self.validate_grant(grant)
+        digest = _credential_digest(credential)
+        self.initialize()
+        with self.transaction() as db:
+            # An issuer credential represents one deployment/workspace, even
+            # when several independently approved bot bindings share it.
+            self.approve_in_transaction(db, grant, digest)
+        return {"grant_id": grant["grant_id"], "new_issuance": "allowed", "expires_at": grant["expires_at"]}
+
+    def revoke(self, grant_id):
+        with self.transaction() as db:
+            grant = db.execute("SELECT * FROM github_grants WHERE grant_id=?", (grant_id,)).fetchone()
+            if grant is None:
+                raise IssuanceDenied("unknown grant")
+            db.execute("UPDATE github_grants SET revoked=1 WHERE grant_id=?", (grant_id,))
+            result = {"grant_id": grant_id, "new_issuance": "blocked",
+                      "host_enforcement": "unconfirmed", "residual_token_expires_at":
+                      datetime.fromtimestamp(grant["last_token_expires_at"], timezone.utc).isoformat()
+                      if grant["last_token_expires_at"] is not None else None}
+        return result
+
+    @staticmethod
+    def _revocation_matches(selector, binding, repository_id, user_id):
+        if selector["kind"] == "user":
+            return user_id == selector["id"]
+        return binding["installation_id"] == selector["id"] and (
+            selector["kind"] == "installation" or repository_id in selector["repository_ids"])
+
+    def revoke_provider(self, app_id, delivery_id, body_digest, selector):
+        # Store only verified numeric scope and a digest, never the provider body.
+        # The issuance write lock also orders revocation against in-flight mints.
+        with self.transaction() as db:
+            previous = db.execute("SELECT body_digest FROM github_revocations WHERE app_id=? AND delivery_id=?",
+                                  (app_id, delivery_id)).fetchone()
+            if previous is not None:
+                if previous[0] != body_digest:
+                    raise IssuanceDenied("webhook delivery changed")
+                return
+            db.execute("INSERT INTO github_revocations (app_id,delivery_id,body_digest,selector) VALUES (?,?,?,?)",
+                       (app_id, delivery_id, body_digest, _json(selector)))
+            grants = db.execute("""SELECT g.*, c.github_user_id FROM github_grants g
+                LEFT JOIN github_consent c ON c.status='approved'
+                AND json_extract(c.grant_json,'$.grant_id')=g.grant_id WHERE g.revoked=0""").fetchall()
+            for grant in grants:
+                binding = json.loads(grant["binding"])
+                if binding["app_id"] == app_id and self._revocation_matches(
+                        selector, binding, grant["repository_id"], grant["github_user_id"]):
+                    db.execute("UPDATE github_grants SET revoked=1 WHERE grant_id=?", (grant["grant_id"],))
+
+    @staticmethod
+    def check_provider_revocations(db, grant, user_id, after):
+        for row in db.execute("SELECT selector FROM github_revocations WHERE app_id=? AND seq>?",
+                              (grant["binding"]["app_id"], after)):
+            if GrantStore._revocation_matches(json.loads(row[0]), grant["binding"], grant["repository_id"], user_id):
+                raise GrantConflict("GitHub access changed during authorization; start a new invitation")
+
+    def issue(self, credential, payload, mint):
+        digest = _credential_digest(credential)
+        if not isinstance(payload, dict) or set(payload) != {"schema", "binding", "revision"} or type(payload["schema"]) is not int or payload["schema"] != 1:
+            raise IssuanceDenied("invalid issuance request")
+        binding = payload["binding"]
+        if not isinstance(binding, dict) or payload["revision"] != binding.get("revision"):
+            raise IssuanceDenied("invalid issuance revision")
+        with self.transaction() as db:
+            grants = db.execute("SELECT * FROM github_grants WHERE credential_digest=? AND binding=? AND revoked=0 AND expires_at>?",
+                                (digest, _json(binding), time.time())).fetchall()
+            if len(grants) != 1:
+                raise IssuanceDenied("no unique active grant for this binding")
+            grant = grants[0]
+            # Only issuer-owned fields reach the mint implementation.
+            approved = json.loads(grant["binding"])
+            result = mint(approved, grant["repository_id"])
+            provider_expiry = result.get("_provider_expires_at")
+            result = _token_result(approved, grant["repository_id"], result)
+            if grant["expires_at"] <= time.time():
+                raise IssuanceDenied("grant expired during issuance")
+            # Keep GitHub's actual expiry for revocation reporting, separate
+            # from the conservative client deadline on the issuer's clock.
+            expiry = provider_expiry if provider_expiry is not None else datetime.fromisoformat(result["expires_at"]).timestamp()
+            db.execute("UPDATE github_grants SET last_token_expires_at=max(coalesce(last_token_expires_at,0),?) WHERE grant_id=?",
+                       (expiry, grant["grant_id"]))
+        return result
+
+
+def _token_result(binding, repository_id, result):
+    try:
+        token, expires = result["token"], result["expires_at"]
+        expiry = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        repos, permissions = result["repositories"], result["permissions"]
+        allowed = {**binding["permissions"], "metadata": "read"}
+        if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+            raise ValueError()
+        if expiry.tzinfo is None or not 0 < expiry.timestamp() - time.time() <= 3600:
+            raise ValueError()
+        if not isinstance(repos, list) or len(repos) != 1 or type(repos[0]["id"]) is not int or repos[0]["id"] != repository_id or repos[0]["full_name"].lower() != binding["repo"]:
+            raise ValueError()
+        if permissions not in (binding["permissions"], allowed):
+            raise ValueError()
+        return {"token": token, "expires_at": expiry.astimezone(timezone.utc).isoformat(),
+                "repositories": [{"id": repository_id, "full_name": binding["repo"]}],
+                "permissions": permissions, "revision": binding["revision"]}
+    except (KeyError, TypeError, AttributeError, ValueError, OverflowError) as exc:
+        raise IssuerUnavailable("GitHub did not confirm the exact approved scope and expiry") from exc
+
+
+class GithubMinter:
+    def __init__(self, app_keys):
+        self.app_keys = dict(app_keys)
+
+    def __call__(self, binding, repository_id):
+        import httpx
+        import jwt
+
+        try:
+            key = _private_file(self.app_keys[binding["app_id"]]).read_bytes()
+            now = int(time.time())
+            assertion = jwt.encode({"iat": now - 60, "exp": now + 540, "iss": str(binding["app_id"])}, key, algorithm="RS256")
+            with httpx.Client(trust_env=False, follow_redirects=False, timeout=15) as client:
+                started = int(time.time()) - 1  # conservative even with HTTP Date's second precision
+                response = client.post(
+                    f"https://api.github.com/app/installations/{binding['installation_id']}/access_tokens",
+                    headers={"Authorization": "Bearer " + assertion, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
+                    json={"repository_ids": [repository_id], "permissions": binding["permissions"]})
+                response.raise_for_status()
+                result = response.json()
+                expiry = datetime.fromisoformat(result["expires_at"].replace("Z", "+00:00"))
+                issued = parsedate_to_datetime(response.headers["Date"])
+                remaining = (expiry - issued).total_seconds()
+                if expiry.tzinfo is None or issued.tzinfo is None or not 0 < remaining <= 3600:
+                    raise ValueError("unconfirmed token lifetime")
+                result["_provider_expires_at"] = expiry.timestamp()
+                result["expires_at"] = datetime.fromtimestamp(started + remaining, timezone.utc).isoformat()
+                return result
+        except Exception as exc:
+            # Provider errors can include sensitive context; never reflect them.
+            raise IssuerUnavailable("GitHub issuance unavailable; check installation access and issuer configuration") from exc
+
+
+def create_app(store, mint, consent=None, webhooks=None, enrollment=None):
+    import asyncio
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.concurrency import run_in_threadpool
+
+    def respond(value, status=200):
+        # Stamp after issuance. A request-start Date can predate the GitHub mint.
+        return JSONResponse(value, status_code=status, headers={
+            "Cache-Control": "no-store", "Date": formatdate(usegmt=True)})
+
+    async def issue(request):
+        try:
+            size = request.headers.get("content-length", "")
+            authorization = request.headers.getlist("authorization")
+            if not size.isdecimal() or not 0 < int(size) <= 16384 or request.headers.get("transfer-encoding") or request.headers.get("origin") or len(authorization) != 1 or not authorization[0].startswith("Bearer "):
+                raise IssuanceDenied("invalid issuance request")
+            raw = await asyncio.wait_for(request.body(), timeout=15)
+            if len(raw) != int(size):
+                raise IssuanceDenied("invalid issuance request")
+            result = await run_in_threadpool(store.issue, authorization[0][7:], json.loads(raw), mint)
+            return respond(result)
+        except (IssuanceDenied, ValueError, TypeError):
+            return respond({"error": "issuance_denied"}, 403)
+        except (IssuerUnavailable, OSError, sqlite3.Error, asyncio.TimeoutError):
+            return respond({"error": "issuer_unavailable"}, 503)
+
+    routes = [Route("/v1/github/token", issue, methods=["POST"])]
+    if consent is not None:
+        routes.extend(consent.routes())
+    if webhooks is not None:
+        routes.extend(webhooks.routes())
+    if enrollment is not None:
+        routes.extend(enrollment.routes())
+    return Starlette(routes=routes)
