@@ -68,8 +68,16 @@ another root: its installation seal binds its location. Once recovery is active,
 upgrade using the normal activation path.
 
 Review restored manifests for old absolute paths, mounts and repository locations.
-Re-provision provider credentials and reconcile external work. If the bundle
-contains `host-system.yaml`, use it explicitly while reviewing and planning:
+Re-provision provider credentials and reconcile external work.
+
+If the saved configuration enrolled the owner service, set
+`host.jobs.plane-owner.enroll: false` in the restored `host-system.yaml` for this
+first activation. Owner authority and the recorder binding are deliberately
+absent on the replacement; the private service cannot start until you initialize
+and approve them again.
+
+If the bundle contains `host-system.yaml`, use it explicitly while reviewing
+and planning:
 
 ```bash
 export CLAUDLOBBY_HOST_SYSTEM_YAML=/absolute/replacement/host-system.yaml
@@ -93,3 +101,7 @@ copies through their existing owners. Review and revoke the replaced host's old
 website/GitHub authorizations as part of replacement; importing a backup cannot
 change those remote services. Application readiness and actual worker progress
 still require observation on the replacement host.
+
+Once local owner access is prepared, re-enable `host.jobs.plane-owner` and
+plan, review and activate that change. Verify the private service responds
+before connecting the website to it.
