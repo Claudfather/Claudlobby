@@ -219,6 +219,36 @@ issuer command, or through the configured GitHub revocation events.
 
 ## Guided first-team connection
 
+To resolve App, installation and repository IDs without hand-authoring a connection,
+open `/v1/github/repositories` on the trusted issuer. Paste an existing repository
+URL or `owner/repo`, then sign in to GitHub as its administrator. The managed App
+must already be installed there with contents and pull-request write access.
+Missing installation or organization approval must be resolved on GitHub first.
+
+The issuer uses the same PKCE callback and per-browser cookie as bot consent. It
+reads the requested repository and the user's accessible App installations through
+the [GitHub user-token endpoints](https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-user-access-token).
+The temporary user token stays in memory. This step does not approve a grant, mint
+an installation token, create a checkout or start a team. Results expire after ten
+minutes, are visible only to the original browser, and can be downloaded as the
+nonsecret `github-selection.json`. Expired selection rows are removed when another
+selection starts; at most 128 selections are retained at once.
+
+Save that file on the team host. On the existing `host owner allow-setup` command,
+use `--github-selection /absolute/github-selection.json` together with the explicit
+trusted `--github-issuer-origin https://issuer.example.invalid`, instead of
+`--github-config`, `--github-connection` and `--github-repository-id`. The repository
+comes from the file; an optional `--repository` must match it. Template, target
+fleet, release and native installation directory flags are unchanged.
+
+The download is configuration, not proof or authority. Core validates its finite
+shape, matches its issuer against the separately supplied address, chooses fixed
+credential environment names and limits permissions to contents/write,
+pull_requests/write and metadata/read. Review the displayed repository, App,
+installation, permissions and issuer before typing `ALLOW-SETUP`. The trusted issuer
+checks its configured App again during each bot's consent; a modified or stale
+selection cannot bypass those checks. A new App ID flag is not required.
+
 The existing local `host owner allow-setup` approval accepts the optional pair
 `--github-issuer-origin` and `--github-repository-id` alongside a selected managed
 `--github-config` / `--github-connection`. The issuer must be an exact HTTPS origin;
@@ -243,6 +273,7 @@ of the same setup scope reuse the credential. Preview requires those credentials
 to be installed; runtime consumers still enforce current issuer authorization.
 Removing local setup approval does not revoke already approved issuer grants.
 
-Installation/repository selection is still configured locally. Real App consent,
-webhooks, native host launch and cold-host onboarding require acceptance before
-public self-service. These are not established by synthetic issuer checks.
+The selection file currently crosses to the host by explicit download/copy; it is
+not sent through the website backend. Real App selection/consent, webhooks, native
+host launch and cold-host onboarding require acceptance before public self-service.
+These are not established by synthetic issuer checks.
