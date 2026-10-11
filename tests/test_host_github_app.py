@@ -76,8 +76,17 @@ def test_issuer_browser_consent_only_grants_after_same_browser_callback(tmp_path
     start = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
     query = parse_qs(urlsplit(start.headers["location"]).query)
     assert start.status_code == 303 and query["code_challenge_method"] == ["S256"]
-    callback = "/v1/github/callback?" + "state=" + query["state"][0] + "&code=example-code"
+    abandoned = query["state"][0]
+    returned = client.get(invitation["authorization_url"])
+    assert "Authorize with GitHub" in returned.text and "set-cookie" not in returned.headers
     stranger = TestClient(app, base_url=flow.provider.origin, follow_redirects=False)
+    stranger.get(invitation["authorization_url"])
+    assert stranger.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin}).status_code == 403
+    retry = client.post("/v1/github/connect", data={"ticket": invitation["ticket"]}, headers={"Origin": flow.provider.origin})
+    query = parse_qs(urlsplit(retry.headers["location"]).query)
+    assert query["state"][0] != abandoned
+    assert client.get("/v1/github/callback?state=" + abandoned + "&code=old-code").status_code == 403 and calls == []
+    callback = "/v1/github/callback?" + "state=" + query["state"][0] + "&code=example-code"
     assert stranger.get(callback).status_code == 403 and calls == []
     complete = client.get(callback)
     assert complete.status_code == 303 and complete.headers["location"] == invitation["authorization_url"]
@@ -162,6 +171,33 @@ def test_issuer_consent_verifies_provider_user_installation_and_repo_admin(tmp_p
             flow.provider.verify("example-code", "v" * 43, grant)
         target.clear()
         target.update(before)
+
+
+def test_issuer_consent_conflicts_fail_before_login_or_require_new_invitation(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    from claudlobby.github_consent import _page
+    from claudlobby.github_issuer import GrantConflict
+
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    invitation = flow.invite(grant, credential)
+    _, cookie = flow.page(invitation["ticket"])
+    state = parse_qs(urlsplit(flow.begin(invitation["ticket"], cookie)).query)["state"][0]
+    # The operator creates a conflicting grant while GitHub verification is in flight.
+    def verify(*_):
+        flow.store.approve(grant, credential)
+        flow.store.revoke(grant["grant_id"])
+        return 456
+    flow.provider.verify = verify
+    flow.complete(state, cookie, "example-code")
+    row, _ = flow.page(invitation["ticket"])
+    assert row["status"] == "needs_operator" and "new invitation" in _page(row)
+    with pytest.raises(GrantConflict, match="grant ID already exists"):
+        flow.invite(grant, credential)
+    with pytest.raises(GrantConflict, match="another deployment"):
+        flow.invite({**grant, "grant_id": "new-grant", "deployment_id": "different-host"}, credential)
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_consent").fetchone()[0] == 1
+        assert db.execute("SELECT revoked FROM github_grants").fetchone()[0] == 1
 
 
 def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):

@@ -126,7 +126,11 @@ owner path requires repository administrator permission because it authorizes
 independent App tokens, which could otherwise exceed a collaborator's access.
 The App must already be installed on that repository; pending organization
 approval, missing access, revocation, cancellation or SSO refusal does not grant
-access. Retry from the invitation link to start a new authorization attempt.
+access. Retry from the invitation link in the same browser to start a new
+authorization attempt, including after leaving GitHub without finishing. This
+invalidates the previous attempt. Conflicting grant IDs or deployment credentials
+are refused before an invitation is created; a conflict introduced during sign-in
+instead shows that setup needs a corrected invitation.
 After success, that link displays the completed result without granting twice.
 See [GitHub's user-authorization contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app).
 

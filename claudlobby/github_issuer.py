@@ -29,6 +29,10 @@ class IssuanceDenied(ValueError):
     """No current issuer-side authorization for this request."""
 
 
+class GrantConflict(IssuanceDenied):
+    """The staged grant conflicts with existing issuer-owned authorization."""
+
+
 class IssuerUnavailable(RuntimeError):
     """Issuance could not be confirmed; no broader credential is substituted."""
 
@@ -111,6 +115,12 @@ class GrantStore:
                 expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
                 last_token_expires_at REAL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS github_consent (
+                ticket TEXT PRIMARY KEY, grant_json TEXT NOT NULL,
+                credential_digest TEXT NOT NULL, expires_at REAL NOT NULL,
+                status TEXT NOT NULL, browser_digest TEXT, state_digest TEXT UNIQUE,
+                verifier TEXT, github_user_id INTEGER
+            )""")
 
     @staticmethod
     def validate_grant(grant):
@@ -126,18 +136,19 @@ class GrantStore:
         return json.loads(_json(grant))
 
     @staticmethod
-    def approve_in_transaction(db, grant, digest):
-        # Also used after browser consent, in the same transaction that
-        # consumes its one-time authorization attempt.
-        binding = _json(grant["binding"])
+    def check_grant_available(db, grant, digest):
         if db.execute("SELECT 1 FROM github_grants WHERE credential_digest=? AND (workspace_id!=? OR deployment_id!=?)",
                       (digest, grant["workspace_id"], grant["deployment_id"])).fetchone():
-            raise IssuanceDenied("credential already belongs to another deployment")
-        try:
-            db.execute("INSERT INTO github_grants (grant_id,credential_digest,workspace_id,deployment_id,binding,repository_id,expires_at) VALUES (?,?,?,?,?,?,?)",
-                       (grant["grant_id"], digest, grant["workspace_id"], grant["deployment_id"], binding, grant["repository_id"], grant["expires_at"]))
-        except sqlite3.IntegrityError as exc:
-            raise IssuanceDenied("grant ID already exists; revoked grants cannot be restored") from exc
+            raise GrantConflict("credential already belongs to another deployment")
+        if db.execute("SELECT 1 FROM github_grants WHERE grant_id=?", (grant["grant_id"],)).fetchone():
+            raise GrantConflict("grant ID already exists; revoked grants cannot be restored")
+
+    @staticmethod
+    def approve_in_transaction(db, grant, digest):
+        # Check again under the same write lock that consumes browser consent.
+        GrantStore.check_grant_available(db, grant, digest)
+        db.execute("INSERT INTO github_grants (grant_id,credential_digest,workspace_id,deployment_id,binding,repository_id,expires_at) VALUES (?,?,?,?,?,?,?)",
+                   (grant["grant_id"], digest, grant["workspace_id"], grant["deployment_id"], _json(grant["binding"]), grant["repository_id"], grant["expires_at"]))
 
     def approve(self, grant, credential):
         grant = self.validate_grant(grant)

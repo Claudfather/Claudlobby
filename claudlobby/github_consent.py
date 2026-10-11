@@ -20,6 +20,7 @@ import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from .github_issuer import (
+    GrantConflict,
     GrantStore,
     IssuanceDenied,
     IssuerUnavailable,
@@ -192,12 +193,7 @@ class ConsentFlow:
         ticket = secrets.token_urlsafe(32)
         self.store.initialize()
         with self.store.transaction() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS github_consent (
-                ticket TEXT PRIMARY KEY, grant_json TEXT NOT NULL,
-                credential_digest TEXT NOT NULL, expires_at REAL NOT NULL,
-                status TEXT NOT NULL, browser_digest TEXT, state_digest TEXT UNIQUE,
-                verifier TEXT, github_user_id INTEGER
-            )""")
+            self.store.check_grant_available(db, grant, digest)
             db.execute(
                 "INSERT INTO github_consent (ticket,grant_json,credential_digest,expires_at,status) VALUES (?,?,?,?, 'invited')",
                 (
@@ -263,7 +259,7 @@ class ConsentFlow:
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with self.store.transaction() as db:
             result = db.execute(
-                "UPDATE github_consent SET status='authorizing',state_digest=?,verifier=? WHERE ticket=? AND browser_digest=? AND status='invited' AND expires_at>?",
+                "UPDATE github_consent SET status='authorizing',state_digest=?,verifier=? WHERE ticket=? AND browser_digest=? AND status IN ('invited','authorizing') AND expires_at>?",
                 (_digest(state), verifier, ticket, digest, time.time()),
             )
             if result.rowcount != 1:
@@ -305,12 +301,14 @@ class ConsentFlow:
                     "UPDATE github_consent SET status='approved',browser_digest=NULL,github_user_id=? WHERE ticket=?",
                     (user_id, row["ticket"]),
                 )
-        except (IssuanceDenied, IssuerUnavailable):
+        except (IssuanceDenied, IssuerUnavailable) as exc:
             # A retry begins a new OAuth attempt, never re-exchanges a code.
+            # Conflicts need a corrected invitation, not another GitHub login.
+            status = "needs_operator" if isinstance(exc, GrantConflict) else "invited"
             with self.store.transaction() as db:
                 db.execute(
-                    "UPDATE github_consent SET status='invited',browser_digest=NULL WHERE ticket=? AND status='checking'",
-                    (row["ticket"],),
+                    "UPDATE github_consent SET status=?,browser_digest=NULL WHERE ticket=? AND status='checking'",
+                    (status, row["ticket"]),
                 )
         return self.provider.origin + CONNECT + "?ticket=" + row["ticket"]
 
@@ -446,10 +444,15 @@ def _page(row):
             "Connection removed",
             "<p>This repository grant is no longer active. Return to team setup if you want to reconnect it.</p>",
         )
-    if row["status"] != "invited":
+    if row["status"] == "needs_operator":
+        return _layout(
+            "Connection needs a new invitation",
+            "<p>This invitation conflicts with an existing connection. Ask the person managing setup for a corrected invitation. Signing in to GitHub again will not fix it.</p>",
+        )
+    if row["status"] not in {"invited", "authorizing"}:
         return _layout(
             "Connection in progress"
-            if row["status"] in {"authorizing", "checking"}
+            if row["status"] == "checking"
             else "Connection cancelled",
             "<p>Complete the GitHub step in the browser where you started, or return to team setup for a new invitation.</p>",
         )
