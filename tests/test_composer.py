@@ -68,8 +68,14 @@ class TestRevenueWebAppCandidate:
 
         assert "example-org/revenue-web-app" in instructions
         assert fleet.mission in instructions
-        assert "claudlobby task permission request TASK_ID" in instructions
-        assert "claudlobby task permission check PERMISSION_ID" in instructions
+        assert "claudlobby --json task permission request TASK_ID" in instructions
+        assert "claudlobby --json task permission check PERMISSION_ID" in instructions
+        allowed = settings["permissions"]["allow"]
+        assert "Bash(claudlobby --json request show *)" in allowed
+        for verb in ("request", "show", "check"):
+            assert f"Bash(claudlobby --json task permission {verb} *)" in allowed
+        for verb in ("approve", "decline", "revoke"):
+            assert f"Bash(claudlobby --json task permission {verb} *)" not in allowed
         assert "Without explicit human confirmation" in instructions
         assert "Always create a feature branch" in instructions
         assert "skip Telegram-specific posts and tools, never canonical reports" in instructions

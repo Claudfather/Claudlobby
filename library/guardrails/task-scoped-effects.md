@@ -1,6 +1,13 @@
 ---
 title: Consequential actions need a recorded task permission
 description: Bind merge, deploy, spend and destructive data actions to the core task permission owner.
+permissions:
+  allow:
+    - "Bash(claudlobby task permission --help)"
+    - "Bash(claudlobby --json task permission request *)"
+    - "Bash(claudlobby --json task permission show *)"
+    - "Bash(claudlobby --json task permission check *)"
+    - "Bash(claudlobby --json request show *)"
 ---
 
 # Consequential actions need a recorded task permission
@@ -25,7 +32,7 @@ or deletion selection as applicable. Include no secrets. Before submitting, save
 the exact scope, reason, task ID and request UUID under your bot-owned
 `data/permission-requests/` directory so a restart cannot lose the request.
 Record it with
-`claudlobby task permission request TASK_ID --scope-file FILE --reason TEXT --request-id UUID`.
+`claudlobby --json task permission request TASK_ID --scope-file FILE --reason TEXT --request-id UUID`.
 Save the returned permission ID there and in your handoff. If you are the
 assignee, also reference it in your canonical progress report; a manager must
 not submit a worker report under someone else's assignment. After a lost
@@ -34,11 +41,11 @@ the identical request with its saved UUID and payload to recover the record.
 Never generate another UUID to recover it.
 
 Wait for the human's decision; continue independent authorized work meanwhile.
-Read it with `claudlobby task permission show PERMISSION_ID`, including after
+Read it with `claudlobby --json task permission show PERMISSION_ID`, including after
 resuming. A decision notice names the record but grants nothing by itself; a
 missing notice is not a decline. Immediately before
 the proposed effect, the requesting bot must run
-`claudlobby task permission check PERMISSION_ID --scope-file FILE` and require
+`claudlobby --json task permission check PERMISSION_ID --scope-file FILE` and require
 success for the exact scope derived from the actual operation. Pending, declined,
 revoked, unavailable or stale permission means stop that effect. Reassignment or
 task closure invalidates approval; another bot cannot borrow the requester's grant.
