@@ -65,11 +65,25 @@ def _status(args, root):
             recovery.append({"activation_id": item["activation_id"], "supported_step": step,
                              "abort_in_progress": aborting})
     data = _status_data(root, state, evidence, recovery)
+    from ..activation_state import ActivationRefusal
+    from ..host_backup import restore_status
+    try:
+        restored = restore_status(root)
+    except (ActivationRefusal, OSError, ValueError, TypeError, KeyError) as exc:
+        data["restored_backup"] = {"state": "unavailable"}
+        raise CommandFailure("unavailable", "restored backup provenance is invalid or unreadable",
+                             data=data, release_id=executing,
+                             hint="inspect state/restored-backup.json and the host identity; do not activate until resolved") from exc
+    if restored is not None:
+        data["restored_backup"] = restored
     if problem:
         raise CommandFailure(problem.code, f"{problem.code}: recorded host state is {state}",
                              data=data, release_id=executing, hint=_hint(root))
-    return CommandOutput(data, executing,
-                         (f"Host recorded state: {state}; running processes are unobserved.",))
+    lines = (f"Host recorded state: {state}; running processes are unobserved.",)
+    if restored is not None and state == "unselected":
+        lines += ("Restored backup is inactive. Review external work and credentials before planning activation; "
+                  "owner access must be paired and authorized again.",)
+    return CommandOutput(data, executing, lines)
 
 
 def _passive_status(args):

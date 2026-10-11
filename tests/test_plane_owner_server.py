@@ -2,6 +2,8 @@
 
 from contextlib import contextmanager
 import http.client
+import os
+import select
 import json
 from pathlib import Path
 import socket
@@ -42,6 +44,8 @@ def test_private_listener_permissions_and_owned_cleanup(socket_path):
             peer, _ = listener.accept()
             peer.close()
     assert not socket_path.exists()
+    lease = socket_path.with_name(socket_path.name + ".lock")
+    assert lease.read_bytes() == b"" and stat.S_IMODE(lease.stat().st_mode) == 0o600
 
 
 def test_private_listener_preserves_existing_and_replacement_paths(socket_path):
@@ -298,3 +302,96 @@ def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monke
     with pytest.raises(OwnerServerConfigurationError, match="outside Plane"):
         owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
                            socket_path=root / "state/plane/owner.sock")
+
+
+def test_private_listener_recovers_after_real_sigkill_and_excludes_second_owner(socket_path):
+    code = ("from pathlib import Path; import sys,time; "
+            "from claudlobby.plane.owner_server import private_listener\n"
+            "with private_listener(Path(sys.argv[1])):\n"
+            " print('ready',flush=True)\n"
+            " time.sleep(60)\n")
+    process = subprocess.Popen([sys.executable, "-c", code, str(socket_path)],
+        env=constructed_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert select.select([process.stdout], [], [], 10)[0], "listener did not become ready"
+        assert process.stdout.readline().strip() == "ready"
+        process.kill()
+        process.wait(timeout=5)
+        assert socket_path.exists()
+        with private_listener(socket_path) as listener:
+            with pytest.raises(OwnerServerConfigurationError, match="running server"):
+                with private_listener(socket_path):
+                    pytest.fail("second owner acquired a live listener")
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(socket_path))
+                peer, _ = listener.accept()
+                peer.close()
+        assert not socket_path.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def test_private_listener_preserves_unrecorded_dead_and_recorded_live_sockets(socket_path):
+    lease = socket_path.with_name(socket_path.name + ".lock")
+    # Legacy/unrecorded listeners are never ours to reclaim, even when dead.
+    with socket.socket(socket.AF_UNIX) as other:
+        other.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        other.listen(1)
+        stamp = socket_path.stat()
+        parent = socket_path.parent.stat()
+        with pytest.raises(OwnerServerConfigurationError, match="path exists"):
+            with private_listener(socket_path):
+                pytest.fail("replaced an unrecorded listener")
+        # A matching record is insufficient when the kernel still has a listener.
+        lease.write_text(json.dumps({"version": 1, "parent": [parent.st_dev, parent.st_ino],
+                                     "socket": [stamp.st_dev, stamp.st_ino]}))
+        with pytest.raises(OwnerServerConfigurationError, match="running server"):
+            with private_listener(socket_path):
+                pytest.fail("replaced a live listener")
+    lease.write_text("")
+    with pytest.raises(OwnerServerConfigurationError, match="path exists"):
+        with private_listener(socket_path):
+            pytest.fail("replaced an unrecorded dead socket")
+    assert socket_path.stat().st_ino == stamp.st_ino
+
+
+def test_private_listener_refuses_invalid_or_shared_lock_record(socket_path):
+    lease = socket_path.with_name(socket_path.name + ".lock")
+    lease.write_text('{"version":1,"version":1,"parent":[1,2],"socket":[3,4]}')
+    lease.chmod(0o600)
+    with pytest.raises(OwnerServerConfigurationError, match="record is invalid"):
+        with private_listener(socket_path):
+            pytest.fail("accepted corrupt ownership record")
+    lease.write_text("")
+    os.link(lease, lease.with_name("foreign-lock"))
+    with pytest.raises(OwnerServerConfigurationError, match="private regular file"):
+        with private_listener(socket_path):
+            pytest.fail("modified a shared file")
+    assert not socket_path.exists()
+
+
+def test_service_handover_refuses_live_foreground_without_changing_it(socket_path):
+    from types import SimpleNamespace
+    from claudlobby.activation_state import ActivationRefusal
+    from claudlobby.plane.owner_service import preflight
+
+    root = socket_path.parent
+    unit = SimpleNamespace(argv=("/example/bin/python",), root=root, unit="example-plane-owner",
+        command=("/example/bin/claudlobby", "--root", str(root), "host", "owner", "serve",
+                 "--origin", "https://host.example.test", "--socket", str(socket_path)))
+    starts = {"unit": (None, None, unit)}
+    preflight(starts)
+    assert not list(root.iterdir()), "preflight must not create sockets or lock files"
+    with private_listener(socket_path):
+        before = {p.name: p.stat().st_ino for p in root.iterdir()}
+        with pytest.raises(ActivationRefusal, match="stop the foreground"):
+            preflight(starts)
+        # An already-managed unit is quiesced by the existing activation owner.
+        preflight(starts, managed={(unit.unit, socket_path)})
+        assert {p.name: p.stat().st_ino for p in root.iterdir()} == before
+    preflight(starts)

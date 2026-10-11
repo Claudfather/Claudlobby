@@ -15,7 +15,7 @@ const controller = workLoop.replaceAll('from "./action-state.js"', `from "${new 
   .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const {conversationTaskLink} = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
 const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel})`, {
-  ...panel, conversationTaskLink, renderState() { return false; }, currentFleet: 'example', document: {
+  URL, ...panel, conversationTaskLink, renderState() { return false; }, currentFleet: 'example', document: {
     documentElement: { style: { setProperty() {} } },
     createElement() { return { dataset: {}, messages: [],
       set innerHTML(value) {
@@ -317,4 +317,50 @@ if (process.env.PLANE_ACTIVITY_FIXTURE) test('actual canonical query projection 
   assert.equal(api.nudgeReason(t.messages[0], t), 'Check\nfixture <status> — please.');
   assert.match(visible(html(t)), /Check\nfixture &lt;status&gt; — please\./);
   assert.doesNotMatch(visible(html(t)), /task_nudge|dispatched|working…/);
+});
+
+function reportedThread(overrides = {}) {
+  const t = thread();t.title = null;t.work_item_id = null;t.task_events = [];
+  Object.assign(t.messages[0], {message_class:'report', command_type:null, work_item_id:null,
+    body:'{"format":"claudlobby.report","summary":"Ready <please>"}', body_words:'Ready <please>',
+    report:{state:'captured',status:'completed',percent:null,
+      pr_url:'https://github.com/example/project/pull/1',pr_role:'reviewed',
+      artifacts:['https://example.org/result?a=1&b=2'],issues:[],skill:null}, ...overrides});
+  return t;
+}
+
+test('structured report shows readable results and reported evidence, with raw content in machinery', () => {
+  const t = reportedThread(), rendered = html(t), prose = visible(rendered);
+  assert.match(prose,/Completion reported/);assert.match(prose,/Ready &lt;please&gt;/);
+  assert.match(prose,/PR reviewed \(reported\)/);
+  assert.match(prose,/href="https:\/\/example.org\/result\?a=1&amp;b=2" target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(prose,/claudlobby.report|approved|verified|dispatched/);
+  assert.match(rendered,/machinery raw[^>]*>.*claudlobby.report/);
+  assert.equal(api.threadArticle(t,false).innerHTML,rendered);
+  t.messages[0].report.status='progress';t.messages[0].report.percent=0;
+  assert.match(visible(html(t)),/Progress reported · 0%/);
+  t.messages[0].report.status='blocked';t.messages[0].report.percent=null;
+  t.messages[0].body_words='Need your decision';
+  assert.match(visible(html(t)),/Blocker reported/);assert.match(visible(html(t)),/Need your decision/);
+});
+
+test('report evidence never activates unsafe or credential-bearing URLs', () => {
+  const t=reportedThread();t.messages[0].report.pr_url=null;
+  const unsafe=['javascript:alert(1)','data:text/html,<script>bad</script>','file:///tmp/report',
+    'https://user:secret@example.org/result','s3://example/result','https:example.org/result'];
+  t.messages[0].report.artifacts=unsafe;
+  const rendered=visible(html(t));
+  assert.doesNotMatch(rendered,/<a |<script>/);
+  for (const value of unsafe) assert.ok(rendered.includes(panel.esc(value)));
+});
+
+test('unavailable report content does not become status or evidence, legacy remains prose', () => {
+  for (const state of ['withheld','truncated','invalid','unsupported']) {
+    const t=reportedThread({report:{state}}), rendered=html(t);
+    assert.doesNotMatch(visible(rendered),/Ready|claudlobby.report|Completion reported|<a /);
+    assert.match(visible(rendered),/Report unavailable from/);
+    assert.match(rendered,/machinery raw/);
+  }
+  assert.match(visible(html(reportedThread({report:{state:'legacy'},body_words:'Historical report'}))),/Historical report/);
+  assert.doesNotMatch(visible(html(reportedThread({report:undefined}))),/Completion reported|PR reviewed/);
 });

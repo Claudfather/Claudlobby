@@ -4328,6 +4328,7 @@ def _write_service_units(
     *, create_runtime_dirs: bool = True,
     host_override: str | None = None,
     phase: str | None = None,
+    owner_config: dict | None = None,
 ) -> None:
     """Write the .service/.plist for a RESIDENT host service — no .timer
     (nothing schedules it; supervision restarts it). systemd Restart=always /
@@ -4368,6 +4369,13 @@ def _write_service_units(
         raise source_findings_error(_svc_id, _svc_findings)
 
     environment = native_environment(paths)
+    command = None
+    if owner_config is not None:
+        from .plane.owner_service import service_command
+        command = service_command(paths.root, environment["CLAUDLOBBY_CLI"], owner_config)
+        # This is a host-only operator server, not a generated fleet caller.
+        # Keep the CLI's refusal of all bot/fleet selectors unchanged.
+        environment.pop("FLEET_ROOT", None)
     if host_override is not None:
         environment[HOST_OVERRIDE_ENV] = host_override
     script_expanded = script
@@ -4376,8 +4384,8 @@ def _write_service_units(
         script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
     argv = wrap_unit_argv(environment, unit=service_name,
                           phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
-                          argv=_native_script_argv(script, environment))
-    exec_start = unit_systemd_command(argv) if "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
+                          argv=command if command is not None else _native_script_argv(script, environment))
+    exec_start = unit_systemd_command(argv) if command is not None or "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
     tool_path = _scheduler_tool_path()
 
     # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
@@ -5623,6 +5631,8 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             _prune_host_units(timers_dir, unit)
             continue
         if cfg.get("unit") == "service":
+            if name == "plane-owner" and cfg.get("script") != "$CLAUDLOBBY_CLI":
+                raise ValueError("plane-owner uses the sealed owner CLI; configure its origin and paths, not script")
             # Resident host services (first tenant: the plane ingest daemon).
             # Dormancy is COMPOSE-time, not enroll-time, and that is a safety
             # property rather than a style choice: setup-system's macOS leg
@@ -5642,6 +5652,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                 create_runtime_dirs=output_dir is None,
                 host_override=host_override,
                 phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
+                owner_config=cfg if name == "plane-owner" else None,
             )
             continue
         sched = _resolve_timer_schedule(cfg, {}, host_slot, host_seconds.get(name))

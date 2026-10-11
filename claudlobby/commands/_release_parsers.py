@@ -20,6 +20,12 @@ def _dispatch_host(args):
                    json_output=args.json, request_id=args.activation_id)
 
 
+def _dispatch_backup(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_backup", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _dispatch_doctor(args):
     return execute(args.public_command,
                    lambda: import_module(".host_doctor", __package__).dispatch(args),
@@ -90,6 +96,16 @@ def _route(sub, name, command, help):
 def register_release_subparsers(sub):
     host = sub.add_parser("host", help="Host release diagnosis and explicit first activation")
     hosts = host.add_subparsers(dest="host_command", required=True)
+    backup = hosts.add_parser("backup", help="Create, inspect or restore an owner-managed private recovery bundle")
+    backups = backup.add_subparsers(dest="backup_command", required=True)
+    for action in ("create", "inspect", "restore"):
+        route = backups.add_parser(action, help=f"{action.capitalize()} an owner-managed backup")
+        route.add_argument("destination" if action == "create" else "bundle", metavar="PATH")
+        route.add_argument("--json", action="store_true", help="One schema-1 result object")
+        if action == "restore":
+            route.add_argument("--replacing-retired-host", action="store_true", required=True,
+                               help="Confirm the original deployment is retired; never clone an active host identity")
+        route.set_defaults(func=_dispatch_backup, public_command=f"host.backup.{action}")
     from ._setup_parsers import register_host_setup
     register_host_setup(hosts)
     from ._host_repos_parsers import register_host_repos

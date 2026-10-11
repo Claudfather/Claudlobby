@@ -192,6 +192,58 @@ def test_channel_threads_the_whole_conversation(tmp_path):
     assert "recipient_raw" not in dispatch            # §11: raw id stays home
 
 
+def test_channel_projects_canonical_report_content_without_promoting_other_messages(tmp_path):
+    from uuid import uuid4
+    from claudlobby.report_payload import ReportPayload, encode_report_facts
+
+    report = ReportPayload("completed", summary="Ready for review <please>",
+        pr_url="https://github.com/example/project/pull/1", pr_role="authored",
+        artifacts=("https://example.org/result", "s3://example/result"),
+        issues=("https://github.com/example/project/issues/2",))
+    for mode in ("full", "metadata"):
+        root = tmp_path / mode
+        initialize_plane(root)
+        (root / "state/plane/capture.json").write_text(json.dumps({"*": mode}))
+        facts = encode_report_facts(report, fleet="f", sender="bot:f/worker",
+            recipient="bot:f/manager", msg_id="msg_" + uuid4().hex,
+            event_ids=("ev_" + uuid4().hex, "ev_" + uuid4().hex),
+            occurred_at="2026-10-10T00:00:00Z")
+        emit_batch(root, list(facts), require_commit=True)
+        response = TestClient(create_app(root, package=source_package())).get("/api/channel").json()
+        message = response["data"]["threads"][0]["messages"][0]
+        if mode == "full":
+            assert message["body"] == report.to_body()
+            assert message["body_words"] == report.summary
+            assert message["report"] == dict(state="captured", status="completed", percent=None,
+                pr_url=report.pr_url, pr_role="authored", artifacts=list(report.artifacts),
+                issues=list(report.issues), skill=None)
+        else:
+            assert message["report"] == {"state": "withheld"}
+        assert response["data"]["threads"][0]["terminal"] is None
+
+    # An ordinary chat or foreign emitter must not become a typed result.
+    for field, value in (("message_class", "chat"), ("emitter", "other-producer")):
+        raw = json.loads(json.dumps(facts[0]))
+        raw["event_id"] = "ev_" + uuid4().hex
+        raw["payload"]["msg_id"] = "msg_" + uuid4().hex
+        (raw["payload"] if field == "message_class" else raw)[field] = value
+        emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    messages = [m for t in rows["data"]["threads"] for m in t["messages"]]
+    assert sum("report" in m for m in messages) == 1
+    assert all(m["body_words"] == report.to_body() for m in messages if "report" not in m)
+
+    failed = ReportPayload("failed", reason="Repository preparation needs attention")
+    raw = json.loads(json.dumps(facts[0]))
+    raw["event_id"] = "ev_" + uuid4().hex
+    raw["payload"].update(msg_id="msg_" + uuid4().hex, body=failed.to_body())
+    emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    message = next(m for t in rows["data"]["threads"] for m in t["messages"]
+                   if m["msg_id"] == raw["payload"]["msg_id"])
+    assert message["body_words"] == failed.reason and message["report"]["status"] == "failed"
+
+
 def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
     _seed_conversation(tmp_path)
     (tmp_path / "state" / "plane" / "channels.json").write_text(

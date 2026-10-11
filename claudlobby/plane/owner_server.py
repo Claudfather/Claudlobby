@@ -7,6 +7,9 @@ fallback, even if the local Tailscale daemon cannot reach this socket.
 """
 
 from contextlib import contextmanager
+import errno
+import fcntl
+import json
 import os
 from pathlib import Path
 import socket
@@ -35,36 +38,122 @@ def _private_directory(path: Path):
 
 
 @contextmanager
+def _listener_lease(path: Path, parent_identity, *, create=True):
+    # Never unlink the lock: a second inode would permit two simultaneous owners.
+    lock_path = path.with_name(path.name + ".lock")
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(lock_path, flags | (os.O_CREAT if create else 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_size > 512):
+            raise OwnerServerConfigurationError("owner socket lock is not a private regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OwnerServerConfigurationError("owner socket already has a running server") from None
+        current = lock_path.lstat()
+        if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                or _private_directory(path.parent) != parent_identity):
+            raise OwnerServerConfigurationError("owner socket lock changed during acquisition")
+        raw = os.read(fd, 513)
+        try:
+            previous = json.loads(raw) if raw else None
+            # Only our exact encoding is accepted, including no duplicate keys.
+            if raw and json.dumps(previous).encode() != raw:
+                raise ValueError()
+            if previous is not None and (not isinstance(previous, dict)
+                    or set(previous) != {"version", "parent", "socket"}
+                    or type(previous["version"]) is not int or previous["version"] != 1
+                    or any(not isinstance(previous[key], list) or len(previous[key]) != 2
+                           or any(type(value) is not int or value < 0 for value in previous[key])
+                           for key in ("parent", "socket"))):
+                raise ValueError()
+        except (ValueError, UnicodeError):
+            raise OwnerServerConfigurationError("owner socket lock record is invalid; inspect it locally") from None
+        yield fd, previous
+    finally:
+        os.close(fd)
+
+
+def _reclaim_listener(path: Path, previous, parent_identity, *, remove=True):
+    info = path.lstat()
+    identity = info.st_dev, info.st_ino
+    if (not stat.S_ISSOCK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.geteuid() or previous is None
+            or previous["socket"] != list(identity) or previous["parent"] != list(parent_identity)):
+        raise OwnerServerConfigurationError("owner socket path exists; inspect the previous server")
+    # A legacy or noncooperating live server must also be preserved. Only a
+    # definite refused connection permits reclaiming our recorded socket.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.2)
+        try:
+            probe.connect(str(path))
+        except OSError as exc:
+            if exc.errno != errno.ECONNREFUSED:
+                raise OwnerServerConfigurationError("owner socket liveness is uncertain; inspect the previous server") from None
+        else:
+            raise OwnerServerConfigurationError("owner socket already has a running server")
+    current = path.lstat()
+    if ((current.st_dev, current.st_ino) != identity or not stat.S_ISSOCK(current.st_mode)
+            or stat.S_IMODE(current.st_mode) != 0o600 or current.st_uid != os.geteuid()
+            or _private_directory(path.parent) != parent_identity):
+        raise OwnerServerConfigurationError("owner socket changed during recovery")
+    if remove:
+        path.unlink()
+
+
+def check_listener_available(path: Path):
+    """Noncreating activation preflight; startup repeats ownership and liveness."""
+    identity = _private_directory(path.parent)
+    if not os.path.lexists(path.with_name(path.name + ".lock")):
+        if os.path.lexists(path):
+            raise OwnerServerConfigurationError("owner socket is unrecorded; inspect it locally")
+        return
+    with _listener_lease(path, identity, create=False) as (_, previous):
+        if os.path.lexists(path):
+            _reclaim_listener(path, previous, identity, remove=False)
+
+
+@contextmanager
 def private_listener(path: Path):
-    """Bind only a new socket; never remove an existing or replacement path."""
+    """Recover only our recorded dead socket while holding its private lease."""
     path = Path(path)
     if not path.is_absolute():
         raise OwnerServerConfigurationError("owner socket path must be absolute")
     parent_identity = _private_directory(path.parent)
-    if os.path.lexists(path):
-        raise OwnerServerConfigurationError("owner socket path exists; inspect the previous server")
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    identity = None
-    try:
-        # The containing directory is already private throughout creation.
-        listener.bind(str(path))
-        info = path.lstat()
-        identity = info.st_dev, info.st_ino
-        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid()
-                or _private_directory(path.parent) != parent_identity):
-            raise OwnerServerConfigurationError("owner socket changed during creation")
-        path.chmod(0o600)
-        listener.listen(32)
-        yield listener
-    finally:
-        listener.close()
-        if identity is not None:
-            try:
-                info = path.lstat()
-                if (info.st_dev, info.st_ino) == identity and stat.S_ISSOCK(info.st_mode):
-                    path.unlink()
-            except FileNotFoundError:
-                pass
+    with _listener_lease(path, parent_identity) as (lease, previous):
+        if os.path.lexists(path):
+            _reclaim_listener(path, previous, parent_identity)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        identity = None
+        try:
+            listener.bind(str(path))
+            info = path.lstat()
+            identity = info.st_dev, info.st_ino
+            if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid()
+                    or _private_directory(path.parent) != parent_identity):
+                raise OwnerServerConfigurationError("owner socket changed during creation")
+            path.chmod(0o600)
+            record = json.dumps({"version": 1, "parent": parent_identity, "socket": identity}).encode()
+            os.lseek(lease, 0, os.SEEK_SET)
+            os.ftruncate(lease, 0)
+            if os.write(lease, record) != len(record):
+                raise OwnerServerConfigurationError("owner socket ownership could not be recorded")
+            os.fsync(lease)
+            listener.listen(32)
+            yield listener
+        finally:
+            listener.close()
+            if identity is not None:
+                try:
+                    info = path.lstat()
+                    if (info.st_dev, info.st_ino) == identity and stat.S_ISSOCK(info.st_mode):
+                        path.unlink()
+                except FileNotFoundError:
+                    pass
+                os.ftruncate(lease, 0)
+                os.fsync(lease)
 
 
 def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path | None = None,

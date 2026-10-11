@@ -347,6 +347,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
       ${boardOnly ? '<p class="note">Showing a limited board snapshot. Full task detail is unavailable in this view.</p>' : `
       <h3>Task description</h3>${task.body === null || task.body === undefined ? '<p class="detail-empty">No task body was recorded.</p>' : `<pre class="task-record-body">${esc(task.body)}</pre>`}
+      <h3>Recorded task reports</h3>
+      <p class="note">Reports recorded against this task, including those outside the recent activity window. Completion alone does not mean a result was reviewed.</p>
+      ${task.reports_window?.truncated ? '<p class="note">Some recorded reports are outside this bounded view.</p>' : ""}
+      <div id="task-recorded-reports"></div>
       <h3>Assignments</h3>${historyWindow("Assignments", task.assignments_window)}
       ${(task.assignments || []).map(a => `<details class="task-assignment"><summary>${esc(assigneeLabel(a))} · ${esc(a.state)}</summary>
         ${recordIds([["Assignment", a.assignment_id], ["Assignee", a.assignee_uid], ["Assigned by", a.assigned_by_uid], ["Dispatch message", a.dispatch_message_id]])}
@@ -355,8 +359,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <h3>Task history</h3>${historyWindow("Task history", task.history_window)}<ol class="task-history">${events(task.history)}</ol>
       ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
       ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}`}
-      <p class="note">Task state, history and action selection are a snapshot. Use Refresh to read them again.</p>
-      <h3>Recent conversation &amp; reports</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
+      <p class="note">Task state, history, recorded reports and action selection are a snapshot. Use Refresh to read them again.</p>
+      <h3>Recent conversation</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
       <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
       <p id="task-lineage-note" class="note" hidden></p>
       <div id="task-reports"></div>
@@ -365,6 +369,12 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <p class="note" id="task-action-note"></p>`;
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
+    const recorded = $("task-recorded-reports");
+    if (recorded) {
+      const threads = task.report_threads?.filter(t => t.work_item_id === task.task_id);
+      if (threads?.length) recorded.replaceChildren(...threads.map(t => renderThread(t)));
+      else recorded.innerHTML = `<p class="detail-empty">${threads ? "No recorded reports are available in this view." : "Recorded reports are unavailable in this response."}</p>`;
+    }
     const selection = selected, token = detailEpoch;
     $("task-conversation-update").onclick = () => {
       if (selected !== selection || token !== detailEpoch) return;

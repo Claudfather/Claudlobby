@@ -9,6 +9,7 @@ process, the no-silent-switches violation)."""
 from __future__ import annotations
 
 import subprocess
+import plistlib
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,40 @@ SERVICE_JOB = {
     "unit": "service",
     "script": "$CLAUDLOBBY_NATIVE_DIR/plane-daemon.sh",
 }
+
+
+def test_owner_service_keeps_literal_arguments_and_operator_environment(tmp_path, monkeypatch):
+    binary = tmp_path / "native $CLAUDLOBBY_ROOT % tailscale"
+    binary.write_text("#!/bin/sh\nexit 99\n")
+    binary.chmod(0o700)
+    cfg = {"unit": "service", "script": "$CLAUDLOBBY_CLI", "enroll": True,
+           "origin": "https://host.example.test", "tailscale": str(binary),
+           "socket": str(tmp_path / "private socket"),
+           "workspace_issuer": "https://app.example.test",
+           "workspace_origin": "https://plane.example.test"}
+    out = _compose(tmp_path, monkeypatch, {"plane-owner": cfg})
+    doc = plistlib.loads((out / "claudlobby-plane-owner.plist").read_bytes())
+    argv = doc["ProgramArguments"]
+    assert argv[1:6] == ["--root", str(tmp_path), "host", "owner", "serve"]
+    assert argv[argv.index("--tailscale") + 1] == str(binary)
+    assert argv[argv.index("--socket") + 1] == cfg["socket"]
+    assert argv[argv.index("--workspace-origin") + 1] == "https://plane.example.test"
+    assert "FLEET_ROOT" not in doc["EnvironmentVariables"]
+    assert doc["KeepAlive"] is True
+    assert "$$CLAUDLOBBY_ROOT %% tailscale" in (out / "claudlobby-plane-owner.service").read_text()
+    assert not (out / "claudlobby-plane-owner.timer").exists()
+    for socket_path in (None, "relative.sock"):
+        with pytest.raises(ValueError, match="socket requires"):
+            _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "socket": socket_path}})
+
+
+def test_owner_service_is_dormant_until_configured(tmp_path, monkeypatch):
+    cfg = {"unit": "service", "script": "$CLAUDLOBBY_CLI", "enroll": False}
+    out = _compose(tmp_path, monkeypatch, {"plane-owner": cfg})
+    assert not list(out.glob("*plane-owner*"))
+    with pytest.raises(ValueError, match="HTTPS origin"):
+        _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "enroll": True}})
+    assert not list(out.glob("*plane-owner*"))
 
 
 def test_armed_service_composes_service_and_plist_no_timer(tmp_path, monkeypatch):
