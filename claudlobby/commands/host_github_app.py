@@ -65,10 +65,20 @@ def _issuer(args) -> CommandOutput:
                 if not separator or not app_id.isdecimal() or int(app_id) <= 0 or int(app_id) in keys:
                     raise ValueError("invalid App key mapping")
                 keys[int(app_id)] = _private_file(path)
-            _private_file(store.path)
+            store.initialize()
             if consent and consent.provider.app_id not in keys:
                 raise ValueError("consent App has no issuer key")
-            uvicorn.run(create_app(store, GithubMinter(keys), consent), host="127.0.0.1", port=args.port,
+            webhooks = None
+            if args.webhook_secret:
+                from ..github_webhooks import GithubWebhooks
+                secrets = {}
+                for declaration in args.webhook_secret:
+                    app_id, separator, path = declaration.partition("=")
+                    if not separator or not app_id.isdecimal() or int(app_id) not in keys or int(app_id) in secrets:
+                        raise ValueError("invalid webhook secret mapping")
+                    secrets[int(app_id)] = path
+                webhooks = GithubWebhooks(store, secrets)
+            uvicorn.run(create_app(store, GithubMinter(keys), consent, webhooks), host="127.0.0.1", port=args.port,
                         access_log=False, date_header=False)
             result = {"issuer": "stopped"}
     except ImportError as exc:

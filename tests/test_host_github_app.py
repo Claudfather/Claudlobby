@@ -200,6 +200,104 @@ def test_issuer_consent_conflicts_fail_before_login_or_require_new_invitation(tm
         assert db.execute("SELECT revoked FROM github_grants").fetchone()[0] == 1
 
 
+def _approve_consent(flow, grant, credential, user_id=456):
+    from urllib.parse import parse_qs, urlsplit
+    ticket = flow.invite(grant, credential)["ticket"]
+    _, cookie = flow.page(ticket)
+    state = parse_qs(urlsplit(flow.begin(ticket, cookie)).query)["state"][0]
+    flow.provider.verify = lambda *_: user_id
+    flow.complete(state, cookie, "example-code")
+    return ticket
+
+
+def _webhook(flow, tmp_path):
+    from claudlobby.github_webhooks import GithubWebhooks
+    secret = tmp_path / "webhook-secret"
+    secret.write_bytes(b"example-webhook-secret-for-tests-only")
+    secret.chmod(0o600)
+    return GithubWebhooks(flow.store, {12: secret})
+
+
+def _signed_event(payload):
+    import hashlib
+    import hmac
+    raw = json.dumps(payload).encode()
+    signature = "sha256=" + hmac.new(b"example-webhook-secret-for-tests-only", raw, hashlib.sha256).hexdigest()
+    return raw, signature
+
+
+def test_issuer_signed_user_revocation_and_replay_preserve_other_grants(tmp_path):
+    from fastapi.testclient import TestClient
+    from claudlobby.github_issuer import create_app, IssuanceDenied
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    ticket = _approve_consent(flow, grant, credential)
+    other = {**grant, "grant_id": "other-user", "binding": {**grant["binding"], "bot_id": "reviewer"}}
+    _approve_consent(flow, other, credential, user_id=457)
+    hook = _webhook(flow, tmp_path)
+    client = TestClient(create_app(flow.store, lambda *_: _issuer_token(), flow, hook))
+    raw, signature = _signed_event({"action": "revoked", "sender": {"id": 456}})
+    headers = {"content-type": "application/json", "x-github-event": "github_app_authorization", "x-hub-signature-256": signature,
+               "x-github-delivery": "00000000-0000-4000-8000-000000000001"}
+    assert client.post("/v1/github/webhook/12", content=raw+b" ", headers=headers).status_code == 403
+    assert client.post("/v1/github/webhook/13", content=raw, headers=headers).status_code == 403
+    assert client.post("/v1/github/webhook/12", content=raw, headers=headers).json() == {"received": True}
+    assert flow.page(ticket)[0]["status"] == "revoked"
+    with pytest.raises(IssuanceDenied):
+        flow.store.issue(credential, {"schema": 1, "binding": grant["binding"], "revision": "a"*64}, lambda *_: pytest.fail("revoked grant minted"))
+    assert flow.store.issue(credential, {"schema": 1, "binding": other["binding"], "revision": "a"*64}, lambda *_: _issuer_token())
+    fresh = {**grant, "grant_id": "fresh-consent"}
+    fresh_ticket = _approve_consent(flow, fresh, credential)
+    assert client.post("/v1/github/webhook/12", content=raw, headers=headers).status_code == 200
+    assert flow.page(fresh_ticket)[0]["status"] == "approved"
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_revocations").fetchone()[0] == 1
+    # A later genuine revocation may have identical body bytes but a new delivery ID.
+    assert client.post("/v1/github/webhook/12", content=raw, headers={**headers, "x-github-delivery": "00000000-0000-4000-8000-000000000002"}).status_code == 200
+    assert flow.page(fresh_ticket)[0]["status"] == "revoked"
+
+
+def test_issuer_installation_and_repository_revocations_are_scoped(tmp_path):
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    flow.store.approve(grant, credential)
+    other = {**grant, "grant_id": "other-repo", "repository_id": 124,
+             "binding": {**grant["binding"], "repo": "example/other"}}
+    flow.store.approve(other, credential)
+    hook = _webhook(flow, tmp_path)
+    def event(kind, payload):
+        import uuid
+        raw, signature = _signed_event(payload)
+        hook.receive(12, kind, str(uuid.uuid4()), signature, raw)
+    event("installation_repositories", {"action": "removed", "installation": {"id": 34, "app_id": 12}, "repositories_removed": [{"id": 123}]})
+    with flow.store.transaction() as db:
+        assert dict(db.execute("SELECT grant_id,revoked FROM github_grants")) == {"grant-example": 1, "other-repo": 0}
+    event("installation", {"action": "suspend", "installation": {"id": 34, "app_id": 12}})
+    event("installation", {"action": "unsuspend", "installation": {"id": 34, "app_id": 12}})
+    with flow.store.transaction() as db:
+        assert all(row[0] == 1 for row in db.execute("SELECT revoked FROM github_grants"))
+    with pytest.raises(ValueError):
+        event("installation", {"action": "deleted", "installation": {"id": 34, "app_id": 13}})
+
+
+def test_issuer_revocation_during_consent_prevents_late_approval(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+    flow, grant, credential = _consent_flow(tmp_path), _issuer_grant(), "c" * 43
+    invitation = flow.invite(grant, credential)
+    _, cookie = flow.page(invitation["ticket"])
+    state = parse_qs(urlsplit(flow.begin(invitation["ticket"], cookie)).query)["state"][0]
+    hook = _webhook(flow, tmp_path)
+    def verify(*_):
+        raw, signature = _signed_event({"action": "revoked", "sender": {"id": 456}})
+        hook.receive(12, "github_app_authorization", "00000000-0000-4000-8000-000000000001", signature, raw)
+        return 456
+    flow.provider.verify = verify
+    flow.complete(state, cookie, "example-code")
+    assert flow.page(invitation["ticket"])[0]["status"] == "needs_operator"
+    with flow.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM github_grants").fetchone()[0] == 0
+    fresh_ticket = _approve_consent(flow, {**grant, "grant_id": "new-grant"}, credential)
+    assert flow.page(fresh_ticket)[0]["status"] == "approved"
+
+
 def test_issuer_cli_http_exact_grant_and_revocation(tmp_path, capsys):
     from copy import deepcopy
     from datetime import datetime, timezone

@@ -140,8 +140,38 @@ approved, use `issuer revoke --grant-id GRANT_ID` instead. Configure the reverse
 proxy to preserve the issuer Host header and not log callback queries, cookies
 or response bodies. OAuth callbacks contain temporary authorization codes.
 
-This flow verifies access at approval time. It does not yet consume GitHub
-authorization-revocation webhooks or prove continuing personal access; that
-source integration remains required before public self-service launch. App
-installation/repository revocation still prevents GitHub from issuing a token.
-No real App consent or host credential handoff has been accepted yet.
+## Receive GitHub revocations
+
+Configure a distinct, randomly generated webhook secret for each managed App.
+Save it in a private file (0600, 32–1024 bytes; surrounding whitespace is removed)
+and add `--webhook-secret 12345=/private/issuer/webhook-secret.txt` to `serve`.
+Set that App's JSON webhook URL to the issuer's HTTPS origin followed by
+`/v1/github/webhook/12345`. Never reuse a webhook secret across Apps. The endpoint
+is absent unless explicitly configured; it verifies HMAC-SHA256 over the raw body
+before parsing or changing grants. Keep webhook secrets separate from App keys
+and OAuth client secrets. See [GitHub's signature contract](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
+
+Verified authorization revocation disables grants approved by that GitHub user
+for that App. Installation deletion/suspension disables that installation's
+grants, including manual operator grants. Repository removal disables matching
+repository IDs. An empty removed-repository list conservatively disables the
+installation's grants because GitHub uses it when narrowing all repositories to
+selected repositories. Added repositories and unsuspension never restore grants;
+reconnect through a fresh approval. No checkout or work history is deleted.
+
+The same store transaction records the delivery ID, body digest and numeric
+revocation scope and disables matching grants. A redelivery of the same event
+is acknowledged without disabling newer approvals again; a later event with a
+new delivery ID is processed even when its body matches. Consent begun before a matching revocation cannot commit
+a grant afterward. Successful webhook responses mean the store committed; they
+do not claim cached host tokens were invalidated. Existing token expiry and host
+enforcement remain separate, as described above. No raw webhook payload is saved.
+
+GitHub delivery availability is not continuous authorization verification. Monitor
+failed deliveries and explicitly redeliver them; the handler does not fetch or
+replay provider deliveries itself. It rejects bodies over 2 MiB and takes no
+automatic recovery action for missing events. Personal repository-role changes
+that do not emit an App authorization revocation are not currently rechecked
+after consent. Configure and accept real webhook delivery before public use,
+alongside the remaining website enrollment and secure host handoff. No real App
+consent, webhook delivery or host credential handoff has been accepted yet.

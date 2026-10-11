@@ -121,6 +121,13 @@ class GrantStore:
                 status TEXT NOT NULL, browser_digest TEXT, state_digest TEXT UNIQUE,
                 verifier TEXT, github_user_id INTEGER
             )""")
+            if "revocation_seq" not in {row[1] for row in db.execute("PRAGMA table_info(github_consent)")}:
+                db.execute("ALTER TABLE github_consent ADD COLUMN revocation_seq INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS github_revocations (
+                seq INTEGER PRIMARY KEY, app_id INTEGER NOT NULL,
+                delivery_id TEXT NOT NULL, body_digest TEXT NOT NULL, selector TEXT NOT NULL,
+                UNIQUE(app_id,delivery_id)
+            )""")
 
     @staticmethod
     def validate_grant(grant):
@@ -171,6 +178,41 @@ class GrantStore:
                       datetime.fromtimestamp(grant["last_token_expires_at"], timezone.utc).isoformat()
                       if grant["last_token_expires_at"] is not None else None}
         return result
+
+    @staticmethod
+    def _revocation_matches(selector, binding, repository_id, user_id):
+        if selector["kind"] == "user":
+            return user_id == selector["id"]
+        return binding["installation_id"] == selector["id"] and (
+            selector["kind"] == "installation" or repository_id in selector["repository_ids"])
+
+    def revoke_provider(self, app_id, delivery_id, body_digest, selector):
+        # Store only verified numeric scope and a digest, never the provider body.
+        # The issuance write lock also orders revocation against in-flight mints.
+        with self.transaction() as db:
+            previous = db.execute("SELECT body_digest FROM github_revocations WHERE app_id=? AND delivery_id=?",
+                                  (app_id, delivery_id)).fetchone()
+            if previous is not None:
+                if previous[0] != body_digest:
+                    raise IssuanceDenied("webhook delivery changed")
+                return
+            db.execute("INSERT INTO github_revocations (app_id,delivery_id,body_digest,selector) VALUES (?,?,?,?)",
+                       (app_id, delivery_id, body_digest, _json(selector)))
+            grants = db.execute("""SELECT g.*, c.github_user_id FROM github_grants g
+                LEFT JOIN github_consent c ON c.status='approved'
+                AND json_extract(c.grant_json,'$.grant_id')=g.grant_id WHERE g.revoked=0""").fetchall()
+            for grant in grants:
+                binding = json.loads(grant["binding"])
+                if binding["app_id"] == app_id and self._revocation_matches(
+                        selector, binding, grant["repository_id"], grant["github_user_id"]):
+                    db.execute("UPDATE github_grants SET revoked=1 WHERE grant_id=?", (grant["grant_id"],))
+
+    @staticmethod
+    def check_provider_revocations(db, grant, user_id, after):
+        for row in db.execute("SELECT selector FROM github_revocations WHERE app_id=? AND seq>?",
+                              (grant["binding"]["app_id"], after)):
+            if GrantStore._revocation_matches(json.loads(row[0]), grant["binding"], grant["repository_id"], user_id):
+                raise GrantConflict("GitHub access changed during authorization; start a new invitation")
 
     def issue(self, credential, payload, mint):
         digest = _credential_digest(credential)
@@ -254,7 +296,7 @@ class GithubMinter:
             raise IssuerUnavailable("GitHub issuance unavailable; check installation access and issuer configuration") from exc
 
 
-def create_app(store, mint, consent=None):
+def create_app(store, mint, consent=None, webhooks=None):
     import asyncio
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
@@ -285,4 +327,6 @@ def create_app(store, mint, consent=None):
     routes = [Route("/v1/github/token", issue, methods=["POST"])]
     if consent is not None:
         routes.extend(consent.routes())
+    if webhooks is not None:
+        routes.extend(webhooks.routes())
     return Starlette(routes=routes)

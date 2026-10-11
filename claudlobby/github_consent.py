@@ -259,7 +259,7 @@ class ConsentFlow:
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with self.store.transaction() as db:
             result = db.execute(
-                "UPDATE github_consent SET status='authorizing',state_digest=?,verifier=? WHERE ticket=? AND browser_digest=? AND status IN ('invited','authorizing') AND expires_at>?",
+                "UPDATE github_consent SET status='authorizing',state_digest=?,verifier=?,revocation_seq=(SELECT coalesce(max(seq),0) FROM github_revocations) WHERE ticket=? AND browser_digest=? AND status IN ('invited','authorizing') AND expires_at>?",
                 (_digest(state), verifier, ticket, digest, time.time()),
             )
             if result.rowcount != 1:
@@ -296,6 +296,7 @@ class ConsentFlow:
                     or grant["expires_at"] <= time.time()
                 ):
                     raise IssuanceDenied("consent attempt expired or cancelled")
+                self.store.check_provider_revocations(db, grant, user_id, row["revocation_seq"])
                 self.store.approve_in_transaction(db, grant, row["credential_digest"])
                 db.execute(
                     "UPDATE github_consent SET status='approved',browser_digest=NULL,github_user_id=? WHERE ticket=?",
