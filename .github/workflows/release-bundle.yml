@@ -106,12 +106,23 @@ jobs:
           cp "$work/rehearsal/result.json" "$bundle/rehearsal.json"
           .venv/bin/python -c 'import platform, sys, sysconfig; print("python", sys.version.split()[0]); print("platform", sysconfig.get_platform()); print("libc", *platform.libc_ver())' \
             > "$bundle/built-on.txt"
-          .venv/bin/python - "$bundle" <<'PY_CHECKSUMS'
-          import hashlib, pathlib, sys
+          installer="$RUNNER_TEMP/release-installer/claudlobby-install.pyz"
+          .venv/bin/python - "$bundle" "$installer" <<'PY_CHECKSUMS'
+          import hashlib, pathlib, sys, zipfile
           root = pathlib.Path(sys.argv[1])
           paths = sorted(path for path in root.rglob("*") if path.is_file())
           lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{path.relative_to(root).as_posix()}\n" for path in paths]
           (root / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+          installer = pathlib.Path(sys.argv[2])
+          installer.parent.mkdir()
+          # The executed entrypoint is the same bootstrap checked against the wheel.
+          # Keep the carrier outside the unpacked bundle's exact inventory.
+          with zipfile.ZipFile(installer, "w", compression=zipfile.ZIP_STORED) as archive:
+              for path in paths + [root / "SHA256SUMS"]:
+                  name = path.relative_to(root).as_posix()
+                  archive.write(path, "__main__.py" if name == "bootstrap.py" else name)
+          installer.with_suffix(".sha256").write_text(
+              f"{hashlib.sha256(installer.read_bytes()).hexdigest()}  {installer.name}\n", encoding="utf-8")
           PY_CHECKSUMS
 
           revision="$(git rev-parse HEAD)"
@@ -125,10 +136,17 @@ jobs:
             cat "$bundle/built-on.txt"
             echo
             cat "$bundle/SHA256SUMS"
+            echo
+            cat "${installer%.pyz}.sha256"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: claudlobby-release-${{ steps.bundle.outputs.revision }}-${{ matrix.target }}-py311
           path: ${{ runner.temp }}/release-bundle
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claudlobby-installer-${{ steps.bundle.outputs.revision }}-${{ matrix.target }}-py311
+          path: ${{ runner.temp }}/release-installer
           if-no-files-found: error

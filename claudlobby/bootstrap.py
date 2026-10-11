@@ -1,4 +1,4 @@
-"""First command for a trusted, unpacked release bundle; stdlib only.
+"""Install from a trusted release installer or unpacked bundle; stdlib only.
 
 Checksums establish local integrity, not publisher authenticity. This launcher
 installs a temporary matching CLI, then delegates to canonical host setup. It
@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zipimport
 
 _MAX_FILE = 256 * 1024 * 1024
 _MAX_TOTAL = 1024 * 1024 * 1024
@@ -78,6 +79,58 @@ def _platform(built_on: str) -> None:
         raise BundleError("bundle requires matching Linux aarch64 or macOS arm64 CPython 3.11; wheel/libc compatibility remains host-specific")
 
 
+def _checksums(content: bytes) -> dict[str, str]:
+    if len(content) > 128 * 1024:
+        raise BundleError("checksum inventory is oversized")
+    checksums = {}
+    for line in content.decode("utf-8").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  (?:\./)?([A-Za-z0-9_./+-]+)", line)
+        if not match:
+            raise BundleError("invalid checksum inventory")
+        name = match[2]
+        relative = PurePosixPath(name)
+        if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
+                or name in checksums or name == "SHA256SUMS"):
+            raise BundleError("invalid checksum path or duplicate")
+        checksums[name] = match[1]
+    return checksums
+
+
+def _extract_installer(carrier: Path, directory: Path) -> Path:
+    """Expand a finite carrier into our private directory; _bundle owns identity."""
+    with zipfile.ZipFile(carrier) as archive:
+        entries = archive.infolist()
+        if len(entries) > _MAX_FILES or sum(info.file_size for info in entries) > _MAX_TOTAL:
+            raise BundleError("installer inventory is oversized")
+        names = {}
+        folded = set()
+        for info in entries:
+            name = "bootstrap.py" if info.filename == "__main__.py" else info.filename
+            path = PurePosixPath(name)
+            if (not re.fullmatch(r"[A-Za-z0-9_./+-]+", name) or path.is_absolute()
+                    or ".." in path.parts or str(path) != name or name.casefold() in folded
+                    or info.filename == "bootstrap.py" or info.is_dir()
+                    or stat.S_IFMT(info.external_attr >> 16) not in {0, stat.S_IFREG}
+                    or info.file_size > _MAX_FILE or info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+                    or info.flag_bits & 1):
+                raise BundleError("installer contains a redirected, duplicate, unsupported or oversized file")
+            names[name] = info
+            folded.add(name.casefold())
+        if "bootstrap.py" not in names or "SHA256SUMS" not in names:
+            raise BundleError("installer lacks its launcher or checksum inventory")
+        if names["SHA256SUMS"].file_size > 128 * 1024:
+            raise BundleError("checksum inventory is oversized")
+        if set(names) != set(_checksums(archive.read(names["SHA256SUMS"]))) | {"SHA256SUMS"}:
+            raise BundleError("installer checksum inventory differs")
+        for name, info in names.items():
+            target = directory / name
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as output, archive.open(info) as source:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+    return directory / "bootstrap.py"
+
+
 def _bundle(script: Path) -> tuple[Path, Path, dict[str, str]]:
     if not script.is_absolute() or script != script.resolve(strict=True):
         raise BundleError("run the real bootstrap.py from an absolute, unredirected bundle path")
@@ -102,17 +155,7 @@ def _bundle(script: Path) -> tuple[Path, Path, dict[str, str]]:
     sums = directory / "SHA256SUMS"
     if sums.stat().st_size > 128 * 1024:
         raise BundleError("checksum inventory is oversized")
-    checksums = {}
-    for line in sums.read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (?:\./)?([A-Za-z0-9_./+-]+)", line)
-        if not match:
-            raise BundleError("invalid checksum inventory")
-        name = match[2]
-        relative = PurePosixPath(name)
-        if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
-                or name in checksums or name == "SHA256SUMS"):
-            raise BundleError("invalid checksum path or duplicate")
-        checksums[name] = match[1]
+    checksums = _checksums(sums.read_bytes())
     actual = {p.relative_to(directory).as_posix() for p in paths if p != sums}
     if set(checksums) != actual or any(_digest(directory / name) != value for name, value in checksums.items()):
         raise BundleError("bundle checksum inventory or bytes differ")
@@ -220,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if isinstance(__loader__, zipimport.zipimporter) and Path(__file__).name == "__main__.py":
+            with tempfile.TemporaryDirectory(prefix="claudlobby-installer-") as temporary:
+                script = _extract_installer(Path(__loader__.archive), Path(temporary).resolve())
+                return bootstrap(script, args.root, json_output=args.json)
         return bootstrap(Path(__file__).absolute(), args.root, json_output=args.json)
     except (BundleError, OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
         message = str(exc) if isinstance(exc, BundleError) else "bundle is unreadable or malformed; inspect trusted local inputs and host Python"

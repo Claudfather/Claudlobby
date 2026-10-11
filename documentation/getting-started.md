@@ -21,7 +21,7 @@ Approval does not change the separate `channelsEnabled` master policy. If the ch
 
 ## Trusted local release bundle (no checkout required)
 
-The manually dispatched [release-bundle workflow](../.github/workflows/release-bundle.yml) produces separate **Linux aarch64** and **macOS arm64** bundles for CPython 3.11. Obtain and unpack a bundle from a source you trust; this command does not download or select releases. Compare its checksum inventory with the workflow's independently displayed checksums. Checksums detect changed bytes, not an authentic publisher. These artifacts do not support Intel Macs or every Pi OS/libc; read `built-on.txt` and use wheels compatible with the actual host.
+The manually dispatched [release-bundle workflow](../.github/workflows/release-bundle.yml) produces separate **Linux aarch64** and **macOS arm64** installers for CPython 3.11. From a source you trust, obtain the `claudlobby-installer-<revision>-<platform>-py311` artifact and unzip GitHub's download to get `claudlobby-install.pyz`. Compare its SHA-256 with the workflow's independently displayed installer checksum before running it. Checksums detect changed bytes, not an authentic publisher. This command does not download or select releases. These artifacts do not support Intel Macs or every Pi OS/libc; the companion unpacked bundle contains `built-on.txt` and the wheel tags for checking host compatibility.
 
 With a working host `python3.11` and the prerequisites above, the first command is:
 
@@ -29,7 +29,7 @@ With a working host `python3.11` and the prerequisites above, the first command 
 WORK="$HOME/.local/share/claudlobby-build"   # authoring/output only, not the temporary install
 DATA="$HOME/.local/share/claudlobby-data"
 mkdir -p "$WORK"
-python3.11 /absolute/trusted-bundle/bootstrap.py --root "$DATA" --json > "$WORK/host-setup.json" &&
+python3.11 -I /absolute/claudlobby-install.pyz --root "$DATA" --json > "$WORK/host-setup.json" &&
 RELEASE_CLI=$(python3.11 -c \
   'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
   "$WORK/host-setup.json") &&
@@ -41,7 +41,9 @@ USER_UNIT_DIR=$(python3.11 -c \
 
 If the command exits unsuccessfully, read `WORK/host-setup.json` for the fixed failure step and guidance before continuing.
 
-Use real absolute, unredirected paths. No installed Claudlobby or repository checkout is required. The launcher checks the finite bundle inventory, checksum bytes, successful rehearsal revision/wheel digest and exact candidate launcher bytes. It creates an owned temporary environment, installs only the local hash-locked dependency wheels and candidate, then calls that candidate's canonical `host setup`. The temporary environment is removed afterward; the sealed release uses the original host interpreter rather than a deleted bootstrap interpreter. Host stdlib/system libraries are still required. Native prerequisite/manager refusals and retained incomplete releases remain owned by `host setup`.
+Use real absolute, unredirected paths. No installed Claudlobby or repository checkout is required. The installer extracts its bounded contents into a private temporary directory and runs the same bootstrap shipped in the wheel. The launcher checks the finite bundle inventory, checksum bytes, successful rehearsal revision/wheel digest and exact candidate launcher bytes. It creates an owned temporary environment, installs only the local hash-locked dependency wheels and candidate, then calls that candidate's canonical `host setup`. Temporary inputs are removed afterward; allow space for two copies of the bundle plus the temporary environment. The sealed release uses the original host interpreter rather than a deleted bootstrap interpreter. Host stdlib/system libraries are still required. Native prerequisite/manager refusals and retained incomplete releases remain owned by `host setup`.
+
+The workflow also retains the unpacked `claudlobby-release-<revision>-<platform>-py311` artifact. After checking that bundle's inventory against the workflow checksums, it supports the same command with `/absolute/trusted-bundle/bootstrap.py` in place of `/absolute/claudlobby-install.pyz`.
 
 This command only assembles a release: no selection, activation, unit enrollment, credential changes or fleet startup. On success, `DATA` is the chosen absolute data root, `RELEASE_CLI` is the exact returned `data.cli`, and `USER_UNIT_DIR` is the first directory allowed by the native owner's returned `data.install_directories`. Keep the success JSON in `WORK/host-setup.json`; none of these references the deleted temporary environment. After separately establishing native/provider and approved repository access, create that allowed directory if absent (`mkdir -p "$USER_UNIT_DIR"`) and use the [revenue web-app candidate's template invocation](../examples/teams/revenue-web-app/README.md) with those three variables. The template is installed with the release; no manifest fetch or `WORK/bootstrap` is needed. Its separate `fleet setup` is the consequential activation step, not a continuation automatically performed by this launcher. For a browser/Plane host, the operator must request the workflow's explicit `plane-ui` extras input; the default bundle does not silently include that optional capability.
 
