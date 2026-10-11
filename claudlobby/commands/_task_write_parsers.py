@@ -35,6 +35,8 @@ def add_report_flags(parser):
 
 
 def register_task_write_subparsers(task_children, assignment_children):
+    from .task_permissions import register as register_permissions
+    register_permissions(task_children)
     admitting = _route(task_children, "admit", "task.admit", "Admit unassigned fleet work")
     admitting.add_argument("--title", required=True, metavar="TEXT")
     admitting.add_argument("--body-file", metavar="FILE")
