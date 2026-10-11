@@ -207,3 +207,71 @@ def test_cli_request_show_and_operator_decision_use_canonical_owner(active, monk
     refused = _call(capsys, root, "task", "permission", "check", second["permission_id"],
                     "--scope-file", str(scope_file), expected=4)
     assert "incomplete or inconsistent" in refused["error"]["message"]
+
+
+def test_pending_requests_surface_in_board_detail_and_team_counts(estate):
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+    from tests.package_fixtures import source_package
+
+    ctx, conn, worker, human, assigned = _setup(estate)
+    task = tasks.admit(ctx, str(uuid4()), title="Review release permission")
+    client = TestClient(create_app(ctx.root, package=source_package()))
+
+    def read():
+        board = client.get("/api/tasks?fleet=example").json()["data"]
+        card = next(row for row in board["tasks"] if row["task_id"] == task.task_id)
+        detail = client.get("/api/tasks/" + task.task_id + "?fleet=example").json()["data"]["task"]
+        overview = client.get("/api/overview").json()["data"]
+        team = next(row for row in overview["fleets"] if row["alias"] == "example")
+        assert team["attention"] == board["attention_count"]
+        assert card["attention_reason"] == detail["attention_reason"]
+        return card
+
+    assert not read()["attention"]
+    first, second = _request(ctx, task), _request(ctx, task)
+    card = read()
+    assert card["permission_pending"] == 2 and not card["permission_incomplete"]
+    assert card["attention_reason"] == ["permission_pending"]
+    _decision(human, first)
+    assert read()["permission_pending"] == 1
+    _decision(human, second, "decline")
+    assert not read()["attention"]
+    _decision(human, first, "revoke")
+    assert not read()["attention"]
+
+
+def test_permission_discovery_does_not_invent_decisions_or_hide_unknowns(estate, monkeypatch):
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+    from tests.package_fixtures import source_package
+
+    ctx, conn, worker, human, assigned = _setup(estate)
+    task = tasks.admit(ctx, str(uuid4()), title="Review a bounded request")
+    permission = _request(ctx, task)
+    client = TestClient(create_app(ctx.root, package=source_package()))
+
+    def card():
+        rows = client.get("/api/tasks?fleet=example").json()["data"]["tasks"]
+        return next(row for row in rows if row["task_id"] == task.task_id)
+
+    approved = _decision(human, permission)
+    assert not card()["attention"]
+    # The request is genuine but its later decision can no longer be proven.
+    proof = ctx.root / "state/requests" / ctx.fleet_uid / (approved.request_id + ".json")
+    original = proof.read_bytes()
+    proof.unlink()
+    assert card()["attention_reason"] == ["permission_unavailable"]
+    assert card()["permission_pending"] == 0
+    proof.write_bytes(original)
+    # A forged request without an owned command receipt never becomes a decision.
+    requested = conn.execute("SELECT detail FROM events WHERE event_id=?", (permission.request_event_id,)).fetchone()[0]
+    import json
+    data = json.loads(requested)
+    data["operation_request_id"] = str(uuid4())
+    conn.execute("UPDATE events SET detail=? WHERE event_id=?", (json.dumps(data), permission.request_event_id))
+    conn.commit()
+    assert not card()["attention"]
+    # A bounded canonical list explicitly discloses that older requests exist.
+    monkeypatch.setattr("claudlobby.plane.view.list_task_permissions", lambda *a, **k: ((), True))
+    assert card()["attention_reason"] == ["permission_unavailable"]

@@ -385,6 +385,12 @@ function renderChannel(env) {
 // (chunk M-A, #1481) from the instant the human acted, which the server
 // already put in `attention_since` for them.
 const WHY = {
+  permission_pending: (r) => [
+    `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
+    "open this task to review the exact action, target and limits"],
+  permission_unavailable: () => [
+    "permission history is incomplete",
+    "open this task to inspect permission status; more requests may need a decision"],
   escalated: (r) => [
     r.attention_question
       ? `needs you: ${r.attention_question}`

@@ -155,8 +155,8 @@ def test_protected_detail_requires_session_and_same_source(protected, tmp_path):
 def test_detail_held_response_rechecks_session(protected, tmp_path, monkeypatch):
     _, c, _, _, _, clock = protected
     original = view._fetch_task_detail
-    def expire(*args):
-        result = original(*args)
+    def expire(*args, **kwargs):
+        result = original(*args, **kwargs)
         clock[0] += SESSION_SECONDS
         return result
     monkeypatch.setattr(view, "_fetch_task_detail", expire)
@@ -170,13 +170,13 @@ def test_detail_query_and_provenance_share_admitted_snapshot(protected, tmp_path
         conn.execute("PRAGMA journal_mode=WAL")
     original = view._fetch_task_detail
     checked = []
-    def concurrent(conn, *args):
+    def concurrent(conn, *args, **kwargs):
         assert conn.in_transaction
         before = conn.execute("SELECT ingest_seq FROM ingest_ledger ORDER BY ingest_seq DESC LIMIT 1").fetchone()[0]
         with sqlite3.connect(db_file(tmp_path)) as writer:
             writer.execute("UPDATE work_items SET title='later title' WHERE work_item_id=?", (TASK,))
             writer.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at) VALUES('later','events','later')")
-        result = original(conn, *args)
+        result = original(conn, *args, **kwargs)
         checked.append(before)
         return result
     monkeypatch.setattr(view, "_fetch_task_detail", concurrent)
@@ -221,7 +221,8 @@ def test_detail_explicit_projections_and_consistent_actor_labels(tmp_path):
         "resolved", "current_assignment", "assignments", "history", "terminal_event", "issues",
         "display_ids", "history_window", "assignments_window", "issues_window", "display_ids_window",
         "attention", "attention_reason", "attention_since", "attention_question", "attention_by",
-        "attention_act_reason", "delivery", "report_threads", "reports_window"}
+        "attention_act_reason", "delivery", "report_threads", "reports_window",
+        "permission_pending", "permission_incomplete"}
     assignment = task["assignments"][0]
     assert set(assignment) == {"assignment_id", "task_id", "assignee_uid", "assigned_by_uid", "expected_by",
         "dispatch_message_id", "occurred_at", "state", "assignee_alias", "assignee_short", "assigned_by_alias",
@@ -255,7 +256,7 @@ def test_assignment_history_actor_aliases_use_bounded_lookup_batches(tmp_path, m
         if hasattr(conn, "setlimit"):
             conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 400)
         conn.execute("BEGIN")
-        task = view._fetch_task_detail(BoundedReader(), TASK, "engineering")["task"]
+        task = view._fetch_task_detail(BoundedReader(), TASK, "engineering", root=tmp_path)["task"]
     finally:
         conn.close()
     history = task["assignments"][0]["history"]
