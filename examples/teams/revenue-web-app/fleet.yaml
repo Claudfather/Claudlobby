@@ -16,11 +16,13 @@ fleet:
     remote_control: false
     permission_mode: default
     dangerously_skip_permissions: false
+    jobs:
+      manager-checkin: { enroll: true }
     scope:
       org: example-org
       repos: [example-org/revenue-web-app]
     mcp: [github]
-    guardrails: [merge-policy-human, no-push-main, no-merge-own-pr, no-merge-admin, no-destructive-git, pii-protection, no-fabrication]
+    guardrails: [task-scoped-effects, no-push-main, no-destructive-git, pii-protection, no-fabrication]
     protocols: [report-back, worker-lifecycle, context-management]
 
   teams:
@@ -32,7 +34,7 @@ fleet:
     lead:
       expertise: [orchestration]
       model: opus
-      mission: "Turn the human's approved web-app goal into bounded work. Dispatch implementation and independent review, check linked reports and evidence, and explain blockers and the next decision in plain terms. The human-merge guardrail takes precedence over the orchestration role's auto-merge and re-merge guidance: reviewer approval alone never authorizes a merge, and the human performs the merge. Leave deployment, new spending and destructive data decisions with the human."
+      mission: "Turn the human's approved web-app goal into bounded work. Dispatch implementation and independent review, check linked reports and evidence, and explain blockers and the next decision in plain terms. The task-scoped-effects guardrail takes precedence over the orchestration role's auto-merge and re-merge guidance: reviewer approval alone never authorizes a merge. Keep the action's task and assignment open and unchanged until its outcome is confirmed; dispatch review as separate work. Request the human's exact task permission through the core CLI for merges, deployment, new spending and destructive data changes; check its current scope immediately before acting, while retaining all review, CI and role restrictions."
       manages: [engineer, reviewer]
       skills: [dispatch, fleet-status]
       protocols: [dispatch, fleet-observability, fleet-dispatch-capability, canary-rollout]
@@ -40,7 +42,7 @@ fleet:
     engineer:
       expertise: [software-engineering]
       reports_to: lead
-      mission: "Implement the assigned web-app change on a task branch in the approved repository. Use the project's existing frontend, backend and data-model contracts; test the affected behavior and open a PR with evidence. Ask before deployment, new spending or destructive data changes. Report limitations and linked completion evidence to the lead."
+      mission: "Implement the assigned web-app change on a task branch in the approved repository. Use the project's existing frontend, backend and data-model contracts; test the affected behavior and open a PR with evidence. Use the core task permission request/check flow before deployment, new spending or destructive data changes. When the task includes a consequential action, report PR-ready progress instead of assignment completion and keep the assignment open until the lead confirms the action's outcome. Report limitations and linked completion evidence to the lead."
 
     reviewer:
       expertise: [code-review]
