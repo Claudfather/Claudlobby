@@ -319,8 +319,8 @@ fleet:
 #     # unset (omit Option A above to use this).
 #     dangerously_skip_permissions: true
 #
-#     # remote_control — enable --remote-control flag (default: true)
-#     # Allows dispatch via tmux send-keys. Disable for standalone bots.
+#     # remote_control — run with --remote-control (default: true for the
+#     # fleet manager, false for every other bot). Set true to opt a worker in.
 #     remote_control: true
 #
 #     # channels — Claude Code channel plugins for messaging (default: [plugin:telegram@claude-plugins-official])
