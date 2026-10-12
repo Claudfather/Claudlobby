@@ -158,15 +158,50 @@ function nudgeReason(m, thread) {
   } catch { return null; }
 }
 
+function reportLink(label, value) {
+  // Report evidence also allows non-web URLs (for example s3:); keep those text-only.
+  let clickable = false;
+  try {
+    const url = new URL(value);
+    clickable = /^https?:\/\//i.test(value) && !/[\s\\]/u.test(value)
+      && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+  } catch { /* Unusable URLs remain readable evidence. */ }
+  const text = esc(value);
+  return `<li><span>${esc(label)}:</span> ${clickable
+    ? `<a href="${text}" target="_blank" rel="noopener noreferrer">${text}</a>` : text}</li>`;
+}
+
+function reportEvidence(report) {
+  if (report?.state !== "captured") return "";
+  const links = [report.pr_url ? reportLink(report.pr_role === "reviewed"
+    ? "PR reviewed (reported)" : "PR authored (reported)", report.pr_url) : "",
+    ...report.artifacts.map(url => reportLink("Artifact", url)),
+    ...report.issues.map(url => reportLink("Issue", url))].join("");
+  return links ? `<ul class="report-evidence">${links}</ul>` : "";
+}
+
 function bodyBlock(m, prose = null) {
+  const report = m.report;
+  const unavailable = {withheld: "Report content was withheld by capture policy.",
+    truncated: "Report content is incomplete; structured evidence is unavailable.",
+    invalid: "This report could not be read. Inspect its recorded content in machinery.",
+    unsupported: "This report uses an unsupported format version."};
+  if (report && Object.hasOwn(unavailable, report.state)) {
+    return `<div class="body redacted">${esc(unavailable[report.state])}</div>`;
+  }
+  const labels = {progress: "Progress reported", blocked: "Blocker reported",
+    completed: "Completion reported", failed: "Failure reported"};
+  const status = report?.state === "captured"
+    ? `<div class="report-status ${esc(report.status)}">${esc(labels[report.status])}`
+      + `${report.percent !== null ? ` · ${esc(report.percent)}%` : ""}</div>` : "";
   const words = prose ?? (m.body_words || m.body);
   if (words) {
     const long = words.split("\n").length > CLAMP_LINES || words.length > CLAMP_CHARS;
     const open = long && openBodies.has(m.msg_id);
-    return `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
+    return status + `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
       + `${esc(words)}</div>`
       + (long ? `<button class="more" type="button">`
-                + `${open ? "show less" : "show more"}</button>` : "");
+                + `${open ? "show less" : "show more"}</button>` : "") + reportEvidence(report);
   }
   return `<div class="body redacted">message captured as metadata only`
        + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
@@ -187,7 +222,8 @@ function machineryBlock(m, prose = null) {
   ].filter(Boolean).join(" · ");
   // The verbatim wire body (framing included) lives here — the prose above
   // renders body_words; this expand is the raw-text view of truth.
-  const raw = m.body && m.body !== (prose ?? (m.body_words || ""))
+  const raw = m.body && (m.report && m.report.state !== "legacy"
+    || m.body !== (prose ?? (m.body_words || "")))
     ? `<div class="machinery raw">${esc(m.body)}</div>` : "";
   return `<details><summary>machinery</summary>`
        + `<div class="machinery">${parts}</div>${raw}</details>`;
@@ -231,6 +267,9 @@ function threadTitle(t, reason) {
   if (t.title) return clip(t.title, 100);
   const first = t.messages[0];
   if (reason != null) return clip(reason.split("\n")[0], 100);
+  if (first?.report && !["captured", "legacy"].includes(first.report.state)) {
+    return `Report unavailable from ${first.sender_short}`;
+  }
   if (first && (first.body_words || first.body)) {
     return clip((first.body_words || first.body).split("\n")[0], 100);
   }
@@ -303,9 +342,28 @@ function threadArticle(t, taskOpener = true) {
 // Keyed render: unchanged threads keep their existing DOM node (open
 // machinery <details>, text selection, layout) — a full innerHTML rebuild
 // collapsed all of it every refresh (gauntlet; §16 preserved-focus).
+function checkinArticle(data) {
+  const rows = data.checkins || [], asks = rows.filter(row => row.action === 'ask').length;
+  const el = document.createElement('article'); el.className = 'thread';
+  el.dataset.key = 'lead-checkins'; el.dataset.receipts = JSON.stringify([rows, data.checkins_state, data.checkins_truncated]);
+  el.innerHTML = `<details${asks ? ' open' : ''}><summary>Recent check-ins${asks ? ` · ${asks} asked for input` : ''}</summary>
+    <p>Recorded decisions, not a list of unanswered requests. Message the lead to follow up.</p>
+    ${data.checkins_state === 'unavailable' ? '<p>Some check-in history is unavailable. Other activity may still be available.</p>' : ''}
+    ${rows.map(row => `<div class="msg"><div class="who"><b>${esc(row.actor_short)}</b><span>${esc(row.fleet)}</span>
+      <time>${esc(ago(row.occurred_at))}</time></div>
+      <strong>${esc(({ask:'Asked for your input', dispatch:'Selected work to dispatch', nothing:'Chose not to start more work'})[row.action] || 'Decision unavailable')}</strong>
+      <pre class="task-record-body">${esc(row.reason || 'The reason was not captured.')}</pre>
+      ${row.rationale && row.rationale !== row.reason ? `<p>${esc(row.rationale)}</p>` : ''}
+      ${row.truncated ? '<p>The recorded detail was cut short.</p>' : ''}
+      ${row.actor_uid ? `<button class="pill ghost" type="button" data-bot-inspect="${esc(row.actor_uid)}" data-checkin-bot="${esc(row.actor_uid)}"
+        data-checkin-alias="${esc(row.actor_alias)}" data-checkin-fleet="${esc(row.fleet)}">View bot and message</button>` : ''}</div>`).join('')}
+    ${data.checkins_truncated ? '<p>Showing recent check-ins only. Older decisions remain in the host record.</p>' : ''}</details>`;
+  return el;
+}
+
 function renderChannel(env) {
   const el = $("channel");
-  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length })) return;
+  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) return;
   const existing = new Map(
     [...el.querySelectorAll("article.thread")].map((n) => [n.dataset.key, n]));
   const frag = document.createDocumentFragment();
@@ -314,6 +372,25 @@ function renderChannel(env) {
   // fleet-qualified names under `all`, so a card kept across a tab switch
   // showed the previous room's names (live on the Mini, U follow-up)
   const room = currentFleet || "all";
+  if (env.data.checkins?.length || env.data.checkins_state === 'unavailable') {
+    let article = checkinArticle(env.data);
+    const prev = existing.get('lead-checkins');
+    if (prev?.dataset.room === room) {
+      if (prev.dataset.receipts === article.dataset.receipts) article = prev;
+      else article.querySelector('details').open = prev.querySelector('details').open;
+    }
+    article.dataset.room = room;
+    for (const button of article.querySelectorAll('[data-checkin-bot]')) {
+      const current = () => {
+        const identity = rosterIdentities.get(button.dataset.checkinBot);
+        return identity && !identity.provisional && identity.alias === button.dataset.checkinAlias
+          && identity.fleet === button.dataset.checkinFleet ? identity : null;
+      };
+      button.disabled = !current();
+      button.onclick = () => { if (!button.disabled && button.isConnected && !sessionPaused && current()) inspectBot(current()); };
+    }
+    frag.appendChild(article);
+  }
   for (const t of env.data.threads) {
     const prev = existing.get(t.key);
     const reuse = prev && prev.dataset.seq === String(t.latest_seq)
@@ -346,6 +423,12 @@ function renderChannel(env) {
 // (chunk M-A, #1481) from the instant the human acted, which the server
 // already put in `attention_since` for them.
 const WHY = {
+  permission_pending: (r) => [
+    `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
+    "open this task to review the exact action, target and limits"],
+  permission_unavailable: () => [
+    "permission history is incomplete",
+    "open this task to inspect permission status; more requests may need a decision"],
   escalated: (r) => [
     r.attention_question
       ? `needs you: ${r.attention_question}`
@@ -486,7 +569,7 @@ function renderTasks(env) {
     : "";
   attEl.innerHTML = attn.length || issues || limited
     ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: "nothing needs you" });
+    : stateBlock("idle", null, null, { label: "no tasks need attention" });
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: "no other tasks" });
 }
@@ -848,7 +931,7 @@ async function refreshBoards() {
   adoptFleets(ov);   // the overview carries the fleet list + default: one door
   if (syncWorkRoom()) { refreshBoards(); return; }
   renderHeader(ov); renderHostFacts(ov);
-  renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
+  renderFleet(fl); renderChannel(ch); renderTasks(tk); renderSummary(sm);
   workLoop.update(tk, ch);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick

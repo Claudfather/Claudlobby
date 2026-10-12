@@ -202,7 +202,7 @@ class OwnerConnected:
         Fixed kinds only. This never grants, registers, or issues a direct session.
         Grants remain native-principal/fleet specific, not workspace specific.
         """
-        if kind not in ("message", "nudge", "feedback"):
+        if kind not in ("message", "nudge", "feedback", "permission"):
             raise AccessDenied("unsupported_owner_action")
         fleet_uid = _canonical_uid(fleet_uid, "fleet", action=kind)
         with self.access._connection() as conn:

@@ -263,9 +263,27 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   }
   const nudgeContext = room => taskContext(room, 'nudge');
   const feedbackContext = room => taskContext(room, 'feedback');
+  async function permissionContext(room, task_id) {
+    if (typeof room !== 'string' || !room || room === 'all' || typeof task_id !== 'string' || !/^wi_[0-9a-f]{32}$/.test(task_id)) return null;
+    try {
+      const context = await ownerAction('context', {room, kind:'permission', task_id});
+      return context?.version === 2 && context.simulation === false && context.room === room && context.scope?.fleet === room
+        && context.task_id === task_id && context.actions?.length === 1 && context.actions[0] === 'permission' ? context : null;
+    } catch { return null; }
+  }
   function actionMetadata(value, preparing = false) {
     const scope = { workspace: value?.scope?.workspace, host: value?.scope?.host,
       fleet: value?.scope?.fleet, viewer: value?.scope?.viewer };
+    if (value?.version === 2 && value.kind === 'permission') {
+      const target = value.target;
+      if (!/^perm_[0-9a-f]{32}$/.test(target?.permission_id) || !/^wi_[0-9a-f]{32}$/.test(target?.task_id)
+          || !/^[0-9a-f]{64}$/.test(target?.scope_sha256) || !/^r-[0-9a-f]{64}$/.test(target?.release_id)
+          || !['approve','decline','revoke'].includes(value.decision)
+          || !preparing && !/^[0-9a-f]{64}$/.test(value.semantic_sha256)) throw new Error('Unsupported permission decision.');
+      return {version:2, request_id:value.request_id, kind:'permission', scope, decision:value.decision,
+        target:{permission_id:target.permission_id, task_id:target.task_id, scope_sha256:target.scope_sha256, release_id:target.release_id},
+        ...(!preparing ? {semantic_sha256:value.semantic_sha256} : {})};
+    }
     if (value?.version === 2 && ['nudge', 'feedback'].includes(value.kind)) {
       const target = value.target;
       if (!/^actor_[0-9a-f]{32}$/.test(target?.recipient) || !/^wi_[0-9a-f]{32}$/.test(target?.task_id)
@@ -391,7 +409,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     suspend(note) { pause('unavailable'); if (note) render(note); },
     renew: () => mutate('renew'), logout: () => mutate('logout'),
   });
-  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, feedbackContext, prepareAction, sendAction, actionReceipt, readHandle, sessionControls };
+  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, feedbackContext, permissionContext, prepareAction, sendAction, actionReceipt, readHandle, sessionControls };
 }
 
 const owner = createOwnerTransport();
@@ -411,3 +429,5 @@ export const prepareAction = owner.prepareAction;
 export function createOwnerReadHandle(options = {}) {
   return createOwnerTransport({ ...options, onAccessEnded: () => {} }).readHandle();
 }
+
+export const permissionContext = owner.permissionContext;

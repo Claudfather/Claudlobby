@@ -188,7 +188,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (url === '/api/owner/status' && pending) return { status: 200, json: async () => pending.data };
     const action = { '/api/owner/status': 'status', '/api/owner/renew': 'renew', '/api/owner/logout': 'logout' }[url];
     if (action) {
-      if (!valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
+      // No session has expired before the first admitted host challenge.
+      // Retained binding/uncertain issuance still follows normal expiry handling.
+      if ((action === 'status' && !token && !binding) || !valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         { method: action === 'status' ? 'GET' : 'POST', ...(action !== 'status' ? { body: {} } : {}), signal: options.signal });
       if (result.status === 200 && action !== 'logout') admission(result.data, result.start, action === 'renew');
@@ -201,7 +203,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (actionPath) {
       if (options.method !== 'POST') throw new Error();
       const result = await http(ref.endpoint_origin + '/api/owner/connected/actions/' + actionPath[1],
-        {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:32768});
+        {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:actionPath[1] === 'context' ? 2097152 : 32768});
       return {status:result.status,json:async () => result.data};
     }
     const route = readRoute(url);

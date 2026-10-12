@@ -259,7 +259,10 @@ or printed by the command. `revoke` shows the current grant and requires typing
 `REVOKE`; the expected revision prevents revoking a replacement owner.
 
 Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
-Composed bot permissions deny these operator-only command forms as well.
+On an activated host, a change also runs the native ancestry check that the
+other operator-only commands use: it refuses before its terminal opens when the
+process runs inside a managed unit. Composed bot permissions deny these
+operator-only command forms as well.
 
 Ordinary-message authority is separately approved at the local terminal:
 
@@ -406,14 +409,65 @@ claudlobby --root /path/to/data host owner bind-source
 claudlobby --root /path/to/data host owner serve --origin https://plane.example.ts.net --tailscale /path/to/tailscale
 ```
 
+If a separate native Tailscale daemon owns the private Serve route, pass its
+absolute control socket with `--tailscale-socket /path/to/tailscaled.socket`.
+The verifier passes that selector to every native realm and WhoIs lookup;
+without it, the native CLI's default daemon selection is unchanged. This
+control socket is distinct from the owner HTTP backend selected by `--socket`.
+
 The default socket is `DATA_ROOT/state/plane/owner.sock`. An explicit `--socket`
 can select a shorter absolute path when the host's Unix-socket path limit requires
 it. The containing directory must already be owned by the process user with mode
-0700; the socket is 0600. Existing socket paths are never deleted on startup.
-Graceful shutdown removes only the socket this invocation created. After an
-unclean exit, the operator must inspect a retained socket before removing it.
+0700 on a local filesystem; the socket is 0600. A private `SOCKET.lock` file
+serializes listeners and records the exact socket and parent-directory identity.
+After an unclean exit, startup can reclaim only that recorded socket, with the
+same ownership and permissions, after a bounded connection probe confirms no
+listener remains. Live, replaced, unrecorded or uncertain paths are preserved
+and require local inspection. Older releases and a crash before ownership is
+recorded can leave such an unrecorded socket. Graceful shutdown removes only
+this invocation's socket and clears the record; the lock file stays in place.
+This recovery does not start a service, renew authority or configure Serve.
 There is no TCP fallback. A daemon unable to reach this socket leaves access
 unavailable; it is not a reason to expose an unprotected loopback backend.
+
+**Persistent serving after setup.** Once the host is activated, paired and its
+recorder bound, the existing host-job compositor can supervise the same owner
+server. In this host's `system.yaml` override, configure:
+
+```yaml
+host:
+  jobs:
+    plane-owner:
+      enroll: true
+      origin: https://host.example.test
+      tailscale: /absolute/path/to/tailscale
+      tailscale_socket: /absolute/path/to/tailscaled.socket # optional native control socket
+      socket: /absolute/private/directory/owner.sock
+      workspace_issuer: https://app.example.test
+      workspace_origin: https://plane.example.test
+```
+
+The socket and workspace pair are optional; omit both workspace fields for
+direct-only access. Retain the foreground server's exact socket path when Serve
+already points at it. The socket directory must exist with mode 0700. Configuration
+uses literal arguments, not shell expansion; `script` is fixed to the sealed CLI.
+Missing required configuration refuses planning. Without the `plane-ui` release
+extra no unit is composed, as reported by the switch table.
+
+Stage and inspect a normal configuration plan, stop the foreground server with
+Ctrl-C, then activate that plan through the existing operator CLI. This is an
+explicit handover after first-team setup, not a second server during guided
+launch. A foreground collision refuses activation before pausing the fleet.
+Upgrades quiesce an already-managed owner service through the normal producer
+phase and recheck socket availability before starting its replacement. Startup
+still repeats socket ownership and liveness checks.
+
+The composed systemd service uses `Restart=always`; launchd uses `KeepAlive`.
+Logs use the normal service journal or `state/plane-owner.log`. Disarm with
+`enroll: false` followed by plan/diff/activation; activation retires the owned unit.
+Supervision never configures Serve, pairs an owner, renews grants or grants
+website access. Public bootstrap remains a foreground operation; autonomous
+handover during first-team browser launch is not provided by this service.
 
 The server disables Uvicorn's proxy-header rewriting. The ingress adapter accepts
 only a Unix-socket request with exactly one source IP in `X-Forwarded-For`, which
@@ -783,6 +837,7 @@ metric-sample retention.
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
+| `plane-owner` | **off** — private write-capable endpoint can spend model budget and mutate operator configuration | host service | system.yaml enroll | host.jobs.plane-owner.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `plane-prune-system-events` | **off** — deletes data — and unlike the sample lane beside it, this one could delete a RECORD rather than a sample, which is why it is an allowlist: a wrongly-pruned type breaks selfstart-snapshot.sh's boot gate, which fails closed on an unreachable receipt read but reads an ABSENT receipt as a certain no-receipt | door | host/root .env | PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in the host or root .env |
 | `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |

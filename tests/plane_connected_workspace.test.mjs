@@ -31,7 +31,7 @@ function dom() {
     querySelector:q=>q==='main'?elements.get('main'):null,
     querySelectorAll:q=>{
       assert.ok(['#view-nav button, [data-bot-inspect]', '#view-nav button, #debug-toggle, [data-bot-inspect]'].includes(q), 'selector must be modelled explicitly');
-      return [...nav,...(q.includes('#debug-toggle')?[elements.get('debug-toggle')]:[]),...(elements.get('fleet').children||[]).filter(e=>e.dataset.botInspect)];
+      return [...nav,...(q.includes('#debug-toggle')?[elements.get('debug-toggle')]:[]),...['fleet','channel'].flatMap(id=>elements.get(id).children).filter(e=>e.dataset.botInspect)];
     },
     addEventListener(n,fn){listeners.set(n,fn);},removeEventListener(n){listeners.delete(n);}};
   class Element {
@@ -46,9 +46,9 @@ function dom() {
     close(){this.closed=true;}
     click(){if(!this.disabled)this.handlers.click?.();}
   }
-  for(const id of ['owner-session','main','fleet','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
+  for(const id of ['owner-session','main','fleet','channel','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
   const nav=['channel','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
-  class Observer {constructor(fn){this.fn=fn;observers.push(this);}observe(){}disconnect(){this.closed=true;}}
+  class Observer {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
 }
 function harness(options={}) {
@@ -197,9 +197,12 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
 test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
   for(const n of h.ui.nav)assert.equal(n.disabled,n.dataset.view!=='channel');assert.equal(h.ui.get('search').disabled,true);
-  const root=h.ui.get('owner-session'),row=root.children[2],check=root.children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[1],check);
-  const connect=row.children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1],connect);
-  const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';h.ui.get('fleet').append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
+  const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
+  const connect=row.children[1].children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[1],connect);
+  for(const id of ['fleet','channel']){
+    const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
+    const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
+  }
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
@@ -217,8 +220,8 @@ test('api-client selects only an existing marker; absent marker preserves legacy
 // This separates keyed focus from the unsupported-view assertions above.
 test('account recheck preserves the same focused control rather than replacing its DOM',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  const root=h.ui.get('owner-session'),check=root.children[1];check.focus();
-  await h.api.checkAccount();assert.equal(root.children[1],check);assert.equal(check.isConnected,true);
+  const root=h.ui.get('owner-session'),check=root.children[0].children[1];check.focus();
+  await h.api.checkAccount();assert.equal(root.children[0].children[1],check);assert.equal(check.isConnected,true);
   assert.equal(h.ui.document.activeElement,check);h.api.dispose();
 });
 
@@ -229,7 +232,7 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
  const calls=h.calls.slice(before);assert.deepEqual(calls.map(c=>new URL(c.url).pathname),['/api/plane/context','/api/owner/workspace/challenge','/api/plane/host-assertion','/api/owner/workspace/stage']);
  const signer=calls.find(c=>c.url.endsWith('/host-assertion'));assert.equal(signer.init.credentials,'include');assert.deepEqual(Object.keys(JSON.parse(signer.init.body)).sort(),['host_uid','nonce','operational_origin','workspace_id']);
  assert.notEqual(h.api.snapshot().computers[0].state,'ready');assert.equal(h.api.snapshot().computers[1].state,'ready');
- const root=h.ui.get('owner-session'),first=root.children[2],proposal=first.children.at(-1);
+ const root=h.ui.get('owner-session'),first=root.children[1],proposal=first.children.at(-1).children[1];
  assert.ok(proposal.children.some(c=>c.textContent.includes('Approval code:')));assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,1);
  assert.equal(await h.api.act(0,'enroll'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);
  // Synthetic host fixture now represents local approval; UI itself has no confirm door.
@@ -240,7 +243,7 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
 test('account loss during host staging erases approval code and fences late staged result',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
- assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[2].children.at(-1);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[1].children.at(-1).children[1];assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
@@ -249,8 +252,8 @@ test('forgetting approval returns keyboard focus to that computer, including an 
   const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();
   if(busy)h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
   const pending=h.api.act(0,'enroll');if(busy)await flush();else await pending;
-  const row=h.ui.get('owner-session').children[2],proposal=row.children.at(-1),cancel=proposal.children.at(-1);
-  cancel.focus();cancel.click();assert.ok([row,row.children[5]].includes(h.ui.document.activeElement));
+  const row=h.ui.get('owner-session').children[1],proposal=row.children.at(-1).children[1],cancel=proposal.children.at(-1);
+  cancel.focus();cancel.click();assert.ok([row,row.children[1].children[5]].includes(h.ui.document.activeElement));
   assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));
   if(busy)held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));await pending;
   assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);h.api.dispose();
@@ -259,7 +262,7 @@ test('forgetting approval returns keyboard focus to that computer, including an 
 
 test('temporary account loading is aria-disabled and activation guarded without blurring focus',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  const check=h.ui.get('owner-session').children[1];check.focus();
+  const check=h.ui.get('owner-session').children[0].children[1];check.focus();
   const held=deferred();h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
   const before=h.calls.length,pending=h.api.checkAccount();await flush();
   assert.equal(check.disabled,false);assert.equal(check.attributes['aria-disabled'],'true');assert.equal(h.ui.document.activeElement,check);
@@ -322,7 +325,7 @@ test('unavailable admitted host exposes explicit Disconnect and uses existing ca
   const h=harness({count:1});h.mount();await h.api.checkAccount();await flush();await h.api.act(0,'connect');
   h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/status',()=>reply(503,{}));
   await h.api.act(0,'check');assert.equal(h.api.snapshot().computers[0].state,'unavailable');
-  const buttons=h.ui.get('owner-session').children[2].children;
+  const buttons=h.ui.get('owner-session').children[1].children[1].children;
   assert.equal(buttons[3].disabled,true);assert.equal(buttons[4].disabled,false);
   buttons[4].click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');h.api.dispose();
@@ -477,4 +480,35 @@ test('overview completed before source loss cannot consume the later recovery re
   assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
   await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
   stream.close();h.api.dispose();
+});
+
+test('connected permission decisions unwrap only their host and inspect the original receipt after a lost response',async()=>{
+ const h=harness();await h.api.checkAccount();await h.api.act(0,'connect');await h.api.act(1,'connect');
+ await h.api.jget('/api/overview');
+ const permission={permission_id:'perm_'+'1'.repeat(32),task_id:wi,request_event_id:'ev_'+'2'.repeat(32),assignment_id:null,
+  requester:{uid:'actor_'+'3'.repeat(32),alias:'Lead'},scope:{action:'deploy',target:'example.test',constraints:'Staging only'},
+  scope_sha256:'4'.repeat(64),reason:'Review release',state:'pending',decided_by:null,decision_reason:null};
+ const capability={version:2,room:'team',scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'permission-grant'},
+  simulation:false,actions:['permission'],release_id:'r-'+'5'.repeat(64),task_id:wi,permissions:[permission],has_more:false};
+ // A full page of valid quoted text exceeds the old 512 KiB context cap.
+ capability.permissions=Array.from({length:50},(_,i)=>({...permission,permission_id:'perm_'+i.toString(16).padStart(32,'0'),
+  scope:{...permission.scope,target:'"'.repeat(1024),constraints:'"'.repeat(4096)},reason:'"'.repeat(2048)}));
+ capability.permissions[0]=permission;capability.has_more=true;
+ assert.ok(new TextEncoder().encode(JSON.stringify(capability)).length>524288);
+ const url=refs[0].endpoint_origin+'/api/owner/connected/actions/';let sent;
+ h.overrides.set(url+'context',init=>{assert.deepEqual(JSON.parse(init.body),{room:'team',kind:'permission',task_id:wi});return reply(200,capability);});
+ h.overrides.set(url+'prepare',init=>{const {body,...metadata}=JSON.parse(init.body);assert.equal(metadata.target.task_id,wi);assert.equal(metadata.target.permission_id,permission.permission_id);return reply(200,{...metadata,semantic_sha256:'6'.repeat(64)});});
+ h.overrides.set(url+'send',init=>{sent=JSON.parse(init.body);throw Error('Lost response');});
+ h.overrides.set(url+'receipt',init=>{const metadata=JSON.parse(init.body);const {body,...original}=sent;assert.deepEqual(metadata,original);return reply(200,{...metadata,status:'recorded',execution:'not_requested',notification:'not_requested',permission:{...permission,state:'approved',decided_by:{uid:'actor_'+'7'.repeat(32),alias:'Owner'},decision_reason:body}});});
+ const c=await h.api.permissionContext(sourceA+' / team',sourceA+'::'+wi);
+ assert.equal(c.permissions[0].requester.uid,sourceA+'::'+permission.requester.uid);
+ const state=new ActionState({getItem:()=>null,setItem(){}}),p=c.permissions[0],target={permission_id:p.permission_id,task_id:p.task_id,scope_sha256:p.scope_sha256,release_id:c.release_id};
+ const request=state.prepare(c,target,'Approved scope',id(8),'approve');
+ const before=h.calls.length;
+ await assert.rejects(()=>h.api.prepareAction({...request,target:{...target,permission_id:sourceB+'::'+permission.permission_id}}));
+ assert.equal(h.calls.length,before);
+ const sending=state.beginPrepared(c,request,await h.api.prepareAction(request));await assert.rejects(()=>h.api.sendAction(sending));
+ const result=await h.api.actionReceipt(state.pending[0]);state.accept(state.pending[0],result);
+ assert.equal(result.permission.permission_id,p.permission_id);assert.equal(state.pending.length,0);
+ assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,1);h.api.dispose();
 });

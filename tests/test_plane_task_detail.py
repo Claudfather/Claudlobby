@@ -1,5 +1,7 @@
 """Selected task reads over disposable Plane roots, including protected admission."""
 import hashlib
+import json
+from uuid import uuid4
 import sqlite3
 
 import pytest
@@ -153,8 +155,8 @@ def test_protected_detail_requires_session_and_same_source(protected, tmp_path):
 def test_detail_held_response_rechecks_session(protected, tmp_path, monkeypatch):
     _, c, _, _, _, clock = protected
     original = view._fetch_task_detail
-    def expire(*args):
-        result = original(*args)
+    def expire(*args, **kwargs):
+        result = original(*args, **kwargs)
         clock[0] += SESSION_SECONDS
         return result
     monkeypatch.setattr(view, "_fetch_task_detail", expire)
@@ -168,13 +170,13 @@ def test_detail_query_and_provenance_share_admitted_snapshot(protected, tmp_path
         conn.execute("PRAGMA journal_mode=WAL")
     original = view._fetch_task_detail
     checked = []
-    def concurrent(conn, *args):
+    def concurrent(conn, *args, **kwargs):
         assert conn.in_transaction
         before = conn.execute("SELECT ingest_seq FROM ingest_ledger ORDER BY ingest_seq DESC LIMIT 1").fetchone()[0]
         with sqlite3.connect(db_file(tmp_path)) as writer:
             writer.execute("UPDATE work_items SET title='later title' WHERE work_item_id=?", (TASK,))
             writer.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at) VALUES('later','events','later')")
-        result = original(conn, *args)
+        result = original(conn, *args, **kwargs)
         checked.append(before)
         return result
     monkeypatch.setattr(view, "_fetch_task_detail", concurrent)
@@ -219,7 +221,8 @@ def test_detail_explicit_projections_and_consistent_actor_labels(tmp_path):
         "resolved", "current_assignment", "assignments", "history", "terminal_event", "issues",
         "display_ids", "history_window", "assignments_window", "issues_window", "display_ids_window",
         "attention", "attention_reason", "attention_since", "attention_question", "attention_by",
-        "attention_act_reason", "delivery"}
+        "attention_act_reason", "delivery", "report_threads", "reports_window",
+        "permission_pending", "permission_incomplete"}
     assignment = task["assignments"][0]
     assert set(assignment) == {"assignment_id", "task_id", "assignee_uid", "assigned_by_uid", "expected_by",
         "dispatch_message_id", "occurred_at", "state", "assignee_alias", "assignee_short", "assigned_by_alias",
@@ -253,7 +256,7 @@ def test_assignment_history_actor_aliases_use_bounded_lookup_batches(tmp_path, m
         if hasattr(conn, "setlimit"):
             conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 400)
         conn.execute("BEGIN")
-        task = view._fetch_task_detail(BoundedReader(), TASK, "engineering")["task"]
+        task = view._fetch_task_detail(BoundedReader(), TASK, "engineering", root=tmp_path)["task"]
     finally:
         conn.close()
     history = task["assignments"][0]["history"]
@@ -277,3 +280,62 @@ def test_detail_attention_and_provenance_share_snapshot(protected, tmp_path, mon
         result = c.get(URL).json()
     assert result["data"]["task"]["attention_question"] == "Original question"
     assert c.get(URL).json()["data"]["task"]["attention_question"] is None
+
+
+def _record_report(root, summary, *, fleet="engineering", emitter=None):
+    from claudlobby.report_payload import ReportPayload, ReportLink, encode_report_facts
+
+    (root / "state/plane/capture.json").write_text(json.dumps({"*": "full"}))
+    comm, _ = encode_report_facts(ReportPayload("progress", summary=summary), fleet=fleet,
+        sender=f"bot:{fleet}/one", recipient=f"bot:{fleet}/mgr", msg_id="msg_" + uuid4().hex,
+        event_ids=("ev_" + uuid4().hex, "ev_" + uuid4().hex), occurred_at="2026-10-10T00:00:00Z",
+        link=ReportLink(TASK, "asg_" + "a" * 32, "progress"))
+    if emitter:
+        comm["emitter"] = emitter
+    emit_batch(root, [comm], require_commit=True)
+
+
+def test_detail_retains_canonical_reports_outside_recent_feed_with_lineage_admission(tmp_path):
+    _seed(tmp_path)
+    _record_report(tmp_path, "First result")
+    _record_report(tmp_path, "Follow-up result")
+    _record_report(tmp_path, "Foreign producer", emitter="other-producer")
+    _record_report(tmp_path, "Foreign team", fleet="data")
+    emit_batch(tmp_path, [{"event_type": "communication", "emitter": "t", "fleet": "engineering",
+        "payload": {"msg_id": "msg_" + uuid4().hex, "sender": "bot:engineering/one",
+                    "recipient": "bot:engineering/mgr", "message_class": "chat", "body": "New unrelated chat"}}])
+    c = client(tmp_path)
+    recent = c.get("/api/channel?fleet=engineering&limit=1").json()["data"]["threads"]
+    assert all(m["message_class"] == "chat" for t in recent for m in t["messages"])
+    before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    task = c.get(URL).json()["data"]["task"]
+    thread, = task["report_threads"]
+    assert thread["work_item_id"] == TASK and thread["task_link"]["task_id"] == TASK
+    assert [m["body_words"] for m in thread["messages"]] == ["First result", "Follow-up result"]
+    assert all(m["report"]["state"] == "captured" for m in thread["messages"])
+    assert not thread["task_events"]  # The dialog already has bounded task history.
+    assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
+
+
+def test_report_count_and_byte_limits_preserve_task_detail(tmp_path, monkeypatch):
+    _seed(tmp_path)
+    for i in range(4):
+        _record_report(tmp_path, f"Report {i}: " + "Result text " * 100)
+    monkeypatch.setattr(view, "_TASK_DETAIL_REPORTS", 2)
+    c = client(tmp_path)
+    data = c.get(URL).json()["data"]
+    task = data["task"]
+    messages = task["report_threads"][0]["messages"]
+    assert len(messages) == 2
+    assert [m["body_words"].split(":")[0] for m in messages] == ["Report 2", "Report 3"]
+    assert task["reports_window"] == {"limit": 2, "truncated": True}
+    base = json.loads(json.dumps(data))
+    del base["task"]["report_threads"], base["task"]["reports_window"]
+    budget = len(json.dumps(base, ensure_ascii=False).encode()) + 250
+    monkeypatch.setattr(view, "_TASK_DETAIL_BYTES", budget)
+    limited = c.get(URL).json()
+    assert limited["state"] == "ok"
+    assert limited["data"]["task"]["title"] == task["title"]
+    assert limited["data"]["task"]["report_threads"] == []
+    assert limited["data"]["task"]["reports_window"]["truncated"]
+    assert len(json.dumps(limited["data"], ensure_ascii=False).encode()) <= budget

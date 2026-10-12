@@ -291,6 +291,18 @@ host:
       enroll: true
       unit: service
       script: "$CLAUDLOBBY_NATIVE_DIR/plane-view.sh"
+    # Explicitly paired private serving, after first-team setup. Configuration
+    # and enrollment belong to this host's override; grants and Serve are separate.
+    plane-owner:
+      enroll: false
+      unit: service
+      script: "$CLAUDLOBBY_CLI"
+      origin: null
+      tailscale: null
+      tailscale_socket: null
+      socket: null
+      workspace_issuer: null
+      workspace_origin: null
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
     # north star): daily root-usage check, FLEET ALERT past the threshold.
     disk-monitor:

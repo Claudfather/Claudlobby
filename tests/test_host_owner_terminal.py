@@ -104,9 +104,10 @@ def test_attest_existing_source_through_actual_cli_terminal(tmp_path):
     inspect_source(tmp_path)
 
 
-# Only release/native-manager identity is a fixture; terminal approval, CLI
-# dispatch, active config, mutation admission, Plane registration and authority
-# writes are real. This is not a sealed installed CLI or live bot canary.
+# Only release/native-manager identity, which includes the operator shell's
+# unit ancestry, is a fixture; terminal approval, CLI dispatch, active config,
+# mutation admission, Plane registration and authority writes are real. This is
+# not a sealed installed CLI or live bot canary.
 from tests.test_activation import cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
@@ -125,6 +126,8 @@ release = read_release(root, read_selection(root)['release_id'], verify_files=Fa
 package = replace(source_package(), native=release.native_path, artifact_id=release.inputs.artifact_id)
 context.get_resources = lambda: package
 RuntimeIdentity.current = classmethod(lambda cls: RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id))
+from claudlobby.commands import operator_context
+operator_context.require_operator_context = lambda root=None: None
 from claudlobby.__main__ import main
 raise SystemExit(main(sys.argv[1:]))
 """
@@ -217,27 +220,28 @@ def test_nudge_registration_and_independent_grant_through_actual_terminal(active
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
-def test_feedback_registration_and_independent_grant_through_actual_terminal(active):
+@pytest.mark.parametrize("capability,kind", [("feedback", "feedback"), ("permissions", "permission")])
+def test_action_registration_and_independent_grant_through_actual_terminal(active, capability, kind):
     from claudlobby.activation_identity import read_selected_identity_bindings
     root, host = active
     store = OwnerAccess.initialize(root)
     principal = PrincipalRef("test-verifier", "human-001")
     challenge = store.begin_pairing(principal)
     owner = store.confirm_pairing(challenge.token, expected_principal=principal)
-    code, output = _command(root, "allow-feedback", [("Type REGISTER", "REGISTER"),
-        ("Type ALLOW-FEEDBACK", "ALLOW-FEEDBACK")],
+    code, output = _command(root, "allow-" + capability, [("Type REGISTER", "REGISTER"),
+        ("Type ALLOW-" + capability.upper(), "ALLOW-" + capability.upper())],
         args=("--target-fleet", "example", "--actor", "human:terminal-feedback", "--register-actor"),
         bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
-    assert "task-linked comments" in output
+    assert ("task-linked comments" if capability == "feedback" else "approve, decline and revoke") in output
     fleet = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
-    grant = store.current_feedback_grant(expected_owner=owner, fleet_uid=fleet)
+    grant = getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)
     assert grant.actor_alias == "human:terminal-feedback"
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
     (root / "state/selected-release.json").unlink()
-    code, output = _command(root, "revoke-feedback", [("Type REVOKE-FEEDBACK", "REVOKE-FEEDBACK")],
+    code, output = _command(root, "revoke-" + capability, [("Type REVOKE-" + capability.upper(), "REVOKE-" + capability.upper())],
                             args=("--fleet-uid", fleet))
     assert code == 0, output
-    with pytest.raises(AccessDenied, match="feedback_not_allowed"):
-        store.current_feedback_grant(expected_owner=owner, fleet_uid=fleet)
+    with pytest.raises(AccessDenied, match=capability + "_not_allowed"):
+        getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)

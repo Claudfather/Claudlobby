@@ -662,6 +662,14 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby host channels approve*)" in deny
         assert "Bash(claudlobby host owner *)" in deny
         assert "Bash(claudlobby * host owner *)" in deny
+        for verb in ("approve", "decline", "revoke"):
+            assert f"Bash(claudlobby task permission {verb}*)" in deny
+            assert f"Bash(claudlobby * task permission {verb}*)" in deny
+        # A bot's own permission verbs stay reachable: no deny names them.
+        from tests.test_checkin_library import _bash_grant_matches
+        bash = [rule for rule in deny if rule.startswith("Bash(")]
+        for own in ("task permission request t1", "task permission check p1", "task permission show p1"):
+            assert not any(_bash_grant_matches(rule, f"claudlobby --json {own}") for rule in bash), own
 
     def test_tool_allow_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)

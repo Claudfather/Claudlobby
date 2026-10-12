@@ -31,7 +31,8 @@ def register_host_owner(hosts):
         route.add_argument("--json", action="store_true", help="Structured result (status only)")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
     for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
-                              ("feedback", "task-linked comments")):
+                              ("feedback", "task-linked comments"),
+                              ("permissions", "task permission decisions")):
         allow = actions.add_parser("allow-" + capability,
             help=f"Allow {label} as a local human in one active fleet (interactive)")
         allow.add_argument("--target-fleet", required=True, help="Explicit active fleet name")
@@ -48,6 +49,7 @@ def register_host_owner(hosts):
     serve.add_argument("--json", action="store_true", help="Not supported for the foreground server")
     serve.add_argument("--origin", required=True, help="Exact external HTTPS origin configured in Tailscale Serve")
     serve.add_argument("--tailscale", type=Path, required=True, help="Absolute path to the native Tailscale executable")
+    serve.add_argument("--tailscale-socket", type=Path, help="Absolute native Tailscale control socket; distinct from --socket")
     serve.add_argument("--socket", type=Path, help="Private Unix socket path; default DATA_ROOT/state/plane/owner.sock")
     serve.add_argument("--workspace-issuer", help="Explicit fixed HTTPS website issuer; requires --workspace-origin")
     serve.add_argument("--workspace-origin", help="Explicit fixed HTTPS operational Origin for bootstrap and connected reads; requires --workspace-issuer")

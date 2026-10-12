@@ -126,7 +126,6 @@ if command -v jq >/dev/null 2>&1; then
     if [ "$_consent_ok" -eq 0 ]; then
         # Serialize with other bots — mass restart can race on this file.
         _do_consent_update() {
-            mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
             _tmp=$(safe_mktemp)
             if [ -f "$CLAUDE_SETTINGS" ] && jq -e '.' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
                 jq '.skipAutoPermissionPrompt = true | .skipDangerousModePermissionPrompt = true' \
@@ -136,6 +135,8 @@ if command -v jq >/dev/null 2>&1; then
             fi
             echo "$(ts_iso) CONSENT pre-accepted permission prompts in $CLAUDE_SETTINGS" >> "$BOT_DIR/logs/startup.log" 2>/dev/null || true
         }
+        # with_lock opens the lock file before calling the updater.
+        mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
         with_lock "${CLAUDE_SETTINGS}.lock" _do_consent_update
     fi
 fi

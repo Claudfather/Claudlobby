@@ -49,8 +49,10 @@ from ..context import resolve_paths
 from .health import staged_summary
 from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
-from ..task_state import TaskStateError, read_tasks
-from ..task_queries import task_escalations_from_snapshot
+from ..task_state import TASK_EMITTER, TaskStateError, read_tasks
+from ..report_payload import decode_report_body
+from ..task_queries import TaskQueryError, task_escalations_from_snapshot
+from ..task_permissions import EMITTER as PERMISSION_EMITTER, list_task_permissions
 
 try:  # §14: optional UI features degrade without disabling the core ledger
     from fastapi import FastAPI, Request
@@ -485,15 +487,48 @@ def _channel_lineage(conn, comms):
         "ancestor_lookups": looked_up, "unresolved_threads": sum(reasons.values()), "reasons": reasons}
 
 
+def _recent_checkins(conn, fleet):
+    """Read the CLI's decision records; these are history, not unresolved asks."""
+    from ..commands.checkins import collect_checkins
+
+    limit = 10
+    rows = []
+    unavailable = False
+    selected = [fleet] if fleet else [r["alias"] for r in conn.execute(_FLEET_ROWS_SQL)]
+    for name in selected:
+        try:
+            for row in collect_checkins(conn, name, since=None, bot=None, last=False, limit=limit + 1,
+                                        include_dispatches=False):
+                rows.append({"checkin_id": row["checkin_id"], "actor_uid": row["actor_uid"],
+                    "actor_alias": row["actor"], "actor_short": row["bot"] or row["actor"],
+                    "fleet": name, "occurred_at": row["occurred_at"], "ingest_seq": row["ingest_seq"],
+                    "action": row["action"], "reason": row["raise"]["reason"],
+                    "rationale": row["rationale"], "truncated": row["truncated"]})
+        except (ValueError, TypeError, sqlite3.DatabaseError, TaskStateError):
+            unavailable = True
+    rows.sort(key=lambda r: (_epoch(r["occurred_at"]) or 0, r["ingest_seq"]), reverse=True)
+    return {"checkins": rows[:limit], "checkins_state": "unavailable" if unavailable else "ok", "checkins_limit": limit,
+            "checkins_truncated": len(rows) > limit}
+
+
 def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
-                   fleet: str | None = None) -> dict:
+                   fleet: str | None = None, *, report_task: str | None = None) -> dict:
     cols = ("ingest_seq, msg_id, occurred_at, sender_alias,"
             " recipient_alias, recipient_raw, message_class, command_type,"
             " privacy, body, body_bytes, truncated, work_item_id,"
             " assignment_id, reply_to_msg_id, emitter, fleet_uid,"
             " recipient_fleet")
     fleet = _fleet_scope(conn, fleet)
-    if fleet:
+    checkins = _recent_checkins(conn, fleet) if report_task is None else {}
+    if report_task is not None:
+        # The selected task was admitted by _fetch_task_detail. Reuse channel
+        # lineage checks and privacy-aware projection for its indexed reports.
+        comms = [dict(r) for r in conn.execute(
+            f"SELECT {cols} FROM communications WHERE msg_id IN ("
+            "SELECT msg_id FROM communications WHERE work_item_id=?"
+            " AND message_class='report' AND emitter=? ORDER BY ingest_seq DESC LIMIT ?)"
+            " ORDER BY ingest_seq DESC", (report_task, TASK_EMITTER, limit)).fetchall()]
+    elif fleet:
         # Per-team channels are the DEFAULT view (operator ruling 2026-08-29:
         # rooms, not a firehose). A room shows every message that TOUCHES the
         # fleet — sender OR recipient — so a cross-fleet thread stays whole in
@@ -522,7 +557,7 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             f"SELECT {cols} FROM communications"
             " ORDER BY ingest_seq DESC LIMIT ?", (limit,)).fetchall()]
     if not comms:
-        return {"threads": []}
+        return {"threads": [], **checkins}
     msg_ids = [c["msg_id"] for c in comms]
     ph = ",".join("?" * len(msg_ids))
     # fold F4: `received` is the RECEIVER's proof, consumed ONLY by the delivery
@@ -585,6 +620,18 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         # server-side — the raw id never rides the wire to the page.
         c.pop("recipient_raw", None)
         c["body_words"] = body_words(c["body"])
+        if c["message_class"] == "report" and c["emitter"] == TASK_EMITTER:
+            decoded = decode_report_body(c["body"], privacy=c["privacy"],
+                                         truncated=bool(c["truncated"]))
+            c["report"] = {"state": decoded.state}
+            if decoded.payload is not None:
+                report = decoded.payload
+                c["body_words"] = report.summary or report.reason
+                # Display reported evidence, never infer task or review approval.
+                c["report"].update(status=report.status, percent=report.percent,
+                                   pr_url=report.pr_url, pr_role=report.pr_role,
+                                   artifacts=list(report.artifacts), issues=list(report.issues),
+                                   skill=report.skill)
         c["tx"] = tx_by_msg.get(c["msg_id"], [])
         # chunk P: the receiver's verdict for THIS message, story-first.
         _dv = delivery_by_msg.get(c["msg_id"], {})
@@ -601,11 +648,13 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             "SELECT w.work_item_id,w.title,w.repo,w.fleet_uid,w.host_uid,f.alias AS fleet"
             " FROM work_items w JOIN identity_registry f ON f.uid=w.fleet_uid AND f.kind='fleet'"
             f" WHERE w.work_item_id IN ({ph}) AND f.parent_uid=w.host_uid", wi_ids).fetchall()}
-        for r in conn.execute(
-            f"SELECT work_item_id, assignment_id, event, occurred_at,"
-            f" ingest_seq, detail FROM events WHERE kind='task'"
-            f" AND work_item_id IN ({ph}) ORDER BY ingest_seq", wi_ids):
-            task_events_by_wi.setdefault(r["work_item_id"], []).append(dict(r))
+        # Task detail already carries its own bounded canonical history.
+        if report_task is None:
+            for r in conn.execute(
+                f"SELECT work_item_id, assignment_id, event, occurred_at,"
+                f" ingest_seq, detail FROM events WHERE kind='task'"
+                f" AND work_item_id IN ({ph}) ORDER BY ingest_seq", wi_ids):
+                task_events_by_wi.setdefault(r["work_item_id"], []).append(dict(r))
 
     out = []
     for t in threads.values():
@@ -636,7 +685,8 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             + [e["ingest_seq"] for e in t["task_events"]])
         out.append(t)
     out.sort(key=lambda t: t["latest_seq"], reverse=True)
-    return {"threads": out, "lineage": lineage}
+    return {"threads": out, "lineage": lineage, **checkins,
+            **({"scan_limited": len(comms) == limit} if report_task is not None else {})}
 
 
 def _stale_tier(arm, now: str) -> str | None:
@@ -689,6 +739,7 @@ _TASK_DETAIL_ASSIGNMENTS = 100
 _TASK_DETAIL_ASSIGNMENT_HISTORY = 100
 _TASK_DETAIL_ISSUES = 100
 _TASK_DETAIL_BYTES = 2 * 1024 * 1024
+_TASK_DETAIL_REPORTS = 8
 
 
 class TaskDetailError(Exception):
@@ -750,12 +801,30 @@ def _detail_attention(conn, snapshot, task):
             "attention_act_reason": arm[lead + "_reason"] if lead and not escalation else None}
 
 
-def _fetch_task_detail(conn, task_id, fleet):
+def _add_permission_attention(conn, root, task, card):
+    """Discovery only: decisions and authority remain in the permission owner."""
+    try:
+        items, truncated = list_task_permissions(conn, task.task_id, root=root,
+            host_uid=task.host_uid, fleet_uid=task.fleet_uid)
+        pending = sum(item["state"] == "pending" for item in items)
+        incomplete = truncated or any(item["state"] == "unavailable" for item in items)
+    except (TaskQueryError, TaskStateError):
+        pending, incomplete = 0, True
+    card["permission_pending"] = pending
+    card["permission_incomplete"] = incomplete
+    if pending:
+        card["attention_reason"].append("permission_pending")
+    if incomplete:
+        card["attention_reason"].append("permission_unavailable")
+    card["attention"] = card["attention"] or bool(pending) or incomplete
+
+
+def _fetch_task_detail(conn, task_id, fleet, names=None, *, root):
     """One opaque ID, one recorded fleet UID, one canonical read projection.
 
     Task bodies are stored work-item content; missing content is not invented
-    from a communication preview. Linked conversations remain the channel's
-    separate recent window. No registration, state inference or mutation.
+    from a communication preview. Linked reports get a separate bounded read;
+    other conversation remains the channel's recent window. No mutations.
     """
     if not re.fullmatch(ID_PATTERNS["work_item"], task_id):
         raise TaskDetailError("invalid", "A canonical task ID is required.")
@@ -809,6 +878,7 @@ def _fetch_task_detail(conn, task_id, fleet):
         issues_window=_detail_window(task.issues, _TASK_DETAIL_ISSUES),
         display_ids_window=_detail_window(task.display_ids, _TASK_DETAIL_ISSUES))
     result.update(_detail_attention(conn, snapshot, task))
+    _add_permission_attention(conn, root, task, result)
     message_id = None
     if task.current_assignment:
         row = conn.execute(ASSIGNMENT_DELIVERY_MSG_SQL.format(ph="?"),
@@ -819,10 +889,28 @@ def _fetch_task_detail(conn, task_id, fleet):
     data = {"task": result, "payload_limit_bytes": _TASK_DETAIL_BYTES}
     if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES:
         raise TaskDetailError("unavailable", "Task detail exceeds this view's size limit; use claudlobby task show for the canonical record.")
+    reports = _fetch_channel(conn, names or {}, _TASK_DETAIL_REPORTS + 1, fleet, report_task=task_id)
+    result["report_threads"] = [t for t in reports["threads"] if t["work_item_id"] == task_id]
+    result["reports_window"] = {"limit": _TASK_DETAIL_REPORTS,
+        "truncated": bool(reports.get("scan_limited") or reports.get("lineage", {}).get("unresolved_threads"))}
+    if result["report_threads"]:
+        # Admitted messages for one task share one thread, oldest first. Drop
+        # whole older messages; reports must never crowd out the task itself.
+        thread = result["report_threads"][0]
+        while thread["messages"] and (len(thread["messages"]) > _TASK_DETAIL_REPORTS
+                or len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES):
+            thread["messages"].pop(0)
+            result["reports_window"]["truncated"] = True
+        if not thread["messages"]:
+            result["report_threads"] = []
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES:
+        # Even the added envelope can exceed the remaining budget. Absence is
+        # explicitly unavailable to clients, never an assertion of no reports.
+        del result["report_threads"], result["reports_window"]
     return data
 
 
-def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
+def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
     """Recent fleet-owned Tasks, with current-assignment evidence kept separate.
 
     The work-item query enforces the 200-card cap before any board projection;
@@ -904,6 +992,16 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
             if msg_ids:
                 delivery = {row["msg_id"]: row["delivery"] for row in conn.execute(
                     DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(msg_ids))), msg_ids)}
+        # Only a candidate filter: raw events never establish permission state.
+        # Batch once so tasks without requests do not repeat canonical reduction.
+        permission_tasks = set()
+        if selected:
+            permission_tasks = {tuple(row) for row in conn.execute(
+                "SELECT DISTINCT host_uid, fleet_uid, json_extract(detail, '$.task_id') "
+                "FROM events WHERE kind='system' AND emitter=? AND event='permission_requested' "
+                "AND detail_truncated=0 AND CASE WHEN json_valid(detail) "
+                "THEN json_extract(detail, '$.task_id') END IN ("
+                + ",".join("?" * len(selected)) + ")", (PERMISSION_EMITTER, *selected))}
         cards = []
         for task_id, _uid in candidates:
             task = by_id.get(task_id)
@@ -959,6 +1057,8 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                 "nudged_at": nudge["nudged_at"] if nudge else None,
                 "nudged_by": nudge["nudged_by"] if nudge else None,
             }
+            if (task.host_uid, task.fleet_uid, task.task_id) in permission_tasks:
+                _add_permission_attention(conn, root, task, card)
             cards.append(card)
         rendered_issues = [(_task_issue(issue) if not isinstance(issue, dict) else issue)
                            for issue in issues]
@@ -1420,7 +1520,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
       separate from the work-ownership axis below (`open_scope`).
     * `attention` / `overdue` — the board's own cards for the tasks this
       fleet OWNS (`_fetch_tasks`, the one counting owner, whose reasons come
-      from `ATTENTION_ARMS_SQL`); overdue is cards led or joined by the
+      from `ATTENTION_ARMS_SQL` and canonical permission reads); overdue is cards led or joined by the
       deadline arm. `attention_truncated` discloses the board's card cap.
     * `orphaned` — the watchdog's split (#835): an id'd overdue dispatch
       older than the bot's `.spawn` was lost to a restart. It needs the
@@ -1472,7 +1572,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         # attention / overdue are the fleet's OWN work, counted by the board's
         # card builder (one counting owner): the board groups by owning fleet,
         # so an assignee-axis count here disagreed with it for cross-fleet work
-        board = _fetch_tasks(conn, alias)
+        board = _fetch_tasks(conn, alias, root=root)
         attention = board["attention_count"]
         overdue = sum(1 for card in board["tasks"]
                       if "overdue" in card["attention_reason"])
@@ -1806,12 +1906,13 @@ def create_app(
 
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):
-        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet)))
+        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet, root=root)))
 
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str, fleet: str | None = None):
         # The same snapshot also supplies provenance for ordinary local views.
-        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet),
+        names = _channel_names(root)
+        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet, names, root=root),
                                      snapshot=True))
 
     @app.get("/api/identities")
@@ -2104,7 +2205,7 @@ def create_app(
     # the redeploy window it was built for (gauntlet round 2). Ten stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
-                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-actions.js", "connected-workspace.js", "workspace-enrollment.js",
+                 "work-loop.js", "permission-panel.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-actions.js", "connected-workspace.js", "workspace-enrollment.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -2154,7 +2255,11 @@ def create_app(
 
     @app.get("/work-loop.js")
     def work_loop_js():
-        return _busted_js("work-loop.js", ("panel-state.js", "action-state.js"))
+        return _busted_js("work-loop.js", ("panel-state.js", "action-state.js", "permission-panel.js"))
+
+    @app.get("/permission-panel.js")
+    def permission_panel_js():
+        return _busted_js("permission-panel.js", ("panel-state.js", "action-state.js"))
 
     @app.get("/two-source-read.js")
     def two_source_read_js():

@@ -12,21 +12,28 @@ const channel = { children: [], querySelectorAll() { return this.children; },
   replaceChildren(fragment) { this.children = fragment.children; } };
 const workLoop = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8');
 const controller = workLoop.replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+  .replaceAll('from "./permission-panel.js"', `from "${new URL('../claudlobby/plane/ui/permission-panel.js', import.meta.url)}"`)
   .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const {conversationTaskLink} = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
-const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel})`, {
-  ...panel, conversationTaskLink, renderState() { return false; }, currentFleet: 'example', document: {
+const recipients = new Map(), inspected = [];
+const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel, checkinArticle, pause(value) { sessionPaused=value; }})`, {
+  rosterIdentities: recipients, sessionPaused:false, inspectBot(identity) { inspected.push(identity); },
+  URL, ...panel, conversationTaskLink, renderState() { return false; }, currentFleet: 'example', document: {
     documentElement: { style: { setProperty() {} } },
-    createElement() { return { dataset: {}, messages: [],
+    createElement() { const disclosure = {open:false}; return { dataset: {}, messages: [], buttons: [],
       set innerHTML(value) {
         this.html = value;
+        disclosure.open = value.includes('<details open>');
+        this.buttons = [...value.matchAll(/data-checkin-bot="([^"]+)"\s+data-checkin-alias="([^"]+)" data-checkin-fleet="([^"]+)"/g)]
+          .map(match=>({dataset:{checkinBot:match[1],checkinAlias:match[2],checkinFleet:match[3]},isConnected:true}));
         this.messages = [...value.matchAll(/<div class="msg" data-msg-id="([^"]+)">/g)].map(match => {
           const details = { open: false };
           return { dataset: { msgId: match[1] }, querySelector(selector) { return selector === 'details' ? details : null; } };
         });
       },
       get innerHTML() { return this.html || ''; },
-      querySelectorAll(selector) { return selector === '.msg[data-msg-id]' ? this.messages : []; },
+      querySelector(selector) { return selector === 'details' ? disclosure : null; },
+      querySelectorAll(selector) { return selector === '.msg[data-msg-id]' ? this.messages : selector === '[data-checkin-bot]' ? this.buttons : []; },
     }; },
     getElementById() { return channel; },
     createDocumentFragment() { return { children: [], appendChild(node) { this.children.push(node); } }; },
@@ -47,6 +54,32 @@ function thread(reason = 'Any update?') {
 }
 const html = t => api.threadArticle(t).innerHTML;
 const visible = text => text.replace(/<details>[\s\S]*?<\/details>/g, '');
+
+test('check-ins show recorded requests and reuse current bot inspection without claiming resolution', () => {
+  const identity={uid:'actor_'+'7'.repeat(32),alias:'bot:example/lead',fleet:'example',provisional:false};
+  const row={actor_uid:identity.uid,actor_alias:identity.alias,actor_short:'lead',fleet:identity.fleet,
+    action:'ask',reason:'Choose <one> & explain',rationale:'A decision is needed.',occurred_at:'2026-01-01T00:00:00Z'};
+  recipients.set(identity.uid,identity);
+  const envelope={data:{threads:[],checkins:[row],checkins_state:'ok',checkins_truncated:true}};
+  api.renderChannel(envelope);
+  const article=channel.children[0],button=article.buttons[0];
+  assert.match(article.innerHTML,/Asked for your input/);
+  assert.match(article.innerHTML,/Choose &lt;one&gt; &amp; explain/);
+  assert.match(article.innerHTML,/not a list of unanswered requests/);
+  assert.match(article.innerHTML,/Older decisions remain/);
+  assert.equal(button.disabled,false);button.onclick();assert.equal(inspected.at(-1),identity);
+  article.querySelector('details').open=false;
+  api.renderChannel(envelope);assert.equal(channel.children[0],article);
+  assert.equal(article.querySelector('details').open,false);
+  const count=inspected.length;
+  button.disabled=true;button.onclick();assert.equal(inspected.length,count);button.disabled=false;
+  recipients.set(identity.uid,{...identity,alias:'bot:example/replacement'});
+  button.onclick();assert.equal(inspected.length,count);
+  recipients.set(identity.uid,identity);api.pause(true);button.onclick();assert.equal(inspected.length,count);api.pause(false);
+  api.renderChannel({data:{threads:[],checkins:[],checkins_state:'unavailable'}});
+  assert.match(channel.children[0].innerHTML,/history is unavailable/);
+  recipients.clear();channel.children=[];
+});
 
 test('only validated task owner metadata enables a main-channel opener, never the dialog copy', () => {
   const t=thread();t.task_link={task_id:wi,fleet:'owner-team',fleet_uid:'fleet_'+'4'.repeat(32),host_uid:'host_'+'5'.repeat(32)};
@@ -317,4 +350,74 @@ if (process.env.PLANE_ACTIVITY_FIXTURE) test('actual canonical query projection 
   assert.equal(api.nudgeReason(t.messages[0], t), 'Check\nfixture <status> — please.');
   assert.match(visible(html(t)), /Check\nfixture &lt;status&gt; — please\./);
   assert.doesNotMatch(visible(html(t)), /task_nudge|dispatched|working…/);
+});
+
+function reportedThread(overrides = {}) {
+  const t = thread();t.title = null;t.work_item_id = null;t.task_events = [];
+  Object.assign(t.messages[0], {message_class:'report', command_type:null, work_item_id:null,
+    body:'{"format":"claudlobby.report","summary":"Ready <please>"}', body_words:'Ready <please>',
+    report:{state:'captured',status:'completed',percent:null,
+      pr_url:'https://github.com/example/project/pull/1',pr_role:'reviewed',
+      artifacts:['https://example.org/result?a=1&b=2'],issues:[],skill:null}, ...overrides});
+  return t;
+}
+
+test('structured report shows readable results and reported evidence, with raw content in machinery', () => {
+  const t = reportedThread(), rendered = html(t), prose = visible(rendered);
+  assert.match(prose,/Completion reported/);assert.match(prose,/Ready &lt;please&gt;/);
+  assert.match(prose,/PR reviewed \(reported\)/);
+  assert.match(prose,/href="https:\/\/example.org\/result\?a=1&amp;b=2" target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(prose,/claudlobby.report|approved|verified|dispatched/);
+  assert.match(rendered,/machinery raw[^>]*>.*claudlobby.report/);
+  assert.equal(api.threadArticle(t,false).innerHTML,rendered);
+  t.messages[0].report.status='progress';t.messages[0].report.percent=0;
+  assert.match(visible(html(t)),/Progress reported · 0%/);
+  t.messages[0].report.status='blocked';t.messages[0].report.percent=null;
+  t.messages[0].body_words='Need your decision';
+  assert.match(visible(html(t)),/Blocker reported/);assert.match(visible(html(t)),/Need your decision/);
+});
+
+test('report evidence never activates unsafe or credential-bearing URLs', () => {
+  const t=reportedThread();t.messages[0].report.pr_url=null;
+  const unsafe=['javascript:alert(1)','data:text/html,<script>bad</script>','file:///tmp/report',
+    'https://user:secret@example.org/result','s3://example/result','https:example.org/result'];
+  t.messages[0].report.artifacts=unsafe;
+  const rendered=visible(html(t));
+  assert.doesNotMatch(rendered,/<a |<script>/);
+  for (const value of unsafe) assert.ok(rendered.includes(panel.esc(value)));
+});
+
+test('unavailable report content does not become status or evidence, legacy remains prose', () => {
+  for (const state of ['withheld','truncated','invalid','unsupported']) {
+    const t=reportedThread({report:{state}}), rendered=html(t);
+    assert.doesNotMatch(visible(rendered),/Ready|claudlobby.report|Completion reported|<a /);
+    assert.match(visible(rendered),/Report unavailable from/);
+    assert.match(rendered,/machinery raw/);
+  }
+  assert.match(visible(html(reportedThread({report:{state:'legacy'},body_words:'Historical report'}))),/Historical report/);
+  assert.doesNotMatch(visible(html(reportedThread({report:undefined}))),/Completion reported|PR reviewed/);
+});
+
+
+test('permission attention opens the existing task and clears after a fresh decided read', () => {
+  const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
+  const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
+  const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
+    ...panel, renderState: () => false, document: {
+      getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
+    },
+  });
+  const row = {task_id: 'workshop::' + wi, fleet: 'web', title: 'Release signup', state: 'queued', resolved: true,
+    attention: true, attention_reason: ['permission_pending'], permission_pending: 2};
+  board.renderTasks({data: {tasks: [row]}});
+  assert.match(nodes.attention.innerHTML, /2 permission requests need review/);
+  assert.match(nodes.attention.innerHTML, /data-task-open="workshop::wi_/);
+  assert.match(nodes.attention.innerHTML, /data-task-fleet="web"/);
+  assert.equal(nodes['attn-count'].textContent, 1);
+  board.renderTasks({data: {tasks: [{...row, attention_reason: ['permission_unavailable'], permission_pending: 0}]}});
+  assert.match(nodes.attention.innerHTML, /permission history is incomplete/);
+  assert.doesNotMatch(nodes.attention.innerHTML, /no tasks need attention/);
+  board.renderTasks({data: {tasks: [{...row, attention: false, attention_reason: [], permission_pending: 0}]}});
+  assert.match(nodes.attention.innerHTML, /no tasks need attention/);
+  assert.doesNotMatch(nodes.tasks.innerHTML, /permission requests need review/);
 });

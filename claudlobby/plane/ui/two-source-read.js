@@ -65,6 +65,7 @@ export function createWorkspaceReadTransport({ sources }) {
       ...(v.last_event ? { last_event: event(e, v.last_event) } : {}),
       ...(v.assignments ? { assignments: v.assignments.map(x => assignment(e, x)) } : {}),
       ...(v.history ? { history: v.history.map(x => event(e, x)) } : {}), terminal_event: event(e, v.terminal_event),
+      ...(v.report_threads ? { report_threads: v.report_threads.map(t => thread(e, t)) } : {}),
       ...(v.issues ? { issues: v.issues.map(x => event(e, x)) } : {}),
       ...(v.display_ids ? { display_ids: v.display_ids.map(x => qualified(e, x)) } : {}),
       delivery: fields(e, v.delivery, ['message_id']) };
@@ -185,7 +186,12 @@ export function createWorkspaceReadTransport({ sources }) {
       windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
     if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
     if (path === '/api/fleets') data.fleets = data.fleet_choices;
-    if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads), lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
+    if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads),
+      checkins: good.flatMap(x => x.v.data.checkins || []).sort((a,b) =>
+        (Date.parse(b.occurred_at) || 0) - (Date.parse(a.occurred_at) || 0)),
+      checkins_state: good.length && good.every(x => x.v.data.checkins_state === 'ok') ? 'ok' : 'unavailable',
+      checkins_truncated: good.some(x => x.v.data.checkins_truncated),
+      lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
     if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
     if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
     if (path === '/api/overview') {
@@ -203,7 +209,9 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   function project(e, path, v) {
     const d = v.data;
-    if (path === '/api/channel') return { ...v, data: { ...d, threads: d.threads.map(t => thread(e, t)) } };
+    if (path === '/api/channel') return { ...v, data: { ...d, threads: d.threads.map(t => thread(e, t)),
+      ...(d.checkins === undefined ? {} : {checkins: d.checkins.map(x => fields(e, x,
+        ['checkin_id', 'actor_uid'], ['actor_alias'], ['fleet']))}) } };
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
     if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid'], ['alias'], ['fleet'])) } };
     if (path === '/api/overview' && (!d.totals || !d.host)) throw new Error('Missing source facts.');

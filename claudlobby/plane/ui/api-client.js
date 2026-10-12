@@ -16,6 +16,7 @@ export const roomLabel = connected?.roomLabel;
 export const interactionContext = connected?.interactionContext;
 export const nudgeContext = connected?.nudgeContext;
 export const feedbackContext = connected?.feedbackContext;
+export const permissionContext = connected?.permissionContext;
 export const prepareAction = connected?.prepareAction;
 export const sendAction = connected?.sendAction;
 export const actionReceipt = connected?.actionReceipt;

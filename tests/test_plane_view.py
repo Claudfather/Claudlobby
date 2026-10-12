@@ -95,6 +95,44 @@ def test_no_write_routes_exist(tmp_path):
             assert methods <= {"GET", "HEAD"}, (route.path, methods)
 
 
+def test_channel_shows_bounded_checkin_history_without_a_telegram_conversation(tmp_path):
+    from tests.test_checkins_cli import _decision, _query, F
+
+    for i in range(12):
+        _decision(tmp_path, "lead", f"ck_{i:032x}", age_h=i,
+                  action="ask", raise_={"decided": True, "reason": "Which goal next?", "held": []})
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    data = client.get("/api/channel", params={"fleet": F}).json()["data"]
+    assert data["threads"] == []
+    assert data["checkins_state"] == "ok" and data["checkins_truncated"]
+    assert len(data["checkins"]) == data["checkins_limit"] == 10
+    canonical = _query(tmp_path, limit=10)
+    assert [r["checkin_id"] for r in data["checkins"]] == [r["checkin_id"] for r in canonical]
+    assert data["checkins"][0]["actor_uid"] == canonical[0]["actor_uid"]
+    assert data["checkins"][0]["actor_alias"] == f"bot:{F}/lead"
+    assert data["checkins"][0]["reason"] == "Which goal next?"
+    assert client.get("/api/channel").json()["data"]["checkins"] == data["checkins"]
+    assert client.get("/api/channel?fleet=other").json()["state"] == "unknown"
+
+
+def test_checkin_read_failure_does_not_hide_conversations_or_claim_no_decisions(tmp_path, monkeypatch):
+    from claudlobby.commands import checkins
+    from tests.test_checkins_cli import _decision, CK1
+
+    _seed_conversation(tmp_path)
+    _decision(tmp_path, "lead", CK1, age_h=0)
+    original = checkins.collect_checkins
+    def unavailable(*args, **kwargs):
+        assert kwargs["include_dispatches"] is False
+        if args[1] == "f":
+            raise ValueError("unreadable recorded detail")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(checkins, "collect_checkins", unavailable)
+    data = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()["data"]
+    assert data["threads"] and data["checkins_state"] == "unavailable"
+    assert [r["checkin_id"] for r in data["checkins"]] == [CK1]
+
+
 def test_connections_are_query_only(tmp_path):
     import sqlite3
 
@@ -190,6 +228,58 @@ def test_channel_threads_the_whole_conversation(tmp_path):
     assert t["delivered"] is True
     assert t["terminal"] == "completed"
     assert "recipient_raw" not in dispatch            # §11: raw id stays home
+
+
+def test_channel_projects_canonical_report_content_without_promoting_other_messages(tmp_path):
+    from uuid import uuid4
+    from claudlobby.report_payload import ReportPayload, encode_report_facts
+
+    report = ReportPayload("completed", summary="Ready for review <please>",
+        pr_url="https://github.com/example/project/pull/1", pr_role="authored",
+        artifacts=("https://example.org/result", "s3://example/result"),
+        issues=("https://github.com/example/project/issues/2",))
+    for mode in ("full", "metadata"):
+        root = tmp_path / mode
+        initialize_plane(root)
+        (root / "state/plane/capture.json").write_text(json.dumps({"*": mode}))
+        facts = encode_report_facts(report, fleet="f", sender="bot:f/worker",
+            recipient="bot:f/manager", msg_id="msg_" + uuid4().hex,
+            event_ids=("ev_" + uuid4().hex, "ev_" + uuid4().hex),
+            occurred_at="2026-10-10T00:00:00Z")
+        emit_batch(root, list(facts), require_commit=True)
+        response = TestClient(create_app(root, package=source_package())).get("/api/channel").json()
+        message = response["data"]["threads"][0]["messages"][0]
+        if mode == "full":
+            assert message["body"] == report.to_body()
+            assert message["body_words"] == report.summary
+            assert message["report"] == dict(state="captured", status="completed", percent=None,
+                pr_url=report.pr_url, pr_role="authored", artifacts=list(report.artifacts),
+                issues=list(report.issues), skill=None)
+        else:
+            assert message["report"] == {"state": "withheld"}
+        assert response["data"]["threads"][0]["terminal"] is None
+
+    # An ordinary chat or foreign emitter must not become a typed result.
+    for field, value in (("message_class", "chat"), ("emitter", "other-producer")):
+        raw = json.loads(json.dumps(facts[0]))
+        raw["event_id"] = "ev_" + uuid4().hex
+        raw["payload"]["msg_id"] = "msg_" + uuid4().hex
+        (raw["payload"] if field == "message_class" else raw)[field] = value
+        emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    messages = [m for t in rows["data"]["threads"] for m in t["messages"]]
+    assert sum("report" in m for m in messages) == 1
+    assert all(m["body_words"] == report.to_body() for m in messages if "report" not in m)
+
+    failed = ReportPayload("failed", reason="Repository preparation needs attention")
+    raw = json.loads(json.dumps(facts[0]))
+    raw["event_id"] = "ev_" + uuid4().hex
+    raw["payload"].update(msg_id="msg_" + uuid4().hex, body=failed.to_body())
+    emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    message = next(m for t in rows["data"]["threads"] for m in t["messages"]
+                   if m["msg_id"] == raw["payload"]["msg_id"])
+    assert message["body_words"] == failed.reason and message["report"]["status"] == "failed"
 
 
 def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
@@ -671,6 +761,11 @@ def test_app_js_import_is_cache_busted(tmp_path):
     assert work_loop.headers.get("cache-control") == "no-store"
     assert 'from "./action-state.js?v=' in work_loop.text
     assert 'from "./panel-state.js?v=' in work_loop.text
+    assert 'from "./permission-panel.js?v=' in work_loop.text
+    permissions = client.get("/permission-panel.js")
+    assert permissions.status_code == 200 and permissions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in permissions.text
+    assert 'from "./panel-state.js?v=' in permissions.text
     transport = client.get("/api-client.js")
     assert transport.status_code == 200
     assert transport.headers.get("cache-control") == "no-store"
@@ -1842,7 +1937,7 @@ def test_every_arm_carries_its_own_date_column(tmp_path):
 
 
 def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
-    """Attention names SQL arms; lifecycle labels name only reducer states."""
+    """Attention names canonical work/permission reasons; lifecycle stays unchanged."""
     import re
     from pathlib import Path as _P
 
@@ -1852,7 +1947,8 @@ def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
            / "app.js").read_text()
     why = src.split("const WHY = {", 1)[1].split("\n};", 1)[0]
     assert set(re.findall(r"^  (\w+):", why, re.M)) == \
-        {name for name, _s, _a, _w in ATTENTION_ARMS}
+        ({name for name, _s, _a, _w in ATTENTION_ARMS}
+         | {"permission_pending", "permission_unavailable"})
     status = src.split("const TASK_STATUS = {", 1)[1].split("\n};", 1)[0]
     labelled = set(re.findall(r"^  (\w+):", status, re.M))
     assert labelled == {"queued", "assigned", "active", "blocked",

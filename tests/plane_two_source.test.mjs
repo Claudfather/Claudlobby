@@ -44,13 +44,23 @@ test('only core admitted read handles; distinct hosts; no action or mutation cap
 });
 test('colliding identities stay distinct; all and selected activity preserve canonical link and literal body', async () => {
   const { api, a, b } = await pair();
+  for (const item of [a,b]) Object.assign(item.routes.get('/api/channel?limit=120').data,
+    {checkins:[{checkin_id:'ck_'+'5'.repeat(32),actor_uid:actor,actor_alias:'bot:team/lead',
+      actor_short:'lead',fleet:'team',action:'ask',reason:'Which goal next?',
+      occurred_at:item===a?'2026-01-01T00:00:00Z':'2026-01-02T00:00:00Z'}],checkins_state:'ok'});
   const all = await api.jget('/api/channel?limit=120');
+  assert.deepEqual(all.data.checkins.map(r=>r.actor_uid),['b::'+actor,'a::'+actor]);
+  assert.deepEqual(all.data.checkins.map(r=>r.fleet),['b / team','a / team']);
+  assert.equal(all.data.checkins[0].actor_alias,'b::bot:team/lead');
+  assert.equal(all.data.checkins[0].reason,'Which goal next?');
+  assert.equal(all.data.checkins_state,'ok');
   assert.deepEqual(all.data.threads.map(t => t.work_item_id), ['a::'+wi,'b::'+wi]);
   assert.equal(all.data.threads[0].task_link.host_uid, 'a::'+a.host);
   assert.equal(all.data.threads[0].messages[0].body, '<literal>');
   assert.equal(all.data.lineage.unresolved_threads, 2);
   const selected = await api.jget('/api/channel?limit=120&fleet=a%20%2F%20team');
   assert.equal(selected.data.threads.length, 1);
+  assert.equal(selected.data.checkins.length,1);
   assert.equal(b.calls.filter(c => c.url.includes('&fleet=')).length, 0);
   a.routes.get('/api/channel?limit=120').data.threads[0].task_link.host_uid = b.host;
   assert.equal((await api.jget('/api/channel?limit=120')).data.threads[0].task_link, null);
@@ -58,7 +68,13 @@ test('colliding identities stay distinct; all and selected activity preserve can
 test('outside-board detail routes by exact source/team and refuses mismatched ownership', async () => {
   const { api, a, b } = await pair();
   const url = `/api/tasks/${encodeURIComponent('a::'+wi)}?fleet=a%20%2F%20team`;
+  a.routes.get(`/api/tasks/${wi}?fleet=team`).data.task.report_threads = a.routes.get('/api/channel?limit=120').data.threads;
   const detail = await api.jget(url);
+  const recorded = detail.data.task.report_threads[0];
+  assert.equal(recorded.work_item_id, 'a::'+wi);
+  assert.equal(recorded.task_link.host_uid, 'a::'+a.host);
+  assert.ok(recorded.messages[0].msg_id.startsWith('a::'));
+  assert.equal(recorded.messages[0].body, '<literal>');
   assert.equal(detail.data.task.task_id, 'a::'+wi);
   assert.equal(detail.data.task.fleet_uid, 'a::'+fleet);
   assert.equal(b.calls.filter(c => c.url.startsWith('/api/tasks/')).length, 0);
@@ -443,7 +459,7 @@ test('held old one-source detail cannot paint private bytes after disposal or co
 // Deploying the unchanged graph below a release path must never load the
 // public demo's root adapter, or create a second owner-handle module instance.
 test('canonical module graph stays inside its release directory', async () => {
-  const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js',
+  const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js', 'permission-panel.js',
     'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js'];
   for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
     for (const name of files) {
