@@ -409,6 +409,12 @@ claudlobby --root /path/to/data host owner bind-source
 claudlobby --root /path/to/data host owner serve --origin https://plane.example.ts.net --tailscale /path/to/tailscale
 ```
 
+If a separate native Tailscale daemon owns the private Serve route, pass its
+absolute control socket with `--tailscale-socket /path/to/tailscaled.socket`.
+The verifier passes that selector to every native realm and WhoIs lookup;
+without it, the native CLI's default daemon selection is unchanged. This
+control socket is distinct from the owner HTTP backend selected by `--socket`.
+
 The default socket is `DATA_ROOT/state/plane/owner.sock`. An explicit `--socket`
 can select a shorter absolute path when the host's Unix-socket path limit requires
 it. The containing directory must already be owned by the process user with mode
@@ -435,6 +441,7 @@ host:
       enroll: true
       origin: https://host.example.test
       tailscale: /absolute/path/to/tailscale
+      tailscale_socket: /absolute/path/to/tailscaled.socket # optional native control socket
       socket: /absolute/private/directory/owner.sock
       workspace_issuer: https://app.example.test
       workspace_origin: https://plane.example.test

@@ -157,6 +157,7 @@ def private_listener(path: Path):
 
 
 def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path | None = None,
+          tailscale_socket: Path | None = None,
           package=None, workspace_issuer=None, workspace_origin=None):
     """Foreground server; caller explicitly selects root and local authority."""
     import uvicorn
@@ -175,7 +176,8 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
             from .owner_workspace_http import WorkspaceBootstrapConfig
             workspace_bootstrap = WorkspaceBootstrapConfig(workspace_issuer, workspace_origin)
         app = create_owner_browser_app(root, expected_origin=origin,
-            verify_principal=ServePrincipalVerifier(tailscale_binary=Path(tailscale_binary)),
+            verify_principal=ServePrincipalVerifier(tailscale_binary=Path(tailscale_binary),
+                tailscale_socket=tailscale_socket),
             package=package, workspace_bootstrap=workspace_bootstrap)
     except AccessUnavailable:
         if workspace_bootstrap is not None:

@@ -278,7 +278,7 @@ def dispatch(args):
                 raise CommandFailure("invalid_argument", "workspace issuer and origin must be supplied together")
             try:
                 serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
-                      socket_path=args.socket,
+                      socket_path=args.socket, tailscale_socket=args.tailscale_socket,
                       package=paths.package, workspace_issuer=args.workspace_issuer,
                       workspace_origin=args.workspace_origin)
             except OwnerServerStartupError as exc:

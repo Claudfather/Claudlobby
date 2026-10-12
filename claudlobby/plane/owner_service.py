@@ -12,14 +12,15 @@ def service_command(root, cli, config):
     from .owner_workspace_http import WorkspaceBootstrapConfig
 
     values = {key: config.get(key) for key in (
-        "origin", "tailscale", "socket", "workspace_issuer", "workspace_origin")}
+        "origin", "tailscale", "tailscale_socket", "socket", "workspace_issuer", "workspace_origin")}
     for key, value in values.items():
         if value is not None and (not isinstance(value, str) or not value or not value.isprintable()):
             raise ValueError(f"host.jobs.plane-owner.{key} must be a nonempty printable string")
     _origin(values["origin"])
     if values["tailscale"] is None:
         raise ValueError("host.jobs.plane-owner.tailscale requires an absolute native executable")
-    ServePrincipalVerifier(tailscale_binary=Path(values["tailscale"]))
+    ServePrincipalVerifier(tailscale_binary=Path(values["tailscale"]),
+                           tailscale_socket=Path(values["tailscale_socket"]) if values["tailscale_socket"] else None)
     if values["socket"] is not None and not Path(values["socket"]).is_absolute():
         raise ValueError("host.jobs.plane-owner.socket requires an absolute private socket path")
     if values["workspace_issuer"] is not None or values["workspace_origin"] is not None:
