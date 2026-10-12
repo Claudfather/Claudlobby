@@ -299,6 +299,7 @@ host:
       script: "$CLAUDLOBBY_CLI"
       origin: null
       tailscale: null
+      tailscale_socket: null
       socket: null
       workspace_issuer: null
       workspace_origin: null
