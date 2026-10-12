@@ -721,7 +721,9 @@ class BotConfig:
     # values — carried so `validate` can say so, never consumed by a door.
     retired_keys: dict[str, Any] = field(default_factory=dict)
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
-    remote_control: bool = True  # --remote-control
+    # --remote-control. Unset (None) takes the role default when FleetConfig is
+    # built: on for the fleet manager, off for every other bot.
+    remote_control: bool | None = None
     # Conservative default: with neither field set the composer emits
     # `--permission-mode acceptEdits` (see compose_bot_conf). dangerously_skip is
     # an explicit opt-in.
@@ -931,6 +933,13 @@ class FleetConfig:
                     f"team '{team.name}': manager '{team.manager}' must match "
                     f"fleet.manager '{self.manager}'"
                 )
+        # Bots are coerced before their fleet exists, so a role default can
+        # only be applied here. An explicit bot or `defaults:` value is
+        # already set and stays as declared.
+        managers = self.manager_bots()
+        for bot in self.bots.values():
+            if bot.remote_control is None:
+                bot.remote_control = bot.bot_id in managers
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -1794,6 +1803,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     def _bool(key: str, fallback: bool) -> bool:
         return bool(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
+    def _role_bool(key: str) -> bool | None:
+        """`_bool` without a fixed fallback: unset stays None for FleetConfig's
+        role default. Presence-based like `_bool`, so `config explain` names
+        the same source the loader used."""
+        value, source = _select_bot_scalar(raw, defaults, key)
+        return None if source == "built_in" else bool(value)
+
     def _str(key: str, fallback: str) -> str:
         return str(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
@@ -1853,7 +1869,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "agent_cli", _select_bot_scalar(raw, defaults, "agent_cli")[0], KNOWN_AGENT_CLIS,
         ) or "claude",
         retired_keys={key: raw[key] for key in _RETIRED_BOT_KEYS if key in raw},
-        remote_control=_bool("remote_control", True),
+        remote_control=_role_bool("remote_control"),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
         permission_mode=_parse_enum(
             "permission_mode",
@@ -2308,6 +2324,9 @@ _EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
     "preferred_notif_channel", "prefers_reduced_motion",
 })
 _EXPLAIN_BOT_LOCAL_SCALARS = frozenset({"name", "voice", "reports_to", "startup_prompt"})
+# Inherited scalars whose built-in default follows the bot's role, which
+# `fleet.manager` decides (FleetConfig.__post_init__).
+_EXPLAIN_BOT_ROLE_DEFAULTS = frozenset({"remote_control"})
 
 
 def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
@@ -2327,6 +2346,8 @@ def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
     raw_bot = (raw_fleet.get("bots") or {}).get(bot) or {}
     if field in _EXPLAIN_BOT_INHERITED_SCALARS:
         _, source = _select_bot_scalar(raw_bot, merged_defaults, field)
+        if source == "built_in" and field in _EXPLAIN_BOT_ROLE_DEFAULTS:
+            return "role_default", "fleet.manager"
         if source == "fleet.defaults" and field not in (raw_fleet.get("defaults") or {}):
             source = "system_defaults"
         declaration = (f"fleet.bots.{bot}.{field}" if source == "bot" else

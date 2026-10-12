@@ -1230,5 +1230,30 @@ assert_eq "the refusal says that nothing was sent" "1" "$r"
 r=$(run_send_rc 'ordinary queued message' $(sent_frames 'ordinary queued message' "$FIXTURES/input-queued-hint.txt" "$FIXTURES/input-queued-hint.txt"))
 assert_eq "queued hint remains writable and is not mistaken for held input" "2 0" "$r"
 
+echo "=== a menu on screen refuses every new payload: nothing is typed into it ==="
+# A menu reads typed keys as choices: a digit can choose an option by its number
+# and a line feed can confirm the one under the pointer. The usage-limit menu is
+# a live capture; a server flag can list usage credits first, built here from it
+# the way tests/test_usage_limit_reader.py builds that layout.
+credits_first="$TMPD/usage-limit-menu-credits-first.txt"
+sed -e 's/❯ 1\. Stop and wait for limit to reset/❯ 1. Switch to usage credits/' \
+    -e 's/^\(  *\)3\. Switch to usage credits/\13. Stop and wait for limit to reset/' \
+    "$FIXTURES/usage-limit-menu.txt" > "$credits_first"
+r=$(grep -c -e '❯ 1\. Switch to usage credits' -e '3\. Stop and wait for limit to reset' "$credits_first" || true)
+assert_eq "the credits-first frame was built (both lines swapped)" "2" "$r"
+cap_reset
+for menu in "$FIXTURES/menu-option.txt" "$FIXTURES/usage-limit-menu.txt" "$credits_first"; do
+    r=$(run_send_rc $'Reply 3 when the review is done\nthanks' "$menu")
+    assert_eq "${menu##*/}: no keystrokes and definite refusal" "0 4" "$r"
+done
+r=$(grep -cF 'pane_send: recipient-menu-open; no payload or Enter was sent' "$SEND_ERR" || true)
+assert_eq "the menu refusal says that nothing was sent" "1" "$r"
+r=$(count_events '"reason": ?"recipient-menu-open"')
+assert_eq "each menu refusal is recorded as a send_miss" "3" "$r"
+r=$(boot_send_settled STARTUP 4 "$blog"; echo "rc=$?")
+assert_eq "rc 4 at boot: a menu does not abort the boot either" "rc=0" "$r"
+r=$(grep -c 'STARTUP — NOT SENT: the input box already held text, or a menu held the screen' "$blog" || true)
+assert_eq "the boot log names both reasons a send takes no input" "2" "$r"
+
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

@@ -111,8 +111,10 @@ def render_stanza(inp: NewBotInputs) -> str:
         lines.append(f"      model: {_yaml_str(inp.model)}")
     if inp.effort:
         lines.append(f"      effort: {_yaml_str(inp.effort)}")
-    if inp.remote_control is False:
-        lines.append("      remote_control: false")
+    # remote_control's default follows the bot's role (on for the fleet
+    # manager only), so a line is written only for an explicit choice.
+    if inp.remote_control is not None:
+        lines.append(f"      remote_control: {'true' if inp.remote_control else 'false'}")
     # dangerously_skip_permissions is opt-IN: an omitted field composes to the
     # safe acceptEdits default, so emit a line only to positively enable it.
     if inp.dangerously_skip_permissions is True:
@@ -332,6 +334,17 @@ def _list_skills(p: Path) -> list[str]:
     return sorted(d.name for d in p.iterdir() if d.is_dir())
 
 
+def _inherited_remote_control(paths: Paths) -> bool:
+    """What a new bot gets with no remote_control line: the fleet's
+    `defaults:` value, else the role default, which is off because a new
+    bot is never the fleet manager."""
+    try:
+        _fleet, merged_defaults = load_fleet(paths.fleet_yaml)
+    except (FileNotFoundError, ValueError, yaml.YAMLError):
+        return False
+    return bool(merged_defaults.get("remote_control", False))
+
+
 def interactive_collect(paths: Paths) -> NewBotInputs:
     """Walk the user through every field. Returns a populated NewBotInputs."""
     print("\n=== claudlobby bot create — interactive ===\n")
@@ -404,7 +417,8 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     lessons = _ask_pick("Lessons:", _list_dir(paths.base_lessons))
 
     print()
-    remote_control = _ask_yn("--remote-control?", default=True)
+    inherited_rc = _inherited_remote_control(paths)
+    remote_control = _ask_yn("--remote-control?", default=inherited_rc)
     dangerously = _ask_yn("--dangerously-skip-permissions?", default=False)
 
     print("\nScope (optional — leave blank to skip):")
@@ -467,7 +481,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         protocols=protocols or None,
         resources=resources or None,
         lessons=lessons or None,
-        remote_control=False if not remote_control else None,
+        remote_control=None if remote_control == inherited_rc else remote_control,
         dangerously_skip_permissions=True if dangerously else None,
         scope_org=scope_org,
         scope_repos=scope_repos,

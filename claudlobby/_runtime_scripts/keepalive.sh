@@ -430,12 +430,15 @@ classify_pane() {
 # ---------------------------------------------------------------------------
 # Usage limit (#996)
 # ---------------------------------------------------------------------------
-# A claude.ai usage limit stops a turn with one line in the transcript, and on
-# this estate nothing resumes it: every bot runs with --remote-control, and
-# while that bridge is up Claude Code arms neither its own automatic continue
-# nor its limit menu (2.1.291 and 2.1.292 check the bridge first). The pane is
-# left at an empty prompt, which read as IDLE: data/.idle kept activity_stuck
-# quiet, and the bot sat until someone noticed (#996: 75 and 85 minutes).
+# A claude.ai usage limit stops a turn with one line in the transcript. On a
+# bot with --remote-control (by default only the fleet manager) nothing resumes
+# it: while that bridge is up Claude Code arms neither its own automatic
+# continue nor its limit menu (2.1.291 and 2.1.292 check the bridge first). The
+# pane is left at an empty prompt, which read as IDLE: data/.idle kept
+# activity_stuck quiet, and the bot sat until someone noticed (#996: 75 and 85
+# minutes). A bot without the bridge, every worker by default, shows the menu
+# instead, its options in no fixed order: _limit_resume presses Enter only on
+# the wait label, and no framework send types into a menu (pane_is_menu).
 #
 # LIMIT names that frame. It takes two facts, never one:
 #   - data/.usage-limit, written by usage-limit-hook.sh when Claude Code ends

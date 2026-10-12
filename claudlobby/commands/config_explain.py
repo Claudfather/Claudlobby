@@ -73,7 +73,9 @@ def dispatch(args) -> CommandOutput:
         data = {"fleet": context.fleet.name, "bot": bot if scope == "bot" else None,
                 "key": key, "kind": "configuration", "source": source,
                 "declaration": declaration, "state": state, "next_cursor": None}
-        return CommandOutput(data, lines=(f"{key}: {state} from {declaration or 'built-in default'}",))
+        origin = (f"role default ({declaration})" if source == "role_default"
+                  else declaration or "built-in default")
+        return CommandOutput(data, lines=(f"{key}: {state} from {origin}",))
     try:
         register = build(context.fleet, paths, bot=bot, key=args.key)
     except KeyError as exc:

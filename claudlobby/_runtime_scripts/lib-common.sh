@@ -3347,6 +3347,8 @@ pane_send_key() {
 # leaves behind is a crash. Returns 4 when a fresh capture under the send lock
 # proves the input box already holds text: no new payload or Enter is sent, and
 # the existing input is left untouched. Unreadable captures are not held proof.
+# It returns 4 too, typing nothing, when that capture shows a menu
+# (pane_is_menu), which would read the keystrokes as choices.
 #
 # The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
 # send-keys — see _pane_send_payload and the knobs above for the measurement
@@ -3408,6 +3410,16 @@ _pane_send_verified_locked() {
             "$(printf '{"session":"%s","reason":"recipient-input-held"}' \
                 "$(json_escape "$session")")"
         printf 'pane_send: recipient-input-held; no payload or Enter was sent\n' >&2
+        return 4
+    fi
+    # A menu takes typed keys as choices (pane_is_menu), so nothing goes into
+    # one: not the payload, whose digits or line feed could choose an option by
+    # its position, and not an Enter.
+    if pane_is_menu "$before"; then
+        emit_fleet_event send_miss dispatch \
+            "$(printf '{"session":"%s","reason":"recipient-menu-open"}' \
+                "$(json_escape "$session")")"
+        printf 'pane_send: recipient-menu-open; no payload or Enter was sent\n' >&2
         return 4
     fi
 
@@ -3648,18 +3660,43 @@ pane_is_held() {
     [ -n "$first" ] || return 1
     case "$first" in
         'Try "'*'"'|'Press up to edit queued messages') return 1 ;;
-        [0-9].\ *|[0-9][0-9].\ *) return 1 ;;
     esac
-    if printf '%s\n' "$region" | LC_ALL=C awk '
+    _pane_region_is_menu "$region" "$first" && return 1
+    return 0
+}
+
+# pane_is_menu <pane_text>
+# Returns 0 when a menu or dialog holds the input region: Claude Code's
+# usage-limit menu, a permission or safeguards dialog, a picker. A menu reads
+# typed keys as choices, so a digit or a line feed in a payload can choose an
+# option by its position, and the usage-limit menu can list usage credits
+# first. pane_send_verified types nothing while one is open. The evidence is
+# the menu half of pane_is_held, so the two never disagree about a frame.
+pane_is_menu() {
+    local region first
+    region=$(pane_input_region "$1")
+    [ -n "$region" ] || return 1
+    first=$(_pane_strip_chrome "${region%%$'\n'*}")
+    [ -n "$first" ] || return 1
+    _pane_region_is_menu "$region" "$first"
+}
+
+# _pane_region_is_menu <region> <first>
+# The menu evidence pane_is_held and pane_is_menu share. <region> is
+# pane_input_region's output and <first> its input line with the chrome
+# stripped: a numbered option under the pointer (an Enter CHOOSES it), or the
+# menu's own exit offered as an exact line outside the rule below the box.
+_pane_region_is_menu() {
+    case "$2" in
+        [0-9].\ *|[0-9][0-9].\ *) return 0 ;;
+    esac
+    printf '%s\n' "$1" | LC_ALL=C awk '
         NR > 1 {
             line = $0; gsub("\342\224\200", "", line)
             if (line ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) outside = 1
             if (outside && $0 ~ /^[ \t]*(Enter to confirm · )?Esc to (cancel|go back)[ \t]*$/) found = 1
         }
-        END { exit !found }'; then
-        return 1
-    fi
-    return 0
+        END { exit !found }'
 }
 
 # _held_box_squeezed <region>
@@ -4873,7 +4910,7 @@ boot_send_settled() {
         3) printf '%s %s — NOT SUBMITTED: the input box never showed it, or still held it after the last Enter (#1236)\n' \
                "$(ts_iso)" "$1" >> "$3"
            return 0 ;;
-        4) printf '%s %s — NOT SENT: the input box already held text; no payload or Enter was sent\n' \
+        4) printf '%s %s — NOT SENT: the input box already held text, or a menu held the screen; no payload or Enter was sent\n' \
                "$(ts_iso)" "$1" >> "$3"
            return 0 ;;
         *) return "$2" ;;
