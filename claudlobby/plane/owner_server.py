@@ -156,6 +156,38 @@ def private_listener(path: Path):
                 os.fsync(lease)
 
 
+def _serve_authority_app(app, authority: str):
+    """Restore Serve's external Host only for its exact private Unix proxy tuple."""
+    from .owner_browser import _response
+
+    authority = authority.encode("ascii")
+
+    async def admitted(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        headers = scope.get("headers", ())
+        host = [value for key, value in headers if key.lower() == b"host"]
+        forwarded_host = [value for key, value in headers if key.lower() == b"x-forwarded-host"]
+        forwarded_proto = [value for key, value in headers if key.lower() == b"x-forwarded-proto"]
+        refused = (scope.get("client", object()) is not None
+                   or any(key.lower() == b"tailscale-funnel-request" for key, _ in headers))
+        if forwarded_host or forwarded_proto:
+            refused = refused or (host != [b"localhost"]
+                                  or forwarded_host != [authority]
+                                  or forwarded_proto != [b"https"])
+            if not refused:
+                scope = {**scope, "headers": [
+                    (key, authority if key.lower() == b"host" else value)
+                    for key, value in headers]}
+        if refused:
+            await _response({"state": "denied"}, 403)(scope, receive, send)
+            return
+        await app(scope, receive, send)
+
+    return admitted
+
+
 def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path | None = None,
           tailscale_socket: Path | None = None,
           package=None, workspace_issuer=None, workspace_origin=None):
@@ -163,7 +195,7 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
     import uvicorn
 
     from .owner_access import AccessUnavailable, OwnerAccess
-    from .owner_browser import create_owner_browser_app
+    from .owner_browser import _origin, create_owner_browser_app
     from .owner_ingress import ServePrincipalVerifier
     from .owner_source import inspect_source
     from .view import begin_shutdown
@@ -211,8 +243,10 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
     with private_listener(socket_path) as listener:
         # Trust comes only from the socket's filesystem boundary. In particular,
         # proxy middleware must not turn an attacker-supplied forwarding header
-        # into scope.client or alter which headers the identity verifier sees.
-        config = uvicorn.Config(app, log_level="warning", access_log=False,
+        # into scope.client. The adapter restores only Host; verifier source and
+        # identity headers remain unchanged.
+        config = uvicorn.Config(_serve_authority_app(app, _origin(origin)[1]),
+                                log_level="warning", access_log=False,
                                 proxy_headers=False, timeout_graceful_shutdown=5)
         server = OwnerServer(config)
         try:
