@@ -98,6 +98,51 @@ class TestFleetManager:
         assert fleet.manager in fleet.bots
 
 
+class TestRemoteControlRoleDefault:
+    """remote_control left unset follows the bot's role (#2325): on for the
+    fleet manager, off for every other bot, a bot that `manages` another
+    fleet's manager included. An explicit value on the bot or in the fleet's
+    `defaults:` wins in either direction."""
+
+    @staticmethod
+    def _flags(fleet):
+        return {name: bot.remote_control for name, bot in fleet.bots.items()}
+
+    def test_the_manager_is_on_and_every_other_bot_off(self, tmp_path):
+        fleet = TestFleetManager._load(tmp_path, TestFleetManager._raw())
+        assert self._flags(fleet) == {"lead": True, "worker": False, "coordinator": False}
+
+    @pytest.mark.parametrize(("bot", "value"), [("worker", True), ("lead", False)])
+    def test_an_explicit_bot_value_wins_either_way(self, tmp_path, bot, value):
+        raw = TestFleetManager._raw()
+        raw["bots"][bot]["remote_control"] = value
+        assert TestFleetManager._load(tmp_path, raw).bots[bot].remote_control is value
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_a_fleet_default_wins_over_the_role_either_way(self, tmp_path, value):
+        raw = TestFleetManager._raw()
+        raw["defaults"] = {"remote_control": value}
+        fleet = TestFleetManager._load(tmp_path, raw)
+        assert set(self._flags(fleet).values()) == {value}
+
+    def test_a_fleet_default_of_false_with_the_manager_set_true(self, tmp_path):
+        raw = TestFleetManager._raw()
+        raw["defaults"] = {"remote_control": False}
+        raw["bots"]["lead"]["remote_control"] = True
+        fleet = TestFleetManager._load(tmp_path, raw)
+        assert self._flags(fleet) == {"lead": True, "worker": False, "coordinator": False}
+
+    def test_a_fleet_built_in_code_gets_the_role_default_too(self):
+        from claudlobby.config import BotConfig, FleetConfig
+
+        bots = {name: BotConfig(bot_id=name, name=name, expertise=["x"])
+                for name in ("lead", "worker")}
+        bots["pinned"] = BotConfig(bot_id="pinned", name="pinned", expertise=["x"],
+                                   remote_control=True)
+        fleet = FleetConfig(name="f", service_prefix="com.f", manager="lead", bots=bots)
+        assert self._flags(fleet) == {"lead": True, "worker": False, "pinned": True}
+
+
 class TestCoercePlugins:
     def test_defaults_applied_when_no_plugins_section(self):
         result = _coerce_plugins(None)
@@ -187,7 +232,8 @@ class TestCoerceBot:
         assert bot.expertise == ["software-engineering"]
         assert bot.account == "default"
         assert bot.model is None
-        assert bot.remote_control is True
+        # Unset stays unset here: FleetConfig applies the role default.
+        assert bot.remote_control is None
         # Conservative default: a bot that opts into nothing is NOT dangerous —
         # the composer turns this (no permission_mode + no skip) into acceptEdits.
         assert bot.dangerously_skip_permissions is False

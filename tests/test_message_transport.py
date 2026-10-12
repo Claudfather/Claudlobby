@@ -199,10 +199,64 @@ def test_real_native_refuses_existing_input_without_typing_or_enter():
             subprocess.run([*command, "kill-server"], env=env, capture_output=True, timeout=5)
 
 
+@pytest.mark.parametrize("credits_first", [False, True])
+def test_real_native_types_nothing_into_a_usage_limit_menu(credits_first):
+    """#2325: a worker without Remote Control shows Claude Code's usage-limit
+    menu at a limit, and a menu reads typed keys as choices. The body carries a
+    digit and the wire a line feed, so the native send refuses before typing:
+    not one byte reaches the menu, whichever option is listed first."""
+    tmux = shutil.which("tmux")
+    assert tmux, "native transport requires tmux"
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    with TemporaryDirectory(prefix="cl-menu-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        sockets, home = root / "s", root / "h"
+        sockets.mkdir(); home.mkdir()
+        env = {"PATH": "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
+               "HOME": str(home), "TMUX_TMPDIR": str(sockets), "TMPDIR": str(sockets)}
+        frame = fixtures / "pane-states" / "usage-limit-menu.txt"
+        if credits_first:
+            built = (frame.read_text()
+                     .replace("❯ 1. Stop and wait for limit to reset", "❯ 1. Switch to usage credits")
+                     .replace("  3. Switch to usage credits", "  3. Stop and wait for limit to reset"))
+            assert "❯ 1. Switch to usage credits" in built and "3. Stop and wait" in built
+            frame = root / "credits-first.txt"
+            frame.write_text(built)
+        keys = root / "keys"
+        stub = fixtures / "menu-pane-stub.py"
+        command = [tmux, "-L", "private-menu", "-f", "/dev/null"]
+        def native(*args):
+            return subprocess.run([*command, *args], env=env, capture_output=True,
+                                  text=True, timeout=5, check=True)
+        try:
+            native("new-session", "-d", "-s", "worker",
+                   f"python3 {shlex.quote(str(stub))} {shlex.quote(str(frame))}"
+                   f" --keys {shlex.quote(str(keys))}")
+            deadline = time.monotonic() + 5
+            while "Esc to cancel" not in (before := native("capture-pane", "-t", "worker", "-p").stdout):
+                if time.monotonic() > deadline:
+                    pytest.fail("the menu frame did not render")
+                time.sleep(0.02)
+            destination = transport.TransportDestination(root, "fleet", "private-menu", "worker", sockets)
+            package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
+            result = transport.send(package, destination, message_id=MSG,
+                                    body="Reply 3 when the review is done", timeout=20)
+            time.sleep(0.5)  # any byte that did cross the pty has reached the record
+            assert keys.read_bytes() == b"", "bytes were typed into the menu"
+            assert result.status == "failed", result
+            assert result.reason == "recipient pane showed a menu; nothing was sent"
+            assert result.wire_sha256 is result.wire_bytes is None
+            assert native("capture-pane", "-t", "worker", "-p").stdout == before
+        finally:
+            subprocess.run([*command, "kill-server"], env=env, capture_output=True, timeout=5)
+
+
 @pytest.mark.parametrize("marker,reported,actual,expected", [
     (b"pane_send: recipient-input-held; no payload or Enter was sent\n", 4, 4, "failed"),
     (b"unclassified failure", 4, 4, "unknown"),
     (b"pane_send: recipient-input-held; no payload or Enter was sent\n", 4, 1, "unknown"),
+    (b"pane_send: recipient-menu-open; no payload or Enter was sent\n", 4, 4, "failed"),
+    (b"pane_send: recipient-menu-open; no payload or Enter was sent\n", 4, 1, "unknown"),
 ])
 def test_held_refusal_requires_coherent_native_proof(destination, marker, reported, actual, expected):
     calls = []

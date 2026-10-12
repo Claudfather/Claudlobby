@@ -801,7 +801,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
             emit_fleet_event "input_held" "pulse" \
                 '{"held_since_epoch":'"$held_since"',"held_seconds":'"$held_for"'}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "held_alerted" _notify_current_bot \
-                "$bot_id input_held — its input box holds text that was never submitted, and no turn is running (${held_for}s). Remedy: an operator presses Enter in its pane, and one more only if the text is still there after about 10 s. If it is still there after that, stop and look: a menu or a modal may be taking the Enter. Never typed text, and do not restart (a restart discards the text)." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+                "$bot_id input_held — its input box holds text that was never submitted, and no turn is running (${held_for}s). Remedy: look at its pane first: where a menu shows (numbered options, Enter to confirm), an Enter would choose one, so press nothing. Otherwise an operator presses Enter in its pane, and one more only if the text is still there after about 10 s. If it is still there after that, stop and look: a menu or a modal may be taking the Enter. Never typed text, and do not restart (a restart discards the text)." "$_mgr_token" "$_RENOTIFY_AFTER_S"
         fi
     else
         debounce_clear "$state_dir" "$bot_id" "held_alerted"
@@ -860,7 +860,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 *) _l_remedy="send it any prompt (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env lets keepalive do this once per limit)" ;;
             esac
             debounce_notify "$state_dir" "$bot_id" "limit_alerted" _notify_current_bot \
-                "$bot_id usage_limit_held — stopped by a usage limit (${_l_name:-limit}) since $(epoch_to_iso_utc "$_l_first"); it resets ${_l_text:-at a time keepalive could not read}, and the bot has not resumed. Remedy: $_l_remedy. If a menu is up, choose \"Stop and wait for limit to reset\" by its label, never usage credits. No restart is needed." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+                "$bot_id usage_limit_held — stopped by a usage limit (${_l_name:-limit}) since $(epoch_to_iso_utc "$_l_first"); it resets ${_l_text:-at a time keepalive could not read}, and the bot has not resumed. Remedy: if its limit menu is up, first choose \"Stop and wait for limit to reset\" by its label (arrow keys, then Enter), never by position and never usage credits; nothing typed reaches it while it is up. Then $_l_remedy. No restart is needed." "$_mgr_token" "$_RENOTIFY_AFTER_S"
         fi
     else
         debounce_clear "$state_dir" "$bot_id" "limit_alerted"

@@ -5,10 +5,12 @@ A claude.ai usage limit stops a bot with one line in its transcript:
 
     ⎿  You've hit your session limit · resets 10:50pm (America/New_York)
 
-On this estate nothing ever resumes it. Every bot runs with --remote-control, and
-while that bridge is up Claude Code arms neither its own automatic continue nor its
-limit menu (both check the bridge first, in 2.1.291 and 2.1.292), so the pane sits
-at an empty prompt that keepalive used to read as IDLE. keepalive now asks this
+On a bot with --remote-control (by default only the fleet manager) nothing ever
+resumes it: while that bridge is up Claude Code arms neither its own automatic
+continue nor its limit menu (both check the bridge first, in 2.1.291 and 2.1.292),
+so the pane sits at an empty prompt that keepalive used to read as IDLE. A bot
+without the bridge, every worker by default, shows the menu instead (`menu` below).
+keepalive now asks this
 reader about any pane whose text names a usage limit, and reads it as held by the
 limit until the reset, then resumes the bot once (keepalive.sh, KEEPALIVE_LIMIT_RESUME).
 

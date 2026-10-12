@@ -122,7 +122,7 @@ fleet:
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
-      remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
+      remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
       extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
@@ -903,7 +903,9 @@ String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; co
 
 ### `bots.<name>.remote_control`
 
-Boolean (default `true`). Controls whether the bot runs with `--remote-control`, which allows dispatch via `tmux send-keys`. Disable for standalone bots that should only respond to Telegram messages. Can be set in `defaults:`.
+Boolean. Controls whether the bot runs with `--remote-control`, Claude Code's Remote Control session. Unset, it follows the bot's role: `true` for the fleet's manager (`fleet.manager`) and `false` for every other bot. An explicit value on the bot, or in `defaults:`, wins in either direction, so a worker opts in with `remote_control: true` and a fleet that wants it nowhere sets `defaults: {remote_control: false}`. `config explain bot.remote_control --bot <bot>` reports an unset value as `source: role_default`, decided by `fleet.manager`.
+
+Two behaviours change with it. While Remote Control is up, Claude Code arms neither its own automatic continue nor its usage-limit menu at a usage limit; without it, both arm, and the menu's options can come in any order, usage credits first included. keepalive chooses "Stop and wait for limit to reset" only by that label (`keepalive.sh`, #996), and no framework send types into a pane while a menu holds it (`pane_is_menu` in `lib-common.sh`). And a plain-text answer to a Telegram message reaches Telegram through Remote Control's relay (`plane-rc-relay-out.sh`), so a bot without it answers through the channel's reply tool only.
 
 ### `bots.<name>.prompt_suggestions`
 
@@ -1101,7 +1103,9 @@ Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI 
 `claudlobby --fleet <fleet> config explain bot.model --bot <bot>` name the
 declaration or built-in default that supplied supported scalar settings.
 `config explain GITHUB_PAT --bot <bot>` uses the environment tier register.
-These reads report source and set/unset state without printing values. Nested
+These reads report source and set/unset state without printing values. A bot
+field whose built-in default follows the bot's role, `remote_control` today,
+reports `source: role_default` with `fleet.manager` as its declaration. Nested
 merge fields such as `bot.env` are explicitly unsupported; `bot.env` is read
 from the bot stanza itself and does not inherit `defaults.env`.
 

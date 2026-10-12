@@ -116,9 +116,11 @@ class TestRenderStanza:
         assert "token_env: TELEGRAM_TOKEN_X" in stanza
         assert "require_mention: true" in stanza
 
-    def test_remote_control_false_rendered(self):
-        inp = NewBotInputs(name="x", expertise=["a"], remote_control=False)
-        assert "remote_control: false" in render_stanza(inp)
+    @pytest.mark.parametrize(("value", "line"), [(True, "remote_control: true"),
+                                                (False, "remote_control: false")])
+    def test_an_explicit_remote_control_is_rendered_either_way(self, value, line):
+        inp = NewBotInputs(name="x", expertise=["a"], remote_control=value)
+        assert line in render_stanza(inp)
 
     def test_remote_control_none_omitted(self):
         inp = NewBotInputs(name="x", expertise=["a"], remote_control=None)
@@ -334,9 +336,10 @@ def test_interactive_collect_lists_public_base_expertise_only(
     assert result.dangerously_skip_permissions is None
 
 
-def _wizard_answers(dangerous: str) -> list[str]:
-    """interactive_collect's answer sequence; index 14 is the
-    --dangerously-skip-permissions prompt (parameterized here)."""
+def _wizard_answers(dangerous: str, remote: str = "") -> list[str]:
+    """interactive_collect's answer sequence; index 13 is the --remote-control
+    prompt and index 14 the --dangerously-skip-permissions prompt
+    (parameterized here)."""
     return [
         "bot-a",
         "1",
@@ -351,7 +354,7 @@ def _wizard_answers(dangerous: str) -> list[str]:
         "none",
         "none",
         "none",
-        "",  # remote_control (blank = default)
+        remote,  # --remote-control? (blank = the default offered)
         dangerous,  # --dangerously-skip-permissions?
         "",
         "",
@@ -378,6 +381,32 @@ def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch)
     result = interactive_collect(paths)
     assert result.dangerously_skip_permissions is True
     assert "dangerously_skip_permissions: true" in render_stanza(result)
+
+
+@pytest.mark.parametrize(("defaults", "answer", "line"), [
+    ("", "", None),                              # inherits the role default, off
+    ("", "y", "remote_control: true"),           # a worker opts in
+    ("  defaults:\n    remote_control: true\n", "", None),  # inherits defaults:, on
+    ("  defaults:\n    remote_control: true\n", "n", "remote_control: false"),
+])
+def test_interactive_collect_offers_the_inherited_remote_control(
+        tmp_path, monkeypatch, defaults, answer, line):
+    """#2325: a new bot is never the fleet manager, so the wizard offers what
+    it would inherit (the fleet's defaults:, else off) and writes a line only
+    for an answer that departs from it."""
+    root = tmp_path / "repo"
+    (root / "library" / "expertise").mkdir(parents=True)
+    (root / "library" / "expertise" / "base-engineering.md").write_text("base")
+    paths = Paths(root=root, package=replace(source_package(), library=root / "library"))
+    paths.fleet_yaml.write_text(FLEET_WITH_BOTS.replace("\n  bots:", defaults + "\n  bots:"))
+
+    answers = iter(_wizard_answers("", answer))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    stanza = render_stanza(interactive_collect(paths))
+    if line is None:
+        assert "remote_control:" not in stanza
+    else:
+        assert line in stanza
 
 
 def test_interactive_collect_retains_pasted_voice_without_writing(tmp_path, monkeypatch):
@@ -477,6 +506,27 @@ def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys, monkeypa
 
     with pytest.raises(SystemExit):  # cut clean: the old opt-out is gone
         main(base + ["--no-dangerously-skip-permissions"])
+
+
+def test_cli_remote_control_is_a_three_way_choice(tmp_path, capsys, monkeypatch):
+    """#2325: remote_control's default follows the role and a created bot is
+    never the fleet manager, so no flag writes no line (the bot is off);
+    --remote-control opts it in and --no-remote-control pins it off."""
+    from claudlobby.__main__ import main
+    from claudlobby import context
+
+    paths = Paths(root=tmp_path, package=source_package())
+    (tmp_path / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    base = ["--root", str(tmp_path), "bot", "create", "--name", "x",
+            "--expertise", "software-engineering", "--dry-run", "--yes"]
+
+    assert main(base) == 0
+    assert "remote_control:" not in capsys.readouterr().out  # the tmp path names the test
+    assert main(base + ["--remote-control"]) == 0
+    assert "remote_control: true" in capsys.readouterr().out
+    assert main(base + ["--no-remote-control"]) == 0
+    assert "remote_control: false" in capsys.readouterr().out
 
 
 def test_bot_create_generated_fleet_preview_matches_explicit_selector(tmp_path, capsys, monkeypatch):
