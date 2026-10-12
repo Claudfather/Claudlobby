@@ -2871,9 +2871,11 @@ def compose_settings_local(
     # Build permissions block — layered composition
     deny_patterns: list[str] = []
 
-    # Operator-only destructive doors are never bot equipment. These narrow
-    # command denies catch ordinary direct invocations before the CLI guard;
-    # native ancestry still supplies the selected-host accidental-context check.
+    # Operator-only doors, destructive or deciding for a human, are never bot
+    # equipment. These narrow command denies catch ordinary direct invocations
+    # before the CLI guard; native ancestry still supplies the selected-host
+    # accidental-context check. A bot's own permission verbs (request, check,
+    # show) stay reachable.
     deny_patterns.extend((
         "Bash(claudlobby bot remove *)", "Bash(claudlobby * bot remove *)",
         "Bash(claudlobby fleet move *)", "Bash(claudlobby * fleet move *)",
@@ -2881,6 +2883,9 @@ def compose_settings_local(
         "Bash(claudlobby host repos pull *)", "Bash(claudlobby * host repos pull *)",
         "Bash(claudlobby host channels approve*)", "Bash(claudlobby * host channels approve*)",
         "Bash(claudlobby host owner *)", "Bash(claudlobby * host owner *)",
+        "Bash(claudlobby task permission approve*)", "Bash(claudlobby * task permission approve*)",
+        "Bash(claudlobby task permission decline*)", "Bash(claudlobby * task permission decline*)",
+        "Bash(claudlobby task permission revoke*)", "Bash(claudlobby * task permission revoke*)",
     ))
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime

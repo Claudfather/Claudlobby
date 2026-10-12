@@ -393,6 +393,7 @@ class TestGrantUnion:
                 "config plan", "config diff plan", "migration apply plan", "plane emit --file request.json",
                 "plane emit-batch --file request.json", "_task-recheck-tick",
                 "host owner initialize", "host owner confirm", "host owner revoke", "host owner status",
+                "task permission approve p", "task permission decline p", "task permission revoke p",
             )
             patterns = [rule[5:-1] for rule in allow if rule.startswith("Bash(") and rule.endswith(")")]
             for command in operator_commands:

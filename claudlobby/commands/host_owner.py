@@ -1,6 +1,8 @@
 """Explicit local-console owner administration, separate from browser authority.
 
 An operator terminal is a usability/accident boundary, not same-UID isolation.
+Before it opens, a change runs the operator-context check that the other
+operator-only commands run (native unit ancestry on an activated host).
 Processes with the operator's privileges can edit the same authority files.
 These doors never grant website membership. Ordinary messages require an
 explicit local actor/fleet approval separate from read pairing.
@@ -32,9 +34,11 @@ _ACTION_LABELS = {
 
 
 @contextmanager
-def _terminal():
+def _terminal(root):
     if not sys.stdin.isatty():
         raise CommandFailure("conflict", "owner changes require an interactive operator terminal")
+    from .operator_context import require_operator_context
+    require_operator_context(root)
     try:
         # A terminal is not seekable: buffered r+ would require seeks between
         # reading and writing. FileIO keeps this duplex console unbuffered.
@@ -311,7 +315,7 @@ def dispatch(args):
                                   "feedback_grants": [asdict(feedback) for feedback in feedbacks],
                                   "permission_grants": [asdict(p) for p in status.permission_grants]},
                                  lines=tuple(lines))
-        with _terminal() as terminal:
+        with _terminal(paths.root) as terminal:
             if args.owner_action == "initialize-connected":
                 owner = _active_owner(store)
                 _describe(terminal, owner)

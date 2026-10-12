@@ -3,7 +3,9 @@
 from contextlib import contextmanager
 import io
 import json
+from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -35,11 +37,33 @@ def terminal(monkeypatch, answers):
     output.readline = lambda size=-1: next(answers)
 
     @contextmanager
-    def opened():
+    def opened(root):
         yield output
 
     monkeypatch.setattr(host_owner, "_terminal", opened)
     return output
+
+
+def unit_ancestry_refuses(monkeypatch):
+    """A selected host whose native ancestry places this process in a managed
+    unit, with a terminal on stdin that must not open first. Returns the roots
+    the operator-context check received."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import operator_context
+
+    roots = []
+
+    def inside_a_unit(root=None):
+        roots.append(root)
+        raise CommandFailure("conflict", "operation requires an operator shell outside a managed unit")
+
+    def console(*args, **kwargs):
+        pytest.fail("the terminal opened before unit ancestry was read")
+
+    monkeypatch.setattr(operator_context, "require_operator_context", inside_a_unit)
+    monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(host_owner, "io", SimpleNamespace(FileIO=console, TextIOWrapper=io.TextIOWrapper))
+    return roots
 
 
 def test_status_does_not_initialize_or_mint_identity(tmp_path, capsys):
@@ -70,6 +94,17 @@ def test_changes_require_terminal_and_reject_json(owner, monkeypatch, action):
     monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
     assert call(owner, action) == 4
     assert call(owner, action, "--json") == 2
+    assert owner.current_grant() is None
+
+
+@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source"])
+def test_changes_read_unit_ancestry_before_the_terminal(owner, monkeypatch, capsys, action):
+    # No selector variables and a terminal on stdin: unit ancestry refuses,
+    # before the terminal opens.
+    roots = unit_ancestry_refuses(monkeypatch)
+    assert call(owner, action) == 4
+    assert "outside a managed unit" in capsys.readouterr().err
+    assert [Path(root).resolve() for root in roots] == [owner.root.resolve()]
     assert owner.current_grant() is None
 
 
