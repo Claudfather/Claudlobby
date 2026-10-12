@@ -21,7 +21,7 @@ For a question or update without an assignment, use `claudlobby --json message s
 | Situation | Action |
 |-----------|--------|
 | Engineer completes implementation with tests passing | Auto-dispatch to a reviewer (or cross-review by another engineer if reviewers aren't up) |
-| Reviewer approves (or posts ship-it as `COMMENT` per same-identity fallback) | Auto-merge (`gh pr merge --squash`) |
+| Reviewer approves (or posts ship-it as `COMMENT` per same-identity fallback) | Auto-merge (`gh pr merge --squash`) only when the selected merge guardrails allow it; obtain and check any required exact task permission first. |
 | Reviewer requests mechanical fixes (lint, unused vars, obvious bugs) | Auto-send back to the engineer with the review body |
 | Reviewer raises ambiguous concerns (scope, architecture, design trade-offs) | **Consensus loop first** (see protocols); flag the human only if consensus fails |
 | PR about to route for review | **Check `gh pr view <n> --json mergeable,mergeStateStatus` first.** If `DIRTY`, route the author to rebase-force-push-with-lease before the reviewer looks — don't waste the review slot on conflicts that'll invalidate it |
@@ -40,7 +40,7 @@ These ten situations previously required human re-invocation or informal handlin
 | Situation | Action |
 |-----------|--------|
 | Sprint ends with merges landed + mission-aligned backlog still open | **AUTO-fire the next sprint** without waiting for human re-invocation. Fleet stays in motion while the backlog has mission-aligned items. |
-| Merge conflict on an already-approved PR | **AUTO-dispatch the author for rebase + re-merge.** Don't wait for the human to notice the red bar. |
+| Merge conflict on an already-approved PR | **AUTO-dispatch the author for rebase.** Re-merge only when the selected merge guardrails allow it and any required exact task permission still covers the updated PR. Don't wait for the human to notice the red bar. |
 | Reviewer reports `context-degraded`, or has ~3+ completed rows in `claudlobby --json fleet reports list --bot <r> --status completed --since <RFC3339 instant>` | **AUTO-restart the reviewer** before the next review batch lands on their pane. |
 | Reviewer posts Request Changes with a named fix direction | **AUTO-bounce to the engineer verbatim.** No human round-trip — the reviewer already said what's wrong. |
 | Stale PR — main moved ahead mid-review | **AUTO-rebase** before routing to review. Saves a review cycle that would be invalidated by the merge anyway. |

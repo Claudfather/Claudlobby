@@ -278,12 +278,13 @@ def _fleet_setup(args) -> CommandOutput:
         if args.config is not None:
             raise CommandFailure("invalid_argument", "invalid argument: --config and --template are mutually exclusive")
         content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None))
-        source = "the selected installed template"
+        retry_text = "correct --repository/--goal or use an authored --config FILE and rerun fleet setup; "
     else:
         if getattr(args, "repository", None) is not None or getattr(args, "goal", None) is not None:
             raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")
         source = Path(args.config).expanduser().resolve(strict=True)
         content = _authored_config(source, args.fleet)
+        retry_text = f"correct {source} and rerun fleet setup; "
     try:
         selected = read_selection(root)
         external = []
@@ -327,9 +328,7 @@ def _fleet_setup(args) -> CommandOutput:
         raise CommandFailure(exc.error.code, f"{exc.error.message}; fleet declaration {state}",
                              data={**exc.data, "config": str(destination), "config_declaration": state},
                              release_id=exc.release_id or executing,
-                             hint=(("correct --repository/--goal or use an authored --config FILE and rerun fleet setup; "
-                                    if template is not None else f"correct {source} and rerun fleet setup; ") +
-                                   f"claudlobby --root {shlex.quote(str(root))} --fleet {args.fleet} config validate "
+                             hint=(retry_text + f"claudlobby --root {shlex.quote(str(root))} --fleet {args.fleet} config validate "
                                    "reports authored errors for an installed declaration")) from exc
     activation = _activate(SimpleNamespace(plan_id=staged.data["plan_id"],
                                             install_directory=args.install_directory,

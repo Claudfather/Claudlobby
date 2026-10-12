@@ -91,6 +91,8 @@ class TestRevenueWebAppCandidate:
             assert (timers / f"{fleet.service_prefix}.manager-checkin.plist").is_file()
             assert f"{fleet.service_prefix}.manager-checkin" not in (timers / "DORMANT").read_text()
             assert "Auto-merge (`gh pr merge --squash`)" in instructions
+            assert "only when the selected merge guardrails allow it" in instructions
+            assert "Re-merge only when the selected merge guardrails allow it" in instructions
             assert "auto-merge and re-merge guidance: reviewer approval alone never authorizes a merge" in instructions
             assert "check its current scope immediately before acting" in instructions
         assert bot.channels == []
