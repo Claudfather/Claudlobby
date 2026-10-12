@@ -220,6 +220,18 @@ def register_release_subparsers(sub):
     repair.add_argument("--fleet", dest="repair_fleet", required=True, metavar="FLEET")
     repair.add_argument("--bot", required=True, metavar="BOT")
     repair.add_argument("--reason", required=True, metavar="TEXT")
+    reset = _route(hosts, "repair-after-reset", "host.repair-after-reset",
+                   "Archive every verified-dead candidate start after a host reset")
+    reset.description = ("Operator only. Starts nothing. For a host that reset or lost power while "
+                         "its selected activation was pending ingest_started, bots_started, verified "
+                         "or producers_resumed. Requires every recorded start's unit inactive with "
+                         "identical frozen bytes, every published candidate unit quiet, no private bot "
+                         "tmux server, and the plane socket down. Archives those starts and reopens "
+                         "ingest_started; then run the sealed candidate's host activate --resume once "
+                         "to start every candidate again.")
+    reset.set_defaults(func=_dispatch_host)
+    reset.add_argument("reset_activation_id", metavar="ACTIVATION_ID")
+    reset.add_argument("--reason", required=True, metavar="TEXT")
     abort = _route(hosts, "abort-adoption", "host.abort-adoption",
                    "Abort an unsealed first adoption stopped while pausing producers")
     abort.description = ("Operator-only, from a sealed release CLI. Restores only the original producer "

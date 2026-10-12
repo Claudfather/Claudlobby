@@ -11,7 +11,7 @@ import hashlib
 import base64
 import json
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
@@ -21,9 +21,9 @@ import subprocess
 import sys
 import time
 
-from .activation_state import (ACTIVATION_WAIT_S, ActivationError, ActivationRecord, ActivationRefusal,
-                               CandidateDisabledOverride, STEPS, lock_busy,
-                               locked_activation, read_activation, read_selection)
+from .activation_state import (ACTIVATION_WAIT_S, START_STEPS, STEPS, ActivationError, ActivationRecord,
+                               ActivationRefusal, CandidateDisabledOverride, _RUNNING_QUIESCE_STEPS, lock_busy,
+                               locked_activation, read_activation, read_selection, resumable_running_step)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import RuntimeEvidence, assert_quiescent, observe_started_unit, start_unit
@@ -552,6 +552,12 @@ def _legacy_quiet(adapter, pause, phase, sockets, *, candidate_started=frozenset
                          target=unit["target"], socket_path=sockets.get(unit["target"]))
 
 
+def _oneshot_producer(phase: str, installed) -> bool:
+    """A directly started producer service runs once: with no recorded result,
+    whether it ran is unknown, so neither the resume nor a repair may start it again."""
+    return phase == "producers" and Path(installed).suffix == ".service"
+
+
 def _startable_producers(entries):
     """Publish paired services, but start only their declared timers."""
     timer_services = {entry["service"] for entry in entries if entry["service"]}
@@ -947,7 +953,7 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
                     adapter=adapter, fence=fence, readiness=readiness)
                 saved = effect["result"]
                 if saved is None:
-                    if phase == "producers" and Path(entry["installed"]).suffix == ".service":
+                    if _oneshot_producer(phase, entry["installed"]):
                         raise ActivationError("one-shot producer start has unknown effect; inspect its native/journal witness")
                     store.record_start_result(activation_id, source=source, target=entry["target"],
                                               details=observed.details, digest=observed.digest)
@@ -1013,42 +1019,6 @@ def _verify_candidate_startup(root, store, activation_id, release, starts,
         store.complete(activation_id, "verified", evidence_digest=digest)
 
 
-_RESUMABLE_RUNNING_STEPS = frozenset({
-    "queues_classified", "backup_saved", "migration_applied",
-    "selection_switched", "configuration_applied",
-})
-_RESUMABLE_START_STEPS = frozenset({"ingest_started", "bots_started", "verified", "producers_resumed"})
-_BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
-                                    "sessions_quiesced", "ingest_quiesced"})
-_RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
-
-
-def resumable_running_step(record: ActivationRecord) -> str | None:
-    """Return a supported same-ID stage; a missing start journal never implies no effect."""
-    completed = record.body["completed"]
-    # An early adoption abort in progress refuses forward steps; only its
-    # explicit abort-adoption rerun can continue that record.
-    if (record.status != "activating" or "adoption_abort" in record.body
-            or completed != list(STEPS[:len(completed)])
-            or not isinstance(record.body["intent"].get("install_directory"), str)
-            or len(completed) >= len(STEPS)):
-        return None
-    step = STEPS[len(completed)]
-    bootstrap = (record.body["previous_selection"] is None
-                 and record.body["intent"].get("source_kind") != "legacy-unsealed")
-    supported = step in _RESUMABLE_RUNNING_STEPS or bootstrap and step in _BOOTSTRAP_EMPTY_STEPS
-    if not bootstrap and step in _RUNNING_QUIESCE_STEPS:
-        # Parking and native pause converge; a begun handoff needs a per-bot
-        # witness with no unknown intent, or it stays refused for inspection.
-        effects = record.body.get("handoff_effects")
-        supported = (step != "sessions_handed_off" or record.body["pending"] is None
-                     or isinstance(effects, dict) and None not in effects.values())
-    if step in _RESUMABLE_START_STEPS:
-        supported = (isinstance(record.body.get("start_effects"), dict)
-                     and isinstance(record.body.get("start_phases"), dict))
-    return step if supported and record.body["pending"] in (None, step) else None
-
-
 def _published_tmux_dir(installed: Path, content: bytes) -> str:
     """The private tmux directory named by the frozen published unit bytes."""
     if installed.suffix == ".plist":
@@ -1066,6 +1036,56 @@ def _published_tmux_dir(installed: Path, content: bytes) -> str:
     return tmpdir
 
 
+def _guarded_repair(what: str, body, root, reason, adapter, *args):
+    """Check one repair's operator inputs, then run its ``body``.
+
+    ``body(root, package, adapter, reason, writing, *args)`` appends to
+    ``writing`` just before its single journal write. Every failure before that
+    is an ``ActivationRefusal`` (nothing changed); a failure after it keeps its
+    own type, because the atomic replace may already have landed.
+    """
+    writing = []
+    try:
+        root = Path(root).expanduser()
+        if not root.is_absolute() or not root.is_dir():
+            raise ActivationRefusal(f"{what} requires an explicit existing absolute data root")
+        if (not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+                or not reason.isprintable()):
+            raise ActivationRefusal(f"{what} requires a short reason on one printable line")
+        package = get_resources()
+        return body(root.resolve(), package, adapter if adapter is not None else Adapter(package),
+                    reason.strip(), writing, *args)
+    except ActivationRefusal:
+        raise
+    except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        if writing:
+            raise
+        if lock_busy(str(exc)):
+            raise ActivationRefusal(str(exc)) from exc
+        raise ActivationRefusal(f"{what} could not verify the recorded activation "
+                                f"({type(exc).__name__})") from exc
+
+
+def _selected_candidate(root, activation_id, intent):
+    """The activation's frozen plan and sealed release, which must be the host's selection."""
+    plan = read_plan(root, intent["plan_id"])
+    release = read_release(root, intent["release_id"])
+    if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
+        raise ActivationRefusal("activation plan differs from its sealed release")
+    if read_selection(root) != {"schema": 1, "activation_id": activation_id,
+                                "release_id": release.release_id, "plan_id": plan.plan_id}:
+        raise ActivationRefusal("host selection is not this activation's candidate")
+    return plan
+
+
+def _intent_matches(effect, entry, item) -> bool:
+    """A recorded start is exactly its frozen publication, with its phase's fence shape."""
+    fenced = isinstance(effect.get("fence"), dict) if effect["phase"] == "bots" else effect.get("fence") is None
+    return (fenced and effect["phase"] == item["phase"] == entry["phase"]
+            and effect["target"] == entry["target"]
+            and effect["sha256"] == entry["after"]["sha256"] == item["sha256"])
+
+
 def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: str,
                             reason: str, adapter: Adapter | None = None) -> ActivationRecord:
     """Archive one verified-dead unresolved candidate bot start; never start anything.
@@ -1079,42 +1099,16 @@ def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: 
     (nothing changed); a failure after entering the write keeps its own type,
     because the atomic replace may already have landed.
     """
-    writing = []
-    try:
-        return _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing)
-    except ActivationRefusal:
-        raise
-    except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
-        if writing:
-            raise
-        if lock_busy(str(exc)):
-            raise ActivationRefusal(str(exc)) from exc
-        raise ActivationRefusal("start repair could not verify the recorded activation "
-                                f"({type(exc).__name__})") from exc
+    return _guarded_repair("start repair", _repair_failed_bot_start, root, reason, adapter,
+                           activation_id, fleet, bot)
 
 
-def _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing):
-    root = Path(root).expanduser()
-    if not root.is_absolute() or not root.is_dir():
-        raise ActivationRefusal("start repair requires an explicit existing absolute data root")
-    root = root.resolve()
-    if (not isinstance(reason, str) or not reason.strip() or len(reason) > 500
-            or not reason.isprintable()):
-        raise ActivationRefusal("start repair requires a short reason on one printable line")
-    package = get_resources()
-    adapter = adapter if adapter is not None else Adapter(package)
+def _repair_failed_bot_start(root, package, adapter, reason, writing, activation_id, fleet, bot):
     with locked_activation(root) as store:
         record = read_activation(root, activation_id)
-        intent = record.body["intent"]
         if record.body["pending"] != "bots_started" or resumable_running_step(record) != "bots_started":
             raise ActivationRefusal("start repair requires a pending bots_started activation")
-        plan = read_plan(root, intent["plan_id"])
-        release = read_release(root, intent["release_id"])
-        if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-            raise ActivationRefusal("activation plan differs from its sealed release")
-        if read_selection(root) != {"schema": 1, "activation_id": activation_id,
-                                    "release_id": release.release_id, "plan_id": plan.plan_id}:
-            raise ActivationRefusal("host selection is not this activation's candidate")
+        plan = _selected_candidate(root, activation_id, record.body["intent"])
         manager = _catalog(units.load_unit_pause(store, activation_id).enrollment["catalog"])[0]
         matches = [(declaration, item) for declaration, item in planned_units(plan, manager)
                    if item["enroll"] and item["phase"] == "bots"
@@ -1123,54 +1117,185 @@ def _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, w
             raise ActivationRefusal("named fleet/bot is not exactly one candidate bot unit")
         declaration, item = matches[0]
         source = str(declaration.source)
-        entries = [entry for entry in enrollment.candidate_entries(store, activation_id, "bots")
-                   if entry["source"] == source]
+        placements = enrollment.candidate_placements(store, activation_id)[1]
+        entries = [entry for entry in placements["bots"] if entry["source"] == source]
         effect = record.body["start_effects"].get(source)
         if len(entries) != 1 or effect is None:
             raise ActivationRefusal("named bot has no recorded candidate start intent")
         if effect["result"] is not None:
             raise ActivationRefusal("named bot has a durable start result; nothing to repair")
         entry = entries[0]
-        if (effect["phase"] != "bots" or effect["target"] != entry["target"]
-                or effect["sha256"] != entry["after"]["sha256"] or effect["sha256"] != item["sha256"]
-                or not isinstance(effect.get("fence"), dict)):
+        if not _intent_matches(effect, entry, item):
             raise ActivationRefusal("recorded start intent differs from frozen publication")
-        # Native ancestry over this activation's recorded placements, as activation
-        # itself checks; ordinary inventory cannot classify a partial start.
-        for phase in enrollment.PHASES:
-            for placement in enrollment.candidate_entries(store, activation_id, phase):
-                if adapter.call("svc_activation_assert_external", placement["installed"],
-                                placement["target"], str(os.getpid())).returncode:
-                    raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
-                                            "use an operator shell")
-        installed = Path(entry["installed"])
-        try:
-            content = installed.read_bytes()
-            source_bytes = declaration.source.read_bytes()
-        except OSError as exc:
-            raise ActivationRefusal("source or installed bot unit is unreadable") from exc
-        if (hashlib.sha256(content).hexdigest() != effect["sha256"]
-                or hashlib.sha256(source_bytes).hexdigest() != effect["sha256"]):
-            raise ActivationRefusal("source or installed bot unit differs from the frozen start")
-        socket_path = (Path(_published_tmux_dir(installed, content)) / f"tmux-{os.getuid()}"
-                       / declaration.source.stem)
-        try:
-            dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
-                                    socket_path=socket_path)
-        except ActivationError as exc:
-            if "socket" in getattr(exc, "detail", ""):
-                raise ActivationRefusal("named bot's private tmux server still accepts or cannot be "
-                                        "observed; inspect that server before repair") from exc
-            raise ActivationRefusal("named bot's unit is not verified inactive; if it is active "
-                                    "(exited) or restarting, explicitly stop that exact verified "
-                                    "bot unit, then retry") from exc
-        if dead.details["socket_state"] not in {"absent", "refused"}:
-            raise ActivationRefusal("named bot's private tmux server is not verified absent")
+        _assert_external_caller(adapter, placements)
+        dead = _verified_dead_start(adapter, declaration, entry, effect, "named bot")
         writing.append(True)
         return store.archive_failed_bot_start(
             activation_id, source=source, target=entry["target"], sha256=effect["sha256"],
             fence=effect["fence"], evidence={"details": dead.details, "digest": dead.digest},
-            reason=reason.strip(), repair_artifact=package.artifact_id)
+            reason=reason, repair_artifact=package.artifact_id)
+
+
+def _assert_external_caller(adapter, placements: dict) -> None:
+    """Native ancestry over this activation's recorded placements, as activation
+    itself checks; ordinary inventory cannot classify a partial start."""
+    for entries in placements.values():
+        for placement in entries:
+            if adapter.call("svc_activation_assert_external", placement["installed"],
+                            placement["target"], str(os.getpid())).returncode:
+                raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
+                                        "use an operator shell")
+
+
+def _verified_dead_start(adapter, declaration, entry, effect, who: str) -> RuntimeEvidence:
+    """Prove one recorded candidate start's unit inactive, with matching frozen bytes.
+
+    A bot's private tmux server must also be absent or refuse connections.
+    ``who`` names the start in each refusal.
+    """
+    installed = Path(entry["installed"])
+    try:
+        content = installed.read_bytes()
+        source_bytes = declaration.source.read_bytes()
+    except OSError as exc:
+        raise ActivationRefusal(f"{who}: source or installed unit is unreadable") from exc
+    if (hashlib.sha256(content).hexdigest() != effect["sha256"]
+            or hashlib.sha256(source_bytes).hexdigest() != effect["sha256"]):
+        raise ActivationRefusal(f"{who}: source or installed unit differs from the frozen start")
+    bot = effect["phase"] == "bots"
+    socket_path = (Path(_published_tmux_dir(installed, content)) / f"tmux-{os.getuid()}"
+                   / declaration.source.stem) if bot else None
+    try:
+        dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
+                                socket_path=socket_path)
+    except ActivationError as exc:
+        if "socket" in getattr(exc, "detail", ""):
+            raise ActivationRefusal(f"{who}'s private tmux server still accepts or cannot be "
+                                    "observed; inspect that server before repair") from exc
+        raise ActivationRefusal(f"{who}'s unit is not verified inactive; if it is active "
+                                "(exited), failed or restarting, explicitly stop that exact verified "
+                                "unit (and reset-failed it), then retry") from exc
+    if bot and dead.details["socket_state"] not in {"absent", "refused"}:
+        raise ActivationRefusal(f"{who}'s private tmux server is not verified absent")
+    return dead
+
+
+def _host_boot() -> dict | None:
+    """This boot's identity, recorded beside a host-reset repair for the audit trail.
+
+    Linux reads the kernel's boot id and boot time; macOS asks ``sysctl`` for
+    the boot session UUID only. Anything unreadable records ``None``.
+    """
+    try:
+        if sys.platform == "darwin":
+            # Only the UUID: one parser of kern.boottime already exists (lib-common.sh).
+            boot_id = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True,
+                                     text=True, timeout=5, check=True).stdout.strip()
+            return {"boot_id": boot_id, "booted_at": None} if boot_id else None
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+    except (OSError, subprocess.SubprocessError, StopIteration, ValueError, IndexError):
+        return None
+    return {"boot_id": boot_id, "booted_at": datetime.fromtimestamp(btime, timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def _plane_state(root: Path) -> str:
+    """The plane socket's handshake state; only "down" (no socket, or refused) is dead.
+
+    A listener that is slow, unreachable or answers garbage is not proof the
+    daemon is gone. Tests replace this native observation seam.
+    """
+    from .plane.daemon import probe_daemon_state, socket_path
+    return probe_daemon_state(socket_path(root))
+
+
+@dataclass(frozen=True)
+class HostResetRepair:
+    """The repaired record and the targets this one write archived."""
+    record: ActivationRecord
+    archived_targets: tuple[str, ...]
+
+
+def repair_starts_after_host_reset(root: Path, activation_id: str, *, reason: str,
+                                   adapter: Adapter | None = None) -> HostResetRepair:
+    """Archive every verified-dead candidate start after a host reset; never start anything.
+
+    A host that resets while a start step is next (``ingest_started``,
+    ``bots_started``, ``verified`` or ``producers_resumed``) loses every
+    started candidate at once, and the resume only re-observes recorded
+    starts, so it cannot continue. This proves each recorded start dead (its
+    unit inactive, a bot's private tmux server gone, the plane not answering)
+    and every published candidate quiet, as the resume's republish will
+    require, then archives the starts and reopens ``ingest_started`` in one
+    write. The sealed candidate's ``--resume`` then starts every candidate
+    fresh. Like ``repair-start`` it may run from a newer CLI: it only reads the
+    frozen plan/release and observes units through its own adapter.
+
+    A one-shot producer service started with no recorded result is refused,
+    as the resume refuses it: its effect is unknown, so it needs inspection.
+
+    Every failure before the single journal write is an ``ActivationRefusal``
+    (nothing changed); a failure after entering the write keeps its own type,
+    because the atomic replace may already have landed.
+    """
+    return _guarded_repair("host-reset repair", _repair_starts_after_host_reset, root, reason, adapter,
+                           activation_id)
+
+
+def _repair_starts_after_host_reset(root, package, adapter, reason, writing, activation_id):
+    with locked_activation(root) as store:
+        record = read_activation(root, activation_id)
+        if resumable_running_step(record) not in START_STEPS:
+            raise ActivationRefusal("host-reset repair requires an activation stopped at one of "
+                                    + ", ".join(START_STEPS))
+        plan = _selected_candidate(root, activation_id, record.body["intent"])
+        effects = record.body["start_effects"]
+        if not effects:
+            raise ActivationRefusal("no candidate start is recorded; resume directly")
+        manager = _catalog(units.load_unit_pause(store, activation_id).enrollment["catalog"])[0]
+        planned = {str(declaration.source): (declaration, item)
+                   for declaration, item in planned_units(plan, manager) if item["enroll"]}
+        frozen, placements = enrollment.candidate_placements(store, activation_id)
+        entries = {entry["source"]: entry for phase in placements.values() for entry in phase}
+        for source, effect in sorted(effects.items()):
+            if source not in planned or source not in entries:
+                raise ActivationRefusal(f"recorded start {source} is not a frozen candidate unit")
+            if not _intent_matches(effect, entries[source], planned[source][1]):
+                raise ActivationRefusal(f"recorded start of {entries[source]['target']} differs "
+                                        "from frozen publication")
+            if effect["result"] is None and _oneshot_producer(effect["phase"], entries[source]["installed"]):
+                raise ActivationRefusal(f"one-shot producer start of {effect['target']} has an unknown "
+                                        "effect; inspect its native/journal witness before repair")
+        _assert_external_caller(adapter, placements)
+        # Every unit the resume will republish must be quiet, recorded start or
+        # not: a published candidate that systemd started at boot loops on
+        # admission refusals, and the resume would refuse it after this write.
+        unquiet = enrollment.unquiet_candidates(adapter, frozen, [
+            entry for phase, phase_entries in placements.items()
+            if phase in record.body["start_phases"] for entry in phase_entries])
+        if unquiet:
+            raise ActivationRefusal("candidate units are not quiet; stop and reset each one (a "
+                                    "collision needs inspection), then retry: " + "; ".join(unquiet))
+        evidence = {}
+        for source, effect in sorted(effects.items()):
+            entry = entries[source]
+            dead = _verified_dead_start(adapter, planned[source][0], entry, effect, entry["target"])
+            evidence[source] = {"details": dead.details, "digest": dead.digest}
+        try:
+            plane = _plane_state(root)
+        except Exception as exc:
+            raise ActivationRefusal("the plane daemon's socket cannot be observed; inspect it "
+                                    "before repair") from exc
+        if plane != "down":
+            raise ActivationRefusal(f"the plane socket is {plane}, not down; stop whatever listens "
+                                    "on it, or this is not a host reset")
+        writing.append(True)
+        repaired = store.archive_starts_after_host_reset(
+            activation_id, attempts=effects, evidence=evidence, reason=reason,
+            repair_artifact=package.artifact_id, host_boot=_host_boot())
+        return HostResetRepair(repaired, tuple(sorted(effect["target"] for effect in effects.values())))
 
 
 def _frozen_unit(row: dict) -> EnrolledUnit:
@@ -1268,7 +1393,7 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                     validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
                 candidate_targets[source_path] = enrollment._target(manager, domain, declaration.source)
         candidate_started = set()
-        if step in _RESUMABLE_START_STEPS:
+        if step in START_STEPS:
             for source_path, effect in record.body["start_effects"].items():
                 candidate = starts.get(source_path)
                 if (candidate is None or effect.get("phase") != candidate[1]["phase"]
