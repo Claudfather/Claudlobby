@@ -33,9 +33,9 @@ STEPS = (
     "selection_switched", "configuration_applied", "ingest_started",
     "bots_started", "verified", "producers_resumed",
 )
-# Pending steps a host reset can strand with every started candidate dead:
-# ``host repair-after-reset`` reopens them from ``ingest_started``.
-RESET_REPAIRABLE_STEPS = ("ingest_started", "bots_started", "verified")
+# The candidate start steps. A host reset strands any of them with every
+# started candidate dead; ``host repair-after-reset`` reopens them all.
+START_STEPS = STEPS[STEPS.index("ingest_started"):]
 ROLLBACK_STEPS = (
     "producers_paused", "sessions_quiesced", "ingest_quiesced",
     "compatibility_verified", "candidate_units_removed", "configuration_restored",
@@ -153,6 +153,41 @@ def read_selection(root: Path) -> dict | None:
             or result["schema"] != 1):
         raise ActivationError("invalid release selection")
     return result
+
+
+_RESUMABLE_RUNNING_STEPS = frozenset({
+    "queues_classified", "backup_saved", "migration_applied",
+    "selection_switched", "configuration_applied",
+})
+_BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
+                                    "sessions_quiesced", "ingest_quiesced"})
+_RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
+
+
+def resumable_running_step(record: ActivationRecord) -> str | None:
+    """Return a supported same-ID stage; a missing start journal never implies no effect."""
+    completed = record.body["completed"]
+    # An early adoption abort in progress refuses forward steps; only its
+    # explicit abort-adoption rerun can continue that record.
+    if (record.status != "activating" or "adoption_abort" in record.body
+            or completed != list(STEPS[:len(completed)])
+            or not isinstance(record.body["intent"].get("install_directory"), str)
+            or len(completed) >= len(STEPS)):
+        return None
+    step = STEPS[len(completed)]
+    bootstrap = (record.body["previous_selection"] is None
+                 and record.body["intent"].get("source_kind") != "legacy-unsealed")
+    supported = step in _RESUMABLE_RUNNING_STEPS or bootstrap and step in _BOOTSTRAP_EMPTY_STEPS
+    if not bootstrap and step in _RUNNING_QUIESCE_STEPS:
+        # Parking and native pause converge; a begun handoff needs a per-bot
+        # witness with no unknown intent, or it stays refused for inspection.
+        effects = record.body.get("handoff_effects")
+        supported = (step != "sessions_handed_off" or record.body["pending"] is None
+                     or isinstance(effects, dict) and None not in effects.values())
+    if step in START_STEPS:
+        supported = (isinstance(record.body.get("start_effects"), dict)
+                     and isinstance(record.body.get("start_phases"), dict))
+    return step if supported and record.body["pending"] in (None, step) else None
 
 
 _LOCK_TOKEN = object()
@@ -456,30 +491,27 @@ class ActivationStore:
                                         host_boot: dict | None) -> ActivationRecord:
         """Archive every verified-dead candidate start and reopen ``ingest_started``.
 
-        For a host that lost every started candidate process at once (a reset
-        or power loss while ``ingest_started``, ``bots_started`` or
-        ``verified`` is next; ``verified`` can be next with nothing pending). Each attempt and its dead evidence move into
-        ``start_repairs``, the start steps the resume must redo leave
-        ``completed`` with their evidence, and ``ingest_started`` becomes
-        pending, all in one atomic write. The sealed candidate's resume then
-        starts the plane daemon and every bot fresh, as on a first start.
-        ``attempts`` must be exactly the recorded start effects, so none stays
-        behind unverified. Selection, publication and identity bindings stay.
+        For a host that lost every started candidate process at once: a reset
+        or power loss while a start step (:data:`START_STEPS`) is
+        next, which for ``verified`` can be with nothing pending. Each attempt
+        and its dead evidence move into ``start_repairs``, the start steps the
+        resume must redo leave ``completed`` with their evidence, and
+        ``ingest_started`` becomes pending, all in one atomic write. The sealed
+        candidate's resume then starts every candidate fresh, as on a first
+        start. ``attempts`` must be exactly the recorded start effects, so none
+        stays behind unverified. Selection, publication and identity bindings
+        stay. The guard is the resume's own admission
+        (:func:`resumable_running_step`), so no caller can reopen a record the
+        resume would refuse.
         """
         self.assert_locked()
         record = read_activation(self.root, activation_id)
         body = record.body
         effects = body.get("start_effects")
         repairs = body.setdefault("start_repairs", [])
-        reopen = STEPS[STEPS.index("ingest_started"):]
-        completed = body["completed"]
-        if (record.status != "activating" or completed != list(STEPS[:len(completed)])
-                or len(completed) >= len(STEPS) or STEPS[len(completed)] not in RESET_REPAIRABLE_STEPS
-                or body["pending"] not in (None, STEPS[len(completed)])
-                or "configuration_applied" not in completed
-                or not isinstance(effects, dict) or not effects or attempts != effects
+        if (resumable_running_step(record) not in START_STEPS
+                or not effects or attempts != effects
                 or set(evidence) != set(effects) or not isinstance(repairs, list)
-                or any(effect["phase"] not in ("ingest", "bots") for effect in effects.values())
                 or not isinstance(reason, str) or not reason.strip() or not reason.isprintable()):
             # Raised before the single write, so nothing changed.
             raise ActivationRefusal("host-reset repair is not the admitted set of dead candidate starts")
@@ -488,8 +520,8 @@ class ActivationStore:
                             "reason": reason, "repair_artifact": repair_artifact,
                             "kind": "host_reset", "host_boot": host_boot})
         body["start_effects"] = {}
-        body["completed"] = [step for step in completed if step not in reopen]
-        for step in reopen:
+        body["completed"] = list(STEPS[:STEPS.index(START_STEPS[0])])
+        for step in START_STEPS:
             body["evidence"].pop(step, None)
         body["pending"] = "ingest_started"
         return self._save(record)

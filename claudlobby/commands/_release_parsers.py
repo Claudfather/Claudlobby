@@ -223,11 +223,12 @@ def register_release_subparsers(sub):
     reset = _route(hosts, "repair-after-reset", "host.repair-after-reset",
                    "Archive every verified-dead candidate start after a host reset")
     reset.description = ("Operator only. Starts nothing. For a host that reset or lost power while "
-                         "its selected activation was pending ingest_started, bots_started or "
-                         "verified. Requires every recorded plane and bot start's unit inactive with "
-                         "identical frozen bytes, no private bot tmux server, and no plane answer. "
-                         "Archives those starts and reopens ingest_started; then run the sealed "
-                         "candidate's host activate --resume once to start the plane and every bot again.")
+                         "its selected activation was pending ingest_started, bots_started, verified "
+                         "or producers_resumed. Requires every recorded start's unit inactive with "
+                         "identical frozen bytes, every published candidate unit quiet, no private bot "
+                         "tmux server, and the plane socket down. Archives those starts and reopens "
+                         "ingest_started; then run the sealed candidate's host activate --resume once "
+                         "to start every candidate again.")
     reset.set_defaults(func=_dispatch_host)
     reset.add_argument("reset_activation_id", metavar="ACTIVATION_ID")
     reset.add_argument("--reason", required=True, metavar="TEXT")

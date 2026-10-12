@@ -311,12 +311,12 @@ command gives the bot a fresh fence and starts it. Nothing retries
 automatically, so each further repair needs the command again.
 
 **After a host reset during the start steps.** A reset or power loss while
-`ingest_started`, `bots_started` or `verified` is next kills every candidate
-that had started, including ones with a recorded result. The resume only
-re-observes recorded starts, and native admission refuses every unit while the
-activation is unfinished, so neither the resume nor `repair-start` can continue.
-Archive all of them at once instead, from a newer CLI if the sealed one lacks
-the verb:
+`ingest_started`, `bots_started`, `verified` or `producers_resumed` is next
+kills every candidate that had started, including ones with a recorded result.
+The resume only re-observes recorded starts, and native admission refuses every
+unit while the activation is unfinished, so neither the resume nor
+`repair-start` can continue. Archive all of them at once instead, from a newer
+CLI if the sealed one lacks the verb:
 
 ```bash
 claudlobby --root "$DATA" host repair-after-reset "$ACTIVATION_ID" \
@@ -324,28 +324,34 @@ claudlobby --root "$DATA" host repair-after-reset "$ACTIVATION_ID" \
 ```
 
 It refuses unless all of these hold:
-- this activation is selected and stopped at one of those three steps;
-- every recorded start is an ingest or bot start;
-- each start's source and installed unit bytes match the frozen start, and
-  its unit is inactive;
+- this activation is selected and stopped at one of those four steps;
+- each recorded start's source and installed unit bytes match the frozen
+  start, and its unit is inactive;
+- no recorded start is a one-shot producer service without a result (its
+  effect is unknown; inspect it as the resume's own refusal says);
+- every published candidate unit is quiet, started or not, as the resume
+  will require when it publishes again;
 - each bot's private tmux server is gone;
-- the plane daemon does not answer.
+- the plane socket is down: no socket file, or nothing listening on it.
 
 It also checks that the caller runs outside every unit this activation
 recorded. When the checks pass, it moves every recorded start and its dead
-evidence into `start_repairs`, with the boot id, as one write. It takes
+evidence into `start_repairs` as one write, with the boot id where the host
+reports one (Linux's kernel boot id, macOS's boot session UUID). It takes
 `ingest_started` and the steps after it out of `completed` and makes
 `ingest_started` pending. Selection, publication and identity bindings are not
 changed. Nothing is started.
 
-Before running it, a unit left `failed` or looping on admission refusals has
-to be stopped and reset by hand. Its retries end only when you do:
-`systemctl --user stop <unit>` and then `systemctl --user reset-failed <unit>`
-for each candidate bot unit and for `claudlobby-plane-daemon.service`. Then run
-the sealed candidate's `--resume` command once. It starts the plane daemon and
-every bot fresh, as on a first start, and continues to `verified` and
-`producers_resumed`. If the host resets again during that resume, the same two
-commands recover it again.
+Before running it, stop and reset every candidate unit the host started again
+at boot or left `failed` or looping on admission refusals; their retries end
+only when you do. A refusal lists every unit that is not quiet. On Linux:
+`systemctl --user stop <unit>` and then `systemctl --user reset-failed <unit>`.
+On macOS: `launchctl bootout gui/$(id -u)/<label>`. That covers the plane
+daemon and any other ingest unit, each bot, and, after a reset during
+`producers_resumed`, each producer timer and service. Then run the sealed
+candidate's `--resume` command once. It starts every candidate fresh, as on a
+first start, and continues to `verified` and `producers_resumed`. If the host
+resets again during that resume, the same two commands recover it again.
 
 For the specific refusal "existing canonical handoff section is malformed" at
 pending step `queues_classified`, the journal supports repair-forward before

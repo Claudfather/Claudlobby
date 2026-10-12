@@ -8,23 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added — `host repair-after-reset`: recover an activation a host reset stranded during its start steps
 
-A host that reset or lost power while `ingest_started`, `bots_started` or `verified` was next could not be recovered. Every started candidate died with the host. The resume only re-observes recorded starts, so it failed on the first bot that had a recorded result. `repair-start` covers only a start with no result. Native admission refuses every unit while the activation is unfinished. A floor host hit this after a watchdog reset at its 16th bot start and stayed down with no supported way back.
+A host that reset or lost power while `ingest_started`, `bots_started`, `verified` or `producers_resumed` was next could not be recovered. Every started candidate died with the host. The resume only re-observes recorded starts, so it failed on the first one that had a recorded result. `repair-start` covers only a bot start with no result. Native admission refuses every unit while the activation is unfinished. A floor host hit this after a watchdog reset at its 16th bot start and stayed down with no supported way back.
 
 `claudlobby --root DATA host repair-after-reset ACTIVATION_ID --reason TEXT` (operator only; starts nothing):
-- **What it checks.** The activation is selected and stopped at one of those steps, and every recorded start is an ingest or bot start. Each start's frozen unit bytes match and its unit is verified inactive. Each bot's private tmux server is gone. The plane does not answer. The caller is outside every unit the activation recorded.
-- **What it writes.** One atomic write moves every recorded start and its dead evidence into `start_repairs`, tagged `host_reset` with the boot id. It reopens `ingest_started`. Selection, publication and identity bindings are not changed.
-- **Then the resume.** The sealed candidate's `--resume` starts the plane daemon and every bot fresh and finishes the activation. Like `repair-start`, the new verb can run from a newer CLI than the sealed release.
+- **What it checks.** The activation is selected and stopped at one of those steps. Each recorded start's frozen unit bytes match and its unit is verified inactive; a one-shot producer service with no recorded result is refused, as the resume refuses it. Every published candidate unit is quiet, as the resume's republish requires, and a refusal lists each one that is not. Each bot's private tmux server is gone. The plane socket is down (no socket file, or nothing listening); a slow or garbled listener refuses. The caller is outside every unit the activation recorded.
+- **What it writes.** One atomic write moves every recorded start and its dead evidence into `start_repairs`, tagged `host_reset` with the boot id where the host reports one (Linux's kernel boot id, macOS's boot session UUID). It reopens `ingest_started`. Selection, publication and identity bindings are not changed. The store refuses a record the resume would not admit (an early-abort marker, no install directory).
+- **Then the resume.** The sealed candidate's `--resume` starts every candidate fresh and finishes the activation. Like `repair-start`, the new verb can run from a newer CLI than the sealed release.
 
-`documentation/existing-host-release-conversion.md` gives the procedure, including `systemctl --user stop` and `reset-failed` for units left looping on admission refusals.
+`documentation/existing-host-release-conversion.md` gives the procedure, with the Linux (`systemctl --user stop` and `reset-failed`) and macOS (`launchctl bootout`) commands for units left running or looping on admission refusals.
+
+`repair-start` and the new verb share their admission, frozen-intent and dead-start checks and their CLI error mapping; `repair-start`'s refusal texts now name the bot, with the same meaning.
 
 Tests: `tests/test_activation.py` reproduces the reset mid-`bots_started`:
 - one bot started with a result, one without, then everything dead;
 - the repair, then the resume to `active`, with each unit started once more;
-- the `verified` variant;
-- refusals for a live bot, a live plane unit, an answering plane, a hosted caller, a producer start, a bad reason and a held lock, each changing nothing;
-- the store taking exactly the recorded starts.
+- the `verified` and `producers_resumed` variants, the latter refusing first on the producer timer systemd started at boot;
+- refusals, each matched by text and changing nothing: a serving or hung plane socket, a live bot, a live plane unit, a looping unit with no recorded start, a hosted caller, a bad reason, a held lock, an ingest start with a stray fence, and a one-shot producer start with no result;
+- the store taking exactly the recorded starts of a record the resume would admit;
+- the boot id on Linux and macOS.
 
-The fake host now answers `svc_inventory_properties`, so the loaded-but-stopped candidate check runs as on Linux. `tests/test_host_commands.py` covers the verb's guard, output and refusal. `repair-start` shares the new dead-start check; its refusal texts now name the bot, with the same meaning.
+The fake host now answers `svc_inventory_properties` like `systemctl show`, a timer's `Triggers=` included, so the loaded-but-stopped candidate check runs as on Linux. `tests/test_host_commands.py` covers the verb's guard, its output and a refusal.
 
 ### Added — private-socket owner ingress and recorder-source binding
 

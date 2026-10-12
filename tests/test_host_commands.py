@@ -115,24 +115,25 @@ def test_repair_start_routes_through_environment_guard_and_discloses_unknown_wri
 
 def test_repair_after_reset_routes_through_environment_guard_and_names_the_resume(
         candidate, monkeypatch, capsys):
-    from claudlobby.commands import operator_context
     from claudlobby.activation_state import ActivationRefusal
+    from claudlobby.commands import operator_context
     root, release, plan, directory = candidate
     argv = ["--root", str(root), "--json", "host", "repair-after-reset", "act-1",
             "--reason", "watchdog reset during bots_started"]
     calls, guarded = [], []
-    batch = [{"attempt": {"target": target}, "kind": "host_reset", "reason": "watchdog reset during bots_started",
-              "host_boot": {"boot_id": "b"}} for target in ("claudlobby-plane-daemon.service",
-                                                            "com.example.worker.service")]
+    archived = ("claudlobby-plane-daemon.service", "com.example.worker.service")
 
     def repair(*args, **kwargs):
         calls.append((args, kwargs))
         if len(calls) == 2:
-            raise ActivationRefusal("the plane daemon still answers; stop it, or this is not a host reset")
-        return SimpleNamespace(body={"intent": {"release_id": release.release_id, "plan_id": plan.plan_id,
-                                                "install_directory": str(directory)},
-                                     "pending": "ingest_started",
-                                     "start_repairs": [{"attempt": {"target": "older"}, "reason": "x"}, *batch]})
+            raise ActivationRefusal("the plane socket is serving, not down; stop whatever listens on it, "
+                                    "or this is not a host reset")
+        # Earlier repairs stay in start_repairs; the output names only this write's targets.
+        record = SimpleNamespace(body={"intent": {"release_id": release.release_id, "plan_id": plan.plan_id,
+                                                  "install_directory": str(directory)},
+                                       "pending": "ingest_started",
+                                       "start_repairs": [{"attempt": {"target": "older"}}] * 3})
+        return SimpleNamespace(record=record, archived_targets=archived)
 
     monkeypatch.setattr(activation, "repair_starts_after_host_reset", repair)
     monkeypatch.setenv("BOT_ID", "worker")
@@ -146,11 +147,12 @@ def test_repair_after_reset_routes_through_environment_guard_and_names_the_resum
     assert guarded == [None] and calls[0][0] == (root, "act-1")
     assert calls[0][1] == {"reason": "watchdog reset during bots_started"}
     assert body["data"]["recording"] == "committed" and body["data"]["pending"] == "ingest_started"
-    assert body["data"]["archived_targets"] == ["claudlobby-plane-daemon.service", "com.example.worker.service"]
+    assert body["data"]["archived_targets"] == list(archived)
+    assert body["data"]["plan_id"] == plan.plan_id
     assert main(argv) != 0
     body = json.loads(capsys.readouterr().out)
     assert body["error"]["code"] == "conflict" and body["data"]["recording"] == "unchanged"
-    assert "still answers" in body["error"]["message"]
+    assert "host-reset repair refused: the plane socket is serving" in body["error"]["message"]
 
 
 def test_supervision_reap_requires_an_explicit_mode_with_full_schema_command(tmp_path):
