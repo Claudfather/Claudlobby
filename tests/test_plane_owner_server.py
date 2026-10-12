@@ -1,5 +1,6 @@
 """Real private-socket server; only the native Tailscale CLI is a synthetic stand-in."""
 
+import asyncio
 from contextlib import contextmanager
 import http.client
 import os
@@ -18,7 +19,9 @@ import pytest
 from claudlobby.__main__ import main
 from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
 from claudlobby.plane.owner_browser import COOKIE_NAME
-from claudlobby.plane.owner_server import OwnerServerConfigurationError, private_listener
+from claudlobby.plane.owner_server import (
+    OwnerServerConfigurationError, _serve_authority_app, private_listener,
+)
 from claudlobby.plane.owner_source import bind_source
 from tests.conftest import _short_test_directory, constructed_env
 from tests.test_plane_two_fleets import _seed
@@ -123,11 +126,11 @@ class UnixHTTP(http.client.HTTPConnection):
 
 
 @contextmanager
-def running_server(root, socket_path, binary):
+def running_server(root, socket_path, binary, *, origin="https://plane.example.test"):
     with (root / "server.log").open("w+") as log:
         process = subprocess.Popen([sys.executable, "-m", "claudlobby", "--root", str(root),
             "host", "owner", "serve", "--socket", str(socket_path),
-            "--origin", "https://plane.example.test", "--tailscale", str(binary)],
+            "--origin", origin, "--tailscale", str(binary)],
             env=constructed_env(), stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 10
@@ -136,7 +139,8 @@ def running_server(root, socket_path, binary):
             # Wait for the actual read route, not merely the filesystem entry.
             while process.poll() is None and time.monotonic() < deadline:
                 try:
-                    ready = request(socket_path, "/owner")[0] == 200
+                    ready = request(socket_path, "/owner", headers={
+                        "Host": origin.removeprefix("https://")})[0] == 200
                 except (OSError, http.client.HTTPException):
                     ready = False
                 if ready:
@@ -174,6 +178,71 @@ def request(path, route, *, action=False, cookie=None, headers=None):
         return response.status, dict(response.getheaders()), response.read()
     finally:
         connection.close()
+
+
+def raw_request(path, route, headers):
+    """Keep repeated HTTP fields visible to uvicorn instead of folding them into a dict."""
+    connection = UnixHTTP(path)
+    try:
+        connection.putrequest("GET", route, skip_host=True)
+        for name, value in headers:
+            connection.putheader(name, value)
+        connection.endheaders()
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def test_serve_unix_forwarded_authority_is_exact_and_keeps_browser_origin(tmp_path, socket_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    authority = "plane.example.test:8443"
+    # Captured twice from installed Tailscale 1.104.1 Serve over a Unix backend:
+    # Host localhost, one X-Forwarded-Host with external :8443, one HTTPS proto.
+    # The hostname is synthetic; the port and header cardinality preserve capture.
+    forwarded = [("Host", "localhost"), ("X-Forwarded-Host", authority),
+                 ("X-Forwarded-Proto", "https"), ("X-Forwarded-For", "100.64.0.42")]
+    with running_server(tmp_path, socket_path, sys.executable,
+                        origin="https://" + authority):
+        assert raw_request(socket_path, "/owner", forwarded)[0] == 200
+        assert raw_request(socket_path, "/owner-entry.js", forwarded)[0] == 200
+        cases = {
+            "duplicate host": forwarded + [("Host", "localhost")],
+            "duplicate forwarded host": forwarded + [("X-Forwarded-Host", authority)],
+            "duplicate forwarded proto": forwarded + [("X-Forwarded-Proto", "https")],
+            "wrong host": [("Host", authority), *forwarded[1:]],
+            "wrong forwarded host": [forwarded[0], ("X-Forwarded-Host", "other.example.test:8443"), *forwarded[2:]],
+            "wrong forwarded proto": [*forwarded[:2], ("X-Forwarded-Proto", "http"), forwarded[3]],
+            "funnel": forwarded + [("Tailscale-Funnel-Request", "?1")],
+            "foreign browser origin": forwarded + [("Origin", "https://other.example.test")],
+        }
+        for label, headers in cases.items():
+            code, response_headers, body = raw_request(socket_path, "/owner", headers)
+            if label == "duplicate host" and code == 400:
+                continue  # Uvicorn's HTTP parser may reject before the adapter.
+            assert code == 403 and json.loads(body) == {"state": "denied"}, label
+            assert response_headers["cache-control"] == "no-store", label
+
+
+def test_serve_authority_adapter_refuses_tcp_even_with_exact_headers():
+    async def unexpected(*_):
+        pytest.fail("TCP request reached browser app")
+
+    async def probe():
+        messages = []
+        async def send(message):
+            messages.append(message)
+        scope = {"type": "http", "method": "GET", "path": "/owner",
+                 "client": ("127.0.0.1", 5555), "headers": [
+                     (b"host", b"localhost"), (b"x-forwarded-host", b"plane.example.test:8443"),
+                     (b"x-forwarded-proto", b"https")]}
+        await _serve_authority_app(unexpected, "plane.example.test:8443")(
+            scope, unexpected, send)
+        return messages
+
+    assert asyncio.run(probe())[0]["status"] == 403
 
 
 def test_foreground_cli_pair_read_revoke_and_restart_over_real_unix_socket(tmp_path, socket_path):
