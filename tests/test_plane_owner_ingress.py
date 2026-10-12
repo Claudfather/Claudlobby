@@ -9,6 +9,7 @@ not establish installed Serve header replacement or real UDS reachability.
 import asyncio
 import copy
 import os
+import shlex
 import signal
 from pathlib import Path
 import sys
@@ -135,6 +136,36 @@ def test_absolute_configured_executable_required(tmp_path):
     for binary in [Path('tailscale'), tmp_path / 'missing', tmp_path]:
         with pytest.raises(ValueError, match='absolute configured native'):
             ServePrincipalVerifier(tailscale_binary=binary)
+
+
+def test_explicit_control_socket_selects_realm_and_whois_without_default_fallback(tmp_path):
+    control = tmp_path / 'headless control.sock'
+    calls = tmp_path / 'calls'
+    binary = tmp_path / 'synthetic-tailscale'
+    binary.write_text(
+        '#!/bin/sh\n'
+        f'printf "%s\\n" "$*" >> {shlex.quote(str(calls))}\n'
+        f'if [ "$1" != {shlex.quote("--socket=" + str(control))} ]; then\n'
+        '  printf "%s\\n" \'{"ControlURL":"https://other.example.test"}\'\n'
+        '  exit 0\n'
+        'fi\n'
+        'shift\n'
+        'case "$*" in\n'
+        '  "debug prefs") printf "%s\\n" \'{"ControlURL":"https://controlplane.tailscale.com"}\';;\n'
+        '  "whois --json --proto=tcp 100.64.0.42") '
+        'printf "%s\\n" \'{"Node":{"User":123456789,"Addresses":["100.64.0.42/32"]},'
+        '"UserProfile":{"ID":123456789}}\';;\n'
+        '  *) exit 7;;\n'
+        'esac\n')
+    binary.chmod(0o700)
+    verify = ServePrincipalVerifier(tailscale_binary=binary, tailscale_socket=control)
+    assert asyncio.run(verify(scope())).subject == '123456789'
+    selector = '--socket=' + str(control)
+    assert calls.read_text().splitlines() == [
+        f'{selector} debug prefs', f'{selector} whois --json --proto=tcp {SOURCE}',
+        f'{selector} debug prefs']
+    with pytest.raises(ValueError, match='absolute native Tailscale control socket'):
+        ServePrincipalVerifier(tailscale_binary=binary, tailscale_socket=Path('relative.sock'))
 
 
 def test_five_request_burst_succeeds_with_four_active_verifications(monkeypatch):
