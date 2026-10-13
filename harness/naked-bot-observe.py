@@ -247,8 +247,8 @@ class TypeObservation:
 
         This is the state that makes a Phase 2 PR look landed while changing no
         bot: populating ``REGISTRY[<type>].entries`` moves the constant, but
-        ``config.py`` consumes only ``DEFAULT_GUARDRAILS`` — nothing feeds
-        ``resolve(<type>)`` into the merge for the other eleven. Measured: a
+        ``config.py`` consumes only ``DEFAULT_GUARDRAILS`` and ``DEFAULT_RESOURCES``
+        — nothing feeds ``resolve(<type>)`` into that merge for the other ten. Measured: a
         REAL skill (`doctor`) placed in the registry composed no symlink, while
         the same skill DECLARED in fleet.yaml composed one. So the registry is
         the source of the DECISION but not yet of the BEHAVIOUR, and a gate that

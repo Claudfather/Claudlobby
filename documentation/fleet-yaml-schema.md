@@ -19,7 +19,7 @@ fleet:
     default: ~/.claude
     work: ~/.claude-work
 
-  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool }
+  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool, guardrails: bool, protocols: bool, skills: bool, resources: bool }
                                          # OPTIONAL — gate system.yaml injection into defaults (default: true)
 
   defaults:                             # applied to every bot unless overridden
@@ -197,10 +197,13 @@ fleet:
     hooks: true            # merge system.yaml hooks
     timers: true           # merge system.yaml job timers
     observability: true    # merge system.yaml observability defaults
-    guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
-    protocols: true        # apply default protocols, including the leaf-manager checkin default
+    guardrails: true       # apply default guardrails: claudlobby-dev-in-projects, no-push-main, no-destructive-git, pii-protection, no-fabrication, confirm-before-send
+    protocols: true        # apply default protocols: context-management, telegram-routing and telegram-formatting (the last two only for a bot with a Telegram channel), shared-documentation, and the leaf-manager checkin default
     skills: true           # apply default skills: the status skill on every manager
+    resources: true        # apply default resources: timezone
 ```
+
+Guardrail and resource defaults compose **ahead of** the fleet's own `defaults:` list and the bot's stanza, in the order above. A fleet that lists the same entries first, in that order, composes the same bytes with or without its own copies. Protocol defaults compose **after** the bot's declared protocols, so a fleet that removes its copies of `context-management`, `telegram-routing` or `telegram-formatting` moves those sections to the end of its protocol list. Keep those copies where the order matters to you.
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
 

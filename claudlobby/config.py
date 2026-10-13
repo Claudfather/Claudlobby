@@ -99,7 +99,7 @@ class SystemDefaultsConfig:
     disabling all injection.  Per-category bools allow surgical opt-out.
 
     KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
-    Nine of the twelve library entity types still have no opt-out, and an
+    Eight of the twelve library entity types still have no opt-out, and an
     unrecognised key is silently dropped — so a fleet cannot yet tell a working
     opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
     gives a type an opt-out; the check is in the code that consumes the default.
@@ -118,6 +118,10 @@ class SystemDefaultsConfig:
     # default is role-scoped, so it is resolved per bot there. One bot can
     # switch it off for itself with BotSystemDefaultsConfig below.
     skills: bool = True
+    # Consumed in the load_fleet merge below, beside guardrails: the resources
+    # default has no availability gate and no role, so every reader of
+    # `bot.resources` sees it.
+    resources: bool = True
 
 
 @dataclass
@@ -868,6 +872,7 @@ DEFAULT_PLUGINS: list[str] = [
 # The membership test this entry had to clear, and the tier it belongs to, live
 # beside it in the registry.
 DEFAULT_GUARDRAILS = _defaults.DEFAULT_GUARDRAILS
+DEFAULT_RESOURCES = _defaults.DEFAULT_RESOURCES
 
 
 @dataclass
@@ -2012,6 +2017,7 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             guardrails=bool(raw.get("guardrails", True)),
             protocols=bool(raw.get("protocols", True)),
             skills=bool(raw.get("skills", True)),
+            resources=bool(raw.get("resources", True)),
         )
     return SystemDefaultsConfig()
 
@@ -2423,17 +2429,19 @@ def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig
             effective_system["jobs"] = system_section.get("jobs", {})
     merged_defaults = _merge_system_into_defaults(effective_system, defaults)
 
-    if system_defaults_cfg.enabled and system_defaults_cfg.guardrails:
-        # Applied AFTER the system.yaml merge, and unioned rather than assigned.
-        # fleet.yaml.seed ships a `defaults.guardrails` list, so every newly
-        # seeded fleet supplies one — and the merge above replaces a fleet-set
-        # key rather than combining it, which would drop these for exactly the
-        # new fleets the default exists to protect. Opting out is
-        # `system_defaults.guardrails: false`, visible in fleet.yaml; declaring
-        # a guardrail list is not an opt-out and must not act as one.
-        merged_defaults["guardrails"] = _merge_lists(
-            DEFAULT_GUARDRAILS, merged_defaults.get("guardrails")
-        )
+    # Applied AFTER the system.yaml merge, and unioned rather than assigned.
+    # fleet.yaml.seed ships a `defaults.guardrails` list, so every newly
+    # seeded fleet supplies one — and the merge above replaces a fleet-set
+    # key rather than combining it, which would drop these for exactly the
+    # new fleets the default exists to protect. The defaults go AHEAD of the
+    # fleet's own list. Opting out is `system_defaults.<type>: false`, visible
+    # in fleet.yaml; declaring a list is not an opt-out and must not act as one.
+    for key, enabled, registered in (
+        ("guardrails", system_defaults_cfg.guardrails, DEFAULT_GUARDRAILS),
+        ("resources", system_defaults_cfg.resources, DEFAULT_RESOURCES),
+    ):
+        if system_defaults_cfg.enabled and enabled:
+            merged_defaults[key] = _merge_lists(registered, merged_defaults.get(key))
 
     bots = {
         bot_name: _coerce_bot(bot_name, bot_def, merged_defaults)
