@@ -1,6 +1,6 @@
 ---
 name: bootstrap
-description: "Guided fleet creation. Resume-aware — checks filesystem state and picks up where the user left off."
+description: "Use when a user is creating a fleet, or resuming a fleet setup they left unfinished. Guided fleet creation. Resume-aware — checks filesystem state and picks up where the user left off."
 argument-hint: "[<fleet-name>]"
 ---
 

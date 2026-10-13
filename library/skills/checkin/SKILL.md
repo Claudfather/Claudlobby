@@ -1,6 +1,6 @@
 ---
 name: checkin
-description: "The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
+description: "Use when the check-in beat sends /checkin to an idle manager, or an idle manager must choose its next move. The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
 argument-hint: "[--dry-run]"
 tool_grants:
   - "Bash(claudlobby --json --fleet * checkin list *)"

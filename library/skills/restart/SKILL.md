@@ -1,6 +1,6 @@
 ---
 name: restart
-description: "Graceful self-restart: captures a session handoff, notifies on the channel, then requests the canonical bot restart. The new session resumes from that handoff when a resume capability is installed."
+description: "Use when this bot should restart itself: a human or your manager asks for it, or a scheduled restart invokes it with --auto. Graceful self-restart: captures a session handoff, notifies on the channel, then requests the canonical bot restart. The new session resumes from that handoff when a resume capability is installed."
 allowed-tools: Skill, Write, mcp__plugin_telegram_telegram__reply
 argument-hint: "[--auto]"
 ---

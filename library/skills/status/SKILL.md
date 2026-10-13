@@ -1,6 +1,6 @@
 ---
 name: status
-description: "Manager readout for the human: what moved, and what is waiting on their decision. One line each, bounds stated. Consumes `claudlobby brief` and adds the PR surface brief does not carry."
+description: "Use when the human asks a manager what's the latest, what moved, or what is waiting on them. Manager readout for the human: what moved, and what is waiting on their decision. One line each, bounds stated. Consumes `claudlobby brief` and adds the PR surface brief does not carry."
 argument-hint: "[24h|7d|since <ISO>]"
 tool_grants:
   - "Bash(claudlobby --json brief)"

@@ -1,6 +1,6 @@
 ---
 name: fleet-status
-description: "Quick health check across your own fleet's bots — session and service observations, reported context-degraded state, who's idle/working/down/unknown."
+description: "Use when asked how your fleet is doing, or before you dispatch work and need to know which bots are free. Quick health check across your own fleet's bots — session and service observations, reported context-degraded state, who's idle/working/down/unknown."
 argument-hint: "[bot-name]"
 ---
 
