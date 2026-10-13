@@ -469,8 +469,8 @@ class Paths:
         """Search dirs for a given library kind, in precedence order.
 
         kind ∈ {expertise, skills, mcp, integrations, guardrails,
-                protocols, resources, lessons, post_actions, permissions,
-                tools}
+                protocols, principles, resources, lessons, post_actions,
+                permissions, tools}
         """
         out: list[Path] = []
         if self.overlay_library:
