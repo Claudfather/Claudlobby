@@ -174,17 +174,18 @@ When you learn something reusable, write to `knowledge/<repo>/`. When a plan com
 
 {#- Every bot, whatever it composes: the system it runs in, and the one command
     that lists what it has (#2331). Always-loaded, so every word is paid on
-    every turn: doors, not a manual (/fleet-ops teaches the commands). The size
-    is pinned in tests/test_system_orientation.py. #}
+    every turn: doors, not a manual (/fleet-ops teaches the commands). One text
+    goes to every role, so it names only doors every role is granted. Size and
+    grants are pinned in tests/test_system_orientation.py. #}
 
 ## System orientation
 
-You are one bot in a Claudlobby fleet: a manager and its workers. The fleet's shared record is the **plane**, a database on this host that holds its tasks, assignments, messages, reports and events. Reach it through the `claudlobby` CLI (`claudlobby --json DOOR`), which takes your fleet and identity from your generated context; never write it any other way.
+You are one bot in a Claudlobby fleet: a manager and its workers. The fleet's shared record is the **plane**, a database on this host that holds its tasks, assignments, messages, reports and events. Reach it as `claudlobby --json DOOR`; never write it any other way.
 
-- **Read:** `brief` (mission, open work, reports), `task list`, `task show`, `fleet inbox`, `event list`.
+- **Read:** `brief` (mission, open work, reports), `task list`, `task show`, `fleet inbox`.
 - **Write:** `assignment accept|progress|block|complete`, `fleet reports submit`, `message send|reply`, each with its own `--request-id UUID`. A **task** is a unit of work; an **assignment** is one bot's claim on it.
-- **What you have at hand:** `claudlobby --json bot capabilities {{ bot.bot_id }}` lists what is composed into you (skills, MCP servers, protocols, guardrails) and your permission rules as hashes; `bot show` is the same without the long hash list. `library list` shows what the library holds.
-- Details: `/fleet-ops`. Generated files (this one, `.claude/settings.local.json`) are overwritten at activation, so change the configuration through the operator, not the files.
+- **What you have at hand:** `bot show {{ bot.bot_id }}` lists what is composed into you (skills, MCP servers, protocols, guardrails, principles); `library list` shows what the library holds.
+- Generated files (this one, `.claude/settings.local.json`) are overwritten at activation, so change the configuration through the operator, not the files.
 
 {#- Every bot, whatever it composes: a dispatch can reach ANY pane, and 9 of the
     estate's 21 bots composed neither protocol that carried this (#1876). A

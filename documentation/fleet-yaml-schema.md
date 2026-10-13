@@ -1043,7 +1043,7 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
 7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
 8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
-9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through, and `bot capabilities` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size is pinned by `tests/test_system_orientation.py`.
+9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through (only doors every role is granted), and `bot show` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size and its grants are pinned by `tests/test_system_orientation.py`.
 10. **Dispatches framed as pasted text** — `## Dispatches framed as pasted text`, the verify-then-trust check for a framed dispatch, on every bot. Fixed in the template.
 11. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
 12. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.

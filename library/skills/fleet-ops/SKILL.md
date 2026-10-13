@@ -428,17 +428,17 @@ way to deliver work.
 These reads change nothing:
 
 ```bash
-claudlobby --json bot capabilities BOT
 claudlobby --json bot show BOT
+claudlobby --json bot capabilities BOT
 claudlobby --json project list
 claudlobby --json project show PROJECT
 ```
 
-`bot capabilities BOT` answers what a bot has at hand: its role and manager, what
-is composed into it (`data.bot.effective_configuration.equipment`: skills, MCP
-servers, protocols, guardrails, principles and the rest), and its permission rules
-as SHA-256 hashes, the arguments withheld. `bot show BOT` is the same without the
-permission rules and far shorter; use it when equipment is all you need. Both
+`bot show BOT` answers what a bot has at hand: its role and manager and what is
+composed into it (`data.bot.effective_configuration.equipment`: skills, MCP
+servers, protocols, guardrails, principles and the rest). `bot capabilities BOT`
+adds its permission rules as SHA-256 hashes, the arguments withheld, and is about
+four times as long; read it to compare rule sets, not to learn the equipment. Both
 describe what was composed, not what a running session enforces:
 `permissions.enforcement` and `runtime_observed` always read `unknown` or
 `not_probed`, because nothing probes the session, and unknown is not "off". `project list` and
