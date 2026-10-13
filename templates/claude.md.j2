@@ -179,7 +179,7 @@ When you learn something reusable, write to `knowledge/<repo>/`. When a plan com
 
 ## System orientation
 
-You are one bot in a Claudlobby fleet: a manager and its workers. The fleet's shared record is the **plane**, a database on this host that holds its tasks, assignments, messages, reports and events. Reach it through the `claudlobby` CLI, which takes your fleet and identity from your generated context; never write it any other way.
+You are one bot in a Claudlobby fleet: a manager and its workers. The fleet's shared record is the **plane**, a database on this host that holds its tasks, assignments, messages, reports and events. Reach it through the `claudlobby` CLI (`claudlobby --json DOOR`), which takes your fleet and identity from your generated context; never write it any other way.
 
 - **Read:** `brief` (mission, open work, reports), `task list`, `task show`, `fleet inbox`, `event list`.
 - **Write:** `assignment accept|progress|block|complete`, `fleet reports submit`, `message send|reply`, each with its own `--request-id UUID`. A **task** is a unit of work; an **assignment** is one bot's claim on it.

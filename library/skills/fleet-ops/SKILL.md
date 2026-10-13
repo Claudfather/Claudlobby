@@ -431,8 +431,8 @@ servers, protocols, guardrails, principles and the rest), and its permission rul
 as SHA-256 hashes, the arguments withheld. `bot show BOT` is the same without the
 permission rules and far shorter; use it when equipment is all you need. Both
 describe what was composed, not what a running session enforces:
-`permissions.enforcement` and `runtime_observed` read `unknown` or `not_probed`
-unless something observed them, and unknown is not "off". `project list` and
+`permissions.enforcement` and `runtime_observed` always read `unknown` or
+`not_probed`, because nothing probes the session, and unknown is not "off". `project list` and
 `project show PROJECT` read the fleet's declared projects: key, title, repos,
 validation tier (how work in them is closed) and mission file. A manager's
 CLAUDE.md carries that table; a worker reads it here.
