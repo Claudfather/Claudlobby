@@ -1,8 +1,8 @@
 ---
 name: fleet-ops
-description: "Read fleet work, admit tasks, deliver and route assignments as manager, and accept or report assigned work as worker. Use the canonical claudlobby CLI and verify recorded results."
+description: "Use when fleet work or a framework message reaches you, or before you read, admit, assign, deliver, accept or report fleet work, message another bot, or mint a request ID. Covers the canonical claudlobby CLI for managers and workers, and how to verify each recorded result."
 tool_grants:
-  - "Bash(uuidgen)"
+  - "Bash(python3 -c 'import uuid; print(uuid.uuid4())')"
   - "Bash(claudlobby --help)"
   - "Bash(claudlobby brief --help)"
   - "Bash(claudlobby library list --help)"
@@ -102,11 +102,18 @@ tool_grants:
 
 # Fleet operations
 
-Before a new mutation, run the granted standalone `uuidgen` command once. Convert
-its hex letters to lowercase when copying the UUID into the CLI argument. Retain
-that literal UUID with the operation; never reuse a tutorial UUID or mint a new
-one to retry the same uncertain effect. A distinct operation gets a fresh UUID.
-Do not wrap UUID generation and a mutation in one shell command.
+Before a new mutation, run this granted standalone command once to mint its
+request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
+lowercase form the CLI requires. `uuidgen` is not granted: a stock Debian host
+does not have it.
+
+```bash
+python3 -c 'import uuid; print(uuid.uuid4())'
+```
+
+Retain that literal UUID with the operation; never reuse a tutorial UUID or mint
+a new one to retry the same uncertain effect. A distinct operation gets a fresh
+UUID. Do not wrap UUID generation and a mutation in one shell command.
 
 Use `claudlobby --json config explain` to inspect environment declarations and
 which tier supplies or blanks each variable. `config explain KEY --bot BOT`

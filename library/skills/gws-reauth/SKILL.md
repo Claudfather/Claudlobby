@@ -1,6 +1,6 @@
 ---
 name: gws-reauth
-description: "Re-authorize expired Google Workspace OAuth tokens via Telegram. Probes token freshness, walks the user through browser auth, exchanges the code, and verifies — no SSH tunnels or port forwarding needed."
+description: "Use when a Google Workspace OAuth token has expired or a Google Workspace call fails to authenticate. Re-authorizes expired Google Workspace OAuth tokens via Telegram. Probes token freshness, walks the user through browser auth, exchanges the code, and verifies — no SSH tunnels or port forwarding needed."
 allowed-tools: Bash(python3 *), Bash(cat *), Bash(ls *), Bash(date *), mcp__plugin_telegram_telegram__reply
 argument-hint: "[instance-name]"
 ---

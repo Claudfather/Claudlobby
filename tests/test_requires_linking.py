@@ -385,7 +385,7 @@ class TestGrantUnion:
             } <= set(allow)
             assert "Bash(git push *)" in deny
             assert "Bash" not in allow
-            assert "Bash(uuidgen)" in allow
+            assert "Bash(python3 -c 'import uuid; print(uuid.uuid4())')" in allow
             operator_commands = (
                 "host activate plan", "host job run sample", "host supervision reap-orphans",
                 "host repos pull", "bot remove worker-1 --purge", "bot move worker-1 --to other",
@@ -677,7 +677,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Skill(fleet-ops:*)",
         "Bash(gadget-tool *)",
         "Bash(widget-tool *)",
-        "Bash(uuidgen)",
+        "Bash(python3 -c 'import uuid; print(uuid.uuid4())')",
         "Bash(claudlobby --help)",
         "Bash(claudlobby brief --help)",
         "Bash(claudlobby library list --help)",

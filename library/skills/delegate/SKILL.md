@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: "Route fleet work and inspect or manage declared bots through the public CLI."
+description: "Use when a manager hands work to a declared bot, or checks on, restarts or surveys its bots. Routes fleet work and inspects or manages declared bots through the public CLI."
 argument-hint: "[dispatch|status|restart|fleet] <bot> [task description]"
 ---
 

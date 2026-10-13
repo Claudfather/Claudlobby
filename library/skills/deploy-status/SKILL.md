@@ -1,6 +1,6 @@
 ---
 name: deploy-status
-description: "Check deployment health across Vercel, Railway, DigitalOcean, and Neon. Shows service status, recent deploys, and failures."
+description: "Use when asked whether deployments are healthy, or after a deploy or an outage report. Checks deployment health across Vercel, Railway, DigitalOcean, and Neon. Shows service status, recent deploys, and failures."
 argument-hint: "[vercel|railway|digitalocean|neon|all] [<project-name>]"
 ---
 
