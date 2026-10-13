@@ -2,7 +2,7 @@
 name: fleet-ops
 description: "Use when fleet work or a framework message reaches you, or before you read, admit, assign, deliver, accept or report fleet work, message another bot, or mint a request ID. Covers the canonical claudlobby CLI for managers and workers, and how to verify each recorded result."
 tool_grants:
-  - "Bash(python3 -c 'import uuid; print(uuid.uuid4())')"
+  - "Bash(python3 -I -c 'import uuid; print(uuid.uuid4())')"
   - "Bash(claudlobby --help)"
   - "Bash(claudlobby brief --help)"
   - "Bash(claudlobby library list --help)"
@@ -104,11 +104,13 @@ tool_grants:
 
 Before a new mutation, run this granted standalone command once to mint its
 request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
-lowercase form the CLI requires. `uuidgen` is not granted: a stock Debian host
-does not have it.
+lowercase form the CLI requires. `-I` keeps the current directory off the import
+path and ignores `PYTHON*` variables, so a `uuid.py` in a checkout under review
+cannot run in place of the standard library's. `uuidgen` is not granted: a stock
+Debian host does not have it.
 
 ```bash
-python3 -c 'import uuid; print(uuid.uuid4())'
+python3 -I -c 'import uuid; print(uuid.uuid4())'
 ```
 
 Retain that literal UUID with the operation; never reuse a tutorial UUID or mint
