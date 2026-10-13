@@ -453,10 +453,10 @@ def test_status_header_names_a_disabled_reaction(tmp_path):
     from claudlobby.status import switches_off_note
 
     rows = _resolve(tmp_path, "TASK_RECHECK_ENABLED=0\n")
-    note = switches_off_note("artemis-data", rows)
-    assert "task-recheck off on artemis-data" in note
+    note = switches_off_note("example-data", rows)
+    assert "task-recheck off on example-data" in note
     assert "doctor --switches" in note
-    assert switches_off_note("artemis-data", _resolve(tmp_path / "b")) == ""
+    assert switches_off_note("example-data", _resolve(tmp_path / "b")) == ""
 
 
 # ---------------------------------------------------------------------------
