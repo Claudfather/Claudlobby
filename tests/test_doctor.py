@@ -1362,7 +1362,7 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     as ARMED and every disarmed scenario in this file silently collapses to
     PASS. The `.env` then disarms it so "no door armed" is reachable at all.
     """
-    from claudlobby.config import DEFAULT_GUARDRAILS
+    from claudlobby.config import DEFAULT_GUARDRAILS, DEFAULT_RESOURCES
 
     root = tmp_path / "r"
     for kind in (
@@ -1413,6 +1413,11 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     for name in DEFAULT_GUARDRAILS:
         (root / "library" / "guardrails" / f"{name}.md").write_text(
             f"---\ntitle: {name}\n---\n\nDefault guardrail.\n"
+        )
+    (root / "library" / "resources").mkdir(parents=True, exist_ok=True)
+    for name in DEFAULT_RESOURCES:
+        (root / "library" / "resources" / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n---\n\nDefault resource.\n"
         )
     (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
     (root / "fleet.yaml").write_text(dedent(fleet_yaml))

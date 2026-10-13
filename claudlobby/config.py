@@ -118,6 +118,10 @@ class SystemDefaultsConfig:
     # default is role-scoped, so it is resolved per bot there. One bot can
     # switch it off for itself with BotSystemDefaultsConfig below.
     skills: bool = True
+    # Consumed in the load_fleet merge below, beside guardrails: the resources
+    # default has no availability gate and no role, so every reader of
+    # `bot.resources` sees it.
+    resources: bool = True
 
 
 @dataclass
@@ -868,6 +872,7 @@ DEFAULT_PLUGINS: list[str] = [
 # The membership test this entry had to clear, and the tier it belongs to, live
 # beside it in the registry.
 DEFAULT_GUARDRAILS = _defaults.DEFAULT_GUARDRAILS
+DEFAULT_RESOURCES = _defaults.DEFAULT_RESOURCES
 
 
 @dataclass
@@ -2012,6 +2017,7 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             guardrails=bool(raw.get("guardrails", True)),
             protocols=bool(raw.get("protocols", True)),
             skills=bool(raw.get("skills", True)),
+            resources=bool(raw.get("resources", True)),
         )
     return SystemDefaultsConfig()
 
@@ -2433,6 +2439,14 @@ def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig
         # a guardrail list is not an opt-out and must not act as one.
         merged_defaults["guardrails"] = _merge_lists(
             DEFAULT_GUARDRAILS, merged_defaults.get("guardrails")
+        )
+    if system_defaults_cfg.enabled and system_defaults_cfg.resources:
+        # The same merge as guardrails, for the same reasons: unioned, never
+        # assigned, and AHEAD of the fleet's own list, so a fleet that lists
+        # these entries first composes the same order with or without its
+        # copies. Opting out is `system_defaults.resources: false`.
+        merged_defaults["resources"] = _merge_lists(
+            DEFAULT_RESOURCES, merged_defaults.get("resources")
         )
 
     bots = {

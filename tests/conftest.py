@@ -23,7 +23,7 @@ REALBOOT_HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
 if Path(claudlobby.__file__).resolve().parent != _TEST_TREE / "claudlobby":
     raise pytest.UsageError("test package origin does not match the tree under test")
 
-from claudlobby.config import DEFAULT_GUARDRAILS
+from claudlobby.config import DEFAULT_GUARDRAILS, DEFAULT_RESOURCES
 
 
 def _require_prepared_resources():
@@ -711,12 +711,14 @@ def fleet_dir(tmp_path: Path) -> Path:
     (root / "library" / "guardrails" / "no-push-main.md").write_text(
         "---\ntitle: No push to main\n---\n\nNever push to main.\n"
     )
-    # Every bot composes DEFAULT_GUARDRAILS, so the minimal library must carry
-    # them or the validator warns per bot about a guardrail it cannot resolve.
-    for _default_guardrail in DEFAULT_GUARDRAILS:
-        (root / "library" / "guardrails" / f"{_default_guardrail}.md").write_text(
-            f"---\ntitle: {_default_guardrail}\n---\n\nDefault guardrail.\n"
-        )
+    # Every bot composes DEFAULT_GUARDRAILS and DEFAULT_RESOURCES, so the minimal
+    # library must carry them or the validator warns per bot about an item it
+    # cannot resolve. A file written above keeps its own text.
+    for _kind, _names in (("guardrails", DEFAULT_GUARDRAILS), ("resources", DEFAULT_RESOURCES)):
+        for _name in _names:
+            _stub = root / "library" / _kind / f"{_name}.md"
+            if not _stub.exists():
+                _stub.write_text(f"---\ntitle: {_name}\n---\n\nDefault {_kind[:-1]}.\n")
     (root / "library" / "protocols" / "report-back.md").write_text(
         "---\ntitle: Report-Back Protocol\n---\n\nReport back when done.\n"
     )

@@ -111,7 +111,7 @@ class TestCompleteness:
         # and they must be enumerable rather than discovered one at a time.
         unsettled = sorted(t for t, d in REGISTRY.items() if not d.settled)
         settled = sorted(t for t, d in REGISTRY.items() if d.settled)
-        assert settled == ["guardrails", "protocols", "skills"], (
+        assert settled == ["guardrails", "protocols", "resources", "skills"], (
             "the settled set moved. Every entry here changes what a bot composes "
             "on the default path, so it lands by editing this list deliberately — "
             f"never by a default arriving unannounced: {settled}"
@@ -163,7 +163,14 @@ class TestRoleOverlay:
     """F2, generalised: keyed on role, shipping with one role populated."""
 
     def test_global_entries_apply_with_no_role(self):
-        assert resolve("guardrails") == ["claudlobby-dev-in-projects"]
+        assert resolve("guardrails") == [
+            "claudlobby-dev-in-projects",
+            "no-push-main",
+            "no-destructive-git",
+            "pii-protection",
+            "no-fabrication",
+            "confirm-before-send",
+        ]
 
     def test_a_role_overlay_is_unioned_on_top_of_the_global(self):
         d = Disposition(

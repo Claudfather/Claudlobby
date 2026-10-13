@@ -459,20 +459,21 @@ actually lives in *this* file:
 
 | `system_defaults` key | Gates | Declared in `system.yaml`? |
 |---|---|---|
-| `enabled` | master switch — `false` disables all five categories below | n/a |
+| `enabled` | master switch — `false` disables every category below | n/a |
 | `hooks` | `defaults.hooks` | yes |
 | `observability` | `defaults.observability` | yes |
 | `timers` | `defaults.jobs` | yes |
-| `guardrails` | `DEFAULT_GUARDRAILS` — currently `claudlobby-dev-in-projects` | **no** |
-| `protocols` | the INSTRUCT-tier protocol default(s) — currently the `shared-documentation` / `shared-documentation-vault` pair | **no** |
+| `guardrails` | `DEFAULT_GUARDRAILS` — currently `claudlobby-dev-in-projects`, `no-push-main`, `no-destructive-git`, `pii-protection`, `no-fabrication`, `confirm-before-send` | **no** |
+| `protocols` | the INSTRUCT-tier protocol defaults — currently `context-management`, `telegram-routing` and `telegram-formatting` (the last two for a bot with a Telegram channel), and the `shared-documentation` / `shared-documentation-vault` pair | **no** |
+| `resources` | `DEFAULT_RESOURCES` — currently `timezone` | **no** |
 
-The last two don't correspond to a `guardrails:`/`protocols:` key in this
+The last three don't correspond to a `guardrails:`/`protocols:`/`resources:` key in this
 file — there isn't one, at either the `host:` or `defaults:` level — because
 they don't gate *content declared here*. They gate a separate,
 compositor-internal default registry, `claudlobby/defaults.py`'s
 `REGISTRY`, which is Python code (with its own tier system — RESTRICT / INSTRUCT
 / WIRE — and its own admission bar per tier), not YAML. If you're looking for
-where a new estate-wide default guardrail or protocol gets declared, it's
+where a new estate-wide default guardrail, protocol or resource gets declared, it's
 that registry, not this file.
 
 ## Composition & enrollment
