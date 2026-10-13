@@ -18,6 +18,7 @@ it is why the protocol copies stay. Names are obviously fake; the repo is public
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from textwrap import dedent
 
@@ -209,7 +210,14 @@ class TestGuardrailAndResourceDefaults:
 
 
 class TestComposedBytes:
-    """Byte-level: the composed CLAUDE.md, settings and bot.conf, both bots."""
+    """Byte-level: the composed CLAUDE.md, settings and bot.conf, both bots.
+
+    `bot.conf` records the manifest's own digest (`FLEET_MANIFEST_SHA256`), which any
+    edit to fleet.yaml changes, comments included. That line is the one allowed to
+    differ, and it must differ, or the second compose did not read the edited file.
+    """
+
+    DIGEST = re.compile(rb"^export FLEET_MANIFEST_SHA256=.*$", re.M)
 
     FILES = ("CLAUDE.md", ".claude/settings.local.json", "bot.conf")
 
@@ -256,7 +264,14 @@ class TestComposedBytes:
             "    guardrails: [extra-guard]\n",
         )
         without_copies = self._compose(fleet_dir, monkeypatch)
-        assert without_copies == with_copies
+        assert sorted(without_copies) == sorted(with_copies)
+        for bot_id, files in with_copies.items():
+            for name in self.FILES:
+                a, b = files[name], without_copies[bot_id][name]
+                if name == "bot.conf":
+                    assert self.DIGEST.search(a) and a != b, f"{bot_id}: digest did not move"
+                    a, b = self.DIGEST.sub(b"", a), self.DIGEST.sub(b"", b)
+                assert a == b, f"{bot_id}: {name} differs"
 
 
 class TestProtocolDefaults:
