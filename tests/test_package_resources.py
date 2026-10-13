@@ -108,7 +108,7 @@ def _copy_installed_dependencies(wheel, installed):
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    for directory in ("claudlobby", "library", "voices", "templates", "missions"):
+    for directory in ("claudlobby", "library", "voices", "templates", "missions", "examples"):
         shutil.copytree(REPO / directory, source / directory,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources"))
     for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed", "fleet.yaml.example",
@@ -119,12 +119,14 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     # A private index proves authored inputs without a commit, remote or identity.
     _run(["git", "init", "--quiet"], source)
     _run(["git", "add", "."], source)
+    assert "examples/teams/revenue-web-app/fleet.yaml" in _run(["git", "ls-files"], source).splitlines()
     ignored = ("voices/local/operator.md", "library/skills/printify/config.json",
-               "claudlobby/_runtime_scripts/fleet-state.json")
+               "claudlobby/_runtime_scripts/fleet-state.json", "examples/teams/private/fleet.yaml")
     for name in ignored:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("PRIVATE-OPERATOR-FIXTURE-DO-NOT-PACKAGE\n")
+    assert _run(["git", "check-ignore", "examples/teams/private/fleet.yaml"], source).strip() == "examples/teams/private/fleet.yaml"
 
     before_removal = tmp_path / "before-removal"
     _run([sys.executable, "-m", "build", "--no-isolation", "--wheel",
@@ -160,7 +162,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
             assert payload[prefix + name] == (path.read_bytes(), path.stat().st_mode & 0o111)
         source_inputs.update(expected.values())
     for name in ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
-                 "missions/fleet.md.seed"):
+                 "missions/fleet.md.seed", "examples/teams/revenue-web-app/fleet.yaml"):
         assert payload["claudlobby/_resources/seeds/" + name][0] == (source / name).read_bytes()
         source_inputs.add(source / name)
     assert payload["claudlobby/system.yaml"][0] == (source / "claudlobby/system.yaml").read_bytes()
@@ -246,6 +248,7 @@ assert r.native.is_relative_to(pathlib.Path(sys.argv[1]).resolve())
 assert (r.native / 'git-credential-github-app').stat().st_mode & 0o111
 assert (r.seeds / '.env.seed.example').is_file()
 assert (r.seeds / 'missions/fleet.md.seed').is_file()
+assert (r.seeds / 'examples/teams/revenue-web-app/fleet.yaml').is_file()
 assert not {'yaml', 'jinja2', 'pydantic'} & sys.modules.keys()
 assert not hasattr(r, 'release_id')
 print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha256}))
@@ -253,6 +256,22 @@ print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha2
     installed_identity = json.loads(_run(
         [python, "-I", "-S", "-B", "-c", script, installed], tmp_path))
     assert installed_identity == {key: metadata[key] for key in installed_identity}
+    # The installed consumer works with the source tree unavailable, not by
+    # resolving a nearby repository recipe.
+    _run([python, "-I", "-B", "-c", """
+from pathlib import Path
+from claudlobby.commands.setup import _template_config
+from claudlobby.config import load_fleet_snapshot
+content = _template_config('revenue-web-app', 'shop', 'example-org/shop', 'Improve checkout tests')
+fleet, _ = load_fleet_snapshot(Path('/unused/fleet.yaml'), content, None)
+assert fleet.name == 'shop' and fleet.service_prefix == 'com.claudlobby.shop'
+assert set(fleet.bots) == {'lead', 'engineer', 'reviewer'}
+assert all(bot.scope.repos == ['example-org/shop'] for bot in fleet.bots.values())
+assert 'Improve checkout tests' in fleet.mission
+assert all(not bot.channels and not bot.remote_control for bot in fleet.bots.values())
+"""], tmp_path)
+    template_help = _run([cli, "fleet", "setup", "--help"], tmp_path)
+    assert "--template {revenue-web-app}" in template_help and "--repository OWNER/REPO" in template_help
 
     data, outside = tmp_path / "data", tmp_path / "outside"
     data.mkdir()

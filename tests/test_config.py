@@ -92,7 +92,10 @@ class TestFleetManager:
         assert fleet.manager_bots() == {"coordinator"}
         assert fleet.leaf_manager_bots() == set()
 
-    @pytest.mark.parametrize("template", ["fleet.yaml.seed", "fleet.yaml.example"])
+    @pytest.mark.parametrize("template", [
+        "fleet.yaml.seed", "fleet.yaml.example",
+        "examples/teams/revenue-web-app/fleet.yaml",
+    ])
     def test_cold_fleet_templates_declare_a_local_manager(self, template):
         fleet, _ = load_fleet(Path(__file__).resolve().parents[1] / template)
         assert fleet.manager in fleet.bots
