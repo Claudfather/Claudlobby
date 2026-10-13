@@ -1,6 +1,6 @@
 ---
 name: eng-status
-description: "Self-diagnostic for work engineer bot."
+description: "Use when a work engineer bot is asked how it is doing. Self-diagnostic for work engineer bot."
 ---
 
 # Engineer Status

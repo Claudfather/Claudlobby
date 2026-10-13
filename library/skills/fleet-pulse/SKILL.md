@@ -1,6 +1,6 @@
 ---
 name: fleet-pulse
-description: "Run the selected fleet pulse and act on findings — restart dead workers, flag stuck panes, protect WIP."
+description: "Use when you manage a fleet and a worker looks dead, stuck or silent, and you want it recovered, not only reported. Runs the selected fleet pulse and acts on findings — restart dead workers, flag stuck panes, protect WIP."
 argument-hint: "[<bot-name>]"
 ---
 

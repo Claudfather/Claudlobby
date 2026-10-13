@@ -1,6 +1,6 @@
 ---
 name: triage
-description: "Surface untracked items from emails, meetings, or alerts. Enrich with external data, deduplicate against Notion, and create structured tasks."
+description: "Use when work items may be sitting untracked in emails, meetings, or alerts. Surfaces them, enriches them with external data, deduplicates against Notion, and creates structured tasks."
 argument-hint: "[email|alerts|meetings|all] [query]"
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: "Read fleet and host health through the public CLI and report observed failures and missing evidence."
+description: "Use when asked whether the fleet or its host is healthy, or when something on either looks broken. Reads fleet and host health through the public CLI and reports observed failures and missing evidence."
 argument-hint: "[fleet name]"
 tool_grants:
   - "Bash(claudlobby --json context show)"

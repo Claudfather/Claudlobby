@@ -1,6 +1,6 @@
 ---
 name: add-bot
-description: "Conversational bot creation. Authors one bot, then stages and activates the reviewed fleet configuration."
+description: "Use when the user wants to add a bot to a fleet. Conversational bot creation. Authors one bot, then stages and activates the reviewed fleet configuration."
 argument-hint: "[--fleet <name>] [--name <bot-name>]"
 ---
 
