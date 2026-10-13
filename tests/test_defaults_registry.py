@@ -122,18 +122,22 @@ class TestCompleteness:
 class TestRegistryIsTheSource:
     """F4, binding: the registry is where the constant lives, not a mirror."""
 
-    def test_config_reexports_the_registry_value_by_identity(self):
+    @pytest.mark.parametrize("name", ["DEFAULT_GUARDRAILS", "DEFAULT_RESOURCES"])
+    def test_config_reexports_the_registry_value_by_identity(self, name):
         # IDENTITY, not equality. Equality would still pass if someone
         # re-declared `DEFAULT_GUARDRAILS = ["claudlobby-dev-in-projects"]` in
         # config.py — two sources holding the same value today and drifting
         # tomorrow, which is the exact failure this refinement exists to stop.
-        assert config.DEFAULT_GUARDRAILS is defaults.DEFAULT_GUARDRAILS, (
-            "config.DEFAULT_GUARDRAILS is no longer the registry's value — it has "
+        assert getattr(config, name) is getattr(defaults, name), (
+            f"config.{name} is no longer the registry's value — it has "
             "been re-declared. The registry must be the single source."
         )
 
-    def test_the_derived_constant_matches_what_the_registry_resolves(self):
-        assert defaults.DEFAULT_GUARDRAILS == resolve("guardrails")
+    @pytest.mark.parametrize(
+        "name, etype", [("DEFAULT_GUARDRAILS", "guardrails"), ("DEFAULT_RESOURCES", "resources")]
+    )
+    def test_the_derived_constant_matches_what_the_registry_resolves(self, name, etype):
+        assert getattr(defaults, name) == resolve(etype)
 
     def test_the_composer_consumes_the_registry_value(self, tmp_path):
         # Through `load_fleet`, the real door — NOT `_coerce_bot`. The default is

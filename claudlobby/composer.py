@@ -2046,6 +2046,7 @@ def resolve_effective_skills(
             shared_docs=paths.shared_docs is not None,
             vault_wired=bot_is_vault_wired(bot),
             available_skills=frozenset(paths.expand_skill_folder("")),
+            telegram_channel=_has_telegram_channel(bot.channels),
         )
         for name in defaults.resolve(
             "skills", default_roles(bot, fleet, is_manager=is_manager)

@@ -5,11 +5,10 @@ merge pathway for that already exists and is universal — all 12 entity types
 merge fleet defaults in ``_coerce_bot``. This module is where each type's
 disposition gets decided.
 
-TWO of the twelve are settled: ``guardrails`` (RESTRICT, declared at Phase 1)
-and ``protocols`` (INSTRUCT, admitted at Phase 3). Both were ALREADY COMPOSING
-before they were registered, and neither changed a composed byte on the default
-path when it was — which is the only shape of entry that may land without an
-A/B on real bots. See ``grandfathered`` on ``Disposition``: an entry that
+FOUR of the twelve are settled: ``guardrails`` (RESTRICT), and ``protocols``,
+``skills`` and ``resources`` (INSTRUCT). An entry that was ALREADY COMPOSING
+before it was registered, and changes no composed byte on the default path when
+it is, is the only shape of entry that may land without an A/B on real bots. See ``grandfathered`` on ``Disposition``: an entry that
 predates its own registration is not evidence that the tier test is passable.
 
 THIS REGISTRY IS THE SOURCE, NOT A DESCRIPTION (F4, binding).
@@ -187,12 +186,10 @@ REGISTRY: dict[str, Disposition] = {
             "`confirm-before-send`: a message to people outside the fleet speaks "
             "for the operator, and it cannot be recalled. Any bot holding a send "
             "tool without the rule is an unreviewed voice for every fleet.\n\n"
-            "ORDER IS COMPOSED ORDER: `load_fleet` merges these entries AHEAD of "
-            "the fleet's own `defaults.guardrails`, and the bot's stanza comes "
-            "after both. A fleet that lists the same entries in this order at "
-            "the head of its own list composes identical bytes with or without "
-            "its copies. An entry added here goes at the end of this tuple, so "
-            "no existing entry changes position."
+            "ORDER IS COMPOSED ORDER: these merge ahead of the fleet's own list, "
+            "so a fleet that lists them first, in this order, composes the same "
+            "bytes with or without its copies. Add a new entry at the end of "
+            "this tuple."
         ),
     ),
     "permissions": Disposition(tier=Tier.RESTRICT, reason=_UNARGUED),
@@ -357,8 +354,7 @@ REGISTRY: dict[str, Disposition] = {
             "`telegram-routing`, `telegram-formatting`) are GRANDFATHERED. Each "
             "was already composing on every bot, declared in each fleet's own "
             "`defaults:` and in `fleet.yaml.seed`, before it was registered here. "
-            "Registering one makes it visible and disableable; it is not a "
-            "finding that it clears TIER_TESTS[Tier.INSTRUCT]. A bot that "
+            "A bot that "
             "declares one keeps it at its declared position, and the registry "
             "adds nothing twice, so a fleet with its copies in place composes "
             "the same bytes.\n\n"
@@ -370,10 +366,8 @@ REGISTRY: dict[str, Disposition] = {
             "bots whose remaining lists both start with `report-back` can need "
             "these three before it in one fleet and after it in another. Which "
             "order wins is #1168's decision, not this registration's.\n\n"
-            "`telegram-routing` and `telegram-formatting` are gated on the bot "
-            "loading a Telegram channel (AVAILABILITY_GATES): they teach the use "
-            "of a tool only that channel provides, so a bot with `channels: []` "
-            "is not told how to post to a chat it cannot reach."
+            "`telegram-routing` and `telegram-formatting` carry an availability "
+            "gate on the Telegram channel (AVAILABILITY_GATES)."
         ),
     ),
     "principles": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
@@ -394,15 +388,11 @@ REGISTRY: dict[str, Disposition] = {
             "are still WIRE here; each moves with its own argument.\n\n"
             "`timezone` is GRANDFATHERED: it was already composing on every bot, "
             "declared in each fleet's `defaults:` or its stanzas, before it was "
-            "registered here. Registering it makes it visible and disableable; it "
-            "is not a finding that it clears TIER_TESTS[Tier.INSTRUCT]. "
-            "`fleet.yaml.seed` does not declare it, so a newly seeded fleet "
+            "registered here. `fleet.yaml.seed` does not declare it, so a newly seeded fleet "
             "composes it as a new `Resources` section: that is this entry's "
             "naked-bot delta.\n\n"
-            "ORDER IS COMPOSED ORDER, as for guardrails: `load_fleet` merges these "
-            "entries AHEAD of the fleet's own `defaults.resources`, and the bot's "
-            "stanza comes after both. A fleet that lists them first composes "
-            "identical bytes with or without its copies.\n\n"
+            "ORDER IS COMPOSED ORDER, as for guardrails: a fleet that lists these "
+            "first composes the same bytes with or without its copies.\n\n"
             "OPT-OUT: `system_defaults.resources: false` for the fleet. It switches "
             "off the DEFAULT only: a bot that lists `timezone` itself keeps it."
         ),
@@ -493,9 +483,9 @@ AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
     # skill-missing; the gate keeps a default from naming a skill the library
     # lacks. Keyed by the entry name, like the shared-documentation gates.
     "status": lambda f: "status" in f.available_skills,
-    # How to route and format replies on Telegram, for a bot that has the
-    # channel. Without it these would tell a bot with `channels: []` to post
-    # where it cannot.
+    # How to route and format replies on Telegram: injected as a default only
+    # for a bot that has the channel. Like every gate here it filters the
+    # injected default only; a copy the fleet declares by hand still composes.
     "telegram-routing": lambda f: f.telegram_channel,
     "telegram-formatting": lambda f: f.telegram_channel,
 }

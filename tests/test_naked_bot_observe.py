@@ -384,8 +384,8 @@ def test_the_two_always_present_files_have_a_content_probe():
 def test_inert_flags_a_registry_entry_that_composed_nothing():
     """The Phase 2 trap: the constant moves and no bot changes.
 
-    `config.py` consumes only `DEFAULT_GUARDRAILS`; nothing feeds
-    `resolve(<type>)` into the merge for the other eleven. Measured with a REAL
+    `config.py` consumes only `DEFAULT_GUARDRAILS` and `DEFAULT_RESOURCES`; nothing
+    feeds `resolve(<type>)` into that merge for the other ten. Measured with a REAL
     skill (`doctor`): in the registry it composed no symlink, declared in
     fleet.yaml it composed one.
     """

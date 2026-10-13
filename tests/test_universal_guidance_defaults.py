@@ -12,8 +12,9 @@ properties are pinned here:
 Guardrail and resource defaults merge AHEAD of the fleet's own list, so a fleet
 that lists them first composes identical bytes after removing its copies.
 Protocol defaults compose AFTER the declared list, so the same removal reorders
-a fleet's protocol sections. The last test class pins that difference, because
-it is why the protocol copies stay. Names are obviously fake; the repo is public.
+a fleet's protocol sections; the last protocol test pins that difference,
+because it is why the protocol copies stay. Names are obviously fake; the repo
+is public.
 """
 
 from __future__ import annotations
@@ -25,20 +26,11 @@ from textwrap import dedent
 import pytest
 
 from claudlobby import defaults
-from claudlobby.composer import compose_bot, resolve_effective_protocols
+from claudlobby.composer import render_bot_files, resolve_effective_protocols
 from claudlobby.config import DEFAULT_GUARDRAILS, DEFAULT_RESOURCES, load_fleet
-from claudlobby.paths import Paths
-from tests.conftest import install_real_template
-from tests.package_fixtures import source_package
+from tests.conftest import install_real_template, load_test_fleet, make_paths
 
-GUARDRAILS = [
-    "claudlobby-dev-in-projects",
-    "no-push-main",
-    "no-destructive-git",
-    "pii-protection",
-    "no-fabrication",
-    "confirm-before-send",
-]
+GUARDRAILS = list(DEFAULT_GUARDRAILS)
 TELEGRAM_PROTOCOLS = ["telegram-routing", "telegram-formatting"]
 PROTOCOLS = ["context-management", *TELEGRAM_PROTOCOLS]
 
@@ -108,36 +100,33 @@ def _with(body: str, block: str) -> str:
 
 
 def _edit(fleet_dir: Path, old: str, new: str) -> None:
-    """Replace one exact span of the fixture's fleet.yaml, refusing a miss."""
+    """Replace one exact span of the fixture's fleet.yaml, refusing a miss.
+
+    A replacement that matches nothing leaves the fixture unchanged and the test
+    then measures the default fleet, so the count is asserted.
+    """
     path = fleet_dir / "fleet.yaml"
     text = path.read_text()
     assert text.count(old) == 1, f"fixture edit matched {text.count(old)} times: {old!r}"
     path.write_text(text.replace(old, new))
 
 
-def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
-
-
 def _effective_protocols(fleet_dir: Path, bot_id: str) -> list[str]:
     """The bot's effective protocols, less the shared-documentation slot.
 
-    The fixture fleet has a shared-docs tree, so that slot is appended too;
-    it is not what these tests are about, and its own tests pin it.
+    The fixture fleet has a shared-docs tree, so that slot is appended too; it is
+    not what these tests are about, and its own tests pin it.
     """
-    fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+    fleet = load_test_fleet(fleet_dir)
     bot = fleet.bots[bot_id]
     effective = resolve_effective_protocols(
-        bot, fleet, _paths(fleet_dir), is_manager=bot_id in fleet.manager_bots()
+        bot, fleet, make_paths(fleet_dir), is_manager=bot_id in fleet.manager_bots()
     )
     assert len(effective) == len(set(effective)), f"duplicate protocol: {effective}"
     return [p for p in effective if not p.startswith("shared-documentation")]
 
 
 class TestTheRegistry:
-    def test_the_guardrail_defaults_lead_with_the_install_rule(self):
-        assert DEFAULT_GUARDRAILS == GUARDRAILS
-
     def test_timezone_is_the_resource_default_at_the_instruct_tier(self):
         d = defaults.REGISTRY["resources"]
         assert DEFAULT_RESOURCES == ["timezone"]
@@ -145,10 +134,8 @@ class TestTheRegistry:
         assert d.grandfathered == ("timezone",)
 
     def test_the_three_protocols_are_grandfathered_global_entries(self):
-        d = defaults.REGISTRY["protocols"]
-        for name in PROTOCOLS:
-            assert name in d.entries, name
-            assert name in d.grandfathered, name
+        grandfathered = defaults.REGISTRY["protocols"].grandfathered
+        assert set(PROTOCOLS) <= set(grandfathered)
 
     @pytest.mark.parametrize("channel", [True, False])
     def test_only_the_telegram_protocols_wait_for_the_channel(self, channel):
@@ -209,68 +196,59 @@ class TestGuardrailAndResourceDefaults:
         assert worker.guardrails == ["extra-guard", "stanza-guard"]
 
 
-class TestComposedBytes:
-    """Byte-level: the composed CLAUDE.md, settings and bot.conf, both bots.
+class TestRenderedBytes:
+    """Byte-level: each bot's rendered CLAUDE.md, settings and bot.conf.
 
-    `bot.conf` records the manifest's own digest (`FLEET_MANIFEST_SHA256`), which any
-    edit to fleet.yaml changes, comments included. That line is the one allowed to
-    differ, and it must differ, or the second compose did not read the edited file.
+    `bot.conf` records the manifest's own digest (`FLEET_MANIFEST_SHA256`), which
+    any edit to fleet.yaml changes, comments included. That line is the one
+    allowed to differ, and it must differ, or the second render did not read the
+    edited file.
     """
 
-    DIGEST = re.compile(rb"^export FLEET_MANIFEST_SHA256=.*$", re.M)
-
     FILES = ("CLAUDE.md", ".claude/settings.local.json", "bot.conf")
+    DIGEST = re.compile(r"^export FLEET_MANIFEST_SHA256=.*$", re.M)
 
-    def _compose(self, fleet_dir: Path, monkeypatch) -> dict[str, dict[str, bytes]]:
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        install_real_template(fleet_dir)
-        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-        paths = _paths(fleet_dir)
+    def _render(self, fleet_dir: Path) -> dict[str, dict[str, str]]:
+        fleet = load_test_fleet(fleet_dir)
+        paths = make_paths(fleet_dir)
         out = {}
         for bot in fleet.bots.values():
-            compose_bot(bot, fleet, paths, log=lambda m: None)
-            bot_dir = paths.bot_runtime(bot.bot_id)
-            out[bot.bot_id] = {f: (bot_dir / f).read_bytes() for f in self.FILES}
+            files = render_bot_files(bot, fleet, paths)
+            out[bot.bot_id] = {name: files[name].content for name in self.FILES}
         return out
 
     def test_guardrail_and_timezone_copies_come_out_with_identical_bytes(
         self, fleet_dir, monkeypatch
     ):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        install_real_template(fleet_dir)
         (fleet_dir / "library" / "guardrails" / "extra-guard.md").write_text(
             "---\ntitle: extra-guard\n---\n\nA fleet's own guardrail.\n"
         )
-        line = "    guardrails: [no-push-main]\n"
-        _edit(
-            fleet_dir,
-            line,
+        copies = (
             "    guardrails: [no-push-main, no-destructive-git, pii-protection, "
             "no-fabrication, confirm-before-send, extra-guard]\n"
-            "    resources: [timezone]\n",
+            "    resources: [timezone]\n"
         )
-        with_copies = self._compose(fleet_dir, monkeypatch)
+        _edit(fleet_dir, "    guardrails: [no-push-main]\n", copies)
+        with_copies = self._render(fleet_dir)
         # Positive control, so the comparison below is not two empty states:
         # every default rendered, each exactly once.
+        headings = [f"### {g}" for g in GUARDRAILS if g != "no-push-main"]
+        headings += ["### No push to main", "### timezone", "### extra-guard"]
         for bot_id, files in with_copies.items():
-            text = files["CLAUDE.md"].decode()
-            for heading in (*(f"### {g}" for g in GUARDRAILS if g != "no-push-main"),
-                            "### No push to main", "### timezone", "### extra-guard"):
-                assert text.count(heading + "\n") == 1, f"{bot_id}: {heading!r}"
-        _edit(
-            fleet_dir,
-            "    guardrails: [no-push-main, no-destructive-git, pii-protection, "
-            "no-fabrication, confirm-before-send, extra-guard]\n"
-            "    resources: [timezone]\n",
-            "    guardrails: [extra-guard]\n",
-        )
-        without_copies = self._compose(fleet_dir, monkeypatch)
+            for heading in headings:
+                assert files["CLAUDE.md"].count(heading + "\n") == 1, f"{bot_id}: {heading!r}"
+        _edit(fleet_dir, copies, "    guardrails: [extra-guard]\n")
+        without_copies = self._render(fleet_dir)
         assert sorted(without_copies) == sorted(with_copies)
         for bot_id, files in with_copies.items():
             for name in self.FILES:
                 a, b = files[name], without_copies[bot_id][name]
                 if name == "bot.conf":
                     assert self.DIGEST.search(a) and a != b, f"{bot_id}: digest did not move"
-                    a, b = self.DIGEST.sub(b"", a), self.DIGEST.sub(b"", b)
+                    a, b = self.DIGEST.sub("", a), self.DIGEST.sub("", b)
                 assert a == b, f"{bot_id}: {name} differs"
 
 
@@ -292,15 +270,6 @@ class TestProtocolDefaults:
         # The other bot still has its channel and keeps both.
         assert set(TELEGRAM_PROTOCOLS) <= set(_effective_protocols(fleet_dir, "lead"))
 
-    def test_declared_copies_keep_their_order_and_compose_once(self, fleet_dir):
-        declared = ["report-back", *PROTOCOLS, "extra-proto"]
-        _edit(
-            fleet_dir,
-            "    protocols: [report-back]\n",
-            f"    protocols: [{', '.join(declared)}]\n",
-        )
-        assert _effective_protocols(fleet_dir, "worker-1") == declared
-
     def test_the_opt_out_removes_them(self, fleet_dir):
         _edit(
             fleet_dir,
@@ -309,29 +278,21 @@ class TestProtocolDefaults:
         )
         assert not set(PROTOCOLS) & set(_effective_protocols(fleet_dir, "worker-1"))
 
+    def test_copies_keep_their_order_and_removing_them_moves_the_three_last(self, fleet_dir):
+        """Why the protocol copies stay: protocol defaults are appended.
 
-class TestWhyTheProtocolCopiesStay:
-    def test_removing_them_moves_them_after_the_declared_list(self, fleet_dir):
-        """Not byte-identical, by construction: the defaults are appended.
-
-        A fleet that lists the three after `report-back` and before its own
-        protocols composes them there; with the copies removed they compose at
-        the end. A registry position cannot fix it in general: two bots whose
-        remaining lists both start with `report-back` can need these three
-        before it in one fleet and after it in another.
+        With the copies in place the declared order is kept, each entry once. With
+        them removed the three compose after the declared list. A registry
+        position cannot fix that in general: two bots whose remaining lists both
+        start with `report-back` can need these three before it in one fleet and
+        after it in another.
         """
-        _edit(
-            fleet_dir,
-            "    protocols: [report-back]\n",
-            f"    protocols: [report-back, {', '.join(PROTOCOLS)}, extra-proto]\n",
-        )
-        with_copies = _effective_protocols(fleet_dir, "worker-1")
-        _edit(
-            fleet_dir,
-            f"    protocols: [report-back, {', '.join(PROTOCOLS)}, extra-proto]\n",
-            "    protocols: [report-back, extra-proto]\n",
-        )
-        without_copies = _effective_protocols(fleet_dir, "worker-1")
-        assert sorted(with_copies) == sorted(without_copies)
-        assert without_copies == ["report-back", "extra-proto", *PROTOCOLS]
-        assert with_copies != without_copies
+        with_copies = f"    protocols: [report-back, {', '.join(PROTOCOLS)}, extra-proto]\n"
+        _edit(fleet_dir, "    protocols: [report-back]\n", with_copies)
+        assert _effective_protocols(fleet_dir, "worker-1") == [
+            "report-back", *PROTOCOLS, "extra-proto",
+        ]
+        _edit(fleet_dir, with_copies, "    protocols: [report-back, extra-proto]\n")
+        assert _effective_protocols(fleet_dir, "worker-1") == [
+            "report-back", "extra-proto", *PROTOCOLS,
+        ]

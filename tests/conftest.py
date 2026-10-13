@@ -613,6 +613,19 @@ def report_row(bot, ts, status="completed", task_id=None, **extra):
     return row
 
 
+def write_default_stubs(library: Path) -> None:
+    """Stub every list default that `load_fleet` merges onto every bot.
+
+    A minimal library must carry them, or the validator warns per bot about an
+    item it cannot resolve. Call it before a fixture writes its own copy of one,
+    so that copy's text wins.
+    """
+    for kind, names in (("guardrails", DEFAULT_GUARDRAILS), ("resources", DEFAULT_RESOURCES)):
+        (library / kind).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (library / kind / f"{name}.md").write_text(f"---\ntitle: {name}\n---\n\nDefault stub.\n")
+
+
 def load_test_fleet(fleet_dir: Path):
     """load_fleet against a fleet_dir fixture, returning just the FleetConfig."""
     from claudlobby.config import load_fleet
@@ -707,18 +720,11 @@ def fleet_dir(tmp_path: Path) -> Path:
         "# Engineer\n\nBuild things.\n"
     )
 
+    write_default_stubs(root / "library")
     # A guardrail and protocol the defaults reference
     (root / "library" / "guardrails" / "no-push-main.md").write_text(
         "---\ntitle: No push to main\n---\n\nNever push to main.\n"
     )
-    # Every bot composes DEFAULT_GUARDRAILS and DEFAULT_RESOURCES, so the minimal
-    # library must carry them or the validator warns per bot about an item it
-    # cannot resolve. A file written above keeps its own text.
-    for _kind, _names in (("guardrails", DEFAULT_GUARDRAILS), ("resources", DEFAULT_RESOURCES)):
-        for _name in _names:
-            _stub = root / "library" / _kind / f"{_name}.md"
-            if not _stub.exists():
-                _stub.write_text(f"---\ntitle: {_name}\n---\n\nDefault {_kind[:-1]}.\n")
     (root / "library" / "protocols" / "report-back.md").write_text(
         "---\ntitle: Report-Back Protocol\n---\n\nReport back when done.\n"
     )
