@@ -98,6 +98,20 @@ tool_grants:
   - "Bash(claudlobby --json fleet usage)"
   - "Bash(claudlobby --json fleet usage *)"
   - "Bash(claudlobby --json fleet reconcile)"
+  - "Bash(claudlobby bot capabilities --help)"
+  - "Bash(claudlobby bot show --help)"
+  - "Bash(claudlobby project list --help)"
+  - "Bash(claudlobby project show --help)"
+  - "Bash(claudlobby task permission request --help)"
+  - "Bash(claudlobby task permission show --help)"
+  - "Bash(claudlobby task permission check --help)"
+  - "Bash(claudlobby --json bot capabilities *)"
+  - "Bash(claudlobby --json bot show *)"
+  - "Bash(claudlobby --json project list)"
+  - "Bash(claudlobby --json project show *)"
+  - "Bash(claudlobby --json task permission request *)"
+  - "Bash(claudlobby --json task permission show *)"
+  - "Bash(claudlobby --json task permission check *)"
 ---
 
 # Fleet operations
@@ -408,3 +422,48 @@ Stop on permission, scope, or release errors. Do not substitute raw SQL,
 hand-built plane events, shell dispatch helpers, or tmux keystrokes for a
 refused CLI operation. Stop at an unsupported operation; do not invent another
 way to deliver work.
+
+## Orientation reads and permission requests
+
+These reads change nothing:
+
+```bash
+claudlobby --json bot show BOT
+claudlobby --json bot capabilities BOT
+claudlobby --json project list
+claudlobby --json project show PROJECT
+```
+
+`bot show BOT` answers what a bot has at hand: its role and manager and what is
+composed into it (`data.bot.effective_configuration.equipment`: skills, MCP
+servers, protocols, guardrails, principles and the rest). `bot capabilities BOT`
+adds its permission rules as SHA-256 hashes, the arguments withheld, and is about
+four times as long; read it to compare rule sets, not to learn the equipment. Both
+describe what was composed, not what a running session enforces:
+`permissions.enforcement` and `runtime_observed` always read `unknown` or
+`not_probed`, because nothing probes the session, and unknown is not "off". `project list` and
+`project show PROJECT` read the fleet's declared projects: key, title, repos,
+validation tier (how work in them is closed) and mission file. A manager's
+CLAUDE.md carries that table; a worker reads it here.
+
+To ask for a `merge`, `deploy`, `spend` or `delete` that needs a person's approval,
+record a request. A message, an escalation, a comment or a passing review does not
+grant permission:
+
+```bash
+claudlobby --json task permission request TASK_ID --scope-file FILE --reason "Why" --request-id REQUEST_UUID
+claudlobby --json task permission show PERMISSION_ID
+claudlobby --json task permission check PERMISSION_ID --scope-file FILE
+```
+
+The scope file is JSON with exactly `action`, `target` and `constraints`: the exact
+revision, environment, budget ceiling or selection, never a credential. Only the
+task's assignee or the fleet manager can request. `show` reads the request and its
+latest decision. `check` tests this bot and this exact scope and executes nothing;
+an approval covers those exact terms only while the task and its assignment stay
+unchanged. The decisions (`approve`, `decline`, `revoke`) are a local operator's
+and are denied to generated bots.
+
+Two commands are not yours to run. `task feedback` takes an explicit local human
+and refuses every generated bot session. `task recheck` is run by the fleet timer,
+which sends the manager one digest of overdue work.

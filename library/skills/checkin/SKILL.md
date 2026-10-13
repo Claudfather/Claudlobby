@@ -5,6 +5,7 @@ argument-hint: "[--dry-run]"
 tool_grants:
   - "Bash(claudlobby --json --fleet * checkin list *)"
   - "Bash(claudlobby --json --fleet * checkin record *)"
+  - "Bash(claudlobby --json --fleet * checkin show *)"
   - "Bash(claudlobby --fleet * brief *)"
   - "Bash(claudlobby --fleet * fleet status *)"
   - "Bash(claudlobby --json fleet inbox)"
@@ -237,6 +238,10 @@ proceeding; never mint another UUID or resend automatically. If an act is
 confirmed failed, record a follow-up `nothing` check-in with
 `prev_checkin_id=CHECKIN_ID` and name the failed step. Do not report a failed
 notification as an unrecorded task.
+
+To re-read one recorded decision with the assignments joined to it
+(`data.decision.dispatches`), run
+`claudlobby --json --fleet "$FLEET_NAME" checkin show CHECKIN_ID`.
 
 Under `--dry-run`, pass the same file and request UUID to `checkin record --dry-run`.
 Its `validated: true` output has no committed check-in ID. Print the

@@ -1043,15 +1043,17 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
 7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
 8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
-9. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
-10. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
-11. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-12. **Principles** — `## Principles` section.
-13. **Permissions** — `## Permissions` section.
-14. **Protocols** — `## Protocols` section.
-15. **Guardrails** — `## Guardrails` section.
-16. **Lessons** — `## Lessons` section.
-17. **Post-actions** — `## Post-actions` section.
+9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through (only doors every role is granted), and `bot show` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size and its grants are pinned by `tests/test_system_orientation.py`.
+10. **Dispatches framed as pasted text** — `## Dispatches framed as pasted text`, the verify-then-trust check for a framed dispatch, on every bot. Fixed in the template.
+11. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
+12. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
+13. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
+14. **Principles** — `## Principles` section.
+15. **Permissions** — `## Permissions` section.
+16. **Protocols** — `## Protocols` section.
+17. **Guardrails** — `## Guardrails` section.
+18. **Lessons** — `## Lessons` section.
+19. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 
