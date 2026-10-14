@@ -47,6 +47,19 @@ log = logging.getLogger(__name__)
 # never library or voice content, so a walk over *.md must skip them.
 INSTRUCTION_FILE_NAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
 
+#: Old names of package voices, each mapped to the voice that replaced it.
+#: ``Paths.find_voice_file`` reads an old name as its new one when no file
+#: answers to the old name itself, and validate names each bot that still
+#: declares one (``voice-renamed``). #2344 stops reading them.
+RENAMED_VOICES: dict[str, str] = {
+    "aswath-damodaran": "valuation-professor",
+    "casual-degenerate": "deadpan-wit",
+    "issey-miyake": "minimalist-designer",
+    "john-carmack": "optimization-engineer",
+    "srinivasa-ramanujan": "intuitive-mathematician",
+    "stoner-creative": "meandering-creative",
+}
+
 
 class InvalidPathSelector(ValueError):
     """Invalid selector syntax, distinguished from stored configuration errors."""
@@ -575,7 +588,9 @@ class Paths:
         Accepts a bare voice name, the 'voices/<name>.md' that fleet.yaml
         declares, or 'library/voices/<name>.md'. Order: the overlay's
         library/voices/, its pre-#2150 voices/ (``legacy_overlay_voices``), a
-        path relative to the source directory, then the package.
+        path relative to the source directory, then the package. An old name
+        in ``RENAMED_VOICES`` that none of them holds is looked up as its new
+        name.
         """
         clean = rel_path
         for prefix in ("library/voices/", "voices/"):
@@ -591,7 +606,8 @@ class Paths:
         for c in candidates:
             if c.is_file():
                 return c
-        return None
+        renamed = RENAMED_VOICES.get(clean.removesuffix(".md")) if clean.endswith(".md") else None
+        return self.find_voice_file(f"{renamed}.md") if renamed else None
 
     # --- shared documentation ---
 

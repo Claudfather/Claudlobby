@@ -109,6 +109,25 @@ class TestSharedCauseIsOneLine:
         report = _validate(fleet_dir)
         assert _of(report, "voice-legacy-path") == [] and _of(report, "voice-missing") == []
 
+    def test_a_renamed_voice_is_one_line_per_old_name_until_its_bots_move(
+        self, fleet_dir, monkeypatch
+    ):
+        """#2344: an old voice name composes the renamed voice for one release,
+        and validate names each old name once, however many bots declare it."""
+        _env(monkeypatch)
+        _grow(fleet_dir, bots={"w2": "      voice: voices/john-carmack.md\n",
+                               "w3": "      voice: voices/john-carmack.md\n",
+                               "w4": "      voice: voices/optimization-engineer.md\n"})
+        paths = _paths(fleet_dir)
+        paths.overlay_voices.mkdir(parents=True, exist_ok=True)
+        (paths.overlay_voices / "optimization-engineer.md").write_text("---\nname: New\n---\n\nNew.\n")
+        report = _validate(fleet_dir)
+        assert _of(report, "voice-renamed") == [
+            "voice 'john-carmack' is now 'optimization-engineer'; declare "
+            "voices/optimization-engineer.md — affects 2 bot(s): w2, w3"
+        ]
+        assert _of(report, "voice-missing") == []
+
     def test_a_retired_key_in_one_bots_own_stanza_stays_that_bots(
         self, fleet_dir, monkeypatch
     ):

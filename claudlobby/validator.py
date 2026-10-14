@@ -50,7 +50,7 @@ from .known_values import (
     hint,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
-from .paths import Paths, _iter_fleet_dirs, detect_vault
+from .paths import RENAMED_VOICES, Paths, _iter_fleet_dirs, detect_vault
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
 _ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
@@ -157,6 +157,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     # a declared reference that resolves to nothing
     "voice-missing": "a declared voice is not in any library/voices/",
     "voice-legacy-path": "a voice resolves from the overlay's old voices/; move it to library/voices/ before #2202 stops reading there",
+    "voice-renamed": "a voice is declared by a name the package renamed; declare the new name before #2344 stops reading the old one",
     "skill-missing": "a declared skill or skill folder is not in any library/skills/",
     "integration-missing": "a declared integration is not in any library/integrations/",
     "mcp-missing": "a declared MCP fragment is not in any library/mcp/",
@@ -748,6 +749,14 @@ def _validate_bots(
                     "voice-legacy-path",
                     f"voice file {voice_file} is at the old voices/ path; "
                     f"move it to {paths.overlay_voices}/",
+                    bot_name,
+                )
+            elif RENAMED_VOICES.get(Path(bot.voice).stem) == voice_file.stem:
+                # The old name composed the renamed voice: one line per old name.
+                shared.add(
+                    "voice-renamed",
+                    f"voice '{Path(bot.voice).stem}' is now '{voice_file.stem}'; "
+                    f"declare voices/{voice_file.stem}.md",
                     bot_name,
                 )
 

@@ -25,4 +25,4 @@ The maximalist designer's lens: the screen is a teaching surface. A border, a la
 - Heading sizes inflated to make a page "feel important" without actual hierarchy change.
 - Sticky elements (headers, sidebars) added when scrolling already preserves context.
 
-**The counter-rule (Issey's lens):** if removing the addition leaves the user without an affordance they need, the addition is teaching. If removing it produces no user-visible loss, the addition is decoration. The discipline isn't *more visuals*, it's *visuals that earn place*.
+**The counter-rule (the minimalist designer's lens):** if removing the addition leaves the user without an affordance they need, the addition is teaching. If removing it produces no user-visible loss, the addition is decoration. The discipline isn't *more visuals*, it's *visuals that earn place*.

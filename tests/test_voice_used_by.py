@@ -18,7 +18,7 @@ def test_a_voice_a_bot_declares_reads_as_used_by_that_bot(tmp_path):
             declaring,
             _bot(f"bot:{FLEET}/dinesh", skills=()),
             _lib("voices", "vito-corleone"),
-            _lib("voices", "john-carmack"),
+            _lib("voices", "optimization-engineer"),
             _done(),
         ],
     )
@@ -28,5 +28,5 @@ def test_a_voice_a_bot_declares_reads_as_used_by_that_bot(tmp_path):
     finally:
         conn.close()
     rows = {r["name"]: r["used_by"] for r in inv["library"] if r["category"] == "voices"}
-    assert rows == {"vito-corleone": ["erlich"], "john-carmack": []}
+    assert rows == {"vito-corleone": ["erlich"], "optimization-engineer": []}
     assert inv["counts"]["library_in_use"] == 1

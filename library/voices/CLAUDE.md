@@ -7,7 +7,7 @@ Personality overlays. A voice defines **how** a bot communicates — tone, humor
 - **Voice** = personality, communication style, character. "Who you sound like."
 - **Expertise** (in `library/expertise/`) = domain knowledge, responsibilities, workflows. "What you do."
 
-These are independent axes. Any voice can pair with any expertise. A `conspiracy-theorist` voice works on an SEO bot, an advertising bot, or an engineer. An `agreeable-workhorse` voice works on a site-copy bot or a data pipeline bot. If your voice file references a specific domain or skill, it's leaking expertise into personality — fix it.
+These are independent axes: any voice pairs with any expertise. If your voice file references a specific domain or skill, it's leaking expertise into personality — fix it.
 
 ## What belongs here
 
@@ -25,15 +25,16 @@ Use `{{BOT_NAME}}` as the character name so the voice works for any bot.
 - Workflow instructions (how to audit a site, how to write a PR)
 - Tool usage patterns (which MCP servers to call, which CLI commands to run)
 - References to specific brands, products, or companies
+- Real people's names, or words put in a real person's mouth
 
 All of the above belong in `library/expertise/`, `library/skills/`, or fleet-specific `local/` overlays.
 
 ## Naming
 
-Lowercase, hyphenated, descriptive of the persona archetype: `conspiracy-theorist.md`, `agreeable-workhorse.md`, `stoner-creative.md`. Not the bot's name — the personality type.
+Lowercase, hyphenated, descriptive of the persona archetype: `conspiracy-theorist.md`, `agreeable-workhorse.md`, `meandering-creative.md`. Not the bot's name — the personality type.
 
 ## Composition
 
 Bots reference a voice in fleet.yaml: `voice: voices/conspiracy-theorist.md`. The compositor injects it into the bot's CLAUDE.md under a "Voice" section. A bot gets exactly one voice (or none).
 
-The compositor looks the name up in a fleet's `local/<fleet>/library/voices/` first, then in this folder. A fleet voice still in the old `local/<fleet>/voices/` composes for one more release; `config validate` names it (`voice-legacy-path`) until it moves.
+The compositor looks the name up in a fleet's `local/<fleet>/library/voices/` first, then in this folder. A fleet voice still in the old `local/<fleet>/voices/` composes for one more release; `config validate` names it (`voice-legacy-path`) until it moves. Renamed voices answer to their old names for one more release (`voice-renamed`).

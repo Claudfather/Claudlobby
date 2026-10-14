@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the voices renovation: every voice is a reusable archetype; six renamed voices answer to their old names for one more release
+
+Voices now follow their folder's rules: a voice is an archetype (tone, cadence, how it pushes back), not a real person and not a bot's name, and it carries no domain knowledge. A bot whose voice changed composes the new voice text after its next activation.
+
+- **Renamed:** `aswath-damodaran` → `valuation-professor`, `john-carmack` → `optimization-engineer`, `issey-miyake` → `minimalist-designer`, `srinivasa-ramanujan` → `intuitive-mathematician`, `casual-degenerate` → `deadpan-wit`, `stoner-creative` → `meandering-creative`.
+- **An old name still composes in this release.** When no file answers to an old name, lookup reads it as the new one, so a fleet's own voice file under an old name still wins. `config validate` and doctor's fleet-yaml rung name each old name once, folded across the bots that declare it (`voice-renamed`). Declare the new name before #2344 stops reading the old ones.
+- **Rewritten:** the four voices named after real people keep their flavor without the names or the quotes. `agreeable-workhorse`, `high-energy-jester`, `deadpan-wit` and `meandering-creative` keep their humor without insults or profanity, and `conspiracy-theorist` becomes a playful skeptic. `alex`, `astrid` and `ari-gold` address the bot as `{{BOT_NAME}}`; `alex` and `astrid` are titled by archetype. `bob-porter`, `bob-slydell`, `joanna`, `samir-nagheenanajar`, `michael-bolton` and `tom-smykowski` lose their domain knowledge, which belongs in expertise files. `takahashi` and the two design lessons name the minimalist and maximalist designers instead of a person.
+- **Added:** eight archetypes, `skeptical-auditor`, `patient-teacher`, `pragmatic-shipper`, `calm-incident-commander`, `plain-spoken-editor`, `curious-researcher`, `diplomatic-facilitator` and `meticulous-archivist`.
+
 ### Changed — voices live in `library/voices/`; a fleet's old `voices/` is read for one more release (#2150)
 
 Voices are library content, so the package's `voices/` moved to `library/voices/`, and a fleet overlay's `local/<fleet>/voices/` becomes `local/<fleet>/library/voices/`. Only the location moved: each bot that composes a voice composes a byte-identical `CLAUDE.md` before and after (measured on a live host's fleets; the PR has the hashes).
