@@ -165,14 +165,11 @@ def test_pulse_preserves_native_warning_and_summary(capfd, tmp_path):
 
 
 def test_pulse_timeout_kills_its_private_process_group(monkeypatch, tmp_path):
-    child = SimpleNamespace(pid=731, calls=0)
-    def communicate(*, timeout=None):
-        child.calls += 1
-        if timeout is not None:
-            raise subprocess.TimeoutExpired("pulse", timeout)
-        return b"", None
-    child.communicate = communicate
-    child.returncode = -9
+    child = SimpleNamespace(pid=731, waits=[])
+    def wait(*, timeout):  # a sweep that has not exited, even after SIGKILL
+        child.waits.append(timeout)
+        raise subprocess.TimeoutExpired("pulse", timeout)
+    child.communicate = child.wait = wait
     monkeypatch.setattr(fleet_pulse.subprocess, "Popen", lambda *a, **k: child)
     killed = []
     monkeypatch.setattr(fleet_pulse.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
@@ -181,6 +178,22 @@ def test_pulse_timeout_kills_its_private_process_group(monkeypatch, tmp_path):
     assert failure.value.code == "timeout" and failure.value.effect_attempted
     # SIGTERM first, so the sweep's own traps can clean up; SIGKILL what is left.
     assert killed == [(731, fleet_pulse.signal.SIGTERM), (731, fleet_pulse.signal.SIGKILL)]
+    # Every wait is bounded, so a sweep that will not die still ends the stop.
+    assert child.waits[1:] == [fleet_pulse.TERM_GRACE_S, fleet_pulse.REAP_WAIT_S]
+
+
+def test_pulse_stop_takes_eperm_as_a_group_with_no_live_member(monkeypatch):
+    """macOS refuses a signal to a group none of whose members can take one (EPERM),
+    as after the sweep exits and before it is reaped. The stop goes on to reap it."""
+    child = SimpleNamespace(pid=731, waits=[])
+    def wait(*, timeout):
+        child.waits.append(timeout)
+    child.communicate = child.wait = wait
+    def refuse(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(fleet_pulse.os, "killpg", refuse)
+    fleet_pulse._stop(child)
+    assert child.waits == [fleet_pulse.REAP_WAIT_S]
 
 
 def test_selected_private_pulse_refuses_direct_entry(tmp_path):

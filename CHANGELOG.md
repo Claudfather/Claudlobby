@@ -13,6 +13,10 @@ Every usage-limit stop since the #996 fix went live read `IDLE` in production, s
 - **Only a newer prompt drawn under the limit line, or Claude Code's own "Usage limit available again" notice, counts as moving on.** A turn that ended normally since the stop has already removed the hook's record, which keepalive checks before it asks the reader.
 - **An `IDLE` tick names a record the pane does not confirm.** When `data/.usage-limit` is newer than the last tool call and the reader answers `none`, or gives no answer, keepalive's `IDLE` line says so.
 
+### Fixed — a fleet pulse run ends by 260 s, whatever the load (#2347)
+
+A scheduled pulse run now ends by the largest cap (240 s unset), counted from its unit's start. A wait for admission while an activation holds the lock, or a slow interpreter start on a loaded host, cuts the sweep short instead of lengthening the run, and a run with no time left starts no sweep. Stopping a sweep that reached its cap waits for its output only through the 10 s grace, then at most 1 s for the sweep to exit, and writing the `TIMED OUT` summary no longer imports the composer. The pulse's systemd unit carries its own limit for a run that cannot stop itself: `TimeoutStartSec=` at the largest cap plus 14 s (254 s unset), with `TimeoutStopSec=1`. A timed-out run's message and summary say how long the sweep ran of its cap and how far into the run it began.
+
 ### Changed — the voices renovation: every voice is a reusable archetype; six voices are renamed and their old names removed
 
 Voices now follow their folder's rules: a voice is an archetype (tone, cadence, how it pushes back), not a real person and not a bot's name, and it carries no domain knowledge. A bot whose voice changed composes the new voice text after its next activation.
