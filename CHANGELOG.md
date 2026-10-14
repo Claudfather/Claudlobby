@@ -53,6 +53,30 @@ Voices are library content, so the package's `voices/` moved to `library/voices/
 - **The plane's library registry now records the packaged voices** (`shared/voices/<name>`). It discovers categories from `library/`'s folders, and voices used to sit outside it. It skips a folder's `CLAUDE.md`/`AGENTS.md`.
 - **The plane's content room counts a declared voice as in use.** A bot declares `voice: voices/<name>.md`, and the voice's library item is `voices/<name>`. The inventory now joins the two, so each voice names the bots that use it instead of reading unused.
 
+### Added — a fixed system-orientation section in every bot's CLAUDE.md, and the orientation commands taught where they belong
+
+Every composed CLAUDE.md now carries a short `## System orientation` section (under 1 KB): what the plane is, the doors a bot reads and writes through (only doors every role is granted), a task versus an assignment, and `claudlobby --json bot show BOT` for what the bot has at hand. fleet-ops teaches `bot show`, `bot capabilities`, `project list`, `project show` and `task permission request|show|check` in a new section, with their grants; the check-in skill teaches `checkin show`. `task feedback` and `task recheck` are named there as not a bot's; `checkin selection` waits for the sprint action that produces its input. #2331.
+
+### Changed — `library list` includes principles
+
+The list left out the principles kind, so a bot asking what the library holds got an incomplete answer. A test now fails for any library directory that holds items and is not listed.
+
+### Changed — library skills say when to use them, and `fleet-ops` mints request IDs without `uuidgen` (#2330, #2061)
+
+Every library skill's description opens with its trigger ("Use when …"), and `tests/test_skill_descriptions.py` fails one that does not. `fleet-ops` mints request IDs with `python3 -I -c 'import uuid; print(uuid.uuid4())'`, granted exactly, instead of `uuidgen`, which a stock Debian host lacks (#2061). Isolated mode keeps a `uuid.py` in the bot's working directory from running in place of the standard library's.
+
+### Added — registry defaults for the guidance every fleet copied by hand (#1168)
+
+The registry has defaults for the guardrails `no-push-main`, `no-destructive-git`, `pii-protection`, `no-fabrication` and `confirm-before-send`; the protocols `context-management`, `telegram-routing` and `telegram-formatting` (the last two only for a bot with a Telegram channel); and the resource `timezone`. Added the `system_defaults.resources` opt-out. The `resources` registry tier moves from WIRE to INSTRUCT.
+
+### Changed — `remote_control` defaults to the fleet manager only (#2325)
+
+Unset, it is true for `fleet.manager` and false for every other bot; an explicit value on the bot or in `defaults:` wins either way. `config explain bot.remote_control` names the role default. `bot create` takes `--remote-control` / `--no-remote-control` as one option, and its wizard offers the inherited value.
+
+### Fixed — no framework send types into a menu (#2325)
+
+`pane_send_verified` refuses while a menu holds the pane (rc 4, `recipient-menu-open`), so a delivery's text can no longer choose an option in Claude Code's usage-limit menu, usage credits included.
+
 ### Added — `host repair-after-reset`: recover an activation a host reset stranded during its start steps
 
 A host that reset or lost power while `ingest_started`, `bots_started`, `verified` or `producers_resumed` was next could not be recovered. Every started candidate died with the host. The resume only re-observes recorded starts, so it failed on the first one that had a recorded result. `repair-start` covers only a bot start with no result. Native admission refuses every unit while the activation is unfinished. A floor host hit this after a watchdog reset at its 16th bot start and stayed down with no supported way back.
@@ -75,6 +99,47 @@ Tests: `tests/test_activation.py` reproduces the reset mid-`bots_started`:
 - the boot id on Linux and macOS.
 
 The fake host now answers `svc_inventory_properties` like `systemctl show`, a timer's `Triggers=` included, so the loaded-but-stopped candidate check runs as on Linux. `tests/test_host_commands.py` covers the verb's guard, its output and a refusal.
+
+### Added — a workflow builds the release inputs for one commit on a Linux arm64 runner
+
+`release-bundle.yml` builds the wheel, the offline wheelhouse and the hash lock that `claudlobby host setup` takes, for any commit, on `ubuntu-24.04-arm` with CPython 3.11. It uploads them with their checksums once its offline assembly rehearsal has passed. Inputs: the commit, extras (`plane-ui`) and dependency pins. A host no longer has to build the wheel or download its dependencies. CI-only.
+
+### Fixed — a bot stopped on purpose no longer pages as an outage, and one fault is one alert (#2243)
+
+A bot stopped through `bot stop` paged as an outage. fleet-pulse read the missing session and the down unit as a death: `session_missing` and `service_down` every sweep, both pushed to the manager, and two stopped bots reached the fleet escalation once per type, every 10 to 20 minutes, for hours. Over seven days on one host, all 230 escalation-type rows came from four deliberate stops and none from a real death (the issue's pre-scope comment has the measurement).
+
+- **A recorded stop is silent.** `bot stop` now writes a local record of the stop before the unit file goes, whatever the plane does: who made it, when, and an optional `--reason TEXT`, in the bot's `data/.stopped`. fleet-pulse reads that record beside the missing unit file, the fact activation, keepalive and reconcile already read, and raises no row, push or escalation for the bot. `bot start` removes the record. The plane gets notice rows, `bot_stopped` and `bot_started`, as the audit trail. The sweep never reads them, so a stop made while the plane is down stays quiet, and the stop reports `recording: degraded`.
+- **No unit file and no record is its own fault, `unit_missing`** (critical): a unit lost with nobody having stopped it, which a botched disenroll, a broken activation or a deleted unit directory leaves. It records one row every sweep and pushes once per episode, and the escalation counts it with today's threshold and window, in place of the `service_down` and `session_missing` such a bot raised. A bot stopped before this change has no record and reads as `unit_missing` until `bot stop` runs on it again; on a bot already stopped, that writes the record and changes nothing else.
+- **One fault, one alert.** A down unit raises `service_down` alone, and its payload's new `session` field (`up` or `missing`) carries what `session_missing` said. `session_missing` is for a session gone under an active unit, or on a bot with no service configured.
+- **One FLEET ALERT per sweep.** Every cause over its threshold goes out in one message; a single cause reads as before.
+- **A forgotten stop gets a reminder, never a page.** After `fleet_pulse.stopped_remind_days` days (default 3, `0` off), the manager gets one push, then one every as many days again.
+- **`stopped` everywhere.** The pulse summary shows `stopped` in both columns and `stopped since <UTC> by <caller>`. `fleet status` reports `state: "stopped"` with `stopped_since`, `stopped_by` and `stop_reason`. `fleet reconcile` reports `stopped` for a recorded stop with no enrolled unit and no ready session. A missing unit with no record never reads as stopped.
+- **A stop record cannot outlive its stop.** A record beside an installed unit is from a stop that is over: the unit came back through another door, or a start or a stop failed partway. fleet-pulse removes it once it is 15 minutes old, so a later loss of that unit pages `unit_missing`. A record it cannot remove is pushed to the manager as `stop_record_kept` until it is gone, and a `bot start` that cannot remove it says so (`stop_record_kept: true`).
+- A recorded stop with no session also skips the activity checks: a stopped bot has no turn to be stuck in. `bot move` clears the record it copies to the moved bot.
+- The held-push and debounce-recipient rehearsals drew their two alerts from one such bot. Each now uses two workers with one alert each.
+
+### Fixed — a newer push to a pull request cancels the test run for the commit it replaced (#2269)
+
+`test.yml` sets a concurrency group per pull request with `cancel-in-progress`, so the run for a replaced commit stops instead of running to the end. On the morning of 2026-10-10, 23% of macOS runner-minutes ran after a pull request's head had moved (9.3% over the week ending that morning). A push to main falls back to its own run id, so pushes to main are never grouped, cancelled or queued behind each other. CI-only.
+
+### Fixed — `declared_bots_strict` takes its output file only as `--bad-out` and never truncates it, and `bot create` writes `fleet.yaml` atomically (#1131)
+
+`declared_bots_strict` finds every manifest itself. Its one argument named an output for the broken-manifest lines, and both of its last branches overwrote that path in place, so a `fleet.yaml` passed there as the manifest to check was emptied whenever every manifest parsed.
+
+- **`declared_bots_strict [--bad-out FILE]`.** Any other argument is refused with rc 2 before anything is read or written, as is a FILE that already holds content. FILE is only appended to, and stderr stays the default. The doc comment says what FILE holds after each outcome.
+- **A break for outside scripts:** the helper takes no positional argument, so a script outside this repository that passes it a file now gets rc 2 and must pass `--bad-out FILE` instead.
+- **Its four callers pass `--bad-out`.** `boot-capture` clears its per-boot file first, since each tick writes there again.
+- **`bot create` writes `fleet.yaml` through `fleet setup`'s atomic writer**: a temporary file beside it, then a rename, so a reader or a crash never meets a truncated manifest. That writer gives the file mode 0600, as `fleet setup` does.
+
+### Fixed — the native tests link node instead of copying it for every case (#2239)
+
+`tests/test_bridge_state.py` copied the host's `node` twice for each of its four native cases, and `tests/test_claude_session_pid.py` once for each of three cases, into pytest's `tmp_path`. On a Raspberry Pi, `node` is 122,159,120 bytes and `tmp_path` sits on the SD card, so a local run of the two files wrote 1,343,750,320 bytes of copies of it, and 35,008,480 more of copies of `bash`.
+
+- **One set of stand-ins per session, shared by both files.** `native_stand_ins` in `tests/conftest.py` makes `bun` and `claude` once. Every native case runs them and keeps its own scripts and state under its own `tmp_path`.
+- **On Linux each stand-in is a symbolic link, so nothing is copied.** Linux names a process after the path it was started from: a link named `bun` reads as `bun` in `/proc/<pid>/comm` and in `ps`, and its command line starts with the link's path. Those are what the tests and the code they test read; only `/proc/<pid>/exe` names `node`, and nothing reads it. The `bash` stand-ins in `tests/test_bridge_state.py` are links too.
+- **Elsewhere each stand-in is still a copy, now made once per session.** Whether macOS names a linked `node` after the link has not been checked, and #1012 and #1087 are why the stand-ins there are real `node` binaries.
+- **`harness/validate-bot-change.sh` uses the same helper.** Its session-scope scenario copied `node` twice per run (244,318,240 bytes) and now links it on Linux.
+- **`tests/test_stand_in_fixtures.py` pins it** with a small file in `node`'s place. It fails if a Linux stand-in holds a copy, if a copy is made more than once per name, if a copy loses its `libnode` link, or if either test file copies a file itself.
 
 ### Added — private-socket owner ingress and recorder-source binding
 
@@ -143,7 +208,7 @@ remain required before browser operations are activated.
 
 ### Fixed — a usage-limit stop is named, paged, and (opt-in) resumed once after its reset (#996)
 
-A claude.ai usage limit ends a bot's turn with one line, `You've hit your session limit · resets 10:50pm (America/New_York)`, and on this estate nothing resumed it. Every bot runs with `--remote-control`, and while that bridge is up Claude Code (2.1.291 and 2.1.292, read from the binary and reproduced) arms neither its own automatic continue nor its limit menu. The pane sat at an empty prompt that keepalive read as IDLE, so `data/.idle` also kept `activity_stuck` quiet, and bots sat 75 to 85 minutes past the reset until someone noticed.
+A claude.ai usage limit ends a bot's turn with one line, `You've hit your session limit · resets 10:50pm (America/New_York)`, and on this estate nothing resumed it. Every bot ran with `--remote-control`, and while that bridge is up Claude Code (2.1.291 and 2.1.292, read from the binary and reproduced) arms neither its own automatic continue nor its limit menu. The pane sat at an empty prompt that keepalive read as IDLE, so `data/.idle` also kept `activity_stuck` quiet, and bots sat 75 to 85 minutes past the reset until someone noticed.
 
 - **keepalive reads that frame as `LIMIT`, not `IDLE`.** It takes two facts, never one. The first is the bot's own record: `usage-limit-hook.sh`, a new StopFailure and Stop hook, writes `data/.usage-limit` when Claude Code ends a turn with `error: rate_limit` and clears it when a turn ends normally. The second is the whole pane: the new `usage-limit.py` reads the limit line, which sits above `tail -10`, as the bot's last word, with its reset time and what holds the screen. A limit line a bot merely quotes writes no record, so it is never a stop. `LIMIT` writes `data/.limit`, no `.idle`, and sends no reload and no bridge heal. It rides the heartbeat sample, and `fleet status` shows `limit`.
 - **The reset is read as Claude Code prints it.** A time with no date is within 24 hours after the hit that printed it, since Claude Code adds the date only beyond 24 hours. In the hour that repeats when DST ends, it is the later pass: an hour late delays a resume, an hour early would type it while the limit holds. A later hit in the same hold that prints the same limit and reset reads the reset the hold first read, so a hit after the reset is not read as tomorrow's.
