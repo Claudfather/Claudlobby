@@ -1,6 +1,8 @@
 """Selected fleet signals retain scope and send during recorder failure."""
 
 from contextlib import contextmanager
+from dataclasses import replace
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -8,12 +10,16 @@ import pytest
 from claudlobby import fleet_notification as operation
 from claudlobby.command_result import CommandFailure
 from claudlobby.commands import fleet_notify
+from claudlobby.composer import compose_fleet_timers
+from claudlobby.config import FLEET_PULSE_ENV_KEYS, FleetPulseConfig, load_fleet
 from claudlobby.plane.emit_api import validate_item
 from claudlobby.plane.migrations import DowngradeError
 from claudlobby.plane.schema_state import PendingMigrationError
-from claudlobby.recording_alerts import send_fleet_notification
+from claudlobby.recording_alerts import (clear_recording_degraded, notify_recording_degraded,
+                                         send_fleet_notification)
 from tests.plane_setup import initialize_plane
 from tests.package_fixtures import source_package
+from tests.test_fleet_pulse_knobs import _make_paths, _write
 from tests.test_recording_alerts import AT, REQUEST, private_alert  # noqa: F401
 
 
@@ -54,6 +60,9 @@ def test_public_notification_refuses_worker_and_foreign_fleet_before_effect(
 @pytest.mark.parametrize("failure", [OSError, PendingMigrationError, DowngradeError])
 def test_recording_outage_still_uses_exact_configured_carriers(private_alert, monkeypatch, failure):  # noqa: F811
     context, package, manager, tier = private_alert
+    context = replace(context, fleet=replace(context.fleet, fleet_pulse=FleetPulseConfig(
+        escalation_chat_id=tier["FLEET_PULSE_ESCALATION_CHAT_ID"],
+        escalation_state_dir=tier["FLEET_PULSE_ESCALATION_STATE_DIR"])))
     monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
     monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
     @contextmanager
@@ -62,8 +71,7 @@ def test_recording_outage_still_uses_exact_configured_carriers(private_alert, mo
     monkeypatch.setattr(operation, "mutation_admission", admitted)
     monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
     monkeypatch.setattr(operation, "_transport", lambda *_: manager)
-    monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: {
-        key: SimpleNamespace(value=value) for key, value in tier.items()})
+    monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: {})
     def recorder(*args, **kwargs):
         validate_item(args[1][0], {})
         assert args[1][0]["fleet"] == "fleet"
@@ -145,3 +153,98 @@ def test_no_channel_and_unverified_recording_are_distinct_results(private_alert,
         fleet_notify.dispatch(args)
     assert degraded.value.error.code == "recording_degraded"
     assert degraded.value.data["recording"] == "unknown"
+
+
+_ESCALATION = ("FLEET_PULSE_ESCALATION_CHAT_ID", "FLEET_PULSE_ESCALATION_STATE_DIR")
+
+
+def _pulse_fleet(tmp_path):
+    """The fixture's fleet with a fleet_pulse block, and the escalation pair its
+    composed fleet-pulse unit carries: the target the pulse escalates to."""
+    root = tmp_path / "declared"
+    fleet, defaults = load_fleet(_write(root, f"""\
+        fleet:
+          name: fleet
+          manager: manager
+          service_prefix: svc
+          bots:
+            manager:
+              expertise: [eng]
+          fleet_pulse:
+            escalation_chat_id: "-1002222222222"
+            escalation_state_dir: {tmp_path / "escalation-channel"}
+            renotify_after_s: 60
+    """))
+    paths = _make_paths(root)
+    compose_fleet_timers(fleet, paths, defaults)
+    unit = next((paths.runtime_fleet / "timers").glob("*.fleet-pulse.service")).read_text()
+    env = dict(item.split("=", 1) for line in unit.splitlines() if line.startswith("Environment=")
+               for item in shlex.split(line.removeprefix("Environment=")))
+    return fleet, "|".join(env[key] for key in _ESCALATION)
+
+
+def _env_copy(tmp_path):
+    """Another pair in the manager's .env tiers: the copy freshbox calls inert."""
+    return {"FLEET_PULSE_ESCALATION_CHAT_ID": SimpleNamespace(value="-1003333333333"),
+            "FLEET_PULSE_ESCALATION_STATE_DIR": SimpleNamespace(value=str(tmp_path / "env-channel")),
+            "TELEGRAM_BOT_TOKEN": SimpleNamespace(value="8888888:AAAAAAAAAAAAAAAAAAAA")}
+
+
+def _record_targets(package):
+    """The Telegram carrier records the chat and sender each alert goes to."""
+    (package.native / "tg-post.sh").write_text(
+        "#!/bin/bash\n"
+        "printf '%s|%s\\n' \"$TELEGRAM_GROUP_CHAT_ID\" \"$TELEGRAM_STATE_DIR\" "
+        ">> \"$CLAUDLOBBY_ROOT/telegram-target\"\n")
+
+
+def test_notify_escalates_to_the_target_the_pulse_unit_carries(
+        private_alert, monkeypatch, tmp_path):  # noqa: F811
+    """#2234: `fleet notify` and fleet-pulse read one escalation target, the
+    fleet.yaml `fleet_pulse:` block. A .env copy reaches neither."""
+    context, package, manager, _ = private_alert
+    fleet, pulse_target = _pulse_fleet(tmp_path)
+    context = replace(context, fleet=fleet)
+    _record_targets(package)
+    monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
+    monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
+    @contextmanager
+    def admitted(*args, **kwargs):
+        yield SimpleNamespace(release_id="selected", native_path=package.native)
+    monkeypatch.setattr(operation, "mutation_admission", admitted)
+    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "_transport", lambda *_: manager)
+    monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: _env_copy(tmp_path))
+    result = operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
+                                    event="disk_high", message="Disk nearly full", identity=object(),
+                                    emit=lambda *a, **k: [SimpleNamespace(status="committed")])
+    assert result.telegram.status == "carrier_accepted"
+    assert (context.paths.root / "telegram-target").read_text().splitlines() == [pulse_target]
+
+
+def test_a_failed_message_write_alerts_the_same_target(private_alert, monkeypatch, tmp_path):  # noqa: F811
+    """The message-write alert reaches the pulse's target, also when the
+    manager's .env tiers cannot be read."""
+    from claudlobby import env_tiers
+    from claudlobby.commands.message_write import _alert_tiers
+
+    context, package, manager, _ = private_alert
+    fleet, pulse_target = _pulse_fleet(tmp_path)
+    context = replace(context, fleet=fleet)
+    _record_targets(package)
+    def unreadable(*args, **kwargs):
+        raise OSError("tiers unreadable")
+    for resolve in (lambda *a, **k: _env_copy(tmp_path), unreadable):
+        monkeypatch.setattr(env_tiers, "resolve", resolve)
+        tiers, _available = _alert_tiers(SimpleNamespace(selected=context))
+        notify_recording_degraded(context, package, manager, request_id=REQUEST,
+                                  component="message", at=AT, trusted_tiers=tiers)
+        clear_recording_degraded(context, package, manager, request_id=REQUEST,
+                                 component="message", at=AT)
+    assert (context.paths.root / "telegram-target").read_text().splitlines() == [pulse_target] * 2
+
+
+def test_alerts_read_only_keys_the_fleet_pulse_block_composes():
+    """A variable renamed in FLEET_PULSE_ENV_KEYS cannot drop out of alerts unseen."""
+    from claudlobby.recording_alerts import _FLEET_PULSE_KEYS
+    assert _FLEET_PULSE_KEYS <= set(FLEET_PULSE_ENV_KEYS.values())
