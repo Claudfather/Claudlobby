@@ -37,4 +37,4 @@ Lowercase, hyphenated, descriptive of the persona archetype: `conspiracy-theoris
 
 Bots reference a voice in fleet.yaml: `voice: voices/conspiracy-theorist.md`. The compositor injects it into the bot's CLAUDE.md under a "Voice" section. A bot gets exactly one voice (or none).
 
-The compositor looks the name up in a fleet's `local/<fleet>/library/voices/` first, then in this folder. A fleet voice still in the old `local/<fleet>/voices/` composes for one more release; `config validate` names it (`voice-legacy-path`) until it moves. Renamed voices answer to their old names for one more release (`voice-renamed`).
+The compositor looks the name up in a fleet's `local/<fleet>/library/voices/` first, then in this folder. A fleet voice still in the old `local/<fleet>/voices/` composes for one more release; `config validate` names it (`voice-legacy-path`) until it moves.

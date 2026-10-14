@@ -6,12 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed — the voices renovation: every voice is a reusable archetype; six renamed voices answer to their old names for one more release
+### Changed — the voices renovation: every voice is a reusable archetype; six voices are renamed and their old names removed
 
 Voices now follow their folder's rules: a voice is an archetype (tone, cadence, how it pushes back), not a real person and not a bot's name, and it carries no domain knowledge. A bot whose voice changed composes the new voice text after its next activation.
 
 - **Renamed:** `aswath-damodaran` → `valuation-professor`, `john-carmack` → `optimization-engineer`, `issey-miyake` → `minimalist-designer`, `srinivasa-ramanujan` → `intuitive-mathematician`, `casual-degenerate` → `deadpan-wit`, `stoner-creative` → `meandering-creative`.
-- **An old name still composes in this release.** When no file answers to an old name, lookup reads it as the new one, so a fleet's own voice file under an old name still wins. `config validate` and doctor's fleet-yaml rung name each old name once, folded across the bots that declare it (`voice-renamed`). Declare the new name before #2344 stops reading the old ones.
+- **The old names no longer resolve.** A bot that still declares one composes with no voice, and `config validate` reports it as `voice-missing`. Change its `voice:` to the new name from the map above in the configuration you activate with this release.
 - **Rewritten:** the four voices named after real people keep their flavor without the names or the quotes. `agreeable-workhorse`, `high-energy-jester`, `deadpan-wit` and `meandering-creative` keep their humor without insults or profanity, and `conspiracy-theorist` becomes a playful skeptic. `alex`, `astrid` and `ari-gold` address the bot as `{{BOT_NAME}}`; `alex` and `astrid` are titled by archetype. `bob-porter`, `bob-slydell`, `joanna`, `samir-nagheenanajar`, `michael-bolton` and `tom-smykowski` lose their domain knowledge, which belongs in expertise files. `takahashi` and the two design lessons name the minimalist and maximalist designers instead of a person.
 - **Added:** eight archetypes, `skeptical-auditor`, `patient-teacher`, `pragmatic-shipper`, `calm-incident-commander`, `plain-spoken-editor`, `curious-researcher`, `diplomatic-facilitator` and `meticulous-archivist`.
 

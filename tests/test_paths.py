@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.context import load_context, resolve_context, resolve_paths
-from claudlobby.paths import RENAMED_VOICES, Paths
+from claudlobby.paths import Paths
 from claudlobby.resources import PackageResources
 
 
@@ -180,26 +180,6 @@ def test_voice_lookup_reads_the_old_overlay_after_the_new_one(tmp_path, package)
     for spelling in ("packaged.md", "voices/packaged.md", "library/voices/packaged.md"):
         assert paths.find_voice_file(spelling) == package.voices / "packaged.md", spelling
     assert paths.find_voice_file("voices/absent.md") is None
-
-
-def test_a_renamed_voice_answers_to_its_old_name_until_a_file_does(tmp_path, package):
-    """#2344: for one release an old package voice name composes the renamed
-    voice, whichever spelling declares it; a fleet's own file under the old
-    name still wins."""
-    paths = Paths(root=tmp_path / "data", package=package)
-    (package.voices / "optimization-engineer.md").write_text("renamed")
-    for spelling in ("john-carmack.md", "voices/john-carmack.md", "library/voices/john-carmack.md"):
-        assert paths.find_voice_file(spelling) == package.voices / "optimization-engineer.md", spelling
-    paths.overlay_voices.mkdir(parents=True)
-    (paths.overlay_voices / "john-carmack.md").write_text("the fleet's own")
-    assert paths.find_voice_file("voices/john-carmack.md") == paths.overlay_voices / "john-carmack.md"
-
-
-def test_every_renamed_voice_ships_under_its_new_name_only():
-    voices = Path(__file__).resolve().parents[1] / "library" / "voices"
-    for old, new in RENAMED_VOICES.items():
-        assert (voices / f"{new}.md").is_file(), new
-        assert not (voices / f"{old}.md").exists(), old
 
 
 def test_seed_template_does_not_become_writable_config_root(tmp_path, package):
