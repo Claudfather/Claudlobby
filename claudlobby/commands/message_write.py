@@ -184,7 +184,8 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
         data["report_status"] = report.status
         data["task_id"] = data["assignment_id"] = None
     if outcome.code == "recording_degraded":
-        if not tiers_available:
+        if not tiers_available and (data["alert"] is None
+                                    or data["alert"]["telegram"]["status"] == "unconfigured"):
             if data["alert"] is not None:
                 from ..recording_alerts import ChannelOutcome
                 availability = data["alert"]["telegram"]["debounce_available"]
