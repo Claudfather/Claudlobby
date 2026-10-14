@@ -4337,6 +4337,7 @@ def _write_timer_units(
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
+    time_limit: tuple[int, int] | None = None,
     extra_env: dict[str, str] | None = None,
     abandon_children: bool = False,
 ) -> None:
@@ -4443,6 +4444,11 @@ def _write_timer_units(
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
         service_lines.append(unit_systemd_environment(var, value))
+    if time_limit:
+        # The job's own bound: systemd ends a run its command cannot stop, then
+        # waits TimeoutStopSec= in each kill phase.
+        service_lines.append(f"TimeoutStartSec={time_limit[0]}")
+        service_lines.append(f"TimeoutStopSec={time_limit[1]}")
     if abandon_children:
         # The script backgrounds work that must outlive the job (keepalive's
         # per-bot plane emit, reaped on its own clock). With the default
@@ -5169,6 +5175,12 @@ def compose_fleet_timers(
         seconds = _calendar_seconds(
             {name: _resolve_timer_schedule(cfg, merged_defaults)
              for name, cfg in merged_defaults.get("jobs", {}).items()}, slot)
+        # Imported here: at module level it would add the CLI's runtime modules to
+        # composer's. The pulse bounds its own runs (claudlobby/fleet_pulse.py).
+        from .fleet_pulse import UNIT_STOP_S, unit_time_limit
+
+        pulse_limit = (unit_time_limit(fleet.fleet_pulse.timeout_s if fleet.fleet_pulse else None),
+                       UNIT_STOP_S)
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults, slot, seconds.get(name))
             script = cfg.get("script", "")
@@ -5189,6 +5201,7 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
+                time_limit=pulse_limit if name == _FLEET_PULSE_JOB else None,
                 extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
             )
             composed_jobs.add(f"{prefix}.{name}")

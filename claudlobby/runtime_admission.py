@@ -33,6 +33,12 @@ RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
 # 2026-10-01: a 44-timer phase took about 55 seconds). Its one-shot waits.
 _SCHEDULED_WAIT = 180.0
 _UNIT_PREFIX = ("-I", "-B", "-m", "claudlobby.runtime_admission", "unit-start")
+# A one-shot's command learns when its unit started, as "<admission pid>
+# <monotonic seconds>", so a time limit it counts from there covers the wait for
+# admission too. The pid scopes it to the admission's own child: a process that
+# outlives the job, such as a bot session keepalive starts, inherits a stamp it
+# must ignore.
+UNIT_STARTED_ENV = "CLAUDLOBBY_UNIT_STARTED"
 
 
 class WatchdogActivationPause(ActivationError):
@@ -539,6 +545,20 @@ def _await_scheduled(target: UnitStart, fd: int, selected: dict) -> None:
         return
 
 
+def _unit_started() -> str:
+    """UNIT_STARTED_ENV's value: this pid and its process's start on the monotonic
+    clock, read from procfs where there is one, else now."""
+    now = time.monotonic()
+    try:
+        with open("/proc/self/stat") as proc_stat:
+            ticks = int(proc_stat.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/uptime") as uptime:
+            age = max(0.0, float(uptime.read().split()[0]) - ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        age = 0.0
+    return f"{os.getpid()} {now - age:.3f}"
+
+
 def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
              execer=os.execvpe, runner=subprocess.run) -> int:
     """Private native unit boundary, not a readiness or lifetime writer claim.
@@ -551,6 +571,7 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
     unlocks descendants. Safe stop commands remain outside this boundary.
     """
     target = parse_unit_argv(argv)
+    started = _unit_started()
     identity = identity or RuntimeIdentity.current()
     release = read_release(target.root, target.release_id, verify_files=False)
     _match_identity(target.root, release, identity)
@@ -588,6 +609,7 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
             os.set_inheritable(fd, False)
             execer(target.command[0], target.command, env)
             raise ActivationError("native unit exec unexpectedly returned")
+        env[UNIT_STARTED_ENV] = started
         result = runner(target.command, env=env, pass_fds=(fd,), check=False)
         finished = True
         return result.returncode
