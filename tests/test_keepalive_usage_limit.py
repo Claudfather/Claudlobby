@@ -2,10 +2,10 @@
 
 Every test drives the REAL keepalive.sh tick (real lib-common, real
 usage-limit.py) against a stateful tmux stub that serves live Claude Code
-frames (tests/fixtures/pane-states/usage-limit-*.txt, captured from 2.1.292),
-records every key it is sent, and moves the frame the way Claude Code does: a
-typed prompt shows in the input box, an Enter submits it, and an Enter on the
-usage-limit menu closes it. The reset time in each frame is rewritten relative
+frames (tests/fixtures/pane-states/usage-limit-*.txt, captured from 2.1.292,
+and from 2.1.299 for press-to-continue), records every key it is sent, and
+moves the frame the way Claude Code does: a typed prompt shows in the input
+box, an Enter submits it, and an Enter on the usage-limit menu closes it. The reset time in each frame is rewritten relative
 to now, so "before the reset" and "after the reset" are the real clock's.
 
 The failures each test names are the ones #996 ruled out: another menu gets no
@@ -103,7 +103,12 @@ def _clock(epoch: int) -> str:
 
 def _frame(name: str, reset_text: str) -> str:
     text = (FIXTURES / f"usage-limit-{name}.txt").read_text()
-    for old in ("10:36am (America/New_York)", "10:45am (America/New_York)", "10:45am"):
+    for old in (
+        "10:36am (America/New_York)",
+        "10:45am (America/New_York)",
+        "10:21am (America/New_York)",
+        "10:45am",
+    ):
         text = text.replace(
             old, reset_text if "(" in old else reset_text.split(" (")[0]
         )
@@ -225,16 +230,11 @@ def test_a_held_frame_reads_limit_with_its_reset_not_idle(rig):
 def test_a_line_the_reader_did_not_know_under_the_limit_still_reads_limit(rig):
     """#2348: every production stop read IDLE with the hook's record in place.
     A line Claude Code draws under the limit line that #996 never measured
-    ("Press ⏎ to continue after reset", 2.1.296) made the reader call it the
-    bot moving on."""
+    ("Press ⏎ to continue after reset", live from 2.1.299 with a server flag
+    on) made the reader call it the bot moving on."""
     r = rig(armed=False)
     hit, reset = _future_reset()
-    r.show(
-        _frame("held", reset).replace(
-            "     /usage-credits to finish what you’re working on.",
-            "     /usage-credits to finish what you’re working on.\n     Press ⏎ to continue after reset",
-        )
-    )
+    r.show(_frame("press-to-continue", reset))
     r.hook_record(hit)
     r.tick()
     assert f"LIMIT — held by a usage limit (session limit), resets {reset}" in r.log()

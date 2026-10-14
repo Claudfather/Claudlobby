@@ -1,8 +1,9 @@
 """usage-limit.py (#996): the reader keepalive asks about a pane a usage limit may hold.
 
 The frames under tests/fixtures/pane-states/usage-limit-*.txt are live captures
-from Claude Code (2.1.292, and 2.1.291 for the armed one), run with the bots'
-renderer, flags, 80x24 pane and New York zone against a stand-in API that
+from Claude Code (2.1.292, 2.1.291 for the armed one, and 2.1.299 with the
+server flag tengu_vellum_anchor on for press-to-continue, #2348), run with the
+bots' renderer, flags, 80x24 pane and New York zone against a stand-in API that
 answered 429 with the unified rate-limit headers; only the cwd line is
 scrubbed. The variants below them are those frames edited to the shapes a live
 run cannot be made to draw on demand (a server flag that puts credits first,
@@ -323,15 +324,22 @@ def test_a_newer_prompt_under_the_limit_line_reads_none():
 
 def test_a_line_claude_code_adds_under_the_limit_line_is_not_moving_on():
     """#2348: Claude Code draws more under the limit line than #996 measured,
-    and changes it from release to release and from the server: 2.1.296 can
-    add "Press ⏎ to continue after reset" under the hint. The reader took any
-    line it did not know for the bot having moved on, so a stop with its hook
-    record in place read IDLE. Only a newer prompt is moving on."""
-    frame = _frame("held").replace(
-        "     /usage-credits to finish what you’re working on.",
-        "     /usage-credits to finish what you’re working on.\n     Press ⏎ to continue after reset",
+    and changes it from release to release and from the server. With a server
+    flag on, 2.1.299 adds "Press ⏎ to continue after reset" (and "progress
+    saved" to the limit line). The reader took any line it did not know for the
+    bot having moved on, so a stop with its hook record in place read IDLE.
+    Only a newer prompt is moving on."""
+    state, reset, pointer, native, name, text = _read(
+        _frame("press-to-continue"), "2026-10-14T14:19:30+00:00"
     )
-    assert _read(frame)[0] == "limit"
+    assert (state, pointer, native, name, text) == (
+        "limit",
+        "-",
+        "-",
+        "session limit",
+        "10:21am (America/New_York)",
+    )
+    assert int(reset) == _epoch("2026-10-14T14:21:00+00:00")
 
 
 def test_a_reworded_continue_notice_is_still_the_limit():

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a usage-limit stop reads `LIMIT` whatever Claude Code draws under the limit line (#2348)
+
+Every usage-limit stop since the #996 fix went live read `IDLE` in production, so none was named and none paged. The hook's record was in place and no turn had ended since, but `usage-limit.py` took a line under the limit line that it did not know for the bot moving on. Claude Code changes what it draws there between releases and from the server: with a server flag on, 2.1.299 adds `Press ⏎ to continue after reset` under the limit line, and in an offline reproduction keepalive read that frame `IDLE` on every tick.
+
+- **Only a newer prompt drawn under the limit line, or Claude Code's own "Usage limit available again" notice, counts as moving on.** A turn that ended normally since the stop has already removed the hook's record, which keepalive checks before it asks the reader.
+- **An `IDLE` tick names a record the pane does not confirm.** When `data/.usage-limit` is newer than the last tool call and the reader answers `none`, or gives no answer, keepalive's `IDLE` line says so.
+
 ### Changed — the voices renovation: every voice is a reusable archetype; six voices are renamed and their old names removed
 
 Voices now follow their folder's rules: a voice is an archetype (tone, cadence, how it pushes back), not a real person and not a bot's name, and it carries no domain knowledge. A bot whose voice changed composes the new voice text after its next activation.
