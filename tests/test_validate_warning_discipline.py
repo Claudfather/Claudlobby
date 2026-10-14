@@ -84,6 +84,31 @@ class TestSharedCauseIsOneLine:
         assert hits[0].endswith("affects 6 bot(s): lead, worker-1, w2, w3 (+2 more)")
         assert report.warning_categories["retired-key"] == 1
 
+    def test_a_voice_at_the_old_path_is_one_line_per_file_until_it_moves(
+        self, fleet_dir, monkeypatch
+    ):
+        """#2150: the old overlay voices/ still composes for one release, and
+        validate names each file there once, however many bots declare it."""
+        _env(monkeypatch)
+        _grow(fleet_dir, bots={"w2": "      voice: voices/old-one.md\n",
+                               "w3": "      voice: voices/old-one.md\n",
+                               "w4": "      voice: voices/moved.md\n"})
+        paths = _paths(fleet_dir)
+        paths.legacy_overlay_voices.mkdir(exist_ok=True)
+        old = paths.legacy_overlay_voices / "old-one.md"
+        old.write_text("---\nname: Old\n---\n\nOld.\n")
+        paths.overlay_voices.mkdir(parents=True, exist_ok=True)
+        (paths.overlay_voices / "moved.md").write_text("---\nname: Moved\n---\n\nMoved.\n")
+        report = _validate(fleet_dir)
+        assert _of(report, "voice-legacy-path") == [
+            f"voice file {old} is at the old voices/ path; move it to "
+            f"{paths.overlay_voices}/ — affects 2 bot(s): w2, w3"
+        ]
+        assert _of(report, "voice-missing") == []
+        old.rename(paths.overlay_voices / "old-one.md")
+        report = _validate(fleet_dir)
+        assert _of(report, "voice-legacy-path") == [] and _of(report, "voice-missing") == []
+
     def test_a_retired_key_in_one_bots_own_stanza_stays_that_bots(
         self, fleet_dir, monkeypatch
     ):

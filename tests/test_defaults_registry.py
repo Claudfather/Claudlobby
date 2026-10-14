@@ -23,7 +23,8 @@ import pytest
 from claudlobby import config, defaults
 from claudlobby.composer import compose_bot, compose_claude_md
 from claudlobby.config import load_fleet
-from claudlobby.defaults import REGISTRY, TIER_TESTS, Disposition, Tier, resolve
+from claudlobby.defaults import (NON_ENTITY_FOLDERS, REGISTRY, TIER_TESTS, Disposition,
+                                 Tier, resolve)
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
@@ -78,7 +79,7 @@ def _library_entity_types() -> set[str]:
     """
     return {
         d.name for d in LIBRARY.iterdir() if d.is_dir() and not d.name.startswith(".")
-    }
+    } - set(NON_ENTITY_FOLDERS)
 
 
 class TestCompleteness:
@@ -92,6 +93,15 @@ class TestCompleteness:
             f"disposition before it composes.\n  only on disk: {sorted(on_disk - registered)}"
             f"\n  only in registry: {sorted(registered - on_disk)}"
         )
+
+    def test_every_non_entity_folder_exists_is_unregistered_and_says_why(self):
+        # The one way out of the guard above, so it must not rot: a name for a
+        # folder that is gone, or one that is also registered, would hide a
+        # real type (#2150: voices are library content, not an entity type).
+        for name, reason in NON_ENTITY_FOLDERS.items():
+            assert (LIBRARY / name).is_dir(), f"{name}: no such library folder"
+            assert name not in REGISTRY, f"{name}: both registered and excluded"
+            assert reason.strip(), f"{name}: no reason given"
 
     def test_every_disposition_states_a_reason(self):
         # An empty default is a valid answer; an unexplained one is not. This is

@@ -60,7 +60,9 @@ def _walk_skills(paths) -> list[dict]:
 
 def _walk_voices(paths) -> list[dict]:
     found: dict[str, str] = {}
-    for directory, source in ((paths.overlay_voices, "overlay"), (paths.base_voices, "base")):
+    for directory, source in ((paths.overlay_voices, "overlay"),
+                              (paths.legacy_overlay_voices, "overlay"),
+                              (paths.base_voices, "base")):
         if directory and directory.is_dir():
             for path in sorted(directory.rglob("*.md")):
                 if path.name in INSTRUCTION_FILE_NAMES:

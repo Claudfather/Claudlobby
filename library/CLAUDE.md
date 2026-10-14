@@ -6,7 +6,7 @@ format; this file is the boundary at the seam — what belongs here, what must n
 **What belongs here.** Composition inputs: `expertise/` (roles), `skills/` (fleet-operations
 commands), `mcp/` (wire-config fragments, `${ENV_VAR}` placeholders only), `guardrails/`,
 `protocols/` (workflow patterns), `principles/`, `resources/` (non-secret environment facts),
-`post_actions/`.
+`post_actions/`, `voices/` (personality overlays).
 
 **What must never land here.**
 

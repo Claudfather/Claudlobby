@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME_COMPATIBILITY = runpy.run_path(
     str(ROOT / "claudlobby/runtime_versions.py")
 )["runtime_declaration"]()
-ASSET_DIRS = ("library", "voices", "templates")
+ASSET_DIRS = ("library", "templates")
 SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
          "missions/fleet.md.seed")
 # Private runtime scripts are authored inside the package and install at the
@@ -83,7 +83,8 @@ def _resource_sources():
     for required in SEEDS:
         if required not in sources:
             raise SetupError(f"Resource inventory is missing seed: {required}")
-    for directory in (*ASSET_DIRS, NATIVE_DIR):
+    # Voices are library content (#2150); the package still needs them.
+    for directory in (*ASSET_DIRS, "library/voices", NATIVE_DIR):
         if not any(name.startswith(directory + "/") for name in sources):
             raise SetupError(f"Resource inventory is missing directory: {directory}")
     return tuple(sources)
