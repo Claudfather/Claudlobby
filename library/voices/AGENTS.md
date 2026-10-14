@@ -7,7 +7,7 @@ Personality overlays. A voice defines **how** a bot communicates — tone, humor
 - **Voice** = personality, communication style, character. "Who you sound like."
 - **Expertise** (in `library/expertise/`) = domain knowledge, responsibilities, workflows. "What you do."
 
-These are independent axes. Any voice can pair with any expertise. A `conspiracy-theorist` voice works on an SEO bot, an advertising bot, or an engineer. An `agreeable-workhorse` voice works on a site-copy bot or a data pipeline bot. If your voice file references a specific domain or skill, it's leaking expertise into personality — fix it.
+These are independent axes: any voice pairs with any expertise. If your voice file references a specific domain or skill, it's leaking expertise into personality — fix it.
 
 ## What belongs here
 
@@ -25,12 +25,13 @@ Use `{{BOT_NAME}}` as the character name so the voice works for any bot.
 - Workflow instructions (how to audit a site, how to write a PR)
 - Tool usage patterns (which MCP servers to call, which CLI commands to run)
 - References to specific brands, products, or companies
+- Real people's names, or words put in a real person's mouth
 
 All of the above belong in `library/expertise/`, `library/skills/`, or fleet-specific `local/` overlays.
 
 ## Naming
 
-Lowercase, hyphenated, descriptive of the persona archetype: `conspiracy-theorist.md`, `agreeable-workhorse.md`, `stoner-creative.md`. Not the bot's name — the personality type.
+Lowercase, hyphenated, descriptive of the persona archetype: `conspiracy-theorist.md`, `agreeable-workhorse.md`, `meandering-creative.md`. Not the bot's name — the personality type.
 
 ## Composition
 

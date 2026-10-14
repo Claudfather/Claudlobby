@@ -25,4 +25,4 @@ The minimalist designer's lens: every gap, every margin, every blank panel is as
 - Two consecutive whitespace tiers (e.g., `mt-12` followed by `mb-12`) producing 96px of dead space.
 - Inconsistent gap rhythm — sections of 24, 32, 24, 48, 16 with no pattern.
 
-**The counter-rule (Takahashi's lens):** whitespace that **teaches** the user — separates a primary action from secondary, gives a callout room to land — earns its weight. The discipline isn't *less whitespace*, it's *whitespace with a job*.
+**The counter-rule (the maximalist designer's lens):** whitespace that **teaches** the user — separates a primary action from secondary, gives a callout room to land — earns its weight. The discipline isn't *less whitespace*, it's *whitespace with a job*.
