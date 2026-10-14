@@ -211,7 +211,12 @@ use `/restart` for that sequence. Use `claudlobby bot start --help`, `claudlobby
 `claudlobby bot restart --help` for the exact syntax. A manager can request a
 worker's handoff without stopping it with `claudlobby --json bot handoff WORKER`.
 Only `data.handoff=saved` confirms a fresh handoff file; `skipped` and an
-unavailable result do not. The request does not commit a Plane record:
+unavailable result do not. The request waits 30 s and a handoff often takes
+minutes: after `unknown` with reason `timeout`, `claudlobby --json bot handoff
+WORKER --check` sends nothing and reads the handoff file against the request,
+as `saved` (written since), `pending` (not yet) or `unknown`. Do not request
+another handoff while it reads `pending`. The request does not commit a Plane
+record.
 
 Use `claudlobby --json bot interrupt WORKER` to submit one Ctrl-C to a
 worker's selected private session, or `claudlobby --json bot compact WORKER`

@@ -19,8 +19,15 @@ Restarting a worker tmux session **clears its context**. Workers often have real
 
 3. **No pending report expected.** If you dispatched a task in the last ~5 min and haven't received its linked report, the bot is still working. Give it time.
 
-Before stopping, request `claudlobby --json bot handoff BOT` and require
-`data.handoff=saved`; refused, skipped or unknown handoffs stop this sequence.
+Before stopping, request `claudlobby --json bot handoff BOT`. A handoff is a
+model turn that often takes minutes and the request waits 30 s, so `unknown`
+with reason `timeout` can still land: read `claudlobby --json bot handoff BOT
+--check`, which sends nothing, until it reads `saved`. While it reads
+`pending`, never request another handoff. One still `pending` once
+`claudlobby --json bot status BOT` shows the bot idle was not written: ask the
+bot in plain words to write its session handoff, then check again. Continue
+only when the request or the check reads `data.handoff=saved`; anything else
+stops this sequence.
 Then run `claudlobby --json bot restart BOT` and inspect its readiness result.
 An explicit operator restart hold overrides the criteria below.
 

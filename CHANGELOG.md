@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a handoff that lands after `bot handoff` returns reads `saved` on `bot handoff BOT --check` (#963, #990)
+
+`claudlobby bot handoff` waits 30 s, and a handoff is a model turn that often takes minutes, so the door read `unknown` on handoffs the bot went on to write. A manager had no supported way to see one land: its permissions deny it the worker's handoff file.
+
+- **The door records when it asked.** Each request it sends writes `data/.handoff-request` in the bot's directory; a request it skips writes nothing.
+- **`claudlobby --json bot handoff BOT --check` reads the handoff file against that record.** It sends nothing and takes no lifecycle lock. `saved`: written since the request, by a capture whose own `last_updated` says so (a reference refresh written over an older capture is not one). `pending`: not written since the request. `unknown`: no request recorded, or a file it cannot verify. The fleet manager's composed grants include it for each worker.
+- **The restart guidance names it.** `safe-worker-restart`, `fleet-ops`, `delegate` and the orchestration expertise accept `saved` from the request or from the check, say never to request another handoff while one reads `pending`, and say what to do when one still reads `pending` once the bot is idle.
+
 ### Fixed — a usage-limit stop reads `LIMIT` whatever Claude Code draws under the limit line (#2348)
 
 Every usage-limit stop since the #996 fix went live read `IDLE` in production, so none was named and none paged. The hook's record was in place and no turn had ended since, but `usage-limit.py` took a line under the limit line that it did not know for the bot moving on. Claude Code changes what it draws there between releases and from the server: with a server flag on, 2.1.299 adds `Press ⏎ to continue after reset` under the limit line, and in an offline reproduction keepalive read that frame `IDLE` on every tick.
