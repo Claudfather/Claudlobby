@@ -5,9 +5,9 @@ from Claude Code (2.1.292, 2.1.291 for the armed one, and 2.1.299 with the
 server flag tengu_vellum_anchor on for press-to-continue, #2348), run with the
 bots' renderer, flags, 80x24 pane and New York zone against a stand-in API that
 answered 429 with the unified rate-limit headers; only the cwd line is
-scrubbed. The variants below them are those frames edited to the shapes a live
-run cannot be made to draw on demand (a server flag that puts credits first,
-another menu over a limit).
+replaced by a placeholder. The variants below them are those frames edited to
+the shapes a live run cannot be made to draw on demand (a server flag that puts
+credits first, another menu over a limit).
 """
 
 from __future__ import annotations
