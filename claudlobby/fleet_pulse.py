@@ -86,12 +86,14 @@ def _stop(child: subprocess.Popen) -> None:
     """SIGTERM the sweep's own process group so its traps can clean up, SIGKILL
     whatever is left after a grace period, then wait at most REAP_WAIT_S for the
     sweep to exit. Only the grace waits for its output to end: a process that left
-    the group can hold the pipe open for as long as it runs."""
+    the group can hold the pipe open for as long as it runs. macOS answers EPERM,
+    not ESRCH, when no member of the group can be signaled, such as a sweep that
+    exited and is not yet reaped."""
     try:
         os.killpg(child.pid, signal.SIGTERM)
         child.communicate(timeout=TERM_GRACE_S)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        with contextlib.suppress(ProcessLookupError):
+    except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(child.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
             child.wait(timeout=REAP_WAIT_S)
