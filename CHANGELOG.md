@@ -14,6 +14,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`claudlobby --json bot handoff BOT --check` reads the handoff file against that record.** It sends nothing and takes no lifecycle lock. `saved`: written since the request, by a capture whose own `last_updated` says so (a reference refresh written over an older capture is not one). `pending`: not written since the request. `unknown`: no request recorded, or a file it cannot verify. The fleet manager's composed grants include it for each worker.
 - **The restart guidance names it.** `safe-worker-restart`, `fleet-ops`, `delegate` and the orchestration expertise accept `saved` from the request or from the check, say never to request another handoff while one reads `pending`, and say what to do when one still reads `pending` once the bot is idle.
 
+### Fixed — `fleet notify` escalates to the fleet.yaml `fleet_pulse` target, as the pulse does (#2234)
+
+`claudlobby fleet notify`, and the alert a failed message write raises, now read the escalation chat, its sender, `renotify_after_s` and `rearm_window_s` from the active fleet.yaml `fleet_pulse:` block, where fleet-pulse reads them. They read them from the manager's `.env` tiers before, so a pair set in fleet.yaml left `fleet notify` with no Telegram target, and a pair set in a `.env` tier reached `fleet notify` but not the pulse.
+
+- **A fleet that sets `FLEET_PULSE_ESCALATION_CHAT_ID` and `FLEET_PULSE_ESCALATION_STATE_DIR` in a `.env` tier** moves them to `fleet_pulse.escalation_chat_id` and `escalation_state_dir` in the configuration it activates with this release, or `fleet notify` has no Telegram target. In that block they also send the pulse's escalations to that chat. `config validate --runtime` names each `.env` copy (`fleet_pulse_env_inert`).
+- **The Telegram pair and token** (`TELEGRAM_GROUP_CHAT_ID`, `TELEGRAM_STATE_DIR`, `TELEGRAM_BOT_TOKEN`) are still read from the manager's `.env` tiers.
+- **When those tiers cannot be read,** an alert still reaches the `fleet_pulse` target, and a message write's result reports it as sent.
+
 ### Fixed — a usage-limit stop reads `LIMIT` whatever Claude Code draws under the limit line (#2348)
 
 Every usage-limit stop since the #996 fix went live read `IDLE` in production, so none was named and none paged. The hook's record was in place and no turn had ended since, but `usage-limit.py` took a line under the limit line that it did not know for the bot moving on. Claude Code changes what it draws there between releases and from the server: with a server flag on, 2.1.299 adds `Press ⏎ to continue after reset` under the limit line, and in an offline reproduction keepalive read that frame `IDLE` on every tick.

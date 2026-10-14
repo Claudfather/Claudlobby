@@ -26,9 +26,13 @@ from .resources import PackageResources
 
 
 ChannelStatus = Literal["submitted", "carrier_accepted", "suppressed", "failed", "unconfigured"]
-_TIER_KEYS = frozenset({"FLEET_PULSE_ESCALATION_CHAT_ID", "FLEET_PULSE_ESCALATION_STATE_DIR",
-                        "TELEGRAM_GROUP_CHAT_ID", "TELEGRAM_STATE_DIR", "TELEGRAM_BOT_TOKEN",
-                        "FLEET_PULSE_RENOTIFY_AFTER_S", "FLEET_PULSE_REARM_WINDOW_S"})
+# A caller resolves these from the manager's .env tiers.
+_TIER_KEYS = frozenset({"TELEGRAM_GROUP_CHAT_ID", "TELEGRAM_STATE_DIR", "TELEGRAM_BOT_TOKEN"})
+# _environment reads these from the active fleet.yaml `fleet_pulse:` block, where
+# fleet-pulse reads them too, so an alert and the pulse escalate to one target (#2234).
+_FLEET_PULSE_KEYS = frozenset({"FLEET_PULSE_ESCALATION_CHAT_ID", "FLEET_PULSE_ESCALATION_STATE_DIR",
+                               "FLEET_PULSE_RENOTIFY_AFTER_S", "FLEET_PULSE_REARM_WINDOW_S"})
+_ALERT_KEYS = _TIER_KEYS | _FLEET_PULSE_KEYS
 _PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 
 
@@ -161,7 +165,7 @@ def _validate(context: Context, package: PackageResources, manager: TransportDes
 def _environment(context: Context, manager: TransportDestination,
                  trusted_tiers: Mapping[str, str]) -> dict[str, str]:
     if not isinstance(trusted_tiers, Mapping) or any(
-        key not in _TIER_KEYS or not isinstance(value, str) or "\0" in value
+        key not in _ALERT_KEYS or not isinstance(value, str) or "\0" in value
         for key, value in trusted_tiers.items()
     ):
         raise ValueError("alert tier values must be explicitly resolved and allowlisted")
@@ -170,6 +174,8 @@ def _environment(context: Context, manager: TransportDestination,
            "TMPDIR": str(manager.tmux_tmpdir), "HOME": str(manager.root / "state/recording-alert-home"),
            "PLANE_EMIT_DISABLED": "1", "PLANE_MSG_ID": "", "PANE_SEND_VERIFY_TICKS": "0"}
     env.update(trusted_tiers)
+    pulse = context.fleet.fleet_pulse.env() if context.fleet.fleet_pulse is not None else {}
+    env.update({key: pulse[key] for key in _FLEET_PULSE_KEYS if key in pulse})
     return env
 
 
