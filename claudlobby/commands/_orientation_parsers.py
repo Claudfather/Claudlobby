@@ -207,6 +207,10 @@ def register_orientation_subparsers(sub):
                 elif verb == "stop":
                     route.add_argument("--reason", metavar="TEXT",
                                        help="Why it is stopped, recorded with the stop (#2243)")
+                elif verb == "handoff":
+                    route.add_argument("--check", action="store_true",
+                                       help="Send nothing; read whether the last requested handoff "
+                                            "was saved, is pending or is unknown (#990)")
             elif domain == "project" and verb == "show":
                 route.add_argument("project_id", metavar="PROJECT", help="Exact project key")
             elif domain == "context":

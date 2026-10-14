@@ -69,8 +69,9 @@ Bots accumulate context; bad context degrades output. Proactively manage:
 - **Between unrelated tasks:** preserve a fresh handoff and use the supported restart flow when a fresh session is needed.
 - **Reviewers:** use the supported compaction command between substantial reviews. Consider a fresh session after completed work and a verified handoff; respect operator holds and never interrupt an active review because of a report count alone.
 - **Restart:** honor operator holds and the safe-worker-restart protocol. Request
-  `claudlobby --json bot handoff WORKER`, require `data.handoff=saved`, then use
-  `claudlobby --json bot restart WORKER` and inspect its readiness result.
+  `claudlobby --json bot handoff WORKER` and require `data.handoff=saved` from it
+  or, after a `timeout`, from `claudlobby --json bot handoff WORKER --check`; then
+  use `claudlobby --json bot restart WORKER` and inspect its readiness result.
 - **Compaction:** use `claudlobby --json bot compact WORKER`; an accepted control
   submission is not proof that compaction has finished. Read the selected bot's
   session/status before claiming success. Unknown outcomes do not allow resend.

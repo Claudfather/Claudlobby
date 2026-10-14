@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a handoff that lands after `bot handoff` returns reads `saved` on `bot handoff BOT --check` (#963, #990)
+
+`claudlobby bot handoff` waits 30 s, and a handoff is a model turn that often takes minutes, so the door read `unknown` on handoffs the bot went on to write. A manager had no supported way to see one land: its permissions deny it the worker's handoff file.
+
+- **The door records when it asked.** Each request it sends writes `data/.handoff-request` in the bot's directory; a request it skips writes nothing.
+- **`claudlobby --json bot handoff BOT --check` reads the handoff file against that record.** It sends nothing and takes no lifecycle lock. `saved`: written since the request, by a capture whose own `last_updated` says so (a reference refresh written over an older capture is not one). `pending`: not written since the request. `unknown`: no request recorded, or a file it cannot verify. The fleet manager's composed grants include it for each worker.
+- **The restart guidance names it.** `safe-worker-restart`, `fleet-ops`, `delegate` and the orchestration expertise accept `saved` from the request or from the check, say never to request another handoff while one reads `pending`, and say what to do when one still reads `pending` once the bot is idle.
+
 ### Fixed — `fleet notify` escalates to the fleet.yaml `fleet_pulse` target, as the pulse does (#2234)
 
 `claudlobby fleet notify`, and the alert a failed message write raises, now read the escalation chat, its sender, `renotify_after_s` and `rearm_window_s` from the active fleet.yaml `fleet_pulse:` block, where fleet-pulse reads them. They read them from the manager's `.env` tiers before, so a pair set in fleet.yaml left `fleet notify` with no Telegram target, and a pair set in a `.env` tier reached `fleet notify` but not the pulse.
