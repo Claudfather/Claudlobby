@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from claudlobby import activation, bot_operations, context
+from claudlobby import activation, activation_handoffs, bot_operations, context
 from claudlobby.__main__ import main
 from claudlobby.activation_enrollment import selected_bot_entry
 from claudlobby.activation_runtime import RuntimeEvidenceError
@@ -219,6 +219,49 @@ def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
     handoff.symlink_to(foreign)
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
         bot_operations._fresh_self_handoff(bot_dir)
+
+
+def test_a_late_handoff_is_read_against_the_request_the_door_recorded(tmp_path):
+    """#963/#990: the door waits 30 s and a handoff takes minutes. Saved means
+    written after the recorded request, by a capture that says so."""
+    bot_dir = tmp_path / "bot"
+    (bot_dir / ".claude").mkdir(parents=True)
+    (bot_dir / "data").mkdir()
+    handoff = bot_dir / ".claude/session.md"
+
+    def stamp(epoch):
+        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def write(text, at):
+        handoff.write_text(text)
+        os.utime(handoff, (at, at))
+
+    now = int(time.time()) + 0.5  # mid-second, so each stamp reads the same second
+    asked = now - 600  # the door asked ten minutes ago
+    older = f"---\nlast_updated: {stamp(asked - 3600)}\n---\nolder context\n"
+    write(older, asked - 3600)
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "no_request_recorded")
+    assert bot_operations._record_handoff_request(bot_dir, asked)
+    # Not written since: also what a turn that ends without writing it leaves (#963).
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("pending", "not_written_since_request")
+    handoff.unlink()
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("pending", "not_written_since_request")
+
+    write(f"---\nlast_updated: {stamp(now)}\n---\nnew context\n", now)
+    saved = bot_operations.handoff_state(bot_dir)
+    assert saved[:2] == ("saved", "written_after_request")
+    assert (saved.requested_at, saved.written_at) == (stamp(asked), stamp(now))
+
+    # Activation's reference refresh rewrites the file over the old capture.
+    handoff.write_bytes(activation_handoffs._refresh_envelope(bot_dir, stamp(now)) + older.encode())
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "capture_predates_request")
+    foreign = tmp_path / "foreign.md"
+    foreign.write_text(f"---\nlast_updated: {stamp(now)}\n---\nnew context\n")
+    handoff.unlink()
+    handoff.symlink_to(foreign)
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "file_unverified")
+    (bot_dir / "data/.handoff-request").write_text("not a record\n")
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "request_unreadable")
 
 
 def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path):
@@ -705,6 +748,47 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert "failed" in refused_restart["error"]["message"]
     assert "bot stop" in refused_restart["error"]["message"]
     assert len(native.actions) == before_failed + 1
+
+
+def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold, monkeypatch, capsys):  # noqa: F811
+    """#963/#990: a handoff takes minutes and the door waits 30 s. The door
+    records its request; `bot handoff BOT --check` reads the handoff file
+    against it later, sends nothing and takes no lifecycle lock."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    root, release, native, call = worker.root, worker.release, worker.native, worker.call
+    handoff = root / "runtime/bots/worker/.claude/session.md"
+    handoff.parent.mkdir(exist_ok=True)
+    older = time.time() - 3600
+    stamp = datetime.fromtimestamp(older, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    handoff.write_text(f"---\nlast_updated: {stamp}\n---\nolder context\n")
+    os.utime(handoff, (older, older))
+    assert call("bot", "handoff", "worker", "--check")["data"]["reason"] == "no_request_recorded"
+
+    native.explicit_handoff = "handoff-timeout"
+    native.handoff_rc = 3
+    timed_out = call("bot", "handoff", "worker", expected=6)
+    assert timed_out["data"]["reason"] == "timeout"
+    assert "bot handoff worker --check" in timed_out["error"]["hint"]
+    native.calls.clear()
+    with bot_operations._operation_lock(root):  # another lifecycle operation is running
+        pending = call("bot", "handoff", "worker", "--check")["data"]
+    assert (pending["handoff"], pending["reason"]) == ("pending", "not_written_since_request")
+
+    now = datetime.now(timezone.utc)
+    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\nnew context\n")
+    saved = call("bot", "handoff", "worker", "--check")["data"]
+    assert (saved["handoff"], saved["reason"]) == ("saved", "written_after_request")
+    assert saved["requested_at"] <= saved["written_at"]
+    assert "svc_activation_handoff" not in native.calls and native.actions == []
+
+    monkeypatch.setenv("FLEET_NAME", "example")
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
+    monkeypatch.setenv("FLEET_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    refused = call("bot", "handoff", "manager", "--check", expected=4)
+    assert refused["error"]["code"] == "conflict"
 
 
 def test_a_staggered_unit_restarts_and_starts_within_its_boot_delay(cold, monkeypatch, capsys):  # noqa: F811

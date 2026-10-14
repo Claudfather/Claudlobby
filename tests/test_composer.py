@@ -442,6 +442,7 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot restart lead)" in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in lead_grants
         assert "Bash(claudlobby --json bot handoff worker)" in lead_grants
+        assert "Bash(claudlobby --json bot handoff worker --check)" in lead_grants
         assert "Bash(claudlobby --json bot interrupt worker)" in lead_grants
         assert "Bash(claudlobby --json bot compact worker)" in lead_grants
         assert "Bash(claudlobby --json bot stop worker --reason *)" in lead_grants
@@ -451,6 +452,7 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot restart worker)" in worker_grants
         assert "Bash(claudlobby --json bot handoff lead)" not in worker_grants
         assert "Bash(claudlobby --json bot handoff worker)" not in worker_grants
+        assert "Bash(claudlobby --json bot handoff worker --check)" not in worker_grants
         assert "Bash(claudlobby --json bot interrupt worker)" not in worker_grants
         assert "Bash(claudlobby --json bot compact worker)" not in worker_grants
         assert "Bash(claudlobby --json fleet notify --level * --event * --message *)" not in worker_grants

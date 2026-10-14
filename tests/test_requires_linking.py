@@ -823,6 +823,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot logs worker-1)",
         "Bash(claudlobby --json bot logs worker-1 --lines *)",
         "Bash(claudlobby --json bot handoff worker-1)",
+        "Bash(claudlobby --json bot handoff worker-1 --check)",
         "Bash(claudlobby --json bot interrupt worker-1)",
         "Bash(claudlobby --json bot compact worker-1)",
         "Bash(claudlobby --json bot start worker-1)",
