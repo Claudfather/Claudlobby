@@ -446,8 +446,12 @@ classify_pane() {
 #     call: the bot's own record of the stop, which a limit line quoted in a
 #     bot's own message never writes;
 #   - usage-limit.py over the WHOLE pane (the line sits above tail -10): the
-#     limit line is still the bot's last word, and it says what holds the
-#     screen now (the input box, the usage-limit menu, or another dialog).
+#     limit line is still the bot's last word, with no newer prompt drawn under
+#     it (#2348: what else Claude Code draws there changes between releases),
+#     and it says what holds the screen now (the input box, the usage-limit
+#     menu, or another dialog).
+# A record the pane does not confirm leaves the tick IDLE, and the IDLE line
+# says so (_ul_note), so a stop read wrong names itself in keepalive.log.
 # LIMIT writes data/.limit (fleet-pulse pages usage_limit_held from it once the
 # reset has passed), never data/.idle, and sends no reload and no bridge heal.
 #
@@ -464,6 +468,7 @@ classify_pane() {
 # as keepalive_limit_resume, so no later tick acts on the same reset again.
 _LIMIT_RESUME_PROMPT="Your usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete. (keepalive, #996)"
 _ul_verdict=""
+_ul_note=""
 _ul_hit=""
 # fleet-pulse's _HELD_FRESH_S: a data/.limit older than this is no hold.
 _LIMIT_HOLD_FRESH_S=300
@@ -640,6 +645,8 @@ else
             usage_limit_keep_anchor "$pane_content"
             case "${_ul_verdict%%$'\t'*}" in
                 limit|menu|modal) state=LIMIT ;;
+                none) _ul_note="; a usage-limit record from $(epoch_to_iso_utc "$_ul_hit") is newer than the last tool call, but the pane shows no limit as its last word" ;;
+                *) _ul_note="; a usage-limit record from $(epoch_to_iso_utc "$_ul_hit") is newer than the last tool call, but usage-limit.py gave no answer" ;;
             esac
         fi
     fi
@@ -677,7 +684,7 @@ case "$state" in
         fi
         ;;
     IDLE)
-        echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
+        echo "$(ts_iso) IDLE — at prompt${_ul_note}" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"

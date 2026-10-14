@@ -311,14 +311,51 @@ def test_a_frame_with_neither_the_box_nor_the_menu_is_another_dialog():
     assert _read(frame)[0] == "modal"
 
 
-def test_a_limit_line_quoted_in_an_answer_reads_none():
-    """A bot explaining a limit (this issue's own bots will) writes the line in
-    an answer that goes on after it: not a stop."""
-    quoted = _frame("held").replace(
+def test_a_newer_prompt_under_the_limit_line_reads_none():
+    """A bot explaining a limit (this issue's own bots will) answers a newer
+    prompt, drawn under the limit line: the bot has moved on."""
+    answered = _frame("held").replace(
+        "✻ Baked for 0s · done 10:34 AM",
+        "✻ Baked for 0s · done 10:34 AM\n\n❯ what did the pane show?\n\n● That line is what the pane showed tonight.\n  It printed the reset without seconds.\n\n✻ Baked for 2s · done 10:40 AM",
+    )
+    assert _read(answered)[0] == "none"
+
+
+def test_a_line_claude_code_adds_under_the_limit_line_is_not_moving_on():
+    """#2348: Claude Code draws more under the limit line than #996 measured,
+    and changes it from release to release and from the server: 2.1.296 can
+    add "Press ⏎ to continue after reset" under the hint. The reader took any
+    line it did not know for the bot having moved on, so a stop with its hook
+    record in place read IDLE. Only a newer prompt is moving on."""
+    frame = _frame("held").replace(
+        "     /usage-credits to finish what you’re working on.",
+        "     /usage-credits to finish what you’re working on.\n     Press ⏎ to continue after reset",
+    )
+    assert _read(frame)[0] == "limit"
+
+
+def test_a_reworded_continue_notice_is_still_the_limit():
+    """The server words Claude Code's own continue notices (#996): a notice the
+    reader has no pattern for is still not a newer prompt."""
+    frame = _frame("native-armed").replace(
+        "● Usage limit reached · continuing automatically at 12:34am · esc to\n  cancel",
+        "● Paused for your usage limit · picks up again at 12:34am",
+    )
+    state, _r, _p, native, _n, text = _read(frame, "2026-10-07T04:31:00+00:00")
+    assert (state, native, text) == ("limit", "armed", "12:34am (America/New_York)")
+
+
+def test_an_answer_with_no_newer_prompt_is_left_to_the_hook_record():
+    """An answer under the limit line with no newer prompt over it is Claude
+    Code's own continue at work, or a notice drawn like an answer: the reader
+    does not call it moving on, since the two look alike. keepalive asks the
+    reader only while the hook's record is newer than the last tool call, and
+    the end of that turn removes the record (usage-limit-hook.sh, on Stop)."""
+    answered = _frame("held").replace(
         "✻ Baked for 0s · done 10:34 AM",
         "● That line is what the pane showed tonight.\n  It printed the reset without seconds.\n\n✻ Baked for 0s · done 10:34 AM",
     )
-    assert _read(quoted)[0] == "none"
+    assert _read(answered)[0] == "limit"
 
 
 def test_claude_codes_resumed_notice_reads_none():

@@ -39,9 +39,14 @@ hit for as long as the bot prints the same limit and reset (data/.limit), so a
 second hit after the reset still reads that reset, not tomorrow's. In the hour that
 repeats when DST ends, the later pass is taken.
 
-Positive evidence only: a pane this reader does not recognise reads none or modal,
-never menu, and keepalive sends keys only on limit and menu. Stdlib only, Python 3.9
-(the system python3 on the estate's macOS hosts).
+The limit line is the bot's last word until a newer prompt is drawn under it, or
+Claude Code's own notice that it is continuing now (#2348). Whatever else Claude Code
+draws under the line (hints, a turn summary, status, its notices about the limit) it
+changes between releases and from the server, so none of it is read as moving on.
+
+Positive evidence only for keys: a pane this reader does not recognise reads none or
+modal, never menu, and keepalive sends keys only on limit and menu. Stdlib only,
+Python 3.9 (the system python3 on the estate's macOS hosts).
 """
 
 import datetime
@@ -162,22 +167,17 @@ def _is_rule(line):
     return len(s) >= 10 and set(s) <= {"─", "▔"}
 
 
-# What may follow the limit line while it is still the bot's last word: the
-# error's own hint lines (indented, "/usage-credits to ...", "/upgrade to ..."),
-# the turn summary ("✻ Baked for 0s · done 10:34 AM"), and Claude Code's own
-# notices about this limit ("● Usage limit reached · continuing automatically
-# ...", wrapped onto indented lines). Anything else, a prompt echoed back or an
-# answer, means the bot has moved on and the line is history.
-_SUMMARY_RE = re.compile(r"^\S \S+ for \d")
-_HINT_RE = re.compile(
-    r"^\s+(/[a-z][a-z-]*\b|Switch models|Run /|Ask your admin|Raise the cap)"
-)
-# Status drawn right-aligned above the box, not transcript: "◈ max · /effort"
-# appears there once the limit menu closes (measured, 2.1.292).
-_CHROME_RE = re.compile(r"^ {20,}\S")
-_HELD_NOTICE_RE = re.compile(
-    r"^\S (Usage limit reached|Automatic continue|Usage limit has reset)"
-)
+# What says the bot has moved on past the limit line, and nothing else does
+# (#2348): a newer prompt drawn under it ("❯ ..." at the left edge; the input
+# box's own "❯" sits under a rule, where the scan stops), or Claude Code's own
+# notice that it is continuing now. Under the line Claude Code draws hints, a
+# turn summary, status and notices about the limit, and changes them between
+# releases and from the server: 2.1.296 can add "Press ⏎ to continue after
+# reset", and its continue notices are server copy. The #996 reader took any
+# line it did not know for moving on, and every production stop read IDLE. A
+# turn that ended normally since the stop has removed the hook's record
+# (usage-limit-hook.sh, on Stop), which keepalive asks before this reader.
+_PROMPT_RE = re.compile(r"^❯\s*\S")
 _RESUMED_NOTICE_RE = re.compile(r"^\S Usage limit available again")
 _NATIVE_RE = re.compile(r"[Cc]ontinuing (automatically|shortly)")
 _POINTER_RE = re.compile(r"^\s*❯\s*")
@@ -219,32 +219,15 @@ def read_pane(text, anchor, tz_name=None):
     # Never an empty field before the last: bash's read collapses two tabs.
     name = name or "limit"
     j = i + used
-    native = "-"
     while j < len(lines):
         line = lines[j]
         if _is_rule(line) or line.strip() == MENU_TITLE:
             break
-        if (
-            not line.strip()
-            or _SUMMARY_RE.match(line)
-            or _HINT_RE.match(line)
-            or _CHROME_RE.match(line)
-        ):
-            j += 1
-            continue
-        if _RESUMED_NOTICE_RE.match(line):
+        if _PROMPT_RE.match(line) or _RESUMED_NOTICE_RE.match(line):
             return none
-        if _HELD_NOTICE_RE.match(line):
-            if _NATIVE_RE.search(line):
-                native = "armed"
-            j += 1
-            while j < len(lines) and lines[j].startswith(" ") and lines[j].strip():
-                j += 1
-            continue
-        return none
+        j += 1
     rest = lines[j:]
-    if any(_NATIVE_RE.search(l) for l in rest):
-        native = "armed"
+    native = "armed" if any(_NATIVE_RE.search(l) for l in lines[i:]) else "-"
     epoch = str(when) if when is not None else "-"
     title = [k for k, l in enumerate(rest) if l.strip() == MENU_TITLE]
     if title:

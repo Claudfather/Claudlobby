@@ -222,6 +222,44 @@ def test_a_held_frame_reads_limit_with_its_reset_not_idle(rig):
     assert r.keys() == []
 
 
+def test_a_line_the_reader_did_not_know_under_the_limit_still_reads_limit(rig):
+    """#2348: every production stop read IDLE with the hook's record in place.
+    A line Claude Code draws under the limit line that #996 never measured
+    ("Press ⏎ to continue after reset", 2.1.296) made the reader call it the
+    bot moving on."""
+    r = rig(armed=False)
+    hit, reset = _future_reset()
+    r.show(
+        _frame("held", reset).replace(
+            "     /usage-credits to finish what you’re working on.",
+            "     /usage-credits to finish what you’re working on.\n     Press ⏎ to continue after reset",
+        )
+    )
+    r.hook_record(hit)
+    r.tick()
+    assert f"LIMIT — held by a usage limit (session limit), resets {reset}" in r.log()
+    assert "IDLE" not in r.log() and not r.data(".idle").exists()
+
+
+def test_an_idle_tick_names_a_record_the_pane_did_not_confirm(rig):
+    """A record newer than the last tool call that the pane does not confirm
+    (here a newer prompt under the limit line) reads IDLE, and the IDLE line
+    says so, so a stop that is missed again names itself (#2348 left none)."""
+    r = rig()
+    hit, reset = _past_reset()
+    r.show(_frame("resumed", reset))
+    r.hook_record(hit)
+    r.tick()
+    stamp = datetime.datetime.fromtimestamp(hit, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    assert (
+        f"IDLE — at prompt; a usage-limit record from {stamp} is newer than the "
+        "last tool call, but the pane shows no limit as its last word"
+    ) in r.log()
+    assert "LIMIT" not in r.log() and r.keys() == []
+
+
 def test_a_limit_line_with_no_hook_record_is_not_a_limit(rig):
     """A bot that quotes a limit line writes no StopFailure record: IDLE as before."""
     r = rig()
