@@ -11,7 +11,7 @@ from ..command_result import CommandFailure, CommandOutput
 _REMEDIES = {
     "orphan_unit": "Review the stale unit, then use host supervision reap-orphans --dry-run before --apply.",
     "orphan_grant": "Remove the unowned allow rule or equip the declaring source, then stage a plan.",
-    "unsourced_grant": "Review the fleet tools.allow override and its declared source.",
+    "unsourced_grant": "Review the fleet tool_permissions.allow override and its declared source.",
     "under_grant": "Stage a plan so the equipped source's permission is composed.",
     "missing_external": "Restore the declared host dependency or remove its declaration.",
     "isolation_not_composed": "Stage and review a plan, then ask the operator to activate it.",

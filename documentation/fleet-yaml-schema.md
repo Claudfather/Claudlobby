@@ -19,12 +19,13 @@ fleet:
     default: ~/.claude
     work: ~/.claude-work
 
-  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool }
+  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool, guardrails: bool, protocols: bool, skills: bool, resources: bool }
                                          # OPTIONAL — gate system.yaml injection into defaults (default: true)
 
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
+    agent_cli: claude | codex            # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
@@ -89,6 +90,7 @@ fleet:
       account: <account-key>
       model: <model>
       effort: <effort>
+      agent_cli: <agent_cli>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
       integrations: [<list>]            # auto-paired with mcp; explicit overrides
@@ -120,7 +122,7 @@ fleet:
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
-      remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
+      remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
       extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
@@ -195,10 +197,13 @@ fleet:
     hooks: true            # merge system.yaml hooks
     timers: true           # merge system.yaml job timers
     observability: true    # merge system.yaml observability defaults
-    guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
-    protocols: true        # apply default protocols, including the leaf-manager checkin default
+    guardrails: true       # apply default guardrails: claudlobby-dev-in-projects, no-push-main, no-destructive-git, pii-protection, no-fabrication, confirm-before-send
+    protocols: true        # apply default protocols: context-management, telegram-routing and telegram-formatting (the last two only for a bot with a Telegram channel), shared-documentation, and the leaf-manager checkin default
     skills: true           # apply default skills: the status skill on every manager
+    resources: true        # apply default resources: timezone
 ```
+
+Guardrail and resource defaults compose **ahead of** the fleet's own `defaults:` list and the bot's stanza, in the order above. A fleet that lists the same entries first, in that order, composes the same bytes with or without its own copies. Protocol defaults compose **after** the bot's declared protocols, so a fleet that removes its copies of `context-management`, `telegram-routing` or `telegram-formatting` moves those sections to the end of its protocol list. Keep those copies where the order matters to you.
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
 
@@ -211,12 +216,12 @@ Omit the field entirely for the common case — everything defaults to `true`. U
 Applied to every bot. Merge rules by type:
 
 - **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
-- **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
+- **Scalars** (model, effort, agent_cli, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
-- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job whose interval divides an hour or a day is anchored to the clock at its own second on the host, in this fleet's slot, so the fleets' copies of one job are never due in the same second; any other interval keeps `OnUnitActiveSec=` with a slot for its first run only. `randomized_delay` is for calendar jobs. See `startup_delay` in [`system-yaml-schema.md`](system-yaml-schema.md) for both.
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
@@ -244,6 +249,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
+| `keepalive-limit-resume` | **off** — no deployment gate: claudlobby/_runtime_scripts/ is in force on every bot at activation, and this door types into a bot's pane, so one armed bot is the only canary | door | fleet.yaml env: → bot.conf | KEEPALIVE_LIMIT_RESUME_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `mcp-direct-launch` | **off** — changes how every MCP server starts; warm the pinned cache and activate an independent canary root with one armed bot before widening the manifest | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.mcp_direct_launch: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> --fleet <fleet> host cache warm, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. Planning must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | composition | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
@@ -704,6 +710,8 @@ observability:
 
 **dispatch_deadline remains composed for every bot.** The default is 86400 seconds (24 hours), and a fleet override still reaches bot.conf for historical native watchdog rows. Canonical task assign takes an explicit --expected-by timestamp; it does not read this env value to manufacture a deadline. A value of 0 disables the legacy dispatch clock.
 
+`pulse_interval` also sets the `fleet-pulse` timer's cadence. A whole number of minutes that divides an hour (60, 120, 180, 240, 300, 360, 600, 720, 900, 1200, 1800 or 3600) keeps the pulse anchored in this fleet's slot on the host. Any other value runs it on `OnUnitActiveSec=` with a slot for its first run only, and that slot lasts only until the copies drift back together; on a four-fleet host, 60 s copies did so within minutes to an hour.
+
 The three threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
 **`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`claudlobby/_runtime_scripts/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
@@ -720,7 +728,7 @@ Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_
 
 ### Fleet-pulse escalation (environment overrides)
 
-`claudlobby/_runtime_scripts/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `crash_loop`, …) affects multiple bots within a short window.
+`claudlobby/_runtime_scripts/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `unit_missing`, `crash_loop`, …) affects multiple bots within a short window. Every event over its threshold in one sweep goes out as one message (#2243).
 
 Set these in the fleet-level `fleet_pulse:` block. The composer emits them as `Environment=` lines on the fleet-pulse timer unit, which is the only tier the script can read:
 
@@ -734,6 +742,7 @@ fleet_pulse:
   escalation_state_dir: "~/.claude/channels/telegram-<bot-handle>"
   renotify_after_s: 21600
   rearm_window_s: 0
+  stopped_remind_days: 3
   timeout_s: 300
 ```
 
@@ -758,6 +767,7 @@ The composed env vars, and what each does:
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
 | `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |
 | `FLEET_PULSE_REARM_WINDOW_S` | _(lib-common default)_ | Bounds debounce re-arming during a known crashloop. `0` disables the bound. |
+| `FLEET_PULSE_STOPPED_REMIND_DAYS` | `3` | From `stopped_remind_days`: a bot stopped through `bot stop` raises no alert, and its manager gets one reminder push once it has been stopped this many days, then one every as many days again (#2243). `0` turns the reminder off. |
 
 Set `FLEET_PULSE_ESCALATION_CHAT_ID` explicitly so alert targeting never depends on bot directory ordering.
 
@@ -886,9 +896,19 @@ the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
 
+### `bots.<name>.agent_cli`
+
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_AGENT_CLI`, which names the rule the bot's session uid is derived with (#2145 §2.2; the doors that record the caller's session read it from #2145 P1 Half B). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). An explicit `null` reads as `claude`; any other value outside the set fails to parse. Can be set in `defaults:`.
+
+`runtime:` was this key's draft spelling and is not read. A `runtime:` key in a bot stanza or under `defaults:` gets a `retired-key` warning naming `agent_cli:`, and is an **error** when its value is not the CLI the bot runs (`runtime: codex` would otherwise run `claude` in silence).
+
+`agent_cli` is the one name for this value everywhere: the `fleet.yaml` key, `CLAUDLOBBY_AGENT_CLI` in `bot.conf`, the bot keyframe's `agent_cli` and the session join key `(agent_cli, session_id)` (`session_alias(id, agent_cli)`, #2145 F2). It is not `runtime`, which already names release activation, the Claude Code binary update (`host update runtime`) and the composed-output audit (`config validate --runtime`) (#1997).
+
 ### `bots.<name>.remote_control`
 
-Boolean (default `true`). Controls whether the bot runs with `--remote-control`, which allows dispatch via `tmux send-keys`. Disable for standalone bots that should only respond to Telegram messages. Can be set in `defaults:`.
+Boolean. Controls whether the bot runs with `--remote-control`, Claude Code's Remote Control session. Unset, it follows the bot's role: `true` for the fleet's manager (`fleet.manager`) and `false` for every other bot. An explicit value on the bot, or in `defaults:`, wins in either direction, so a worker opts in with `remote_control: true` and a fleet that wants it nowhere sets `defaults: {remote_control: false}`. `config explain bot.remote_control --bot <bot>` reports an unset value as `source: role_default`, decided by `fleet.manager`.
+
+Two behaviours change with it. While Remote Control is up, Claude Code arms neither its own automatic continue nor its usage-limit menu at a usage limit; without it, both arm, and the menu's options can come in any order, usage credits first included. keepalive chooses "Stop and wait for limit to reset" only by that label (`keepalive.sh`, #996), and no framework send types into a pane while a menu holds it (`pane_is_menu` in `lib-common.sh`). And a plain-text answer to a Telegram message reaches Telegram through Remote Control's relay (`plane-rc-relay-out.sh`), so a bot without it answers through the channel's reply tool only.
 
 ### `bots.<name>.prompt_suggestions`
 
@@ -1023,15 +1043,17 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
 7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
 8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
-9. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
-10. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
-11. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-12. **Principles** — `## Principles` section.
-13. **Permissions** — `## Permissions` section.
-14. **Protocols** — `## Protocols` section.
-15. **Guardrails** — `## Guardrails` section.
-16. **Lessons** — `## Lessons` section.
-17. **Post-actions** — `## Post-actions` section.
+9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through (only doors every role is granted), and `bot show` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size and its grants are pinned by `tests/test_system_orientation.py`.
+10. **Dispatches framed as pasted text** — `## Dispatches framed as pasted text`, the verify-then-trust check for a framed dispatch, on every bot. Fixed in the template.
+11. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
+12. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
+13. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
+14. **Principles** — `## Principles` section.
+15. **Permissions** — `## Permissions` section.
+16. **Protocols** — `## Protocols` section.
+17. **Guardrails** — `## Guardrails` section.
+18. **Lessons** — `## Lessons` section.
+19. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 
@@ -1071,6 +1093,8 @@ does not own.
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
+- **Hard fail** — a bot's `agent_cli:` is not `claude` (`execution adapter not shipped`, until #2149)
+- **Hard fail** — a leftover `runtime:` key (bot or `defaults:`) whose value is not the bot's `agent_cli` (warn, `retired-key`, when it matches)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve
@@ -1084,7 +1108,9 @@ Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI 
 `claudlobby --fleet <fleet> config explain bot.model --bot <bot>` name the
 declaration or built-in default that supplied supported scalar settings.
 `config explain GITHUB_PAT --bot <bot>` uses the environment tier register.
-These reads report source and set/unset state without printing values. Nested
+These reads report source and set/unset state without printing values. A bot
+field whose built-in default follows the bot's role, `remote_control` today,
+reports `source: role_default` with `fleet.manager` as its declaration. Nested
 merge fields such as `bot.env` are explicitly unsupported; `bot.env` is read
 from the bot stanza itself and does not inherit `defaults.env`.
 

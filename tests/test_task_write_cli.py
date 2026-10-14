@@ -473,3 +473,150 @@ def test_task_write_help_and_syntax_do_not_import_mutation_owner(monkeypatch, ca
     output = capsys.readouterr().out
     assert exited.value.code == 2 and "private-value" not in output
     assert json.loads(output)["command"] == "assignment.accept"
+
+
+def test_feedback_cli_binds_existing_explicit_human_and_original_receipt(active, monkeypatch, capsys):
+    from tests.test_plane_owner_feedback import receiver
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Review result',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    monkeypatch.setattr(operation_context, '_local_operator_alias',
+                        lambda: pytest.fail('feedback must not resolve an ambient actor'))
+    calls, repairs = receiver(monkeypatch)
+    before = _counts(root)
+    bad = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:unregistered',
+                '--expected-assignment', 'none', '--text', 'Comment', '--request-id', str(uuid4()), expected=4)
+    assert bad['error']['code'] == 'conflict' and _counts(root) == before
+    request = str(uuid4())
+    argv = ('task', 'feedback', task_id, '--actor', 'human:reviewer', '--expected-assignment', 'none',
+            '--text', '  Please consider café\nNext iteration  ', '--request-id', request)
+    first = _call(capsys, root, *argv)
+    assert first['command'] == 'task.feedback' and first['request_id'] == request
+    assert first['data']['recording'] == 'committed' and first['data']['current_task_state'] == 'queued'
+    assert first['data']['notification'] == 'received'
+    replay = _call(capsys, root, *argv)
+    assert replay['data']['replayed'] and replay['data']['message_id'] == first['data']['message_id']
+    assert replay['data']['recording'] == 'committed'
+    retained = _call(capsys, root, 'request', 'show', request)['data']['request']
+    assert retained['operation'] == 'task.feedback' and retained['assignment_id'] is None
+    assert len(calls) == 1 and repairs == []
+    after = _counts(root)
+    assert after[:3] == before[:3] and after[3] == before[3] + 1 and after[4] == before[4]
+    monkeypatch.setenv('BOT_ID', 'worker')
+    denied = _call(capsys, root, *argv, expected=4)
+    assert denied['error']['code'] == 'conflict' and _counts(root) == after
+
+
+@pytest.mark.parametrize('change', ['body', 'selection', 'actor'])
+def test_feedback_cli_invalid_input_has_no_recording(active, monkeypatch, capsys, change):
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    before = _counts(root)
+    result = _call(capsys, root, 'task', 'feedback', task_id,
+        '--actor', 'bot:example/manager' if change == 'actor' else 'human:reviewer',
+        '--expected-assignment', '' if change == 'selection' else 'none',
+        '--text', 'x' * 16385 if change == 'body' else 'Comment', '--request-id', str(uuid4()), expected=2)
+    assert result['error']['code'] == 'invalid_argument' and _counts(root) == before
+
+
+@pytest.mark.parametrize('carrier', ['fleet-name', 'fleet-selector', 'timer', 'empty-timer',
+                                     'service', 'empty-service', 'release', 'empty-release', 'host-update'])
+def test_feedback_cli_refuses_generated_carrier_with_existing_human(active, monkeypatch, capsys, carrier):
+    from tests.test_plane_owner_feedback import receiver
+    from claudlobby.active_config import resolve_active_context
+
+    root, release = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Existing human selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    selected = resolve_active_context(root=root, fleet='example', package=context.get_resources())
+    calls, repairs = receiver(monkeypatch)
+    if carrier in {'fleet-name', 'fleet-selector'}:
+        monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+        monkeypatch.setenv('FLEET_ROOT', str(selected.paths.fleet_config_dir))
+        monkeypatch.setenv('FLEET_NAME' if carrier == 'fleet-name' else 'CLAUDLOBBY_FLEET', 'example')
+    elif carrier in {'timer', 'empty-timer'}:
+        monkeypatch.setenv('CLAUDLOBBY_TIMER_CONTEXT', 'fleet' if carrier == 'timer' else '')
+    elif carrier in {'service', 'empty-service'}:
+        monkeypatch.setenv('BOT_SERVICE', 'fixture-worker' if carrier == 'service' else '')
+    elif carrier in {'release', 'empty-release'}:
+        monkeypatch.setenv('CLAUDLOBBY_RELEASE_ID', release.release_id if carrier == 'release' else '')
+    else:
+        # Actual host_update_operations child shape: no BOT_* or FLEET_ROOT,
+        # but explicit root/native/CLI and the selected generated release.
+        monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+        monkeypatch.setenv('CLAUDLOBBY_RELEASE_ID', release.release_id)
+        monkeypatch.setenv('CLAUDLOBBY_NATIVE_DIR', str(release.native_path))
+        monkeypatch.setenv('CLAUDLOBBY_CLI', str(release.cli_path))
+    before = _counts(root)
+    result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
+                   '--expected-assignment', 'none', '--text', 'A timer must not impersonate this human',
+                   '--request-id', str(uuid4()), expected=4)
+    assert result['error']['code'] == 'conflict'
+    assert result['error']['message'] == 'task feedback requires an explicit local human caller'
+    assert _counts(root) == before and calls == repairs == []
+
+
+@pytest.mark.parametrize('selector', ['FLEET_NAME', 'CLAUDLOBBY_FLEET'])
+def test_feedback_cli_allows_manual_root_and_fleet_selectors(active, monkeypatch, capsys, selector):
+    from tests.test_plane_owner_feedback import receiver
+
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Manual human selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+    monkeypatch.setenv(selector, 'example')
+    calls, repairs = receiver(monkeypatch)
+    result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
+                   '--expected-assignment', 'none', '--text', 'Explicit local operator comment',
+                   '--request-id', str(uuid4()))
+    assert result['data']['recording'] == 'committed' and result['data']['notification'] == 'received'
+    assert len(calls) == 1 and repairs == []
+
+
+def test_feedback_cli_expanded_body_has_bounded_native_budget_and_never_retries(active, monkeypatch, capsys):
+    from dataclasses import replace
+    import subprocess
+    from claudlobby import message_operations, message_transport
+    from tests.package_fixtures import source_package
+
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Maximum escaped comment',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    original = message_operations.send_committed_native_attempt
+    calls = []
+
+    def native_runner(command, **kwargs):
+        calls.append(kwargs)
+        assert len(kwargs['input']) > 98301  # Escaped comment plus canonical envelope.
+        assert kwargs['timeout'] == 120
+        # Exercise the actual transport's timeout classification, without a PTY.
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'transport-v1\tinvoked\n')
+
+    def selected_transport(package, destination, **kwargs):
+        # The activation fixture seals only a stub native directory. Select the
+        # prepared helper for validation; native_runner prevents its execution.
+        return message_transport.send(replace(package, native=source_package().native),
+                                      destination, **kwargs, runner=native_runner)
+
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt',
+                        lambda *a, **k: original(*a, **k, transport=selected_transport))
+    monkeypatch.setattr(message_operations, 'repair_held_delivery',
+                        lambda *a, **k: pytest.fail('feedback must not repair input'))
+    request_id = str(uuid4())
+    args = ('task', 'feedback', task_id, '--actor', 'human:reviewer',
+            '--expected-assignment', 'none', '--text', 'x' + '\x01' * 16383,
+            '--request-id', request_id)
+    first = _call(capsys, root, *args, expected=5)
+    assert first['data']['recording'] == 'committed'
+    assert first['data']['transport'] == 'unknown' and first['data']['request_persisted']
+    recorded = _counts(root)
+    replay = _call(capsys, root, *args, expected=5)
+    assert replay['data']['replayed'] and replay['data']['transport'] == 'unknown'
+    assert _counts(root) == recorded and len(calls) == 1
+    assert calls[0]['timeout'] == 120 and len(calls[0]['input']) > 98301

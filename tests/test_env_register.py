@@ -164,6 +164,48 @@ def test_config_explain_scalar_sources_follow_loader_without_values(world, capsy
     assert (fallback["source"], fallback["state"], fallback["declaration"]) == (
         "built_in", "unset", None)
 
+    # #2145: `agent_cli` is an inherited scalar on effort's path; its built-in is set.
+    assert main([*argv, "bot.agent_cli", "--bot", "solo"]) == 0
+    agent_cli = json.loads(capsys.readouterr().out)["data"]
+    assert (agent_cli["source"], agent_cli["state"], agent_cli["declaration"]) == (
+        "built_in", "set", None)
+    manifest.write_text(manifest.read_text().replace("mcp: [github]", "mcp: [github]\n    agent_cli: claude"))
+    assert main([*argv, "bot.agent_cli", "--bot", "solo"]) == 0
+    agent_cli = json.loads(capsys.readouterr().out)["data"]
+    assert (agent_cli["source"], agent_cli["declaration"]) == ("fleet.defaults", "fleet.defaults.agent_cli")
+
+
+def test_config_explain_names_the_role_default_of_remote_control(world, capsys, monkeypatch):
+    """#2325: remote_control left unset follows the bot's role, so the source
+    named for both the manager and a worker is the role default, with
+    fleet.manager as the declaration that decides it."""
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    manifest = fleet_dir / "fleet.yaml"
+    two_bots = FLEET + "    helper:\n      expertise: [x]\n"
+    manifest.write_text(two_bots)
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+    for bot in ("solo", "helper"):
+        assert main([*argv, "bot.remote_control", "--bot", bot]) == 0
+        result = json.loads(capsys.readouterr().out)["data"]
+        assert (result["source"], result["declaration"], result["state"]) == (
+            "role_default", "fleet.manager", "set")
+    text = ["--root", str(paths.root), "--fleet", "acme", "config", "explain"]
+    assert main([*text, "bot.remote_control", "--bot", "helper"]) == 0
+    assert "bot.remote_control: set from role default (fleet.manager)" in capsys.readouterr().out
+
+    manifest.write_text(two_bots + "      remote_control: true\n")
+    assert main([*argv, "bot.remote_control", "--bot", "helper"]) == 0
+    result = json.loads(capsys.readouterr().out)["data"]
+    assert (result["source"], result["declaration"]) == (
+        "bot", "fleet.bots.helper.remote_control")
+
+    manifest.write_text(two_bots.replace("mcp: [github]", "mcp: [github]\n    remote_control: false"))
+    assert main([*argv, "bot.remote_control", "--bot", "solo"]) == 0
+    result = json.loads(capsys.readouterr().out)["data"]
+    assert (result["source"], result["declaration"]) == (
+        "fleet.defaults", "fleet.defaults.remote_control")
+
 
 def test_config_explain_refuses_unsupported_or_unknown_config_paths(world, capsys, monkeypatch):
     _fleet, paths, _fleet_dir, _home = world

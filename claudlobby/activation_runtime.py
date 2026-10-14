@@ -87,16 +87,23 @@ def _start_budget(unit: UnitStart, file: Path, content: bytes) -> int:
 
 def assert_quiescent(adapter: Adapter, *, installed_file: Path, target: str,
                      socket_path: Path | None = None, known_pids: tuple[int, ...] = (),
-                     known_cgroup: str = "") -> RuntimeEvidence:
+                     known_cgroup: str = "", settle_s: int = 0) -> RuntimeEvidence:
     """Observe only the named unit and pre-stop witnesses; never a host-wide proof.
 
     A missing/refused owned Unix socket and absent known PIDs are evidence.
     Permission errors, unknown native states and occupied sockets refuse.
     Detached processes outside the supplied witnesses remain the caller's
     coverage responsibility. No process is signalled and no socket is removed.
+
+    ``settle_s`` is for a caller that has just stopped the unit: the native
+    check then waits up to that many seconds for processes still exiting to
+    leave the unit's cgroup (#2227). Without it the cgroup is read once.
     """
+    if type(settle_s) is not int or not 0 <= settle_s <= 999:
+        raise RuntimeEvidenceError("quiescence", target, "invalid settle window")
     observed = _call(adapter, "svc_activation_quiet", target,
-                     installed_file, target, known_cgroup)
+                     installed_file, target, known_cgroup,
+                     *((str(settle_s),) if settle_s else ()), timeout=30 + settle_s)
     if observed not in {"inactive\tcgroup-empty", "inactive\tno-cgroup-witness"}:
         raise RuntimeEvidenceError("quiescence", target, "unrecognized native evidence")
     for pid in known_pids:

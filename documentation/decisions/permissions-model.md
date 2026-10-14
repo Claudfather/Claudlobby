@@ -220,9 +220,9 @@ Data-plane servers whose writes are real-world mutations (Shopify catalog, Print
 
 - **Reads compose automatically.** Every bot that attaches the server gets exact `mcp__<server>__<tool>` allows for the read set (per instance), so headless workers never wedge on a safe-read permission prompt.
 - **Writes always prompt.** No library-derived path may cover them, enforced twice: the paired `library/integrations/<name>.md` `tool_grants` must mirror the read-only set exactly (a wildcard, write-tool, or missing-read entry fails `generate` with a directional error), and a union-layer assert re-checks the accumulated allow list — so a skill/expertise/guardrail grant covering a write of a split server also fails `generate`. A `read_only_tools` entry absent from `tools` fails too (typo/rename protection).
-- **Operator escape hatch.** A bot that genuinely needs an unattended write gets it explicitly in fleet.yaml: `tools: {allow: ["mcp__shopify__createProduct"]}` (per-bot, or fleet-wide via `defaults.tools.allow`). Operator-declared and auditable — never a library default; this layer is appended after the union-layer assert, deliberately exempt.
+- **Operator escape hatch.** A bot that genuinely needs an unattended write gets it explicitly in fleet.yaml: `tool_permissions: {allow: ["mcp__shopify__createProduct"]}` (per-bot, or fleet-wide via `defaults.tool_permissions.allow`). Operator-declared and auditable — never a library default; this layer is appended after the union-layer assert, deliberately exempt.
 
-Declaration paths, summarized: the read/write **facts** live in the fragment `_permissions_contract`; the composed **auto-grants** live in the integration file's `tool_grants` (kept mirror-equal by the compose-time gates); **exceptions** live in fleet.yaml `tools.allow`.
+Declaration paths, summarized: the read/write **facts** live in the fragment `_permissions_contract`; the composed **auto-grants** live in the integration file's `tool_grants` (kept mirror-equal by the compose-time gates); **exceptions** live in fleet.yaml `tool_permissions.allow`.
 
 ---
 

@@ -374,6 +374,28 @@ def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path):
     assert not late.exists()
 
 
+def test_quiet_settle_is_the_native_wait_and_widens_the_call_budget(tmp_path):
+    """#2227: settle_s reaches svc_activation_quiet as its wait, inside a call
+    budget that covers it; without it the native argv and budget are unchanged."""
+    calls = []
+
+    class Adapter:
+        def call(self, function, *args, timeout=30):
+            calls.append((function, args, timeout))
+            return subprocess.CompletedProcess(args, 0, "inactive\tcgroup-empty\n", "")
+
+    installed_file = tmp_path / "worker.service"
+    args = dict(installed_file=installed_file, target="worker.service")
+    runtime.assert_quiescent(Adapter(), **args)
+    runtime.assert_quiescent(Adapter(), **args, settle_s=30)
+    assert calls == [("svc_activation_quiet", (installed_file, "worker.service", ""), 30),
+                     ("svc_activation_quiet", (installed_file, "worker.service", "", "30"), 60)]
+    for bad in (-1, True, 2.5, "30"):
+        with pytest.raises(runtime.RuntimeEvidenceError, match="settle"):
+            runtime.assert_quiescent(Adapter(), **args, settle_s=bad)
+    assert len(calls) == 2  # a refused settle reaches no native call
+
+
 def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_path):
     class Adapter:
         def call(self, *args, **kwargs):

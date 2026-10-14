@@ -65,7 +65,7 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
     feeds into the allow list, recomputed here independently so a divergence
     between the composed output and the declared contracts surfaces. Excludes
     the always-injected ``BASE_TOOLS`` floor and the ad-hoc fleet
-    ``tools.allow`` override, which are classified separately.
+    ``tool_permissions.allow`` override, which are classified separately.
 
     Skill grants are resolved from the EFFECTIVE skill set
     (:func:`resolve_effective_skills`, spec §10), never ``bot.skills`` alone —
@@ -98,7 +98,7 @@ _GRANT_KINDS: dict[str, tuple[str, str]] = {
     ),
     "unsourced_grant": (
         WARN,
-        "granted via fleet tools.allow but no equipped source declares it",
+        "granted via fleet tool_permissions.allow but no equipped source declares it",
     ),
     "under_grant": (
         FAIL,
@@ -121,7 +121,7 @@ def classify_grants(
       - ``orphan_grant`` (fail): an allow entry tracing to no source, base floor,
         or fleet override — composition emitted a grant nothing produced.
       - ``unsourced_grant`` (warn): an allow entry present only via the ad-hoc
-        fleet ``tools.allow`` override (drift signal — no source contract).
+        fleet ``tool_permissions.allow`` override (drift signal — no source contract).
       - ``under_grant`` (fail): a source-declared grant that is not denied yet
         never reached the allow list (the bot would rely on the retired global).
     """

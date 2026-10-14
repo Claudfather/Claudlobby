@@ -1,6 +1,6 @@
 ---
 name: fleet-digest
-description: "Assemble the monitor's pass input. Joins the plane's session_digest events with vitals, utilization, and fleet report rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
+description: "Use when a monitoring pass needs its input — usually as the first step of /fleet-observe. Assembles the monitor's pass input: joins the plane's session_digest events with vitals, utilization, and fleet report rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"

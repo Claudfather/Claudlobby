@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
@@ -25,7 +26,10 @@ _UID_PREFIX = {
     # F12 refinement (§19.6, delivered PR-B T7): session_uid is the TRANSCRIPT
     # identity (stable across resume — empirically confirmed 2026-08-25);
     # process_uid distinguishes the concurrent RESUMES of one transcript —
-    # minted fresh per process at SessionStart, never derived.
+    # minted fresh per process at SessionStart, never derived. (#2145 P1 note:
+    # its only minter, plane-session-start.sh, retires in #2145 P3; the proc_
+    # prefix stays registered so historical rows classify — P3 rewrites this
+    # comment.)
     "process": "proc_",
 }
 
@@ -76,21 +80,60 @@ def mint_assignment_id() -> str:
     return mint("asg_")
 
 
-def derive_session_uid(platform_session_id: str) -> str:
+def session_alias(platform_session_id: str, agent_cli: str = "claude") -> str:
+    """The F2 material (#2145 §2.2): the ONE place the (agent_cli, session_id)
+    join key is spelled. `claude` is the raw id — byte-identical to every row
+    written so far; any other agent CLI is "<agent_cli>:<id>", so two vendors'
+    ids never collide. P2's intake sets its session `subject` from this
+    function; clauDNA and Claudron cite register row 10, which states this rule
+    once. The vocabulary is config's (known_values.KNOWN_AGENT_CLIS); this
+    module refuses only an empty agent CLI."""
+    if not platform_session_id or not platform_session_id.strip():
+        raise ValueError("empty platform session id — refusing to derive")
+    if not agent_cli or not agent_cli.strip():
+        raise ValueError("empty agent_cli — refusing to derive")
+    return platform_session_id if agent_cli == "claude" else f"{agent_cli}:{platform_session_id}"
+
+
+def derive_session_uid(platform_session_id: str, agent_cli: str = "claude") -> str:
     """sess_ uid DERIVED from the platform session id (sha256, first 32 hex).
 
     Deliberately deterministic, not random (§9d): any emitter — bash included,
     via shasum — computes the same uid for the same session with no registry
-    lookup, and the transcript/OTel join needs exactly that stability."""
+    lookup, and the transcript/OTel join needs exactly that stability.
 
-    if not platform_session_id or not platform_session_id.strip():
-        raise ValueError("empty platform session id — refusing to derive")
-    digest = hashlib.sha256(platform_session_id.encode("utf-8")).hexdigest()
-    return "sess_" + digest[:32]
+    #2145 F2: composed from session_alias — never a second spelling of the
+    rule. A `claude` uid is byte-identical to the one derived before #2145 (the
+    bash mirror in plane-session-start.sh is Claude-only and stays so)."""
+    return derive_uid("sess", session_alias(platform_session_id, agent_cli))
 
 
 def mint_uid(kind: str) -> str:
     return mint(_UID_PREFIX[kind])
+
+
+def read_host_uid(state_dir: Path) -> str:
+    """Read an existing private installation identity without repairing it.
+
+    This identifies the installation, not its operator or a remote caller.
+    Readers must never mint a replacement identity or relax file checks.
+    """
+    state_dir = Path(state_dir)
+    try:
+        if state_dir.is_symlink():
+            raise ValueError("redirected state")
+        fd = os.open(state_dir / "host-uid", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "r") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError("host identity is not an owned private file")
+            value = stream.read().strip()
+        if not _HOST_UID_RE.fullmatch(value):
+            raise ValueError("malformed host identity")
+        return value
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ValueError("existing host identity is unavailable or invalid") from exc
 
 
 def ensure_host_uid(state_dir: Path) -> str:

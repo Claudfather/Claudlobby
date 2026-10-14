@@ -9,10 +9,14 @@ Ref: https://github.com/Claudfather/Claudlobby/issues/367
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 
 from claudlobby.config import (
     BotConfig,
@@ -23,6 +27,40 @@ from claudlobby.config import (
 from claudlobby.composer import compose_bot_conf
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
+from tests.conftest import constructed_env
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="startup settings require jq")
+@pytest.mark.parametrize("custom_config", [False, True])
+def test_first_start_creates_settings_directory_before_lock(tmp_path, custom_config):
+    """Run the actual startup block against an uninitialized provider home."""
+    scripts = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
+    block = (scripts / "start-bot.sh").read_text().split(
+        "# --- Headless consent pre-acceptance", 1
+    )[1].split("# --- end headless consent", 1)[0]
+    block = block.split("\n", 1)[1]
+    home = tmp_path / "home"
+    home.mkdir()
+    bot = tmp_path / "bot"
+    (bot / "logs").mkdir(parents=True)
+    config = tmp_path / "custom config" if custom_config else home / ".claude"
+    env = constructed_env(
+        HOME=home, BOT_DIR=bot, CLAUDLOBBY_NATIVE_PYTHON=sys.executable,
+        CLAUDE_CONFIG_DIR=config if custom_config else "",
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", 'set -euo pipefail; . "$1";\n' + block,
+         "_", str(scripts / "lib-common.sh")],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads((config / "settings.json").read_text()) == {
+        "skipAutoPermissionPrompt": True,
+        "skipDangerousModePermissionPrompt": True,
+    }
+    assert (config / "settings.json.lock").is_file()
+    if custom_config:
+        assert not (home / ".claude").exists()
 
 
 def _make_paths(root: Path) -> Paths:

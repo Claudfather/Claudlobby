@@ -128,7 +128,7 @@ _resolve_uv_tools() {
 # which wheels-v* does NOT match, and sdists-v*/ on this host holds only
 # editable/ -- so a wheel-only probe would report such a package MISSING
 # forever while uvx runs it, the #852 unsatisfiable warning by another route.
-# Verified on uv 0.11.3: the three shipped uvx packages match wheels-v*, the
+# Verified on uv 0.11.3: the four shipped uvx packages match wheels-v*, the
 # sdist-built `daff` matches only built-wheels-v*, two never-fetched controls
 # match nothing.
 #

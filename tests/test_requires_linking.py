@@ -385,13 +385,15 @@ class TestGrantUnion:
             } <= set(allow)
             assert "Bash(git push *)" in deny
             assert "Bash" not in allow
-            assert "Bash(uuidgen)" in allow
+            assert "Bash(python3 -I -c 'import uuid; print(uuid.uuid4())')" in allow
             operator_commands = (
                 "host activate plan", "host job run sample", "host supervision reap-orphans",
                 "host repos pull", "bot remove worker-1 --purge", "bot move worker-1 --to other",
                 "bot create new", "library create skill new", "fleet setup new", "fleet move other",
                 "config plan", "config diff plan", "migration apply plan", "plane emit --file request.json",
                 "plane emit-batch --file request.json", "_task-recheck-tick",
+                "host owner initialize", "host owner confirm", "host owner revoke", "host owner status",
+                "task permission approve p", "task permission decline p", "task permission revoke p",
             )
             patterns = [rule[5:-1] for rule in allow if rule.startswith("Bash(") and rule.endswith(")")]
             for command in operator_commands:
@@ -412,6 +414,7 @@ class TestGrantUnion:
                     "Bash(claudlobby --json bot start worker-1)",
                     "Bash(claudlobby --json bot stop worker-1)",
                     "Bash(claudlobby --json bot restart worker-1)",
+                    "Bash(claudlobby --json bot stop worker-1 --reason *)",
                     "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
                 }
             else:
@@ -674,7 +677,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Skill(fleet-ops:*)",
         "Bash(gadget-tool *)",
         "Bash(widget-tool *)",
-        "Bash(uuidgen)",
+        "Bash(python3 -I -c 'import uuid; print(uuid.uuid4())')",
         "Bash(claudlobby --help)",
         "Bash(claudlobby brief --help)",
         "Bash(claudlobby library list --help)",
@@ -770,6 +773,20 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json fleet usage)",
         "Bash(claudlobby --json fleet usage *)",
         "Bash(claudlobby --json fleet reconcile)",
+        "Bash(claudlobby bot capabilities --help)",
+        "Bash(claudlobby bot show --help)",
+        "Bash(claudlobby project list --help)",
+        "Bash(claudlobby project show --help)",
+        "Bash(claudlobby task permission request --help)",
+        "Bash(claudlobby task permission show --help)",
+        "Bash(claudlobby task permission check --help)",
+        "Bash(claudlobby --json bot capabilities *)",
+        "Bash(claudlobby --json bot show *)",
+        "Bash(claudlobby --json project list)",
+        "Bash(claudlobby --json project show *)",
+        "Bash(claudlobby --json task permission request *)",
+        "Bash(claudlobby --json task permission show *)",
+        "Bash(claudlobby --json task permission check *)",
         "Bash(claudlobby --json config validate)",
         "Bash(claudlobby --json task admit *)",
         "Bash(claudlobby --json assignment accept *)",
@@ -811,6 +828,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot start worker-1)",
         "Bash(claudlobby --json bot stop worker-1)",
         "Bash(claudlobby --json bot restart worker-1)",
+        "Bash(claudlobby --json bot stop worker-1 --reason *)",
         "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
         "Bash(claudlobby --json bot session lead)",
         "Bash(claudlobby --json bot logs lead)",

@@ -57,12 +57,21 @@ cleanup () {
 trap cleanup EXIT
 
 # A worker whose tmux session does not exist -> Check 1 fires session_missing
-# every tick, for as long as we leave it that way. That is the "episode".
+# every tick, for as long as we leave it that way. That is the "episode". A
+# second worker names a service with no installed unit and no stop record, so
+# it raises unit_missing every tick (#2243): the second alert type, from its own
+# fault, pushed to the same manager.
 cat > "$BOTS/w1/bot.conf" <<EOF
 export MANAGER_TMUX=$MGR
 export MANAGER_TMUX_SOCKET=$MGR_SOCK
 export TMUX_SOCKET=rdrw$$
-export BOT_SERVICE=rdrw$$
+EOF
+mkdir -p "$BOTS/w2"
+cat > "$BOTS/w2/bot.conf" <<EOF
+export MANAGER_TMUX=$MGR
+export MANAGER_TMUX_SOCKET=$MGR_SOCK
+export TMUX_SOCKET=rdrv$$
+export BOT_SERVICE=rdrv$$
 EOF
 
 # The manager's stand-in logs each line it is submitted (--log), and each start
@@ -82,8 +91,8 @@ start_manager () {
     check "the manager drew its box" drawn "$(. "$LIB_DIR/lib-common.sh" &&
         PANE_READY_TICKS=100 PANE_READY_POLL_S=0.2 pane_await_input_box "$MGR_SOCK" "$MGR")"
 }
-# Counted PER ALERT TYPE: one tick legitimately pushes two here (the worker has
-# no tmux session AND no real service unit), so a bare total would conflate them.
+# Counted PER ALERT TYPE: one tick legitimately pushes two here (one from each
+# worker), so a bare total would conflate them.
 push_count ()    { grep -c "\\[FLEET-PULSE\\].*$1" "$MGR_LOG" || true; }
 
 run_pulse () {
@@ -99,20 +108,20 @@ echo "--- 1. episode opens: manager is up, condition fires ---"
 start_manager
 run_pulse
 check "  session_missing pushed once" 1 "$(push_count session_missing)"
-check "  service_down pushed once"    1 "$(push_count service_down)"
+check "  unit_missing pushed once"    1 "$(push_count unit_missing)"
 
 echo "--- 2. control: same manager, same episode -> debounce still debounces ---"
 run_pulse
 run_pulse
 check "3 ticks, still one session_missing to the SAME instance" 1 "$(push_count session_missing)"
-check "3 ticks, still one service_down to the SAME instance"    1 "$(push_count service_down)"
+check "3 ticks, still one unit_missing to the SAME instance"    1 "$(push_count unit_missing)"
 
 echo "--- 3. the bug: manager restarts, condition STILL unresolved ---"
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
 start_manager
 run_pulse
 check "restarted manager receives session_missing (THE PROPERTY)" 1 "$(push_count session_missing)"
-check "restarted manager receives service_down too"              1 "$(push_count service_down)"
+check "restarted manager receives unit_missing too"              1 "$(push_count unit_missing)"
 
 echo "--- 4. resolution still re-arms: close the condition, then reopen it ---"
 tmux -L "rdrw$$" new-session -d -s "w1" "sleep 600" 2>/dev/null || true

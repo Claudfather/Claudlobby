@@ -35,8 +35,9 @@ _MAX_INTERVAL_SECS = 600
 
 # The samples that say the session was up. HELD (#2070) is a live session whose
 # input box holds text that was never submitted: up, and counted where those
-# ticks counted while keepalive could only call them UNKNOWN.
-_UP_STATES = frozenset({"BUSY", "IDLE", "UNKNOWN", "SKIP", "HELD"})
+# ticks counted while keepalive could only call them UNKNOWN. LIMIT (#996) is a
+# live session a usage limit stopped, counted the same way (it read IDLE before).
+_UP_STATES = frozenset({"BUSY", "IDLE", "UNKNOWN", "SKIP", "HELD", "LIMIT"})
 
 
 def _restart_episodes(entries: list[tuple[datetime, str]]) -> list[tuple[datetime, bool]]:
@@ -91,7 +92,7 @@ def compute_metrics(
 
     Returns:
         uptime_pct      - % of OBSERVED time the bot was up (BUSY + IDLE +
-                          UNKNOWN/SKIP/HELD); None when nothing was observed
+                          UNKNOWN/SKIP/HELD/LIMIT); None when nothing was observed
         observed_pct    - % of the window observed
         observed_seconds - seconds observed, up or down
         restart_count   - restart episodes in window the bot was seen up just
@@ -104,7 +105,7 @@ def compute_metrics(
                           those starting in window (None without a gap)
         busy_seconds    - seconds in BUSY
         idle_seconds    - seconds in IDLE
-        unknown_seconds - seconds in UNKNOWN/SKIP/HELD
+        unknown_seconds - seconds in UNKNOWN/SKIP/HELD/LIMIT
         down_seconds    - seconds observed DOWN (a dead session)
         first_boot      - ISO timestamp of the first up sample after the last
                           restart (the first entry when none is in window)

@@ -1,6 +1,6 @@
 ---
 name: account-relog
-description: "Re-authenticate the Claude Code account a fleet runs on, from a throwaway tmux server. Establishes blast radius first (a shared credential makes this a cross-fleet action), relays the device-login URL to the human, and verifies with `claude auth status` rather than the success message. Use when an account must be switched, or a credential has expired. Re-authenticating the SAME account does not reset a weekly limit."
+description: "Use when an account must be switched, or a credential has expired. Re-authenticates the Claude Code account a fleet runs on, from a throwaway tmux server. Establishes blast radius first (a shared credential makes this a cross-fleet action), relays the device-login URL to the human, and verifies with `claude auth status` rather than the success message. Re-authenticating the SAME account does not reset a weekly limit."
 allowed-tools: Bash(claude auth*), Bash(tmux *), Bash(grep *), Read, mcp__plugin_telegram_telegram__reply
 argument-hint: "[--same-account]"
 ---

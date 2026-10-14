@@ -91,6 +91,11 @@ def test_arming_one_job_keeps_every_other_job_and_field_as_packaged(override):
     assert _load_system_defaults()["host"]["jobs"] == packaged
 
 
+def test_owner_control_socket_is_an_explicit_host_override_field(override):
+    override.write_text("host: { jobs: { plane-owner: { tailscale_socket: /var/run/tailscaled.socket } } }\n")
+    assert load_host_jobs()["plane-owner"]["tailscale_socket"] == "/var/run/tailscaled.socket"
+
+
 @pytest.mark.parametrize("text", [
     'host: { jobs: { claude-update: { enroll: "false" } } }\n',  # the composer enrolls on a string
     "host: { jobs: { claude-update: { enrol: false } } }\n",     # a field nothing reads

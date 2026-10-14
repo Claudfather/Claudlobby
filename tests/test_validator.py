@@ -112,6 +112,60 @@ class TestValidate:
         report = validate(fleet, paths)
         assert not report.has_errors
 
+    def test_codex_agent_cli_is_refused_until_the_adapter_ships(self, fleet_dir, monkeypatch):
+        """#2145 F11: `codex` parses (the vocabulary ships) but is an error, so
+        `config plan` refuses it, until the execution adapter (#2149) lands."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        manifest = fleet_dir / "fleet.yaml"
+        base = manifest.read_text()
+        anchor = "    worker-1:\n      expertise: [software-engineering]\n"
+        assert anchor in base, "the fixture's worker-1 stanza moved"
+        paths = _make_paths(fleet_dir)
+
+        manifest.write_text(base.replace(anchor, anchor + "      agent_cli: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "execution adapter not shipped" in e]
+        assert report.has_errors
+        assert len(refused) == 1 and "'worker-1'" in refused[0], report.errors
+
+        manifest.write_text(base.replace(anchor, anchor + "      agent_cli: claude\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        assert not report.has_errors, report.errors
+
+    def test_a_leftover_runtime_key_never_quietly_runs_another_cli(self, fleet_dir, monkeypatch):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:`; nothing reads
+        it. A value naming a CLI the bot will not run is refused (it would otherwise
+        run claude in silence); `runtime: claude` changes nothing and only warns."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        manifest = fleet_dir / "fleet.yaml"
+        base = manifest.read_text()
+        anchor = "    worker-1:\n      expertise: [software-engineering]\n"
+        defaults = "    protocols: [report-back]\n"
+        assert anchor in base and base.count(defaults) == 1, "the fixture moved"
+        paths = _make_paths(fleet_dir)
+
+        manifest.write_text(base.replace(anchor, anchor + "      runtime: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "runtime" in e]
+        assert refused == ["bot 'worker-1': runtime is 'codex', but nothing reads it — the key is agent_cli:, "
+                           "so this would run 'claude'. Rename it to agent_cli: (#2145)."], report.errors
+
+        manifest.write_text(base.replace(defaults, defaults + "    runtime: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "runtime" in e]
+        assert refused == ["defaults.runtime is 'codex', but nothing reads it — the key is agent_cli:, "
+                           "so this would run 'claude'. Rename it to agent_cli: (#2145)."], report.errors
+
+        manifest.write_text(base.replace(anchor, anchor + "      runtime: claude\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        assert not report.has_errors, report.errors
+        assert ("retired-key", "bot 'worker-1': runtime has no reader — the key is agent_cli: (#2145); "
+                "rename or remove it") in report.categorized()
+
     def test_missing_expertise_is_error(self, fleet_dir, monkeypatch):
         # Overwrite fleet.yaml with a bot referencing nonexistent expertise
         yaml_text = (fleet_dir / "fleet.yaml").read_text()

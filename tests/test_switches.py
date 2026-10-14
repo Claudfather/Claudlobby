@@ -97,6 +97,9 @@ def test_exactly_the_categories_that_ship_off():
     visible test edit and an argued reason, never a silent registry entry."""
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert opt_in == {"update-siblings", "session-digest", "code-audit-sweep",
+                      # Explicit private write-capable serving; owner grants
+                      # and native endpoint configuration remain separate.
+                      "plane-owner",
                       "weekly-worker-restart",
                       # mutates operator source — update-siblings' OWN
                       # category, not a new one: armed, vault-sync commits and
@@ -114,6 +117,12 @@ def test_exactly_the_categories_that_ship_off():
                       # Nothing from the four list: its prune deletes only
                       # versions it staged itself, never one a process runs.
                       "claude-staged-update",
+                      # no deployment gate, and the door it gates TYPES INTO
+                      # a bot's pane (#996): keepalive is a runtime script, in
+                      # force on every bot at activation, so one armed bot's
+                      # bot.conf is the only canary. Nothing from the four
+                      # list: its one prompt resumes work the limit stopped.
+                      "keepalive-limit-resume",
                       # pages a human with no rate guard beyond the debounce
                       # — outbound-to-people-at-scale's risk, not its volume
                       "worker-unassigned",
@@ -444,10 +453,10 @@ def test_status_header_names_a_disabled_reaction(tmp_path):
     from claudlobby.status import switches_off_note
 
     rows = _resolve(tmp_path, "TASK_RECHECK_ENABLED=0\n")
-    note = switches_off_note("artemis-data", rows)
-    assert "task-recheck off on artemis-data" in note
+    note = switches_off_note("example-data", rows)
+    assert "task-recheck off on example-data" in note
     assert "doctor --switches" in note
-    assert switches_off_note("artemis-data", _resolve(tmp_path / "b")) == ""
+    assert switches_off_note("example-data", _resolve(tmp_path / "b")) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +700,10 @@ def test_the_validator_namespaces_come_from_the_registry():
         # dead. CLAUDLOBBY_ cannot collide with a fleet's own tooling, which is
         # the bound this test's docstring exists to hold.
         "CLAUDLOBBY",
+        # keepalive-limit-resume (#996). keepalive's own knobs already live
+        # here (KEEPALIVE_ACTIVE_WINDOW_S, KEEPALIVE_BUSY_PATTERNS), none of
+        # them an *_ENABLED key, so claiming it flags no existing setting.
+        "KEEPALIVE",
     }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED

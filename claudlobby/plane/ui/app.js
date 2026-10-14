@@ -10,7 +10,10 @@
 // only presentation labels. The first version's copied vocabularies already
 // disagreed live with the SQL reducer.
 
-import { esc, ago, renderState, stateBlock } from "/panel-state.js";
+import { esc, ago, renderState, stateBlock } from "./panel-state.js";
+import { jget, createEventSource } from "./api-client.js";
+import * as interactionApi from "./api-client.js";
+import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -32,7 +35,7 @@ const TASK_STATUS = {
   assigned: { label: "assigned", cls: "s-open" },
   active: { label: "active", cls: "s-open" },
   blocked: { label: "blocked", cls: "s-pend" },
-  completed: { label: "completed", cls: "s-done" },
+  completed: { label: "completed", cls: "s-done s-completed" },
   failed: { label: "failed", cls: "s-bad" },
   cancelled: { label: "cancelled", cls: "s-done" },
 };
@@ -48,15 +51,6 @@ const THREAD_TERMINAL_STATUS = {
 const CLASS_TAGS = new Set(["task_request", "report", "question", "answer",
   "alert", "notice", "briefing", "nudge", "acknowledgement", "chat",
   "config_change", "raw_control"]);
-
-async function jget(url) {
-  try {
-    const r = await fetch(url);
-    return await r.json();
-  } catch {
-    return null; // renderState(null) => disconnected
-  }
-}
 
 // Signed deadline label (gauntlet, 3 reviewers: the old ago()+replace made
 // every NOT-yet-due task read "due 0s past").
@@ -76,7 +70,18 @@ function latestTx(msg) {
   return msg.tx && msg.tx.length ? msg.tx[msg.tx.length - 1] : null;
 }
 
-function deliveryLine(msg) {
+function deliveryLine(msg, nudge = false) {
+  if (nudge) {
+    // A submitted prompt is not receiver proof, and says nothing about work.
+    const delivered = msg.delivery === "delivered";
+    const warning = msg.delivery === "altered" ? "The request arrived altered. "
+      : msg.delivery === "truncated" ? "The request arrived short. " : "";
+    const failed = !delivered && !warning && latestTx(msg)?.event === "failed";
+    return `<div class="delivery ${delivered ? "ok" : failed || warning ? "bad" : "pend"}">`
+      + esc(delivered ? "The lead received this update request."
+        : failed ? "The update request failed to reach the lead."
+        : `${warning}Delivery to the lead is unconfirmed.`) + `</div>`;
+  }
   // chunk P fold F4: prefer the SERVER's receiver-proven verdict. delivery_state
   // is the plain-language rendering of the delivery JOIN (the receiver's own
   // `received` proof vs the sender's wire proof) — the honest replacement for
@@ -109,21 +114,100 @@ document.documentElement.style.setProperty("--clamp-lines", String(CLAMP_LINES))
 // the message you had expanded (fold F8).
 const openBodies = new Set();
 
-function bodyBlock(m) {
-  const words = m.body_words || m.body;
+// Interpret only the canonical task/communication pair, never ordinary JSON
+// prose. The channel projects both facts; ambiguous or partial capture stays raw.
+function nudgeReason(m, thread) {
+  const qualifier = typeof m.work_item_id === 'string' && m.work_item_id.includes('::')
+    ? m.work_item_id.split('::')[0] : null;
+  if (qualifier !== null && (!/^[a-z][a-z0-9-]{0,31}$/.test(qualifier) || qualifier.trim() !== qualifier)) return null;
+  const bare = (value, prefix) => {
+    if (typeof value !== 'string') return undefined;
+    const raw = qualifier === null ? value : value.startsWith(qualifier + '::') ? value.slice(qualifier.length + 2) : '';
+    return raw.length === prefix.length + 33 && new RegExp(`^${prefix}_[0-9a-f]{32}$`).test(raw) ? raw : undefined;
+  };
+  const id = (value, prefix) => bare(value, prefix) !== undefined;
+  if (m.emitter !== "claudlobby.tasks.v1" || m.message_class !== "task_request"
+      || m.command_type !== "query" || !id(m.msg_id, "msg")
+      || !id(m.work_item_id, "wi") || m.work_item_id !== thread.work_item_id
+      || !(m.assignment_id === null || id(m.assignment_id, "asg"))
+      || !Number.isSafeInteger(m.ingest_seq) || m.ingest_seq < 2
+      || (m.truncated !== 0 && m.truncated !== false)
+      || typeof m.body !== "string" || m.body.length > 102400) return null;
+  try {
+    const body = JSON.parse(m.body);
+    if (!body || Array.isArray(body) || Object.keys(body).sort().join() !== "assignment_id,by,kind,reason,task_id"
+        || body.kind !== "task_nudge" || body.task_id !== bare(m.work_item_id, "wi")
+        || body.assignment_id !== (m.assignment_id === null ? null : bare(m.assignment_id, "asg")) || typeof body.by !== "string" || !body.by.trim() || body.by.length > 240
+        || typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 16384
+        || [body.by, body.reason].some(text => /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(text))) return null;
+    // Match nudge_body's sorted, ASCII JSON, including exact authored text.
+    // This also refuses duplicate JSON keys and malformed Unicode evidence.
+    const canonical = JSON.stringify({ assignment_id: body.assignment_id, by: body.by,
+      kind: body.kind, reason: body.reason, task_id: body.task_id })
+      .replace(/[\u007f-\uffff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    if (canonical !== m.body) return null;
+    const matches = thread.task_events.filter(event => {
+      if (event.event !== "nudged" || event.work_item_id !== m.work_item_id
+          || event.assignment_id !== m.assignment_id || event.ingest_seq !== m.ingest_seq - 1
+          || typeof event.detail !== "string") return false;
+      const detail = JSON.parse(event.detail);
+      return detail && Object.keys(detail).sort().join() === "by,reason"
+        && detail.by === body.by && detail.reason === body.reason;
+    });
+    return matches.length === 1 ? body.reason : null;
+  } catch { return null; }
+}
+
+function reportLink(label, value) {
+  // Report evidence also allows non-web URLs (for example s3:); keep those text-only.
+  let clickable = false;
+  try {
+    const url = new URL(value);
+    clickable = /^https?:\/\//i.test(value) && !/[\s\\]/u.test(value)
+      && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+  } catch { /* Unusable URLs remain readable evidence. */ }
+  const text = esc(value);
+  return `<li><span>${esc(label)}:</span> ${clickable
+    ? `<a href="${text}" target="_blank" rel="noopener noreferrer">${text}</a>` : text}</li>`;
+}
+
+function reportEvidence(report) {
+  if (report?.state !== "captured") return "";
+  const links = [report.pr_url ? reportLink(report.pr_role === "reviewed"
+    ? "PR reviewed (reported)" : "PR authored (reported)", report.pr_url) : "",
+    ...report.artifacts.map(url => reportLink("Artifact", url)),
+    ...report.issues.map(url => reportLink("Issue", url))].join("");
+  return links ? `<ul class="report-evidence">${links}</ul>` : "";
+}
+
+function bodyBlock(m, prose = null) {
+  const report = m.report;
+  const unavailable = {withheld: "Report content was withheld by capture policy.",
+    truncated: "Report content is incomplete; structured evidence is unavailable.",
+    invalid: "This report could not be read. Inspect its recorded content in machinery.",
+    unsupported: "This report uses an unsupported format version."};
+  if (report && Object.hasOwn(unavailable, report.state)) {
+    return `<div class="body redacted">${esc(unavailable[report.state])}</div>`;
+  }
+  const labels = {progress: "Progress reported", blocked: "Blocker reported",
+    completed: "Completion reported", failed: "Failure reported"};
+  const status = report?.state === "captured"
+    ? `<div class="report-status ${esc(report.status)}">${esc(labels[report.status])}`
+      + `${report.percent !== null ? ` · ${esc(report.percent)}%` : ""}</div>` : "";
+  const words = prose ?? (m.body_words || m.body);
   if (words) {
     const long = words.split("\n").length > CLAMP_LINES || words.length > CLAMP_CHARS;
     const open = long && openBodies.has(m.msg_id);
-    return `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
+    return status + `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
       + `${esc(words)}</div>`
       + (long ? `<button class="more" type="button">`
-                + `${open ? "show less" : "show more"}</button>` : "");
+                + `${open ? "show less" : "show more"}</button>` : "") + reportEvidence(report);
   }
   return `<div class="body redacted">message captured as metadata only`
        + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
 }
 
-function machineryBlock(m) {
+function machineryBlock(m, prose = null) {
   const t = latestTx(m);
   const parts = [
     `msg ${esc(m.msg_id)}`,
@@ -134,39 +218,58 @@ function machineryBlock(m) {
     `class ${esc(m.message_class)}`,
     `sender ${esc(m.sender_alias)}`,
     `emitter ${esc(m.emitter)}`,
+    prose !== null && m.delivery_state ? `receipt ${esc(m.delivery_state)}` : "",
   ].filter(Boolean).join(" · ");
   // The verbatim wire body (framing included) lives here — the prose above
   // renders body_words; this expand is the raw-text view of truth.
-  const raw = m.body && m.body !== (m.body_words || "")
+  const raw = m.body && (m.report && m.report.state !== "legacy"
+    || m.body !== (prose ?? (m.body_words || "")))
     ? `<div class="machinery raw">${esc(m.body)}</div>` : "";
   return `<details><summary>machinery</summary>`
        + `<div class="machinery">${parts}</div>${raw}</details>`;
 }
 
-// The task ribbon renders SERVER facts: thread.delivered / thread.terminal.
-function ladder(thread) {
+// Task-linked conversation delivery cannot establish assignment delivery.
+function ladder(thread, conversation) {
   if (!thread.work_item_id) return "";
+  if (conversation) {
+    // Nudges and comments can be received before any worker is assigned.
+    // Render recorded task acts, independently of conversation delivery.
+    const history = thread.task_events.filter(e => e.event === "accepted" || e.event === "progress"
+      || Object.hasOwn(THREAD_TERMINAL_STATUS, e.event));
+    const labels = [...new Set(history.map(e => THREAD_TERMINAL_STATUS[e.event] || e.event))];
+    return labels.length ? `<div class="t-ladder">Task history: ` + labels.map(label =>
+      `<span class="step done">${esc(label)}</span>`).join("") + `</div>` : "";
+  }
   const events = thread.task_events.map((e) => e.event);
   const steps = [{ label: "dispatched", on: true }];
-  const anyTx = thread.messages.some((m) => latestTx(m));
-  steps.push({ label: "delivered", on: thread.delivered,
-               now: anyTx && !thread.delivered });
+  const dispatches = thread.messages.filter(m => m.message_class === "task_request" && m.command_type === "task");
+  // The thread-wide stamp can describe a received reply or comment. Only the
+  // dispatch's own receiver verdict establishes delivery of the task request.
+  const delivered = dispatches.some(m => m.delivery === "delivered");
+  const anyTx = dispatches.some((m) => latestTx(m));
+  steps.push({ label: delivered ? "delivered" : "delivery unconfirmed", on: delivered,
+               now: anyTx && !delivered });
   if (events.includes("accepted")) steps.push({ label: "accepted", on: true });
   if (events.includes("progress")) steps.push({ label: "progress", on: true });
   if (thread.terminal) {
     steps.push({ label: THREAD_TERMINAL_STATUS[thread.terminal] || thread.terminal,
                  on: true });
-  } else {
-    steps.push({ label: "working…", on: false, now: thread.delivered });
+  } else if (events.includes("accepted") || events.includes("progress")) {
+    steps.push({ label: "working…", on: false, now: true });
   }
   return `<div class="t-ladder">` + steps.map((s) =>
     `<span class="step ${s.on ? "done" : ""} ${s.now ? "now" : ""}">`
     + `${esc(s.label)}</span>`).join("") + `</div>`;
 }
 
-function threadTitle(t) {
+function threadTitle(t, reason) {
   if (t.title) return clip(t.title, 100);
   const first = t.messages[0];
+  if (reason != null) return clip(reason.split("\n")[0], 100);
+  if (first?.report && !["captured", "legacy"].includes(first.report.state)) {
+    return `Report unavailable from ${first.sender_short}`;
+  }
   if (first && (first.body_words || first.body)) {
     return clip((first.body_words || first.body).split("\n")[0], 100);
   }
@@ -174,13 +277,25 @@ function threadTitle(t) {
   return `${cls}${first ? ` from ${first.sender_short}` : ""}`;
 }
 
-function threadArticle(t) {
+function channelReceiptKey(t) {
+  // Receipt and transmission facts can change without another message/task event.
+  return JSON.stringify([t.messages.map(m => [m.msg_id, m.delivery, m.delivery_state, m.tx]), t.task_link || null]);
+}
+
+function threadArticle(t, taskOpener = true) {
   const first = t.messages[0];
   const attribution = first
     ? `${first.sender_short} → ${first.recipient_short || "—"}`
       + ` · ${ago(first.occurred_at)}`
     : "";
-  const kicker = t.work_item_id
+  // One recognition per message; the kicker, title, ribbon and rows share it.
+  const reasons = t.messages.map((m) => nudgeReason(m, t));
+  const nudgeOnly = reasons.length > 0 && reasons.every((r) => r !== null);
+  // The recent window may contain only a reply, with its dispatch or comment
+  // parent outside it. A task link alone cannot establish a dispatch ladder.
+  const conversation = reasons.some((r) => r !== null) || t.messages.some(m => m.message_class === "chat")
+    || !t.messages.some(m => m.message_class === "task_request" && m.command_type === "task");
+  const kicker = nudgeOnly ? "task update request" : t.work_item_id
     ? `work item${t.repo ? ` · ${esc(t.repo)}` : ""}` : "conversation";
   // U2: a cross-fleet thread carries a visible mark; its names arrive
   // fleet-qualified from the server (`eng/erlich → data/samir`) in every
@@ -188,28 +303,38 @@ function threadArticle(t) {
   const xfleet = t.cross_fleet
     ? `<span class="tag xfleet" title="sender and recipient are on`
       + ` different fleets">cross-fleet</span>` : "";
-  const msgs = t.messages.map((m) => `
+  const title = threadTitle(t, reasons[0]);
+  const taskLink = taskOpener ? conversationTaskLink(t) : null;
+  const taskButton = taskLink ? `<button class="pill ghost" type="button" data-task-open="${esc(taskLink.task_id)}"
+    data-task-fleet="${esc(taskLink.fleet)}" data-task-host="${esc(taskLink.host_uid)}"
+    data-task-fleet-uid="${esc(taskLink.fleet_uid)}" data-task-thread="${esc(t.key)}"
+    aria-label="View task: ${esc(title)}">View task</button>` : "";
+  const msgs = t.messages.map((m, i) => {
+    const reason = reasons[i];
+    return `
     <div class="msg" data-msg-id="${esc(m.msg_id)}">
       <div class="who"><b>${esc(m.sender_short)}</b>
         <span class="to">→ ${esc(m.recipient_short || "—")}</span>
         ${CLASS_TAGS.has(m.message_class)
           ? `<span class="tag ${esc(m.message_class)}">`
-            + `${esc(m.message_class.replace("_", " "))}</span>` : ""}
+            + `${reason !== null ? "task update request" : esc(m.message_class.replace("_", " "))}</span>` : ""}
         <time>${esc(ago(m.occurred_at))}</time></div>
-      ${bodyBlock(m)}
-      ${deliveryLine(m)}
-      ${machineryBlock(m)}
-    </div>`).join("");
+      ${bodyBlock(m, reason)}
+      ${deliveryLine(m, reason !== null)}
+      ${machineryBlock(m, reason)}
+    </div>`;
+  }).join("");
   const el = document.createElement("article");
   el.className = "thread";
   el.dataset.key = t.key;
   el.dataset.seq = String(t.latest_seq);
+  el.dataset.receipts = channelReceiptKey(t);
   el.dataset.room = currentFleet || "all";   // the room this card's names were rendered for
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
-    <div class="t-head"><span class="t-title">${esc(threadTitle(t))}</span>
-      ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
-    ${ladder(t)}
+    <div class="t-head"><span class="t-title">${esc(title)}</span>
+      ${taskButton}${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
+    ${ladder(t, conversation)}
     ${msgs}`;
   return el;
 }
@@ -217,9 +342,28 @@ function threadArticle(t) {
 // Keyed render: unchanged threads keep their existing DOM node (open
 // machinery <details>, text selection, layout) — a full innerHTML rebuild
 // collapsed all of it every refresh (gauntlet; §16 preserved-focus).
+function checkinArticle(data) {
+  const rows = data.checkins || [], asks = rows.filter(row => row.action === 'ask').length;
+  const el = document.createElement('article'); el.className = 'thread';
+  el.dataset.key = 'lead-checkins'; el.dataset.receipts = JSON.stringify([rows, data.checkins_state, data.checkins_truncated]);
+  el.innerHTML = `<details${asks ? ' open' : ''}><summary>Recent check-ins${asks ? ` · ${asks} asked for input` : ''}</summary>
+    <p>Recorded decisions, not a list of unanswered requests. Message the lead to follow up.</p>
+    ${data.checkins_state === 'unavailable' ? '<p>Some check-in history is unavailable. Other activity may still be available.</p>' : ''}
+    ${rows.map(row => `<div class="msg"><div class="who"><b>${esc(row.actor_short)}</b><span>${esc(row.fleet)}</span>
+      <time>${esc(ago(row.occurred_at))}</time></div>
+      <strong>${esc(({ask:'Asked for your input', dispatch:'Selected work to dispatch', nothing:'Chose not to start more work'})[row.action] || 'Decision unavailable')}</strong>
+      <pre class="task-record-body">${esc(row.reason || 'The reason was not captured.')}</pre>
+      ${row.rationale && row.rationale !== row.reason ? `<p>${esc(row.rationale)}</p>` : ''}
+      ${row.truncated ? '<p>The recorded detail was cut short.</p>' : ''}
+      ${row.actor_uid ? `<button class="pill ghost" type="button" data-bot-inspect="${esc(row.actor_uid)}" data-checkin-bot="${esc(row.actor_uid)}"
+        data-checkin-alias="${esc(row.actor_alias)}" data-checkin-fleet="${esc(row.fleet)}">View bot and message</button>` : ''}</div>`).join('')}
+    ${data.checkins_truncated ? '<p>Showing recent check-ins only. Older decisions remain in the host record.</p>' : ''}</details>`;
+  return el;
+}
+
 function renderChannel(env) {
   const el = $("channel");
-  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length })) return;
+  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) return;
   const existing = new Map(
     [...el.querySelectorAll("article.thread")].map((n) => [n.dataset.key, n]));
   const frag = document.createDocumentFragment();
@@ -228,11 +372,39 @@ function renderChannel(env) {
   // fleet-qualified names under `all`, so a card kept across a tab switch
   // showed the previous room's names (live on the Mini, U follow-up)
   const room = currentFleet || "all";
+  if (env.data.checkins?.length || env.data.checkins_state === 'unavailable') {
+    let article = checkinArticle(env.data);
+    const prev = existing.get('lead-checkins');
+    if (prev?.dataset.room === room) {
+      if (prev.dataset.receipts === article.dataset.receipts) article = prev;
+      else article.querySelector('details').open = prev.querySelector('details').open;
+    }
+    article.dataset.room = room;
+    for (const button of article.querySelectorAll('[data-checkin-bot]')) {
+      const current = () => {
+        const identity = rosterIdentities.get(button.dataset.checkinBot);
+        return identity && !identity.provisional && identity.alias === button.dataset.checkinAlias
+          && identity.fleet === button.dataset.checkinFleet ? identity : null;
+      };
+      button.disabled = !current();
+      button.onclick = () => { if (!button.disabled && button.isConnected && !sessionPaused && current()) inspectBot(current()); };
+    }
+    frag.appendChild(article);
+  }
   for (const t of env.data.threads) {
     const prev = existing.get(t.key);
-    frag.appendChild(prev && prev.dataset.seq === String(t.latest_seq)
-                     && prev.dataset.room === room
-      ? prev : threadArticle(t));
+    const reuse = prev && prev.dataset.seq === String(t.latest_seq)
+      && prev.dataset.room === room && prev.dataset.receipts === channelReceiptKey(t);
+    const article = reuse ? prev : threadArticle(t);
+    if (prev && !reuse && prev.dataset.room === room) {
+      const expanded = new Set([...prev.querySelectorAll(".msg[data-msg-id]")]
+        .filter(message => message.querySelector("details")?.open).map(message => message.dataset.msgId));
+      for (const message of article.querySelectorAll(".msg[data-msg-id]")) {
+        const disclosure = message.querySelector("details");
+        if (disclosure) disclosure.open = expanded.has(message.dataset.msgId);
+      }
+    }
+    frag.appendChild(article);
   }
   el.replaceChildren(frag);
 }
@@ -251,6 +423,12 @@ function renderChannel(env) {
 // (chunk M-A, #1481) from the instant the human acted, which the server
 // already put in `attention_since` for them.
 const WHY = {
+  permission_pending: (r) => [
+    `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
+    "open this task to review the exact action, target and limits"],
+  permission_unavailable: () => [
+    "permission history is incomplete",
+    "open this task to inspect permission status; more requests may need a decision"],
   escalated: (r) => [
     r.attention_question
       ? `needs you: ${r.attention_question}`
@@ -374,7 +552,7 @@ function renderTasks(env) {
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
-      <b>${esc(clip(r.title || "", 160) || r.task_id)}</b>
+      <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || r.task_id)}</button>
       <div class="sub">${esc(who)} · task ${esc(r.task_id)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
@@ -391,7 +569,7 @@ function renderTasks(env) {
     : "";
   attEl.innerHTML = attn.length || issues || limited
     ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: "nothing needs you" });
+    : stateBlock("idle", null, null, { label: "no tasks need attention" });
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: "no other tasks" });
 }
@@ -400,7 +578,7 @@ function railRow(a) {
   const live = a.last_seen && (Date.now() - Date.parse(a.last_seen)) < 36e5;
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
-    <span>${esc(a.short)}</span>
+    ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
     <small>${esc(a.kind)} · ${esc(ago(a.last_seen))}</small></div>`;
@@ -424,12 +602,18 @@ function railRow(a) {
 // `all` read ever does.
 function renderFleet(env) {
   const el = $("fleet");
+  const focused = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button === document.activeElement);
+  const focusedIdentity = focused && rosterIdentities.get(focused.dataset.botInspect);
   if (renderState(el, env,
-                  { idleWhenEmpty: (d) => !d.identities.length })) return;
+                  { idleWhenEmpty: (d) => !d.identities.length })) {
+    adoptRoster(new Map()); return;
+  }
   const rows = env.data.identities;
-  const fleets = new Set(rows.map((a) => a.fleet).filter(Boolean));
-  if (fleets.size < 2) { el.innerHTML = rows.map(railRow).join(""); return; }
-  el.innerHTML = groupBy(rows, (a) => a.fleet || "")
+  adoptRoster(new Map(rows.filter(a => a.kind === "actor" && a.fleet)
+    .map(a => [a.uid, Object.freeze({ uid: a.uid, alias: a.alias, fleet: a.fleet,
+      fleet_uid: fleets.find(f => f.alias === a.fleet)?.uid, provisional: !!a.provisional })])));
+  const groups = new Set(rows.map((a) => a.fleet).filter(Boolean));
+  el.innerHTML = groups.size < 2 ? rows.map(railRow).join("") : groupBy(rows, (a) => a.fleet || "")
     .sort((x, y) => (y[0].last_seen || "").localeCompare(
       x[0].last_seen || ""))
     .map((members) => {
@@ -442,6 +626,35 @@ function renderFleet(env) {
         + `<small>${esc(count)}</small></div>`
         + members.map(railRow).join("");
     }).join("");
+  el.querySelectorAll("[data-bot-inspect]").forEach(button => {
+    const identity = rosterIdentities.get(button.dataset.botInspect), version = rosterGeneration, epoch = sessionEpoch;
+    button.addEventListener("click", () => {
+      if (!button.isConnected || sessionPaused || epoch !== sessionEpoch || version !== rosterGeneration) return;
+      inspectBot(identity);
+    });
+  });
+  if (focusedIdentity) {
+    const current = rosterIdentities.get(focusedIdentity.uid);
+    if (current && Object.keys(focusedIdentity).every(key => focusedIdentity[key] === current[key])) {
+      const replacement = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button.dataset.botInspect === current.uid);
+      if (replacement) {
+        if (equipmentFocus?.origin === focused) equipmentFocus.origin = replacement;
+        replacement.focus();
+      }
+    }
+  }
+}
+// The roster generation moves only when an inspectable identity changed: an
+// unchanged refresh keeps the open equipment panel instead of refetching it,
+// while any changed join still fences every button minted against the old one.
+function adoptRoster(next) {
+  const same = next.size === rosterIdentities.size && [...next].every(([uid, a]) => {
+    const b = rosterIdentities.get(uid);
+    return !!b && Object.keys(a).every(key => a[key] === b[key]);
+  });
+  if (!same) { rosterIdentities = next; ++rosterGeneration; }
+  if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
+  else refreshEquipmentAction();
 }
 
 // The header in the operator's language (chunk L, #1479): the host's totals
@@ -458,8 +671,10 @@ function renderHeader(env) {
     return;
   }
   const t = env.data.totals;
+  const coverage = env.data.coverage;
+  const coverageCopy = coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
-    el.innerHTML = `<span class="dim">no fleet recorded</span>`;
+    el.innerHTML = `<span class="dim">${coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
   el.innerHTML = `<b>${t.bots}</b> bots`
@@ -479,7 +694,7 @@ function renderHeader(env) {
     + ((t.recorder_gaps && t.recorder_gaps.length)
        ? ` · <b class="warn" title="the recorder itself is failing — see the`
          + ` Trust tab for detail">⚠ recorder: `
-         + `${t.recorder_gaps.map((g) => esc(g.label)).join(", ")}</b>` : "");
+         + `${t.recorder_gaps.map((g) => esc(g.label)).join(", ")}</b>` : "") + coverageCopy;
 }
 
 // The machinery rail's host line — from the OVERVIEW's host block, the same
@@ -490,6 +705,12 @@ function renderHeader(env) {
 function renderHostFacts(env) {
   const el = $("host-facts");
   if (!el) return;
+  if (env?.data?.sources) {
+    el.textContent = env.data.sources.map(s => `${s.label}: ${s.state === 'ok' && s.host
+      ? `ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
+      : s.state}`).join(' | ');
+    return;
+  }
   const h = env && env.state === "ok" && env.data ? env.data.host : null;
   el.textContent = h
     ? `host ingest ${h.last_ingest_at ? ago(h.last_ingest_at) : "never"}`
@@ -499,6 +720,20 @@ function renderHostFacts(env) {
 
 function renderSummary(env) {
   const beat = $("beat"), label = $("beat-label");
+  if (env?.data?.sources) {
+    const c = env.data.coverage;
+    const health = s => {
+      if (s.state !== 'ok') return s.state;
+      if (s.summary?.daemon_serving === false) return 'recorder DOWN';
+      if (s.summary?.daemon_serving !== true) return 'recorder unknown';
+      const at = Date.parse(s.provenance?.last_ingest_at);
+      return Number.isFinite(at) && Date.now() - at < 12e4 ? 'recording' : 'recorder up, quiet';
+    };
+    beat.className = `dot ${!c.partial && env.data.sources.every(s => health(s) === 'recording') ? 'ok' : 'warn'}`;
+    label.textContent = `${c.reachable}/${c.total} sources readable · `
+      + env.data.sources.map(s => `${s.label}: ${health(s)}`).join(' · ');
+    return;
+  }
   if (!env || env.state !== "ok") {
     beat.className = "dot";
     label.textContent = env ? `source ${env.state}` : "view daemon unreachable";
@@ -539,7 +774,7 @@ function ovNum(n, word, bad = true) {
 function renderOverview(env) {
   const el = $("overview");
   if (!el) return;
-  if (!env || env.state !== "ok") {
+  if (!env || (env.state !== "ok" && !env.data?.sources)) {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
                               env && env.provenance, env && env.remediation);
     return;
@@ -550,8 +785,8 @@ function renderOverview(env) {
     <div class="ov-card ${dimension ? "pick" : ""} ${
         dimension && f.alias === currentFleet ? "on" : ""}"
          data-fleet="${esc(f.alias)}" ${dimension ? 'role="button" tabindex="0"' : ""}
-         title="${esc(f.alias)}${dimension ? " — open this room" : ""}">
-      <div class="ov-head"><b>${esc(f.alias)}</b>
+         title="${esc(f.display_label || f.alias)}${dimension ? " — open this room" : ""}">
+      <div class="ov-head"><b>${esc(f.display_label || f.alias)}</b>
         <span>${f.bots} bot${f.bots === 1 ? "" : "s"}${
           f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
@@ -570,6 +805,16 @@ function renderOverview(env) {
                 esc(f.acked_by)} ${esc(ago(f.acked_at))}</small>`}</span> ·
         <span>active ${esc(ago(f.last_activity_at))}</span></div>
     </div>`).join("");
+  if (d.sources) {
+    el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
+      <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.state)}</span></div>
+      <div class="ov-line">${s.state === 'ok' && s.host
+        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving ? 'up' : 'DOWN'}`
+        : esc(s.remediation || 'This source is not currently readable.')}</div>
+      <div class="ov-line">Separate source snapshot; recent windows are per source.</div>
+    </div>`).join('');
+    return;
+  }
   const h = d.host;
   // the lag STATE is the API's (ingest_lag_state) — the page only renders it
   const lag = h.ingest_lag_state === "none"
@@ -610,7 +855,7 @@ function renderOverview(env) {
   el.innerHTML = cards + host;
 }
 
-$("channel").addEventListener("click", (e) => {
+function toggleMessageBody(e) {
   const b = e.target.closest("button.more");
   if (!b) return;
   // by STRUCTURE, not by sibling order: anything rendered between a body and
@@ -625,7 +870,9 @@ $("channel").addEventListener("click", (e) => {
     if (open) openBodies.add(msg.dataset.msgId);
     else openBodies.delete(msg.dataset.msgId);
   }
-});
+}
+$("channel").addEventListener("click", toggleMessageBody);
+$("task-detail").addEventListener("click", toggleMessageBody);
 
 // ONE delegated listener for the strip's cards (re-rendered on every refresh;
 // per-card listeners were re-attached each time — simplify lens)
@@ -657,8 +904,11 @@ function renderDebugRail() {
 let refreshTimer = null;
 let safetyTimer = null;
 let generation = 0;
+let sessionPaused = false;
+let sessionEpoch = 0;
 
 async function refreshBoards() {
+  if (sessionPaused) return;
   const gen = ++generation;   // stale responses never paint over newer ones
   if (!fleetsSeen) {
     // The FIRST paint learns the fleet dimension before it fetches a board:
@@ -666,9 +916,11 @@ async function refreshBoards() {
     // be known first — the old flow fetched the firehose, discovered the
     // fleets from the roster, and refetched (one wasted round trip and one
     // flash of the wrong room on every load).
-    adoptFleets(await jget("/api/fleets"));
-    if (gen !== generation) return;
+    const env = await jget("/api/fleets");
+    if (sessionPaused || gen !== generation) return;
+    adoptFleets(env);
   }
+  syncWorkRoom();
   const q = fleetQuery();
   const [ch, tk, fl, sm, ov] = await Promise.all([
     jget(channelUrl()), jget("/api/tasks" + q),
@@ -677,31 +929,36 @@ async function refreshBoards() {
   ]);
   if (gen !== generation) return;
   adoptFleets(ov);   // the overview carries the fleet list + default: one door
+  if (syncWorkRoom()) { refreshBoards(); return; }
   renderHeader(ov); renderHostFacts(ov);
-  renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
+  renderFleet(fl); renderChannel(ch); renderTasks(tk); renderSummary(sm);
+  workLoop.update(tk, ch);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick
   restartSafety();
 }
 
 function scheduleRefresh() { // coalesce bursts into one refetch
-  if (refreshTimer) return;
+  if (sessionPaused || refreshTimer) return;
   refreshTimer = setTimeout(() => { refreshTimer = null; refreshBoards(); },
                             400);
 }
 
 function restartSafety() {  // relative times re-render; missed pushes heal
   clearTimeout(safetyTimer);
-  safetyTimer = setTimeout(refreshBoards, 60000);
+  if (!sessionPaused) safetyTimer = setTimeout(refreshBoards, 60000);
 }
 
 function openStream() {
-  const es = new EventSource("/api/stream");  // server starts at HEAD;
+  const es = createEventSource("/api/stream");  // server starts at HEAD;
   es.onmessage = (ev) => {                    // reconnects ride Last-Event-ID
     try {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
-      if (payload.rows.length) scheduleRefresh();
+      if (payload.rows.length || payload.coverage_changed) {
+        if (payload.coverage_changed) ++generation;
+        scheduleRefresh();
+      }
     } catch { /* malformed push — the next board refresh corrects */ }
   };
   es.addEventListener("source", (ev) => {
@@ -711,10 +968,17 @@ function openStream() {
     // they hold came from a source that has stopped answering (§16).
     try {
       const env = JSON.parse(ev.data);
+      // A refresh already in flight read the source BEFORE this loss: retire
+      // it, or its older text repaints what is cleared below. The retired
+      // read would have re-armed the safety timer, so the coalesced refetch
+      // takes its place — the same door a pushed row uses, never a new one.
+      ++generation;
+      scheduleRefresh();
       renderSummary(env);
       renderHeader(null);
       renderHostFacts(null);
       renderState($("channel"), env);
+      workLoop.updateChannel(env);
     } catch { /* next refresh corrects */ }
   });
   es.onerror = () => {
@@ -773,6 +1037,10 @@ function ansiToHtml(text) {
 }
 
 let currentView = "channel";
+let equipmentAlias = null;
+let equipmentGeneration = 0, equipmentSelection = null, equipmentFocus = null, inventoryAliases = new Set();
+let rosterGeneration = 0, rosterIdentities = new Map();
+let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
 let focusTimer = null;
@@ -796,9 +1064,9 @@ function savePick(f) {
 // else the server's default (the room that moved most recently), else the
 // first fleet. One fleet = no dimension at all (null, no tabs).
 function adoptFleets(env) {
-  if (!env || env.state !== "ok" || !env.data) return;
+  if (!env || !env.data || (env.state !== "ok" && !Array.isArray(env.data.fleet_choices))) return;
   fleetsSeen = true;
-  fleets = env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  fleets = env.data.fleet_choices || env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
   const names = fleets.map((f) => f.alias);
   if (names.length < 2) { currentFleet = null; return; }
   if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
@@ -823,9 +1091,10 @@ function renderFleetTabs() {
   // selected; the merged host view is the explicit last resort.
   el.innerHTML = [...fleets.map((f) => f.alias), "all"].map((f) => {
     const meta = fleets.find((x) => x.alias === f);
-    const n = meta ? `<small>${esc(meta.bots)}</small>` : "<small>host</small>";
+    const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok" ? meta.source_state : meta.bots)}</small>`
+      : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
     return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
-      + ` data-fleet="${esc(f)}" type="button">${esc(f)} ${n}</button>`;
+      + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`;
   }).join("");
   el.querySelectorAll("button").forEach((b) =>
     b.addEventListener("click", () => pickFleet(b.dataset.fleet)));
@@ -834,7 +1103,9 @@ function renderFleetTabs() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f) closeEquipment();
   currentFleet = f;
+  syncWorkRoom();
   savePick(currentFleet);
   renderFleetTabs();             // instant highlight (the strip re-renders with the boards)
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
@@ -949,11 +1220,13 @@ function renderGrid(env) {
 // the frames still render; the badges just go absent (the recorded half is
 // the degradable one).
 async function pollGrid() {
-  if (currentView !== "grid") return;
+  if (sessionPaused || currentView !== "grid") return;
+  const epoch = sessionEpoch, fleet = currentFleet;
   const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
     jget("/api/grid" + q), jget("/api/presence" + q).catch(() => null),
   ]);
+  if (sessionPaused || epoch !== sessionEpoch || currentView !== "grid" || currentFleet !== fleet) return;
   const byAlias = {};
   if (presEnv && presEnv.data) {
     for (const b of presEnv.data.bots) byAlias[b.alias] = b;
@@ -1000,6 +1273,7 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  if (view !== "fleet") closeEquipment();
   currentView = view;
   $("channel").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
@@ -1240,27 +1514,84 @@ $("search").addEventListener("input", () => {
     return;
   }
   searchTimer = setTimeout(async () => {
+    if (sessionPaused) return;
+    const epoch = sessionEpoch;
     const fleetAtFire = currentFleet;   // room captured at fetch time —
     const f = fleetAtFire && fleetAtFire !== "all"
       ? `&fleet=${encodeURIComponent(fleetAtFire)}` : "";
     const env = await jget(`/api/search?q=${encodeURIComponent(q)}${f}`);
     // stale if the QUERY or the ROOM moved on (two rapid tab clicks raced
     // the old room's hits under the new tab — round 2, probed)
-    if ($("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
+    if (sessionPaused || epoch !== sessionEpoch || $("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
     $("channel").hidden = true;
     $("search-results").hidden = false;
     renderSearch(env);
   }, 250);
 });
 
+function resumeOwnerReads() {
+  sessionPaused = false;
+  refreshBoards();
+  if (currentView === "fleet") void pollFleet();
+  if ($("search").value.trim()) $("search").dispatchEvent(new Event("input"));
+}
+
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
 // has initialized. Placed mid-file it read those bindings in their temporal
 // dead zone and threw on first load, freezing the page at its loading markup.
 $("focus-overlay").hidden = true;   // a restored-open modal never survives a load
-["channel", "tasks", "attention", "fleet"].forEach((id) =>
-  renderState($(id), { state: "loading" }));
-refreshBoards();
+function showLoading() {
+  ["channel", "tasks", "attention", "fleet"].forEach((id) =>
+    renderState($(id), { state: "loading" }));
+}
+showLoading();
+let workLoop = null;
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange: refreshEquipmentAction });
+let workRoom;
+function syncWorkRoom() {
+  const room = activeRoom();
+  if (workRoom === room) return false;
+  workRoom = room;
+  workLoop.setRoom(room);
+  showLoading();
+  return true;
+}
+function activeRoom() {
+  return currentFleet || (fleets.length === 1 ? fleets[0].alias : "all");
+}
+const ownerSession = typeof interactionApi.mountSessionControls === "function"
+  ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
+      onPause() {
+        sessionPaused = true;
+        ++sessionEpoch;
+        ++generation; ++trustGen;
+        // Invalidate the action context as well as reads. pause saves the
+        // current draft in memory; resume must fetch fresh authority for this room.
+        workLoop.pause();
+        workRoom = undefined;
+        clearTimeout(refreshTimer); refreshTimer = null;
+        clearTimeout(safetyTimer);
+        clearTimeout(searchTimer);
+        $("beat").className = "dot";
+        $("beat-label").textContent = "session access paused";
+      },
+      onResume: resumeOwnerReads,
+      onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
+      onActionSourceChange(source) { workLoop.refreshActions(source); },
+    }) : null;
+
+// Injected multi-source transports own their streams; disposal never signs out a host.
+if (typeof interactionApi.dispose === 'function') {
+  window.addEventListener('pagehide', () => interactionApi.dispose(), { once: true });
+  window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
+}
+
+if (!ownerSession) refreshBoards();
 openStream();
+if (ownerSession) {
+  window.addEventListener("pagehide", () => ownerSession.dispose(), { once: true });
+  window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+}
 
 
 // --- fleet inventory + per-bot equipment (#1405) ---------------------------
@@ -1273,7 +1604,11 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
   "plugins", "voice"];
 
 async function pollFleet() {
-  if (currentView !== "fleet") return;
+  if (sessionPaused || currentView !== "fleet") return;
+  const epoch = sessionEpoch, fleet = currentFleet;
+  const request = ++inventoryGeneration;
+  ++equipmentGeneration; inventoryAliases.clear();
+  rememberEquipmentFocus($("equip-detail"), equipmentAlias, equipmentSelection, epoch);
   renderState($("fleet-room"), { state: "loading" });
   // honor the fleet picker (the same fleet= the channel/search use); with
   // "all", every fleet the host records — cross-fleet twins come back
@@ -1288,12 +1623,15 @@ async function pollFleet() {
     jget("/api/org" + f).catch(() => null),
     jget("/api/utilization" + f).catch(() => null),
   ]);
+  if (sessionPaused || epoch !== sessionEpoch || request !== inventoryGeneration || currentView !== "fleet" || currentFleet !== fleet) return;
   if (inv && inv.data && util && util.data) {
     const by = {};
     for (const u of util.data) by[u.alias] = u;
     for (const b of inv.data.bots) { const u = by[b.alias]; if (u) b.util = u; }
   }
+  inventoryAliases = new Set(inv?.state === "ok" ? (inv.data?.bots || []).map(bot => bot.alias) : []);
   renderInventory(inv, org);
+  if (equipmentAlias) void openEquipment(equipmentAlias);
 }
 
 function orgNode(n) {
@@ -1370,7 +1708,13 @@ function renderInventory(env, orgEnv) {
     <h3>projects</h3>${projects}
     <h3>library</h3>${library}`;
   el.querySelectorAll(".bot-card").forEach((c) => {
-    const open = () => openEquipment(c.dataset.alias);
+    const alias = c.dataset.alias, version = inventoryGeneration, epoch = sessionEpoch, fleet = currentFleet;
+    const open = () => {
+      if (!c.isConnected || sessionPaused || currentView !== "fleet" || epoch !== sessionEpoch || version !== inventoryGeneration || fleet !== currentFleet) return;
+      equipmentSelection = [...rosterIdentities.values()].find(identity => identity.alias === alias) || null;
+      equipmentFocus = { alias, selection: equipmentSelection, epoch: sessionEpoch, origin: document.activeElement };
+      void openEquipment(alias);
+    };
     c.addEventListener("click", open);
     c.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -1378,18 +1722,75 @@ function renderInventory(env, orgEnv) {
   });
 }
 
+function closeEquipment() {
+  ++equipmentGeneration; equipmentAlias = null; equipmentSelection = null; equipmentFocus = null;
+  const box = $("equip-detail"); if (box) box.hidden = true;
+}
+function inspectBot(identity) {
+  if (!identity || sessionPaused) return;
+  const origin = document.activeElement;
+  const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
+  if (roomChanged) pickFleet(identity.fleet);
+  equipmentSelection = identity; equipmentAlias = identity.alias;
+  equipmentFocus = { alias: identity.alias, selection: identity, epoch: sessionEpoch, origin };
+  // pickFleet already started the Team inventory read in this case.
+  if (roomChanged && teamOpen) return;
+  setView("fleet"); // Existing inventory/equipment renderer; never a write path.
+}
+function equipmentRecipient() {
+  if (sessionPaused || !equipmentSelection || !inventoryAliases.has(equipmentAlias)) return null;
+  const identity = rosterIdentities.get(equipmentSelection.uid);
+  if (!identity || identity.alias !== equipmentAlias
+      || fleets.find(fleet => fleet.alias === identity.fleet)?.uid !== identity.fleet_uid
+      || ["alias", "fleet", "fleet_uid", "provisional"].some(key => identity[key] !== equipmentSelection[key])) return null;
+  return { ...identity, current: true };
+}
+function refreshEquipmentAction() {
+  const box = $("equip-detail"), button = box?.querySelector(".ed-message");
+  if (!button) return;
+  const identity = equipmentRecipient();
+  button.disabled = !workLoop?.canSelectMessageRecipient(identity);
+  const explanation = box.querySelector(".ed-message-note");
+  if (explanation) explanation.textContent = !button.disabled ? ""
+    : sessionPaused ? "Messaging is paused."
+    : !inventoryAliases.has(equipmentAlias) ? "This bot is not in the current team. Messaging is unavailable."
+    : !identity ? "This bot’s details changed or are unavailable. Select it again after the team refreshes."
+    : identity.provisional ? "This bot is unconfirmed. Inspect it again after its identity is confirmed."
+    : "Messaging is currently unavailable.";
+}
+function rememberEquipmentFocus(box, alias, selection, epoch) {
+  const focused = document.activeElement;
+  if (box?.contains(focused)) equipmentFocus = {
+    alias, selection, epoch, origin: focused,
+    control: focused.matches(".ed-message") ? ".ed-message" : ".ed-close",
+  };
+}
 async function openEquipment(alias) {
+  if (sessionPaused) return;
+  const epoch = sessionEpoch, fleet = currentFleet, inventory = inventoryGeneration, roster = rosterGeneration;
+  const request = ++equipmentGeneration;
+  const selection = equipmentSelection;
   const box = $("equip-detail");
   if (!box) return;
+  equipmentAlias = alias;
+  rememberEquipmentFocus(box, alias, selection, epoch);
   box.hidden = false;
   renderState(box, { state: "loading" });
   const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
+  if (sessionPaused || epoch !== sessionEpoch || request !== equipmentGeneration || fleet !== currentFleet
+      || currentView !== "fleet" || inventory !== inventoryGeneration || roster !== rosterGeneration
+      || equipmentSelection !== selection || equipmentAlias !== alias || box !== $("equip-detail")) return;
+  const closeControl = '<button class="pill ghost ed-close" type="button">Close bot inspection</button>';
   if (!env || env.state !== "ok") {
-    box.innerHTML = stateBlock(env ? env.state : "disconnected",
+    box.innerHTML = closeControl + stateBlock(env ? env.state : "disconnected",
                                env && env.provenance, env && env.remediation);
-    return;
+    finishInspection(); return;
   }
   const b = env.data;
+  if (!b || b.alias !== alias) {
+    box.innerHTML = closeControl + stateBlock("unknown", null, "Equipment did not match the selected bot. Inspect it again.");
+    finishInspection(); return;
+  }
   const chips = (arr) => (arr || []).map((x) => `<span class="chip">${esc(String(x))}</span>`).join("");
   const eq = EQUIP_ORDER.filter((k) => b.equipment[k] && (Array.isArray(b.equipment[k])
       ? b.equipment[k].length : true))
@@ -1404,7 +1805,9 @@ async function openEquipment(alias) {
   box.innerHTML = `
     <div class="ed-head"><b>${esc(b.short)}</b>
       <small>${esc(b.model || "")}${b.account ? ` · ${esc(b.account)}` : ""}</small>
-      <button class="pill ghost ed-close" type="button">close</button></div>
+      <button class="pill ghost ed-close" type="button" aria-label="Close inspection of ${esc(b.short)}">close</button></div>
+    <button class="pill ghost ed-message" type="button" disabled>Message this bot</button>
+    <p class="note ed-message-note" role="status"></p>
     ${b.org && b.org.mission ? `<div class="ed-mission">${esc(b.org.mission)}</div>` : ""}
     <div class="ed-cols">
       <div><h4>equipment</h4>${eq}</div>
@@ -1425,6 +1828,35 @@ async function openEquipment(alias) {
         </details>
       </div>
     </div>`;
-  box.querySelector(".ed-close").addEventListener("click", () => { box.hidden = true; });
-  box.scrollIntoView({ block: "nearest" });
+  finishInspection();
+  function finishInspection() {
+    const close = box.querySelector(".ed-close");
+    close.addEventListener("click", () => {
+      // Closing the current visible panel needs no authority. Detached controls
+      // cannot close a replacement, and only a current snapshot returns focus.
+      if (!close.isConnected || box !== $("equip-detail") || box.querySelector(".ed-close") !== close) return;
+      const returnFocus = !sessionPaused && epoch === sessionEpoch && request === equipmentGeneration
+        && inventory === inventoryGeneration && roster === rosterGeneration && fleet === currentFleet && currentView === "fleet";
+      closeEquipment();
+      if (returnFocus) [...$("fleet-room").querySelectorAll(".bot-card")].find(card => card.dataset.alias === alias)?.focus();
+    });
+    const message = box.querySelector(".ed-message");
+    if (message) message.addEventListener("click", () => {
+      if (!message.isConnected || box !== $("equip-detail") || request !== equipmentGeneration
+          || inventory !== inventoryGeneration || roster !== rosterGeneration || epoch !== sessionEpoch) return;
+      if (workLoop.selectMessageRecipient(equipmentRecipient())) {
+        closeEquipment(); $("work-loop").scrollIntoView({ block: "nearest" });
+      } else refreshEquipmentAction();
+    });
+    refreshEquipmentAction();
+    if (equipmentFocus?.alias === alias && equipmentFocus.selection === selection && equipmentFocus.epoch === epoch) {
+      const ticket = equipmentFocus, active = document.activeElement;
+      equipmentFocus = null;
+      if (!active || active === document.body || active.isConnected === false || active === ticket.origin) {
+        const control = ticket.control && box.querySelector(ticket.control);
+        (control && !control.disabled ? control : close).focus();
+      }
+    }
+    box.scrollIntoView({ block: "nearest" });
+  }
 }

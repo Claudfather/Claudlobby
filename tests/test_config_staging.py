@@ -177,6 +177,19 @@ def test_stage_validates_and_renders_retained_bytes_when_authoring_changes_durin
     assert b"export MANAGER_TMUX=primary-manager\n" in worker_conf
 
 
+@pytest.mark.parametrize("line", ["agent_cli: codex", "runtime: codex"])
+def test_stage_refuses_a_bot_declared_to_run_a_cli_with_no_adapter(staging_case, line):
+    """#2145: `config plan` stages only what `validate` passes. `agent_cli: codex`
+    waits for the execution adapter (#2149); the leftover draft key `runtime:`
+    with a non-claude value is refused rather than staged as a claude bot."""
+    manifest = staging_case.paths.fleet_yaml
+    anchor = "      expertise: [stage-role]\n      skills: [stage-skill]\n"
+    assert manifest.read_text().count(anchor) == 1, "the fixture's worker stanza moved"
+    manifest.write_text(manifest.read_text().replace(anchor, anchor + f"      {line}\n"))
+    with pytest.raises(PlanError, match="invalid fleet configuration: bot 'primary-worker'"):
+        config_staging.stage_configuration([staging_case.paths], staging_case.release)
+
+
 def test_stage_freezes_prefixed_host_ingest_identity(staging_case, tmp_path, monkeypatch):
     override = _write(tmp_path / "host-system.yaml",
                       "host: { unit_prefix: claudlobby-canary, jobs: { plane-daemon: { enroll: true } } }\n")

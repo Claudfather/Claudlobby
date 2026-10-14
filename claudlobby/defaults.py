@@ -5,11 +5,10 @@ merge pathway for that already exists and is universal — all 12 entity types
 merge fleet defaults in ``_coerce_bot``. This module is where each type's
 disposition gets decided.
 
-TWO of the twelve are settled: ``guardrails`` (RESTRICT, declared at Phase 1)
-and ``protocols`` (INSTRUCT, admitted at Phase 3). Both were ALREADY COMPOSING
-before they were registered, and neither changed a composed byte on the default
-path when it was — which is the only shape of entry that may land without an
-A/B on real bots. See ``grandfathered`` on ``Disposition``: an entry that
+FOUR of the twelve are settled: ``guardrails`` (RESTRICT), and ``protocols``,
+``skills`` and ``resources`` (INSTRUCT). An entry that was ALREADY COMPOSING
+before it was registered, and changes no composed byte on the default path when
+it is, is the only shape of entry that may land without an A/B on real bots. See ``grandfathered`` on ``Disposition``: an entry that
 predates its own registration is not evidence that the tier test is passable.
 
 THIS REGISTRY IS THE SOURCE, NOT A DESCRIPTION (F4, binding).
@@ -168,12 +167,43 @@ REGISTRY: dict[str, Disposition] = {
     # --- RESTRICT ------------------------------------------------------------
     "guardrails": Disposition(
         tier=Tier.RESTRICT,
-        entries=("claudlobby-dev-in-projects",),
+        entries=(
+            "claudlobby-dev-in-projects",
+            "no-push-main",
+            "no-destructive-git",
+            "pii-protection",
+            "no-fabrication",
+            "confirm-before-send",
+        ),
         settled=True,
         reason=(
-            "The shared install is CLAUDLOBBY_ROOT for every bot on the host, so "
-            "one bot branching there swaps supervision and dispatch scripts for "
-            "all of them — estate-wide harm, universal coverage required."
+            "EACH ENTRY'S HARM LANDS BEYOND THE BOT THAT CAUSES IT, so one bot "
+            "left uncovered is a way around the rule for every bot.\n\n"
+            "`claudlobby-dev-in-projects`: the shared install is CLAUDLOBBY_ROOT "
+            "for every bot on the host, so one bot branching there swaps "
+            "supervision and dispatch scripts for all of them.\n\n"
+            "`no-push-main`: a default branch is shared by every bot and fleet "
+            "that builds on it, and review is the gate that protects all of "
+            "them. A bot that may push to it directly ships unreviewed code to "
+            "every consumer of that branch.\n\n"
+            "`no-destructive-git`: a force-push rewrites history other bots have "
+            "built on, and a hard reset or clean in a shared checkout destroys "
+            "work that is not the caller's. The state a bot does not recognise "
+            "is most often someone else's work in progress.\n\n"
+            "`pii-protection`: library content, repositories and the fleet's "
+            "channels are written by every bot and read by all of them, and the "
+            "credentials in reach are the host's, not one bot's. A leak through "
+            "any one bot exposes all of them and cannot be taken back.\n\n"
+            "`no-fabrication`: reports, reviews and recorded events are the "
+            "shared record that managers, other fleets and the operator act on. "
+            "An invented result from one bot becomes a wrong decision elsewhere.\n\n"
+            "`confirm-before-send`: a message to people outside the fleet speaks "
+            "for the operator, and it cannot be recalled. Any bot holding a send "
+            "tool without the rule is an unreviewed voice for every fleet.\n\n"
+            "ORDER IS COMPOSED ORDER: these merge ahead of the fleet's own list, "
+            "so a fleet that lists them first, in this order, composes the same "
+            "bytes with or without its copies. Add a new entry at the end of "
+            "this tuple."
         ),
     ),
     "permissions": Disposition(tier=Tier.RESTRICT, reason=_UNARGUED),
@@ -221,12 +251,24 @@ REGISTRY: dict[str, Disposition] = {
     ),
     "protocols": Disposition(
         tier=Tier.INSTRUCT,
-        entries=("shared-documentation", "shared-documentation-vault"),
+        entries=(
+            "context-management",
+            "telegram-routing",
+            "telegram-formatting",
+            "shared-documentation",
+            "shared-documentation-vault",
+        ),
         settled=True,
-        grandfathered=("shared-documentation",),
+        grandfathered=(
+            "context-management",
+            "telegram-routing",
+            "telegram-formatting",
+            "shared-documentation",
+        ),
         roles={ROLE_LEAF_MANAGER: ("checkin",)},
         reason=(
-            "ONE SLOT, TWO MUTUALLY EXCLUSIVE ENTRIES — how a bot reaches fleet "
+            "THE SHARED-DOCUMENTATION SLOT: ONE SLOT, TWO MUTUALLY EXCLUSIVE "
+            "ENTRIES — how a bot reaches fleet "
             "knowledge, which differs by whether a Claudron vault is wired. "
             "AVAILABILITY_GATES below picks exactly one; neither is composed in "
             "root mode, where there is no shared-docs tree to describe.\n\n"
@@ -321,16 +363,58 @@ REGISTRY: dict[str, Disposition] = {
             "and touches a live session — the `manager-checkin` trigger firing "
             "`/checkin` on a schedule — is a separate, OPT-IN switch (F8): this "
             "entry equips the skill and the instruction for free; the beat that "
-            "fires it is still armed by the operator, fleet by fleet."
+            "fires it is still armed by the operator, fleet by fleet.\n\n"
+            "THE THREE UNIVERSAL PROTOCOLS (`context-management`, "
+            "`telegram-routing`, `telegram-formatting`) are GRANDFATHERED. Each "
+            "was already composing on every bot, declared in each fleet's own "
+            "`defaults:` and in `fleet.yaml.seed`, before it was registered here. "
+            "A bot that "
+            "declares one keeps it at its declared position, and the registry "
+            "adds nothing twice, so a fleet with its copies in place composes "
+            "the same bytes.\n\n"
+            "THEIR HAND COPIES STAY IN THE FLEETS THAT HAVE THEM. Protocol "
+            "defaults compose AFTER the declared list (the composer appends them, "
+            "as it does the shared-documentation slot), so a fleet that removes "
+            "its copies moves these sections to the end of its protocol list. No "
+            "single registry position would reproduce every fleet's order: two "
+            "bots whose remaining lists both start with `report-back` can need "
+            "these three before it in one fleet and after it in another. Which "
+            "order wins is #1168's decision, not this registration's.\n\n"
+            "`telegram-routing` and `telegram-formatting` carry an availability "
+            "gate on the Telegram channel (AVAILABILITY_GATES)."
         ),
     ),
     "principles": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
     "post_actions": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
+    "resources": Disposition(
+        tier=Tier.INSTRUCT,
+        entries=("timezone",),
+        settled=True,
+        grandfathered=("timezone",),
+        reason=(
+            "INSTRUCT, NOT WIRE. The template renders every composed resource "
+            "into CLAUDE.md as standing text (`render_section('Resources', …)`), "
+            "and `timezone` tells a bot how to read and present every time it "
+            "reports. A resource default therefore changes what a bot does on "
+            "every turn, without saying so: INSTRUCT's definition. WIRE's "
+            "premise, 'inert until referenced', does not hold for this type. "
+            "`lessons` and `integrations` render into CLAUDE.md the same way and "
+            "are still WIRE here; each moves with its own argument.\n\n"
+            "`timezone` is GRANDFATHERED: it was already composing on every bot, "
+            "declared in each fleet's `defaults:` or its stanzas, before it was "
+            "registered here. `fleet.yaml.seed` does not declare it, so a newly seeded fleet "
+            "composes it as a new `Resources` section: that is this entry's "
+            "naked-bot delta.\n\n"
+            "ORDER IS COMPOSED ORDER, as for guardrails: a fleet that lists these "
+            "first composes the same bytes with or without its copies.\n\n"
+            "OPT-OUT: `system_defaults.resources: false` for the fleet. It switches "
+            "off the DEFAULT only: a bot that lists `timezone` itself keeps it."
+        ),
+    ),
     # --- WIRE ----------------------------------------------------------------
     "mcp": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
     "tools": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
     "integrations": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
-    "resources": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
     "lessons": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
 }
 
@@ -367,11 +451,17 @@ class Facts:
     #: (#2010 follow-up). Default empty so a Facts built without it gates every
     #: skill default OFF (fail closed); the composer always supplies the set.
     available_skills: frozenset[str] = frozenset()
+    #: The bot loads a Telegram channel: the composer's `_has_telegram_channel`,
+    #: the same predicate that grants the Telegram plugin tools, so a bot is told
+    #: how to use Telegram exactly when it can. Default False so a Facts built
+    #: without it gates the Telegram protocol defaults OFF (fail closed); the
+    #: protocol resolver always supplies it.
+    telegram_channel: bool = False
 
 
 # Some defaults are conditional on a fact this module cannot see. `guardrails`
-# needs none: its merge happens in `load_fleet`, which knows nothing but the
-# parsed YAML. `shared-documentation` does, and the gate cannot move down into
+# and `resources` need none: their merge happens in `load_fleet`, which knows
+# nothing but the parsed YAML. `shared-documentation` does, and the gate cannot move down into
 # that merge — `load_fleet` takes a bare path and never learns whether the fleet
 # is overlay- or root-mode, and threading `Paths` into it would widen a config
 # parser into a filesystem consumer.
@@ -407,6 +497,11 @@ AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
     # skill-missing; the gate keeps a default from naming a skill the library
     # lacks. Keyed by the entry name, like the shared-documentation gates.
     "status": lambda f: "status" in f.available_skills,
+    # How to route and format replies on Telegram: injected as a default only
+    # for a bot that has the channel. Like every gate here it filters the
+    # injected default only; a copy the fleet declares by hand still composes.
+    "telegram-routing": lambda f: f.telegram_channel,
+    "telegram-formatting": lambda f: f.telegram_channel,
 }
 
 
@@ -515,3 +610,4 @@ def resolve(entity_type: str, roles: tuple[str, ...] = ()) -> list[str]:
 # copy, so the registry above is the single source and the completeness test
 # asserts over the value the composer actually consumes (F4, binding).
 DEFAULT_GUARDRAILS: list[str] = resolve("guardrails")
+DEFAULT_RESOURCES: list[str] = resolve("resources")

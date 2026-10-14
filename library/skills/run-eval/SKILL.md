@@ -1,6 +1,6 @@
 ---
 name: run-eval
-description: "Run an A/B evaluation to decide whether a change's claimed effect is real — pre-register target/battery/baseline/reps/verdict, run control vs treatment paired, emit a version-pinned PASS/FAIL/INCONCLUSIVE. Dry-run by default; real runs are opt-in and cost money."
+description: "Use when a change claims a measurable effect (cheaper, faster, fewer tokens) and needs a verdict before it lands. Runs an A/B evaluation to decide whether that effect is real — pre-register target/battery/baseline/reps/verdict, run control vs treatment paired, emit a version-pinned PASS/FAIL/INCONCLUSIVE. Dry-run by default; real runs are opt-in and cost money."
 argument-hint: "[--dry-run|--real] [--target <what>] [--reps N] [--reps-max N]"
 ---
 

@@ -149,7 +149,8 @@ The bot is started by `claudlobby/_runtime_scripts/start-bot.sh`:
 ```bash
 # Reads runtime/bots/<bot>/bot.conf
 # Sources $CLAUDLOBBY_ROOT/.env
-# Launches `claude --channels plugin:telegram --remote-control` inside a tmux
+# Launches `claude --channels plugin:telegram` (with `--remote-control` for the
+# fleet manager, or a bot that sets remote_control: true) inside a tmux
 # session on the bot's OWN tmux server (private `-L <socket>` == BOT_SERVICE),
 # so one server's death drops only that bot, never the whole fleet
 ```

@@ -48,3 +48,29 @@ def test_mobile_releases_the_attention_height_cap():
 def test_the_one_breakpoint_still_collapses_to_a_single_column():
     # the reorder is meaningless if the grid has not collapsed to one column
     assert "grid-template-columns: 1fr" in _mobile_block()
+
+
+def test_workspace_phone_keeps_attention_before_the_channel():
+    # The workspace sheet loads last, so checking style.css alone misses a
+    # later reversal of the triage order.
+    workspace = CSS.with_name("workspace.css").read_text()
+    mobile = re.search(r"@media\s*\(max-width:\s*650px\)\s*\{(.*?)\n\}\n\n@media",
+                       workspace, re.S)
+    assert mobile, "the workspace phone breakpoint is gone"
+    b = mobile.group(1)
+    assert _order(b, ".plane-workspace #rail-right") < \
+        _order(b, ".plane-workspace #rail-channel") < \
+        _order(b, ".plane-workspace #rail-fleet")
+
+
+def test_workspace_desktop_resets_legacy_tablet_rail_order():
+    # At 1001-1100px workspace still uses three columns, while style.css's
+    # 1100px media query changes the order. Its id rules must be overridden
+    # before workspace's own 1000px breakpoint or the roster moves right.
+    workspace = CSS.with_name("workspace.css").read_text()
+    desktop = workspace.split("@media", 1)[0]
+    m = re.search(r"\.plane-workspace #rail-fleet,\s*"
+                  r"\.plane-workspace #rail-channel,\s*"
+                  r"\.plane-workspace #rail-right\s*\{([^}]*)\}", desktop)
+    assert m and re.search(r"order:\s*0\b", m.group(1)), \
+        "workspace must own all three rail orders above its tablet breakpoint"

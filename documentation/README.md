@@ -12,7 +12,7 @@ Project documentation for claudlobby. Each subdirectory has a specific purpose:
 - `guides/` — Conceptual walkthroughs and diagnostic guides (decision trees, feature deep-dives) — distinct from the step-by-step procedures in `runbooks/`
 - `decisions/` — Architecture Decision Records (ADRs)
 - `plans/` — Hand-authored implementation plans, one per PR/feature, dated filenames, `type: plan` frontmatter with a `status` (draft/approved/completed)
-- `planning/` — Dated session output from the `/artemis-skills:audit` lens skills (`tech_debt/`, `security/`, `access-paths/`, `phases/`, `product-vision/`, `investigations/` subdirs) — machine-generated remediation plans, not hand-authored
+- `planning/` — Dated session output from the `/claudna:audit` lens skills (`tech_debt/`, `security/`, `access-paths/`, `phases/`, `product-vision/`, `investigations/` subdirs) — machine-generated remediation plans, not hand-authored
 - `baselines/` — Dated JSON snapshots consumed by gates such as `naked-bot-observe.py --baseline` (recorded output, not hand-authored)
 - `screenshots/` — Issue/PR reference images (committed on asset branches for private repos)
 - `integrations/` — External service integration guides

@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +34,7 @@ from tests.test_releases import installed
 from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
 from tests.test_activation_units import _pause_all, _prepare as _prepare_pause, enrollment  # noqa: F401
+from tests.test_activation_enrollment import unit_properties
 
 
 @pytest.fixture
@@ -75,6 +78,12 @@ class NativeHost:
             rc = self.external_result
         elif function == "svc_inventory_state":
             output = self.states.get(args[1], "not-found not-found inactive")
+        elif function == "svc_inventory_properties":
+            # systemctl show for a unit the manager still has loaded: after a host
+            # reset, every enabled candidate is loaded again at boot.
+            output = unit_properties(self.directory, args[0], self.by_name[args[0]][0],
+                                     active=self.states.get(args[0], "inactive").split()[-1],
+                                     unit_file_state="enabled")
         elif function == "svc_activation_snapshot":
             output = self.states[args[1]]
             if self.bad_enablement:
@@ -236,6 +245,51 @@ def test_bootstrap_resume_from_quiesced_queue_reuses_same_id(cold, monkeypatch):
     monkeypatch.setattr(activation, "build_migration_manifest", original)
     resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert resumed.status == "active" and resumed.activation_id == "cold"
+
+
+def _job_holding_the_lock(root, seconds):
+    """A timer job's hold on the activation lock (shared), let go after *seconds*."""
+    fd = os.open(root / "state/activation.lock", os.O_RDONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    job = threading.Timer(seconds, os.close, (fd,))
+    job.start()
+    return job
+
+
+def test_bootstrap_and_upgrade_wait_for_a_running_job_instead_of_refusing(cold, monkeypatch):
+    root, source, source_plan, host = cold
+    job = _job_holding_the_lock(root, 1.0)
+    record = activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    job.join()
+    assert record.status == "active"
+
+    class PastTheLock(Exception):
+        pass
+
+    def enrollment(*_args, **_kwargs):
+        raise PastTheLock  # the upgrade's first step under the lock
+
+    monkeypatch.setattr(activation, "collect_enrollment", enrollment)
+    plan = ConfigPlanBuilder(root, source.release_id, source.seal_sha256, ("example",), effects={}).seal()
+    job = _job_holding_the_lock(root, 1.0)
+    with pytest.raises(PastTheLock):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    job.join()
+
+
+def test_resume_waits_for_a_running_job_instead_of_refusing(cold, monkeypatch):
+    root, _, plan, host = cold
+    original = activation.build_migration_manifest
+    def interrupted(*_args, **_kwargs):
+        raise state.ActivationError("fixture interrupted after empty native pause")
+    monkeypatch.setattr(activation, "build_migration_manifest", interrupted)
+    with pytest.raises(state.ActivationError, match="fixture interrupted"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation, "build_migration_manifest", original)
+    job = _job_holding_the_lock(root, 1.0)
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    job.join()
+    assert resumed.status == "active"
 
 
 def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(cold):
@@ -483,6 +537,9 @@ def cold(installed, monkeypatch, tmp_path):
     builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
                                 effects={"fleet_manifests": {"example": str(manifest)}, "units": []})
     projects = root / "projects.yaml"
+    from claudlobby.config import host_override_path
+    for source in (host_override_path(), *(root / name for name in ("library", "voices", "templates"))):
+        builder.input(source)
     builder.effects["fleet_sources"] = {"example": {
         "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
         "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
@@ -536,6 +593,118 @@ def cold(installed, monkeypatch, tmp_path):
     # output fixture checks ordering and the real operation-context SQL reader.
     monkeypatch.setattr(activation, "_registry_scan", host.registry_scan)
     return root, release, plan, host
+
+
+def test_backup_restore_preserves_work_and_activates_without_reviving_owner_access(cold, monkeypatch, tmp_path, capsys):
+    from claudlobby.host_backup import create_backup, restore_backup, restored_bootstrap
+    from claudlobby.plane.owner_source import bind_source, inspect_source, SourceNeedsBinding
+    from claudlobby.plane.ids import read_host_uid
+    from tests.test_task_audit import _task
+
+    root, release, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    host_uid = read_host_uid(root / "state")
+    with sqlite3.connect(db_file(root)) as conn:
+        fleet = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet'").fetchone()[0]
+        _task(conn, "wi_history", fleet=fleet)
+        conn.execute("UPDATE work_items SET host_uid=?", (host_uid,))
+        identities = conn.execute("SELECT * FROM identity_registry ORDER BY uid").fetchall()
+    bind_source(root)
+    (root / ".env").write_text("EXAMPLE_SECRET=excluded\n")
+    (db_file(root).parent / "owner-access.db").write_bytes(b"excluded owner credentials")
+    (root / "runtime/bots/worker/memory").mkdir()
+    (root / "runtime/bots/worker/memory/private.md").write_text("separate owner backup needed")
+    frozen = (root / "fleet.yaml").read_bytes()
+    (root / "fleet.yaml").write_text("unactivated edit must not replace the selected configuration")
+    bundle = tmp_path / "backup"
+    manifest = create_backup(root, bundle)
+    from claudlobby.__main__ import main
+    assert main(["host", "backup", "inspect", str(bundle), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["command"] == "host.backup.inspect"
+    assert not any(".env" in name or "owner-access" in name or "runtime" in name for name in manifest["files"])
+    replacement = tmp_path / "r"  # Keep the existing activation socket under AF_UNIX's path limit.
+    replacement.mkdir()
+    restored = replacement / "data"
+    restore_backup(bundle, restored, replacing_retired_host=True)
+    assert (restored / "fleet.yaml").read_bytes() == frozen
+    assert not (restored / ".env").exists() and not (restored / "runtime").exists()
+    assert not (db_file(restored).parent / "owner-access.db").exists()
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(restored)
+    assert restored_bootstrap(restored, release)
+    # Reinstall the same fixture release at the new root and use the existing
+    # activation owner. Only native manager observations are authored here.
+    candidate = installed.__wrapped__(replacement)
+    new_root, new_release, new_plan, new_host = globals()["cold"].__wrapped__(candidate, monkeypatch, replacement)
+    record = activation.bootstrap_activation(new_root, "cold", new_plan.plan_id, new_host.directory, adapter=new_host)
+    assert record.status == "active" and read_migration(new_root, "cold")["manifest"]["database"]["initialize_empty"] is False
+    assert read_host_uid(new_root / "state") == host_uid
+    with sqlite3.connect(db_file(new_root)) as conn:
+        assert conn.execute("SELECT title FROM work_items WHERE work_item_id='wi_history'").fetchone() == ("Historical work",)
+        assert conn.execute("SELECT * FROM identity_registry ORDER BY uid").fetchall() == identities
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(new_root)
+
+
+def test_backup_refuses_config_drift_tamper_and_existing_restore_target(cold, tmp_path):
+    from claudlobby.host_backup import create_backup, inspect_backup, restore_backup
+    root, _, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    (root / "library").mkdir()
+    with pytest.raises(state.ActivationRefusal, match="configuration changed"):
+        create_backup(root, tmp_path / "changed")
+    assert not (tmp_path / "changed").exists()
+    (root / "library").rmdir()
+    bundle = tmp_path / "backup"
+    create_backup(root, bundle)
+    with pytest.raises(state.ActivationRefusal, match="retired host"):
+        restore_backup(bundle, tmp_path / "restored", replacing_retired_host=False)
+    with pytest.raises(state.ActivationRefusal, match="new absolute"):
+        restore_backup(bundle, root, replacing_retired_host=True)
+    (bundle / "configuration/fleet.yaml").write_text("tampered")
+    with pytest.raises(state.ActivationRefusal, match="digest"):
+        inspect_backup(bundle)
+
+
+def test_restored_activation_refuses_wrong_release_and_post_restore_writes(cold, tmp_path, capsys):
+    from claudlobby.host_backup import create_backup, restore_backup, restored_bootstrap
+    root, release, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    bundle, restored = tmp_path / "backup", tmp_path / "restored"
+    create_backup(root, bundle)
+    restore_backup(bundle, restored, replacing_retired_host=True)
+    with pytest.raises(state.ActivationRefusal, match="original release"):
+        restored_bootstrap(restored, SimpleNamespace(release_id="r-" + "0" * 64))
+    with sqlite3.connect(db_file(restored)) as conn:
+        conn.execute("CREATE TABLE unexpected_write(value)")
+    with pytest.raises(state.ActivationRefusal, match="changed before activation"):
+        restored_bootstrap(restored, release)
+    from claudlobby.__main__ import main
+    (restored / "state/restored-backup.json").write_text("corrupt")
+    assert main(["--root", str(restored), "host", "status", "--json"]) == 6
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "unavailable"
+    assert result["data"]["restored_backup"] == {"state": "unavailable"}
+
+
+@pytest.mark.parametrize("linked", ["fleet.yaml", "projects.yaml"])
+def test_backup_refuses_recorded_linked_configuration(tmp_path, linked):
+    from claudlobby.host_backup import _source_files
+    root = tmp_path / "host"
+    root.mkdir()
+    outside = tmp_path / "external.yaml"
+    outside.write_text("fleet: {name: example}\n")
+    for name in ("fleet.yaml", "projects.yaml"):
+        if name == linked:
+            (root / name).symlink_to(outside)
+        else:
+            (root / name).write_text("{}\n")
+    builder = ConfigPlanBuilder(root, "r-" + "0" * 64, "1" * 64, ("example",), effects={})
+    builder.effects["fleet_sources"] = {"example": {
+        key: {"path": str(root / name), "sha256": builder.input_content(root / name)}
+        for key, name in (("fleet", "fleet.yaml"), ("projects", "projects.yaml"))}}
+    with pytest.raises(state.ActivationRefusal, match="linked fleet or project"):
+        _source_files(builder.seal())
 
 
 @pytest.mark.parametrize("ready_kind", ["bridge-ready", "session-ready"])
@@ -970,6 +1139,231 @@ def test_start_repair_interruption_keeps_history(cold, monkeypatch):
     assert record["start_repairs"] == archived and record["pending"] == "bots_started"
     fresh = [e for e in record["start_effects"].values() if e["target"] == _WORKER_UNIT]
     assert len(fresh) == 1 and fresh[0]["result"] is None
+
+
+_PLANE_UNIT = "claudlobby-plane-daemon.service"
+_MANAGER_UNIT = "com.example.manager.service"
+_KEEPALIVE_TIMER = "claudlobby-keepalive.timer"
+
+
+def _after_reset(host, monkeypatch, targets):
+    """What a reset leaves once the operator stops and resets each candidate:
+    loaded but inactive, and the plane socket down."""
+    for target in targets:
+        host.states[target] = "enabled loaded inactive"
+    monkeypatch.setattr(activation, "_plane_state", lambda _root: "down")
+
+
+def _host_reset(cold, monkeypatch):
+    """A watchdog reset mid bots_started: every started candidate process is gone.
+
+    The plane daemon and the manager started with results, the worker's start
+    has none, and afterwards nothing runs and the plane socket is down.
+    """
+    stranded = _failed_worker_start(cold).body
+    assert {e["target"]: e["result"] is not None for e in stranded["start_effects"].values()} == {
+        _PLANE_UNIT: True, _MANAGER_UNIT: True, _WORKER_UNIT: False}
+    _after_reset(cold[3], monkeypatch, (_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT))
+    return stranded
+
+
+def _rewrite(root, change):
+    """Edit the record body in place, as a corrupt or partial record would read."""
+    with state.locked_activation(root) as store:
+        record = state.read_activation(root, "cold")
+        change(store, record.body)
+        store._save(record)
+    return state.read_activation(root, "cold").body
+
+
+def test_host_reset_repair_archives_every_dead_start_then_resume_starts_them_once(cold, monkeypatch):
+    root, _, plan, host = cold
+    stranded = _host_reset(cold, monkeypatch)
+    starts = list(host.starts)
+    repaired = activation.repair_starts_after_host_reset(root, "cold", reason="watchdog reset", adapter=host)
+    assert host.starts == starts  # The repair itself starts nothing.
+    assert repaired.archived_targets == tuple(sorted([_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT]))
+    body = repaired.record.body
+    assert body["pending"] == "ingest_started" and body["start_effects"] == {}
+    assert body["completed"] == list(state.STEPS[:state.STEPS.index("ingest_started")])
+    assert not {"ingest_started", "bots_started"} & set(body["evidence"])
+    archived = body["start_repairs"]
+    assert sorted(r["attempt"]["target"] for r in archived) == list(repaired.archived_targets)
+    assert all(r["kind"] == "host_reset" and r["reason"] == "watchdog reset" for r in archived)
+    assert all(r["host_boot"] == activation._host_boot() for r in archived)
+    assert all(r["attempt"] == stranded["start_effects"][r["source"]] for r in archived)
+    assert all(r["dead_evidence"]["details"]["native"] == "inactive\tno-cgroup-witness" for r in archived)
+    bots = [r for r in archived if r["attempt"]["phase"] == "bots"]
+    assert all(r["dead_evidence"]["details"]["socket_state"] == "absent" for r in bots)
+    # Everything else the resume needs survives: selection, publication, identity.
+    kept = ("intent", "previous_selection", "start_phases", "identity_bindings")
+    assert all(body[key] == stranded[key] for key in kept)
+    with pytest.raises(state.ActivationRefusal, match="no candidate start is recorded"):
+        activation.repair_starts_after_host_reset(root, "cold", reason="again", adapter=host)
+    host.fail_bot = None
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active" and tuple(resumed.body["completed"]) == state.STEPS
+    assert host.starts == starts + [_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT, _KEEPALIVE_TIMER]
+    assert resumed.body["start_repairs"] == archived
+    assert all(e["result"] is not None for e in resumed.body["start_effects"].values())
+
+
+def _stray_fence(_store, body):
+    effects = body["start_effects"]
+    plane = next(source for source, effect in effects.items() if effect["phase"] == "ingest")
+    effects[plane]["fence"] = {"ceiling": 210, "fence": "RR_FENCE_stray"}
+
+
+def _oneshot_producer(store, body):
+    service = next(entry for entry in activation.enrollment.candidate_entries(store, "cold", "producers")
+                   if entry["target"] == "claudlobby-keepalive.service")
+    body["start_effects"][service["source"]] = {"phase": "producers", "target": service["target"],
+                                                "sha256": service["after"]["sha256"], "fence": None,
+                                                "result": None}
+
+
+def _unrecorded_worker(_store, body):
+    # The reset landed before the worker's start intent was durable.
+    effects = body["start_effects"]
+    del effects[next(s for s, effect in effects.items() if effect["target"] == _WORKER_UNIT)]
+
+
+@pytest.mark.parametrize("case, message", [
+    ("serving", "plane socket is serving, not down"),
+    ("hung", "plane socket is unanswered, not down"),
+    ("live-bot", f"not quiet.*not quiescent: {_MANAGER_UNIT}"),
+    ("live-plane", f"not quiet.*not quiescent: {_PLANE_UNIT}"),
+    ("two-live", f"not quiescent: {_MANAGER_UNIT}; candidate target is not quiescent: {_PLANE_UNIT}"),
+    ("unrecorded", f"not quiet.*not quiescent: {_WORKER_UNIT}"),
+    ("hosted", "hosted or cannot be proved external"),
+    ("reason", "short reason on one printable line"),
+    ("locked", "holds the lock"),
+    ("stray-fence", f"recorded start of {_PLANE_UNIT} differs from frozen publication"),
+    ("oneshot", "one-shot producer start of claudlobby-keepalive.service has an unknown effect"),
+])
+def test_host_reset_repair_refuses_unless_every_start_is_proved_dead(cold, monkeypatch, case, message):
+    root, _, _, host = cold
+    stranded = _host_reset(cold, monkeypatch)
+    if case in ("serving", "hung"):
+        plane = "serving" if case == "serving" else "unanswered"
+        monkeypatch.setattr(activation, "_plane_state", lambda _root: plane)
+    elif case in ("live-bot", "live-plane", "two-live"):
+        live = {"live-bot": (_MANAGER_UNIT,), "live-plane": (_PLANE_UNIT,)}.get(case, (_PLANE_UNIT, _MANAGER_UNIT))
+        for unit in live:
+            host.states[unit] = "enabled loaded active"
+    elif case == "unrecorded":
+        stranded = _rewrite(root, _unrecorded_worker)
+        host.states[_WORKER_UNIT] = "enabled loaded failed"  # Looping on admission refusals.
+    elif case == "hosted":
+        host.external_result = 1
+    elif case in ("stray-fence", "oneshot"):
+        stranded = _rewrite(root, _stray_fence if case == "stray-fence" else _oneshot_producer)
+    starts = list(host.starts)
+    reason = "two\nlines" if case == "reason" else "watchdog reset"
+    lock = (state.locked_activation(root) if case == "locked" else nullcontext())
+    with lock, pytest.raises(state.ActivationRefusal, match=message):
+        activation.repair_starts_after_host_reset(root, "cold", reason=reason, adapter=host)
+    assert state.read_activation(root, "cold").body == stranded  # Nothing changed.
+    assert host.starts == starts
+
+
+def test_host_reset_repair_reopens_a_failed_verification(cold, monkeypatch):
+    """A reset after bots_started leaves verified next with nothing pending."""
+    root, _, plan, host = cold
+
+    def lost(*_args, **_kwargs):
+        raise state.ActivationError("candidate bot lost readiness before producer admission")
+
+    verify = activation._verify_candidate_startup
+    monkeypatch.setattr(activation, "_verify_candidate_startup", lost)
+    with pytest.raises(state.ActivationError, match="lost readiness"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation, "_verify_candidate_startup", verify)
+    stopped = state.read_activation(root, "cold")
+    assert activation.resumable_running_step(stopped) == "verified"
+    assert stopped.body["pending"] in (None, "verified")
+    _after_reset(host, monkeypatch, (_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT))
+    repaired = activation.repair_starts_after_host_reset(root, "cold", reason="reset", adapter=host)
+    assert repaired.record.body["pending"] == "ingest_started"
+    assert "bots_started" not in repaired.record.body["completed"]
+    assert len(repaired.archived_targets) == 3
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active"
+
+
+def test_host_reset_repair_recovers_a_reset_during_producers_resumed(cold, monkeypatch):
+    """The producer timer started, then the host reset before producers_resumed completed."""
+    root, _, plan, host = cold
+    verify = activation.enrollment.verify_candidate_enablement
+
+    def reset_during_producers(store, activation_id, phase, *, adapter):
+        if phase == "producers":
+            raise state.ActivationError("watchdog reset")
+        return verify(store, activation_id, phase, adapter=adapter)
+
+    monkeypatch.setattr(activation.enrollment, "verify_candidate_enablement", reset_during_producers)
+    with pytest.raises(state.ActivationError, match="watchdog reset"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation.enrollment, "verify_candidate_enablement", verify)
+    stopped = state.read_activation(root, "cold").body
+    assert stopped["pending"] == "producers_resumed" and "producers" in stopped["start_phases"]
+    timer = next(e for e in stopped["start_effects"].values() if e["target"] == _KEEPALIVE_TIMER)
+    assert timer["result"] is not None
+    everything = (_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT, _KEEPALIVE_TIMER)
+    _after_reset(host, monkeypatch, everything[:-1])
+    host.states[_KEEPALIVE_TIMER] = "enabled loaded active"  # Enabled timers start again at boot.
+    with pytest.raises(state.ActivationRefusal, match=f"not quiescent: {_KEEPALIVE_TIMER}"):
+        activation.repair_starts_after_host_reset(root, "cold", reason="reset", adapter=host)
+    assert state.read_activation(root, "cold").body == stopped
+    _after_reset(host, monkeypatch, everything)  # The operator stops the timer too.
+    starts = list(host.starts)
+    repaired = activation.repair_starts_after_host_reset(root, "cold", reason="reset", adapter=host)
+    assert repaired.archived_targets == tuple(sorted(everything))
+    assert repaired.record.body["pending"] == "ingest_started"
+    assert repaired.record.body["start_phases"] == stopped["start_phases"]
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active" and tuple(resumed.body["completed"]) == state.STEPS
+    assert host.starts == starts + [_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT, _KEEPALIVE_TIMER]
+
+
+@pytest.mark.parametrize("change", ["partial", "mismatched", "abort-marker", "no-install-directory"])
+def test_host_reset_archive_takes_exactly_the_recorded_starts_of_a_resumable_record(cold, monkeypatch, change):
+    root = cold[0]
+    stranded = _host_reset(cold, monkeypatch)
+    effects = stranded["start_effects"]
+    attempts, evidence = effects, {source: {} for source in effects}
+    if change == "partial":
+        attempts = dict(list(effects.items())[:-1])
+        evidence = {source: {} for source in attempts}
+    elif change == "mismatched":
+        evidence = dict(list(evidence.items())[:-1])
+    elif change == "abort-marker":
+        stranded = _rewrite(root, lambda _store, body: body.update(adoption_abort={"reason": "fixture"}))
+    else:
+        stranded = _rewrite(root, lambda _store, body: body["intent"].pop("install_directory"))
+    with state.locked_activation(root) as store, pytest.raises(state.ActivationRefusal, match="not the admitted set"):
+        store.archive_starts_after_host_reset("cold", attempts=attempts, evidence=evidence,
+                                              reason="reset", repair_artifact="a", host_boot=None)
+    assert state.read_activation(root, "cold").body == stranded
+
+
+def test_host_boot_reads_the_kernel_or_sysctl_and_records_none_when_unreadable(monkeypatch):
+    linux = activation._host_boot()
+    assert linux is None or set(linux) == {"boot_id", "booted_at"}
+    answer = ["8C1F2B6A-0D0E-4C55-9C1E-2D7B9E1A0F33\n"]
+
+    def sysctl(argv, **_kwargs):
+        assert argv[-1] == "kern.bootsessionuuid"
+        if answer[0] is None:
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 0, answer[0], "")
+
+    monkeypatch.setattr(activation.sys, "platform", "darwin")
+    monkeypatch.setattr(activation.subprocess, "run", sysctl)
+    assert activation._host_boot() == {"boot_id": "8C1F2B6A-0D0E-4C55-9C1E-2D7B9E1A0F33", "booted_at": None}
+    for unreadable in ("\n", None):
+        answer[0] = unreadable
+        assert activation._host_boot() is None
 
 
 def test_selected_bindings_refuse_loss_foreign_scope_and_ambiguous_actors(cold):

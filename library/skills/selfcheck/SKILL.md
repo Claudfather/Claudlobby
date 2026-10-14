@@ -1,6 +1,6 @@
 ---
 name: selfcheck
-description: "Manager self-diagnostic (formerly /status). Reports session health, MCP connectivity, and own-fleet state from claudlobby fleet status. Generic — no host-specific or personal paths."
+description: "Use when a manager is asked how it is doing, or wants to surface degradation in its own session, MCP servers or Telegram link. Manager self-diagnostic (formerly /status). Reports session health, MCP connectivity, and own-fleet state from claudlobby fleet status. Generic — no host-specific or personal paths."
 argument-hint: "[full|mcp|telegram]"
 ---
 

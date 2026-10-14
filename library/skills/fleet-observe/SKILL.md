@@ -1,6 +1,6 @@
 ---
 name: fleet-observe
-description: "The monitor's reasoning pass. Reads the assembled digest summary and emits cited findings — each tied to a session_id and to a decision it should change. Reports; never acts outside its own fleet."
+description: "Use when the monitor's cadence tick fires, or you are asked what the fleet's recent sessions show. The monitor's reasoning pass. Reads the assembled digest summary and emits cited findings — each tied to a session_id and to a decision it should change. Reports; never acts outside its own fleet."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"

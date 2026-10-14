@@ -12,8 +12,8 @@ _SLUG = re.compile(r"[a-z][a-z0-9_-]*\Z")
 _MARKDOWN = (
     ("expertise", "Expertise"), ("integrations", "Integrations"),
     ("protocols", "Protocols"), ("guardrails", "Guardrails"),
-    ("resources", "Resources"), ("lessons", "Lessons"),
-    ("post_actions", "Post-actions"),
+    ("principles", "Principles"), ("resources", "Resources"),
+    ("lessons", "Lessons"), ("post_actions", "Post-actions"),
 )
 
 

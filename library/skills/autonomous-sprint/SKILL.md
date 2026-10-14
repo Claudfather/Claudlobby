@@ -1,6 +1,6 @@
 ---
 name: autonomous-sprint
-description: "Autonomous development cycle: reads PROJECT_MISSION.md, evaluates backlog, runs a product-vision pass if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
+description: "Use when asked to run an autonomous, mission-driven development cycle on a repo. Reads PROJECT_MISSION.md, evaluates backlog, runs a product-vision pass if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
 argument-hint: "<repo> [--max-issues N] [--dry-run] [--focus <area>]"
 tool_grants:
   - "Bash(python3 *issue-intake.py* list *)"
