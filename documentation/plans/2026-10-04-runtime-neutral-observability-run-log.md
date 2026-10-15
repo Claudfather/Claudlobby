@@ -1,14 +1,14 @@
 ---
-title: "Run log — runtime-neutral observability (#2145): P0 canaries"
+title: "Run log — runtime-neutral observability (#2145): canaries and build-all delivery"
 type: run-log
-status: P0 Claude legs done; §10 orders 2–6 merged; 2–3 activated on the floor host (2026-10-07), Half A (2026-10-11); the Codex batch is outstanding
+status: build-all in progress; orders 2–6 previously merged and activated; remaining phases and evidence gates tracked in the 2026-10-15 ledger
 created: 2026-10-05
 epic: 2026-10-04-runtime-neutral-observability-plan.md
 issue: Claudfather/Claudlobby#2145
 pr: Claudfather/Claudlobby#2144
 ---
 
-# P0 run log
+# Runtime-neutral observability run log
 
 Epic §6 P0 and §10 order 1. Instrument: `harness/runtime-neutral-canary.py` (stdlib; `receiver` is a raw
 OTLP/HTTP-JSON receiver on `127.0.0.1` that answers 200 first, the shape the `plane-otel` intake takes; `hook`
@@ -16,6 +16,8 @@ logs hook payloads; `c10` probes tmux env inheritance; `report` prints the verdi
 temporality, event names, attribute *keys*, and the values of a short allowlist of id/enum keys. Every other
 value is kept as its type and length. Prompts, tool inputs and responses never reach a log
 (`tests/test_runtime_neutral_canary.py` pins that).
+
+The historical P0 measurements follow. Current implementation, review and integration state is in the [2026-10-15 sprint ledger](#2026-10-15--build-all-sprint-ledger).
 
 ## Summary
 
@@ -411,3 +413,83 @@ through the canary CLI. Record:
 Remove the lines from `$BOT_DIR/.env` and restart the bot when done.
 
 Paste each `report` and the notes here, as a new timestamped entry.
+
+
+## 2026-10-15 — Build-all sprint ledger
+
+### Kickoff gates and goal
+
+**Goal condition:** complete the remaining epic verification checklist (§8), integrate each planned phase in its declared dependency order, publish the releases its sibling consumers require, and verify deploy reachability and mixed-runtime acceptance. A code merge alone does not satisfy a live or timed observation. Any unreached check stays named below; the epic is not complete while one remains.
+
+- **Passed (recorded evidence):** orders 1–6, including clauDNA v0.27.0 and Half A's rollout; see the dated entries above. These are historical observations, not a fresh claim about the production fleet.
+- **Passed:** phase docs and execution rationale are in epic §10/§10.1. The export release precedes its consumer; the telemetry canary precedes the plane-reader leg; measured Codex behavior precedes owner-side adapters and execution companions.
+- **Authorized by the operator in this chat:** execute the entire planned bill of work without inter-phase confirmation. For code review, “just use subagent reviewers to run simplify, review, and verify procedures”; after convergence, admin merge is authorized. This replaces the prior human code-review gate only; it is not evidence that a runtime observation passed.
+- **Constraint:** use Codex for reasoning and delegation; do not spend Claude model quota. Non-model CLI operations against the software under test are distinguished from Claude model turns.
+- **Passed for the candidate code:** actual installed-CLI hook dispatch against a local fixed-response provider stub; prompt activity, sealing, private entrypoint and recorded-door exports observed. This proves the CLI/plugin protocol, not provider authentication or model acceptance. The published-version check is repeated at release 0.28.
+- **Blocking at their dependent phases:** P2-a1's seven-day independent-root canary and day-1/day-7 reply, coverage, RSS and latency evidence; Half B's 48-hour keepalive/restart observation; the Codex batch's isolated authentication and measured feature support. No timer is silently shortened and no unsupported field is invented.
+- **Planning inputs pending:** P4 and companion phase docs are written from the Codex measurements, as the epic requires. Existing locked decisions remain binding.
+
+### Invariant registry
+
+| Invariant | Check | On breakage |
+|---|---|---|
+| Claudlobby instructions remain byte-identical copies | `cmp CLAUDE.md AGENTS.md`; `cmp claudlobby/_runtime_scripts/CLAUDE.md claudlobby/_runtime_scripts/AGENTS.md`; `pytest tests/test_instruction_budget.py` in a prepared disposable export | Repair the authored Claude-side file, copy, and re-check before merge. |
+| Existing Claude session aliases and receipt replay remain compatible | `pytest tests/test_plane_ids.py tests/test_request_receipts.py` (resolve names against each phase's current tree) | Stop integration; repair against before-leg behavior. |
+| clauDNA activity stays frozen; export is additive and private records withheld | clauDNA `pytest tests/test_session_store_activity.py tests/test_session_store_export.py tests/test_session_store_hook.py`; `make test-runtime` | Fix before any release or consumer integration. |
+| No consumer or register claims an unreleased sibling surface | Verify `gh release view` for the exact pinned tag and run the sibling contract/conformance suite before register/pin merges | Hold the dependent merge; publish through the owner's release process first. |
+| Telemetry stays local and explicitly armed, raw storage bounded and private | P2 parser/composer/intake/sink tests and actual loopback CLI probe once the surface exists; repeat after each integration affecting it | Refuse activation; fix the producer/receiver contract. |
+| Phase scope and public assets stay clean | `git diff --check`; `git diff origin/main...HEAD --stat`; review the staged diff for identifiers/secrets and unrelated cargo | Unstage or repair; never force a source change onto main. |
+
+Run all applicable checks after every phase merge, recording exact output and any not-yet-created test path explicitly. A missing check is not a green result.
+
+### Merge topology and reachability
+
+Use fresh branches from the latest `origin/main`, squash merges with exact-head matching, and no direct commits or force-pushes to main. Avoid stacked phases; if parallel phases overlap, the second rebases and regenerates switch tables, system example and instruction copies before fresh checks. Preserve unrelated working trees and untracked files.
+
+- **clauDNA:** export PR → release 0.28 through `scripts/release.sh` → exact tag/readback → Claudron row-11 register PR and Claudlobby 6b consumer. The plugin becomes live on a host only through the host's managed update/restart path.
+- **Claudlobby:** telemetry 7a and export 7b are independent; 7c follows release 0.28. Half B is an independent ready phase. P2-a2 waits for the 7a canary week; 6a waits for 6b. Each release still needs an independent-root staged activation and observed rollout to be live.
+- **Claudron:** row 11 cites released clauDNA 0.28; the Codex adapter and row 12 wait for actual Codex measurements and the owning release. Do not edit the engine's main checkout.
+- **Codex:** the canary batch may run alongside the Claude-path phases. Its results ground P4, then the execution and clauDNA companions. Record unsupported features and unresolved decisions rather than constructing fixtures from presumed producer behavior.
+
+### Phase results
+
+| Order | Phase / plan | State | PR / CI | Reachability |
+|---|---|---|---|---|
+| 7b | P3 clauDNA export contract / plan 5 | Implemented; final convergence and non-model host observation in progress | clauDNA#411 candidate `3c857c3`; prior eight verification jobs passed, fresh CI pending | Not merged or released at kickoff. |
+| 7a | P2-a1 telemetry intake / plan 4 Tasks 3–8 | Starting in isolated phase worktree | Pending | Seven-day canary is required before merge; no production activation. |
+| 7c | P3 summary consumer / plan 6 6b | Queued after clauDNA 0.28 | Pending | Requires host activation and consumer evidence. |
+| 8a | P2-a2 plane rows/readers / plan 4 Task 9 | Waiting on 7a canary evidence | Pending | Not live. |
+| 8b | P3 Claudron pin / plan 6 6a | Queued after 6b | Pending | Per-host migration/doctor readback required. |
+| 9 | P1 Half B session joins / plan 2 | Starting in isolated phase worktree | Pending | Independent canary and 48-hour observation required. |
+| 10 | P0 Codex canary batch / existing runbook | Preflight queued | Measurement only | Isolated config/auth; no production fleet changes. |
+| 11 | P4 owner-side adapters / per-repo plans | Waiting on measured Codex answers | Pending | Owner releases and parity evidence required. |
+| 12 | Execution and clauDNA companions / #2149 and clauDNA#404 | Plans follow P4 | Pending | Mixed-runtime acceptance not yet demonstrated. |
+
+### Phase entries
+
+**Export evidence carried forward:** at `0e6e0ea`, all eight GitHub verification checks pass; paid Claude routing evaluation is skipped. Local pinned `make check`: 2058 passed, 9 skipped, one pre-existing macOS sed failure (`tests/test_pretooluse_permissions_hook.py::TestWriteRedirectionKeepsThePrompt::test_dev_null_still_approves`), exit 2. Python 3.9 runtime: 875 passed, exit 0. Existing export suite: 63 passed before and after simplify. Offline canary: seven checks, 15 real shell-hook calls with synthetic payloads, zero model calls and unexpected errors. These results do not prove an authenticated host dispatch or a production rollout.
+
+### Review rounds and class sweeps
+
+Historical export review fixed retired-only exhaustion and unreadable-manifest gaps, then canonicalized the owned telemetry role. The actual local built-in simplify prompt ran through four independent Codex lenses in two waves: reuse and altitude clean; redundant archive scans and eager live projection reads fixed. A fresh exact-head convergence review follows under the operator's new review authority. Cross-repository class sweeps and final verdicts are appended per round below.
+
+### Owner-decision and external-evidence queue
+
+- Code review and admin integration are delegated and authorized; no repeat confirmation is requested for those steps.
+- No seven-day or 48-hour observation exists yet for the new phases; record the real start/end and evidence before dependent merges.
+- Isolated Codex authentication must use the documented supported path; do not copy authentication material or change user config by inference.
+- Any new auth/security fork or unsupported runtime capability is a named decision, not an automatic waiver.
+- Production host activation and outbound canary messages require concrete scoped host/channel authority; independent local samples proceed without those writes.
+
+**Review round 1 — export convergence at `0e6e0ea`:** code clean; two source-plan omissions found (phase-3 C10/C11 evidence fold and export module docstring status flag). A clauDNA worker owns both. Class sweep also found an unconditional flag/cursor-equality claim in plan5; corrected here to untruncated pages, matching the existing bounded-status test and normative spec. The concurrent branches carry the same pre-integration plan copy and will receive this ledger/plan correction on rebase; no duplicate conflicting edit is assigned. P1 Task7b stale marker prose is assigned to the session-joins phase worker.
+
+
+**Class-sweep evidence — round 1:** tracked text across the three repositories, their main snapshots and active sprint branches was searched for `CLAUDE_CODE_CHILD_SESSION|CLAUDLOBBY_HOOK_CHILD|SUBAGENT_SHELL_SHARES_SESSION_ID` and export/status descriptions. Nine initial snapshots yielded 867 matching lines (copies and broad vocabulary counted separately): Claudlobby source 44/101, ledger 85/101, telemetry 85/101, session joins 86/101; clauDNA export 5/73, source 2/38, main 2/41; Claudron source 0/0, main 1/1 (marker/export matches). Executable pins and dated/struck history are legitimate; active clauDNA phase-3 evidence and export docstring omissions are fixed at `3c857c3`; active P1 Task 7b prose is owned by the session-joins branch. A narrow `git grep -n -I -F '`next` is the same with or without the flag' -- .` sweep found five copies: the ledger copy is now qualified to untruncated pages; two active phase copies receive that fix when rebased onto this ledger merge; source/main copies describe their pre-integration snapshot. clauDNA and Claudron have no match for that literal. The actual bounded-page behavior is already pinned in the export suite. No producer-source reconstruction was accepted as a live fixture.
+
+**Export candidate evidence — `3c857c3`, 2026-10-15:** the docs-only correction leaves executable AST unchanged. Affected export/runtime-layout checks: 148 passed, exit 0; skill/integration/changelog checks exit 0 (39 skills, 61 existing warnings); Ruff and diff checks exit 0. The repeated offline canary passes seven checks through 15 real shell-hook invocations, peak 60.13 ms, no unexpected hook errors and zero model calls. Its first invocation used the system interpreter while wrappers deliberately selected the development venv; the interpreter-identity assertion failed. Running the documented venv interpreter passed; this was a harness invocation mismatch, not a product change.
+
+**Native CLI protocol canary — `3c857c3`, 2026-10-15 21:25–21:27 UTC:** installed Claude Code 2.1.301 loaded the real candidate plugin in private HOME/config/state, with empty MCP configuration, real hooks and native OTel exporters. A loopback Messages stub returned fixed SSE responses under a fake key; no Claude model quota was used. Both the one-response arm and a bounded `Bash true` arm exited 0. Actual hooks recorded one prompt, opened/sealed/closed the session, and wrote a schema-valid mode-0600 entrypoint pointing at the candidate package (`agent_cli=claude`, current pre-release manifest 0.27.0). Exports invoked through that record both exited 0 and validated: plain zero items; flagged one disabled-status item with `counts.prompts=1`, `sealed_by=session_end`. Summary generation was deliberately off. The short arm reported its asynchronous prompt hook response cancelled after its event had already landed; the tool arm reported hook success and recorded the same one prompt. Actual OTLP/HTTP JSON logs/metrics, including native `tool_result`, were captured privately mode 0600 for the intake fixture. A refusing proxy rejected auxiliary requests, but environment proxies are not proof of OS-level egress confinement. This is protocol evidence with a local provider stub, not a real-provider or production-bot claim. The isolated plugin-manager update check separately observed the old cache directory surviving an update; release-version/native-dispatch readback follows the actual 0.28 release candidate.
+
+**Parallel-merge adjustment:** P2-a1 remains subject to its seven-day pre-merge canary. To preserve the epic's P2/P3 parallelism, 6b may land first with the identical reviewed strict-mapping helpers currently implemented by the telemetry worker. In that order 7a rebases onto 6b and keeps only its telemetry registration; no duplicate helper implementation is introduced. Consumer fields remain owned by 6b.
+
+**Review round 2 — clean:** an independent exact-head read of clauDNA `3c857c305a0201d56bdd1da96db67e167b699614` against `046115e42540f5073c7d51aaaff33600d73c9244` returned **NO FINDINGS**. Both prior omissions are closed; no new implementation or requirement gap was identified. The same reviewer returned **NO FINDINGS** on this two-document governance diff, including its protocol/provider/rollout distinctions and timed gates. The review used supplied canary evidence and performed no tests, network or model calls. The final candidate is pushed once for fresh CI; a clean candidate check run precedes its authorized admin merge.
