@@ -2080,6 +2080,29 @@ as soon as an install exists, in parallel with orders 2–8; nothing in them blo
 parallel-optional to it — they pay for a Claude-only fleet (§1) and neither blocks P4. The calendar gates the size
 table does not price are listed in §9.
 
+### 10.0 Status (2026-10-13)
+
+Orders 1–6 are merged and live on the floor host. Nothing is in flight. Order 10 has a ready runbook; 7–9, 11
+and 12 are not started. The run log has the evidence for each done item.
+
+| Order | Item | Status |
+|---|---|---|
+| 1 | P0, Claude-only batch (C6a, C10, C11) | Done (run log 2026-10-05). C10 leaked; Half A carries the scrub. |
+| 2 | P2-b, marker-only `bot-vitals.sh` | Merged (#2173), activated on the floor host (run log 2026-10-06). |
+| 3 | Per-bot `CLAUDNA_STATE_DIR` | Merged (#2172), activated on the floor host with the old root's stranded sessions sealed (run log 2026-10-06). |
+| 4 | Claudron boundary spec | Merged (Claudron#224). Register row 10 flipped to shipped (Claudron#226). |
+| 5 | P1 Claudlobby Half A | Merged (#2203). Activated on the floor host 2026-10-11 after two watchdog resets, recovered by `host repair-after-reset` (#2312). Rollout check passed. |
+| 6 | clauDNA runtime-at-open | Merged (clauDNA#407), released as v0.27.0 (clauDNA#408). Live on every bot. |
+| 7 | P2-a1 ∥ (P3 clauDNA 0.28 → P3 Claudlobby 6b) | Not started. Plans 4, 5, 6. |
+| 8 | P2-a2 ∥ P3 Claudlobby 6a | Not started. Plans 4, 6. Waits on order 7 (P2-a2 also on P2-a1's canary week). |
+| 9 | P1 Claudlobby Half B | Not started. Its gates are met: Half A merged, C11 in the run log, the C10 scrub live on every bot since 2026-10-11. Plan 2. |
+| 10 | P0, Codex batch (C1–C5, C7–C9) | Not run. `documentation/runbooks/runtime-neutral-codex-canary-batch.md`; needs a machine with the Codex CLI and its login. |
+| 11 | P4 per repo | Blocked on order 10. Its plans are written once the canary answers are in the run log (§10.1). |
+| 12 | Companions (#2149, clauDNA#404) | Blocked on order 11. |
+
+Register rows still **planned** in the boundary spec: row 11 (P3 clauDNA Task 9 opens the Claudron PR that flips
+it) and row 12 (P4 Claudron flips it).
+
 ### 10.1 Per-PR plans (forge, 2026-10-04)
 
 One plan per PR beside this file, each with `epic:` pointing here. P4 and the companions get theirs when
