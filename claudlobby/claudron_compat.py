@@ -175,7 +175,11 @@ def vault_migration_state(
     if probe is None:
         return state("unknown", f"{vault}: {probe_detail}; pending migrations are unknown "
                      f"(status + doctor budget {budget:g}s)")
-    if "doctor" not in (probe.get("capabilities") or []):
+    capabilities = probe.get("capabilities", [])
+    if not isinstance(capabilities, list) or any(not isinstance(cap, str) for cap in capabilities):
+        return state("unknown", f"{vault}: `claudron status --json` did not report a string capability list; "
+                     "pending migrations are unknown")
+    if "doctor" not in capabilities:
         return state("unknown", (
             f"{vault}: this claudron does not declare the `doctor` capability, so pending "
             f"migrations cannot be checked — upgrade Claudron (engine "
@@ -205,17 +209,25 @@ def vault_migration_state(
         shaped = False
     if rc not in (0, 1) or not shaped:
         return state("unknown", f"{vault}: `claudron doctor --json` exited {rc} without its envelope")
-    findings = tuple((str(f.get("code")), str(f.get("message")))
-                     for f in errors + warnings if isinstance(f, dict))
+    raw_findings = errors + warnings
+    findings = tuple((f["code"], f["message"]) for f in raw_findings
+                     if isinstance(f, dict) and isinstance(f.get("code"), str)
+                     and isinstance(f.get("message"), str))
+    if len(findings) != len(raw_findings):
+        return state("unknown", f"{vault}: `claudron doctor --json` returned malformed findings; "
+                     "pending migrations are unknown", findings=findings)
     vault_format, engine_format = data.get("vault_format"), data.get("engine_format")
     if type(vault_format) is not int or type(engine_format) is not int:
         return state("unknown", f"{vault}: `claudron doctor --json` did not report integer vault and engine formats; "
                      "pending migrations are unknown", findings=findings)
     raw_pending = data.get("pending")
-    if not isinstance(raw_pending, list):
-        return state("unknown", f"{vault}: `claudron doctor --json` did not report a pending list; "
+    if not isinstance(raw_pending, list) or any(
+        not isinstance(p, dict) or not isinstance(p.get("id"), str) or not isinstance(p.get("title"), str)
+        for p in raw_pending
+    ):
+        return state("unknown", f"{vault}: `claudron doctor --json` returned a malformed pending list; "
                      "pending migrations are unknown", findings=findings)
-    pending = tuple((str(p.get("id")), str(p.get("title"))) for p in raw_pending if isinstance(p, dict))
+    pending = tuple((p["id"], p["title"]) for p in raw_pending)
     status = ("pending" if pending or any(code == "D001" for code, _ in findings)
               else "old_format" if vault_format != engine_format else "ok")
     return state(status, pending=pending, vault_format=vault_format, engine_format=engine_format, findings=findings)

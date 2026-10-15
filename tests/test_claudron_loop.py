@@ -448,11 +448,11 @@ class TestVaultMigrationWarnings:
 
     @staticmethod
     def _setup(tmp_path, monkeypatch, *, data=None, findings=(), caps=("doctor",),
-               rc=0, status_rc=0, answer=None, loop=True, bots=1):
+               rc=0, status_rc=0, answer=None, status_data=None, loop=True, bots=1):
         vault = tmp_path / "vault"
         (vault / "_shared").mkdir(parents=True, exist_ok=True)
         calls = tmp_path / "calls.jsonl"
-        status = {"command": "status", "data": {"capabilities": list(caps), "engine_version": "test"}}
+        status = {"command": "status", "data": status_data if status_data is not None else {"capabilities": list(caps), "engine_version": "test"}}
         envelope = {"command": "doctor", "data": data if data is not None else {
             "vault_format": 3, "engine_format": 3, "pending": []},
             "errors": [], "warnings": [{"code": code, "message": code} for code in findings]}
@@ -564,6 +564,39 @@ class TestVaultMigrationWarnings:
         monkeypatch.setattr(compat, "vault_migration_state", replacement)
         assert self._migration_rows(validate(fleet, paths)) == []
         assert seen == [str(vault)]
+
+
+class TestMalformedVaultMigrationEnvelopes:
+    @pytest.mark.parametrize("field,value", [
+        ("capabilities", 7), ("capabilities", "doctor"), ("capabilities", ["doctor", 7]),
+        ("pending", ["m003"]), ("pending", [7]), ("pending", [{}]),
+        ("pending", [{"id": 3, "title": "migration"}]),
+        ("warnings", ["D009"]), ("errors", [7]), ("errors", [{}]),
+        ("warnings", [{"code": "D009", "message": 7}]),
+    ])
+    def test_malformed_collections_warn_in_validator_and_doctor(
+        self, tmp_path, monkeypatch, field, value
+    ):
+        from claudlobby.doctor import DoctorReport, check_claudron
+        data = {"vault_format": 3, "engine_format": 3, "pending": []}
+        envelope = {"command": "doctor", "data": data, "errors": [], "warnings": []}
+        kwargs = {}
+        if field == "capabilities":
+            kwargs["status_data"] = {"capabilities": value}
+        else:
+            (data if field == "pending" else envelope)[field] = value
+            kwargs["answer"] = json.dumps(envelope)
+        vault, _, fleet, paths = TestVaultMigrationWarnings._setup(tmp_path, monkeypatch, **kwargs)
+        report = validate(fleet, paths)
+        rows = TestVaultMigrationWarnings._migration_rows(report)
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert str(vault) in rows[0][1]
+        assert not any("migration" in error for error in report.errors)
+        doctor_report = DoctorReport()
+        check_claudron(fleet, paths, doctor_report)
+        diagnostic = next(c for c in doctor_report.checks if c.name == "claudron-doctor")
+        assert diagnostic.status == "warn"
+        assert "unknown" in diagnostic.detail or "envelope" in diagnostic.detail
 
 
 # ---------------------------------------------------------------------------

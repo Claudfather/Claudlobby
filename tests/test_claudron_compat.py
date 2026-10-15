@@ -375,3 +375,14 @@ def test_live_v090_pending_migration_shape():
     assert "engine 0.9.0" in state.probe_detail
     assert [argv[1] for argv in calls] == ["status", "doctor"]
     assert not any("--fix" in argv for argv in calls)
+
+
+@pytest.mark.parametrize("capabilities", [42, "doctor", {"doctor": True}, None])
+def test_malformed_capabilities_are_unknown_without_doctor(capabilities):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return 0, json.dumps({"data": {"capabilities": capabilities}})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "capabilit" in state.detail
+    assert len(calls) == 1
