@@ -1,0 +1,45 @@
+{
+  "actor": {
+    "bot_id": null,
+    "bot_name": null,
+    "entrypoint": "sdk-cli",
+    "fleet": null,
+    "kind": "headless",
+    "model": null
+  },
+  "agent_cli": "claude",
+  "chain_id": "00000000-0000-4000-8000-000000000002",
+  "children": [],
+  "close_reason": "other",
+  "closed_at": "2026-10-15T21:34:30.813Z",
+  "opened_at": "2026-10-15T21:34:26.424Z",
+  "opened_by": "startup",
+  "origin": {
+    "branch": null,
+    "cwd": "/example/transcript.jsonl",
+    "head": null,
+    "repo": null
+  },
+  "parent_sid": null,
+  "private": false,
+  "projected_from": {
+    "bytes": 1329,
+    "lines": 5,
+    "skipped": 0
+  },
+  "schema": "claudna.session/2",
+  "segments": {
+    "count": 1,
+    "open": null,
+    "retired": 0
+  },
+  "sid": "00000000-0000-4000-8000-000000000002",
+  "status": "closed",
+  "summary": {
+    "segments_done": 0,
+    "segments_failed": 0,
+    "segments_pending": 0,
+    "segments_skipped": 1
+  },
+  "transcript_path": "/example/transcript.jsonl"
+}

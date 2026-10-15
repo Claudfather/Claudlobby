@@ -185,7 +185,6 @@ wait "$reader"
 CONSUMERS = (
     "start-bot.sh",
     "reload-fleet.sh",
-    "transcript-digest.sh",
     "update-claude-code.sh",
 )
 

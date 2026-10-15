@@ -334,7 +334,9 @@ fleet:
 #
 #     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
 #     # All optional. Can also be set in defaults: for fleet-wide values.
-#     claudna_version: "0.2.0"                    # pin clauDNA plugin version
+#     claudna: {session_summary: true, harvest: false}  # OPTIONAL strict booleans
+#     # harvest needs Claudron >= 0.8.0 on the host first (PR 6a).
+#     claudna_version: "0.2.0"                    # exports a version hint; pins nothing
 #     claudron_vault_path: "/srv/vaults/my-vault"  # points AT a vault, not into one
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
 #

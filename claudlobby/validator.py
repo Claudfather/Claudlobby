@@ -154,6 +154,8 @@ RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
 #: is a KIND of finding, grouped by remedy; the value is the one line a reader
 #: gets when a category appears that a baseline did not have.
 WARNING_CATEGORIES: dict[str, str] = {
+    "claudna-env": "a clauDNA composed knob is assigned in .env or bot.env; move it to claudna:",
+    "claudna-harvest-pin": "harvest needs Claudron >= 0.8.0; arm it once PR 6a is on the host",
     # a declared reference that resolves to nothing
     "voice-missing": "a declared voice is not in any library/voices/",
     "voice-legacy-path": "a voice resolves from the overlay's old voices/; move it to library/voices/ before #2202 stops reading there",
@@ -852,6 +854,29 @@ def _validate_bots(
                         f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
                         f"won't migrate ({hint})"
                     )
+
+        # Authored tiers only: an operator's os.environ is not fleet config.
+        from .env_tiers import ResolverUnavailable, resolve as resolve_claudna_tiers
+        try:
+            claudna_tiers = resolve_claudna_tiers(paths, bot_name=bot_name, fleet_name=fleet.name)
+        except ResolverUnavailable:
+            claudna_tiers = {}
+            shared.add("claudna-env", "authored .env tiers could not be resolved; claudna: override coverage is unknown", bot_name)
+        for key in ("CLAUDNA_STATE_DIR", "CLAUDNA_SESSION_SUMMARY", "CLAUDNA_HARVEST"):
+            resolution = claudna_tiers.get(key)
+            if resolution is not None:
+                finding = (f"{key} assigned in {resolution.tier} tier ({resolution.path}) is overridden "
+                           "by bot.conf; use claudna: as the one knob")
+                if resolution.tier == "bot":
+                    report.warn("claudna-env", f"bot '{bot_name}': {finding}")
+                else:
+                    shared.add("claudna-env", finding, bot_name)
+            if key in bot.env:
+                report.warn("claudna-env", f"bot '{bot_name}': env: assigns {key} after the composed lines "
+                            "and overrides the claudna: mapping; move it to claudna:")
+        if bot.claudna.harvest is True:
+            shared.add("claudna-harvest-pin", "claudna.harvest needs Claudron >= 0.8.0 for capture/amend; "
+                       "arm it once PR 6a is on the host", bot_name)
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
         # var names (the same names composer puts into the rendered

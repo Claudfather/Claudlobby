@@ -1543,8 +1543,9 @@ Claudlobby:
   ledger pre-read of the derived ids, emitting only the unseen) and an ack per `sid` right after its items
   land, never one batch per bot: a batch mixing a duplicate with a new item rolls back and raises
   `RuntimeError("… mixed state")` (`ingest.py:548-552,598-605`), which `emit_batch` does not spool
-  (`emit_api.py:273-280`), so a run that emitted [seg1, seg2] and died before `--ack` would wedge the bot
-  forever with the tick exiting 0 (ironclad cycle 1, critical). A deterministic refusal
+  (`emit_api.py:273-280`). The 2026-10-15 real-backend combined-batch mutant converted that refusal into
+  unexportable statuses and acknowledged the new segment, losing its normal summary; per-item emission
+  preserves the normal content on replay. A deterministic refusal
   (`ContractViolation`/`RuntimeError`) becomes a `status: skipped, skipped_reason: unexportable` item so the
   cursor advances; after N consecutive failures per bot the job emits an `export_stalled` system event at `notice`
   (the record; the registry's severity rule holds) and pages through the existing alert door,
@@ -1753,7 +1754,7 @@ transcript pointer to the `segment` object and computed the volume fields from i
 | `digest_chars`, `model` | `producer.duration_ms` / `producer.cost_usd` / `producer.model` |
 | `context` | `journey.title` + `journey.intent` |
 | `worked` | `journey.done` (+ `journey.outcome`) |
-| `failed` | `journey.outcome` when not `completed`, with `failures` |
+| `failed` | `journey.outcome` when not `shipped`, with `failures` |
 | `would_change` | `journey.next` (the nearest field; the digest's "what the operator would change" has no direct successor — the monitor's prompt asks for it from `next` + `in_progress`) |
 | `reusable` | `blocks.count` / `blocks.kinds` (what harvest will offer Claudron) |
 | `error` | `skipped_reason` |
@@ -1767,7 +1768,7 @@ not include `fleet-monitoring.md`; what binds the protocol rewrite to the regist
 positive control at `:323`, so both land in one PR (P3 Claudlobby). The monitor also gains the stop rule for
 the window P3 actually produces (ironclad cycle 1): `session-export` ships on, so week one is one status row per
 sealed segment with `journey: null` unless a bot is armed — `fleet-digest` stops on "every row `skipped` →
-COVERAGE: summaries armed on 0 of N bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
+COVERAGE: summaries available on 0 of N represented bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
 `fleet-monitoring.md:39-41` "Nothing watches for sessions ending" joins the edit range). The per-session tool
 totals: P2-a2 writes the `session.tool_calls` samples, but the first reader it repoints is `usage_read`/`brief_read`
 (`session.tokens`, `session.api_requests`; A-F3), and no P2 PR grants `fleet-digest` the `plane samples` door
@@ -1784,7 +1785,9 @@ which one item collides and another is new (`RuntimeError("… mixed state")`, `
 `emit_batch` does not spool that (`emit_api.py:273-280`), so ~~one batch per bot per run~~ becomes **one
 `emit_batch` per item** (or a ledger pre-read of the derived ids, emitting only the unseen) with an ack per `sid`
 as its items land; the test "emit seg1 without acking, seal seg2, run → seg2 `committed`, seg1 `duplicate`, both
-acked" pins it. A deterministic refusal becomes a `skipped_reason: unexportable` status item so the cursor
+acked" pins it. A real-backend combined-batch mutation instead loses the normal new summary and lands
+unexportable fallbacks before advancing the cursor; the invariant is content preservation, not a claim that
+every refusal wedges. A deterministic refusal becomes a `skipped_reason: unexportable` status item so the cursor
 advances; N consecutive failures per bot raise `export_stalled`; `doctor` reports per-bot cursor age. Emits go
 through `emit_batch` in-process (`claudlobby/plane/emit_api.py:149-153`) — `session-export` is a one-shot Python
 tick under the transport rule stated once in the §6 P2 intake spec (ironclad cycle 2) —

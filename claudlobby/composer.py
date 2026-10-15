@@ -1340,6 +1340,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
         )
 
+    # #2145 P3: clauDNA reads these at session open. Its summary_gate checks
+    # SESSION_SUMMARY before the bot/headless gate (project.py): harvest alone
+    # cannot summarize a bot. Always compose 0 for an unarmed bot (disabled).
+    lines.append(f"export CLAUDNA_SESSION_SUMMARY={1 if (bot.claudna.session_summary or bot.claudna.harvest) else 0}")
+    if bot.claudna.harvest is not None:
+        lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
+
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.

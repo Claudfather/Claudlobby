@@ -5803,3 +5803,45 @@ class TestAccessJsonKeepsItsMode:
         compose_bot(bot, fleet, make_paths(fleet_dir))
         assert access.is_file(), "precondition: the first write ran"
         assert seen == [0o600], seen
+
+
+@pytest.mark.parametrize(
+    "summary,harvest,value",
+    [
+        (None, None, 0),
+        (False, None, 0),
+        (True, None, 1),
+        (None, True, 1),
+        (None, False, 0),
+    ],
+)
+def test_claudna_summary_is_always_composed(tmp_path, summary, harvest, value):
+    from claudlobby.config import ClaudnaConfig
+
+    bot = BotConfig(
+        bot_id="b", name="b", expertise=["x"], claudna=ClaudnaConfig(summary, harvest)
+    )
+    fleet = FleetConfig(
+        name="canary", service_prefix="com.canary", manager="b", bots={"b": bot}
+    )
+    paths = _make_paths(tmp_path)
+    text = compose_bot_conf(bot, fleet, paths)
+    assert text.count('export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"') == 1
+    assert text.count("export CLAUDNA_SESSION_SUMMARY=") == 1
+    assert f"export CLAUDNA_SESSION_SUMMARY={value}" in text
+    assert text.index("BOT_DIR=") < text.index("CLAUDNA_STATE_DIR=")
+    if harvest is not None:
+        assert f"export CLAUDNA_HARVEST={int(harvest)}" in text
+
+
+def test_no_retired_hook_is_composed(tmp_path):
+    bot = BotConfig(bot_id="b", name="b", expertise=["x"])
+    fleet = FleetConfig(
+        name="canary", service_prefix="com.canary", manager="b", bots={"b": bot}
+    )
+    text = json.dumps(compose_settings_local(bot, fleet, _make_paths(tmp_path)))
+    assert "transcript-digest" not in text and "plane-session-start" not in text
+    package = yaml.safe_load(
+        (Path(__file__).parent.parent / "claudlobby/system.yaml").read_text()
+    )
+    assert "SessionEnd" not in package["defaults"]["hooks"]

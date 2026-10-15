@@ -42,6 +42,22 @@ named `config plan` *warning* (the validator's warn-never-fail precedent for hos
 composition (F11, companion) and P2's `session.tool_calls` samples (the consumers lose `tool_calls` until a PR grants
 them the `plane samples` door; P2-a2, the plane leg, serves `usage_read`/`brief_read` first — A-F3).
 
+## Released contract clarification (2026-10-15)
+
+clauDNA v0.28.0's observed summary and schema are authoritative: `journey.outcome`
+is `shipped|partial|blocked|abandoned|exploratory`, never `completed`; `arc` is an
+array of `{step,result}`, and `done/in_progress/next` contain objects with `text`,
+not strings. The consumer bounds nested strings and lists, retaining valid JSON.
+Native-dispatched ok and disabled stores ground the scrubbed fixture; the ok
+summary used an actual native CLI with a fixed loopback provider (no inference).
+
+Coverage counts summaries **available**, not configuration armed: k is the
+number of represented bots with at least one ok row, over N represented bots.
+An armed bot may have only trivial/no-transcript/gave-up skips. A session ack
+updates last_ack_at immediately; only a completely successful bot tick resets
+its failure streak and stall. Progress on one session must not mask another's
+persistent failure.
+
 ## Evidence (Claudlobby at `cd292cb`)
 
 - **Where clauDNA state lives today.** Nothing in Claudlobby sets `CLAUDNA_STATE_DIR` (repo grep outside plans: only
@@ -507,7 +523,7 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
   `entrypoint.json` → skip `no_entrypoint`; `schema != "claudna.entrypoint/1"` → `unknown_schema`; `plugin_version` `None` or
   `< 0.28.0` → `old_entrypoint`; `entrypoint` path absent on disk → `stale_entrypoint` (F16), each named in the tick's output
   and none emitting; (g) a 60 s `TimeoutExpired` → `export_timeout`; a non-zero exit or non-JSON stdout → `export_failed` with
-  its own counter (X18), both counting as a failure; (h) the bound: a `journey.arc` of 50 000 chars and 200-item lists
+  its own counter (X18), both counting as a failure; (h) the bound: a `journey.arc` of 200 `{step, result}` entries with 50 000-char strings and 200-item progress lists
   serialize under `DATA_CAP_BYTES` with `arc` cut first, lists second, and the JSON still parses; (i) `SESSION_EXPORT_ENABLED=0`
   → the loud line, exit 0, nothing run; (j) **the wedge test (X20):** emit seg 1 without acking (the fake `run` drops the ack),
   then the envelope gains seg 2 → the next run commits seg 2, seg 1 is `duplicate`, **both** acked; (k) a `ContractViolation` on
@@ -518,7 +534,7 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
   refusal is recorded as `last_unexportable` in the per-bot file and the sid is **still acked** (the terminal rule); (l) three
   consecutive failed ticks for one bot → one `export_stalled` row at `notice` on the bot's actor **and** one alert-door call
   (a fake `notify` records `notify_fleet(level="alert", event="export_stalled", …)`); the fourth tick emits neither (one per
-  stall; a tick that acks re-arms it); the stall's record raising on the third tick → it is not marked recorded and the
+  stall; a completely successful tick re-arms it); the stall's record raising on the third tick → it is not marked recorded and the
   fourth tick retries it (under the same derived id), while a page already submitted is not sent again — the #900 rule;
   a page that fails is retried the same way; (m) `doctor`'s `session-export` rung reads the per-bot files through
   `source_state.probe_source`: absent → nothing (a bot that has never sealed a segment), unreadable or unparseable → `warn`;
@@ -566,10 +582,11 @@ def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notif
   (proven to run the store on this host), else `sys.executable` — never a PATH lookup, because a timer unit's environment is
   closed. **Why in-process (X22):** the epic's transport rule, stated once in its §6 P2 intake spec, puts one-shot Python ticks
   (`task-recheck`, `session-export`) and Python CLI doors on `emit_batch` in-process, as the task doors do
-  (`task_operations.py:351`); this job is such a tick. **The job cannot wedge (X20):** one `emit_batch` per item — a batch
-  that mixes an already-ingested id with a new one is refused as mixed state (`ingest.py:598-605`) and would hold the cursor
-  forever (the alternative, equally
-  acceptable: pre-read `ingest_ledger` for the derived `event_id`s and emit only the unseen, still one commit per item); ack
+  (`task_operations.py:351`); this job is such a tick. **Replay preserves normal summaries (X20):** one `emit_batch` per item — a batch
+  that mixes an already-ingested id with a new one is refused as mixed state (`ingest.py:598-605`). The terminal refusal
+  path may still ack after recording only `unexportable` fallbacks, losing the normal new summary: cursor progress does not
+  prove summary preservation. The alternative is to pre-read `ingest_ledger` for the derived `event_id`s and emit only the
+  unseen, still one commit per item; ack
   per `sid` right after that session's items land; a `committed`, `duplicate` or `spooled` outcome (`require_commit=False`,
   daemon down: durably staged) all count as landed and **are acked**; a deterministic refusal of one item (`ContractViolation`,
   or `RuntimeError` from `_verify_duplicates`, `ingest.py:605-642`) is re-emitted as an `unexportable` status item (built by
@@ -591,7 +608,7 @@ def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notif
   manager and Telegram even when the plane is what is failing (it records best-effort, `:99-104`). `stall` in the per-bot file
   marks each part reported **only once it landed** — the record `committed`/`duplicate`/`spooled`, the page's
   `notification == "submitted"` — `debounce_notify`'s #900 rule (`lib-common.sh:3732-3742`: the marker is written only when
-  the notify succeeded), so a later failing tick retries whichever part did not land, and a tick that acks clears `stall` and
+  the notify succeeded), so a later failing tick retries whichever part did not land, and a completely successful tick clears `stall` and
   re-arms it. A skip reason (`no_entrypoint` … `stale_entrypoint`) is **not** a failure (the bot has nothing to export yet) and
   is recorded as `last_skip`.
 - [ ] **Step 3 — the command and the timer.** `claudlobby/commands/session_export.py`: `tick(args)` (the `task_recheck.tick`
@@ -651,12 +668,12 @@ def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notif
 |---|---|
 | `fleet-digest/SKILL.md:3,26-27,41,58,60` | `session_digest` → `session_summary`; "no `transcript-digest` file" → "recorded by the `session-export` fleet job from clauDNA's export" |
 | `:64` jq | unchanged shape — `.data` **is** the summary record (`legacy_event_row` lifts `detail.data`) |
-| `:82-90` | the job ships on: zero rows + no error means no bot sealed a segment in the window, or the fleet set `SESSION_EXPORT_ENABLED=0`, or every bot's entrypoint is stale/old — say which, from the job's per-bot state files, `<fleet_state>/session-export/<bot>.json` (`last_skip`, `last_ack_at`, `pending`, `consecutive_failures`, `stall`; `paths.fleet_state`, `paths.py:671-679`: the fleet's `runtime/`, i.e. `"$BOT_DIR/../.."` for a manager in an overlay fleet), read with the skill's granted `jq` (`SKILL.md:5-8`) — not `claudlobby host doctor`, which neither monitor skill is granted and which runs the whole `validate()` and, after 6a, a per-vault `claudron doctor` probe of up to 60 s; never `_session-export-tick --dry-run`, a suppressed private command that spawns every bot's export from the monitor's session. **A second stop rule (B5):** every row in the window `skipped` → print `COVERAGE: summaries armed on 0 of N bots (all rows skipped: <reason tally>)` and stop — identity and volume are real, but there is no journey to reason over. Week one reads exactly that way on most fleets: N bots × status rows, journeys only where `claudna.session_summary` is armed |
+| `:82-90` | the job ships on: zero rows + no error means no bot sealed a segment in the window, or the fleet set `SESSION_EXPORT_ENABLED=0`, or every bot's entrypoint is stale/old — say which, from the job's per-bot state files, `<fleet_state>/session-export/<bot>.json` (`last_skip`, `last_ack_at`, `pending`, `consecutive_failures`, `stall`; `paths.fleet_state`, `paths.py:671-679`: the fleet's `runtime/`, i.e. `"$BOT_DIR/../.."` for a manager in an overlay fleet), read with the skill's granted `jq` (`SKILL.md:5-8`) — not `claudlobby host doctor`, which neither monitor skill is granted and which runs the whole `validate()` and, after 6a, a per-vault `claudron doctor` probe of up to 60 s; never `_session-export-tick --dry-run`, a suppressed private command that spawns every bot's export from the monitor's session. **A second stop rule (B5):** every row in the window `skipped` → print `COVERAGE: summaries available on 0 of N represented bots (all rows skipped: <reason tally>)` and stop — identity and volume are real, but there is no journey to reason over. Week one reads exactly that way on most fleets: N bots × status rows, journeys only where `claudna.session_summary` is armed |
 | `:102,113` | `by_status` keeps working; counts are `ok · skipped` (no `error` class) |
 | `:115-116` | "`skipped` means the summarizer did not run: `skipped_reason` names why — `disabled` (summaries off for the bot: the composed default, `CLAUDNA_SESSION_SUMMARY=0`), `headless` (a run with the variable unset — not a composed bot), `trivial`, `no_transcript`, `gave_up`, `retired`, `unexportable` (the job could not record the item); any other value is still a skip. Not a failure." |
-| `:120-121,125-133` | rubric → `journey.title/intent/outcome/done/in_progress/next`; volume jq sums `prompts`, `failures` over every row and `turns`, `transcript_bytes` over `ok` rows only (both are `null` on a skipped row — the template says `turns · bytes: ok rows only`); drop `tool_calls` — its successor is not promised here: P2-a2, the plane leg, writes `session.tool_calls` samples but serves `usage_read`/`brief_read` first (A-F3, ratified 2026-10-05), so the `session.tool_calls` step waits for a PR that grants `fleet-digest` the `plane samples` door (`SKILL.md:5-8` grants `jq`, `python3`, `event list` only); friction jq selects `status=="ok"` rows with `journey.outcome != "completed"` or `failures > 0` or non-empty `journey.next`, keeping `session_id, bot, fleet, ts` |
+| `:120-121,125-133` | rubric → `journey.title/intent/outcome/done/in_progress/next`; volume jq sums `prompts`, `failures` over every row and `turns`, `transcript_bytes` over `ok` rows only (both are `null` on a skipped row — the template says `turns · bytes: ok rows only`); drop `tool_calls` — its successor is not promised here: P2-a2, the plane leg, writes `session.tool_calls` samples but serves `usage_read`/`brief_read` first (A-F3, ratified 2026-10-05), so the `session.tool_calls` step waits for a PR that grants `fleet-digest` the `plane samples` door (`SKILL.md:5-8` grants `jq`, `python3`, `event list` only); friction jq selects `status=="ok"` rows with `journey.outcome != "shipped"` or `failures > 0` or non-empty `journey.next`, keeping `session_id, bot, fleet, ts` |
 | `:173-174,187-192` | cut order: `skipped` rows (count only) first, then `ok` rows with an empty `journey`; template `rows: N ok · N skipped`, `VOLUME: sessions · turns · prompts · failures` |
-| `fleet-observe/SKILL.md:34-35,39,43-49,52` | `failed`/`would_change` → `journey.outcome` not `completed` + `journey.next`; `worked`/`reusable` → `journey.done` + `blocks.count/kinds`; "rubric left empty" (`:43-45`) → a `skipped_reason: disabled` row on a substantial session is **not an instrument failing** — the instrument is off by composition, which `:47-49` ("a gap you can name is a finding") already covers: name it once as *coverage* ("summaries armed on k of N bots"), never per session; the stop rule mirrors `fleet-digest`'s (all rows skipped → the coverage line, stop); token bloat → `transcript_bytes` and `prompts` over `ok` rows (tool totals wait for the `plane samples` grant, see above) |
+| `fleet-observe/SKILL.md:34-35,39,43-49,52` | `failed`/`would_change` → `journey.outcome` not `shipped` + `journey.next`; `worked`/`reusable` → `journey.done` + `blocks.count/kinds`; "rubric left empty" (`:43-45`) → a `skipped_reason: disabled` row on a substantial session is **not an instrument failing** — the instrument is off by composition, which `:47-49` ("a gap you can name is a finding") already covers: name it once as *coverage* ("summaries available on k of N represented bots"), never per session; the stop rule mirrors `fleet-digest`'s (all rows skipped → the coverage line, stop); token bloat → `transcript_bytes` and `prompts` over `ok` rows (tool totals wait for the `plane samples` grant, see above) |
 | `fleet-monitoring.md:39-41,98,102-115,119-122` | `:39-41` "Nothing watches for sessions ending … no poller" → "A session ending is still an event the session reports — clauDNA's SessionEnd seals the segment inside the session; the plane learns of it when the `session-export` timer reads the store's export door (every 15 min): a poll of a contract door, never of transcripts or liveness"; source row → `session_summary`; the contract block becomes the spec's field table (identity `ts · session_id · session_uid · agent_cli · bot · fleet`; `status` + `skipped_reason`; volume `turns · transcript_bytes` (`null` on skipped) `· prompts · skills · failures · interrupts`; `journey.*`; `blocks.count/kinds`, `procedures`; `producer.model/duration_ms/cost_usd`; `seg · sealed_at · sealed_by`); the dormancy paragraph → "the job runs by default; a bot with summaries off still yields a `skipped` row, so an **empty** window means no sealed segment, a disabled job, or a stale entrypoint — name which (the job's per-bot state files, `<fleet_state>/session-export/<bot>.json`, read with `jq`; `host doctor`'s `session-export` rung is the operator's view of them)"; cite #1456/#1503: the digest's rows never reached this reader |
 | `ai-platform-monitor.md:22` | "The plane's `session_summary` events (`claudlobby event list --type session_summary`) \| One per sealed segment — the journey (title, intent, outcome, done, next) when summaries are on for the bot; identity and volume always" |
 
@@ -800,12 +817,16 @@ The seal itself is not this document's: it ran at order 3's activation (Task 1 S
   envelope against `export.schema.json` (plan 5 Task 2 Step 4), so the envelope cannot change without its schema changing, and
   a changed schema fails (3) at the next `claudna.ref` move — a clauDNA-side job would add a cross-repo CI coupling for no new
   signal.
-- [ ] **Mutants** (committed code): the ack before the emit; a two-item `emit_batch` (one seen, one new — ingest refuses it as
-  mixed state and the cursor never moves); an item-level `ContractViolation` with no `unexportable` re-emit (the cursor wedges);
-  the fallback re-emitted under the item's own id (the ledger-keyed refusal repeats and the cursor holds); `stall` marked
+- [ ] **Mutants** (committed code): the ack before the emit; a genuine two-item `emit_batch` through the consumer and real
+  Plane (already-committed seg 1, new seg 2): ingest refuses the mixed batch, normal seg 2 is missing, `unexportable` fallbacks
+  land and the terminal path still acks through 2. Kill this mutant on lost normal-summary preservation and observe the actual
+  ack; a fake batch-length assertion or a direct ingest-only probe is insufficient. An item-level `ContractViolation` with no
+  `unexportable` re-emit; the fallback re-emitted under the item's own id (two real deterministic refusals leave no fallback
+  status row, record `last_unexportable`, and still terminal-ack): kill it on missing fallback-status preservation, not a
+  claimed cursor hold. `stall` marked
   reported before its record landed (a failed emit is never retried);
   a flat `data` (reader renders `{}`); `source_ref` without the `fleet-events:` prefix (reader returns nothing);
-  `derive_uid("ev_", …)`; the bound dropped (a 50 KB arc → `detail_truncated=1`); a stale entrypoint "guessed" from the plugin
+  `derive_uid("ev_", …)`; the bound dropped (a 50 KB nested arc string → `detail_truncated=1`); a stale entrypoint "guessed" from the plugin
   cache; `CLAUDNA_STATE_DIR` conditional on `claudna_version`;
   `CLAUDNA_SESSION_SUMMARY` absent for an unarmed bot; a `"true"` string arming `claudna.harvest`.
 - [ ] **The two-leg gate** (rc + scoped names + count line, against Task 0), CI on Linux, `bash harness/validate-bot-change.sh`
@@ -871,8 +892,9 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
 - [ ] (Order 3) The PR body cites Task 1 Step 2 (i)'s canary-root check; after the fleet's activation,
   `list --bot <b> --json --limit 100000 --include-private --root ~/.claudna` shows no `open` row for any switched bot, the last
   `sweep` printed an empty `closed` list, and no `seal` was run on a session `list --bot` did not return.
-- [ ] `tests/test_session_export.py` wedge cell: seg 1 emitted unacked, seg 2 sealed → seg 2 `committed`, seg 1 `duplicate`, both
-  acked; the two-item-batch mutant holds the cursor (shown, restored).
+- [ ] `tests/test_session_export.py` replay cell: seg 1 emitted unacked, seg 2 sealed → seg 2 `committed`, seg 1 `duplicate`, both
+  acked. The genuine seen/new consumer batch mutant loses normal seg 2 while emitting fallbacks and acking; capture real
+  Plane rows and actual ack calls, then restore and show the baseline passes.
 - [ ] Task 6 Step 1's one "no retired name left" grep returns only its allowlist (`plane/registries.py`'s `session_digest`
   entry and the comments on it, `test_system_event_retention.py:74`, `test_no_retired_digest_reference.py`,
   `tests/test_composer.py::test_no_retired_hook_is_composed`) — no other line, and no second pattern anywhere in this plan.
@@ -900,9 +922,10 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
 - Do not rely on ingest truncation; bound `data` in the emitter (epic §11).
 - Do not guess an entrypoint from the plugin cache (`installed_plugins.json`) when `entrypoint.json` is stale or absent — skip the
   bot and say so (F16).
-- Do not ack before that session's items have landed; do not ack a session after an exception on it; do not put two items in one
-  `emit_batch` call unless the ledger was pre-read for their ids — a batch mixing a seen and an unseen id is refused as mixed
-  state (`ingest.py:598-605`) and holds the cursor forever (X20).
+- Do not ack before that session's items have landed; transient failures hold the cursor, while double deterministic refusal
+  follows the explicit terminal-ack rule. Do not put two items in one `emit_batch` call unless the ledger was pre-read for
+  their ids: a seen/new batch is refused as mixed state (`ingest.py:598-605`) and can be reduced to fallback status rows while
+  still acking. The mutant must expose lost normal summaries, not assert a cursor hold (X20).
 - Do not compose `CLAUDNA_HARVEST=1` without `CLAUDNA_SESSION_SUMMARY=1`: the gate never summarizes a bot on harvest alone
   (`project.py:276-287`).
 - Do not point the monitor at `_session-export-tick --dry-run` or `claudlobby host doctor` (neither is granted to it; `host

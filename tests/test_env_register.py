@@ -322,3 +322,26 @@ def test_declarations_come_from_the_shipped_walk_not_a_private_scan(world) -> No
     miss ones it does — the exact class of defect creds-reconcile already hit."""
     src = Path(reg.__file__).read_text()
     assert "collect_env_contracts" in src
+
+
+def test_config_explain_claudna_mapping(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **kw: paths)
+    p = fleet_dir / "fleet.yaml"
+    p.write_text(
+        FLEET.replace("mcp: [github]", "mcp: [github]\n    claudna: {harvest: true}")
+    )
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+    assert main([*argv, "bot.claudna.harvest", "--bot", "solo"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert (data["source"], data["declaration"]) == (
+        "fleet.defaults",
+        "fleet.defaults.claudna.harvest",
+    )
+    assert main([*argv, "bot.claudna", "--bot", "solo"]) == 2
+    assert (
+        "claudna is a mapping — name a sub-field: claudna."
+        in json.loads(capsys.readouterr().out)["error"]["message"]
+    )
+    assert main([*argv, "bot.nonesuch.x", "--bot", "solo"]) == 3
+    assert "configuration key is not a declared model field" in capsys.readouterr().out
