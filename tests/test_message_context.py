@@ -193,3 +193,10 @@ def test_unknown_or_foreign_target_bad_origin_and_package_skew_refuse(selected, 
     monkeypatch.setenv("BOT_ID", "manager")
     with pytest.raises(state.ActivationError, match="executing package differ"):
         resolve_message_route("worker", package=source_package())
+
+
+def test_generated_message_route_binds_the_callers_session(selected, monkeypatch):
+    from claudlobby.plane.ids import derive_session_uid
+    _, package = selected
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "message-session")
+    assert resolve_message_route("worker", package=package).session_uid == derive_session_uid("message-session")

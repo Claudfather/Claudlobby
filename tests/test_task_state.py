@@ -279,3 +279,14 @@ def test_snapshot_is_read_only_keeps_caller_transaction_and_batches_history_quer
     with pytest.raises(TaskStateError, match="unsupported task schema"):
         read_tasks(conn, fleet_uid="fleet_a")
     assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("session", [None, "sess_" + "1" * 32])
+def test_task_history_preserves_the_executing_session(conn, session):
+    from dataclasses import asdict
+    _task(conn, "wi_session")
+    _assignment(conn, "asg_session", "wi_session")
+    _event(conn, "wi_session", "asg_session", "accepted", session_uid=session)
+    task = _read(conn, "wi_session")
+    assert task.history[-1].session_uid == session
+    assert asdict(task)["history"][-1]["session_uid"] == session

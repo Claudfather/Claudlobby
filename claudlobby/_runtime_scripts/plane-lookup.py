@@ -157,7 +157,7 @@ def _all_open(a) -> int:
 
 def _by_assignment(a) -> int:
     """`--by-assignment <asg_id> [--any-state]`: `<work_item_id>
-    <assignment_id> <dispatch_msg_id|-> <assignee|-> <fleet|-> <source_ref|->`
+    <assignment_id> <dispatch_msg_id|-> <assignee|-> <fleet|-> <source_ref|-> <session_uid|->`
     for the one assignment, or nothing. OPEN only unless `--any-state`.
 
     The acts' asg-first door (#1492): the re-check digest hands a manager
@@ -173,7 +173,29 @@ def _by_assignment(a) -> int:
         if row is not None:
             print(f"{row['work_item_id']} {row['assignment_id']}"
                   f" {row['dispatch_msg_id'] or '-'} {row['assignee'] or '-'}"
-                  f" {row['fleet'] or '-'} {row['source_ref'] or '-'}")
+                  f" {row['fleet'] or '-'} {row['source_ref'] or '-'}"
+                  f" {row['session_uid'] or '-'}")
+        return 0
+    return _with_plane(a.root, fn)
+
+
+def _by_session(a) -> int:
+    """List task events and communications written by one canonical session uid."""
+    def fn(pr, conn):
+        tasks = conn.execute(
+            "SELECT work_item_id, assignment_id, event, occurred_at FROM events"
+            " WHERE kind='task' AND session_uid=? ORDER BY ingest_seq", (a.session,)).fetchall()
+        messages = conn.execute(
+            "SELECT c.msg_id, i.alias, c.occurred_at FROM communications c"
+            " LEFT JOIN identity_registry i ON i.uid=c.recipient_uid"
+            " WHERE c.sender_session_uid=? ORDER BY c.ingest_seq", (a.session,)).fetchall()
+        for wi, asg, event, at in tasks:
+            print(f"task {wi} {asg or '-'} {event} {at}")
+        for msg, recipient, at in messages:
+            print(f"message {msg} {recipient or '-'} {at}")
+        if not tasks and not messages:
+            print(f"plane-lookup: no task events or communications for session {a.session}",
+                  file=sys.stderr)
         return 0
     return _with_plane(a.root, fn)
 
@@ -335,9 +357,11 @@ def main(argv=None) -> int:
                     " event and pages the operator once per escalation event")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
+    ap.add_argument("--session", default=None,
+                    help="list task events and communications written by a sess_ uid")
     ap.add_argument("--by-assignment", default=None,
                     help="resolve ONE assignment by its asg id to '<wi> <asg> <msg|-> <assignee|->"
-                    " <fleet|-> <source_ref|->' (the acts' asg-first door #1492); OPEN only unless"
+                    " <fleet|-> <source_ref|-> <session_uid|->' (the acts' asg-first door #1492); OPEN only unless"
                     " --any-state")
     ap.add_argument("--any-state", action="store_true",
                     help="--by-assignment: match a CLOSED assignment too (the refusal reads this to"
@@ -384,6 +408,12 @@ def main(argv=None) -> int:
         print("plane-lookup: --root is empty (CLAUDLOBBY_ROOT unset?) — unreachable",
               file=sys.stderr)
         return 3
+    if a.session is not None:
+        if not re.fullmatch(r"sess_[0-9a-f]{32}", a.session):
+            ap.error("--session requires sess_ followed by 32 lowercase hex characters; derive it with "
+                     "python3 -c 'from claudlobby.plane.ids import derive_session_uid as d; "
+                     'print(d("<raw id>", "<agent_cli>"))' + "'")
+        return _by_session(a)
     if a.checkin_id:
         return _checkin_id(a)
     if a.received:

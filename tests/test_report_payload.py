@@ -121,3 +121,16 @@ def test_real_ingest_capture_preserves_full_evidence_and_withholds_metadata(tmp_
         detail = captured[1]["payload"]
         assert ("summary" in detail) == (mode == "full")
         assert detail["pr_role"] == report.pr_role and detail["pr_url"] == report.pr_url
+
+
+def test_report_session_is_on_both_linked_facts_and_only_the_unlinked_communication():
+    session = "sess_" + "a" * 32
+    def encode(link=None, **kw):
+        return encode_report_facts(_report(), fleet="f", sender="bot:f/worker", recipient="bot:f/manager",
+            msg_id=MSG, event_ids=IDS, occurred_at="2026-09-28T12:00:00Z", link=link, **kw)
+    comm, task = encode(ReportLink(WI, ASG, "progress"), session_uid=session)
+    assert comm["payload"]["sender_session_uid"] == task["payload"]["session_uid"] == session
+    comm, marker = encode(session_uid=session)
+    assert comm["payload"]["sender_session_uid"] == session
+    assert marker == encode()[1]
+    assert encode(session_uid=None) == encode()

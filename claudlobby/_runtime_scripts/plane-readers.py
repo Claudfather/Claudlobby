@@ -416,10 +416,13 @@ def open_assignments_for_task(conn: sqlite3.Connection, task_id: str) -> list[di
 # exactly as a closed task id does; the ANY form is what a refusal reads to name
 # the sha key even for a row it will not act on.
 _ASG_ROW_COLS = ("work_item_id", "assignment_id", "dispatch_msg_id",
-                 "source_ref", "assignee", "fleet")
+                 "source_ref", "assignee", "fleet", "session_uid")
 _ASG_ROW_SELECT = (
     "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.source_ref,"
-    " i.alias AS assignee, f.alias AS fleet FROM assignments a"
+    " i.alias AS assignee, f.alias AS fleet,"
+    " (SELECT e.session_uid FROM events e WHERE e.kind='task'"
+    " AND e.assignment_id=a.assignment_id AND e.session_uid IS NOT NULL"
+    " ORDER BY e.ingest_seq DESC LIMIT 1) AS session_uid FROM assignments a"
     " LEFT JOIN identity_registry i ON i.uid = a.assignee_uid"
     " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
     " WHERE a.assignment_id = ?")

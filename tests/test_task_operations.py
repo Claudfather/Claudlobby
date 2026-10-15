@@ -1100,3 +1100,55 @@ def test_feedback_digest_validates_explicit_selection_and_exact_text():
     assert digest != tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='asg_' + 'b' * 32)
     with pytest.raises(tasks.TaskQueryError):
         tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='')
+
+
+SESSION_A = "sess_" + "a" * 32
+SESSION_B = "sess_" + "b" * 32
+
+
+def test_operation_context_refuses_a_malformed_session(estate):
+    from claudlobby.task_queries import TaskQueryError
+    ctx, _ = estate
+    with pytest.raises(TaskQueryError, match="canonical session uid"):
+        replace(ctx, session_uid="sess_zz")
+
+
+@pytest.mark.parametrize("first_session", [None, SESSION_A])
+@pytest.mark.parametrize("crash", [False, True])
+@pytest.mark.parametrize("door", ["accept", "progress"])
+def test_worker_doors_record_the_committing_session_and_replay_across_clear(estate, monkeypatch, first_session, crash, door):
+    ctx, conn = estate
+    admitted = tasks.admit(ctx, str(uuid4()), title="Session evidence")
+    assigned = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"], session_uid=first_session)
+    request_id = str(uuid4())
+    if door == "progress":
+        tasks.accept(worker, str(uuid4()), assigned.assignment_id)
+    def call(caller):
+        if door == "accept":
+            return tasks.accept(caller, request_id, assigned.assignment_id)
+        return tasks.progress(caller, request_id, assigned.assignment_id,
+                              ReportPayload("progress", summary="Evidence recorded"))
+    if crash:
+        with monkeypatch.context() as patch:
+            def fail(*a, **k):
+                raise RuntimeError("crash after prepare")
+            patch.setattr(tasks, "_commit", fail)
+            with pytest.raises(RuntimeError, match="crash after prepare"):
+                call(worker)
+        assert _receipt(ctx, request_id).intent.stages[0].facts
+    else:
+        first = call(worker)
+        assert not first.replayed
+    facts = _receipt(ctx, request_id).intent.stages[0].facts
+    result = call(replace(worker, session_uid=SESSION_B))
+    assert result.replayed is (not crash)
+    assert _receipt(ctx, request_id).intent.stages[0].facts == facts
+    expected = SESSION_B if crash else first_session
+    event = "accepted" if door == "accept" else "progress"
+    assert conn.execute("SELECT session_uid FROM events WHERE event=? ORDER BY ingest_seq DESC", (event,)).fetchone()[0] == expected
+    if door == "progress":
+        assert conn.execute("SELECT sender_session_uid FROM communications").fetchone()[0] == expected
+    assert call(replace(worker, session_uid=SESSION_A)).replayed
+    task = show_task(conn, admitted.task_id, fleet_uid=ctx.fleet_uid)
+    assert task.history[-1].session_uid == expected

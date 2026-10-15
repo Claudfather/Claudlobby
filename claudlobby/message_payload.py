@@ -131,7 +131,7 @@ def _envelope(intent: RequestIntent, *, request_id: str, event_id: str,
 
 def encode_communication(intent: RequestIntent, body: MessageBody, *, request_id: str,
                          event_id: str, occurred_at: str, kind: SendKind | None = None,
-                         parent_message_id: str | None = None) -> dict:
+                         parent_message_id: str | None = None, session_uid: str | None = None) -> dict:
     """Encode only ordinary communication; the operation validates/captures it.
 
     Reply participation and parent existence are admission checks elsewhere.
@@ -150,6 +150,8 @@ def encode_communication(intent: RequestIntent, body: MessageBody, *, request_id
                    "recipient": route.recipient_alias,
                    "recipient_raw": route.peer_destination.session,
                    "message_class": message_class, "body": body.text}
+    if session_uid is not None:
+        payload["sender_session_uid"] = session_uid
     if parent_message_id is not None:
         payload["reply_to_msg_id"] = parent_message_id
     return {**_envelope(intent, request_id=request_id, event_id=event_id,

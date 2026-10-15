@@ -488,12 +488,12 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             raw = encode_report_facts(_report, fleet=route.selected.fleet.name,
                                       sender=route.caller.alias, recipient=route.manager.alias,
                                       msg_id=message_id, event_ids=event_ids,
-                                      occurred_at=at.isoformat(), link=None)
+                                      occurred_at=at.isoformat(), link=None, session_uid=route.session_uid)
         else:
             raw = encode_communication(intent, body, request_id=request_id,
                                        event_id=event_ids[0], occurred_at=at.isoformat(),
                                        kind=None if parent_message_id else kind,
-                                       parent_message_id=parent_message_id)
+                                       parent_message_id=parent_message_id, session_uid=route.session_uid)
         raws = raw if isinstance(raw, tuple) else (raw,)
         facts = tuple(expected_fact(validate_item(item, modes)[0], host_uid=route.host_uid,
                                     fleet_uid=route.selected_fleet_uid, parties=parties)
@@ -685,7 +685,8 @@ def record_reply_to_human(route: HumanReplyRoute, package: PackageResources, bod
                               route.caller.uid, route.peer.uid, semantic, (StagePlan("recording"),),
                               message_id=message_id, route=frozen)
         raw = encode_communication(draft, body, request_id=request_id, event_id=event_id,
-                                   occurred_at=at.isoformat(), parent_message_id=parent_message_id)
+                                   occurred_at=at.isoformat(), parent_message_id=parent_message_id,
+                                   session_uid=route.session_uid)
         facts = (expected_fact(validate_item(raw, modes)[0], host_uid=route.host_uid,
                                fleet_uid=route.selected_fleet_uid, parties=parties),)
         if existing is not None:

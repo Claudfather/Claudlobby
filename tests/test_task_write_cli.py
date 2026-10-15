@@ -620,3 +620,20 @@ def test_feedback_cli_expanded_body_has_bounded_native_budget_and_never_retries(
     assert replay['data']['replayed'] and replay['data']['transport'] == 'unknown'
     assert _counts(root) == recorded and len(calls) == 1
     assert calls[0]['timeout'] == 120 and len(calls[0]['input']) > 98301
+
+
+def test_accept_cli_records_session_and_replays_after_clear(active, monkeypatch, capsys):
+    from claudlobby.plane.ids import derive_session_uid
+    from tests.test_message_write_cli import _generated
+    root, release = active
+    admitted = _call(capsys, root, "task", "admit", "--title", "Session CLI canary", "--request-id", str(uuid4()))
+    assigned = _call(capsys, root, "task", "assign", admitted["data"]["task_id"], "--bot", "worker", "--request-id", str(uuid4()))
+    _generated(monkeypatch, root, release, bot="worker")
+    request_id = str(uuid4())
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cli-session-a")
+    args = ("assignment", "accept", assigned["data"]["assignment_id"], "--request-id", request_id)
+    assert not _call(capsys, root, *args)["data"]["replayed"]
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cli-session-b")
+    assert _call(capsys, root, *args)["data"]["replayed"]
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT session_uid FROM events WHERE event='accepted'").fetchone()[0] == derive_session_uid("cli-session-a")

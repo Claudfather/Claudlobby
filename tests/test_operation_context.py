@@ -273,3 +273,27 @@ def test_registry_uncertainty_refuses_instead_of_minting_or_selecting_latest(est
     with pytest.raises(OperationContextError):
         resolve_task_context(fleet="target", package=source_package())
     assert _tree(root) == before
+
+
+def test_caller_session_uid_reads_only_the_measured_agent_cli_env():
+    from claudlobby.operation_context import caller_session_uid
+    from claudlobby.plane.ids import derive_session_uid
+    # C11 (2026-10-05, including tmux): every child has the marker, main too.
+    env = {"CLAUDE_CODE_SESSION_ID": "caller-session"}
+    assert caller_session_uid(env) == derive_session_uid("caller-session")
+    assert caller_session_uid({**env, "CLAUDLOBBY_AGENT_CLI": "claude"}) == caller_session_uid(env)
+    assert caller_session_uid({**env, "CLAUDE_CODE_CHILD_SESSION": "1"}) == caller_session_uid(env)
+    for cli in ("codex", "gemini"):
+        assert caller_session_uid({**env, "CLAUDLOBBY_AGENT_CLI": cli}) is None
+    for raw in (None, "", "  "):
+        assert caller_session_uid({} if raw is None else {"CLAUDE_CODE_SESSION_ID": raw}) is None
+
+
+def test_generated_origin_binds_the_callers_session_uid(estate, monkeypatch):
+    from claudlobby.plane.ids import derive_session_uid
+    root, _, _ = estate
+    _generated(monkeypatch, root)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "generated-session")
+    assert resolve_task_mutation_context(fleet="origin", package=source_package()).session_uid == derive_session_uid("generated-session")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    assert resolve_task_mutation_context(fleet="origin", package=source_package()).session_uid is None

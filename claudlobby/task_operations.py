@@ -51,9 +51,13 @@ class TaskOperationContext:
     caller: TaskActor
     bots: Mapping[str, TaskActor]
     caller_fleet_uid: str | None = None
+    session_uid: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "bots", MappingProxyType(dict(self.bots)))
+        if self.session_uid is not None and (not isinstance(self.session_uid, str)
+                or not re.fullmatch(ID_PATTERNS["session"], self.session_uid)):
+            raise TaskQueryError("operation context requires a canonical session uid")
         for value, kind in ((self.host_uid, "host"), (self.fleet_uid, "fleet"),
                             (self.caller.uid, "actor"), *((a.uid, "actor") for a in self.bots.values())):
             if not isinstance(value, str) or not re.fullmatch(ID_PATTERNS[kind], value):
@@ -478,7 +482,8 @@ def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> Ta
                     raise TaskConflictError("assignment is already accepted")
                 _identities(ctx, conn, (ctx.caller,))
                 raw = _raw(ctx, request_id, "task", dict(work_item_id=task.task_id,
-                           assignment_id=assignment_id, event="accepted", actor=ctx.caller.alias), previous)
+                           assignment_id=assignment_id, event="accepted", actor=ctx.caller.alias,
+                           **({"session_uid": ctx.session_uid} if ctx.session_uid is not None else {})), previous)
                 receipt = _prepare(store, ctx, "assignment.accept", semantic, (raw,), task.task_id, assignment_id)
                 return _commit(store, ctx, conn, receipt, (raw,), check)
 
@@ -534,7 +539,8 @@ def _assignment_report(ctx, request_id, assignment_id, report, *, verb, status, 
                 raws = encode_report_facts(report, fleet=ctx.context.fleet.name, sender=ctx.caller.alias,
                         recipient=manager.alias, msg_id=message_id, event_ids=event_ids,
                         occurred_at=datetime.now(timezone.utc).isoformat(),
-                        link=ReportLink(task.task_id, assignment_id, transition))
+                        link=ReportLink(task.task_id, assignment_id, transition),
+                        session_uid=ctx.session_uid)
                 receipt = _prepare(store, ctx, operation, semantic, raws, task.task_id, assignment_id,
                                    manager.uid, (manager,), message_id=message_id,
                                    notification=True,

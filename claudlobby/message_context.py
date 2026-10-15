@@ -16,7 +16,7 @@ from .activation_identity import read_selected_identity_bindings
 from .activation_state import ActivationError, read_selection
 from .context import Context
 from .message_transport import TransportDestination
-from .operation_context import resolve_operation_scope
+from .operation_context import caller_session_uid, resolve_operation_scope
 from .request_receipts import MessageRouteBinding, NativeDestination, RecordedReplyBinding
 from .resources import PackageResources
 from .supervision import build_supervision_spec
@@ -44,6 +44,7 @@ class MessageRoute:
     manager: TaskActor
     peer_destination: TransportDestination
     manager_destination: TransportDestination
+    session_uid: str | None = None
 
     def receipt_binding(self) -> MessageRouteBinding:
         """Retain the route's historical targets before recording or transport."""
@@ -158,7 +159,7 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
                         source_ids["host_uid"], caller_fleet_uid,
                         selected_ids["fleet_uid"], peer_ids["fleet_uid"], caller,
                         recipient, manager, _transport(peer, bot_id),
-                        _transport(selected, manager_id))
+                        _transport(selected, manager_id), session_uid=caller_session_uid())
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ class HumanReplyRoute:
     selected_fleet_uid: str
     caller: TaskActor
     peer: TaskActor
+    session_uid: str | None = None
 
     def receipt_binding(self, parent_message_id: str) -> RecordedReplyBinding:
         return RecordedReplyBinding(
@@ -216,4 +218,4 @@ def resolve_human_reply_route(sender: TaskActor, *, root: Path | None = None,
     caller = TaskActor(ids["bots"][origin.bot_id], f"bot:{origin.fleet.name}/{origin.bot_id}")
     return HumanReplyRoute(origin, selected, selection["activation_id"], selection["plan_id"],
                            selection["release_id"], ids["host_uid"], ids["fleet_uid"],
-                           ids["fleet_uid"], caller, sender)
+                           ids["fleet_uid"], caller, sender, session_uid=caller_session_uid())

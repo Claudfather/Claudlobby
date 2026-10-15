@@ -777,3 +777,75 @@ def test_lost_delivery_observation_preserves_proof_and_refuses_received_retry(
     with pytest.raises(ReceiptConflict, match="recorded submission"):
         deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id, body,
             retry_uncertain=True, transport=lambda *a, **k: pytest.fail("receiver already proved delivery"))
+
+
+@pytest.mark.parametrize("door", ["message", "report"])
+@pytest.mark.parametrize("crash", [False, True])
+@pytest.mark.parametrize("old_rule", [False, True])
+def test_message_doors_record_the_committing_session_and_replay_across_clear(estate, monkeypatch, door, crash, old_rule):
+    from claudlobby import request_facts
+    route, package, conn = estate
+    if door == "report":
+        route = replace(route, peer=route.manager, peer_destination=route.manager_destination)
+    session_a, session_b = "sess_" + "a" * 32, "sess_" + "b" * 32
+    route_a = replace(route, session_uid=None if old_rule else session_a)
+    request_id, calls = str(uuid4()), []
+    def transport(*a, **k):
+        calls.append(k["body"])
+        return TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0)
+    def call(selected):
+        if door == "report":
+            return messages.send_unlinked_report(selected, package,
+                ReportPayload("progress", summary="Session evidence"), request_id=request_id,
+                retry_uncertain=crash, trusted_tiers={}, transport=transport,
+                notify=lambda *a, **k: "alerted", clear=lambda *a, **k: None)
+        return _call(selected, package, request_id, transport=transport, retry_uncertain=crash,
+                     require_durable_request=True)
+    with monkeypatch.context() as patch:
+        if old_rule:
+            patch.setattr(request_facts, "_SESSION_COLUMNS", ())
+        if crash:
+            def fail(*a, **k):
+                raise RuntimeError("crash before native attempt")
+            patch.setattr(RequestStore, "begin_native_attempt", fail)
+            with pytest.raises(RuntimeError, match="crash before native"):
+                call(route_a)
+        else:
+            call(route_a)
+    frozen = _receipt(route, request_id).intent.stages[0].facts
+    result = call(replace(route, session_uid=session_b))
+    assert result.replayed is (not crash)
+    assert len(calls) == 1
+    assert _receipt(route, request_id).intent.stages[0].facts == frozen
+    assert conn.execute("SELECT sender_session_uid FROM communications").fetchone()[0] == (
+        session_b if crash else (None if old_rule else session_a))
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_human_reply_records_the_committing_session_and_replays(estate, monkeypatch, crash):
+    from claudlobby.message_context import HumanReplyRoute
+    route, package, conn = estate
+    human_uid = resolve_party(conn, "human:operator", now="2026-09-28T00:00:00Z")
+    human = TaskActor(human_uid, "human:operator")
+    reply = HumanReplyRoute(route.origin, route.selected, route.activation_id, route.plan_id,
+        route.release_id, route.host_uid, route.caller_fleet_uid, route.selected_fleet_uid,
+        route.caller, human, session_uid="sess_" + "a" * 32)
+    request_id, parent = str(uuid4()), mint_msg_id()
+    def call(selected):
+        return messages.record_reply_to_human(selected, package, MessageBody("Session answer"),
+            request_id=request_id, parent_message_id=parent)
+    if crash:
+        with monkeypatch.context() as patch:
+            def fail(*a, **k):
+                raise RuntimeError("crash after prepare")
+            patch.setattr(messages, "_record", fail)
+            with pytest.raises(RuntimeError, match="crash after prepare"):
+                call(reply)
+    else:
+        call(reply)
+    facts = _receipt(route, request_id).intent.stages[0].facts
+    result = call(replace(reply, session_uid="sess_" + "b" * 32))
+    assert result.recording == "committed"
+    assert _receipt(route, request_id).intent.stages[0].facts == facts
+    assert conn.execute("SELECT sender_session_uid FROM communications").fetchone()[0] == "sess_" + ("b" if crash else "a") * 32
+    assert conn.execute("SELECT COUNT(*) FROM communications").fetchone()[0] == 1
