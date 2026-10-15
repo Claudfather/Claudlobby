@@ -17,9 +17,9 @@ ASG = "asg_" + "3" * 32
 IDS = ("ev_" + "4" * 32, "ev_" + "5" * 32)
 
 
-def _facts(report, link=None):
+def _facts(report, link=None, **kwargs):
     return encode_report_facts(report, fleet="f", sender="bot:f/worker", recipient="bot:f/manager",
-                               msg_id=MSG, event_ids=IDS, occurred_at="2026-09-28T12:00:00Z", link=link)
+                               msg_id=MSG, event_ids=IDS, occurred_at="2026-09-28T12:00:00Z", link=link, **kwargs)
 
 
 def _report():
@@ -125,12 +125,10 @@ def test_real_ingest_capture_preserves_full_evidence_and_withholds_metadata(tmp_
 
 def test_report_session_is_on_both_linked_facts_and_only_the_unlinked_communication():
     session = "sess_" + "a" * 32
-    def encode(link=None, **kw):
-        return encode_report_facts(_report(), fleet="f", sender="bot:f/worker", recipient="bot:f/manager",
-            msg_id=MSG, event_ids=IDS, occurred_at="2026-09-28T12:00:00Z", link=link, **kw)
-    comm, task = encode(ReportLink(WI, ASG, "progress"), session_uid=session)
+    report = _report()
+    comm, task = _facts(report, ReportLink(WI, ASG, "progress"), session_uid=session)
     assert comm["payload"]["sender_session_uid"] == task["payload"]["session_uid"] == session
-    comm, marker = encode(session_uid=session)
+    comm, marker = _facts(report, session_uid=session)
     assert comm["payload"]["sender_session_uid"] == session
-    assert marker == encode()[1]
-    assert encode(session_uid=None) == encode()
+    assert marker == _facts(report)[1]
+    assert _facts(report, session_uid=None) == _facts(report)
