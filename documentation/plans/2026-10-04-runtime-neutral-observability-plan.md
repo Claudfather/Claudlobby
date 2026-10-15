@@ -2106,6 +2106,25 @@ and 12 are not started. The run log has the evidence for each done item.
 Register rows still **planned** in the boundary spec: row 11 (P3 clauDNA Task 9 opens the Claudron PR that flips
 it) and row 12 (P4 Claudron flips it).
 
+### 10.0a Continuation status (2026-10-15)
+
+The 2026-10-13 table above is historical. Current verification and the full remaining
+work list live in the [single sprint ledger](2026-10-04-runtime-neutral-observability-run-log.md#2026-10-15--build-all-sprint-ledger).
+
+- **7b integrated:** clauDNA#411 and #412 released v0.28.0; Claudron#228 marks register row 11 shipped.
+- **7c integrated:** summary consumer [#2361](https://github.com/Claudfather/Claudlobby/pull/2361) merged
+  `b4ae5dae` after independent simplify/code/verification convergence, full before/after comparison,
+  native composed-producer/cache observations, direct harness and Linux CI. Production activation is separate.
+- **7a under verification:** telemetry rebased onto that actual merged tree. Receiver/sink review and local
+  canary passed; full-suite parser-isolation and privacy-fixture findings are being closed before a fresh final run.
+  The seven-day independent floor-host/RC canary remains a pre-merge gate.
+- **8b started:** a fresh 6a branch from `b4ae5dae` owns its before-leg, Claudron v0.9.0 pin and migration warning.
+  Its real scratch-vault migration and harvest canary are still required. **8a** waits for 7a's week and token ratios.
+- **9 remains draft:** [#2360](https://github.com/Claudfather/Claudlobby/pull/2360) passed local full comparison,
+  four simplify lenses and native protocol checks. Literal `/clear`, native lifecycle and both 48-hour windows remain.
+- **10–12 remain dependent:** isolated Codex authentication choice and real canary measurements precede P4 plans,
+  owner adapters and the two execution/behavior companions. No authenticated Codex measurement is claimed.
+
 ### 10.1 Per-PR plans (forge, 2026-10-04)
 
 One plan per PR beside this file, each with `epic:` pointing here. P4 and the companions get theirs when
