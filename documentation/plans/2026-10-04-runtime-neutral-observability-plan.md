@@ -1753,7 +1753,7 @@ transcript pointer to the `segment` object and computed the volume fields from i
 | `digest_chars`, `model` | `producer.duration_ms` / `producer.cost_usd` / `producer.model` |
 | `context` | `journey.title` + `journey.intent` |
 | `worked` | `journey.done` (+ `journey.outcome`) |
-| `failed` | `journey.outcome` when not `completed`, with `failures` |
+| `failed` | `journey.outcome` when not `shipped`, with `failures` |
 | `would_change` | `journey.next` (the nearest field; the digest's "what the operator would change" has no direct successor — the monitor's prompt asks for it from `next` + `in_progress`) |
 | `reusable` | `blocks.count` / `blocks.kinds` (what harvest will offer Claudron) |
 | `error` | `skipped_reason` |
@@ -1767,7 +1767,7 @@ not include `fleet-monitoring.md`; what binds the protocol rewrite to the regist
 positive control at `:323`, so both land in one PR (P3 Claudlobby). The monitor also gains the stop rule for
 the window P3 actually produces (ironclad cycle 1): `session-export` ships on, so week one is one status row per
 sealed segment with `journey: null` unless a bot is armed — `fleet-digest` stops on "every row `skipped` →
-COVERAGE: summaries armed on 0 of N bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
+COVERAGE: summaries available on 0 of N represented bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
 `fleet-monitoring.md:39-41` "Nothing watches for sessions ending" joins the edit range). The per-session tool
 totals: P2-a2 writes the `session.tool_calls` samples, but the first reader it repoints is `usage_read`/`brief_read`
 (`session.tokens`, `session.api_requests`; A-F3), and no P2 PR grants `fleet-digest` the `plane samples` door
