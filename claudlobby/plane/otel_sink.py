@@ -167,6 +167,7 @@ class RawSink:
             active = self.path / f"{signal}.jsonl"
             flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
             fd = os.open(active, flags, 0o600)
+            rotated = False
             try:
                 offset = self._checked_size(fd)
                 if offset and offset + len(line) > MAX_MEGABYTES * 1024 * 1024:
@@ -174,6 +175,7 @@ class RawSink:
                     fd = None
                     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + f"-{time.time_ns()}"
                     active.rename(self.path / f"{signal}-{stamp}.jsonl")
+                    rotated = True
                     fd = os.open(active, flags, 0o600)
                     offset = self._checked_size(fd)
                 try:
@@ -190,9 +192,10 @@ class RawSink:
             finally:
                 if fd is not None:
                     os.close(fd)
-            # Retention follows a complete line. Its failure can return 503 while
-            # leaving that complete raw body present; it never leaves a fragment.
-            self._prune(time.time())
+                # Enforce the count even if the rotated append failed. After a
+                # complete write, prune failure can return 503 with the body present.
+                if rotated:
+                    self._prune(time.time())
 
     def _prune(self, now: float) -> None:
         probe, entries = scan_dir(self.path)

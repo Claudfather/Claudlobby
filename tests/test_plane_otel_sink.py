@@ -52,8 +52,18 @@ def test_metrics_unchanged_and_rotation_bound(tmp_path, monkeypatch):
     old = time.time() - 16*86400
     for file in files:
         os.utime(file, (old, old))
+    # Ordinary appends do not scan retention; old rotations wait for its cadence.
+    with monkeypatch.context() as patch:
+        patch.setattr(sink, 'MAX_MEGABYTES', 64)
+        raw.append('metrics', body)
+    assert set(raw.path.iterdir()) == set(files)
     raw.prune(time.time())
-    assert not list(raw.path.iterdir())
+    assert list(raw.path.iterdir()) == [raw.path/'metrics.jsonl']
+    # Rotation also prunes, including an aged active file moved to a rotation.
+    os.utime(raw.path/'metrics.jsonl', (old, old))
+    raw.append('metrics', body)
+    assert list(raw.path.iterdir()) == [raw.path/'metrics.jsonl']
+    assert json.loads((raw.path/'metrics.jsonl').read_text()) == body
 
 
 @pytest.mark.parametrize('kind', ['symlink', 'public', 'foreign'])
@@ -163,3 +173,19 @@ def test_existing_incomplete_tail_is_refused_before_rotation(tmp_path, monkeypat
     with pytest.raises(OSError):
         raw.append('metrics', {'resourceMetrics': []})
     assert list(raw.path.iterdir()) == [raw.path/'metrics.jsonl']
+
+
+def test_failed_rotated_append_still_enforces_file_count(tmp_path, monkeypatch):
+    raw = sink.RawSink(tmp_path, days=14)
+    monkeypatch.setattr(sink, 'MAX_MEGABYTES', .000001)
+    monkeypatch.setattr(sink, 'MAX_FILES', 1)
+    body = {'resourceMetrics': []}
+    raw.append('metrics', body)
+    with monkeypatch.context() as patch:
+        inject_partial_write(patch)
+        with pytest.raises(OSError):
+            raw.append('metrics', body)
+    assert list(raw.path.iterdir()) == [raw.path/'metrics.jsonl']
+    assert (raw.path/'metrics.jsonl').read_bytes() == b''
+    raw.append('metrics', body)
+    assert json.loads((raw.path/'metrics.jsonl').read_text()) == body
