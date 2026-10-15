@@ -649,6 +649,22 @@ class TestClaudronDoctorRung:
         assert "1 other finding(s) (D004)" in row.detail
         assert set(rows) == {"claudron-doctor"}
 
+    def test_run_doctor_shares_its_probe_with_fleet_validation(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _, paths = doctor_fleet
+        vault = TestCheckClaudron._vault(tmp_path)
+        fleet = TestCheckClaudron._wire(root, vault)
+        log = self._engine(tmp_path, monkeypatch, envelope=_doctor_envelope(
+            vault_format=2, engine_format=3, pending=PENDING, errors=D001), rc=1)
+        report = run_doctor(fleet, paths, delivery=False)
+        calls = log.read_text().splitlines()
+        assert len([c for c in calls if c.startswith("status ")]) == 1
+        assert len([c for c in calls if c.startswith("doctor ")]) == 1
+        fleet_row = next(c for c in report.checks if c.name == "fleet-yaml")
+        assert "claudron-migration" in fleet_row.detail
+        assert any(c.name == "claudron-doctor" and "m001" in c.detail for c in report.checks)
+
     def test_fix_is_never_passed(self, doctor_fleet, tmp_path, monkeypatch):
         vault, _, doctor_calls, calls = self._diagnose(
             doctor_fleet,

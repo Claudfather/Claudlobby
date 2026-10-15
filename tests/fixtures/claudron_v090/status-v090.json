@@ -1,0 +1,94 @@
+{
+  "ok": true,
+  "command": "status",
+  "data": {
+    "root": "/example/vault",
+    "tiers": {
+      "shared/knowledge": {
+        "docs": 1,
+        "stale": 0,
+        "path": "/example/vault/_shared/knowledge"
+      },
+      "shared/decisions": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/decisions"
+      },
+      "shared/runbooks": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/runbooks"
+      },
+      "shared/planning": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/planning"
+      },
+      "shared/entity": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/entity"
+      },
+      "shared/concept": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/concept"
+      },
+      "shared/project": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/project"
+      },
+      "shared/practice": {
+        "docs": 0,
+        "stale": 0,
+        "path": "/example/vault/_shared/practice"
+      }
+    },
+    "total_docs": 1,
+    "total_stale": 0,
+    "projects": [],
+    "fleets": [],
+    "quarantined": [],
+    "index_present": true,
+    "index_fresh": false,
+    "divergence": {
+      "missing": 0,
+      "ghost": 0,
+      "index_present": false,
+      "corrupt": false
+    },
+    "lifecycle": {
+      "maturity": {
+        "draft": 1,
+        "verified": 0,
+        "canonical": 0,
+        "unrated": 0
+      },
+      "promoted_pct": 0
+    },
+    "warnings": [],
+    "engine_version": "0.9.0",
+    "capabilities": [
+      "navigation",
+      "doctor",
+      "doctor-settings",
+      "trust-aware-reads",
+      "subjects",
+      "amend",
+      "runs",
+      "memory-homes",
+      "tags",
+      "ops-log",
+      "contract",
+      "subject-filing"
+    ],
+    "runs": {
+      "last_run": null,
+      "last_ok_at": null,
+      "last_failure": null
+    }
+  },
+  "warnings": [],
+  "errors": []
+}

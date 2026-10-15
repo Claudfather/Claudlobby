@@ -443,6 +443,129 @@ class TestValidator:
         assert not self._loop_errors(tmp_path, bot)
 
 
+class TestVaultMigrationWarnings:
+    """Synthetic CLI answers exercise the consumer contract, not engine internals."""
+
+    @staticmethod
+    def _setup(tmp_path, monkeypatch, *, data=None, findings=(), caps=("doctor",),
+               rc=0, status_rc=0, answer=None, loop=True, bots=1):
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True, exist_ok=True)
+        calls = tmp_path / "calls.jsonl"
+        status = {"command": "status", "data": {"capabilities": list(caps), "engine_version": "test"}}
+        envelope = {"command": "doctor", "data": data if data is not None else {
+            "vault_format": 3, "engine_format": 3, "pending": []},
+            "errors": [], "warnings": [{"code": code, "message": code} for code in findings]}
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "claudron"
+        stub.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            f"with open({str(calls)!r}, 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"if sys.argv[1] == 'status': print({json.dumps(status)!r}); sys.exit({status_rc})\n"
+            f"if sys.argv[1] == 'doctor': print({answer if answer is not None else json.dumps(envelope)!r}); sys.exit({rc})\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+        fleet = _fleet(BotConfig(bot_id="b1", name="b1", expertise=["eng"],
+            claudron_vault_path=str(vault), claudron_session_loop=loop))
+        for i in range(2, bots + 1):
+            fleet.bots[f"b{i}"] = BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"],
+                claudron_vault_path=str(vault), claudron_session_loop=loop)
+        return vault, calls, fleet, _paths(tmp_path)
+
+    @staticmethod
+    def _migration_rows(report):
+        return [(kind, text) for kind, text in report.categorized()
+                if kind in {"claudron-migration", "claudron-doctor"}]
+
+    @pytest.mark.parametrize("data,findings", [
+        ({"vault_format": 2, "engine_format": 3, "pending": [{"id": "m003", "title": "memory homes"}]}, ()),
+        ({"vault_format": 2, "engine_format": 3, "pending": []}, ()),
+        ({"vault_format": 4, "engine_format": 3, "pending": []}, ()),
+        ({"vault_format": 3, "engine_format": 3, "pending": []}, ("D001",)),
+    ])
+    def test_pending_or_unequal_format_warns_with_explicit_human_command(
+        self, tmp_path, monkeypatch, data, findings
+    ):
+        vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch, data=data,
+            findings=findings, rc=1)
+        report = validate(fleet, paths)
+        rows = self._migration_rows(report)
+        assert len(rows) == 1 and rows[0][0] == "claudron-migration"
+        assert str(vault) in rows[0][1]
+        assert f"claudron doctor --fix --json --vault {vault}" in rows[0][1]
+        assert "one clone" in rows[0][1] and "pull" in rows[0][1] and "plans again" in rows[0][1]
+        assert not any("migration" in error for error in report.errors)
+        assert "--fix" not in calls.read_text()
+
+    @pytest.mark.parametrize("code", ["D007", "D008", "D009", "D010", "S001"])
+    def test_unrelated_findings_do_not_warn_migration(self, tmp_path, monkeypatch, code):
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch, findings=(code,), rc=1)
+        assert self._migration_rows(validate(fleet, paths)) == []
+
+    @pytest.mark.parametrize("engine,why", [
+        ({"caps": ()}, "does not declare"),
+        ({"rc": 3}, "no vault"),
+        ({"status_rc": 3}, "no vault resolved"),
+        ({"answer": "not json"}, "without its envelope"),
+        ({"answer": '{"command":"doctor","data":{},"errors":"bad","warnings":[]}'}, "without its envelope"),
+        ({"data": {"pending": []}}, "format"),
+        ({"data": {"pending": [], "vault_format": True, "engine_format": 3}}, "format"),
+    ])
+    def test_unavailable_state_warns_unknown(self, tmp_path, monkeypatch, engine, why):
+        vault, _, fleet, paths = self._setup(tmp_path, monkeypatch, **engine)
+        rows = self._migration_rows(validate(fleet, paths))
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert why in rows[0][1] and str(vault) in rows[0][1]
+
+    def test_timeout_warns_unknown(self, tmp_path, monkeypatch):
+        from claudlobby import claudron_compat as compat
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch)
+        def run(argv, **kwargs):
+            return (0, '{"data":{"capabilities":["doctor"]}}') if argv[1] == "status" else (124, "")
+        monkeypatch.setattr(compat, "_run", run)
+        rows = self._migration_rows(validate(fleet, paths))
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert "60s" in rows[0][1] and "unknown" in rows[0][1]
+
+    def test_loop_disabled_does_not_probe(self, tmp_path, monkeypatch):
+        _, calls, fleet, paths = self._setup(tmp_path, monkeypatch, loop=False)
+        assert self._migration_rows(validate(fleet, paths)) == []
+        assert not calls.exists()
+
+    def test_unresolved_vault_does_not_probe(self, tmp_path, monkeypatch):
+        vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch)
+        (vault / "_shared").rmdir()
+        assert self._migration_rows(validate(fleet, paths)) == []
+        assert not calls.exists()
+
+    def test_cli_absent_does_not_probe(self, tmp_path, monkeypatch):
+        import claudlobby.claudron_compat as compat
+        _, calls, fleet, paths = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setenv("PATH", str(tmp_path / "absent"))
+        monkeypatch.setattr(compat, "vault_migration_state", lambda *a, **kw: pytest.fail("off-PATH probe"))
+        report = validate(fleet, paths)
+        assert self._migration_rows(report) == []
+        assert "claudron-path" in report.warning_categories and not calls.exists()
+
+    def test_one_probe_per_vault_and_fresh_reader_next_call(self, tmp_path, monkeypatch):
+        import claudlobby.claudron_compat as compat
+        vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch, bots=2,
+            data={"vault_format": 2, "engine_format": 3, "pending": []})
+        report = validate(fleet, paths)
+        rows = self._migration_rows(report)
+        assert len(rows) == 1 and "affects 2 bot(s)" in rows[0][1]
+        argv = [json.loads(line) for line in calls.read_text().splitlines()]
+        assert [a[0] for a in argv] == ["status", "doctor"]
+        seen = []
+        def replacement(path, **kwargs):
+            seen.append(path)
+            return compat.VaultMigrationState("ok", (), 3, 3, "")
+        monkeypatch.setattr(compat, "vault_migration_state", replacement)
+        assert self._migration_rows(validate(fleet, paths)) == []
+        assert seen == [str(vault)]
+
+
 # ---------------------------------------------------------------------------
 # The R3 drift gate — composed entries == the pinned engine's snippet.
 # (Skipped when the [vault] extra is not installed; runs in the vault-mode CI.)

@@ -8,6 +8,7 @@ not out-live it).
 """
 
 import inspect
+import json
 import re
 from pathlib import Path
 
@@ -325,3 +326,52 @@ def test_docstring_names_a_real_consumer():
         "doctor.check_claudron no longer reads COMPAT_FLOOR — the docstring's "
         "'reads this table' claim is stale"
     )
+
+
+class TestVaultMigrationProbeBudget:
+    def test_status_and_doctor_share_one_total_budget(self, monkeypatch):
+        ticks = iter([0.0, 0.0, 9.0])
+        monkeypatch.setattr(claudron_compat, "monotonic", lambda: next(ticks))
+        calls = []
+        def run(argv, timeout=10.0):
+            calls.append((argv, timeout))
+            if argv[1] == "status":
+                return 0, '{"data":{"capabilities":["doctor"]}}'
+            return 124, ""
+        state = claudron_compat.vault_migration_state("/scratch/vault", run=run, timeout=10.0)
+        assert state.status == "unknown"
+        assert [timeout for _, timeout in calls] == [10.0, 1.0]
+        assert "10s" in state.detail and "unknown" in state.detail
+
+    def test_exhausted_budget_does_not_start_doctor(self, monkeypatch):
+        ticks = iter([0.0, 0.0, 60.0])
+        monkeypatch.setattr(claudron_compat, "monotonic", lambda: next(ticks))
+        calls = []
+        def run(argv, timeout=10.0):
+            calls.append(argv)
+            return 0, '{"data":{"capabilities":["doctor"]}}'
+        state = claudron_compat.vault_migration_state("/scratch/vault", run=run)
+        assert state.status == "unknown" and "60s" in state.detail
+        assert len(calls) == 1
+
+    def test_status_timeout_is_unknown(self):
+        state = claudron_compat.vault_migration_state("/scratch/vault", run=lambda *a, **kw: (124, ""))
+        assert state.status == "unknown" and "status" in state.detail and "60s" in state.detail
+
+
+def test_live_v090_pending_migration_shape():
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    answers = {"status": (0, (fixtures / "status-v090.json").read_text()),
+               "doctor": (1, (fixtures / "doctor-format2.json").read_text())}
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return answers[argv[1]]
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    doctor_data = json.loads(answers["doctor"][1])["data"]
+    assert state.status == "pending" and state.vault_format == 2 and state.engine_format == 3
+    assert state.pending == (("m003", doctor_data["pending"][0]["title"]),)
+    assert [code for code, _ in state.findings] == ["D001"]
+    assert "engine 0.9.0" in state.probe_detail
+    assert [argv[1] for argv in calls] == ["status", "doctor"]
+    assert not any("--fix" in argv for argv in calls)

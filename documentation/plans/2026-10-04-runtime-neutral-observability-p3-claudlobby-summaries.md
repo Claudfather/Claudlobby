@@ -1,10 +1,10 @@
 ---
 title: "P3 — summaries owned by clauDNA: the session-export job, `session_summary`, the Claudron pin, and two hooks retired (Claudlobby)"
 type: plan
-status: draft
+status: in-progress
 owner: chrisrogers37
 created: 2026-10-04
-updated: 2026-10-05
+updated: 2026-10-15
 epic: documentation/plans/2026-10-04-runtime-neutral-observability-plan.md
 spec: documentation/plans/2026-08-18-observable-plane-design-v2.md
 issue: "#2145"
@@ -431,6 +431,16 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
   opt in per bot; session-export ships on with a loud off`.
 
 ### Task 3 (PR 6a, after 6b): the Claudron pin `v0.6.1 → v0.9.0`, the compat row that forces it, and the migration warning
+
+**Execution status (2026-10-15):** 6b is integrated in #2361. The separate 6a
+candidate adds the harvest floor, v0.9.0 pin and runbook, and a shared bounded
+CLI migration reader used by validation and doctor. Test-first migration checks
+were observed red before implementation; the old v0.6.1 pin was observed failing
+the new 0.8.0 floor. The new v0.9.0 pending fixture is a scrubbed live capture,
+with provenance beside it; the earlier doctor fixtures remain explicitly
+historical. Final reviews, the private migration/harvest canary, vault-extra lane
+and 6a's own full before/after gate remain required before merge. Production is
+unchanged by this implementation candidate.
 
 **Files:** `pyproject.toml`, `.github/workflows/conformance.yml`, `claudlobby/claudron_compat.py`, `claudlobby/doctor.py`,
 `claudlobby/validator.py`, `tests/test_claudron_compat.py`, `tests/test_claudron_loop.py`, `tests/test_validator*.py`,
