@@ -395,8 +395,7 @@ def _recv_line(conn: socket.socket, timeout: float = 5.0) -> bytes:
     # 19.5s starvation of a healthy client at 1 byte/4s, unbounded in general.
     # Same F5 hole the client and probe_daemon already closed, server-side.
     deadline = time.monotonic() + timeout
-    chunks = []
-    total = 0
+    body = bytearray()
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -405,13 +404,12 @@ def _recv_line(conn: socket.socket, timeout: float = 5.0) -> bytes:
         chunk = conn.recv(65536)
         if not chunk:
             break
-        total += len(chunk)
-        if total > MAX_REQUEST_BYTES:
+        if len(body) + len(chunk) > MAX_REQUEST_BYTES:
             raise ValueError(f"request exceeds {MAX_REQUEST_BYTES} bytes")
-        chunks.append(chunk)
+        body.extend(chunk)
         if b"\n" in chunk:
             break
-    return b"".join(chunks)
+    return bytes(body)
 
 
 class PlaneDaemon:

@@ -103,3 +103,63 @@ def test_file_pruned_during_scan_does_not_hide_the_sink(tmp_path, monkeypatch):
     missing = raw.path/'logs-old.jsonl'
     monkeypatch.setattr(sink, 'scan_dir', lambda path: (SimpleNamespace(state='ok'), [missing]))
     assert sink.scan_sink(tmp_path).state == 'ok'
+
+
+def inject_partial_write(monkeypatch, *, short=False):
+    """Fault at the file writer: actual prefix bytes precede an error/short result."""
+    original = sink.os.fdopen
+    class PartialWriter:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+        def write(self, data):
+            self.stream.write(data[:7])
+            if short:
+                return 7
+            raise OSError('injected partial append')
+    monkeypatch.setattr(sink.os, 'fdopen', lambda *a, **k: PartialWriter(original(*a, **k)))
+
+
+@pytest.mark.parametrize('short', [False, True])
+@pytest.mark.parametrize('prior', [False, True])
+def test_failed_or_short_append_rolls_back_before_next_body(tmp_path, monkeypatch, short, prior):
+    raw = sink.RawSink(tmp_path, days=14)
+    body = {'resourceMetrics': []}
+    if prior:
+        raw.append('metrics', body)
+    with monkeypatch.context() as patch:
+        inject_partial_write(patch, short=short)
+        with pytest.raises(OSError):
+            raw.append('metrics', body)
+    raw.append('metrics', body)
+    lines = (raw.path/'metrics.jsonl').read_bytes().splitlines(keepends=True)
+    assert len(lines) == (2 if prior else 1)
+    assert all(line.endswith(b'\n') and json.loads(line) == body for line in lines)
+
+
+def test_rollback_failure_refuses_later_writes_and_restart_on_fragment(tmp_path, monkeypatch):
+    raw = sink.RawSink(tmp_path, days=14)
+    with monkeypatch.context() as patch:
+        inject_partial_write(patch)
+        patch.setattr(sink.os, 'ftruncate', lambda *args: (_ for _ in ()).throw(OSError('rollback failed')))
+        with pytest.raises(OSError):
+            raw.append('metrics', {'resourceMetrics': []})
+    fragment = (raw.path/'metrics.jsonl').read_bytes()
+    with pytest.raises(OSError):
+        raw.append('metrics', {'resourceMetrics': []})
+    assert (raw.path/'metrics.jsonl').read_bytes() == fragment
+    with pytest.raises(OSError):
+        sink.RawSink(tmp_path, days=14)
+
+
+def test_existing_incomplete_tail_is_refused_before_rotation(tmp_path, monkeypatch):
+    raw = sink.RawSink(tmp_path, days=14)
+    (raw.path/'metrics.jsonl').write_bytes(b'{"incomplete":')
+    monkeypatch.setattr(sink, 'MAX_MEGABYTES', .000001)
+    with pytest.raises(OSError):
+        raw.append('metrics', {'resourceMetrics': []})
+    assert list(raw.path.iterdir()) == [raw.path/'metrics.jsonl']

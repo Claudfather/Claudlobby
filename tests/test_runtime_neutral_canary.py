@@ -9,6 +9,7 @@ identifiers replaced) and assert what lands.
 from __future__ import annotations
 
 import importlib.util
+import gzip
 import json
 import os
 import shutil
@@ -204,6 +205,7 @@ def test_env_block_labels_the_bots_real_fleet():
 @pytest.mark.parametrize('body', [
     b'not a gzip header',
     b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\x07',
+    gzip.compress(b'['*1200 + b'0' + b']'*1200),
 ])
 def test_receiver_records_malformed_gzip_after_immediate_ack(tmp_path, capsys, body):
     import http.client

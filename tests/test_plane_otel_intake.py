@@ -132,3 +132,101 @@ def test_invalid_deflate_in_valid_gzip_header_is_refused(receiver):
     assert receiver.stats.refused[400] == 1
     assert receiver.stats.accepted == 0
     assert list(receiver.sink.path.iterdir()) == []
+
+
+def test_lone_surrogate_is_400_before_raw_mutation(receiver):
+    payload = b'{"resourceLogs":[],"untrusted":"\\ud800"}'
+    assert post(receiver, payload)[0] == 400
+    assert receiver.stats.refused[400] == 1 and receiver.stats.accepted == 0
+    assert not list(receiver.sink.path.iterdir())
+
+
+def test_recursive_tool_parameters_are_dropped_under_metadata_gate(receiver):
+    parameters = '{"skill_name":' + '['*1200 + '0' + ']'*1200 + '}'
+    body = {'resourceLogs': [{'scopeLogs': [{'logRecords': [{'attributes': [
+        {'key': 'tool_parameters', 'value': {'stringValue': parameters}},
+        {'key': 'tool_name', 'value': {'stringValue': 'Skill'}}]}]}]}]}
+    assert post(receiver, json.dumps(body).encode())[0] == 200
+    saved = json.loads((receiver.sink.path/'logs.jsonl').read_text())
+    attrs = saved['resourceLogs'][0]['scopeLogs'][0]['logRecords'][0]['attributes']
+    assert [a['key'] for a in attrs] == ['tool_name']
+
+
+def test_rollback_failure_never_acknowledges_followup_body(receiver, monkeypatch):
+    from tests.test_plane_otel_sink import inject_partial_write
+    from claudlobby.plane import otel_sink
+    with monkeypatch.context() as patch:
+        inject_partial_write(patch)
+        patch.setattr(otel_sink.os, 'ftruncate', lambda *args: (_ for _ in ()).throw(OSError('rollback failed')))
+        assert post(receiver, b'{"resourceMetrics":[]}', '/v1/metrics')[0] == 503
+    fragment = (receiver.sink.path/'metrics.jsonl').read_bytes()
+    assert post(receiver, b'{"resourceMetrics":[]}', '/v1/metrics')[0] == 503
+    assert receiver.stats.accepted == 0 and receiver.stats.unwritten == 2
+    assert (receiver.sink.path/'metrics.jsonl').read_bytes() == fragment
+
+
+def test_many_tiny_chunks_have_bounded_accumulation():
+    import io
+    import tracemalloc
+    from types import SimpleNamespace
+    count = 100000
+    wire = b'1\r\nx\r\n'*count + b'0\r\n\r\n'
+    reader = SimpleNamespace(headers={'Transfer-Encoding': 'chunked'}, rfile=io.BytesIO(wire))
+    reader._exact = lambda n: intake.Handler._exact(reader, n)
+    tracemalloc.start()
+    try:
+        body = intake.Handler._read_body(reader)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert body == b'x'*count
+    assert peak < count*4 + 65536
+
+
+def test_incomplete_headers_do_not_prevent_sigterm_drain(tmp_path):
+    import socket
+    import subprocess
+    import sys
+    from tests.conftest import constructed_env
+    script = '''
+from pathlib import Path
+import sys
+from claudlobby.plane import otel_intake as intake
+root = Path(sys.argv[1])
+intake.REQUEST_TIMEOUT_S = .25
+original_setup = intake.Handler.setup
+def observed_setup(self):
+    original_setup(self)
+    (root / ("handler-" + str(self.client_address[1]))).touch()
+intake.Handler.setup = observed_setup
+class ObservedServer(intake.IntakeServer):
+    def __init__(self, *args):
+        super().__init__(*args)
+        (root / "port").write_text(str(self.server_port))
+intake.IntakeServer = ObservedServer
+intake.serve(root, port=0, retention_days=14)
+'''
+    proc = subprocess.Popen([sys.executable, '-c', script, str(tmp_path)],
+                            env=constructed_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    held = None
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path/'port').exists():
+            assert proc.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(.02)
+        held = socket.create_connection(('127.0.0.1', int((tmp_path/'port').read_text())), timeout=2)
+        held.sendall(b'POST /v1/logs HTTP/1.1\r\nHost:')
+        mark = tmp_path/f'handler-{held.getsockname()[1]}'
+        while not mark.exists():
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        proc.terminate()
+        _stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 0 and 'Traceback' not in stderr
+    finally:
+        if held is not None:
+            held.close()
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate(timeout=5)

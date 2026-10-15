@@ -228,7 +228,7 @@ def make_handler(out: Path):
             try:
                 body = gzip.decompress(raw) if meta["encoding"] == "gzip" else raw
                 doc = json.loads(body)
-            except (OSError, ValueError, zlib.error):
+            except (OSError, ValueError, zlib.error, RecursionError):
                 _append(out / "requests.jsonl", {**meta, "json": False})
                 return
             _append(out / "requests.jsonl", {**meta, "json": True})

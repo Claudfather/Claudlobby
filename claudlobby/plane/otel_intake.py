@@ -19,6 +19,7 @@ from .otel_sink import RawSink
 
 PATHS = {"/v1/logs": "logs", "/v1/metrics": "metrics"}
 MAX_BODY_BYTES = 8 * 1024 * 1024
+REQUEST_TIMEOUT_S = 10.0
 
 
 class Refused(Exception):
@@ -77,7 +78,24 @@ def _valid_body(body, signal_name):
     return True
 
 
+def _check_unicode(value):
+    """JSON accepts escaped lone surrogates; the persisted UTF-8 stream cannot."""
+    if isinstance(value, str):
+        value.encode("utf-8")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _check_unicode(key)
+            _check_unicode(item)
+    elif isinstance(value, list):
+        for item in value:
+            _check_unicode(item)
+
+
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        self.timeout = REQUEST_TIMEOUT_S
+        super().setup()             # sets the timeout before parsing any headers
+
     def log_message(self, *args):
         pass                         # no content or account identity in access logs
 
@@ -104,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
         if encoding:
             if encoding != "chunked" or self.headers.get("Content-Length") is not None:
                 raise Refused(400)
-            chunks, size = [], 0
+            body = bytearray()
             while True:
                 line = self.rfile.readline(128)
                 try:
@@ -122,11 +140,10 @@ class Handler(BaseHTTPRequestHandler):
                         if trailer_bytes > 8192 or not trailer:
                             raise Refused(400)
                         if trailer == b"\r\n":
-                            return b"".join(chunks)
-                size += count
-                if size > MAX_BODY_BYTES:
+                            return bytes(body)
+                if len(body) + count > MAX_BODY_BYTES:
                     raise Refused(413)
-                chunks.append(self._exact(count))
+                body.extend(self._exact(count))
                 if self._exact(2) != b"\r\n":
                     raise Refused(400)
         try:
@@ -141,7 +158,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         start = time.monotonic()
-        self.connection.settimeout(10)
         signal_name = PATHS.get(self.path)
         try:
             if signal_name is None:
@@ -158,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
             elif encoding != "identity":
                 raise Refused(415)
             body = json.loads(raw)
+            _check_unicode(body)
             if not _valid_body(body, signal_name):
                 raise Refused(400)
         except Refused as exc:
@@ -168,6 +185,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self.server.sink.append(signal_name, body)
+        except (ValueError, TypeError, RecursionError):
+            self._reply(400, start)
+            return
         except OSError:
             self._reply(503, start)
             return

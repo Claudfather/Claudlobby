@@ -69,11 +69,12 @@ def strip_content(body: dict) -> int:
                             parameters = json.loads(attr.get("value", {}).get("stringValue", ""))
                             if not isinstance(parameters, dict):
                                 raise ValueError("not an object")
-                        except (ValueError, TypeError):
+                            names = {k: v for k, v in parameters.items() if k in TOOL_PARAMETER_NAMES}
+                            serialized = json.dumps(names, separators=(",", ":"))
+                        except (ValueError, TypeError, RecursionError):
                             removed += 1
                             continue
-                        names = {k: v for k, v in parameters.items() if k in TOOL_PARAMETER_NAMES}
-                        attr = {**attr, "value": {"stringValue": json.dumps(names, separators=(",", ":"))}}
+                        attr = {**attr, "value": {"stringValue": serialized}}
                     kept.append(attr)
                 record["attributes"] = kept
     return removed
@@ -131,6 +132,26 @@ class RawSink:
         if scan_sink(root).state != "ok":
             raise OSError("otel sink not_private or unreadable")
         self.lock = threading.Lock()
+        self._failed = False
+        # A prior crash/failed rollback must not let a new process join its fragment.
+        for signal in SIGNALS:
+            try:
+                fd = os.open(self.path / f"{signal}.jsonl", os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                continue
+            try:
+                self._checked_size(fd)
+            finally:
+                os.close(fd)
+
+    @staticmethod
+    def _checked_size(fd: int) -> int:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
+            raise OSError("otel sink file not_private")
+        if st.st_size and os.pread(fd, 1, st.st_size - 1) != b"\n":
+            raise OSError("otel sink incomplete raw tail — repair before restarting")
+        return st.st_size
 
     def append(self, signal: str, body: dict) -> None:
         if signal not in SIGNALS:
@@ -139,25 +160,38 @@ class RawSink:
             strip_content(body)
         line = (json.dumps(body, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
         with self.lock:
+            if self._failed:
+                raise OSError("otel sink rollback failed — refusing further writes")
             if not _private(self.path):
                 raise OSError("otel sink not_private")
             active = self.path / f"{signal}.jsonl"
+            flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+            fd = os.open(active, flags, 0o600)
             try:
-                size = active.lstat().st_size
-            except FileNotFoundError:
-                size = 0
-            if size and size + len(line) > MAX_MEGABYTES * 1024 * 1024:
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + f"-{time.time_ns()}"
-                active.rename(self.path / f"{signal}-{stamp}.jsonl")
-            fd = os.open(active, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
-                    raise OSError("otel sink file not_private")
-                with os.fdopen(fd, "wb", closefd=False) as stream:
-                    stream.write(line)
+                offset = self._checked_size(fd)
+                if offset and offset + len(line) > MAX_MEGABYTES * 1024 * 1024:
+                    os.close(fd)
+                    fd = None
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + f"-{time.time_ns()}"
+                    active.rename(self.path / f"{signal}-{stamp}.jsonl")
+                    fd = os.open(active, flags, 0o600)
+                    offset = self._checked_size(fd)
+                try:
+                    with os.fdopen(fd, "wb", buffering=0, closefd=False) as stream:
+                        if stream.write(line) != len(line):
+                            raise OSError("otel sink short raw append")
+                except OSError:
+                    try:
+                        os.ftruncate(fd, offset)
+                    except OSError as exc:
+                        self._failed = True
+                        raise OSError("otel sink rollback failed — refusing further writes") from exc
+                    raise
             finally:
-                os.close(fd)
+                if fd is not None:
+                    os.close(fd)
+            # Retention follows a complete line. Its failure can return 503 while
+            # leaving that complete raw body present; it never leaves a fragment.
             self._prune(time.time())
 
     def _prune(self, now: float) -> None:
