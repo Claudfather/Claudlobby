@@ -242,15 +242,28 @@ host:
     # cannot reach what is already enrolled:
     #   linux:  systemctl --user disable --now claudlobby-plane-daemon.service
     #   macos:  launchctl bootout gui/$UID/claudlobby-plane-daemon
-    # Opt-in resident raw intake: rotation deletes the only per-tool detail.
-    plane-otel:
-      enroll: false
-      unit: service
-      script: "$CLAUDLOBBY_NATIVE_DIR/plane-otel.sh --port 4319 --retention-days 14"
     plane-daemon:
       enroll: true
       unit: service
       script: "$CLAUDLOBBY_NATIVE_DIR/plane-daemon.sh"
+    # Opt-in resident raw intake (#2145 F4): rotation deletes the only per-tool
+    # detail. Unarmed composes NO unit; arm in this host's override at
+    # ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge).
+    # --retention-days is the raw writer's age retention, parsed at run time,
+    # like plane-prune's script-line flag. Count rotation still bounds disk use.
+    # --port must match the composed endpoint's OTEL_INTAKE_PORT (4319): moving
+    # the listener away from the bots is reported by host doctor's plane-otel rung.
+    # DISARMING: set host.jobs.plane-otel.enroll: false in this host's override,
+    # then config plan --release RELEASE_ID, config diff PLAN_ID, and
+    # host activate PLAN_ID --install-directory PATH retire its owned units.
+    # To stop an already-installed default-label unit before activation:
+    #   linux:  systemctl --user disable --now claudlobby-plane-otel.service
+    #   macos:  launchctl bootout gui/$UID/claudlobby-plane-otel
+    # Use this host's actual unit_prefix when it differs from claudlobby.
+    plane-otel:
+      enroll: false
+      unit: service
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-otel.sh --port 4319 --retention-days 14"
     # Phase-4 operator plane (read-only UI). Same compose-time dormancy
     # contract as plane-daemon: unarmed composes NO units.
     #

@@ -121,3 +121,14 @@ def test_only_composed_loopback_address_is_accepted(host):
     import argparse
     with pytest.raises(argparse.ArgumentTypeError):
         intake.loopback_host(host)
+
+
+def test_invalid_deflate_in_valid_gzip_header_is_refused(receiver):
+    # Valid gzip header, reserved DEFLATE block type: zlib.error, not BadGzipFile.
+    malformed = b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\x07'
+    status, _headers, body = post(receiver, malformed, headers={
+        'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
+    assert status == 400 and body == b'{}'
+    assert receiver.stats.refused[400] == 1
+    assert receiver.stats.accepted == 0
+    assert list(receiver.sink.path.iterdir()) == []

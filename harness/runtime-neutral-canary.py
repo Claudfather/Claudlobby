@@ -18,8 +18,9 @@ Three canaries gate the first PRs (epic §6 P0, §10 order 1):
 Verbs:
 
 ``receiver --port P --out DIR``
-    A raw OTLP/HTTP-JSON receiver on 127.0.0.1, the shape the ``plane-otel``
-    intake takes (answers 200 before anything else). It records the *shape* of
+    A raw OTLP/HTTP-JSON measurement receiver on 127.0.0.1. It deliberately
+    answers 200 before parsing; the production intake instead waits for raw
+    persistence. This instrument records the *shape* of
     each export (metric names, temporality, attribute keys, event names) and
     the values of a short allowlist of id and enum keys. Never a prompt, a tool
     input or an output.
@@ -59,6 +60,7 @@ import shlex
 import subprocess
 import sys
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -214,7 +216,8 @@ def make_handler(out: Path):
         def do_POST(self):  # noqa: N802 - http.server's name
             received = time.time()
             raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            # Answer first, as the intake does: the exporter never waits on the write.
+            # This measurement receiver acknowledges before parsing/writing shapes;
+            # production plane-otel acknowledges only after its raw append succeeds.
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -225,7 +228,7 @@ def make_handler(out: Path):
             try:
                 body = gzip.decompress(raw) if meta["encoding"] == "gzip" else raw
                 doc = json.loads(body)
-            except (OSError, ValueError):
+            except (OSError, ValueError, zlib.error):
                 _append(out / "requests.jsonl", {**meta, "json": False})
                 return
             _append(out / "requests.jsonl", {**meta, "json": True})

@@ -12,6 +12,7 @@ import signal
 import sys
 import threading
 import time
+import zlib
 
 from ..known_values import OTEL_INTAKE_PORT
 from .otel_sink import RawSink
@@ -162,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
         except Refused as exc:
             self._reply(exc.status, start)
             return
-        except (ValueError, UnicodeError, EOFError, OSError, RecursionError):
+        except (ValueError, UnicodeError, EOFError, OSError, RecursionError, zlib.error):
             self._reply(400, start)
             return
         try:
