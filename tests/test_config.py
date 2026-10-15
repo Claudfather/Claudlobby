@@ -1075,3 +1075,68 @@ class TestGitCredentialsParsing:
         )
         with pytest.raises(ValueError, match="fleet defaults"):
             load_fleet(root / "fleet.yaml")
+
+
+@pytest.mark.parametrize(
+    "defaults,raw,expected",
+    [
+        ({}, {}, (None, None)),
+        ({"harvest": True}, {"harvest": False}, (None, False)),
+        ({"session_summary": True}, {"harvest": True}, (True, True)),
+        ({"session_summary": True}, {"session_summary": None}, (True, None)),
+    ],
+)
+def test_claudna_fieldwise_merge(defaults, raw, expected):
+    cfg = _coerce_bot(
+        "b", {"expertise": ["x"], "claudna": raw}, {"claudna": defaults}
+    ).claudna
+    assert (cfg.session_summary, cfg.harvest) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"harvest": "true"},
+        {"nonesuch": True},
+        {"harvest": True, "session_summary": False},
+    ],
+)
+def test_claudna_strict_fields_and_merged_cross_field_rule(raw):
+    with pytest.raises(ValueError, match="claudna"):
+        _coerce_bot("b", {"expertise": ["x"], "claudna": raw}, {})
+    with pytest.raises(ValueError, match="harvest.*session_summary"):
+        _coerce_bot(
+            "b",
+            {"expertise": ["x"], "claudna": {"session_summary": False}},
+            {"claudna": {"harvest": True}},
+        )
+
+
+def test_registered_mappings_refuse_unknown_keys():
+    from claudlobby.config import _parse_strict_mapping, _STRICT_MAPPING_FIELDS
+
+    for head, fields in _STRICT_MAPPING_FIELDS.items():
+        with pytest.raises(ValueError, match="nonesuch.*accepted"):
+            _parse_strict_mapping({"nonesuch": True}, head, fields)
+
+
+@pytest.mark.parametrize("tier", ["bot", "fleet.defaults", "built_in"])
+def test_claudna_scalar_origin_from_authored_tiers(tmp_path, tier):
+    from claudlobby.config import scalar_config_origin
+
+    raw = {"name": "canary", "manager": "b", "bots": {"b": {"expertise": ["x"]}}}
+    if tier == "bot":
+        raw["bots"]["b"]["claudna"] = {"harvest": True}
+    if tier == "fleet.defaults":
+        raw["defaults"] = {"claudna": {"harvest": True}}
+    path = tmp_path / "fleet.yaml"
+    path.write_text(yaml.safe_dump({"fleet": raw}))
+    _, defaults = load_fleet(path)
+    assert scalar_config_origin(path, defaults, "claudna.harvest", bot="b") == (
+        tier,
+        None
+        if tier == "built_in"
+        else f"fleet.{('bots.b' if tier == 'bot' else 'defaults')}.claudna.harvest",
+    )
+    with pytest.raises(NotImplementedError):
+        scalar_config_origin(path, defaults, "claudna", bot="b")

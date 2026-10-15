@@ -125,7 +125,6 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `plane-host-probe.sh` — per-minute host samples: load, RAM, disk, swap, iowait, thermal
 - `plane-lookup.py` — read-only plane lookups by task id, assignment, escalation, event
 - `plane-readers.py` — stdlib list readers shared by the bash doors
-- `plane-session-start.sh` — SessionStart hook: session and process ids for the plane
 - `plane-dispatch-in.sh` — UserPromptSubmit hook: records what the receiving bot actually got
 - `plane-telegram-in.sh` — UserPromptSubmit hook: records the operator's Telegram messages
 - `plane-telegram-out.sh` — PostToolUse hook on the Telegram reply tool: records the reply
@@ -141,7 +140,6 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `creds-check.sh` — validate fleet credentials, including GitHub App mode
 - `orphan-browser-reaper.sh` — Linux-only reap of browser processes orphaned by dead automation
 - `notify-behind.sh` — daily report of framework checkouts behind their newest release
-- `transcript-digest.sh` — SessionEnd hook: a model-written digest per session (opt-in: spends)
 - `selfstart-snapshot.sh` — after an unplanned reboot, counts which bots self-started; run it before any rescue
 - `boot-capture.sh` — records every declared bot at each host boot (opt-in)
 

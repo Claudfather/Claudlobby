@@ -1,0 +1,5 @@
+{"data":{"actor":{"bot_id":null,"bot_name":null,"entrypoint":"sdk-cli","fleet":null,"kind":"headless","model":null},"agent_cli":"claude","chain_id":"00000000-0000-4000-8000-000000000002","claude_pid": 999999,"harvest":{"enabled":false,"vault":null},"origin":{"branch":null,"cwd":"/example/transcript.jsonl","head":null,"repo":null},"parent_sid":null,"source":"startup","transcript_path":"/example/transcript.jsonl"},"kind":"session.opened","seg":null,"sid":"00000000-0000-4000-8000-000000000002","ts":"2026-10-15T21:34:26.424Z","v":1}
+{"data":{"opened_by":"session_open","start":0},"kind":"segment.opened","seg":1,"sid":"00000000-0000-4000-8000-000000000002","ts":"2026-10-15T21:34:26.425Z","v":1}
+{"data":{"end":51525,"sealed_by":"session_end","trigger":null},"kind":"segment.sealed","seg":1,"sid":"00000000-0000-4000-8000-000000000002","ts":"2026-10-15T21:34:30.813Z","v":1}
+{"data":{"reason":"other"},"kind":"session.closed","seg":null,"sid":"00000000-0000-4000-8000-000000000002","ts":"2026-10-15T21:34:30.813Z","v":1}
+{"data":{"reason":"disabled"},"kind":"summary.skipped","seg":1,"sid":"00000000-0000-4000-8000-000000000002","ts":"2026-10-15T21:34:30.814Z","v":1}

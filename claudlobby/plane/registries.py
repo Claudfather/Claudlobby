@@ -226,6 +226,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hook), moved off the retired transcript-digest-<date>.jsonl onto the
     # plane. Informational — the monitor's substrate, never an alert.
     "session_digest": "notice",
+    # #2145 F6: session-export records each sealed clauDNA segment. The old
+    # session_digest entry above stays so historical rows classify.
+    "session_summary": "notice",
+    # Record only; the independent alert door pages and records fleet_alert.
+    "export_stalled": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.

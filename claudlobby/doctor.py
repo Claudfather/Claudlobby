@@ -1096,6 +1096,37 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
 # ----------------------------------------------------------------------
 
 
+def check_session_export(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """Read the same per-bot progress files granted to the monitor's jq door."""
+    from .source_state import SOURCE_OK, SOURCE_UNREADABLE, probe_source
+    from .session_export import STALL_AFTER, _instant
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    for bot in fleet.bots:
+        path = paths.fleet_state / "session-export" / f"{bot}.json"
+        probe = probe_source(path)
+        if probe.state != SOURCE_OK:
+            if probe.state == SOURCE_UNREADABLE:
+                report.add("session-export", "warn", f"{path} exists but cannot be read")
+            continue
+        try:
+            state = json.loads(path.read_text())
+            if not isinstance(state, dict):
+                raise ValueError("state must be an object")
+            failures, pending = state.get("consecutive_failures", 0), state.get("pending", 0)
+            if type(failures) is not int or type(pending) is not int:
+                raise ValueError("invalid failure or pending count")
+            if failures >= STALL_AFTER:
+                report.add("session-export-stalled", "warn", f"{bot}: {state.get('last_failure')} ({path})")
+            last_ack = _instant(state.get("last_ack_at"), datetime.min.replace(tzinfo=timezone.utc))
+            if pending > 0 and (now - last_ack).total_seconds() > 86400:
+                report.add("session-export-cursor-age", "warn", f"{bot}: {pending} pending; last ack {state.get('last_ack_at')} ({path})")
+            if state.get("last_skip"):
+                report.add("session-export", "pass", f"{bot}: skipped: {state['last_skip']} ({path})")
+        except (OSError, ValueError, TypeError) as exc:
+            report.add("session-export", "warn", f"{path}: invalid or unreadable JSON: {exc}")
+
+
 def check_switches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
     """The `switches` rung — every knob the system ships, and its state here.
 
@@ -1478,6 +1509,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     check_delivery(fleet, paths, report, run=delivery)
     check_goal_binding(fleet, paths, report, doors=doors)
     check_switches(fleet, paths, report)
+    check_session_export(fleet, paths, report)
     check_ignition(fleet, paths, report, doors=doors)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)

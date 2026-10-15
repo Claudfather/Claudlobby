@@ -36,10 +36,10 @@ digest to be produced; it reads what accrued.
 omissions to be filled in later — each is a rejected design, and the negative
 space is the point.
 
-- **Nothing watches for sessions ending.** No poller, no watcher, no filesystem
-  notify, no "has this session gone quiet" heuristic. The digester is a
-  `SessionEnd` hook that fires *inside* the session that is ending. A session
-  ending is not an event the monitor detects; it is an event the session reports.
+- **A session ending is an event the session reports.** clauDNA's SessionEnd
+  seals its segment inside the session. The `session-export` timer reads the
+  store's export door every 15 minutes: polling a contract door, never transcripts
+  or liveness. The monitor itself neither polls nor produces summaries.
 - **Nothing tails transcripts.** The monitor never opens a raw transcript. Ever.
   They are large, they carry secrets, and a distilled row already exists.
 - **No real-time or near-real-time path.** The cadence is hours-to-daily. There is
@@ -95,35 +95,36 @@ The monitor reads **only** pre-aggregated sources:
 
 | Source | Path | Shape |
 |---|---|---|
-| Transcript digests | `claudlobby event list --type session_digest` (the plane; #1503 — no longer a file) | one `session_digest` event per finished session |
+| Session summaries | `claudlobby event list --type session_summary` | one row per sealed segment, including skipped |
 | Bot events | `claudlobby event list` (the one door for bot events — never open `state/plane/plane.db` by hand; see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
 | Rollups | `claudlobby fleet uptime` · `utilization` · `--json fleet reports list` | fleet-level measures and paginated reports; inspect `ok` and follow `next_cursor` |
 
 ### Digest row contract
 
-Emitted by `claudlobby/_runtime_scripts/transcript-digest.sh` (`SessionEnd`) as a `session_digest` system
-event on the plane (`bot` and `ts` on the row, the fleet from the query scope;
-the rest ride `.data`, which `/fleet-digest` lifts up). Fields the monitor depends
-on:
+The `session-export` fleet job records clauDNA's export as `session_summary`
+system events. `.data` is the record the event reader lifts from the nested
+envelope; `/fleet-digest` carries the query's fleet, bot and timestamp with it.
+The predecessor's rows never reached this reader (#1456/#1503).
 
 | Field | Meaning |
 |---|---|
-| `ts` · `session_id` · `bot` · `fleet` | identity — **`session_id` is what a finding cites** |
-| `status` | `ok` · `skipped` (below `SESSION_DIGEST_MIN_TURNS`) · `error` |
-| `turns` · `tool_calls` · `transcript_bytes` · `digest_chars` | volume signals |
-| `context` · `worked` · `failed` · `would_change` · `reusable` | the distilled rubric — the reasoning substrate |
-| `error` | present only on a failed digest |
+| `ts` · `session_id` · `session_uid` · `agent_cli` · `bot` · `fleet` | identity; findings cite `session_id` |
+| `status` · `skipped_reason` | `ok` or `skipped`; all unknown reasons remain skips |
+| `turns` · `transcript_bytes` | summary input volume, null on skipped rows |
+| `prompts` · `skills` · `failures` · `interrupts` | segment counts, null when unavailable after retirement |
+| `journey.title/intent/outcome/arc/done/in_progress/next` | outcome is `shipped`, `partial`, `blocked`, `abandoned` or `exploratory`; arc is `[{step,result}]`; progress lists contain objects with `text` |
+| `blocks.count/kinds` · `procedures` | block count by home, procedure count |
+| `producer.model/duration_ms/cost_usd` | producer provenance, null on skipped rows |
+| `seg` · `sealed_at` · `sealed_by` | sealed-segment identity and boundary |
 
-Three properties to hold onto:
-
-- **The log is dormant by default.** A fleet appears only once it sets
-  `SESSION_DIGEST_ENABLED=1`. **Absence of rows means the instrument is off, not
-  that the fleet is quiet** — never infer health from an empty window. Say which
-  fleets were in scope and which had no coverage.
-- **`skipped` is not failure.** It means the session was below the turn floor.
-  Counting `skipped` rows as problems manufactures findings out of short sessions.
-- **The rubric fields are model-written free text** over a real session. Treat
-  them as evidence, not as structured data, and redact before quoting.
+The job runs by default. A bot with summaries off still yields `skipped: disabled`.
+An empty window means no sealed segment, a disabled job, or an old/stale entrypoint;
+name which from `<fleet_state>/session-export/<bot>.json` using granted `jq`.
+The operator's `host doctor` session-export rung is the other view of those files;
+the monitor runs neither doctor nor the private export tick. Missing/unreadable
+state means unknown coverage. All rows skipped means print the coverage line
+(summaries armed on 0 of N represented bots, with reason tally) and stop.
+A skip is not failure. Journeys are model-written evidence; redact before quoting.
 
 ## Token discipline
 

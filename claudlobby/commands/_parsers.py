@@ -67,6 +67,12 @@ def register_subparsers(sub) -> None:
     tick.add_argument("tick_fleet", metavar="FLEET")
     tick.set_defaults(func=_command("task_recheck", "tick"))
 
+    summary_tick = sub.add_parser("_session-export-tick", help=argparse.SUPPRESS)
+    summary_tick.add_argument("tick_fleet", metavar="FLEET")
+    summary_tick.add_argument("--dry-run", action="store_true")
+    summary_tick.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    summary_tick.set_defaults(func=_command("session_export", "tick"))
+
     from ._message_read_parsers import register_message_read_subparsers
     message_children = register_message_read_subparsers(sub)
     from ._message_write_parsers import register_message_write_subparsers

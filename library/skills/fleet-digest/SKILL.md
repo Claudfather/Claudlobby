@@ -1,6 +1,6 @@
 ---
 name: fleet-digest
-description: "Use when a monitoring pass needs its input — usually as the first step of /fleet-observe. Assembles the monitor's pass input: joins the plane's session_digest events with vitals, utilization, and fleet report rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
+description: "Use when a monitoring pass needs its input — usually as the first step of /fleet-observe. Assembles the monitor's pass input: joins the plane's session_summary events with vitals, utilization, and fleet report rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
@@ -23,8 +23,8 @@ show`).
 
 ## Step 1 — Scope: your own fleet
 
-The digest is a `session_digest` **system event on the plane** (#1503 — there is
-no `transcript-digest` file any more). `claudlobby event list` reads the plane one
+The digest is a `session_summary` **system event on the plane**, recorded by the
+`session-export` fleet job from clauDNA's export door. `claudlobby event list` reads the plane one
 fleet at a time, and the generated bot context selects **your own fleet**; the
 commands below never name a fleet. A sweep of other fleets is an operator action
 from an operator shell (`claudlobby --fleet NAME --json event list …`), not a
@@ -38,7 +38,7 @@ FLEETS="${2:?pass your own fleet name from claudlobby --json context show}"
 ## Step 2 — Assemble the window from the plane
 
 `claudlobby event list --since` bounds the window at the Plane reader. For
-each fleet, pull its `session_digest` events and reshape each plane row back to
+each fleet, pull its `session_summary` events and reshape each plane row back to
 the flat shape the rest of this skill reads: the pre-aggregated digest rides
 `.data`, while `bot` and `occurred_at` sit on each `data.items[]` entry — lift
 `.data` up and carry `bot`, `ts` and the fleet. Follow `data.next_cursor` until
@@ -55,9 +55,9 @@ for F in $FLEETS; do
   cursor=""; n=0; failed=0
   while :; do
     if [ -n "$cursor" ]; then
-      out="$(claudlobby --json event list --type session_digest --since "${DAYS}d" --limit 1000 --cursor "$cursor")"; rc=$?
+      out="$(claudlobby --json event list --type session_summary --since "${DAYS}d" --limit 1000 --cursor "$cursor")"; rc=$?
     else
-      out="$(claudlobby --json event list --type session_digest --since "${DAYS}d" --limit 1000)"; rc=$?
+      out="$(claudlobby --json event list --type session_summary --since "${DAYS}d" --limit 1000)"; rc=$?
     fi
     if [ "$rc" -ne 0 ]; then failed=1; break; fi
     page="$(printf '%s\n' "$out" | jq -c --arg fleet "$F" --arg since "$SINCE" \
@@ -79,15 +79,23 @@ done
 ```
 
 `/tmp/coverage.txt` now holds one row per fleet — a row count, or `UNREACHABLE`.
-A fleet with **zero rows and no error** has the digester **off**: dormant is the
-default (`SESSION_DIGEST_ENABLED=1` arms a fleet), so that absence means the
-instrument is off, not that the fleet was quiet.
+A fleet with **zero rows and no error** has no sealed segment in the window,
+a disabled `session-export` job (`SESSION_EXPORT_ENABLED=0`), or stale/old
+entrypoints. Name which from the per-bot state files: in an overlay fleet,
+`"$BOT_DIR/../../session-export/"*.json`; in root mode,
+`"$BOT_DIR/../../fleet/session-export/"*.json`. These are `<fleet_state>/session-export/<bot>.json`.
+Read them with granted `jq`, looking at `last_skip`, `last_ack_at`, `pending`,
+`consecutive_failures` and `stall`. Missing/unreadable files mean unknown coverage.
+The operator's `host doctor` rung reads these same files; the monitor does not run
+it or the private export tick (which spawns a store process for every bot).
 
-**If `/tmp/window.jsonl` is empty and no fleet was `UNREACHABLE`, stop and say
-so.** That is a complete, correct result: the digester is dormant across the
-scope. Do not fall back to any other source and do not infer health. A fleet
-marked `UNREACHABLE` is the opposite fact — the plane could not be read there, so
-its coverage is unknown rather than empty; report that too, and do not infer.
+**If the window is empty, stop with the coverage explanation.** A fleet marked
+`UNREACHABLE` has unknown coverage; report its read failure and do not infer health.
+
+**If every row is skipped, print `COVERAGE: summaries armed on 0 of N bots
+(all rows skipped: <reason tally>)` and stop.** N is the distinct bots represented
+in the rows, not the whole declared roster. Identity and segment volume are real;
+there is no journey to reason over. Report this as coverage once, never per session.
 
 ## Step 3 — Coverage first, before any aggregation
 
@@ -107,35 +115,40 @@ jq -s '{
 Then state, explicitly (`/tmp/coverage.txt` carries a row per fleet):
 
 - days requested vs days with data
-- fleets with data vs fleets in scope with the digester **off** (zero rows, no
-  error — name them; that absence is itself reportable) vs fleets `UNREACHABLE`
+- fleets with data vs fleets with zero rows (name the cause from state files) vs fleets `UNREACHABLE`
   (the plane refused — coverage there is unknown, not empty)
-- counts of `ok` / `skipped` / `error`
+- counts of `ok` / `skipped`
 
-`skipped` means the session was below `SESSION_DIGEST_MIN_TURNS`. It is **not** a
-failure and must not be counted as one.
+`skipped` means no summary was produced. `skipped_reason` names why: `disabled`
+(summaries off by composition), `headless` (variable unset, not a composed bot),
+`trivial`, `no_transcript`, `gave_up`, `retired`, `unexportable` (the consumer could
+not record the item), or an unknown future reason. Every one is a skip, not a failure.
 
-## Step 4 — Aggregate the rubric fields
+## Step 4 — Aggregate the journey fields
 
-The reasoning substrate is `context` · `worked` · `failed` · `would_change` ·
-`reusable`. Reduce, do not forward wholesale:
+Read `journey.title/intent/outcome/done/in_progress/next`. The released 0.28 schema
+uses `outcome: shipped|partial|blocked|abandoned|exploratory`, `arc` entries with
+`step/result`, and `done/in_progress/next` entries with `text` (plus optional fields).
+Reduce recurring themes rather than forwarding the whole model-written journey.
 
 ```bash
-# Volume signals per fleet
-jq -s 'group_by(.fleet) | map({
-  fleet: .[0].fleet, sessions: length,
-  turns: (map(.turns) | add), tool_calls: (map(.tool_calls) | add),
-  transcript_bytes: (map(.transcript_bytes) | add)
+# Volume: segment counts on all rows; turns and bytes on ok rows only.
+jq -s 'group_by(.fleet) | map({fleet: .[0].fleet,
+  sessions: (map(.session_id) | unique | length),
+  prompts: (map(.prompts // 0) | add), failures: (map(.failures // 0) | add),
+  turns: (map(select(.status=="ok") | .turns // 0) | add),
+  transcript_bytes: (map(select(.status=="ok") | .transcript_bytes // 0) | add)
 })' /tmp/window.jsonl
 
-# Non-empty friction rows, newest first — these carry the signal
-jq -c 'select((.failed // "") != "" or (.would_change // "") != "")
-       | {session_id, bot, fleet, ts, failed, would_change}' /tmp/window.jsonl
+# Friction: preserve each finding's source session and nested evidence.
+jq -c 'select(.status=="ok" and
+  (.journey.outcome != "shipped" or (.failures // 0)>0 or ((.journey.next // [])|length)>0))
+  | {session_id, bot, fleet, ts, journey, failures}' /tmp/window.jsonl
 ```
 
-Group recurring themes across sessions rather than listing every row. **Keep the
-`session_id` on every theme** — `/fleet-observe` cannot cite what you dropped, and
-an uncitable theme is unusable downstream.
+`turns` and `transcript_bytes` are null on skipped rows. Tool-call totals wait for
+a separate PR granting this skill the `plane samples` door; no such grant exists.
+Keep the `session_id` on every theme so `/fleet-observe` can cite it.
 
 ## Step 5 — Join the rollups
 
@@ -170,8 +183,8 @@ fits a reasoning pass alongside its instructions.
 
 If you must cut, cut in this order — **and say what you cut**:
 
-1. `ok` rows with all-empty rubric fields (they carry no signal)
-2. `skipped` rows (retain the count only)
+1. `skipped` rows (retain the count only)
+2. `ok` rows with an empty journey (retain the count)
 3. Oldest days first, never newest
 4. Repeated instances of a theme already represented — keep the count and at
    least one citable `session_id`
@@ -184,12 +197,13 @@ reasoning pass confidently wrong, and `no-fabrication` covers exactly this.
 ```
 COVERAGE
   window: <N> days requested, <M> days with data (missing: <dates>)
-  fleets with data: <list>  |  digester OFF: <list>  |  UNREACHABLE: <list>
-  rows: <N> ok · <N> skipped · <N> error
+  fleets with data: <list>  |  zero rows + cause: <list>  |  UNREACHABLE: <list>
+  rows: <N> ok · <N> skipped
   truncation: <none | what was dropped and why>
 
 VOLUME (per fleet)
-  <fleet>: <sessions> sessions · <turns> turns · <tool_calls> tool calls
+  <fleet>: <sessions> sessions · <turns> turns · <prompts> prompts · <failures> failures
+  turns · bytes: ok rows only
 
 FRICTION THEMES (each with citable session_ids)
   <theme> — <N> sessions — [<session_id>, ...]
@@ -211,4 +225,4 @@ UNRESOLVED
 - **Do not emit unredacted rubric text.** It is model-written free text over real
   sessions. Redact secrets to their last four characters and personal identifiers
   to a placeholder before quoting.
-- **Do not infer health from missing data.** Say the instrument was off.
+- **Do not infer health from missing data.** Name the coverage cause from the job state files.

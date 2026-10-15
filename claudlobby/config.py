@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -682,6 +682,14 @@ class IsolationConfig:
     exempt: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class ClaudnaConfig:
+    """Model-spending session knobs; None inherits clauDNA's bot default (off)."""
+
+    session_summary: bool | None = None
+    harvest: bool | None = None
+
+
 @dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
@@ -825,6 +833,7 @@ class BotConfig:
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
+    claudna: ClaudnaConfig = field(default_factory=ClaudnaConfig)
 
 
 @dataclass
@@ -1790,6 +1799,37 @@ def _select_bot_scalar(raw: dict, defaults: dict, key: str, fallback=None) -> tu
     return fallback, "built_in"
 
 
+def _parse_strict_mapping(raw: Any, where: str, fields: dict[str, Callable[[str, Any], Any]]) -> dict:
+    """Parse only fields this tier sets; null inherits from the next tier."""
+    if raw is None:
+        return {}
+    raw = _shaped(f"'{where}'", raw, dict, "{" + next(iter(fields)) + ": …}")
+    unknown = sorted(str(k) for k in raw if k not in fields)
+    if unknown:
+        raise ValueError(f"'{where}': unknown key(s) {', '.join(unknown)} — accepted: {', '.join(fields)}")
+    return {k: parse(f"{where}.{k}", raw[k]) for k, parse in fields.items() if raw.get(k) is not None}
+
+
+def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, fields: dict):
+    """Bot over defaults over built-in, independently for each field."""
+    return cls(**{**_parse_strict_mapping(defaults_raw, f"defaults.{key}", fields),
+                  **_parse_strict_mapping(bot_raw, f"bots.{name}.{key}", fields)})
+
+
+_CLAUDNA_FIELDS = {
+    "session_summary": lambda where, v: _strict_bool(f"'{where}'", v),
+    "harvest": lambda where, v: _strict_bool(f"'{where}'", v),
+}
+_STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS}
+
+
+def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig:
+    if cfg.harvest is True and cfg.session_summary is False:
+        raise ValueError(f"'{where}': claudna.harvest: true needs session_summary unset or true — "
+                         "clauDNA's gate never summarizes a bot on harvest alone")
+    return cfg
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -1992,6 +2032,8 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "'public_write_guard'",
             raw.get("public_write_guard", defaults.get("public_write_guard", False)),
         ),
+        claudna=_check_claudna(_merge_fieldwise(ClaudnaConfig, defaults.get("claudna"), raw.get("claudna"),
+                                                name, "claudna", _CLAUDNA_FIELDS), f"bots.{name}"),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
         ),
@@ -2339,9 +2381,8 @@ def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
                          *, bot: str | None = None) -> tuple[str, str | None]:
     """Name the authored source of supported scalar fields; never return values.
 
-    Only fields with a simple, known selection path are covered. Complex
-    unions, per-field mappings and composer-resolved defaults need their own
-    operation owner; callers must report those as unsupported.
+    Scalars and registered strict-mapping subfields have known selection paths.
+    Complex unions and composer-resolved defaults remain unsupported.
     """
     with fleet_yaml.open() as source:
         raw_fleet = yaml.safe_load(source)["fleet"]
@@ -2362,6 +2403,15 @@ def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
         return source, declaration
     if field in _EXPLAIN_BOT_LOCAL_SCALARS:
         return ("bot", f"fleet.bots.{bot}.{field}") if field in raw_bot else ("built_in", None)
+    head, dot, sub = field.partition(".")
+    if dot and sub in _STRICT_MAPPING_FIELDS.get(head, {}):
+        for source, mapping, declaration in (
+            ("bot", raw_bot, f"fleet.bots.{bot}.{field}"),
+            ("fleet.defaults", raw_fleet.get("defaults") or {}, f"fleet.defaults.{field}"),
+        ):
+            if (mapping.get(head) or {}).get(sub) is not None:
+                return source, declaration
+        return "built_in", None
     raise NotImplementedError
 
 

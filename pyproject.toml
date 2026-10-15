@@ -42,7 +42,7 @@ include-package-data = false
 # system.yaml is package-owned data, not operator config: every default job,
 # hook, host job and boot policy is read from it. A built wheel must include it,
 # and a missing or empty copy is refused by _load_system_defaults.
-claudlobby = ["system.yaml"]
+claudlobby = ["system.yaml", "contracts/*.json", "contracts/*.ref"]
 "claudlobby.plane" = ["migrations/*.sql", "ui/*"]
 
 [tool.pytest.ini_options]
