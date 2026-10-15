@@ -29,6 +29,7 @@ from .releases import ReleaseManifest, read_release
 
 
 RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
+RESIDENT_UNIT_UMASK = {"plane-otel": "0077"}
 # A due timer can fire while its own candidate still starts producers (Pi
 # 2026-10-01: a 44-timer phase took about 55 seconds). Its one-shot waits.
 _SCHEDULED_WAIT = 180.0

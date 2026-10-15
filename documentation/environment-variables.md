@@ -179,6 +179,20 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 
 ## Ecosystem
 
+The following exports come from `bots.<name>.telemetry` (or `fleet.defaults.telemetry`)
+only for armed Claude bots, at the next process start:
+
+| Variable | Source | Description |
+|---|---|---|
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `bots.<name>.telemetry.enabled` | `1` enables native export |
+| `OTEL_METRICS_EXPORTER` | `bots.<name>.telemetry.enabled` | `otlp` |
+| `OTEL_LOGS_EXPORTER` | `bots.<name>.telemetry.enabled` | `otlp` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `bots.<name>.telemetry.enabled` | `http/json` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `bots.<name>.telemetry.enabled` | `http://127.0.0.1:4319` |
+| `OTEL_RESOURCE_ATTRIBUTES` | `bots.<name>.telemetry` | Fleet, bot alias, content and agent CLI |
+| `OTEL_LOG_TOOL_DETAILS` | `bots.<name>.telemetry.enabled` | `1`; metadata sink retains tool names only |
+| `OTEL_LOG_USER_PROMPTS` | `bots.<name>.telemetry.content` | `1` only for `full` |
+
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `CLAUDNA_STATE_DIR` | composed, always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |

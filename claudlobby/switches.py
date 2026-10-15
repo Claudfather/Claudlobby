@@ -328,6 +328,14 @@ SWITCHES: tuple[Switch, ...] = (
              "extra; fronting it with Tailscale Serve stays yours)",
     ),
     Switch(
+        key="plane-otel", scope=HOST_SERVICE, polarity=OPT_IN, carrier=ENROLL_HOST,
+        job="plane-otel", plane=True,
+        why_opt_in="deletes data — the raw writer rotates by count and age (--retention-days), "
+                   "so the only copy of per-tool detail ages out; a resident process on the smallest host class",
+        what="the OTLP/HTTP-JSON intake on 127.0.0.1:4319 that armed bots export to; "
+             "keeps rotated raw files under state/otel/ (≤ 1.92 GB)",
+    ),
+    Switch(
         key="plane-owner",
         scope=HOST_SERVICE,
         polarity=OPT_IN,
@@ -658,6 +666,19 @@ SWITCHES: tuple[Switch, ...] = (
              "the parent of every server (#1604: 41 of them held 1.4 GB, "
              "mostly swap, on the Pi). A server that cannot launch directly "
              "keeps npx, and composition says which and why",
+    ),
+    Switch(
+        key="telemetry", scope=GENERATE, polarity=OPT_IN, carrier=COMPOSE_BOT,
+        config="telemetry.enabled",
+        compose_steps=("set telemetry.enabled: true for one canary bot; config plan, config diff PLAN_ID, "
+                       "then host activate PLAN_ID --install-directory <native-user-unit-dir>"),
+        takes_effect="at the bot's next restart: the native exporter reads bot.conf at process start",
+        takes_effect_off="export stops at the bot's next restart",
+        why_opt_in="changes what an armed bot's claude process exports at its next restart — a resident "
+                   "stream to a host-local endpoint and, with content: full, prompt text on disk; "
+                   "activate an independent canary root with one armed RC bot before widening (#533)",
+        what="export native OpenTelemetry metrics and events straight to the host's plane-otel intake "
+             "(127.0.0.1 only; raw files under state/otel/)",
     ),
     Switch(
         key="heavy-slot",

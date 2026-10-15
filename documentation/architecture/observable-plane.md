@@ -19,6 +19,8 @@ plans: `2026-08-2x-observable-plane-phase-*.md`; the cutover walk:
 
 | Path (under the host root, `CLAUDLOBBY_ROOT`) | What |
 |---|---|
+| `state/otel/{logs,metrics}.jsonl` | opt-in raw OTLP/JSON, rotated within 1,920 MiB; 0600 files under a 0700 directory; the only full tool-detail copy, outside the plane |
+| `127.0.0.1:4319` | opt-in `plane-otel` raw intake (`claudlobby plane otel-intake`); no plane rows yet |
 | `state/plane/plane.db` (+ `-wal`, `-shm`) | the database, WAL mode |
 | `state/plane/capture.json` | per-fleet capture policy: `full` (the shipped default — bodies recorded) or `metadata` (the opt-out — bodies stripped at the door, proof triple kept). A named fleet beats `*`; a malformed file fails loud and resolves to no mode at all |
 | `state/plane/ingest.sock` | the ingest daemon's socket (`claudlobby plane serve`) |
@@ -648,6 +650,7 @@ program keeps refusing.
 
 | Door | Records | Silenced by |
 |---|---|---|
+| `plane-otel.sh` (host service; `claudlobby plane otel-intake`) | private rotated raw OTLP/JSON under `state/otel/`; no plane rows in P2-a1 | `host.jobs.plane-otel.enroll: false` |
 | `claudlobby task admit` / `task assign` | admission records a queued work item; assignment records its owner separately. Neither sends a message | committed recording required; an unavailable Plane refuses the mutation |
 | `claudlobby assignment deliver` | the generated fleet manager records a communication linked to the committed assignment, then attempts native delivery; transmission and receiver receipt remain separate evidence | committed recording required before delivery; an unknown outcome is not automatically resent |
 | `claudlobby assignment accept` / `progress` / `block` / `return` / `complete` / `fail` | the assigned bot accepts or transitions its current assignment; linked reports record the transition and communication, with manager notification reported separately | committed recording required; notification failure does not undo the recorded transition |
@@ -835,6 +838,7 @@ metric-sample retention.
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
+| `plane-otel` | **off** — deletes data — the raw writer rotates by count and age (--retention-days), so the only copy of per-tool detail ages out; a resident process on the smallest host class | host service | system.yaml enroll | host.jobs.plane-otel.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `plane-owner` | **off** — private write-capable endpoint can spend model budget and mutate operator configuration | host service | system.yaml enroll | host.jobs.plane-owner.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `plane-prune-system-events` | **off** — deletes data — and unlike the sample lane beside it, this one could delete a RECORD rather than a sample, which is why it is an allowlist: a wrongly-pruned type breaks selfstart-snapshot.sh's boot gate, which fails closed on an unreachable receipt read but reads an ABSENT receipt as a certain no-receipt | door | host/root .env | PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in the host or root .env |
 | `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |

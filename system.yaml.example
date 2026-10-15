@@ -270,6 +270,11 @@ host:
     # cannot reach what is already enrolled:
     #   linux:  systemctl --user disable --now claudlobby-plane-daemon.service
     #   macos:  launchctl bootout gui/$UID/claudlobby-plane-daemon
+    # Opt-in resident raw intake: rotation deletes the only per-tool detail.
+    plane-otel:
+      enroll: false
+      unit: service
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-otel.sh --port 4319 --retention-days 14"
     plane-daemon:
       enroll: true
       unit: service

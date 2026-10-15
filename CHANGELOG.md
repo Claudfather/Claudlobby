@@ -45,6 +45,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   consumer. F15 waives the old-vs-new summary comparison; clauDNA owns summaries,
   and Python `derive_session_uid` is now the single session-id derivation.
 
+### Added — opt-in per-bot OpenTelemetry export to a local intake (#2145 P2-a1)
+
+- `telemetry: {enabled: true, content: metadata}` composes Claude's native OTLP/HTTP-JSON exports at its next restart; `content: full` separately enables prompt export.
+- The private raw sink rotates `state/otel/{logs,metrics}.jsonl` by count and age (14 days by default), within 1,920 MiB. Metadata logs omit content and account identity and retain only MCP, skill and subagent names from tool parameters. `plane doctor` reports sink privacy, size and retention.
+- `config validate` and `config plan` warn `telemetry-intake` when an armed bot's host has no enrolled intake; `host doctor` checks enrollment and the listening port.
+- The dormant `plane-otel` host service and `telemetry` switch are both opt-in. The listener binds only loopback, writes before acknowledging, and keeps private units/files. Nothing leaves the box and no plane rows are produced in this phase.
+
 ### Fixed — a handoff that lands after `bot handoff` returns reads `saved` on `bot handoff BOT --check` (#963, #990)
 
 `claudlobby bot handoff` waits 30 s, and a handoff is a model turn that often takes minutes, so the door read `unknown` on handoffs the bot went on to write. A manager had no supported way to see one land: its permissions deny it the worker's handoff file.

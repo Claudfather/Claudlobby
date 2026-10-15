@@ -59,9 +59,12 @@ fleet:
     effort: max
     # agent_cli: claude                        # claude | codex — codex waits for the execution adapter (#2149)
     account: default
+    # telemetry:                  # opt-in; apply at the next Claude restart
+    #   enabled: false            # strict YAML boolean
+    #   content: metadata         # full also exports prompts to the host disk
     prompt_suggestions: false                # disable autocomplete suggestions (headless bots don't need them)
     # Headless config defaults (all overridable per bot):
-    disable_nonessential_traffic: true       # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 — kills the survey, transcript-consent, telemetry, auto-updater (claudlobby manages CC updates)
+    disable_nonessential_traffic: true       # RC-safe granular trim set; never CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC or DISABLE_TELEMETRY (#533)
     spinner_tips_enabled: false              # settings.local spinnerTipsEnabled — silence the "Tip:" lines
     preferred_notif_channel: notifications_disabled  # settings.local preferredNotifChannel — no desktop on a headless bot
     prefers_reduced_motion: true             # settings.local prefersReducedMotion — safe now that keepalive liveness is marker-based

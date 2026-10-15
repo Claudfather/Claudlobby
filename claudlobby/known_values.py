@@ -354,3 +354,7 @@ def hint(value: str, known: set[str] | frozenset[str] | tuple[str, ...]) -> str:
     """
     suggestion = closest_match(value, set(known))
     return f" — did you mean '{suggestion}'?" if suggestion else ""
+
+# Native telemetry exports and the host-local intake share this endpoint.
+KNOWN_TELEMETRY_CONTENT: frozenset[str] = frozenset({"metadata", "full"})
+OTEL_INTAKE_PORT: int = 4319
