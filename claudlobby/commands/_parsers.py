@@ -126,8 +126,7 @@ def register_subparsers(sub) -> None:
                      help="Bind address (default 127.0.0.1 — Tailscale Serve fronts it; a raw address is the dev fallback)")
     pvw.add_argument("--port", type=int, default=8899, help="Bind port (default 8899)")
     pvw.set_defaults(func=_command("plane", "cmd_plane_view"))
-    from ..known_values import OTEL_INTAKE_PORT
-    from ..plane.otel_sink import retention_parser
+    from ._otel_parsers import OTEL_INTAKE_PORT, retention_parser
     pot = psub.add_parser("otel-intake", help="Run the host-local raw OTLP/HTTP-JSON intake",
                           parents=[retention_parser()])
     pot.add_argument("--host", choices=("127.0.0.1",), default="127.0.0.1")

@@ -1,7 +1,6 @@
 """Private, bounded raw OTLP/JSON files for the host-local intake (#2145)."""
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -12,13 +11,13 @@ import stat
 import threading
 import time
 
+from ..commands._otel_parsers import DEFAULT_RETENTION_DAYS, _positive, retention_parser
 from ..source_state import scan_dir
 from .wal import human_bytes
 
 SIGNALS = ("logs", "metrics")
 MAX_MEGABYTES, MAX_FILES = 64, 15
 RAW_SINK_CEILING_MIB = MAX_MEGABYTES * MAX_FILES * len(SIGNALS)
-DEFAULT_RETENTION_DAYS = 14
 CONTENT_KEYS = ("prompt", "prompt_text", "response", "tool_input", "arguments", "output", "body")
 TOOL_PARAMETER_NAMES = ("mcp_server_name", "mcp_tool_name", "skill_name", "subagent_type")
 IDENTITY_KEYS = ("user.email", "user.account_uuid", "user.account_id", "user.id", "organization.id")
@@ -26,22 +25,6 @@ IDENTITY_KEYS = ("user.email", "user.account_uuid", "user.account_id", "user.id"
 
 def sink_dir(root: Path) -> Path:
     return root / "state" / "otel"
-
-
-def _positive(value: str) -> int:
-    try:
-        result = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a positive integer") from exc
-    if result <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return result
-
-
-def retention_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--retention-days", type=_positive, default=DEFAULT_RETENTION_DAYS)
-    return parser
 
 
 def retention_days(script: str) -> int:
