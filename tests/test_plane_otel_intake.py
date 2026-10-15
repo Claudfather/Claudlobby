@@ -89,6 +89,7 @@ def test_callback_runs_after_reply(receiver):
 
 def test_serve_refuses_privacy_before_bind(tmp_path, monkeypatch):
     path = tmp_path/'state'/'otel'; path.mkdir(parents=True, mode=0o755)
+    path.chmod(0o755)  # Explicit negative fixture, independent of caller umask.
     monkeypatch.setattr(intake, 'IntakeServer', lambda *args: pytest.fail('bound before privacy check'))
     with pytest.raises(OSError):
         intake.serve(tmp_path, retention_days=14, install_signals=False)

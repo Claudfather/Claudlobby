@@ -74,6 +74,8 @@ def test_refuses_nonprivate_sink(tmp_path, monkeypatch, kind):
         target = tmp_path/'elsewhere'; target.mkdir(mode=0o700); path.symlink_to(target)
     else:
         path.mkdir(mode=0o755 if kind == 'public' else 0o700)
+        if kind == 'public':
+            path.chmod(0o755)  # Explicit negative fixture, independent of caller umask.
         if kind == 'foreign':
             monkeypatch.setattr(sink.os, 'getuid', lambda: -1)
     with pytest.raises(OSError, match='not_private'):
