@@ -68,6 +68,8 @@ counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
 `claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for agent CLI `claude`; another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
+The task, report and message doors record the caller's session uid from its agent CLI's session-id env (`CLAUDE_CODE_SESSION_ID` for `claude`); a door without that env records none (#2145 §2.2). `plane-lookup.py --session <sess_uid>` lists the task events and communications one session wrote. Derive a uid with `python3 -c 'from claudlobby.plane.ids import derive_session_uid as d; print(d("<raw id>", "<agent_cli>"))'`; the raw id is not stored on these rows. The `state/otel/` cost query joins on the same uid (P2).
+
 ## Owner access foundation (not enabled)
 
 `plane/owner_access.py` is an internal policy/state primitive for **direct,

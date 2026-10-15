@@ -40,6 +40,8 @@ to that selected root; using a second fleet inside the production root does not
 provide an independent release switch. On-demand skills, hooks and permissions
 are published only after the activation owner has quiesced affected consumers.
 
+Request receipts (`state/requests/`) are unchanged in format by #2145 P1: the session columns a door now fills (`session_uid`, `sender_session_uid`) hash as `null`, so receipts read and replay across activation; replaying a request recorded with a session uid after rollback to a release before this rule raises a conflict instead of acting twice — retry under a new request id.
+
 ### Refreshing a skill's installed copies
 
 A bot's skills are copies, frozen into `runtime/bots/<bot>/.claude/skills/` when a plan
