@@ -73,6 +73,47 @@ class Door:
         return subprocess.CompletedProcess(argv, 0, json.dumps(self.doc), "")
 
 
+class CursorDoor(Door):
+    """One captured session, with observed real Plane rows at every ack call."""
+
+    def __init__(self, doc, root):
+        super().__init__(doc)
+        self.db = root / "state/plane/plane.db"
+        self.cursor = 0
+        self.observed_acks = []
+
+    def rows(self):
+        with sqlite3.connect(self.db) as conn:
+            return [
+                json.loads(row[0])["data"]
+                for row in conn.execute(
+                    "SELECT detail FROM events WHERE kind = 'system' "
+                    "AND event = 'session_summary' ORDER BY ingest_seq"
+                )
+            ]
+
+    def __call__(self, argv, **kwargs):
+        if "--ack" in argv:
+            through = int(argv[argv.index("--through") + 1])
+            observed = {"through": through, "rows": self.rows()}
+            result = super().__call__(argv, **kwargs)
+            observed["rc"] = result.returncode
+            self.observed_acks.append(observed)
+            if not result.returncode:
+                self.cursor = max(self.cursor, through)
+            return result
+        pending = [item for item in self.doc["items"] if item["seg"] > self.cursor]
+        doc = {
+            **self.doc,
+            "items": pending,
+            "next": {pending[0]["sid"]: max(i["seg"] for i in pending)}
+            if pending
+            else {},
+        }
+        self.log.append(("export", argv))
+        return subprocess.CompletedProcess(argv, 0, json.dumps(doc), "")
+
+
 def export(world, door, **kwargs):
     root, paths, _, store = world
     return se.export_bot(
@@ -154,17 +195,30 @@ def test_replay_of_unacked_segment_does_not_wedge_new_segment(world):
     doc = envelope()
     doc["items"] = doc["items"][:1]
     doc["next"] = {doc["items"][0]["sid"]: 1}
-    door = Door(doc)
+    door = CursorDoor(doc, world[0])
     door.fail_ack = True
     first = export(world, door)
     assert first.emitted == 1 and first.failed == "ack_failed" and not first.acked
     second = deepcopy(doc["items"][0])
     second["seg"] = 2
+    second["summary"]["index"] = 2
+    second["summary"]["journey"]["title"] = (
+        "Synthetic second segment of captured session"
+    )
     doc["items"].append(second)
     doc["next"][second["sid"]] = 2
     door.fail_ack = False
     result = export(world, door)
+    # A genuine seen/new mixed-batch mutant may fallback and ack: normal rows
+    # must survive, so ack progress alone cannot make this replay test pass.
+    assert sorted(row["seg"] for row in door.rows() if row["status"] == "ok") == [1, 2]
     assert (result.emitted, result.duplicate, result.acked[second["sid"]]) == (1, 1, 2)
+    ack = door.observed_acks[-1]
+    assert ack["rc"] == 0 and ack["through"] == door.cursor == 2
+    assert sorted(row["seg"] for row in ack["rows"] if row["status"] == "ok") == [1, 2]
+    assert state(world)["pending"] == 0
+    again = export(world, door)
+    assert again.emitted == 0 and again.acked == {}
 
 
 def test_transient_failure_acks_only_prior_sessions(world):
@@ -232,7 +286,20 @@ def test_real_ledger_family_divergence_uses_separate_id(world, fallback_refused)
         conn.execute("DELETE FROM events WHERE event_id = ?", (raw["event_id"],))
         conn.commit()
     conn.close()
-    result = export(world, Door(doc))
+    door = CursorDoor(doc, root)
+    result = export(world, door)
+    rows = door.rows()
+    if fallback_refused:
+        assert rows == []
+        assert {"original", "fallback"} <= state(world)["last_unexportable"].keys()
+    else:
+        # Observe the real family row, not a fake emit/cardinality outcome.
+        assert len(rows) == 1
+        assert rows[0]["status"] == "skipped"
+        assert rows[0]["skipped_reason"] == "unexportable"
+    ack = door.observed_acks[-1]
+    assert ack["rc"] == 0 and ack["through"] == door.cursor == 1
+    assert ack["rows"] == rows and state(world)["pending"] == 0
     assert result.unexportable == 1 and result.acked == {sid: 1}
     assert ("last_unexportable" in state(world)) is fallback_refused
 

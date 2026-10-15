@@ -790,6 +790,7 @@ _ALL_JOB_NAMES = {
     "data-sweep",
     "task-recheck",
     "manager-checkin",
+    "session-export",
 }
 
 

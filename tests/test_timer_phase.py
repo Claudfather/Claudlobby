@@ -33,8 +33,8 @@ FLEETS = (
 )  # sorted, so slots 0-3; host jobs take slot 4
 ACCURACY_S = 1  # every anchored timer's AccuracySec=
 # job: (interval, OnCalendar= of fleet-a .. fleet-d) as composed on this four-fleet host. A band
-# is 12 s; in each fleet's band keepalive takes +0 s, the pulse +2, check-in +4, recheck +6 and
-# log rotation +8. A job longer than a minute runs one minute after the previous fleet's copy.
+# is 12 s; in each fleet's band keepalive takes +0 s, the pulse +2, check-in +4, summary export +6,
+# recheck +8 and log rotation +10. A job longer than a minute runs one minute after the previous fleet's copy.
 EXPECTED = {
     "keepalive": (
         60,
@@ -63,22 +63,31 @@ EXPECTED = {
             "*-*-* *:13/15:40 UTC",
         ],
     ),
+    "session-export": (
+        900,
+        [
+            "*-*-* *:12/15:06 UTC",
+            "*-*-* *:13/15:18 UTC",
+            "*-*-* *:14/15:30 UTC",
+            "*-*-* *:00/15:42 UTC",
+        ],
+    ),
     "task-recheck": (
         21600,
         [
-            "*-*-* 00/6:15:06 UTC",
-            "*-*-* 00/6:16:18 UTC",
-            "*-*-* 00/6:17:30 UTC",
-            "*-*-* 00/6:18:42 UTC",
+            "*-*-* 00/6:15:08 UTC",
+            "*-*-* 00/6:16:20 UTC",
+            "*-*-* 00/6:17:32 UTC",
+            "*-*-* 00/6:18:44 UTC",
         ],
     ),
     "log-rotation": (
         86400,
         [
-            "*-*-* 00:20:08 UTC",
-            "*-*-* 00:21:20 UTC",
-            "*-*-* 00:22:32 UTC",
-            "*-*-* 00:23:44 UTC",
+            "*-*-* 00:20:10 UTC",
+            "*-*-* 00:21:22 UTC",
+            "*-*-* 00:22:34 UTC",
+            "*-*-* 00:23:46 UTC",
         ],
     ),
 }
@@ -340,7 +349,7 @@ def test_a_fleet_with_no_place_under_local_takes_slot_0(tmp_path, where):
     ]
     assert _timer(timers, "com.outside.task-recheck") == [
         ANCHORED,
-        "OnCalendar=*-*-* 00/6:15:06 UTC",
+        "OnCalendar=*-*-* 00/6:15:08 UTC",
         "AccuracySec=1",
     ]
 

@@ -604,6 +604,7 @@ defaults:
     session-export:
       script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _session-export-tick"
       interval: 900
+      startup_delay: 735
       type: oneshot
     task-recheck:
       script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _task-recheck-tick"

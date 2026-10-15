@@ -151,6 +151,8 @@ class ResourceBuild(build_py):
                      (ROOT / "claudlobby/plane/migrations").glob("*.sql"))
         paths.update(str(path.relative_to(ROOT)) for path in
                      (ROOT / "claudlobby/plane/ui").glob("*") if path.is_file())
+        paths.update(str(path.relative_to(ROOT)) for path in
+                     (ROOT / "claudlobby/contracts").glob("*") if path.is_file())
         paths.update(("pyproject.toml", "setup.py"))
         return sorted(paths)
 

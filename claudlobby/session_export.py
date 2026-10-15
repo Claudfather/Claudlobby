@@ -1,7 +1,7 @@
 """Consume the clauDNA export contract, one durable event per sealed segment.
 
-Only export/ack touches the store. Per-item ingest avoids the mixed-replay batch
-wedge; deterministic refusals get a separate status event so cursors can move.
+Only export/ack touches the store. Per-item ingest preserves normal summaries
+on replay; deterministic refusals get a separate status event so cursors can move.
 """
 
 from __future__ import annotations

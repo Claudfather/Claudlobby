@@ -82,8 +82,9 @@ done
 A fleet with **zero rows and no error** has no sealed segment in the window,
 a disabled `session-export` job (`SESSION_EXPORT_ENABLED=0`), or stale/old
 entrypoints. Name which from the per-bot state files: in an overlay fleet,
-`"$BOT_DIR/../../session-export/"*.json`; in root mode,
-`"$BOT_DIR/../../fleet/session-export/"*.json`. These are `<fleet_state>/session-export/<bot>.json`.
+set `JOB=session-export` and read `"$BOT_DIR/../../$JOB/"*.json`; in root mode,
+read `"$BOT_DIR/../../fleet/$JOB/"*.json`. These are `<bot>.json` files in the
+`session-export` directory under `<fleet_state>`.
 Read them with granted `jq`, looking at `last_skip`, `last_ack_at`, `pending`,
 `consecutive_failures` and `stall`. Missing/unreadable files mean unknown coverage.
 The operator's `host doctor` rung reads these same files; the monitor does not run

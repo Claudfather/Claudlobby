@@ -119,7 +119,8 @@ The predecessor's rows never reached this reader (#1456/#1503).
 
 The job runs by default. A bot with summaries off still yields `skipped: disabled`.
 An empty window means no sealed segment, a disabled job, or an old/stale entrypoint;
-name which from `<fleet_state>/session-export/<bot>.json` using granted `jq`.
+name which from `<bot>.json` in the `session-export` directory under
+`<fleet_state>` using granted `jq`.
 The operator's `host doctor` session-export rung is the other view of those files;
 the monitor runs neither doctor nor the private export tick. Missing/unreadable
 state means unknown coverage. All rows skipped means print the coverage line

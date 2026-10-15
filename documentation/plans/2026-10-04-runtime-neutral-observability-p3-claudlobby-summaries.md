@@ -582,10 +582,11 @@ def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notif
   (proven to run the store on this host), else `sys.executable` — never a PATH lookup, because a timer unit's environment is
   closed. **Why in-process (X22):** the epic's transport rule, stated once in its §6 P2 intake spec, puts one-shot Python ticks
   (`task-recheck`, `session-export`) and Python CLI doors on `emit_batch` in-process, as the task doors do
-  (`task_operations.py:351`); this job is such a tick. **The job cannot wedge (X20):** one `emit_batch` per item — a batch
-  that mixes an already-ingested id with a new one is refused as mixed state (`ingest.py:598-605`) and would hold the cursor
-  forever (the alternative, equally
-  acceptable: pre-read `ingest_ledger` for the derived `event_id`s and emit only the unseen, still one commit per item); ack
+  (`task_operations.py:351`); this job is such a tick. **Replay preserves normal summaries (X20):** one `emit_batch` per item — a batch
+  that mixes an already-ingested id with a new one is refused as mixed state (`ingest.py:598-605`). The terminal refusal
+  path may still ack after recording only `unexportable` fallbacks, losing the normal new summary: cursor progress does not
+  prove summary preservation. The alternative is to pre-read `ingest_ledger` for the derived `event_id`s and emit only the
+  unseen, still one commit per item; ack
   per `sid` right after that session's items land; a `committed`, `duplicate` or `spooled` outcome (`require_commit=False`,
   daemon down: durably staged) all count as landed and **are acked**; a deterministic refusal of one item (`ContractViolation`,
   or `RuntimeError` from `_verify_duplicates`, `ingest.py:605-642`) is re-emitted as an `unexportable` status item (built by
@@ -816,9 +817,13 @@ The seal itself is not this document's: it ran at order 3's activation (Task 1 S
   envelope against `export.schema.json` (plan 5 Task 2 Step 4), so the envelope cannot change without its schema changing, and
   a changed schema fails (3) at the next `claudna.ref` move — a clauDNA-side job would add a cross-repo CI coupling for no new
   signal.
-- [ ] **Mutants** (committed code): the ack before the emit; a two-item `emit_batch` (one seen, one new — ingest refuses it as
-  mixed state and the cursor never moves); an item-level `ContractViolation` with no `unexportable` re-emit (the cursor wedges);
-  the fallback re-emitted under the item's own id (the ledger-keyed refusal repeats and the cursor holds); `stall` marked
+- [ ] **Mutants** (committed code): the ack before the emit; a genuine two-item `emit_batch` through the consumer and real
+  Plane (already-committed seg 1, new seg 2): ingest refuses the mixed batch, normal seg 2 is missing, `unexportable` fallbacks
+  land and the terminal path still acks through 2. Kill this mutant on lost normal-summary preservation and observe the actual
+  ack; a fake batch-length assertion or a direct ingest-only probe is insufficient. An item-level `ContractViolation` with no
+  `unexportable` re-emit; the fallback re-emitted under the item's own id (two real deterministic refusals leave no fallback
+  status row, record `last_unexportable`, and still terminal-ack): kill it on missing fallback-status preservation, not a
+  claimed cursor hold. `stall` marked
   reported before its record landed (a failed emit is never retried);
   a flat `data` (reader renders `{}`); `source_ref` without the `fleet-events:` prefix (reader returns nothing);
   `derive_uid("ev_", …)`; the bound dropped (a 50 KB nested arc string → `detail_truncated=1`); a stale entrypoint "guessed" from the plugin
@@ -887,8 +892,9 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
 - [ ] (Order 3) The PR body cites Task 1 Step 2 (i)'s canary-root check; after the fleet's activation,
   `list --bot <b> --json --limit 100000 --include-private --root ~/.claudna` shows no `open` row for any switched bot, the last
   `sweep` printed an empty `closed` list, and no `seal` was run on a session `list --bot` did not return.
-- [ ] `tests/test_session_export.py` wedge cell: seg 1 emitted unacked, seg 2 sealed → seg 2 `committed`, seg 1 `duplicate`, both
-  acked; the two-item-batch mutant holds the cursor (shown, restored).
+- [ ] `tests/test_session_export.py` replay cell: seg 1 emitted unacked, seg 2 sealed → seg 2 `committed`, seg 1 `duplicate`, both
+  acked. The genuine seen/new consumer batch mutant loses normal seg 2 while emitting fallbacks and acking; capture real
+  Plane rows and actual ack calls, then restore and show the baseline passes.
 - [ ] Task 6 Step 1's one "no retired name left" grep returns only its allowlist (`plane/registries.py`'s `session_digest`
   entry and the comments on it, `test_system_event_retention.py:74`, `test_no_retired_digest_reference.py`,
   `tests/test_composer.py::test_no_retired_hook_is_composed`) — no other line, and no second pattern anywhere in this plan.
@@ -916,9 +922,10 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
 - Do not rely on ingest truncation; bound `data` in the emitter (epic §11).
 - Do not guess an entrypoint from the plugin cache (`installed_plugins.json`) when `entrypoint.json` is stale or absent — skip the
   bot and say so (F16).
-- Do not ack before that session's items have landed; do not ack a session after an exception on it; do not put two items in one
-  `emit_batch` call unless the ledger was pre-read for their ids — a batch mixing a seen and an unseen id is refused as mixed
-  state (`ingest.py:598-605`) and holds the cursor forever (X20).
+- Do not ack before that session's items have landed; transient failures hold the cursor, while double deterministic refusal
+  follows the explicit terminal-ack rule. Do not put two items in one `emit_batch` call unless the ledger was pre-read for
+  their ids: a seen/new batch is refused as mixed state (`ingest.py:598-605`) and can be reduced to fallback status rows while
+  still acking. The mutant must expose lost normal summaries, not assert a cursor hold (X20).
 - Do not compose `CLAUDNA_HARVEST=1` without `CLAUDNA_SESSION_SUMMARY=1`: the gate never summarizes a bot on harvest alone
   (`project.py:276-287`).
 - Do not point the monitor at `_session-export-tick --dry-run` or `claudlobby host doctor` (neither is granted to it; `host
