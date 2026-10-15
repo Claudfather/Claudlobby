@@ -214,7 +214,7 @@ def unexportable_record(
 
 def bound(record: dict) -> dict:
     """Cap prose, then shed arc and lists before metadata; never rely on ingest truncation."""
-    result = json.loads(json.dumps(record, ensure_ascii=False))
+    result = dict(record)
     journey = result.get("journey")
     if isinstance(journey, dict):
 
@@ -427,15 +427,17 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
             raise ValueError("export door exited nonzero")
         envelope = _envelope(response.stdout)
         state["pending"] = len(envelope["items"])
+        items_by_sid = {}
+        for item in envelope["items"]:
+            items_by_sid.setdefault(item["sid"], []).append(item)
         # next is ordered by the producer's session walk, not global segment order.
         for sid, through in envelope["next"].items():
-            items = [item for item in envelope["items"] if item["sid"] == sid]
-            for item in items:
+            for item in items_by_sid.get(sid, ()):
                 phase = "emit"
                 try:
                     record, at = summary_record(item, fleet=fleet, bot=bot, now=now)
-                    records.append(record)
                     if dry_run:
+                        records.append(record)
                         continue
                     event = _system_event(
                         "session_summary",
@@ -501,11 +503,9 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
             if response.returncode:
                 raise ValueError("ack door exited nonzero")
             acked[sid] = through
+            # Keep the observed progress even if a later session fails. The
+            # failure streak belongs to the whole bot tick, not one session.
             state["last_ack_at"] = now.isoformat()
-            state["consecutive_failures"] = 0
-            state["failure_since"] = None
-            state.pop("stall", None)
-            state["last_failure"] = None
     except subprocess.TimeoutExpired:
         failure = f"{phase}_timeout"
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
@@ -521,6 +521,8 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
     if not failure and not dry_run:
         state["consecutive_failures"] = 0
         state["failure_since"] = None
+        state.pop("stall", None)
+        state["last_failure"] = None
     return BotOutcome(
         bot,
         emitted,

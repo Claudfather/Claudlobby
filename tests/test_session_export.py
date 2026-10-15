@@ -512,3 +512,144 @@ def test_export_contract_absent_skip_and_schema_drift(tmp_path):
     (source / "export.schema.json").write_text("{}")
     code, detail = check_export_contract(clone)
     assert code == 1 and "differs from checkout" in detail
+
+
+@pytest.mark.parametrize("failure_phase", ["emit", "ack"])
+def test_progress_in_one_session_does_not_hide_another_sessions_repeated_failure(
+    world, failure_phase
+):
+    root, paths, _, store = world
+    doc = envelope()
+    a, b = doc["items"]
+    a_sid, b_sid = a["sid"], b["sid"]
+    pages = []
+    failing = True
+
+    def emit(root, rows, **kwargs):
+        data = rows[0]["payload"]["data"]["data"]
+        if failing and failure_phase == "emit" and data.get("session_id") == b_sid:
+            raise sqlite3.OperationalError("session B temporarily unavailable")
+        return emit_batch(root, rows, **kwargs)
+
+    def notify(**kwargs):
+        pages.append(kwargs)
+        return {"notification": "submitted"}
+
+    def drive(tick, *, b_seg=1):
+        a["seg"] = tick + 1
+        b["seg"] = b_seg
+        doc["next"] = {a_sid: tick + 1, b_sid: b_seg}
+        door = Door(doc)
+
+        def run(argv, **kwargs):
+            if (
+                failing
+                and failure_phase == "ack"
+                and "--ack" in argv
+                and argv[argv.index("--sid") + 1] == b_sid
+            ):
+                return subprocess.CompletedProcess(
+                    argv, 1, "{}", "temporary ack failure"
+                )
+            return door(argv, **kwargs)
+
+        return se.export_bot(
+            root,
+            "canary",
+            "lead",
+            store,
+            run=run,
+            now=NOW + timedelta(minutes=tick),
+            emit=emit,
+            notify=notify,
+            fleet_state=paths.fleet_state,
+        )
+
+    # A's cursor genuinely advances every tick while B remains unacked.
+    for tick in range(3):
+        result = drive(tick)
+        assert result.acked == {a_sid: tick + 1}
+        assert result.failed == f"{failure_phase}_failed"
+    stalled = state(world)
+    assert stalled["consecutive_failures"] == 3
+    assert stalled["failure_since"] == NOW.isoformat()
+    assert stalled["last_ack_at"] == (NOW + timedelta(minutes=2)).isoformat()
+    assert stalled["stall"]["recorded"] and stalled["stall"]["notified"]
+    assert len(pages) == 1
+
+    # Only a tick that completes all sessions clears the failure and stall.
+    failing = False
+    recovered = drive(3)
+    assert recovered.acked == {a_sid: 4, b_sid: 1}
+    healthy = state(world)
+    assert healthy["consecutive_failures"] == 0
+    assert healthy["failure_since"] is None and healthy["last_failure"] is None
+    assert "stall" not in healthy and len(pages) == 1
+
+    # A later three-tick failure is a new stall, despite A continuing to ack.
+    failing = True
+    for tick in range(4, 7):
+        drive(tick, b_seg=2)
+    assert state(world)["consecutive_failures"] == 3
+    assert state(world)["stall"]["since"] == (NOW + timedelta(minutes=4)).isoformat()
+    assert len(pages) == 2
+
+
+def test_bound_trims_without_copying_or_mutating_unbounded_journey():
+    import tracemalloc
+
+    record, _ = se.summary_record(
+        envelope()["items"][0], fleet="canary", bot="lead", now=NOW
+    )
+    long_text = "x" * 50_000
+    journey = record["journey"]
+    journey["arc"] = [{"step": long_text, "result": long_text} for _ in range(200)]
+    journey["done"] = [{"text": long_text} for _ in range(200)]
+    source_chars = 600 * len(long_text)
+    tracemalloc.start()
+    try:
+        bounded = se.bound(record)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # A deliberately wide relative budget catches an entire pre-trim JSON copy,
+    # without depending on allocator details or the time this machine takes.
+    assert peak < source_chars // 4
+    assert bounded is not record and bounded["journey"] is not journey
+    assert bounded["journey"]["arc"] is not journey["arc"]
+    assert len(journey["arc"]) == len(journey["done"]) == 200
+    assert journey["arc"][0] == {"step": long_text, "result": long_text}
+    assert journey["done"][0] == {"text": long_text}
+    assert len(json.dumps(bounded).encode()) <= se.DATA_CAP_BYTES
+
+
+def test_interleaved_items_keep_next_session_order_and_each_item_order(world):
+    doc = envelope()
+    a, b = doc["items"]
+    a2 = deepcopy(a)
+    a2["seg"] = 2
+    doc["items"] = [a, b, a2]
+    doc["next"] = {b["sid"]: 1, a["sid"]: 2}
+    operations = []
+    door = Door(doc)
+
+    def run(argv, **kwargs):
+        if "--ack" in argv:
+            operations.append(("ack", argv[argv.index("--sid") + 1]))
+        return door(argv, **kwargs)
+
+    def emit(root, rows, **kwargs):
+        assert len(rows) == 1
+        data = rows[0]["payload"]["data"]["data"]
+        operations.append(("emit", data["session_id"], data["seg"]))
+        return emit_batch(root, rows, **kwargs)
+
+    result = export(world, run, emit=emit)
+    assert not result.failed and result.records == ()
+    assert operations == [
+        ("emit", b["sid"], 1),
+        ("ack", b["sid"]),
+        ("emit", a["sid"], 1),
+        ("emit", a["sid"], 2),
+        ("ack", a["sid"]),
+    ]

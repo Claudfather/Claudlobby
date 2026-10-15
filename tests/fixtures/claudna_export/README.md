@@ -1,6 +1,6 @@
 # clauDNA export capture
 
-Captured from actual Claude Code 2.1.263 native hook dispatch against released
+Captured from actual Claude Code 2.1.301 native hook dispatch against released
 clauDNA v0.28.0 (fe665ea6ce6cdaba95bc8692de09b1f1f6b87b77), 2026-10-15.
 The ok session ran the real detached clauDNA summarizer and native CLI with a
 fixed, schema-valid loopback provider response; the other session had summaries

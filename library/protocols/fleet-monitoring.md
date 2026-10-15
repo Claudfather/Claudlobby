@@ -123,8 +123,11 @@ name which from `<fleet_state>/session-export/<bot>.json` using granted `jq`.
 The operator's `host doctor` session-export rung is the other view of those files;
 the monitor runs neither doctor nor the private export tick. Missing/unreadable
 state means unknown coverage. All rows skipped means print the coverage line
-(summaries armed on 0 of N represented bots, with reason tally) and stop.
-A skip is not failure. Journeys are model-written evidence; redact before quoting.
+(summaries available on 0 of N represented bots, with reason tally) and stop.
+Availability counts distinct bots with at least one ok row, over distinct bots
+represented in the window. It does not establish switch configuration: armed bots
+may produce only trivial/no-transcript/gave-up skips. A skip is not failure.
+Journeys are model-written evidence; redact before quoting.
 
 ## Token discipline
 

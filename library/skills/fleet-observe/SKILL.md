@@ -25,7 +25,7 @@ Run `/fleet-digest $1 $2`. Reason over its output and nothing else.
 
 If it reports an empty window or all rows skipped, **that is your result**:
 carry its coverage explanation and stop. In particular, print its
-`COVERAGE: summaries armed on 0 of N bots (all rows skipped: <reason tally>)`
+`COVERAGE: summaries available on 0 of N represented bots (all rows skipped: <reason tally>)`
 line unchanged. Do not look for substitute evidence or open raw transcripts.
 
 ## Step 2 — Reason across five lenses
@@ -43,7 +43,7 @@ candidate for retirement — say so. Unused content is a cost, not a neutral.
 
 **Logging gaps.** Where did an ok summary leave a substantial session unclear?
 A `skipped_reason: disabled` row means the instrument is off by composition,
-not failing. Name this once as coverage (summaries armed on k of N bots), never
+not failing. Name this once as coverage (summaries available on k of N represented bots), never
 as a finding per skipped session.
 
 **Observability gaps.** What did you *want* to know and could not? Name the

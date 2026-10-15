@@ -92,7 +92,7 @@ it or the private export tick (which spawns a store process for every bot).
 **If the window is empty, stop with the coverage explanation.** A fleet marked
 `UNREACHABLE` has unknown coverage; report its read failure and do not infer health.
 
-**If every row is skipped, print `COVERAGE: summaries armed on 0 of N bots
+**If every row is skipped, print `COVERAGE: summaries available on 0 of N represented bots
 (all rows skipped: <reason tally>)` and stop.** N is the distinct bots represented
 in the rows, not the whole declared roster. Identity and segment volume are real;
 there is no journey to reason over. Report this as coverage once, never per session.
@@ -106,11 +106,17 @@ carry it through:
 jq -s '{
   rows: length,
   fleets: (map(.fleet) | unique),
-  bots:   (map(.bot)   | unique | length),
+  bots:   (map([.fleet, .bot]) | unique | length),
+  bots_with_summaries: (map(select(.status=="ok") | [.fleet, .bot]) | unique | length),
   by_status: (group_by(.status) | map({(.[0].status): length}) | add),
   window_first: (min_by(.ts).ts), window_last: (max_by(.ts).ts)
 }' /tmp/window.jsonl
 ```
+
+Here k is `bots_with_summaries` and N is `bots`: observed summary availability
+among represented bots, never a claim about arming configuration. An armed bot
+can still yield only `trivial`, `no_transcript` or `gave_up` rows. Only separately
+read configuration could establish whether its spend switch is armed.
 
 Then state, explicitly (`/tmp/coverage.txt` carries a row per fleet):
 
@@ -198,6 +204,7 @@ reasoning pass confidently wrong, and `no-fabrication` covers exactly this.
 COVERAGE
   window: <N> days requested, <M> days with data (missing: <dates>)
   fleets with data: <list>  |  zero rows + cause: <list>  |  UNREACHABLE: <list>
+  summaries available: <k> of <N> represented bots
   rows: <N> ok · <N> skipped
   truncation: <none | what was dropped and why>
 
