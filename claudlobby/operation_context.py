@@ -12,6 +12,7 @@ is operation provenance, deliberately not an input to this identity resolver.
 from __future__ import annotations
 
 from contextlib import closing
+from collections.abc import Mapping
 import os
 from pathlib import Path
 import pwd
@@ -21,12 +22,30 @@ import sqlite3
 from .active_config import resolve_active_context
 from .context import Context, generated_selectors
 from .plane.db import connect_ro, db_file
-from .plane.ids import ID_PATTERNS, derive_uid, read_host_uid
+from .plane.ids import ID_PATTERNS, derive_uid, derive_session_uid, read_host_uid
 from .plane.registry_read import current_entities
 from .plane.schema_state import require_current_schema
 from .resources import PackageResources
 from .task_operations import TaskActor, TaskOperationContext
 from .task_queries import TaskQueryError
+
+
+# #2145 F1(c): the companion adds Codex only after its session env is measured.
+_SESSION_ID_ENV = {"claude": "CLAUDE_CODE_SESSION_ID"}
+# C11, run log 2026-10-05 (including interactive tmux): main and subagent
+# shells carry the session's id. Every child carries CLAUDE_CODE_CHILD_SESSION,
+# including the main shell, so that marker cannot identify nested sessions.
+
+
+def caller_session_uid(environ: Mapping[str, str] | None = None) -> str | None:
+    """Derive the caller's session, or record none when its env cannot name it."""
+    env = os.environ if environ is None else environ
+    agent_cli = (env.get("CLAUDLOBBY_AGENT_CLI") or "claude").strip() or "claude"
+    name = _SESSION_ID_ENV.get(agent_cli)
+    if name is None:
+        return None
+    raw = env.get(name, "")
+    return derive_session_uid(raw, agent_cli=agent_cli) if raw.strip() else None
 
 
 class OperationContextError(TaskQueryError):
@@ -121,7 +140,8 @@ def bind_task_context(destination: Context, *, origin: Context | None = None,
                 caller = callers[origin.bot_id]
             if _host_uid(root) != host_uid:
                 raise OperationContextError("host identity changed during operation resolution")
-            return TaskOperationContext(destination, host_uid, fleet_uid, caller, bots, caller_fleet_uid)
+            return TaskOperationContext(destination, host_uid, fleet_uid, caller, bots, caller_fleet_uid,
+                                        session_uid=caller_session_uid())
     except (OSError, sqlite3.Error) as exc:
         raise OperationContextUnavailableError("existing Plane identity registry is unavailable") from exc
 

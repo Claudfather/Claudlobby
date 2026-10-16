@@ -149,3 +149,35 @@ def test_the_cutover_modes_are_gone(tmp_path):
     assert r.returncode == 2 and "unrecognized arguments" in r.stderr, (r.returncode, r.stderr)
     r = _run(tmp_path, "--retired", "--fleet", "f")
     assert r.returncode == 2, (r.returncode, r.stderr)
+
+
+def test_session_mode_and_latest_non_null_assignment_session(tmp_path):
+    root = _root(tmp_path)
+    sessions = ["sess_" + char * 32 for char in "ab"]
+    expected = []
+    for n, session in zip("ab", sessions):
+        wi, asg, _ = _dispatch(root, n, "session-" + n)
+        msg = "msg_" + n * 32
+        emit_batch(root, [
+            {"event_type": "task", "emitter": "session-canary", "fleet": F,
+             "payload": {"work_item_id": wi, "assignment_id": asg, "event": "accepted", "session_uid": session}},
+            {"event_type": "communication", "emitter": "session-canary", "fleet": F,
+             "payload": {"msg_id": msg, "sender": f"bot:{F}/w1", "recipient": f"bot:{F}/mgr",
+                         "message_class": "report", "sender_session_uid": session}}])
+        emit_batch(root, [{"event_type": "task", "emitter": "session-canary", "fleet": F,
+            "payload": {"work_item_id": wi, "assignment_id": asg, "event": "nudged"}}])
+        row = _run(root, "--by-assignment", asg, "--any-state")
+        assert row.returncode == 0 and row.stdout.split()[-1] == session
+        expected.append((wi, asg, msg))
+    out = _run(root, "--session", sessions[0])
+    assert out.returncode == 0 and len(out.stdout.splitlines()) == 2
+    wi, asg, msg = expected[0]
+    assert out.stdout.splitlines()[0].split()[:4] == ["task", wi, asg, "accepted"]
+    assert out.stdout.splitlines()[1].split()[:3] == ["message", msg, f"bot:{F}/mgr"]
+    assert all(value not in out.stdout for value in expected[1])
+    missing = _run(root, "--session", "sess_" + "c" * 32)
+    assert missing.returncode == 0 and missing.stdout == "" and "no task events" in missing.stderr
+    invalid = _run(root, "--session", "raw-id")
+    assert invalid.returncode == 2 and "derive_session_uid" in invalid.stderr
+    unreachable = _run(tmp_path / "absent", "--session", sessions[0])
+    assert unreachable.returncode == 3 and "unreachable" in unreachable.stderr

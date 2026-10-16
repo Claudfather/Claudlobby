@@ -167,7 +167,8 @@ def _id(value, kind):
 
 def encode_report_facts(report: ReportPayload, *, fleet: str, sender: str, recipient: str,
                         msg_id: str, event_ids: tuple[str, str], occurred_at: str,
-                        link: ReportLink | None = None) -> tuple[dict, dict]:
+                        link: ReportLink | None = None,
+                        session_uid: str | None = None) -> tuple[dict, dict]:
     """Return communication + exact linked transition OR unlinked status marker.
 
     All IDs/timestamps/parties are supplied and frozen by the operation owner.
@@ -188,6 +189,8 @@ def encode_report_facts(report: ReportPayload, *, fleet: str, sender: str, recip
         raise ReportPayloadError("report timestamp requires an offset") from exc
     comm = {"msg_id": msg_id, "sender": sender, "recipient": recipient,
             "message_class": "report", "body": report.to_body()}
+    if session_uid is not None:
+        comm["sender_session_uid"] = session_uid
     provenance = {"pr_url": report.pr_url, "pr_role": report.pr_role} if report.pr_url else {}
     if link is not None:
         _id(link.task_id, "work_item")
@@ -197,6 +200,8 @@ def encode_report_facts(report: ReportPayload, *, fleet: str, sender: str, recip
         comm.update(work_item_id=link.task_id, assignment_id=link.assignment_id)
         detail = {"work_item_id": link.task_id, "assignment_id": link.assignment_id,
                   "event": link.transition, "actor": sender, "link_source": "named", **provenance}
+        if session_uid is not None:
+            detail["session_uid"] = session_uid
         for field in ("summary", "reason"):
             if getattr(report, field) is not None:
                 detail[field] = getattr(report, field)

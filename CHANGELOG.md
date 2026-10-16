@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — task, report and message doors record the caller's session; a retry after /clear replays (#2145 P1, Half B)
+
+- Restores the join `lib/report-back.sh` wrote from `data/.plane-session` between `86b4a987` (#1372) and `c4682f7a` (#1989), now from the caller's own session-id env. Assignment acceptance, linked reports, unlinked reports, ordinary messages and human replies carry it.
+- Request receipts keep their format. `session_uid` and `sender_session_uid` retain their field names and hash as `null`, so another session's retry replays. Replay after rollback to a release without this rule conflicts; retry under a new request id. A prepared but unrecorded request records the committing session when retried.
+- Task history and assignment lookup show the executing session; `plane-lookup.py --session <sess_uid>` lists its task events and communications.
+- C11's headless and interactive tmux captures show that main and subagent shells share the session id. The universal `CLAUDE_CODE_CHILD_SESSION` marker is never a nested-session signal.
+
 ### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
 
 - Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,

@@ -535,3 +535,22 @@ def test_assignment_deliver_refuses_stale_before_native(active, monkeypatch, cap
                             "--request-id", str(uuid4()), expected=4)
     assert result["error"]["code"] == "conflict"
     assert _facts(root) == (0, 0)
+
+
+def test_reports_submit_cli_records_session_and_replays_after_clear(active, monkeypatch, capsys):
+    from claudlobby.plane.ids import derive_session_uid
+    root, host = active
+    _generated(monkeypatch, root, host.release, bot="worker")
+    calls = []
+    _native(monkeypatch, calls, operation="send_unlinked_report")
+    args = ["--root", str(root), "--json", "fleet", "reports", "submit", "--status", "progress",
+            "--summary", "Session CLI canary", "--request-id", str(uuid4())]
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cli-report-a")
+    assert main(args) == 5
+    assert not json.loads(capsys.readouterr().out)["data"]["replayed"]
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cli-report-b")
+    assert main(args) == 5
+    assert json.loads(capsys.readouterr().out)["data"]["replayed"]
+    assert len(calls) == 1
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT sender_session_uid FROM communications").fetchone()[0] == derive_session_uid("cli-report-a")

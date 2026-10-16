@@ -24,12 +24,23 @@ def _hash(values: dict) -> str:
                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+# #2145 F17(c): sessions describe an attempt, not the effect's identity. Keep
+# their field names and hash null so pre-join receipts and cross-session retries
+# retain the same projection. Apply the rule to both preparation and proof.
+_SESSION_COLUMNS = ("session_uid", "sender_session_uid")
+
+
+def _null_sessions(values: dict) -> dict:
+    return {**values, **{name: None for name in _SESSION_COLUMNS if name in values}}
+
+
 def expected_fact(item, *, host_uid: str, fleet_uid: str, parties: dict[str, str],
                   entities: dict[tuple[str, str], str] | None = None) -> ExpectedFact:
     """Project an already validated, capture-transformed item without a write.
 
     Callers freeze identities first. Missing aliases refuse instead of minting
-    during preparation. Clock fields are observations, not retry semantics;
+    during preparation. Clock fields and caller sessions are observations, not retry semantics;
+    session columns hash as null (#2145 F17(c));
     schema, scope, provenance, links and every family field are included.
     Use emit_api.validate_item and its capture owner before calling this.
     """
@@ -48,7 +59,7 @@ def expected_fact(item, *, host_uid: str, fleet_uid: str, parties: dict[str, str
     for name in ("ingest_seq", "occurred_at", "observed_at", "ingested_at"):
         envelope.pop(name)
     projection = {**envelope, **values}
-    return ExpectedFact(env.event_id, env.event_type, _hash(projection), tuple(sorted(projection)))
+    return ExpectedFact(env.event_id, env.event_type, _hash(_null_sessions(projection)), tuple(sorted(projection)))
 
 
 @dataclass(frozen=True)
@@ -103,7 +114,7 @@ def reconcile_facts(conn: sqlite3.Connection, facts: tuple[ExpectedFact, ...]) -
                 raise ReceiptError("expected fact has no complete scoped projection")
             if not set(fact.fields) <= row.keys():
                 return FactProof("unknown", "projection fields are unavailable in this schema", matched)
-            if _hash({key: row[key] for key in fact.fields}) != fact.projection_sha256:
+            if _hash(_null_sessions({key: row[key] for key in fact.fields})) != fact.projection_sha256:
                 return FactProof("conflict", "stored fact differs from prepared identities, links or content", matched)
             matched += 1
         if absent == len(facts):

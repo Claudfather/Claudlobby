@@ -83,6 +83,7 @@ class TaskEvent(Fact):
     detail: str | None  # preserve stored JSON, including historical unknown fields
     deadline: str | None
     successor_id: str | None
+    session_uid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -201,7 +202,7 @@ def task_event_from_row(row):
     """Decode one stored task event without changing its identity/provenance."""
     return TaskEvent(**_fact(row), task_id=row["work_item_id"],
                      **{name: row[name] for name in ("assignment_id", "event", "actor_uid",
-                                                   "detail", "deadline", "successor_id")})
+                                                   "detail", "deadline", "successor_id", "session_uid")})
 
 
 def known_task_producer(emitter):
