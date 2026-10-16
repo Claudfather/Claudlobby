@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   An unavailable check warns
   `claudron-doctor`. Other engine findings remain in doctor's detailed rows.
 
+### Changed — issue-linked quarantine for a wrapper timing flake (#2362)
+
+- The PAT-to-App refresh test runs in CI's quarantine lane after an observed full-suite spawn timeout; its assertions and timeouts are unchanged. It still runs in the default local suite. The timing cause remains under investigation.
+
 ### Added — clauDNA summary export (#2145 P3)
 
 - A default-on 15-minute `session-export` fleet job reads clauDNA's recorded export
