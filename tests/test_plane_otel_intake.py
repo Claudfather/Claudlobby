@@ -191,11 +191,16 @@ def test_incomplete_headers_do_not_prevent_sigterm_drain(tmp_path, startup_delay
     import sys
     from tests.conftest import constructed_env
     script = '''
-from pathlib import Path
 import sys
+print("intake-test phase=child-start", file=sys.stderr, flush=True)
+import faulthandler
+faulthandler.dump_traceback_later(10, repeat=True)
+from pathlib import Path
 import time
 time.sleep(float(sys.argv[2]))
+print("intake-test phase=import", file=sys.stderr, flush=True)
 from claudlobby.plane import otel_intake as intake
+print("intake-test phase=imported", file=sys.stderr, flush=True)
 root = Path(sys.argv[1])
 intake.REQUEST_TIMEOUT_S = .25
 original_setup = intake.Handler.setup
@@ -205,8 +210,11 @@ def observed_setup(self):
 intake.Handler.setup = observed_setup
 class ObservedServer(intake.IntakeServer):
     def __init__(self, *args):
+        print("intake-test phase=server-init", file=sys.stderr, flush=True)
         super().__init__(*args)
         (root / "port").write_text(str(self.server_port))
+        faulthandler.cancel_dump_traceback_later()
+        print("intake-test phase=port-published", file=sys.stderr, flush=True)
 intake.IntakeServer = ObservedServer
 intake.serve(root, port=0, retention_days=14)
 '''
@@ -218,11 +226,21 @@ intake.serve(root, port=0, retention_days=14)
         startup_deadline = time.monotonic() + 20
         while not (tmp_path/'port').exists():
             if proc.poll() is not None or time.monotonic() >= startup_deadline:
+                state = 'already exited'
                 if proc.poll() is None:
-                    proc.kill()
+                    # Numeric state only: never collect child argv or environment.
+                    try:
+                        snapshot = subprocess.run(
+                            ['/bin/ps', '-o', 'pid=,ppid=,stat=,etime=,pcpu=', '-p', str(proc.pid)],
+                            env=constructed_env(), capture_output=True, text=True, timeout=2)
+                        state = snapshot.stdout.strip()[-1000:] if snapshot.returncode == 0 else 'unavailable'
+                    except (OSError, subprocess.TimeoutExpired):
+                        state = 'unavailable'
+                    if proc.poll() is None:
+                        proc.kill()
                 _stdout, stderr = proc.communicate(timeout=5)
                 diagnostic = stderr.replace(str(tmp_path), '<scratch>')[-4000:]
-                pytest.fail(f'intake startup failed (rc={proc.returncode}): {diagnostic}')
+                pytest.fail(f'intake startup failed (rc={proc.returncode}, state={state}): {diagnostic}')
             time.sleep(.02)
         held = socket.create_connection(('127.0.0.1', int((tmp_path/'port').read_text())), timeout=2)
         held.sendall(b'POST /v1/logs HTTP/1.1\r\nHost:')
