@@ -643,9 +643,11 @@ def _validate_bots(
     paths: Paths,
     fleet_env: dict[str, str],
     report: ValidationReport,
-    *, migration_reader: MigrationReader,
+    *, migration_reader: MigrationReader | None = None,
 ) -> None:
     """Per-bot validation: expertise, voice, skills, MCP, env vars, integrations, etc."""
+    if migration_reader is None:
+        migration_reader = claudron_compat.vault_migration_reader()
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")

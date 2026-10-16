@@ -578,11 +578,26 @@ class TestVaultMigrationWarnings:
         assert self._migration_rows(report) == []
         assert "claudron-path" in report.warning_categories and not calls.exists()
 
-    def test_one_probe_per_vault_and_fresh_reader_next_call(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("entrypoint", ["validate", "bots", "bots-shared"])
+    def test_one_probe_per_vault_and_fresh_reader_next_call(self, tmp_path, monkeypatch, entrypoint):
         import claudlobby.claudron_compat as compat
+        from claudlobby.validator import ValidationReport, _validate_bots
         vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch, bots=2,
             data={"vault_format": 2, "engine_format": 3, "pending": []})
-        report = validate(fleet, paths)
+        def read():
+            if entrypoint == "validate":
+                return validate(fleet, paths)
+            report = ValidationReport()
+            if entrypoint == "bots-shared":
+                reader = compat.vault_migration_reader()
+                with monkeypatch.context() as shared:
+                    shared.setattr(compat, "vault_migration_reader", lambda **kw: pytest.fail(
+                        "a supplied migration reader must remain the request owner"))
+                    _validate_bots(fleet, paths, {}, report, migration_reader=reader)
+            else:
+                _validate_bots(fleet, paths, {}, report)
+            return report
+        report = read()
         rows = self._migration_rows(report)
         assert len(rows) == 1 and "affects 2 bot(s)" in rows[0][1]
         argv = [json.loads(line) for line in calls.read_text().splitlines()]
@@ -592,7 +607,7 @@ class TestVaultMigrationWarnings:
             seen.append(path)
             return compat.VaultMigrationState("ok", (), 3, 3, "")
         monkeypatch.setattr(compat, "vault_migration_state", replacement)
-        assert self._migration_rows(validate(fleet, paths)) == []
+        assert self._migration_rows(read()) == []
         assert seen == [str(vault)]
 
 
