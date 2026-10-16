@@ -41,6 +41,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "claudlobby/_runtime_scripts" / "plane-dispatch-in.sh"
 LIB = REPO / "claudlobby/_runtime_scripts"
+CODEX_PROMPT = json.loads((REPO / "tests/fixtures/codex/user-prompt-submit.json").read_text())
 
 # a real minted-shape id (msg_ + 32 hex), value faked
 MSGID = "msg_1f3c9a7b2e5d4068a1b2c3d4e5f60718"
@@ -137,11 +138,11 @@ def _arrival(safe: str, msgid: str = MSGID) -> str:
     return f"{safe}\n⟦plane:{msgid}⟧"
 
 
-def _hookjson(prompt: str, *, ensure_ascii: bool) -> str:
+def _hookjson(prompt: str, *, ensure_ascii: bool, codex: bool = False) -> str:
     """The hook JSON on the wire. ensure_ascii toggles the two encodings the
     prefilter must survive: the bracket as `\\u27e6` (Python's default) vs the
     literal UTF-8 byte."""
-    return json.dumps({"prompt": prompt}, ensure_ascii=ensure_ascii)
+    return json.dumps({**(CODEX_PROMPT if codex else {}), "prompt": prompt}, ensure_ascii=ensure_ascii)
 
 
 # --- the crux: received == the sender's WIRE proof, for EVERY shape ----------
@@ -162,13 +163,14 @@ _SHAPES = {
 
 @pytest.mark.parametrize("shape", sorted(_SHAPES))
 @pytest.mark.parametrize("ensure_ascii", [True, False], ids=["escaped", "literal"])
-def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_ascii, *, scratch_plane_env):
+@pytest.mark.parametrize("codex", [False, True], ids=["minimal", "native-codex"])
+def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_ascii, codex, *, scratch_plane_env):
     body = _SHAPES[shape]
     payload = "set +H; " + body                # what dispatch.sh sends for prose
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
     initialize_plane(root)
-    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
+    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii, codex=codex), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0
     assert r.stdout == ""                      # THE law: stdout feeds the model
     rows = _received_row(root)
@@ -261,7 +263,8 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
 
 # --- the prefilter / recogniser ---------------------------------------------
 
-def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path, *, scratch_plane_env):
+@pytest.mark.parametrize("codex", [False, True], ids=["minimal", "native-codex"])
+def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path, codex, *, scratch_plane_env):
     root = _root(tmp_path)
     for prompt in (
         "fix the flaky test in tests/test_auth.py",
@@ -270,7 +273,7 @@ def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path, *, sc
         # a marker-shaped tail that is NOT a minted trailer: recorded as nothing
         "do the thing\n⟦plane:not-a-real-id⟧",
     ):
-        r = _run(_hookjson(prompt, ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
+        r = _run(_hookjson(prompt, ensure_ascii=False, codex=codex), _env(root, scratch_plane_env=scratch_plane_env))
         assert r.returncode == 0
         assert r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
