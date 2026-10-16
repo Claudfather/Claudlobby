@@ -48,7 +48,7 @@ from .config import (
     HOST_OVERRIDE_ENV,
     host_override_path,
 )
-from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
+from .known_values import OTEL_INTAKE_PORT, ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
@@ -65,7 +65,8 @@ from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
 from .runtime_admission import (
-    RESIDENT_UNIT_PHASES, unit_systemd_command, unit_systemd_environment, wrap_unit_argv,
+    RESIDENT_UNIT_PHASES,
+    RESIDENT_UNIT_UMASK, unit_systemd_command, unit_systemd_environment, wrap_unit_argv,
 )
 
 
@@ -1234,6 +1235,21 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         lines.append(
             f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
         )
+
+    # The native exporter reads this block at the next Claude process start.
+    if bot.telemetry.enabled and bot.agent_cli == "claude":
+        lines.extend(["", "# Telemetry (#2145 F4) — read at the next process start",
+                      "export CLAUDE_CODE_ENABLE_TELEMETRY=1",
+                      "export OTEL_METRICS_EXPORTER=otlp", "export OTEL_LOGS_EXPORTER=otlp",
+                      "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json",
+                      f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:{OTEL_INTAKE_PORT}"])
+        attrs = (f"claudlobby.fleet={fleet.name},claudlobby.bot=bot:{fleet.name}/{bot.bot_id},"
+                 f"claudlobby.content={bot.telemetry.content},claudlobby.agent_cli={bot.agent_cli}")
+        lines.append(f"export OTEL_RESOURCE_ATTRIBUTES={_shq(attrs)}")
+        lines.append("export OTEL_LOG_TOOL_DETAILS=1")
+        if bot.telemetry.content == "full":
+            lines.append("# content: full — the disclosed act (design v2 §11)")
+            lines.append("export OTEL_LOG_USER_PROMPTS=1")
 
     # Project validation tiers (projects.yaml) — the repo -> closure-bar map,
     # emitted into EVERY bot's conf: any sprint/runner bot must resolve a
@@ -4191,6 +4207,7 @@ def _write_service_units(
     host_override: str | None = None,
     phase: str | None = None,
     owner_config: dict | None = None,
+    umask: str | None = None,
 ) -> None:
     """Write the .service/.plist for a RESIDENT host service — no .timer
     (nothing schedules it; supervision restarts it). systemd Restart=always /
@@ -4273,6 +4290,7 @@ def _write_service_units(
         "",
         "[Service]",
         "Type=simple",
+        *([f"UMask={umask}"] if umask is not None else []),
         f"WorkingDirectory={paths.root}",
         *(unit_systemd_environment(key, value) for key, value in environment.items()),
         unit_systemd_environment("PATH", tool_path),
@@ -4295,6 +4313,7 @@ def _write_service_units(
         "<dict>",
         "  <key>Label</key>",
         f"  <string>{service_name}</string>",
+        *([f"  <key>Umask</key><integer>{int(umask, 8)}</integer>"] if umask is not None else []),
         "  <key>ProgramArguments</key>",
         "  <array>",
     ]
@@ -5527,6 +5546,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                 create_runtime_dirs=output_dir is None,
                 host_override=host_override,
                 phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
+                umask=RESIDENT_UNIT_UMASK.get(name),
                 owner_config=cfg if name == "plane-owner" else None,
             )
             continue

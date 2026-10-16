@@ -31,9 +31,11 @@ from .config import (
     FleetConfig,
     is_pos_int,
     load_projects,
+    load_host_jobs,
 )
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
+    OTEL_INTAKE_PORT,
     BYPASS_ACTIONS,
     DEPRECATED_ENV_TIERS,
     ENV_TIERS,
@@ -155,6 +157,7 @@ RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
 #: gets when a category appears that a baseline did not have.
 WARNING_CATEGORIES: dict[str, str] = {
     "claudna-env": "a clauDNA composed knob is assigned in .env or bot.env; move it to claudna:",
+    "telemetry-intake": "a bot exports telemetry but this host intake is not enrolled",
     # a declared reference that resolves to nothing
     "voice-missing": "a declared voice is not in any library/voices/",
     "voice-legacy-path": "a voice resolves from the overlay's old voices/; move it to library/voices/ before #2202 stops reading there",
@@ -652,6 +655,11 @@ def _validate_bots(
 
     # The claudron CLI door is host state, not per-bot state — probe once.
     claudron_on_path = shutil.which("claudron") is not None
+    try:
+        intake_enrolled = (load_host_jobs().get("plane-otel") or {}).get("enroll") is True
+        intake_error = None
+    except RuntimeError as exc:
+        intake_enrolled, intake_error = False, str(exc)
     # Same shape: the operator's git identity is one host file every bot's
     # composed .gitconfig includes, and the probe shells out — so resolve it once,
     # and only when some bot actually declares git_credentials.
@@ -706,6 +714,13 @@ def _validate_bots(
         defaults_obs = {}
 
     for bot_name, bot in fleet.bots.items():
+        if bot.telemetry.enabled and not intake_enrolled:
+            shared.add("telemetry-intake",
+                       "telemetry.enabled is true but this host's plane-otel intake is not enrolled"
+                       + (f" ({intake_error})" if intake_error else "")
+                       + f" — the bot would export OTLP to an unbound 127.0.0.1:{OTEL_INTAKE_PORT}; "
+                       "set host.jobs.plane-otel.enroll: true in ~/.config/claudlobby/system.yaml "
+                       "and plan again, or set telemetry.enabled: false", bot_name)
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
         effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
 

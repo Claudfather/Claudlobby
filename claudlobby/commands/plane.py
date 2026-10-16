@@ -255,6 +255,16 @@ def cmd_plane_doctor(args) -> int:
                  " NOT recorded until a plane daemon serves (host.jobs.plane-daemon)")
         else:
             rung(True, "daemon", "never armed (plane not initialized)")
+        from ..plane import otel_sink
+        sink_scan = otel_sink.scan_sink(root)
+        if sink_scan.state != "absent":
+            try:
+                from ..config import load_host_jobs
+                days = otel_sink.retention_days(load_host_jobs()["plane-otel"]["script"])
+            except (RuntimeError, KeyError, ValueError, SystemExit):
+                days = None
+            ok, detail = otel_sink.sink_rung(sink_scan, max_days=days)
+            rung(ok, "otel sink", detail)
         rung(True, "last ingest", str(last_ingest or "none yet"))
         # The staged queue (S5a-02): the only record a hook or timer has while
         # the daemon cannot answer. Non-empty with no serving daemon, full, or
@@ -729,6 +739,15 @@ def cmd_plane_serve(args) -> int:
         return 0
 
     return _guarded("plane serve", run)
+
+
+def cmd_plane_otel_intake(args) -> int:
+    root = _resolve_paths(args).root
+    def run():
+        from ..plane.otel_intake import serve
+        serve(root, args.host, args.port, retention_days=args.retention_days)
+        return 0
+    return _guarded("plane otel-intake", run)
 
 
 def cmd_plane_schema(args) -> int:

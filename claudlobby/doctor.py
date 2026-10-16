@@ -28,7 +28,9 @@ from .claudron_compat import (
     PROBE_API,
     PROBE_VERB_PREFIX,
 )
-from .config import FleetConfig
+from .config import FleetConfig, load_host_jobs
+from .known_values import OTEL_INTAKE_PORT
+import socket
 from .context import native_environment
 from .paths import Paths, tmux_socket_for_bot, vault_api_available
 from .validator import validate, warning_summary
@@ -1414,6 +1416,28 @@ def check_goal_binding(
 # ----------------------------------------------------------------------
 
 
+def check_otel_intake(fleet, paths, report):
+    count = sum(bot.telemetry.enabled for bot in fleet.bots.values())
+    if not count:
+        return
+    try:
+        enrolled = (load_host_jobs().get("plane-otel") or {}).get("enroll") is True
+    except RuntimeError as exc:
+        report.add("plane-otel", "warn", f"plane-otel: host override unavailable: {exc}")
+        return
+    if not enrolled:
+        report.add("plane-otel", "warn", f"plane-otel: {count} bot(s) export telemetry but this host's intake is not enrolled")
+        return
+    endpoint = f"127.0.0.1:{OTEL_INTAKE_PORT}"
+    try:
+        with socket.create_connection(("127.0.0.1", OTEL_INTAKE_PORT), timeout=1):
+            pass
+    except OSError:
+        report.add("plane-otel", "warn", f"plane-otel: enrolled but nothing listens on {endpoint} — activate the plan, or read the unit's log")
+    else:
+        report.add("plane-otel", "pass", f"plane-otel: enrolled, listening on {endpoint}")
+
+
 def run_doctor(fleet: FleetConfig, paths: Paths, *,
                delivery: bool = True) -> DoctorReport:
     """Run all doctor checks and return the report."""
@@ -1448,6 +1472,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)
     check_claudron(fleet, paths, report, migration_reader=migration_reader)
+    check_otel_intake(fleet, paths, report)
     check_workstream_residual(fleet, paths, report)
     return report
 

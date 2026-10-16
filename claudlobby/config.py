@@ -19,6 +19,7 @@ from . import defaults as _defaults
 
 from .known_values import (
     KNOWN_EFFORTS,
+    KNOWN_TELEMETRY_CONTENT,
     KNOWN_AGENT_CLIS,
     PROJECT_KEYS,
     SHELL_IDENT_RE,
@@ -690,6 +691,14 @@ class ClaudnaConfig:
     harvest: bool | None = None
 
 
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Native export is opt-in; full content is a separate disclosed act."""
+
+    enabled: bool = False
+    content: str = "metadata"
+
+
 @dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
@@ -834,6 +843,8 @@ class BotConfig:
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
     claudna: ClaudnaConfig = field(default_factory=ClaudnaConfig)
+
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
 
 @dataclass
@@ -1820,7 +1831,6 @@ _CLAUDNA_FIELDS = {
     "session_summary": lambda where, v: _strict_bool(f"'{where}'", v),
     "harvest": lambda where, v: _strict_bool(f"'{where}'", v),
 }
-_STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS}
 
 
 def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig:
@@ -1828,6 +1838,12 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig:
         raise ValueError(f"'{where}': claudna.harvest: true needs session_summary unset or true — "
                          "clauDNA's gate never summarizes a bot on harvest alone")
     return cfg
+
+_TELEMETRY_FIELDS = {
+    "enabled": lambda where, v: _strict_bool(f"'{where}'", v),
+    "content": lambda where, v: _parse_enum(where, v, KNOWN_TELEMETRY_CONTENT),
+}
+_STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS, "telemetry": _TELEMETRY_FIELDS}
 
 
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
@@ -2034,6 +2050,9 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         claudna=_check_claudna(_merge_fieldwise(ClaudnaConfig, defaults.get("claudna"), raw.get("claudna"),
                                                 name, "claudna", _CLAUDNA_FIELDS), f"bots.{name}"),
+
+        telemetry=_merge_fieldwise(TelemetryConfig, defaults.get("telemetry"), raw.get("telemetry"),
+                                   name, "telemetry", _TELEMETRY_FIELDS),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
         ),

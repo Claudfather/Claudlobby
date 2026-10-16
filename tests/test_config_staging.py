@@ -416,3 +416,17 @@ def test_stage_requires_local_coverage_and_includes_explicit_external_fleet(stag
     assert set(plan.content(changes[host / "mention-allowlist"]).decode().splitlines()) == {
         f"{name}-human" for name in plan.fleets}
     plan.check_fresh()
+
+
+def test_telemetry_missing_intake_warns_without_refusing_stage(staging_case, monkeypatch):
+    from claudlobby import validator
+    path = staging_case.paths.fleet_yaml
+    import yaml
+    doc = yaml.safe_load(path.read_text())
+    doc['fleet'].setdefault('defaults', {})['telemetry'] = {'enabled': True}
+    path.write_text(yaml.safe_dump(doc))
+    monkeypatch.setattr(validator, 'load_host_jobs', lambda: {'plane-otel': {'enroll': False}})
+    messages = []
+    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release, log=messages.append)
+    assert plan is not None
+    assert 'telemetry.enabled is true' in '\n'.join(messages)

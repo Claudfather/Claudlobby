@@ -10,6 +10,8 @@ from __future__ import annotations
 import difflib
 import re
 
+from .commands._otel_parsers import OTEL_INTAKE_PORT
+
 # Shell-identifier pattern — the SSOT for anything that becomes a shell variable
 # name (bot.env keys, model-strategy tiers, briefing slot -> BRIEFING_SECTIONS_<SLOT>).
 # Shared by config.py and composer.py so the rule can't drift between them.
@@ -354,3 +356,6 @@ def hint(value: str, known: set[str] | frozenset[str] | tuple[str, ...]) -> str:
     """
     suggestion = closest_match(value, set(known))
     return f" — did you mean '{suggestion}'?" if suggestion else ""
+
+# Native telemetry content modes recognized by config validation.
+KNOWN_TELEMETRY_CONTENT: frozenset[str] = frozenset({"metadata", "full"})

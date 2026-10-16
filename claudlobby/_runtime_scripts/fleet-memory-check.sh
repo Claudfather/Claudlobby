@@ -82,7 +82,7 @@ fi
 fleet_rss_mb() {
     ps aux 2>/dev/null \
       | awk -v user="$(id -un)" '
-          $1 == user && ($0 ~ /claude|node.*mcp|python.*mcp|uvx/) {
+          $1 == user && ($0 ~ /claude|node.*mcp|python.*mcp|uvx|plane otel-intake/) {
               rss += $6
           }
           END { printf "%d", rss/1024 }'
