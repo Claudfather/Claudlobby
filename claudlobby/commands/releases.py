@@ -219,6 +219,21 @@ def _plan_data(plan) -> dict:
                         "coverage": plan.effects.get("coverage")}}
 
 
+def _configuration_warning(category: str) -> None:
+    """Metadata-only plan diagnostics: categories and static remedies, never values."""
+    from ..validator import UNCATEGORIZED, WARNING_CATEGORIES
+
+    kind = category if category in WARNING_CATEGORIES else UNCATEGORIZED
+    detail = f"configuration warning [{kind}] — run `claudlobby config validate` for details"
+    if kind == "claudron-migration":
+        detail += (". Once per vault, from one clone, a human runs "
+                   "`claudron doctor --fix --json --vault <vault>` (it commits), "
+                   "then pulls on every clone and plans again")
+    elif kind == "claudron-doctor":
+        detail += ". Check the migration state with `claudron doctor --json --vault <vault>`"
+    print(detail, file=sys.stderr)
+
+
 def _config_plan(args, root: Path) -> CommandOutput:
     from ..config_plan import PlanError
     from ..config_staging import stage_configuration
@@ -235,8 +250,8 @@ def _config_plan(args, root: Path) -> CommandOutput:
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", str(exc)) from exc
     try:
-        plan = stage_configuration(paths, release,
-                                   log=lambda _: print("configuration warning reported by the validator",
+        plan = stage_configuration(paths, release, validation_warning=_configuration_warning,
+                                   log=lambda _: print("configuration warning reported while staging",
                                                        file=sys.stderr))
     except (PlanError, ValueError) as exc:
         # Validation exceptions can embed secret authored values. The diagnostic

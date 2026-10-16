@@ -18,6 +18,12 @@ from pathlib import Path
 from . import dotenv
 from .claudron_compat import (
     CLAUDRON_INTEGRATION_URL,
+    CLAUDRON_DOCTOR_TIMEOUT_S,
+    MigrationReader,
+    VaultMigrationState,
+    _run as _compat_run,
+    _claudron_probe,
+    vault_migration_reader,
     COMPAT_FLOOR,
     PROBE_API,
     PROBE_VERB_PREFIX,
@@ -739,135 +745,43 @@ def check_credentials(
 #: A hook degradation older than this is history, not a live symptom.
 _LOOP_DEGRADATION_WINDOW_DAYS = 7
 
-#: How long doctor waits for `claudron doctor` (Claudron #190 part C). A vault
-#: that holds only notes answers in seconds; a vault root that also holds large
-#: ignored trees can take many minutes to walk (Claudron #201), and a doctor
-#: that hangs is worse than one that says it could not tell.
-CLAUDRON_DOCTOR_TIMEOUT_S = 60.0
-
-#: `_run`'s return code for a call that did not finish in time, as coreutils
-#: `timeout` reports it. Distinct from 1, which `claudron doctor` exits with
-#: when it has error findings.
-_RC_TIMEOUT = 124
-
 
 def _run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
-    """Run *argv*, returning (returncode, stdout). Absent binary ⇒ (127, ""),
-    no answer within *timeout* ⇒ (_RC_TIMEOUT, "")."""
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout
-    except FileNotFoundError:
-        return 127, ""
-    except subprocess.TimeoutExpired:
-        return _RC_TIMEOUT, ""
-    except OSError:
-        return 1, ""
+    """Shared subprocess adapter, also used by the floor and git checks."""
+    return _compat_run(argv, timeout=timeout)
 
 
-def _claudron_probe(vault: str) -> tuple[str, str, dict | None]:
-    """Claudron's sanctioned capability probe (CLI_CONTRACT §Capability probe).
-
-    Returns (status, detail) for a doctor row, plus the envelope's `data` (None
-    when there is no envelope) so later rows can gate on `data.capabilities`.
-    Branches on the exit code, never on message text: 0 ⇒ envelope on stdout,
-    3 ⇒ engine present but no vault.
-    """
-    rc, out = _run(["claudron", "status", "--json", "--vault", vault])
-    if rc == 3:
-        return "warn", f"claudron installed but no vault resolved at {vault}", None
-    if rc != 0:
-        return "warn", f"`claudron status --json` exited {rc} for {vault}", None
-    try:
-        data = json.loads(out)["data"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return "warn", "`claudron status --json` did not return the CLI envelope", None
-    if not isinstance(data, dict):
-        return "warn", "`claudron status --json` did not return the CLI envelope", None
-    # engine_version does not exist before 0.3.0 — index it defensively.
-    version = data.get("engine_version", "unknown (pre-0.3.0)")
-    return "pass", (
-        f"engine {version}, vault {data.get('root', vault)} "
-        f"({data.get('total_docs', '?')} notes)"
-    ), data
-
-
-def _claudron_doctor(vault: str, probe: dict | None) -> list[tuple[str, str, str]]:
-    """`claudron doctor --json --vault <vault>` as doctor rows (Claudron #190 part C).
-
-    Surfaces what only a human should act on: pending migrations (D001), the
-    identity file (D007), and tracked files the ignore rules match (D008).
-    Every other finding is counted, not restated. **Never passes `--fix`**:
-    applying a migration stays a human's, or a librarian's.
-
-    Gated on `"doctor"` in the capability probe's `data.capabilities`, never on
-    `engine_version` (Claudron CLI_CONTRACT §Capability probe). The engine is
-    the only source of findings: nothing here inspects the vault itself.
-    """
+def _claudron_doctor(vault: str, state: VaultMigrationState) -> list[tuple[str, str, str]]:
+    """Render shared CLI state, retaining all of doctor's existing diagnostics."""
     name = "claudron-doctor"
-    if probe is None:
-        return [(name, "warn", f"{vault}: not checked, because the capability probe did not answer")]
-    if "doctor" not in (probe.get("capabilities") or []):
-        return [(name, "warn", (
-            f"{vault}: this claudron does not declare the `doctor` capability, so pending "
-            f"migrations cannot be checked — upgrade Claudron (engine "
-            f"{probe.get('engine_version', 'unknown')})"
-        ))]
-    rc, out = _run(
-        ["claudron", "doctor", "--json", "--vault", vault], timeout=CLAUDRON_DOCTOR_TIMEOUT_S
-    )
-    if rc == _RC_TIMEOUT:
-        return [(name, "warn", (
-            f"{vault}: `claudron doctor` did not answer within {CLAUDRON_DOCTOR_TIMEOUT_S:g}s, "
-            f"so pending migrations are unknown — walking a vault root that holds large "
-            f"ignored trees takes minutes (Claudron #201); run `claudron doctor --vault "
-            f"{vault}` by hand"
-        ))]
-    if rc == 3:
-        return [(name, "warn", f"{vault}: `claudron doctor` found no vault there (exit 3)")]
-    try:
-        env = json.loads(out)
-        data = env["data"]
-        findings = [f for f in list(env["errors"]) + list(env["warnings"]) if isinstance(f, dict)]
-        shaped = env.get("command") == "doctor" and isinstance(data, dict)
-    except (json.JSONDecodeError, KeyError, TypeError):
-        shaped = False
-    if rc not in (0, 1) or not shaped:
-        return [(name, "warn", f"{vault}: `claudron doctor --json` exited {rc} without its envelope")]
 
-    def of(code: str) -> list[dict]:
-        return [f for f in findings if f.get("code") == code]
+    def of(code: str) -> list[str]:
+        return [message for finding_code, message in state.findings if finding_code == code]
 
-    rows: list[tuple[str, str, str]] = []
-    others = sorted({str(f.get("code")) for f in findings} - {"D001", "D007", "D008"})
+    others = sorted({code for code, _ in state.findings} - {"D001", "D007", "D008"})
     tail = (
         f"; {len(others)} other finding(s) ({', '.join(others)}): `claudron doctor --vault "
         f"{vault}` has the detail"
-        if others
-        else ""
+        if others else ""
     )
-    fmt = (
-        f"vault format {data.get('vault_format', '?')}, "
-        f"engine format {data.get('engine_format', '?')}"
-    )
-    pending = [p for p in (data.get("pending") or []) if isinstance(p, dict)]
-    if pending or of("D001"):
-        shown = ", ".join(f"{p.get('id')} ({p.get('title')})" for p in pending[:4])
-        more = f" (+{len(pending) - 4} more)" if len(pending) > 4 else ""
-        count = len(pending) or len(of("D001"))
-        rows.append((name, "warn", (
+    fmt = f"vault format {state.vault_format}, engine format {state.engine_format}"
+    if state.status == "unknown":
+        rows = [(name, "warn", state.detail + tail)]
+    elif state.status == "pending":
+        shown = ", ".join(f"{ident} ({title})" for ident, title in state.pending[:4])
+        more = f" (+{len(state.pending) - 4} more)" if len(state.pending) > 4 else ""
+        count = len(state.pending) or len(of("D001"))
+        rows = [(name, "warn", (
             f"{vault}: {fmt}: {count} migration(s) pending: {shown or 'see D001'}{more} — a "
             f"human applies them with `claudron doctor --vault {vault} --fix`; claudlobby "
             f"never runs it{tail}"
-        )))
-    elif data.get("vault_format") != data.get("engine_format"):
-        rows.append((name, "warn", f"{vault}: {fmt}, and nothing is pending{tail}"))
+        ))]
+    elif state.status == "old_format":
+        rows = [(name, "warn", f"{vault}: {fmt}, and nothing is pending{tail}")]
     else:
-        rows.append((name, "pass", f"{vault}: {fmt}, no migration pending{tail}"))
-    for finding in of("D007"):
-        rows.append((f"{name}: D007", "warn", f"{vault}: {finding.get('message')}"))
-    for finding in of("D008"):
-        rows.append((f"{name}: D008", "warn", f"{vault}: {finding.get('message')}"))
+        rows = [(name, "pass", f"{vault}: {fmt}, no migration pending{tail}")]
+    for code in ("D007", "D008"):
+        rows.extend((f"{name}: {code}", "warn", f"{vault}: {message}") for message in of(code))
     return rows
 
 
@@ -965,7 +879,10 @@ def _loop_evidence(vault: str) -> tuple[str, str]:
     return ("warn" if degraded else "pass"), f"{vault}: " + "; ".join(bits)
 
 
-def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+def check_claudron(
+    fleet: FleetConfig, paths: Paths, report: DoctorReport, *,
+    migration_reader: MigrationReader | None = None,
+) -> None:
     """The claudron door check ``claudron_compat``'s docstring promises.
 
     Silent for a fleet with no vault-wired bot — nothing to diagnose. For a
@@ -988,10 +905,20 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         return
 
     cli_present = shutil.which("claudron") is not None
-    probe: dict | None = None
+    if migration_reader is None:
+        migration_reader = vault_migration_reader(run=_run, timeout=CLAUDRON_DOCTOR_TIMEOUT_S)
     if cli_present:
         report.add("claudron-cli", "pass", f"{len(wired)} vault-wired bot(s)")
-        status, detail, probe = _claudron_probe(sorted(set(wired.values()))[0])
+        first_vault = sorted(set(wired.values()))[0]
+        if Path(first_vault).expanduser().is_dir():
+            state = migration_reader(first_vault)
+            status, detail = state.probe_status, state.probe_detail
+        else:
+            # Preserve the engine row without asking doctor about a vault this
+            # host does not hold; the loop row owns that absence.
+            status, detail, _ = _claudron_probe(
+                first_vault, run=_run, timeout=min(10.0, CLAUDRON_DOCTOR_TIMEOUT_S)
+            )
         report.add("claudron-engine", status, detail)
     else:
         report.add(
@@ -1011,7 +938,7 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         # A vault this host does not hold is the loop row's to report; the
         # engine is only asked about one it can reach.
         if cli_present and Path(vault).expanduser().is_dir():
-            for row in _claudron_doctor(vault, probe):
+            for row in _claudron_doctor(vault, migration_reader(vault)):
                 report.add(*row)
 
 
@@ -1402,10 +1329,11 @@ def check_manifest_provenance(
 
 
 def check_fleet_validation(
-    fleet: FleetConfig, paths: Paths, report: DoctorReport
+    fleet: FleetConfig, paths: Paths, report: DoctorReport, *,
+    migration_reader: MigrationReader | None = None,
 ) -> None:
     """Run the standard fleet validator and surface errors/warnings."""
-    val_report = validate(fleet, paths)
+    val_report = validate(fleet, paths, migration_reader=migration_reader)
     if val_report.has_errors:
         report.add(
             "fleet-yaml",
@@ -1504,7 +1432,8 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
         doors = ignition_doors(fleet, paths)
     except Exception:  # noqa: BLE001 — a health command never crashes early
         doors = None
-    check_fleet_validation(fleet, paths, report)
+    migration_reader = vault_migration_reader(run=_run, timeout=CLAUDRON_DOCTOR_TIMEOUT_S)
+    check_fleet_validation(fleet, paths, report, migration_reader=migration_reader)
     check_manifest_provenance(fleet, paths, report)
     check_delivery(fleet, paths, report, run=delivery)
     check_goal_binding(fleet, paths, report, doors=doors)
@@ -1518,7 +1447,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     check_mcp_launch(fleet, paths, report)
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)
-    check_claudron(fleet, paths, report)
+    check_claudron(fleet, paths, report, migration_reader=migration_reader)
     check_workstream_residual(fleet, paths, report)
     return report
 

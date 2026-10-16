@@ -430,13 +430,11 @@ class TestWarnBaseline:
 
 
 class TestClaudnaWarnings:
-    def test_harvest_pin_folds_one_cause(self, fleet_dir, monkeypatch):
+    def test_harvest_pin_is_satisfied(self, fleet_dir, monkeypatch):
         _env(monkeypatch)
         _grow(fleet_dir, defaults="    claudna: {harvest: true}\n")
-        report = _validate(fleet_dir)
-        assert len(_of(report, "claudna-harvest-pin")) == 1
-        assert "PR 6a" in _of(report, "claudna-harvest-pin")[0]
-        assert "claudna-harvest-pin" in WARNING_CATEGORIES
+        assert not _of(_validate(fleet_dir), "claudna-harvest-pin")
+        assert "claudna-harvest-pin" not in WARNING_CATEGORIES
 
     def test_tier_override_warns_without_reading_operator_environment(
         self, fleet_dir, monkeypatch
@@ -466,3 +464,24 @@ class TestClaudnaWarnings:
             and "env:" in rows[0]
             and "claudna:" in rows[0]
         )
+
+
+class TestClaudronMigrationWarningFold:
+    def test_each_vault_cause_is_one_named_warning(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby import claudron_compat as compat
+        _env(monkeypatch)
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True)
+        _grow(fleet_dir, defaults=f"    claudron_vault_path: {vault}\n")
+        original_which = validator_module.shutil.which
+        monkeypatch.setattr(validator_module.shutil, "which", lambda exe: "/fake/claudron" if exe == "claudron" else original_which(exe))
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        for state, category in [
+            (compat.VaultMigrationState("old_format", (), 2, 3, ""), "claudron-migration"),
+            (compat.VaultMigrationState("unknown", (), None, None, f"{vault}: probe unavailable"), "claudron-doctor"),
+        ]:
+            report = validate(fleet, _paths(fleet_dir), migration_reader=lambda path: state)
+            rows = _of(report, category)
+            assert len(rows) == 1 and "affects 6 bot(s)" in rows[0] and str(vault) in rows[0]
+            assert category in WARNING_CATEGORIES
+            assert not report.errors

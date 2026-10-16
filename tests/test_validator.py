@@ -1298,7 +1298,13 @@ class TestClaudronDoor:
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         stub = bindir / "claudron"
-        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  status) echo \'{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}\' ;;\n'
+            "  doctor) echo '{\"ok\":true,\"command\":\"doctor\",\"data\":{\"vault_format\":3,\"engine_format\":3,\"pending\":[]},\"errors\":[],\"warnings\":[]}' ;;\n"
+            "esac\n"
+        )
         stub.chmod(0o755)
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 

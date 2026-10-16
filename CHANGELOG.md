@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
+
+- Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,
+  subject-filing and memory-home capabilities composed clauDNA harvest needs.
+  Remove the temporary `claudna-harvest-pin` warning. Upgrade one host first;
+  from one vault clone run `claudron doctor --fix --json --vault <vault>`, sync
+  its migration commit to every clone, and rebuild each local index before planning.
+- `config plan`, validation and host doctor share one bounded migration probe per
+  vault per request. Session-loop bots warn `claudron-migration` for pending
+  migrations or unequal formats, naming the human fix; `config plan` prints the
+  category and a static remedy while keeping authored paths and values private.
+  An unavailable check warns
+  `claudron-doctor`. Other engine findings remain in doctor's detailed rows.
+
 ### Added — clauDNA summary export (#2145 P3)
 
 - A default-on 15-minute `session-export` fleet job reads clauDNA's recorded export

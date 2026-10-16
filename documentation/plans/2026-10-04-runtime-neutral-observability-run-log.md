@@ -456,11 +456,11 @@ Use fresh branches from the latest `origin/main`, squash merges with exact-head 
 | Order | Phase / plan | State | PR / CI | Reachability |
 |---|---|---|---|---|
 | 7b | P3 clauDNA export contract / plan 5 | DONE: owner implementation, release and register integrated | clauDNA#411 `312e93c`, #412 `fe665ea`; Claudron#228 `bb4b72f` | v0.28.0 published; consuming host update/restart is separate and not claimed. |
-| 7a | P2-a1 telemetry intake / plan 4 Tasks 3–8 | Code and four simplify lenses converged; full/CI/week gates pending | Local `a09d7215`; no PR yet | Seven-day canary is required before merge; no production activation. |
-| 7c | P3 summary consumer / plan 6 6b | Implemented; full-suite integration corrections and final validation in progress | Local branch; no PR yet | Independent installed-CLI sample passed; production activation is separate. |
+| 7a | P2-a1 telemetry intake / plan 4 Tasks 3–8 | Integrated with 6b; parser/privacy findings under final delta review and full verification | Local `bb8a9c81`; no PR yet | Seven-day canary is required before merge; no production activation. |
+| 7c | P3 summary consumer / plan 6 6b | DONE: reviewed, verified and integrated | [#2361](https://github.com/Claudfather/Claudlobby/pull/2361), `b4ae5dae`; mandatory Linux/harness/conformance passed | Native composed-producer/cache observations passed; merged, NOT live in production. |
 | 8a | P2-a2 plane rows/readers / plan 4 Task 9 | Waiting on 7a canary evidence | Pending | Not live. |
-| 8b | P3 Claudron pin / plan 6 6a | Queued after 6b | Pending | Per-host migration/doctor readback required. |
-| 9 | P1 Half B session joins / plan 2 | Code/reviews/full comparison passed; live/timed gates block merge | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), `81147ec2`; CI running | Native protocol sample passed; real lifecycle and two 48-hour observations remain. |
+| 8b | P3 Claudron pin / plan 6 6a | IN PROGRESS: fresh branch after 6b; own before-leg running | Local phase branch; no PR yet | Real scratch migration/harvest and per-host runbook required. |
+| 9 | P1 Half B session joins / plan 2 | Code/reviews/full comparison passed; live/timed gates block merge | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), `81147ec2`; all reported CI passed | Native protocol sample passed; real lifecycle and two 48-hour observations remain. |
 | 10 | P0 Codex canary batch / existing runbook | CLI/config preflight passed; isolated authentication choice pending | Measurement only | No authenticated model turn or runtime measurement claimed. |
 | 11 | P4 owner-side adapters / per-repo plans | Waiting on measured Codex answers | Pending | Owner releases and parity evidence required. |
 | 12 | Execution and clauDNA companions / #2149 and clauDNA#404 | Plans follow P4 | Pending | Mixed-runtime acceptance not yet demonstrated. |
@@ -559,3 +559,83 @@ Historical export review fixed retired-only exhaustion and unreadable-manifest g
 
 
 **Genuine mutation procedures closed:** fresh private prepared exports exercised the production consumer with the real Plane emitter, actual seen seg1/new seg2, and observed rows at acknowledgement. Baseline: `4 passed`, exit 0; genuine combined-batch mutation: `1 failed, 3 passed`, exit 1; original-ID fallback mutation: `1 failed, 3 passed`, exit 1; restored: `4 passed`, exit 0. The combined batch produced real mixed-state refusals, retained normal seg1, replaced the new normal summary with unexportable statuses, then acked through 2 with pending 0. Original-ID fallback produced two real ledger/family refusals, no visible skipped row, recorded both errors in `last_unexportable`, then acked through 1. Neither held the cursor. The old cardinality surrogate and isolated ingest proof remain correctly narrower historical evidence; the required real procedure is now performed. The active source plan/canonical epic replace false unconditional cursor-wedge claims with normal-summary/fallback-status preservation and retain terminal acknowledgement. Four real behavior cells are being adapted into the existing committed suite, without private trace paths. Sweep covers 22 surfaces across three repositories; legitimate owner cursor monotonicity and harvest holds remain. Source equivalence checked 1,353 files per arm; only the intended consumer mutation differed, with identical Python 3.11.5/34 dependencies.
+
+
+**6b final verification and integration — 2026-10-15 23:31:25 UTC:** [#2361](https://github.com/Claudfather/Claudlobby/pull/2361)
+merged by authorized exact-head admin squash as `b4ae5dae86e7f8b62894dd8a500e24e2201cd17d`, from reviewed
+`92e7e4e9707042094065da9fe39c8d9968167f38`. Independent completion review returned **NO FINDINGS**.
+The separate prepared before/final runs terminated normally: `9553 passed, 78 skipped, 2 warnings` versus
+`9595 passed, 78 skipped, 2 warnings`, both exit 0; scoped failed/error names are empty, and the +42 collected
+cases equal +42 passes. Source proof covers 1,353 tracked files with zero mismatches and identical interpreter
+and 33 non-Lobby dependency versions. The dated f3 run completed with ten known integration failures; it is
+retained separately from the corrected final verdict. Final integration checks passed 222 with six platform
+skips; direct harness passed 352/0 before and 359/0 after. Genuine mixed-batch/fallback procedures, actual
+fresh armed/unarmed native SessionEnd sample, bot-context old-cache retention and final sealed replay/equivalence
+were independently audited. The [default Linux pytest and harness jobs](https://github.com/Claudfather/Claudlobby/actions/runs/38819899651)
+and [released export contract/conformance](https://github.com/Claudfather/Claudlobby/actions/runs/38819899677)
+passed on that head. Supported Ubuntu/Python 3.10 and macOS/Python 3.11 were still running at merge; all-CI-green
+is not claimed. Merged and candidate tree IDs both equal `0d927ef306efefa22d7a1fe38c02151a0df82d2e`.
+Production activation remains a separately authorized host operation.
+
+**Post-6b invariant checkpoint:** existing prepared isolated exports returned `39 passed` for Lobby identity,
+receipt and instruction-budget checks, `197 passed` for released clauDNA activity/export/hook checks, and
+`875 passed` for `make test-runtime` on the existing Python 3.12 environment; all exit 0. Both Lobby instruction
+copy pairs match. The tested release tree equals published v0.28.0 (`fe665ea6`); release CI separately covers
+Python 3.9. This checkpoint makes no new production or real-provider claim.
+
+**7a parallel topology and integration review:** telemetry first rebased from `a09d7215` onto frozen consumer
+`92e7e4e` so independent verification could continue. The planned post-squash rebase then moved it onto actual
+`b4ae5dae`; its candidate tree was unchanged (`cdb1c9eb17caad0ee3d337b9d6e7b909e6edfd38`), and the baseline
+tree equals actual main. The earlier integration-only review at `f4c524a6` preserved the prior blobs/modes of
+52 consumer-only and 24 telemetry-only paths, shared mapping helpers and config-explain, both registrants/jobs/
+doctor rungs and hook retirements. The subsequent parser fix below deliberately changes its own parser/reexport
+files; the actual-main rebase preserves that fixed candidate tree. Integration
+checks passed 982; final generated/instruction checks passed 87. The exact installed intake canary again observed
+logs/metrics HTTP 200, protobuf 415, private directory/file modes, no Plane writes and clean SIGTERM. The sole
+integration review finding was a blank line splitting a reference table, fixed on the authored Claude side and
+copied. A tracked-Markdown sweep across three repositories, 17 ref snapshots and ten active worktrees found 28
+occurrences belonging to three intentional table boundaries and zero remaining accidental headerless continuations.
+
+**7a full-suite findings, still under verification:** the old frozen after export exposed eager backend imports
+while constructing any CLI parser. The existing isolated parser/host subset reproduced `52 failed, 49 passed`,
+exit 1, against baseline `101 passed`, exit 0. Moving the shared port/retention grammar into the existing
+stdlib-only parser-module convention preserves public imports/defaults and the unchanged import blocklist;
+the affected set then passed 1,084, exit 0. Reuse review is clean. A separate intake-before-sink privacy-negative
+fixture/order finding is being reproduced and corrected; no terminal final full result is claimed. Old baseline
+and failing after exports remain immutable through terminal output, and a fresh corrected after leg is required.
+The seven-day floor-host/RC gate and P2-a2 dependency remain unchanged.
+
+**6a preflight and start:** its fresh branch is based on actual merged `b4ae5dae`, and its own separately prepared
+before-leg is running. Read-only contract analysis identified the need to preserve doctor's D001/D007/D008 and
+other-code presentation while sharing the migration prober and a request-local 60-second status-plus-doctor
+budget across validation and doctor. Source-only canary preparation found that released v0.6.1 creates format 2,
+and a legacy harvest draft is needed for the real v0.9.0 m003 migration branch. No migration or harvest observation
+is claimed until the actual private scratch-vault/native canary runs. Refreshed companion issues #2149 and
+clauDNA#404 remain open and explicitly depend on measured Codex owner adapters; no speculative fixture or plan
+was substituted for those missing observations.
+
+
+**Supported-platform CI readback:** all reported checks for merged #2361 and draft #2360 now completed successfully,
+including Ubuntu/Python 3.10 and macOS/Python 3.11. The earlier statements that those jobs were running describe
+the merge/publication instant, not the refreshed state. #2360 remains draft because its live/timed acceptance is
+independent of green CI.
+
+**6a live-plan finding before migration:** actual released Claudron v0.6.1 created a format-2 scratch vault with
+a legacy harvested draft; actual v0.9.0 status/doctor reported pending m003 and D001. The exact `983ac22b` wheel
+was assembled into a sealed independent CLI. Its real `config plan` succeeded but exposed only generic
+“configuration warning reported by the validator” lines: the existing metadata-only command discarded the new
+category and fix instruction. The canary stopped before applying the migration, and the phase worker owns a
+category-only/static-guidance correction that preserves redaction of authored paths and warning text. No
+migration or harvested-draft success is claimed at this checkpoint. A private runner syntax typo and a build
+from the commit-free prepared test index failed before host setup; the separate exact-commit packaging checkout
+corrected the build provenance without changing the test export.
+
+**Claudron response-reader class sweep:** an independent owner-contract read confirmed clauDNA treated present
+malformed capabilities as a legacy empty set and filtered malformed resolve items into an apparently empty
+search. A bounded owner fix at `070f80a1` rejects those unusable reads, preserves existing harvest cursors and
+allows valid retries; valid legacy absence, empty results, authored sources and additive fields remain supported.
+Test-first failures: 18; affected suites: 175 passed; local runtime: 901 passed; actual released v0.9.0/v0.6.1
+engine lanes: 7/2 passed with 2/7 expected lane skips. Unsandboxed owner `make check`: 2084 passed, 9 skipped,
+the same pre-existing macOS sed failure, exit 2; this is not a green local full check. Independent review and
+exact-head CI precede integration. Lobby's shared reader has the corresponding capability/pending/finding
+shape guard, and its status-envelope check is being tightened in the same phase.
