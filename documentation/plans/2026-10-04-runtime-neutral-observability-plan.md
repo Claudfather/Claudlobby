@@ -2121,7 +2121,7 @@ work list live in the [single sprint ledger](2026-10-04-runtime-neutral-observab
 - **8b started:** a fresh 6a branch from `b4ae5dae` owns its before-leg, Claudron v0.9.0 pin and migration warning.
   Its real scratch-vault migration and harvest canary are still required. **8a** waits for 7a's week and token ratios.
 - **9 remains draft:** [#2360](https://github.com/Claudfather/Claudlobby/pull/2360) passed local full comparison,
-  four simplify lenses and native protocol checks. Literal `/clear`, native lifecycle and both 48-hour windows remain.
+  four simplify lenses, native protocol checks and all reported CI. Literal `/clear`, native lifecycle and both 48-hour windows remain.
 - **10–12 remain dependent:** isolated Codex authentication choice and real canary measurements precede P4 plans,
   owner adapters and the two execution/behavior companions. No authenticated Codex measurement is claimed.
 

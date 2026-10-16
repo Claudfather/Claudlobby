@@ -460,7 +460,7 @@ Use fresh branches from the latest `origin/main`, squash merges with exact-head 
 | 7c | P3 summary consumer / plan 6 6b | DONE: reviewed, verified and integrated | [#2361](https://github.com/Claudfather/Claudlobby/pull/2361), `b4ae5dae`; mandatory Linux/harness/conformance passed | Native composed-producer/cache observations passed; merged, NOT live in production. |
 | 8a | P2-a2 plane rows/readers / plan 4 Task 9 | Waiting on 7a canary evidence | Pending | Not live. |
 | 8b | P3 Claudron pin / plan 6 6a | IN PROGRESS: fresh branch after 6b; own before-leg running | Local phase branch; no PR yet | Real scratch migration/harvest and per-host runbook required. |
-| 9 | P1 Half B session joins / plan 2 | Code/reviews/full comparison passed; live/timed gates block merge | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), `81147ec2`; CI running | Native protocol sample passed; real lifecycle and two 48-hour observations remain. |
+| 9 | P1 Half B session joins / plan 2 | Code/reviews/full comparison passed; live/timed gates block merge | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), `81147ec2`; all reported CI passed | Native protocol sample passed; real lifecycle and two 48-hour observations remain. |
 | 10 | P0 Codex canary batch / existing runbook | CLI/config preflight passed; isolated authentication choice pending | Measurement only | No authenticated model turn or runtime measurement claimed. |
 | 11 | P4 owner-side adapters / per-repo plans | Waiting on measured Codex answers | Pending | Owner releases and parity evidence required. |
 | 12 | Execution and clauDNA companions / #2149 and clauDNA#404 | Plans follow P4 | Pending | Mixed-runtime acceptance not yet demonstrated. |
@@ -613,3 +613,29 @@ and a legacy harvest draft is needed for the real v0.9.0 m003 migration branch. 
 is claimed until the actual private scratch-vault/native canary runs. Refreshed companion issues #2149 and
 clauDNA#404 remain open and explicitly depend on measured Codex owner adapters; no speculative fixture or plan
 was substituted for those missing observations.
+
+
+**Supported-platform CI readback:** all reported checks for merged #2361 and draft #2360 now completed successfully,
+including Ubuntu/Python 3.10 and macOS/Python 3.11. The earlier statements that those jobs were running describe
+the merge/publication instant, not the refreshed state. #2360 remains draft because its live/timed acceptance is
+independent of green CI.
+
+**6a live-plan finding before migration:** actual released Claudron v0.6.1 created a format-2 scratch vault with
+a legacy harvested draft; actual v0.9.0 status/doctor reported pending m003 and D001. The exact `983ac22b` wheel
+was assembled into a sealed independent CLI. Its real `config plan` succeeded but exposed only generic
+“configuration warning reported by the validator” lines: the existing metadata-only command discarded the new
+category and fix instruction. The canary stopped before applying the migration, and the phase worker owns a
+category-only/static-guidance correction that preserves redaction of authored paths and warning text. No
+migration or harvested-draft success is claimed at this checkpoint. A private runner syntax typo and a build
+from the commit-free prepared test index failed before host setup; the separate exact-commit packaging checkout
+corrected the build provenance without changing the test export.
+
+**Claudron response-reader class sweep:** an independent owner-contract read confirmed clauDNA treated present
+malformed capabilities as a legacy empty set and filtered malformed resolve items into an apparently empty
+search. A bounded owner fix at `070f80a1` rejects those unusable reads, preserves existing harvest cursors and
+allows valid retries; valid legacy absence, empty results, authored sources and additive fields remain supported.
+Test-first failures: 18; affected suites: 175 passed; local runtime: 901 passed; actual released v0.9.0/v0.6.1
+engine lanes: 7/2 passed with 2/7 expected lane skips. Unsandboxed owner `make check`: 2084 passed, 9 skipped,
+the same pre-existing macOS sed failure, exit 2; this is not a green local full check. Independent review and
+exact-head CI precede integration. Lobby's shared reader has the corresponding capability/pending/finding
+shape guard, and its status-envelope check is being tightened in the same phase.
