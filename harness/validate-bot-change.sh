@@ -15,6 +15,8 @@
 # Usage: PLANE_EMIT_CLI=/selected/venv/bin/claudlobby bash harness/validate-bot-change.sh
 #   Exit 0 = all observations matched intent, 1 = a behavior did not fire.
 set -euo pipefail
+# A host override is operator state, never input to disposable scenarios (#2145 B9).
+export CLAUDLOBBY_HOST_SYSTEM_YAML=/nonexistent/claudlobby-harness-host.yaml
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 # shellcheck source=lib-common.sh
@@ -3839,11 +3841,11 @@ harness_check "  ...and a fleet that says nothing carries nothing (the door owns
 env -u FLEET_NAME -u CLAUDLOBBY_FLEET "$VAL_CLI" --root "$SW_ROOT" host doctor --switches \
     > "$SW_ROOT/sw.txt" 2>&1 || true
 r=yes
-for _k in update-siblings session-digest code-audit-sweep; do
+for _k in update-siblings claudna-harvest code-audit-sweep; do
     grep -q "$_k" "$SW_ROOT/sw.txt" || r=no
 done
 harness_check "chunk N doctor --switches names every opt-in that ships OFF" "$r"
-grep -q "arm: SESSION_DIGEST_ENABLED=1" "$SW_ROOT/sw.txt" && r=yes || r=no
+grep -q "bots.<bot>.claudna.harvest: true" "$SW_ROOT/sw.txt" && r=yes || r=no
 harness_check "  ...each with the one line that arms it" "$r"
 
 rm -rf "$SW_ROOT"
@@ -4841,6 +4843,78 @@ _lk_r=$(_lk_pair "" "")
 [ "$_lk_r" = whole ] && r=yes || r=no
 harness_check "#2036: two senders to one real pane arrive as two whole payloads, one submit each ($_lk_r)" "$r"
 command tmux -L "$(vsock "$LK")" kill-server 2>/dev/null || true
+
+
+val_scenario "validate #2145 P3: session-export composition, per-item replay and ack"
+SE_ROOT="$ROOT/session-export"
+mkdir -p "$SE_ROOT"
+# The source harness has no selected release. Exercise its consumer in process;
+# the separately staged sealed-CLI sample owns selected-scope validation.
+cat > "$STUB_BIN/claudron" <<'SECLAUDRON'
+#!/bin/bash
+printf '%s\n' '{"ok":true,"data":{"capabilities":["doctor"],"pending":[],"vault_format":3,"engine_format":3,"findings":[]}}'
+SECLAUDRON
+chmod +x "$STUB_BIN/claudron"
+val_read "session-export source probe" env PATH="$STUB_BIN:$PATH" "$VAL_PY" - "$SE_ROOT" "$VAL_REPO" <<'SEPY' > "$SE_ROOT/result.json"
+import json, os, sys
+from dataclasses import asdict
+from pathlib import Path
+from claudlobby.config import load_fleet
+from claudlobby.composer import compose_fleet, compose_fleet_timers
+from claudlobby.paths import Paths
+from claudlobby.resources import get_resources
+from claudlobby.plane.registry_emit import run_generate_scan
+from claudlobby.session_export import export_bot
+sys.path.insert(0,sys.argv[2])
+from tests.plane_setup import initialize_plane
+root=Path(sys.argv[1]);repo=Path(sys.argv[2])
+(root/"fleet.yaml").write_text("fleet:\n  name: summary-probe\n  service_prefix: com.summary-probe\n  manager: lead\n  bots:\n    lead: {expertise: [orchestration], channels: []}\n")
+(root/".env").write_text("SESSION_EXPORT_ENABLED=0\n")
+fleet,merged=load_fleet(root/"fleet.yaml");paths=Paths(root=root,package=get_resources())
+os.environ["PLANE_EMIT_DISABLED"]="1"
+compose_fleet(fleet,paths)
+compose_fleet_timers(fleet,paths,merged)
+os.environ.pop("PLANE_EMIT_DISABLED",None)
+initialize_plane(root)
+run_generate_scan(paths,fleet,require_commit=True)
+store=paths.bot_runtime("lead")/"data/claudna";store.mkdir(parents=True,exist_ok=True)
+doc=json.loads((repo/"tests/fixtures/claudna_export/envelopes.json").read_text())[0]
+(store/"envelope.json").write_text(json.dumps(doc))
+door=store/"door.py"
+door.write_text("import json,sys\nfrom pathlib import Path\np=Path(__file__).parent\n"
+    "if '--ack' in sys.argv:\n with (p/'acks.jsonl').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\n print('{}')\n"
+    "else:print((p/'envelope.json').read_text())\n")
+entry={"schema":"claudna.entrypoint/1","plugin_version":"0.28.0","python":sys.executable,"entrypoint":str(door)}
+(store/"entrypoint.json").write_text(json.dumps(entry))
+first=export_bot(root,fleet.name,"lead",store,fleet_state=paths.fleet_state)
+second=export_bot(root,fleet.name,"lead",store,fleet_state=paths.fleet_state)
+entry["entrypoint"]="/nonexistent/summary-store";(store/"entrypoint.json").write_text(json.dumps(entry))
+stale=export_bot(root,fleet.name,"lead",store,fleet_state=paths.fleet_state)
+acks=[json.loads(line) for line in (store/"acks.jsonl").read_text().splitlines()]
+assert len(acks)==2*len(doc["next"])
+assert {a[a.index('--sid')+1]:int(a[a.index('--through')+1]) for a in acks}==doc["next"]
+print(json.dumps({"first":asdict(first),"second":asdict(second),"stale":asdict(stale),"acks":len(acks)}))
+SEPY
+r=no; grep -q '"emitted": 2' "$SE_ROOT/result.json" && grep -q '"duplicate": 2' "$SE_ROOT/result.json" && r=yes
+harness_check "#2145 session-export lands two items individually, then duplicate-only replay acks again" "$r"
+r=no; grep -q '"skipped": "stale_entrypoint"' "$SE_ROOT/result.json" && r=yes
+harness_check "#2145 session-export refuses a stale entrypoint without guessing" "$r"
+SE_EVENTS=$(val_events "$SE_ROOT" summary-probe lead session_summary)
+r=no; [ "$(printf '%s\n' "$SE_EVENTS" | wc -l | tr -d ' ')" = 2 ] && printf '%s' "$SE_EVENTS" | grep -q '"status":"ok"' && printf '%s' "$SE_EVENTS" | grep -q '"status":"skipped"' && printf '%s' "$SE_EVENTS" | grep -q 'session_uid' && r=yes
+harness_check "#2145 session_summary reader renders ok and disabled with stable session uid; replay adds no row" "$r"
+SE_CONF="$SE_ROOT/runtime/bots/lead/bot.conf"
+r=no; grep -qF 'export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"' "$SE_CONF" && grep -qF 'export CLAUDNA_SESSION_SUMMARY=0' "$SE_CONF" && r=yes
+harness_check "#2145 unarmed composition exports its own root and explicit summary off" "$r"
+r=yes
+for _se_retired in SESSION_""DIGEST transcript-""digest plane-session-""start; do
+    grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true
+done
+harness_check "#2145 composed bot has no retired summary or SessionStart hook" "$r"
+r=no; grep -q '^Environment=SESSION_EXPORT_ENABLED=0$' "$SE_ROOT/runtime/fleet/timers/com.summary-probe.session-export.service" && r=yes
+harness_check "#2145 session-export fleet opt-out reaches its closed unit environment" "$r"
+SE_OFF=$(SESSION_EXPORT_ENABLED=0 "$VAL_CLI" --root "$SE_ROOT" _session-export-tick summary-probe)
+r=no; printf '%s' "$SE_OFF" | grep -q 'session-export: OFF here' && r=yes
+harness_check "#2145 session-export off tick is a loud clean no-op" "$r"
 
 # A refusal no check reported still fails the run: a read that could not run
 # is never dropped on the floor.

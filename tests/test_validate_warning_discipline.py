@@ -427,3 +427,61 @@ class TestWarnBaseline:
         assert _public_rc(fleet_dir, warn_baseline=str(base), write=True) == 0
         assert _public_rc(fleet_dir, warn_baseline=str(base), strict=True) == 4
         assert _public_rc(fleet_dir, strict=True) == 4
+
+
+class TestClaudnaWarnings:
+    def test_harvest_pin_is_satisfied(self, fleet_dir, monkeypatch):
+        _env(monkeypatch)
+        _grow(fleet_dir, defaults="    claudna: {harvest: true}\n")
+        assert not _of(_validate(fleet_dir), "claudna-harvest-pin")
+        assert "claudna-harvest-pin" not in WARNING_CATEGORIES
+
+    def test_tier_override_warns_without_reading_operator_environment(
+        self, fleet_dir, monkeypatch
+    ):
+        _env(monkeypatch)
+        monkeypatch.setenv("CLAUDNA_SESSION_SUMMARY", "1")
+        assert not _of(_validate(fleet_dir), "claudna-env")
+        (fleet_dir / ".env").write_text("CLAUDNA_SESSION_SUMMARY=1\n")
+        report = _validate(fleet_dir)
+        rows = _of(report, "claudna-env")
+        assert len(rows) == 1 and "fleet tier" in rows[0] and "claudna:" in rows[0]
+        assert not any("CLAUDNA_SESSION_SUMMARY" in e for e in report.errors)
+
+    def test_bot_env_override_names_the_bot(self, fleet_dir, monkeypatch):
+        _env(monkeypatch)
+        p = fleet_dir / "fleet.yaml"
+        p.write_text(
+            p.read_text().replace(
+                "    lead:", "    lead:\n      env: {CLAUDNA_HARVEST: '1'}"
+            )
+        )
+        report = _validate(fleet_dir)
+        rows = _of(report, "claudna-env")
+        assert (
+            len(rows) == 1
+            and "lead" in rows[0]
+            and "env:" in rows[0]
+            and "claudna:" in rows[0]
+        )
+
+
+class TestClaudronMigrationWarningFold:
+    def test_each_vault_cause_is_one_named_warning(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby import claudron_compat as compat
+        _env(monkeypatch)
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True)
+        _grow(fleet_dir, defaults=f"    claudron_vault_path: {vault}\n")
+        original_which = validator_module.shutil.which
+        monkeypatch.setattr(validator_module.shutil, "which", lambda exe: "/fake/claudron" if exe == "claudron" else original_which(exe))
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        for state, category in [
+            (compat.VaultMigrationState("old_format", (), 2, 3, ""), "claudron-migration"),
+            (compat.VaultMigrationState("unknown", (), None, None, f"{vault}: probe unavailable"), "claudron-doctor"),
+        ]:
+            report = validate(fleet, _paths(fleet_dir), migration_reader=lambda path: state)
+            rows = _of(report, category)
+            assert len(rows) == 1 and "affects 6 bot(s)" in rows[0] and str(vault) in rows[0]
+            assert category in WARNING_CATEGORIES
+            assert not report.errors

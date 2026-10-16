@@ -23,13 +23,8 @@ _UID_PREFIX = {
     "vault": "vault_",
     "project": "proj_",
     "library_item": "lib_",
-    # F12 refinement (§19.6, delivered PR-B T7): session_uid is the TRANSCRIPT
-    # identity (stable across resume — empirically confirmed 2026-08-25);
-    # process_uid distinguishes the concurrent RESUMES of one transcript —
-    # minted fresh per process at SessionStart, never derived. (#2145 P1 note:
-    # its only minter, plane-session-start.sh, retires in #2145 P3; the proc_
-    # prefix stays registered so historical rows classify — P3 rewrites this
-    # comment.)
+    # process_uid has no minter since the SessionStart hook retired (#2145 P3);
+    # the prefix stays registered so historical proc_ rows classify.
     "process": "proc_",
 }
 
@@ -104,7 +99,7 @@ def derive_session_uid(platform_session_id: str, agent_cli: str = "claude") -> s
 
     #2145 F2: composed from session_alias — never a second spelling of the
     rule. A `claude` uid is byte-identical to the one derived before #2145 (the
-    bash mirror in plane-session-start.sh is Claude-only and stays so)."""
+    bash mirror retired with the SessionStart hook)."""
     return derive_uid("sess", session_alias(platform_session_id, agent_cli))
 
 

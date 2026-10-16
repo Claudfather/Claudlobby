@@ -1,0 +1,132 @@
+[
+  {
+    "schema": "claudna.export/1",
+    "consumer": "claudlobby",
+    "items": [
+      {
+        "sid": "00000000-0000-4000-8000-000000000001",
+        "seg": 1,
+        "session": {
+          "sid": "00000000-0000-4000-8000-000000000001",
+          "status": "closed",
+          "opened_at": "2026-10-15T21:46:21.046Z",
+          "closed_at": "2026-10-15T21:46:25.248Z",
+          "close_reason": "other",
+          "chain_id": "00000000-0000-4000-8000-000000000001",
+          "parent_sid": null,
+          "actor": {
+            "bot_id": "summary-armed",
+            "bot_name": "summary-armed",
+            "entrypoint": "sdk-cli",
+            "fleet": "summary-canary",
+            "kind": "bot",
+            "model": null
+          },
+          "origin": {
+            "branch": null,
+            "cwd": "/example/transcript.jsonl",
+            "head": null,
+            "repo": null
+          },
+          "agent_cli": "claude"
+        },
+        "summary": {
+          "blocks": [],
+          "index": 1,
+          "input": {
+            "range": {
+              "end": 51621,
+              "start": 0
+            },
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "transcript_path": "/example/transcript.jsonl",
+            "turns": 2
+          },
+          "journey": {
+            "arc": [
+              {
+                "result": "Harmless command completed",
+                "step": "Run local probe"
+              }
+            ],
+            "done": [
+              {
+                "text": "Validated local protocol path"
+              }
+            ],
+            "in_progress": [],
+            "intent": "Verify sealed segment export",
+            "next": [],
+            "outcome": "shipped",
+            "title": "Local summary consumer canary"
+          },
+          "procedures": [],
+          "producer": {
+            "cost_usd": 1.4000000000000001e-05,
+            "duration_ms": 2283,
+            "model": "haiku",
+            "prompt_version": "segment-summary/2"
+          },
+          "schema": "claudna.segment-summary/1",
+          "sid": "00000000-0000-4000-8000-000000000001"
+        },
+        "segment": {
+          "sealed_at": "2026-10-15T21:46:25.248Z",
+          "sealed_by": "session_end",
+          "counts": {
+            "prompts": 1,
+            "skills": 0,
+            "failures": 0,
+            "interrupts": 0
+          }
+        }
+      },
+      {
+        "sid": "00000000-0000-4000-8000-000000000002",
+        "seg": 1,
+        "session": {
+          "sid": "00000000-0000-4000-8000-000000000002",
+          "status": "closed",
+          "opened_at": "2026-10-15T21:34:26.424Z",
+          "closed_at": "2026-10-15T21:34:30.813Z",
+          "close_reason": "other",
+          "chain_id": "00000000-0000-4000-8000-000000000002",
+          "parent_sid": null,
+          "actor": {
+            "bot_id": null,
+            "bot_name": null,
+            "entrypoint": "sdk-cli",
+            "fleet": null,
+            "kind": "headless",
+            "model": null
+          },
+          "origin": {
+            "branch": null,
+            "cwd": "/example/transcript.jsonl",
+            "head": null,
+            "repo": null
+          },
+          "agent_cli": "claude"
+        },
+        "summary": null,
+        "segment": {
+          "sealed_at": "2026-10-15T21:34:30.813Z",
+          "sealed_by": "session_end",
+          "counts": {
+            "prompts": 1,
+            "skills": 0,
+            "failures": 0,
+            "interrupts": 0
+          }
+        },
+        "skipped": {
+          "reason": "disabled"
+        }
+      }
+    ],
+    "next": {
+      "00000000-0000-4000-8000-000000000001": 1,
+      "00000000-0000-4000-8000-000000000002": 1
+    }
+  }
+]

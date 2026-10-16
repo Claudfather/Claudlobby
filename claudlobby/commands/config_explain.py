@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from functools import reduce
 
 from ..command_result import CommandFailure, CommandOutput
 
 
 def _config_field(key, bot):
-    from ..config import BotConfig, FleetConfig
+    from ..config import BotConfig, FleetConfig, _STRICT_MAPPING_FIELDS
 
     if key.startswith("fleet.defaults."):
         field = key.removeprefix("fleet.defaults.")
@@ -21,15 +22,19 @@ def _config_field(key, bot):
     elif key.startswith("bot."):
         field = key.removeprefix("bot.")
         scope = "bot"
-    elif bot and key in BotConfig.__dataclass_fields__:
+    elif bot and key.split(".", 1)[0] in BotConfig.__dataclass_fields__:
         field, scope = key, "bot"
     elif key in FleetConfig.__dataclass_fields__:
         field, scope = key, "fleet"
     else:
         return None
     model = BotConfig if scope == "bot" else FleetConfig
-    if field not in model.__dataclass_fields__:
+    head, dot, sub = field.partition(".")
+    if head not in model.__dataclass_fields__ or (dot and sub not in _STRICT_MAPPING_FIELDS.get(head, {})):
         raise CommandFailure("not_found", "configuration key is not a declared model field")
+    if head in _STRICT_MAPPING_FIELDS and not dot:
+        choices = ", ".join(f"{head}.{k}" for k in _STRICT_MAPPING_FIELDS[head])
+        raise CommandFailure("invalid_argument", f"{head} is a mapping — name a sub-field: {choices}")
     if scope == "bot" and not bot:
         raise CommandFailure("invalid_argument", "bot configuration requires --bot BOT")
     return scope, field
@@ -67,7 +72,7 @@ def dispatch(args) -> CommandOutput:
                 bot=bot if scope == "bot" else None)
         except NotImplementedError as exc:
             raise CommandFailure("unavailable", "provenance unsupported for this configuration field") from exc
-        effective = getattr(context.fleet.bots[bot] if scope == "bot" else context.fleet, field)
+        effective = reduce(getattr, field.split("."), context.fleet.bots[bot] if scope == "bot" else context.fleet)
         key = f"{scope}.{field}"
         state = "unset" if effective is None else "set"
         data = {"fleet": context.fleet.name, "bot": bot if scope == "bot" else None,

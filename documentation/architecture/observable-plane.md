@@ -65,8 +65,7 @@ uid (and to a `bot_instance` uid per spawn); `fleet:<name>`, `host:<name>` and
 message from a bot the registry has not seen creates a PROVISIONAL actor that
 the next `generate` (the registry scan) confirms or tombstones; `plane doctor`
 counts the provisional ones. Session uids are transcript-stable
-(`sess_` + sha256 of the platform session id — the bash derivation in
-`claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for agent CLI `claude`; another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
+(`sess_` + sha256 of the platform session id — the bash copy retired with the SessionStart hook (#2145 P3); another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
 The task, report and message doors record the caller's session uid from its agent CLI's session-id env (`CLAUDE_CODE_SESSION_ID` for `claude`); a door without that env records none (#2145 §2.2). `plane-lookup.py --session <sess_uid>` lists the task events and communications one session wrote. Derive a uid with `python3 -c 'from claudlobby.plane.ids import derive_session_uid as d; print(d("<raw id>", "<agent_cli>"))'`; the raw id is not stored on these rows. The `state/otel/` cost query joins on the same uid (P2).
 
@@ -659,9 +658,8 @@ program keeps refusing.
 | `claudlobby/_runtime_scripts/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby/_runtime_scripts/plane-dispatch-in.sh` (UserPromptSubmit hook) | a `received` transmission for a tracked dispatch, report, or briefing whose final-line plane marker reaches the receiving bot; records the received wire byte count and hash so delivery can be checked against the sender's proof, while ordinary prompts record nothing | `PLANE_EMIT_DISABLED=1` |
 | `claudlobby/_runtime_scripts/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `claudlobby/_runtime_scripts/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby/_runtime_scripts/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `claudlobby/_runtime_scripts/transcript-digest.sh` (SessionEnd hook) | one `session_digest` system event per finished session on the bot's actor — the capture rubric (context/worked/failed/would_change/reusable), session id + uid, model, turn/tool counts, all in `data`; a `skipped` variant at zero model cost, distinct from an `ok` with empty fields (#1503 moved it off `transcript-digest-<date>.jsonl`, the last production JSONL data record) | `SESSION_DIGEST_ENABLED=1` per fleet (dormant by default); `PLANE_EMIT_DISABLED=1` |
+| `claudlobby _session-export-tick` (fleet timer) | one `session_summary` per sealed clauDNA segment on the bot actor: identity, segment volume, journey and block tally when summaries are on; `skipped_reason` otherwise; `data.session_uid` is the F2 uid | `SESSION_EXPORT_ENABLED=0` in fleet-tier `.env`; `PLANE_EMIT_DISABLED=1` |
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the flag's only meaning since the closure |
 | `lib/workstream-update.sh`, `claudlobby/_runtime_scripts/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
@@ -848,6 +846,7 @@ metric-sample retention.
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
 <!-- END GENERATED: switches -->

@@ -131,6 +131,36 @@ def _files(plan, change):
             for name, entry in change.after["files"].items()}
 
 
+
+def test_host_plan_probes_shared_vault_once_and_refreshes_next_request(staging_case, tmp_path, monkeypatch):
+    from claudlobby import claudron_compat, validator
+    case = staging_case
+    other = _fleet(case.root, case.root / "local/secondary", "secondary", case.package)
+    vault = tmp_path / "shared-vault"
+    (vault / "_shared").mkdir(parents=True)
+    for paths in (case.paths, other):
+        manifest = paths.fleet_yaml
+        manifest.write_text(manifest.read_text().replace("    channels: []\n",
+            f"    channels: []\n    claudron_vault_path: {vault}\n"))
+    actual_which = validator.shutil.which
+    monkeypatch.setattr(validator.shutil, "which", lambda exe:
+        "/fake/claudron" if exe == "claudron" else actual_which(exe))
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        data = ({"capabilities": ["doctor"]} if argv[1] == "status" else
+                {"vault_format": 3, "engine_format": 3, "pending": []})
+        return 0, json.dumps({"ok": True, "command": argv[1], "data": data,
+                              "errors": [], "warnings": []})
+    monkeypatch.setattr(claudron_compat, "_run", run)
+
+    for request in range(1, 3):
+        plan = config_staging.stage_configuration([case.paths, other], case.release)
+        assert plan.fleets == ("primary", "secondary")
+        assert [argv[1] for argv in calls] == ["status", "doctor"] * request
+        assert all(argv[-1] == str(vault) for argv in calls)
+
+
 def test_selected_account_plugins_are_frozen_as_plan_input(staging_case):
     account = Path.home() / ".claude" / "settings.json"
     _write(account, json.dumps({"enabledPlugins": {"telegram@claude-plugins-official": True}}))
@@ -163,9 +193,9 @@ def test_stage_validates_and_renders_retained_bytes_when_authoring_changes_durin
         finally:
             manifest.write_text(original)
 
-    def observe_validation(fleet, paths):
+    def observe_validation(fleet, paths, **kwargs):
         validated_managers.append(fleet.manager)
-        return real_validate(fleet, paths)
+        return real_validate(fleet, paths, **kwargs)
 
     monkeypatch.setattr(config, "load_fleet", alternate_during_mutable_parse)
     monkeypatch.setattr(config_staging, "validate", observe_validation)

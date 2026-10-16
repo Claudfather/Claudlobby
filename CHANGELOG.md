@@ -13,6 +13,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Task history and assignment lookup show the executing session; `plane-lookup.py --session <sess_uid>` lists its task events and communications.
 - C11's headless and interactive tmux captures show that main and subagent shells share the session id. The universal `CLAUDE_CODE_CHILD_SESSION` marker is never a nested-session signal.
 
+### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
+
+- Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,
+  subject-filing and memory-home capabilities composed clauDNA harvest needs.
+  Remove the temporary `claudna-harvest-pin` warning. Upgrade one host first;
+  from one vault clone run `claudron doctor --fix --json --vault <vault>`, sync
+  its migration commit to every clone, and rebuild each local index before planning.
+- `config plan`, validation and host doctor share one bounded migration probe per
+  vault per request. Session-loop bots warn `claudron-migration` for pending
+  migrations or unequal formats, naming the human fix; `config plan` prints the
+  category and a static remedy while keeping authored paths and values private.
+  An unavailable check warns
+  `claudron-doctor`. Other engine findings remain in doctor's detailed rows.
+
+### Added — clauDNA summary export (#2145 P3)
+
+- A default-on 15-minute `session-export` fleet job reads clauDNA's recorded export
+  door, lands one reader-visible `session_summary` per sealed segment, then acks.
+  Per-item replay, separate unexportable fallback IDs and independent stall-record /
+  alert retries keep cursors moving. Doctor and the four monitor consumers read the
+  new records and per-bot progress; skipped-only windows stop at coverage.
+
+### Changed — composed clauDNA spend switches (#2145 P3)
+
+- Strict field-wise `claudna: {session_summary, harvest}` opt-ins replace the digest
+  spend switch. Every bot composes `CLAUDNA_SESSION_SUMMARY=0` unless armed;
+  harvest implies summaries and needs Claudron >= 0.8.0 on the host (separate 6a).
+  Move `CLAUDNA_SESSION_SUMMARY` / `CLAUDNA_HARVEST` from `.env` or bot `env:` into
+  `claudna:`: composed lines override tier values, while bot `env:` overrides the
+  mapping. `config validate` warns `claudna-env`. The old state-root seal/rename /
+  retention sequence is in `documentation/runbooks/claudna-state-dir-cutover.md`,
+  operator-run after 6b.
+
+### Removed — duplicate summary and session-start hooks (#2145 F2/F6/F15)
+
+- Retire the transcript digest and SessionStart plane hooks with every live
+  consumer. F15 waives the old-vs-new summary comparison; clauDNA owns summaries,
+  and Python `derive_session_uid` is now the single session-id derivation.
+
 ### Fixed — a handoff that lands after `bot handoff` returns reads `saved` on `bot handoff BOT --check` (#963, #990)
 
 `claudlobby bot handoff` waits 30 s, and a handoff is a model turn that often takes minutes, so the door read `unknown` on handoffs the bot went on to write. A manager had no supported way to see one land: its permissions deny it the worker's handoff file.

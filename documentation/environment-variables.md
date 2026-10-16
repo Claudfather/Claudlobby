@@ -181,24 +181,24 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `CLAUDNA_STATE_DIR` | always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
-| `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
+| `CLAUDNA_STATE_DIR` | composed, always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
+| `CLAUDNA_SESSION_SUMMARY` | composed, always: `0` unless `bots.<name>.claudna.session_summary` / `harvest` or `defaults.claudna.*` arms it | One summary per sealed segment; unarmed bots export `skipped: disabled` |
+| `CLAUDNA_HARVEST` | `bots.<name>.claudna.harvest` / `defaults.claudna.harvest` | Summaries plus draft vault capture; needs Claudron >= 0.8.0 on the host first (PR 6a) |
+| `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | Exports the version hint; does not pin plugin installation |
 | `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `docs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
 
 ## Opt-in Feature Flags
 
-A handful of shared `claudlobby/_runtime_scripts/` hooks and scripts compose into **every** bot on **every** fleet
-(via `system.yaml` `defaults.hooks` or a shared `claudlobby/_runtime_scripts/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
-each is a no-op until the specific var below is set to `"1"` under the relevant bot's
-`bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
-in its session). This is the equippable-dormant pattern: a shared install cannot be staged
-per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate-wide on the next
-`generate` or daily reload.
+The switch registry (`claudlobby host doctor --switches`) names each carrier and
+its arming line. Model-spending summaries and harvest now use the strict
+`bots.<name>.claudna` / `defaults.claudna` mapping, not `env:`. Composition carries
+those gates to the next session open. Runtime Plane hooks remain always on;
+`PLANE_EMIT_DISABLED=1` is their silencer. Timer opt-outs are stamped into closed
+unit environments, and a disabled job says so loudly.
 
 | Variable | Consumer | Description |
 |----------|----------|--------------|
-| `SESSION_DIGEST_ENABLED` | `claudlobby/_runtime_scripts/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
 | `PLANE_EMIT_ENABLED` | `claudlobby generate` (`registry_emit.py`) | An opt-**OUT** since chunk N: the generate-time registry keyframe scan runs unless the fleet-tier `.env` resolves this to exactly `"0"`. Not a runtime door gate — every door is always on since F18 R1 |
 | `PLANE_EMIT_DISABLED` | `claudlobby/_runtime_scripts/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three |
 | `SPINDOWN_RECEIPT_ENABLED` | `claudlobby/_runtime_scripts/spin-down-bot.sh` | An opt-**OUT** since chunk N: the `bot_teardown_started` receipt is written unless this is exactly `"0"` (it is the one record that survives a `--purge`) |

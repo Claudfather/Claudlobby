@@ -439,30 +439,6 @@ defaults:
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-telegram-out.sh"
         matcher: "mcp__plugin_telegram_telegram__reply"
         timeout: 15
-    # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
-    # each finished session into one structured JSONL row via a cheap Haiku
-    # pass, so the monitor reasons over per-session digests and never over raw
-    # transcripts (a real transcript is ~19 MB / ~5M tokens and cannot enter a
-    # 200K context at all). Bounded by a qualifying gate + tail-cap; a session
-    # below the gate still gets a row, written without a model call.
-    #
-    # COMPOSED DORMANT. This entry lands in every bot on every fleet, but the
-    # script exits immediately unless the fleet sets SESSION_DIGEST_ENABLED=1 in
-    # its fleet.yaml `env:`. That keeps the rollout per-fleet: generate composes
-    # it everywhere harmlessly, and fleets are armed one at a time with their
-    # Haiku spend watched between. Default-on would have fired across the whole
-    # estate at the next generate or daily reload.
-    SessionEnd:
-      - command: "$CLAUDLOBBY_NATIVE_DIR/transcript-digest.sh"
-        timeout: 150
-    # Observable-plane session identity (PR-B T7, spec §19.6/F12): derives the
-    # transcript-stable session_uid + a fresh per-process process_uid and
-    # publishes them to $BOT_DIR/data/.plane-session for the doors. Composed
-    # everywhere, always on (PLANE_EMIT_DISABLED=1 is the one silencer), exit
-    # 0 on every path (a hook must never break a boot).
-    SessionStart:
-      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-session-start.sh"
-        timeout: 15
     # The INBOUND Telegram carrier (#1402): recognizes the plugin's channel
     # injection shape and records the OPERATOR's own message as a first-
     # class communication (sender human:<user>). Matches that shape ONLY --
@@ -595,6 +571,13 @@ defaults:
     # no-ops LOUDLY on every tick, so an off switch is visible in the log of
     # the host it is off on rather than reading as a broken timer. The
     # self-gate SHAPE is kept for exactly that -- it is an opt-OUT now.
+    # Contract polling spends nothing and reads no transcript. Model spend is
+    # clauDNA's and gated by the two claudna compose switches.
+    session-export:
+      script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _session-export-tick"
+      interval: 900
+      startup_delay: 735
+      type: oneshot
     task-recheck:
       script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _task-recheck-tick"
       interval: 21600
