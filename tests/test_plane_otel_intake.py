@@ -184,7 +184,8 @@ def test_many_tiny_chunks_have_bounded_accumulation():
     assert peak < count*4 + 65536
 
 
-def test_incomplete_headers_do_not_prevent_sigterm_drain(tmp_path):
+@pytest.mark.parametrize('startup_delay', [0, 6])
+def test_incomplete_headers_do_not_prevent_sigterm_drain(tmp_path, startup_delay):
     import socket
     import subprocess
     import sys
@@ -192,6 +193,8 @@ def test_incomplete_headers_do_not_prevent_sigterm_drain(tmp_path):
     script = '''
 from pathlib import Path
 import sys
+import time
+time.sleep(float(sys.argv[2]))
 from claudlobby.plane import otel_intake as intake
 root = Path(sys.argv[1])
 intake.REQUEST_TIMEOUT_S = .25
@@ -207,18 +210,24 @@ class ObservedServer(intake.IntakeServer):
 intake.IntakeServer = ObservedServer
 intake.serve(root, port=0, retention_days=14)
 '''
-    proc = subprocess.Popen([sys.executable, '-c', script, str(tmp_path)],
+    proc = subprocess.Popen([sys.executable, '-c', script, str(tmp_path), str(startup_delay)],
                             env=constructed_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     held = None
     try:
-        deadline = time.monotonic() + 5
+        # Interpreter/import startup on shared CI hosts has its own budget.
+        startup_deadline = time.monotonic() + 20
         while not (tmp_path/'port').exists():
-            assert proc.poll() is None
-            assert time.monotonic() < deadline
+            if proc.poll() is not None or time.monotonic() >= startup_deadline:
+                if proc.poll() is None:
+                    proc.kill()
+                _stdout, stderr = proc.communicate(timeout=5)
+                diagnostic = stderr.replace(str(tmp_path), '<scratch>')[-4000:]
+                pytest.fail(f'intake startup failed (rc={proc.returncode}): {diagnostic}')
             time.sleep(.02)
         held = socket.create_connection(('127.0.0.1', int((tmp_path/'port').read_text())), timeout=2)
         held.sendall(b'POST /v1/logs HTTP/1.1\r\nHost:')
         mark = tmp_path/f'handler-{held.getsockname()[1]}'
+        deadline = time.monotonic() + 5
         while not mark.exists():
             assert time.monotonic() < deadline
             time.sleep(.01)
