@@ -51,10 +51,10 @@ The `[vault]` extra in `pyproject.toml` is **pinned** to a released Claudron tag
 
 **Per-host upgrade from 0.6.1 to 0.9.0.** Canary one host first. This jump crosses `m003` / vault format 3 and the 0.8.0 index rebuild. In order:
 
-1. Upgrade Claudlobby's install on the host: `pip install -e '.[vault]'` picks up the pin. Upgrade the host's separate Claudron CLI to v0.9.0 too if bots use another install.
+1. Follow [sealed release delivery](../fleet-update-lifecycle.md#sealed-release-delivery): build the reviewed candidate wheel and prepare its offline wheelhouse and hash-pinned `dependency.lock`, including the pinned Claudron v0.9.0 dependency (`[vault]`) and every extra used by the selected release (for example `[plane-ui]`; compare its lock). Assemble with `host setup --wheel <candidate.whl> --dependency-lock <lock> --wheelhouse <wheelhouse> --interpreter <bootstrap-python>` under the host's existing data root. Retain the returned exact candidate CLI as `RELEASE_CLI` and its release ID as `RELEASE_ID`; assembly does not select or activate it. Use that CLI for `config plan --release <RELEASE_ID>` and `config diff <PLAN_ID>`. Upgrade the host's separate Claudron CLI to v0.9.0 too if bots use another install. Keep the selected release's immutable files intact.
 2. From **one clone per vault**, a human runs `claudron doctor --fix --json --vault <vault>`; it commits the migration. Finish the normal vault push/sync so that commit reaches the other clones.
 3. Run `git pull` on every other clone (vault-sync does this on its next run). Rebuild each clone's local index with `claudron index --full --json --vault <vault>` after pulling; the local index is not carried by the migration commit.
-4. Run `claudlobby config plan --release <RELEASE_ID>` again. The `claudron-migration` warning is gone for the migrated vault. Inspect the plan before operator activation.
+4. Use the retained candidate CLI to run `"$RELEASE_CLI" --root <DATA> config plan --release <RELEASE_ID>` again. The `claudron-migration` warning is gone for the migrated vault. Inspect `"$RELEASE_CLI" --root <DATA> config diff <PLAN_ID>` before the operator runs that candidate's `host activate <PLAN_ID> --install-directory <PATH>`.
 
 Arm `claudna.harvest` only after this PR's pin and the migrated vault are on the host. The pin now provides capture/amend and subject filing, so the temporary `claudna-harvest-pin` warning is removed.
 

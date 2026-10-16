@@ -451,7 +451,9 @@ vault-specific finding. Regression coverage drives the actual command dispatch
 and checks secret markers in paths, migration IDs, titles and provider details.
 
 **Files:** `pyproject.toml`, `.github/workflows/conformance.yml`, `claudlobby/claudron_compat.py`, `claudlobby/doctor.py`,
-`claudlobby/validator.py`, `tests/test_claudron_compat.py`, `tests/test_claudron_loop.py`, `tests/test_validator*.py`,
+`claudlobby/validator.py`, `claudlobby/config_staging.py`, `claudlobby/commands/releases.py`,
+`tests/test_claudron_compat.py`, `tests/test_claudron_loop.py`, `tests/test_validator*.py`,
+`tests/test_config_staging.py`, `tests/test_release_commands.py`,
 `documentation/integrations/claudron-integration.md`, `CHANGELOG.md` (6a's own entry).
 
 - [ ] **Step 1 (tests first).** `tests/test_claudron_compat.py`: with the new floor row, `test_vault_pin_satisfies_compat_floor`
@@ -474,7 +476,8 @@ and checks secret markers in paths, migration IDs, titles and provider details.
   pending: tuple[tuple[str, str], ...], vault_format, engine_format, detail: str)`, memoized **per `validate()` call** in the
   `vault_resolutions` shape (`validator.py:1346-1348`; a module-level `lru_cache` would outlive a test's monkeypatch), gated
   on `claudron_on_path` (`:642`), budgeted at `CLAUDRON_DOCTOR_TIMEOUT_S` (60 s, shared with doctor — one probe per distinct
-  vault, so a fleet pays vaults × ≤ 60 s only when the engine hangs); `doctor._claudron_doctor` renders its rows from it
+  vault across all fleets in a host plan, so a request pays vaults × ≤ 60 s only when the engine hangs); each next plan
+  starts a fresh reader. `doctor._claudron_doctor` renders its rows from it
   (same text as today). One prober, two readers.
 - [ ] **Step 3 — the warning (warn-never-fail, B3).** `validator._validate_bots`, after the vault block (`:1358`), for each bot
   with `composer._session_loop_enabled(bot)` and a resolving vault, with `claudron` on PATH: `state = vault_migration_state(vault)`;
@@ -494,9 +497,14 @@ and checks secret markers in paths, migration IDs, titles and provider details.
   has a pending migration or an unrecorded format (D001) and names the fix; every other finding stays doctor's", `:44` "the
   pinned **v0.9.0** ships the write-lock", `:48` `@v0.9.0 today`, the floor table (`:56-61`) gains the row; a new **per-host
   runbook** paragraph under "Version pin and bump policy": the 0.6.1→0.9.0 jump crosses `m003`/vault format 3 and the 0.8.0
-  index rebuild; in order — (1) upgrade the install on the host (`pip install -e .` picks up the pin); (2) from **one** clone,
-  `claudron doctor --fix --json --vault <vault>` (it commits); (3) `git pull` on every other clone (vault-sync does it on its
-  next run); (4) `claudlobby config plan` — the `claudron-migration` warning is gone; canary one host first. Also the "arm
+  index rebuild; in order — (1) follow `fleet-update-lifecycle.md` sealed release delivery: build the reviewed candidate
+  wheel, offline wheelhouse and hash-pinned dependency lock including `[vault]` and all extras used by the selected release,
+  then assemble with `host setup` under the existing data root; retain its exact candidate CLI and release ID for plan/diff
+  and later operator activation, and separately upgrade the host Claudron CLI if it comes from another install; (2) from
+  **one** clone, `claudron doctor --fix --json --vault <vault>` (it commits), then push/sync; (3) `git pull` on every other
+  clone (vault-sync does it on its next run), then rebuild every clone's local index with `claudron index --full --json
+  --vault <vault>`; (4) use that exact candidate CLI for `config plan --release <RELEASE_ID>` — the `claudron-migration`
+  warning is gone — then inspect `config diff <PLAN_ID>` before operator `host activate`; canary one host first. Also the "arm
   `claudna.harvest` only after this PR is on the host" line (6b documents the same from its side), and the bump deletes 6b's
   `claudna-harvest-pin` warning (Task 1 Step 9) with its `WARNING_CATEGORIES` entry and test — the pin now provides what
   harvest calls.

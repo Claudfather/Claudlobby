@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import tempfile
 
+from . import claudron_compat
 from . import composer as compose
 from .config import host_override_path, host_unit_name, load_fleet_snapshot
 from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
@@ -152,6 +153,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     builder.input(Path.home() / ".gitconfig")
     contexts = []
     source_digests = {}
+    migration_reader = claudron_compat.vault_migration_reader()
     for paths in sorted(fleet_paths, key=lambda item: str(item.fleet_yaml)):
         _inputs(builder, paths)
         fleet_content, fleet_digest = builder.input_snapshot(paths.fleet_yaml)
@@ -171,7 +173,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
                     builder.input(tier.path)
             bot = context.fleet.bots[bot_id]
             builder.input(compose.account_settings_path(bot, context.fleet, paths))
-        report = validate(context.fleet, paths)
+        report = validate(context.fleet, paths, migration_reader=migration_reader)
         if report.has_errors:
             raise PlanError("invalid fleet configuration: " + "; ".join(map(str, report.errors)))
         for kind, warning in report.categorized():

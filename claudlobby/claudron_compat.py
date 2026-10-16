@@ -156,7 +156,7 @@ def _claudron_probe(vault: str, *, run: Run, timeout: float) -> tuple[str, str, 
         shaped = (envelope.get("ok") is True and envelope.get("command") == "status"
                   and isinstance(data, dict) and envelope.get("errors") == []
                   and isinstance(warnings, list) and all(_is_finding(f) for f in warnings))
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
         shaped = False
     if not shaped:
         return "warn", "`claudron status --json` did not return the CLI envelope", None
@@ -221,8 +221,8 @@ def vault_migration_state(
         errors, warnings = envelope["errors"], envelope["warnings"]
         shaped = (envelope.get("command") == "doctor" and isinstance(data, dict)
                   and isinstance(errors, list) and isinstance(warnings, list)
-                  and envelope.get("ok") is (not errors))
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                  and envelope.get("ok") is (not errors) and rc == (1 if errors else 0))
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
         shaped = False
     if rc not in (0, 1) or not shaped:
         return state("unknown", f"{vault}: `claudron doctor --json` exited {rc} without its envelope")

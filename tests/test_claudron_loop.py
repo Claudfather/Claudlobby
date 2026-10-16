@@ -455,7 +455,9 @@ class TestVaultMigrationWarnings:
         status = {"ok": True, "command": "status", "warnings": [], "errors": [], "data": status_data if status_data is not None else {"capabilities": list(caps), "engine_version": "test"}}
         envelope = {"ok": True, "command": "doctor", "data": data if data is not None else {
             "vault_format": 3, "engine_format": 3, "pending": []},
-            "errors": [], "warnings": [{"code": code, "message": code} for code in findings]}
+            "errors": [{"code": code, "message": code} for code in findings] if rc == 1 else [],
+            "warnings": [] if rc == 1 else [{"code": code, "message": code} for code in findings]}
+        envelope["ok"] = not envelope["errors"]
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         stub = bindir / "claudron"
@@ -488,7 +490,7 @@ class TestVaultMigrationWarnings:
         self, tmp_path, monkeypatch, data, findings
     ):
         vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch, data=data,
-            findings=findings, rc=1)
+            findings=findings, rc=1 if findings else 0)
         report = validate(fleet, paths)
         rows = self._migration_rows(report)
         assert len(rows) == 1 and rows[0][0] == "claudron-migration"
@@ -546,6 +548,15 @@ class TestVaultMigrationWarnings:
         doctor_report = DoctorReport()
         check_claudron(fleet, paths, doctor_report)
         assert any(row.name == "claudron-doctor" and row.status == "warn" for row in doctor_report.checks)
+
+    def test_doctor_exit_one_without_findings_is_unknown_in_both_readers(self, tmp_path, monkeypatch):
+        from claudlobby.doctor import DoctorReport, check_claudron
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch, rc=1)
+        rows = self._migration_rows(validate(fleet, paths))
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        assert next(row for row in report.checks if row.name == "claudron-doctor").status == "warn"
 
     def test_loop_disabled_does_not_probe(self, tmp_path, monkeypatch):
         _, calls, fleet, paths = self._setup(tmp_path, monkeypatch, loop=False)

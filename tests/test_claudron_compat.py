@@ -449,3 +449,36 @@ def test_probe_expands_home_in_both_cli_arguments(tmp_path, monkeypatch):
     state = claudron_compat.vault_migration_state("~/vault", run=run)
     assert state.status == "pending"
     assert [argv[-1] for argv in calls] == [str(home / "vault"), str(home / "vault")]
+
+
+@pytest.mark.parametrize("rc,errors", [(1, []), (0, [{"code": "D009", "message": "finding"}])])
+def test_doctor_exit_code_must_match_findings(rc, errors):
+    def run(argv, **kwargs):
+        if argv[1] == "status":
+            return 0, json.dumps({"ok": True, "command": "status", "data": {"capabilities": ["doctor"]},
+                                  "errors": [], "warnings": []})
+        return rc, json.dumps({"ok": not errors, "command": "doctor", "data": {
+            "vault_format": 3, "engine_format": 3, "pending": []}, "errors": errors, "warnings": []})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "envelope" in state.detail
+
+
+def test_live_v090_migrated_shape_is_current():
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    def run(argv, **kwargs):
+        return 0, (fixtures / ("status-v090.json" if argv[1] == "status" else "doctor-format3.json")).read_text()
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "ok" and state.vault_format == state.engine_format == 3
+    assert state.pending == () and state.findings == ()
+
+
+@pytest.mark.parametrize("phase", ["status", "doctor"])
+@pytest.mark.parametrize("malformed", ["[" * 2000 + "0" + "]" * 2000, "9" * 5000], ids=["nested", "large-integer"])
+def test_decoder_limit_errors_are_unknown(phase, malformed):
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    def run(argv, **kwargs):
+        if argv[1] == phase:
+            return 0, malformed
+        return 0, (fixtures / ("status-v090.json" if argv[1] == "status" else "doctor-format3.json")).read_text()
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "envelope" in state.detail
