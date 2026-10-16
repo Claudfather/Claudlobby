@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+from socketserver import TCPServer
 import sys
 import threading
 import time
@@ -199,6 +200,11 @@ class IntakeServer(ThreadingHTTPServer):
     # server_close waits for handlers: no torn line on SIGTERM.
     daemon_threads = False
     block_on_close = True
+
+    def server_bind(self):
+        # A numeric loopback listener needs no reverse DNS before it can listen.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, address, sink):
         self.sink = sink

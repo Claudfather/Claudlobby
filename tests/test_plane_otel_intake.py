@@ -2,6 +2,7 @@
 import gzip
 import http.client
 import json
+import socket
 import threading
 import time
 
@@ -23,13 +24,40 @@ def receiver(tmp_path):
 
 
 def post(server, body, path='/v1/logs', headers=None, chunked=False, method='POST'):
-    conn = http.client.HTTPConnection(*server.server_address, timeout=3)
+    conn = http.client.HTTPConnection(*server.server_address[:2], timeout=3)
     try:
         conn.request(method, path, body, headers or {'Content-Type': 'application/json'}, encode_chunked=chunked)
         response = conn.getresponse()
         return response.status, response.headers, response.read()
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize('family,host', [(socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')])
+def test_bind_uses_numeric_address_without_reverse_dns(tmp_path, monkeypatch, family, host):
+    if family == socket.AF_INET6:
+        try:
+            with socket.socket(family) as probe:
+                probe.bind((host, 0))
+        except OSError:
+            pytest.skip('IPv6 loopback unavailable')
+
+    def refuse_lookup(_host):
+        pytest.fail('loopback intake startup attempted reverse DNS')
+
+    monkeypatch.setattr(socket, 'getfqdn', refuse_lookup)
+    monkeypatch.setattr(intake.IntakeServer, 'address_family', family)
+    server = intake.IntakeServer((host, 0), RawSink(tmp_path, days=14))
+    assert server.server_name == host
+    assert server.server_port == server.server_address[1] > 0
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        body = b'{"resourceMetrics":[]}'
+        assert post(server, body, '/v1/metrics')[0] == 200
+        assert (server.sink.path/'metrics.jsonl').read_bytes() == body + b'\n'
+    finally:
+        server.shutdown(); server.server_close(); thread.join(5)
 
 
 @pytest.mark.parametrize('encoding', ['plain', 'gzip', 'chunked'])
