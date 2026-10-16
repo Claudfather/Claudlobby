@@ -1,0 +1,28 @@
+{
+  "installed_cli": "0.162.0-alpha.17.2",
+  "source": "actual native hook stdin; content redacted in memory before any fixture write",
+  "capture_harness_sha256": "d84982af190ce84292456744a678cb0d007671500d1fccd03bb291c0008afbec",
+  "fixtures": [
+    {
+      "fixture": "user-prompt-submit.json",
+      "sanitized_sha256": "845f07979c2808389c8e698360bd0f90cc933143d85c666784ef0182f27631b3",
+      "native_stdin_sha256": "4309c06d208b06300c94aee423afc50006e9d3c708b813d60fccca405a374a47",
+      "native_stdin_bytes": 462,
+      "captured_utc_date": "2026-10-16"
+    },
+    {
+      "fixture": "pre-tool-use.json",
+      "sanitized_sha256": "602ce279901f7866c9c8b0075780ec50332e2fd9b1c6c9187645cec78fe12de2",
+      "native_stdin_sha256": "48635bd91ac65a40ac446ba7d736721fdbb574870145ae9d55e088f3b199b376",
+      "native_stdin_bytes": 509,
+      "captured_utc_date": "2026-10-16"
+    },
+    {
+      "fixture": "post-tool-use.json",
+      "sanitized_sha256": "ae6be304bcfeb8d4dffee39e27d4b6f1ecfb40c5d6e472012a7f12e1e3a0577a",
+      "native_stdin_sha256": "3664b5604b933a8b33a7e11d0c257bbd777f954684466d83f1447e8a7cd5055d",
+      "native_stdin_bytes": 529,
+      "captured_utc_date": "2026-10-16"
+    }
+  ]
+}
