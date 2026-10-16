@@ -15,7 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its migration commit to every clone, and rebuild each local index before planning.
 - `config plan`, validation and host doctor share one bounded migration probe per
   vault per request. Session-loop bots warn `claudron-migration` for pending
-  migrations or unequal formats, naming the human fix; an unavailable check warns
+  migrations or unequal formats, naming the human fix; `config plan` prints the
+  category and a static remedy while keeping authored paths and values private.
+  An unavailable check warns
   `claudron-doctor`. Other engine findings remain in doctor's detailed rows.
 
 ### Added — clauDNA summary export (#2145 P3)

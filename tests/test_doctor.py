@@ -340,7 +340,7 @@ class TestCheckClaudron:
                 "#!/bin/sh\n"
                 'if [ "$1" = "status" ]; then\n'
                 '  echo \'{"ok":true,"command":"status","data":'
-                '{"engine_version":"0.3.0","root":"/v","total_docs":7}}\'\n'
+                '{"engine_version":"0.3.0","root":"/v","total_docs":7},"warnings":[],"errors":[]}\'\n'
                 "fi\n"
                 "exit 0\n"
             ),

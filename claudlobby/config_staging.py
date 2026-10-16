@@ -116,7 +116,7 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
 
 
 def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
-                        *, log=lambda message: None) -> ConfigPlan:
+                        *, log=lambda message: None, validation_warning=None) -> ConfigPlan:
     """Stage all supplied fleets and shared host artifacts as one immutable plan.
 
     No selected-bot shortcut: permissions, hooks, skills and host equipment must
@@ -174,8 +174,11 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
         report = validate(context.fleet, paths)
         if report.has_errors:
             raise PlanError("invalid fleet configuration: " + "; ".join(map(str, report.errors)))
-        for warning in report.warnings:
-            log(str(warning))
+        for kind, warning in report.categorized():
+            if validation_warning is None:
+                log(str(warning))
+            else:
+                validation_warning(kind)
         contexts.append(context)
         source_digests[fleet.name] = {"fleet": fleet_digest, "projects": projects_digest}
     names = [context.fleet.name for context in contexts]

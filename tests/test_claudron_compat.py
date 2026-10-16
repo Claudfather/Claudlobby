@@ -336,7 +336,7 @@ class TestVaultMigrationProbeBudget:
         def run(argv, timeout=10.0):
             calls.append((argv, timeout))
             if argv[1] == "status":
-                return 0, '{"data":{"capabilities":["doctor"]}}'
+                return 0, '{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}'
             return 124, ""
         state = claudron_compat.vault_migration_state("/scratch/vault", run=run, timeout=10.0)
         assert state.status == "unknown"
@@ -349,7 +349,7 @@ class TestVaultMigrationProbeBudget:
         calls = []
         def run(argv, timeout=10.0):
             calls.append(argv)
-            return 0, '{"data":{"capabilities":["doctor"]}}'
+            return 0, '{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}'
         state = claudron_compat.vault_migration_state("/scratch/vault", run=run)
         assert state.status == "unknown" and "60s" in state.detail
         assert len(calls) == 1
@@ -382,7 +382,70 @@ def test_malformed_capabilities_are_unknown_without_doctor(capabilities):
     calls = []
     def run(argv, **kwargs):
         calls.append(argv)
-        return 0, json.dumps({"data": {"capabilities": capabilities}})
+        return 0, json.dumps({"ok": True, "command": "status", "data": {"capabilities": capabilities}, "warnings": [], "errors": []})
     state = claudron_compat.vault_migration_state("/example/vault", run=run)
     assert state.status == "unknown" and "capabilit" in state.detail
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [
+    {"ok": False, "command": "status", "data": {"capabilities": ["doctor"]}},
+    {"ok": True, "command": "other", "data": {"capabilities": ["doctor"]}},
+    {"command": "status", "data": {"capabilities": ["doctor"]}},
+    {"ok": 1, "command": "status", "data": {"capabilities": ["doctor"]}},
+])
+def test_wrong_status_envelope_does_not_open_doctor(status):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return 0, json.dumps({"warnings": [], "errors": [], **status})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and state.probe_status == "warn"
+    assert "status" in state.detail and "envelope" in state.detail
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("ok,errors", [(False, []), (True, [{"code": "D009", "message": "finding"}]), (1, [])])
+def test_doctor_ok_must_match_its_authoritative_error_list(ok, errors):
+    def run(argv, **kwargs):
+        if argv[1] == "status":
+            return 0, json.dumps({"ok": True, "command": "status", "data": {"capabilities": ["doctor"]}, "warnings": [], "errors": []})
+        return 1 if errors else 0, json.dumps({"ok": ok, "command": "doctor", "data": {
+            "vault_format": 3, "engine_format": 3, "pending": []}, "errors": errors, "warnings": []})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "envelope" in state.detail
+
+
+@pytest.mark.parametrize("field,value", [
+    ("errors", [{"code": "D001", "message": "failed"}]),
+    ("errors", {}), ("warnings", [7]), ("warnings", "broken"),
+])
+def test_status_finding_lists_must_match_its_success(field, value):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        envelope = {"ok": True, "command": "status", "data": {"capabilities": ["doctor"]},
+                    "errors": [], "warnings": []}
+        if argv[1] == "status":
+            envelope[field] = value
+        else:
+            envelope.update(command="doctor", data={"vault_format": 3, "engine_format": 3, "pending": []})
+        return 0, json.dumps(envelope)
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and state.probe_status == "warn"
+    assert len(calls) == 1
+
+
+def test_probe_expands_home_in_both_cli_arguments(tmp_path, monkeypatch):
+    home = tmp_path / "private-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        name, rc = ("status-v090.json", 0) if argv[1] == "status" else ("doctor-format2.json", 1)
+        return rc, (fixtures / name).read_text()
+    state = claudron_compat.vault_migration_state("~/vault", run=run)
+    assert state.status == "pending"
+    assert [argv[-1] for argv in calls] == [str(home / "vault"), str(home / "vault")]

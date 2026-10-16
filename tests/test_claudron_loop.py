@@ -452,8 +452,8 @@ class TestVaultMigrationWarnings:
         vault = tmp_path / "vault"
         (vault / "_shared").mkdir(parents=True, exist_ok=True)
         calls = tmp_path / "calls.jsonl"
-        status = {"command": "status", "data": status_data if status_data is not None else {"capabilities": list(caps), "engine_version": "test"}}
-        envelope = {"command": "doctor", "data": data if data is not None else {
+        status = {"ok": True, "command": "status", "warnings": [], "errors": [], "data": status_data if status_data is not None else {"capabilities": list(caps), "engine_version": "test"}}
+        envelope = {"ok": True, "command": "doctor", "data": data if data is not None else {
             "vault_format": 3, "engine_format": 3, "pending": []},
             "errors": [], "warnings": [{"code": code, "message": code} for code in findings]}
         bindir = tmp_path / "bin"
@@ -522,11 +522,30 @@ class TestVaultMigrationWarnings:
         from claudlobby import claudron_compat as compat
         _, _, fleet, paths = self._setup(tmp_path, monkeypatch)
         def run(argv, **kwargs):
-            return (0, '{"data":{"capabilities":["doctor"]}}') if argv[1] == "status" else (124, "")
+            return (0, '{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}') if argv[1] == "status" else (124, "")
         monkeypatch.setattr(compat, "_run", run)
         rows = self._migration_rows(validate(fleet, paths))
         assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
         assert "60s" in rows[0][1] and "unknown" in rows[0][1]
+
+    @pytest.mark.parametrize("phase", ["status", "doctor"])
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_undecodable_cli_reply_warns_unknown(self, tmp_path, monkeypatch, phase, stream):
+        from claudlobby.doctor import DoctorReport, check_claudron
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch)
+        status = {"ok": True, "command": "status", "data": {"capabilities": ["doctor"]},
+                  "warnings": [], "errors": []}
+        stub = tmp_path / "bin" / "claudron"
+        stub.write_text(f"#!{sys.executable}\nimport sys\n"
+            f"if sys.argv[1] == {phase!r}: getattr(sys, {stream!r}).buffer.write(bytes([255])); sys.exit(0)\n"
+            f"if sys.argv[1] == 'status': print({json.dumps(status)!r})\n")
+        report = validate(fleet, paths)
+        rows = self._migration_rows(report)
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert not any("migration" in error for error in report.errors)
+        doctor_report = DoctorReport()
+        check_claudron(fleet, paths, doctor_report)
+        assert any(row.name == "claudron-doctor" and row.status == "warn" for row in doctor_report.checks)
 
     def test_loop_disabled_does_not_probe(self, tmp_path, monkeypatch):
         _, calls, fleet, paths = self._setup(tmp_path, monkeypatch, loop=False)
@@ -579,7 +598,7 @@ class TestMalformedVaultMigrationEnvelopes:
     ):
         from claudlobby.doctor import DoctorReport, check_claudron
         data = {"vault_format": 3, "engine_format": 3, "pending": []}
-        envelope = {"command": "doctor", "data": data, "errors": [], "warnings": []}
+        envelope = {"ok": True, "command": "doctor", "data": data, "errors": [], "warnings": []}
         kwargs = {}
         if field == "capabilities":
             kwargs["status_data"] = {"capabilities": value}

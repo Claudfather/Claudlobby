@@ -442,6 +442,14 @@ historical. Final reviews, the private migration/harvest canary, vault-extra lan
 and 6a's own full before/after gate remain required before merge. Production is
 unchanged by this implementation candidate.
 
+The sealed CLI canary exposed an existing metadata-only `config plan` adapter
+that discarded every warning's category and remedy. The implementation now
+passes category-only diagnostics from staging to that adapter. It prints the
+migration category and the explicit human fix with a literal `<vault>`; authored
+paths and raw warnings remain private, and `config validate` gives the detailed
+vault-specific finding. Regression coverage drives the actual command dispatch
+and checks secret markers in paths, migration IDs, titles and provider details.
+
 **Files:** `pyproject.toml`, `.github/workflows/conformance.yml`, `claudlobby/claudron_compat.py`, `claudlobby/doctor.py`,
 `claudlobby/validator.py`, `tests/test_claudron_compat.py`, `tests/test_claudron_loop.py`, `tests/test_validator*.py`,
 `documentation/integrations/claudron-integration.md`, `CHANGELOG.md` (6a's own entry).

@@ -1301,8 +1301,8 @@ class TestClaudronDoor:
         stub.write_text(
             "#!/bin/sh\n"
             'case "$1" in\n'
-            "  status) echo '{\"data\":{\"capabilities\":[\"doctor\"]}}' ;;\n"
-            "  doctor) echo '{\"command\":\"doctor\",\"data\":{\"vault_format\":3,\"engine_format\":3,\"pending\":[]},\"errors\":[],\"warnings\":[]}' ;;\n"
+            '  status) echo \'{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}\' ;;\n'
+            "  doctor) echo '{\"ok\":true,\"command\":\"doctor\",\"data\":{\"vault_format\":3,\"engine_format\":3,\"pending\":[]},\"errors\":[],\"warnings\":[]}' ;;\n"
             "esac\n"
         )
         stub.chmod(0o755)

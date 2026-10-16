@@ -23,6 +23,7 @@ table's consumer was built to stop doing.
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from time import monotonic
@@ -127,22 +128,37 @@ def _run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
         return 127, ""
     except subprocess.TimeoutExpired:
         return _RC_TIMEOUT, ""
-    except OSError:
+    except (OSError, UnicodeError):
         return 1, ""
+
+
+def _is_finding(value: object) -> bool:
+    return (isinstance(value, dict) and isinstance(value.get("code"), str)
+            and isinstance(value.get("message"), str))
+
+
+def _vault_argv(verb: str, vault: str) -> list[str]:
+    # The CLI never expands a tilde; match the validator's accepted address.
+    return ["claudron", verb, "--json", "--vault", os.path.expanduser(vault)]
 
 
 def _claudron_probe(vault: str, *, run: Run, timeout: float) -> tuple[str, str, dict | None]:
     """Sanctioned capability probe; doctor capability, never version, gates the next call."""
-    rc, out = run(["claudron", "status", "--json", "--vault", vault], timeout=timeout)
+    rc, out = run(_vault_argv("status", vault), timeout=timeout)
     if rc == 3:
         return "warn", f"claudron installed but no vault resolved at {vault}", None
     if rc != 0:
         return "warn", f"`claudron status --json` exited {rc} for {vault}", None
     try:
-        data = json.loads(out)["data"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        data = None
-    if not isinstance(data, dict):
+        envelope = json.loads(out)
+        data = envelope["data"]
+        warnings = envelope["warnings"]
+        shaped = (envelope.get("ok") is True and envelope.get("command") == "status"
+                  and isinstance(data, dict) and envelope.get("errors") == []
+                  and isinstance(warnings, list) and all(_is_finding(f) for f in warnings))
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+        shaped = False
+    if not shaped:
         return "warn", "`claudron status --json` did not return the CLI envelope", None
     version = data.get("engine_version", "unknown (pre-0.3.0)")
     return "pass", (
@@ -189,7 +205,7 @@ def vault_migration_state(
     if remaining == 0:
         rc, out = _RC_TIMEOUT, ""
     else:
-        rc, out = run(["claudron", "doctor", "--json", "--vault", vault], timeout=remaining)
+        rc, out = run(_vault_argv("doctor", vault), timeout=remaining)
     if rc == _RC_TIMEOUT:
         return state("unknown", (
             f"{vault}: `claudron doctor` did not answer within {budget:g}s, "
@@ -204,15 +220,14 @@ def vault_migration_state(
         data = envelope["data"]
         errors, warnings = envelope["errors"], envelope["warnings"]
         shaped = (envelope.get("command") == "doctor" and isinstance(data, dict)
-                  and isinstance(errors, list) and isinstance(warnings, list))
+                  and isinstance(errors, list) and isinstance(warnings, list)
+                  and envelope.get("ok") is (not errors))
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
         shaped = False
     if rc not in (0, 1) or not shaped:
         return state("unknown", f"{vault}: `claudron doctor --json` exited {rc} without its envelope")
     raw_findings = errors + warnings
-    findings = tuple((f["code"], f["message"]) for f in raw_findings
-                     if isinstance(f, dict) and isinstance(f.get("code"), str)
-                     and isinstance(f.get("message"), str))
+    findings = tuple((f["code"], f["message"]) for f in raw_findings if _is_finding(f))
     if len(findings) != len(raw_findings):
         return state("unknown", f"{vault}: `claudron doctor --json` returned malformed findings; "
                      "pending migrations are unknown", findings=findings)
