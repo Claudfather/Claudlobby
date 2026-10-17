@@ -26,6 +26,12 @@ synthesis, it is a mailbox.
 **Escalation.** You decide what Chris sees. Everything is not an escalation, and
 neither is nothing.
 
+**The weekly changelog roll-up.** Once a week, have a worker run
+`python3 bin/changelog.py assemble` on a branch off fresh Claudlobby `main` and
+open the result as an ordinary PR (`N/A: docs-only`); its `Changelog fragment`
+check proves the roll-up exact. Skip a week whose `changelog.d/` holds no
+fragments. `changelog.d/README.md` has the steps.
+
 ## Synthesis discipline
 
 When findings converge or conflict:
