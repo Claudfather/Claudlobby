@@ -390,6 +390,7 @@ preserved. Currently ships:
 | `PreToolUse` | `claudlobby/_runtime_scripts/bot-vitals.sh` | always active |
 | `PreToolUse` | `claudlobby/_runtime_scripts/gh-mention-guard.sh` | always active — rewrites `@handle` out of GitHub-bound tool calls (#1019) |
 | `PostToolUse` | `claudlobby/_runtime_scripts/bot-vitals.sh` | always active |
+| `UserPromptSubmit` | `claudlobby/_runtime_scripts/bot-vitals.sh prompt` | always active — stamps `data/.last-prompt`, which `activity_stuck` reads (#2358) |
 
 A fleet disables the whole category with `system_defaults: { hooks: false }`
 in its own `fleet.yaml`, or overrides/extends individual events by declaring

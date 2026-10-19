@@ -81,6 +81,7 @@ projects.yaml
 # they can land at any depth and are never product data.
 **/data/events/fleet-*.jsonl
 **/data/.last-tool-call
+**/data/.last-prompt
 **/data/.idle
 
 # fleet charter (the .seed beside it is the committed template)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from tests.plane_setup import initialize_plane
 
 import json
+import os
 import pytest
 import subprocess
 import sys
@@ -35,6 +36,7 @@ TOOL_PAYLOADS = [
     json.loads((CODEX_FIXTURES / "post-tool-use.json").read_text()),
 ]
 TOOL_IDS = ["claude-minimal", "codex-pre", "codex-post"]
+PROMPT_PAYLOAD = {"hook_event_name": "UserPromptSubmit", "prompt": "a prompt", "session_id": "s-1"}
 
 
 def _manifest(root: Path):
@@ -120,10 +122,12 @@ def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, hook_payloa
 
 
 @pytest.mark.parametrize("bot_dir", [None, "", "runtime/bots/b1"], ids=["unset", "empty", "relative"])
-@pytest.mark.parametrize("hook_payload", TOOL_PAYLOADS, ids=TOOL_IDS)
-def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, hook_payload, *, scratch_plane_env):
+@pytest.mark.parametrize(("argv", "hook_payload"), [*(([], p) for p in TOOL_PAYLOADS), (["prompt"], PROMPT_PAYLOAD)],
+                         ids=[*TOOL_IDS, "prompt"])
+def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, argv, hook_payload, *, scratch_plane_env):
     """#874: with no usable BOT_DIR (unset, empty or relative) the hook writes no marker into the dir it runs
-    in (a bot's cwd is its project checkout) and records no row against a bot it cannot name. It exits 0."""
+    in (a bot's cwd is its project checkout) and records no row against a bot it cannot name. It exits 0,
+    as the tool-call hook and as `bot-vitals.sh prompt` (#2358)."""
     libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
     env = {k: v for k, v in {**env, "BOT_ID": "b1", "FLEET_NAME": FLEET}.items() if k != "BOT_DIR"}
@@ -133,18 +137,36 @@ def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, hook_pay
     (cwd / "data").mkdir(parents=True)
     (cwd / "runtime" / "bots" / "b1" / "data").mkdir(parents=True)   # a relative BOT_DIR would resolve here
     payload = json.dumps(hook_payload)
-    r = subprocess.run(["bash", str(libdir / "bot-vitals.sh")], input=payload, capture_output=True, text=True,
-                       timeout=180, env=env, cwd=cwd)
-    assert r.returncode == 0, r.stderr
+    r = subprocess.run(["bash", str(libdir / "bot-vitals.sh"), *argv], input=payload, capture_output=True,
+                       text=True, timeout=180, env=env, cwd=cwd)
+    assert (r.returncode, r.stdout) == (0, ""), r.stderr
     assert "recording nothing" in r.stderr
-    assert not list(cwd.rglob(".last-tool-call"))
-    assert not (bot / "data" / ".last-tool-call").exists()
+    assert not list(cwd.rglob(".last-*"))
+    assert not list((bot / "data").glob(".last-*"))
     # The hook has exited; replay anything it staged, then read once: an emit that slipped through is counted.
     _replay_pending(tmp_path)
     if db_path(tmp_path).exists():
         with connect(db_path(tmp_path)) as conn:
             assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'tool_call'").fetchone()[0] == 0
     assert not list((tmp_path / "state" / "plane").rglob("*.batch"))
+
+
+def test_the_vitals_hook_stamps_a_prompt_and_records_nothing_else(tmp_path, *, scratch_plane_env):
+    """#2358: as the UserPromptSubmit hook (`bot-vitals.sh prompt`) it moves data/.last-prompt, which
+    fleet-pulse's activity_stuck reads beside .last-tool-call, and writes no tool-call marker and nothing on
+    stdout, which a UserPromptSubmit hook adds to the model's context."""
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
+    env = {**env, "BOT_DIR": str(bot), "BOT_ID": "b1", "FLEET_NAME": FLEET}
+    marker = bot / "data" / ".last-prompt"
+    marker.touch()
+    os.utime(marker, (1, 1))   # a marker an earlier prompt left must move, not only appear
+    started = int(time.time())
+    r = subprocess.run(["bash", str(libdir / "bot-vitals.sh"), "prompt"], input=json.dumps(PROMPT_PAYLOAD),
+                       capture_output=True, text=True, timeout=180, env=env)
+    assert (r.returncode, r.stdout) == (0, ""), r.stderr
+    assert marker.stat().st_mtime >= started
+    assert not (bot / "data" / ".last-tool-call").exists()
 
 
 # --- uptime ------------------------------------------------------------------------

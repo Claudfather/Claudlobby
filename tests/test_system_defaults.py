@@ -208,6 +208,9 @@ class TestLoadFleetSystemDefaults:
         assert "PreToolUse" in bot.hooks
         cmds = [h["command"] for h in bot.hooks["PreToolUse"]]
         assert "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" in cmds
+        # #2358: the same script stamps each prompt for activity_stuck's clock
+        prompt = [h["command"] for h in bot.hooks["UserPromptSubmit"]]
+        assert "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh prompt" in prompt
 
     def test_system_defaults_inject_observability(self, tmp_path):
         root = tmp_path / "claudlobby"

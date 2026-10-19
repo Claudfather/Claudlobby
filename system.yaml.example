@@ -487,6 +487,11 @@ defaults:
       # on every path (UserPromptSubmit stdout feeds the model). Same dormancy.
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-dispatch-in.sh"
         timeout: 15
+      # #2358: stamps data/.last-prompt for fleet-pulse's activity_stuck. No
+      # python or plane emit, and stdout stays empty (UserPromptSubmit stdout
+      # feeds the model).
+      - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh prompt"
+        timeout: 15
     # Observable-plane Telegram carrier, the RC-relay OUTBOUND half (#1412):
     # when a bot answers a Telegram-initiated turn with plain final text
     # (no reply tool call) the bridge's RC auto-relay delivers it and no

@@ -3,7 +3,8 @@
 #
 # Reads the hook JSON payload from stdin and records each event on the plane
 # through the fleet-event door (emit_fleet_event). Works as both PreToolUse and
-# PostToolUse hook.
+# PostToolUse hook, and as `bot-vitals.sh prompt`, the UserPromptSubmit hook,
+# which only stamps the prompt marker (below).
 #
 # Captures: tool_call. A Pre/PostToolUse payload carries no session lifecycle
 # field, so no session event can be derived here.
@@ -11,7 +12,8 @@
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 #
 # Composed into every bot by the release's defaults (claudlobby/system.yaml) as
-# "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" for PreToolUse and PostToolUse. A fleet
+# "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" for PreToolUse and PostToolUse, and as
+# "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh prompt" for UserPromptSubmit. A fleet
 # manifest must not declare it again: a second entry, such as the retired
 # "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh", runs the hook twice and records every
 # tool call twice (#2062).
@@ -32,6 +34,15 @@ set -euo pipefail
 if [[ "${BOT_DIR:-}" != /* || ! -d "$BOT_DIR" ]]; then
     cat >/dev/null 2>&1 || true   # drain the payload; the writer must not see a closed pipe
     echo "bot-vitals: BOT_DIR unset or not an absolute directory — recording nothing, touching no marker (#874)" >&2
+    exit 0
+fi
+
+# --- Prompt marker (#2358), read by fleet-pulse's activity_stuck ---
+# Before lib-common is sourced: no python, no row, and nothing on stdout,
+# which UserPromptSubmit adds to the model's context.
+if [ "${1:-}" = prompt ]; then
+    cat >/dev/null 2>&1 || true   # drain the payload; the writer must not see a closed pipe
+    touch "$BOT_DIR/data/.last-prompt" 2>/dev/null || true
     exit 0
 fi
 
@@ -94,9 +105,10 @@ done
 
 # --- Activity marker ---
 # Touch a marker file on every tool-call hook invocation. fleet-pulse.sh reads
-# its mtime to detect an "activity_stuck" bot — one whose pane is animating but
-# has made no tool call for a long time (the case pane_stuck can't see). Cheaper
-# and more portable than parsing the last tool_call timestamp out of the JSONL.
+# its mtime, and data/.last-prompt's (above), to detect an "activity_stuck" bot —
+# one whose pane is animating but has made no tool call for a long time (the case
+# pane_stuck can't see). Cheaper and more portable than parsing the last
+# tool_call timestamp out of the JSONL.
 touch "$BOT_DIR/data/.last-tool-call" 2>/dev/null || true
 
 # Non-blocking hook — always exit 0

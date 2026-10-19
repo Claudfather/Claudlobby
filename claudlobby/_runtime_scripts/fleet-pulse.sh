@@ -768,9 +768,11 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # --- Check 5: activity stuck (no tool calls for extended period) ---
     # Uses marker-file comparison instead of pane-regex idle detection.
     # keepalive.sh touches data/.idle when it sees an idle pane; bot-vitals.sh
-    # touches data/.last-tool-call on every tool call. Comparing mtimes is
-    # deterministic and harness-agnostic (works for Claude Code, Codex, Cortex).
+    # touches data/.last-tool-call on every tool call and data/.last-prompt on
+    # every prompt. Comparing mtimes is deterministic and harness-agnostic
+    # (works for Claude Code, Codex, Cortex).
     marker="$bot_dir/data/.last-tool-call"
+    prompt_marker="$bot_dir/data/.last-prompt"
     idle_marker="$bot_dir/data/.idle"
     # #2070: keepalive writes data/.held while the bot's input box holds text
     # that was never submitted and no turn runs (its HELD verdict). That bot is
@@ -871,10 +873,19 @@ for bot_dir in "$BOTS_DIR"/*/; do
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
             now_epoch=$(date +%s)
             last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
+            # #2358: the stall runs from the later of the last tool call and the
+            # last prompt. A bot idle past the threshold keeps an old tool-call
+            # marker, and once keepalive's BUSY tick removes .idle, that marker
+            # alone would count the idle time against a turn begun seconds ago.
+            # No prompt marker (settings that predate the hook): the tool call.
+            prompt_epoch=$(stat_mtime "$prompt_marker" 2>/dev/null || echo null)
             gap=$(( now_epoch - last_epoch ))
+            if [ "$prompt_epoch" != null ] && [ "$prompt_epoch" -gt "$last_epoch" ]; then
+                gap=$(( now_epoch - prompt_epoch ))
+            fi
             if [ "$gap" -ge "$threshold" ]; then
                 emit_fleet_event "activity_stuck" "pulse" \
-                    '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
+                    '{"last_tool_call_epoch":'"$last_epoch"',"last_prompt_epoch":'"$prompt_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
                 debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
                     "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)" "$_mgr_token" "$_RENOTIFY_AFTER_S"
             else

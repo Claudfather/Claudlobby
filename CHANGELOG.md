@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `activity_stuck` times a stall from the later of the last tool call and the last prompt (#2358)
+
+`bot-vitals.sh` also runs as the `UserPromptSubmit` hook (`bot-vitals.sh prompt`,
+composed for every bot from `system.yaml`) and touches `data/.last-prompt`.
+fleet-pulse's Check 5 times a stall from whichever of `.last-tool-call` and
+`.last-prompt` is newer, so a bot that sat idle past the threshold and is then
+woken by a prompt is not paged while it works toward its first tool call, and a
+turn that passes the threshold with no tool call still pages. The `activity_stuck`
+event carries `last_prompt_epoch`, null while a bot's settings lack the hook.
+
 ### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
 
 - Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,
