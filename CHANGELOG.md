@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the heavy slot's render profile: a headless render runs inside the host's lines, in a scope its runner kills (#2221)
+
+`claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND` runs a headless browser render. The start line, the heavy slot, the scope and the watchdog are all in the one process that starts it. Plain `run` refuses a render, because a render is a script (#2039).
+
+- **The start line, read by the runner itself:** MemAvailable at or above 4820 MiB, the 1-minute load under 16, and no stop line already crossed. The runner reads them in the process that starts the render, before it asks for the slot. A closed line exits 75 with nothing started and no queue ticket taken, recorded as `heavy_slot_refused` with `where: gate` and the readings.
+- **The slot, through its queue:** the render then asks for the slot like any heavy job. While the slot is held, or a free one is another caller's turn, it takes a ticket and exits 75.
+- **Its own scope, with the session bus cut:** the render runs in a transient systemd user scope, with `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`. A browser that reaches the session bus moves itself into a scope of its own. Unsetting the variable is no cut: libdbus, GDBus and sd-bus all fall back to `$XDG_RUNTIME_DIR/bus` (measured).
+- **The stop lines, watched by the runner:** every 2 s the runner reads MemAvailable and the load. When MemAvailable falls under 3800 MiB, the 5-minute load passes 25, the 1-minute load passes 40, or the render passes 45 minutes, it kills the whole scope through its `cgroup.kill`, and every process that left the scope (found by parent link). It then exits 79 and records `heavy_slot_stopped`.
+- **A render never outlives its runner:** the scope's keeper, the process `systemd-run` starts in the scope, holds the kernel's parent-death signal. A runner killed outright (SIGKILL) still takes its render with it, and the keeper records why in the slot's file. A signal the runner can catch ends the render first. systemd's own time limit on the scope trails the runner's by 60 s.
+- **The end, recorded where the slot records its runs:** the slot's record and `heavy_slot_released` carry `profile`, the scope's `unit`, `ended` (done, killed or not-started), the stop line with its reading, and the measured `peak`: MemAvailable at the start and at its lowest, the highest loads, and the job's summed PSS. `heavy-slot.py status` shows them, and so does the runner's last line on stderr.
+- **Host knobs:** `state/heavy-slot/render-lines` sets `start_mib`, `start_load1`, `stop_mib`, `stop_load5`, `stop_load1`, `poll_s` and `max_minutes`, one `name = value` per line, read on every use. A file the runner cannot read refuses every render (exit 2).
+- **Limits:** Linux only; elsewhere the profile refuses (exit 2). With no memory controller in the kernel, the stop is a watchdog's, not a cgroup memory limit. A process the job hands to the user manager as a service is no descendant of the job, so the walk for escaped processes cannot find it.
+- **Upgrade:** nothing to change. A caller that gates a render by hand replaces its gate check, scope and watchdog with this one command, once the activation that ships it is in.
+- **Tests:** `tests/test_heavy_slot_render.py` drives the real wrapper with injected readings (`HEAVY_SLOT_PROC`), so nothing loads the host:
+  - the shipped lines at their edges;
+  - refused before any scope: under the start line on each reading, a lines file it cannot read, an unknown profile, a scope that cannot be made, a held slot;
+  - a refusal through `| tail`: the pipeline exits 0, nothing starts, the refusal stays on stderr and on the plane, and `pipefail` gives 75;
+  - in a real scope, where a systemd user manager exists: the scope and the cut bus, killed at each stop line with a detached child, an escaped process killed with the scope, the time limit, a runner killed outright, and a runner sent SIGTERM.
+
 ### Added — a blocking check on every pull request for use-case-specific data (#2042)
 
 `.github/actions/content-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
