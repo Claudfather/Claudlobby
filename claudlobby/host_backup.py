@@ -138,6 +138,8 @@ def _source_files(plan):
         files[str(relative)] = (content, 0o600)
         if project_content is not None:
             files[str(relative.parent / "projects.yaml")] = (project_content, 0o600)
+        # voices/ is the pre-#2150 voice folder, a plan input only while it is
+        # read: drop it here with #2202, or every backup refuses.
         for folder in ("library", "voices", "templates"):
             capture(manifest.parent / folder, relative.parent / folder)
     capture(host_override_path(), Path("host-system.yaml"))

@@ -668,7 +668,7 @@ def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
 def test_body_words_strips_real_door_shapes():
     from claudlobby.plane.view import body_words
     d = ("[BOTCOMMAND] erlich | task | Review the thing carefully"
-         " | repo:Artemis-xyz/huntress | priority:high | task:t-123-abcd")
+         " | repo:Example-Org/huntress | priority:high | task:t-123-abcd")
     assert body_words(d) == "Review the thing carefully"
     r = ("[BOTREPORT] jian-yang | completed | Approve on #2073"
          " | progress:100 | pr:https://github.com/x/y/pull/1 | task:t-1-ffff")

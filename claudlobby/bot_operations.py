@@ -22,6 +22,9 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import time
+from typing import NamedTuple
 from uuid import uuid4
 
 from .activation_enrollment import selected_bot_entry, _target
@@ -96,6 +99,24 @@ class BotHandoffResult:
     reason: str
 
 
+class HandoffState(NamedTuple):
+    state: str  # saved, pending or unknown
+    reason: str
+    requested_at: str | None = None
+    written_at: str | None = None
+
+
+@dataclass(frozen=True)
+class BotHandoffCheck:
+    fleet: str
+    bot: str
+    release_id: str
+    handoff: str
+    reason: str
+    requested_at: str | None
+    written_at: str | None
+
+
 @dataclass(frozen=True)
 class BotControlResult:
     fleet: str
@@ -106,8 +127,8 @@ class BotControlResult:
     outcome: str
 
 
-def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
-    """Require a fresh owned handoff; explicit capture already witnessed its write.
+def _handoff_capture(bot_dir: Path) -> tuple[float, datetime]:
+    """The owned handoff file's mtime and its session capture's last_updated.
 
     The session capture's own frontmatter decides. Under the activation's
     reference refresh envelope (#2094) that is the capture below it: the
@@ -156,15 +177,105 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> Non
             raise ValueError("invalid handoff timestamp")
         if stamp.tzinfo is None or stamp.utcoffset() is None:
             raise ValueError("naive handoff timestamp")
-        age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
-        mtime_age = datetime.now(timezone.utc).timestamp() - info.st_mtime
-        # Explicit capture's changed checksum proves a fresh write, but resume
-        # still reads last_updated. Require a recent model timestamp on both
-        # paths; tolerate future clock skew observed in the live canary.
-        if not (-30 <= mtime_age <= 300) or age > 300:
-            raise ValueError("handoff is stale")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
+    return info.st_mtime, stamp
+
+
+def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
+    """Require a fresh owned handoff; explicit capture already witnessed its write."""
+    mtime, stamp = _handoff_capture(bot_dir)
+    age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
+    mtime_age = datetime.now(timezone.utc).timestamp() - mtime
+    # Explicit capture's changed checksum proves a fresh write, but resume
+    # still reads last_updated. Require a recent model timestamp on both
+    # paths; tolerate future clock skew observed in the live canary.
+    if not (-30 <= mtime_age <= 300) or age > 300:
+        raise BotLifecycleError("self restart requires a fresh owned session handoff") from ValueError(
+            "handoff is stale")
+
+
+_HANDOFF_REQUEST = ".handoff-request"
+
+
+def _record_handoff_request(bot_dir: Path, requested_at: float) -> bool:
+    """Record when the door asked for a handoff, in the bot's data/ (#990).
+
+    The door waits 30 s and a handoff is a model turn of minutes (#963), so
+    `bot handoff BOT --check` reads the handoff file against this record
+    later. When the write fails, the previous record is removed, so it never
+    answers for this request.
+    """
+    data = bot_dir / "data"
+    try:
+        data.mkdir(mode=0o700, exist_ok=True)
+        info = data.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return False
+    record = data / _HANDOFF_REQUEST
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(requested_at)))
+    try:
+        fd, tmp = tempfile.mkstemp(dir=data, prefix=_HANDOFF_REQUEST + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps({"requested_at": stamp}) + "\n")
+            os.replace(tmp, record)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+    except OSError:
+        try:
+            record.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def handoff_state(bot_dir: Path) -> HandoffState:
+    """What came of the door's last recorded handoff request, from files only (#990).
+
+    saved: the handoff file was written after the request, and its capture's
+    own last_updated is no older than the request less the 300 s
+    `_fresh_self_handoff` allows a model's timestamp, so a rewrite with no new
+    capture (activation's reference refresh) is not one. pending: not written
+    since the request; the bot may still be writing it, or may never, since a
+    turn can end without writing it (#963). unknown: no request is recorded,
+    or the file cannot be verified.
+    """
+    try:
+        record = json.loads((bot_dir / "data" / _HANDOFF_REQUEST).read_text(encoding="utf-8"))
+        requested_at = record["requested_at"]
+        requested = datetime.strptime(requested_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except FileNotFoundError:
+        return HandoffState("unknown", "no_request_recorded")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return HandoffState("unknown", "request_unreadable")
+    pending = HandoffState("pending", "not_written_since_request", requested_at)
+    try:
+        info = (bot_dir / ".claude" / "session.md").lstat()
+    except FileNotFoundError:
+        return pending
+    except OSError:
+        return HandoffState("unknown", "file_unverified", requested_at)
+    if stat.S_ISREG(info.st_mode) and info.st_mtime < requested:
+        return pending
+    try:
+        mtime, stamp = _handoff_capture(bot_dir)
+    except BotLifecycleError:
+        return HandoffState("unknown", "file_unverified", requested_at)
+    if mtime < requested:
+        return pending
+    written_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
+    if stamp.timestamp() < requested - 300:
+        return HandoffState("unknown", "capture_predates_request", requested_at, written_at)
+    return HandoffState("saved", "written_after_request", requested_at, written_at)
 
 
 def _self_restart_log(bot_dir: Path) -> tuple[int, Path]:
@@ -419,21 +530,27 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "skipped", "no_session")
             if session != "ready":
                 raise BotLifecycleError("private bot session is unverified", unavailable=True)
+            requested_at = time.time()
             try:
                 outcome = adapter.call("svc_activation_handoff", spec.bot_dir, spec.label,
                                        spec.environment["TMUX_TMPDIR"], "explicit", timeout=45)
             except (OSError, subprocess.SubprocessError) as exc:
+                _record_handoff_request(spec.bot_dir, requested_at)
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"]) from exc
             marker = outcome.stdout.strip().splitlines()[-1:] if outcome.stdout else []
+            skipped = (["handoff-skipped:recent"], ["handoff-skipped:capability"],
+                       ["handoff-skipped:no-session"])
+            if outcome.returncode or marker not in skipped:
+                # A handoff can land minutes after this 30 s wait (#963), so
+                # `bot handoff BOT --check` reads it against this record (#990).
+                _record_handoff_request(spec.bot_dir, requested_at)
             if marker == ["handoff-timeout"]:
                 raise BotLifecycleError("bot handoff timed out after 30 seconds", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"], handoff_reason="timeout")
-            if outcome.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"],
-                                                    ["handoff-skipped:capability"],
-                                                    ["handoff-skipped:no-session"]):
+            if outcome.returncode or marker not in (["handoff-saved"], *skipped):
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"])
@@ -448,6 +565,28 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "saved", "fresh_file_verified")
             return BotHandoffResult(destination.fleet.name, bot, release.release_id,
                                     entry["target"], "skipped", marker[0].split(":", 1)[1])
+
+
+def check_handoff(*, root: Path, fleet: str | None, bot: str) -> BotHandoffCheck:
+    """Read the door's last handoff request against the handoff file (#990).
+
+    It sends nothing and takes neither mutation admission nor the lifecycle
+    lock, so it answers while another bot operation runs.
+    """
+    if not isinstance(bot, str) or not bot or Path(bot).name != bot or bot in {".", ".."}:
+        raise BotLifecycleError("supply one exact bot ID")
+    destination, origin = resolve_operation_scope(root=root, fleet=fleet)
+    if origin is not None and (origin.fleet.name != destination.fleet.name
+                               or origin.bot_id == bot
+                               or origin.bot_id != destination.fleet.manager):
+        raise BotLifecycleError("only the selected fleet manager may check another bot's handoff")
+    if bot not in destination.fleet.bots:
+        raise BotLifecycleError("bot is not declared in the selected active fleet")
+    selected = read_selection(root)
+    if selected is None:
+        raise BotLifecycleError("a handoff check requires an active selected release")
+    return BotHandoffCheck(destination.fleet.name, bot, selected["release_id"],
+                           *handoff_state(destination.paths.bot_runtime(bot)))
 
 
 def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,

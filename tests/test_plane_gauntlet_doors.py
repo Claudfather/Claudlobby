@@ -24,7 +24,7 @@ LIB_DIR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 CLI = Path(sys.executable).parent / "claudlobby"
 
 DOOR_FILES = (
-    "tg-post.sh", "briefing-trigger.sh", "plane-session-start.sh",
+    "tg-post.sh", "briefing-trigger.sh",
     "lib-common.sh", "supervisor.sh", "plane-emit.sh", "plane-socket-client.py",
     "dispatch-overdue.py", "plane-readers.py", "plane-lookup.py",   # the doors' plane joins (R1: no ledger fallback)
 )
@@ -145,7 +145,6 @@ class TestWedgeMarker:
 # T5 plan obligation: the crash window is VISIBLE (spec-lens Major)
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# .plane-session cross-pin: the hook WRITES what report-back READS (S16)
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Join parity: casefold + newest-wins matches dispatch-overdue semantics (C7)

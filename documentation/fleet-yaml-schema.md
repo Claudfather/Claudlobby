@@ -19,7 +19,7 @@ fleet:
     default: ~/.claude
     work: ~/.claude-work
 
-  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool }
+  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool, guardrails: bool, protocols: bool, skills: bool, resources: bool }
                                          # OPTIONAL — gate system.yaml injection into defaults (default: true)
 
   defaults:                             # applied to every bot unless overridden
@@ -71,7 +71,7 @@ fleet:
     <bot-name>:
       name: <display-name>              # OPTIONAL — defaults to dict key
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
-      voice: voices/<file>.md           # OPTIONAL — personality overlay
+      voice: voices/<file>.md           # OPTIONAL — personality overlay from library/voices/
       mission: <string>                 # OPTIONAL — one-paragraph charter
       reports_to: <bot-name>            # OPTIONAL — organizational reporting metadata
       manages: [<bot-name>, ...]        # OPTIONAL — organizational reporting metadata
@@ -122,7 +122,7 @@ fleet:
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
-      remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
+      remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
       extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
@@ -197,10 +197,13 @@ fleet:
     hooks: true            # merge system.yaml hooks
     timers: true           # merge system.yaml job timers
     observability: true    # merge system.yaml observability defaults
-    guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
-    protocols: true        # apply default protocols, including the leaf-manager checkin default
+    guardrails: true       # apply default guardrails: claudlobby-dev-in-projects, no-push-main, no-destructive-git, pii-protection, no-fabrication, confirm-before-send
+    protocols: true        # apply default protocols: context-management, telegram-routing and telegram-formatting (the last two only for a bot with a Telegram channel), shared-documentation, and the leaf-manager checkin default
     skills: true           # apply default skills: the status skill on every manager
+    resources: true        # apply default resources: timezone
 ```
+
+Guardrail and resource defaults compose **ahead of** the fleet's own `defaults:` list and the bot's stanza, in the order above. A fleet that lists the same entries first, in that order, composes the same bytes with or without its own copies. Protocol defaults compose **after** the bot's declared protocols, so a fleet that removes its copies of `context-management`, `telegram-routing` or `telegram-formatting` moves those sections to the end of its protocol list. Keep those copies where the order matters to you.
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
 
@@ -244,6 +247,8 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 |---|---|---|---|---|
 | `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `claudna-harvest` | **off** — model spend (summaries) and draft-note writes through claudron capture | door | fleet.yaml bots.<bot> → activated composition | bots.<bot>.claudna.harvest: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, host activate PLAN_ID (recorded when the bot's next session opens: bot.conf is read at session start); widen to defaults.claudna.harvest once it has run clean |
+| `claudna-session-summary` | **off** — model spend (one Haiku call per sealed segment, in the background of the bot's session) | door | fleet.yaml bots.<bot> → activated composition | bots.<bot>.claudna.session_summary: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, host activate PLAN_ID (recorded when the bot's next session opens: bot.conf is read at session start); widen to defaults.claudna.session_summary once it has run clean |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
 | `keepalive-limit-resume` | **off** — no deployment gate: claudlobby/_runtime_scripts/ is in force on every bot at activation, and this door types into a bot's pane, so one armed bot is the only canary | door | fleet.yaml env: → bot.conf | KEEPALIVE_LIMIT_RESUME_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
@@ -251,13 +256,13 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `mcp-direct-launch` | **off** — changes how every MCP server starts; warm the pinned cache and activate an independent canary root with one armed bot before widening the manifest | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.mcp_direct_launch: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> --fleet <fleet> host cache warm, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. Planning must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | composition | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
 | `public-write-guard` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one refuses GitHub writes, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.public_write_guard: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.public_write_guard once it has run clean |
-| `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `shared-config-isolation` | **off** — restricts access to shared host resources used by running bots; enable for one canary bot before widening the manifest default through activation | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.isolation.shared_config: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.isolation.shared_config once it has run clean |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
 | `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
@@ -745,7 +750,9 @@ fleet_pulse:
 
 Omit a key to keep the script's own default; the composer emits only what is set, so a default lives in exactly one place.
 
-`timeout_s` is the one key that is not an environment variable: it caps the sweep itself, and `claudlobby fleet pulse` reads it from this block, so a hand run gets the same cap as the timer (#2059). Unset, the cap scales with load: 120 s × load1 per CPU, from 120 up to 240 s, which keeps a sweep and its 10 s grace under the default 300 s pulse cadence. That ceiling matters because every timer job holds the host's activation lock shared while it runs, and `host activate` takes it exclusive and does not wait: a cap above the fleet's pulse interval lets sweeps run back to back and can keep activation refused while the host is loaded. Set a longer `timeout_s` only with that trade in mind; it is clamped to 30-3600 and `claudlobby config validate` warns outside it. A sweep that reaches the cap is stopped (SIGTERM, then SIGKILL after 10 s) and exits 8. Its summary file is replaced by one that starts `TIMED OUT` and names what the tick skipped, and the last complete summary is kept beside it as `<fleet>.pulse-summary.last-complete.txt`.
+`claudlobby fleet notify`, and the alert a failed message write raises, read `escalation_chat_id`, `escalation_state_dir`, `renotify_after_s` and `rearm_window_s` from this block in the active configuration, so they escalate to the same target as the pulse (#2234).
+
+`timeout_s` is the one key that is not an environment variable: it caps the sweep itself, and `claudlobby fleet pulse` reads it from this block, so a hand run gets the same cap as the timer (#2059). Unset, the cap scales with load: 120 s × load1 per CPU, from 120 up to 240 s, which keeps a run and its stop under the default 300 s pulse cadence. A scheduled run also ends by the largest cap (240 s unset), counted from its unit's start: a wait for admission while an activation holds the lock, or a slow CLI start, cuts the sweep short instead of lengthening the run, and a run with no time left starts no sweep. That ceiling matters because every timer job holds the host's activation lock shared while it runs, and `host activate` waits at most 300 s for those holders before it refuses; a run past the fleet's pulse interval also delays its next tick. Set a longer `timeout_s` only with that trade in mind; it is clamped to 30-3600 and `claudlobby config validate` warns outside it. A sweep that reaches its cap is stopped (SIGTERM, then SIGKILL after 10 s, then at most 1 s for it to exit) and exits 8. The pulse's systemd unit also carries its own limit, `TimeoutStartSec=` at the largest cap plus 14 s (254 s unset) with `TimeoutStopSec=1`, which ends a run that cannot stop itself; launchd has no equivalent. Its summary file is replaced by one that starts `TIMED OUT` and names what the tick skipped, and the last complete summary is kept beside it as `<fleet>.pulse-summary.last-complete.txt`.
 
 > **Do not put these in a `.env` file.** Earlier revisions of this section said to
 > use the fleet `.env` or to edit the unit's environment. **Neither worked** (#1120):
@@ -903,7 +910,9 @@ String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; co
 
 ### `bots.<name>.remote_control`
 
-Boolean (default `true`). Controls whether the bot runs with `--remote-control`, which allows dispatch via `tmux send-keys`. Disable for standalone bots that should only respond to Telegram messages. Can be set in `defaults:`.
+Boolean. Controls whether the bot runs with `--remote-control`, Claude Code's Remote Control session. Unset, it follows the bot's role: `true` for the fleet's manager (`fleet.manager`) and `false` for every other bot. An explicit value on the bot, or in `defaults:`, wins in either direction, so a worker opts in with `remote_control: true` and a fleet that wants it nowhere sets `defaults: {remote_control: false}`. `config explain bot.remote_control --bot <bot>` reports an unset value as `source: role_default`, decided by `fleet.manager`.
+
+Two behaviours change with it. While Remote Control is up, Claude Code arms neither its own automatic continue nor its usage-limit menu at a usage limit; without it, both arm, and the menu's options can come in any order, usage credits first included. keepalive chooses "Stop and wait for limit to reset" only by that label (`keepalive.sh`, #996), and no framework send types into a pane while a menu holds it (`pane_is_menu` in `lib-common.sh`). And a plain-text answer to a Telegram message reaches Telegram through Remote Control's relay (`plane-rc-relay-out.sh`), so a bot without it answers through the channel's reply tool only.
 
 ### `bots.<name>.prompt_suggestions`
 
@@ -939,7 +948,7 @@ Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. Al
 
 | Field | Env var | Purpose |
 |-------|---------|---------|
-| `claudna_version` | `CLAUDNA_VERSION` | Pin the clauDNA plugin version (e.g., `"0.2.0"`). Skills/hooks can read this to gate behavior by version. |
+| `claudna_version` | `CLAUDNA_VERSION` | A separate version hint; exports this variable and does not pin the installed plugin. |
 | `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Pointer to the Claudron **vault root** (e.g., `"vaults/my-fleet"`) — not a per-bot sub-path; one vault is one tenant. The bot's `claudron` CLI resolves the vault from this env var (Claudron `docs/CLI_CONTRACT.md` §Environment). |
 | `claudron_session_loop` | _(none — gates hook/grant composition, not an env var)_ | Wires the Claudron session loop: composed SessionStart/PreCompact/SessionEnd hooks plus a narrow allowlist of `claudron` CLI verb grants. Tri-state boolean — unset defaults to `true` exactly when `claudron_vault_path` is set, `false` otherwise; set explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone). `true` with no `claudron_vault_path` is a `claudlobby config validate` error. See `documentation/integrations/claudron-integration.md`. |
 | `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
@@ -1014,7 +1023,7 @@ defaults:            # or bots.<bot>:, which wins over defaults
 | `credentials` | `.credentials.json` in each config dir | Read + Edit |
 | `account_config` | `.config.json*` and `.claude.json*` in each config dir, and `~/.claude.json*` | Read + Edit |
 | `env` | `~/.env*`, the root `.env` and `.env.bak*`, every fleet's `.env*`, and every bot's `.env*` — **its own included** | Read + Edit |
-| `install_root` | the install's `claudlobby/_runtime_scripts/`, `claudlobby/`, `library/`, `templates/`, `voices/`, `bin/` | Edit only |
+| `install_root` | the install's `claudlobby/_runtime_scripts/`, `claudlobby/`, `library/`, `templates/`, `bin/` | Edit only |
 | `telegram` | every other bot's Telegram state dir, token included | Read + Edit |
 | `config_surfaces` | `settings.json`, `settings.local.json`, `CLAUDE.md`, `hooks/`, `skills/`, `plugins/`, `agents/`, `commands/` in each config dir | Edit only |
 
@@ -1038,15 +1047,17 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
 7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
 8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
-9. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
-10. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
-11. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-12. **Principles** — `## Principles` section.
-13. **Permissions** — `## Permissions` section.
-14. **Protocols** — `## Protocols` section.
-15. **Guardrails** — `## Guardrails` section.
-16. **Lessons** — `## Lessons` section.
-17. **Post-actions** — `## Post-actions` section.
+9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through (only doors every role is granted), and `bot show` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size and its grants are pinned by `tests/test_system_orientation.py`.
+10. **Dispatches framed as pasted text** — `## Dispatches framed as pasted text`, the verify-then-trust check for a framed dispatch, on every bot. Fixed in the template.
+11. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
+12. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
+13. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
+14. **Principles** — `## Principles` section.
+15. **Permissions** — `## Permissions` section.
+16. **Protocols** — `## Protocols` section.
+17. **Guardrails** — `## Guardrails` section.
+18. **Lessons** — `## Lessons` section.
+19. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 
@@ -1101,7 +1112,9 @@ Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI 
 `claudlobby --fleet <fleet> config explain bot.model --bot <bot>` name the
 declaration or built-in default that supplied supported scalar settings.
 `config explain GITHUB_PAT --bot <bot>` uses the environment tier register.
-These reads report source and set/unset state without printing values. Nested
+These reads report source and set/unset state without printing values. A bot
+field whose built-in default follows the bot's role, `remote_control` today,
+reports `source: role_default` with `fleet.manager` as its declaration. Nested
 merge fields such as `bot.env` are explicitly unsupported; `bot.env` is read
 from the bot stanza itself and does not inherit `defaults.env`.
 
@@ -1185,3 +1198,34 @@ notifying from all.
 A composed **bot name always wins over this list** and cannot be allowlisted.
 Without that, someone eventually adds a bot's name here meaning *our* bot and
 silently re-arms the original bug.
+
+### bots.<name>.claudna / fleet.defaults.claudna
+
+```yaml
+claudna:
+  session_summary: true  # OPTIONAL strict bool; one background model call per sealed segment
+  harvest: false        # OPTIONAL strict bool; summaries + unverified draft notes through claudron
+```
+
+Bot fields override defaults field by field; null inherits. Unknown keys and string
+booleans are refused. `harvest: true` implies summaries; combining it with explicit
+`session_summary: false` is refused after merging. `CLAUDNA_STATE_DIR` always names
+`$BOT_DIR/data/claudna`; `CLAUDNA_SESSION_SUMMARY` is always composed (`0` unless
+summaries or harvest is armed), so unarmed bots export with reason `disabled`.
+`CLAUDNA_HARVEST` is composed when harvest is explicitly set.
+
+Harvest needs **Claudron >= 0.8.0 on the host first (PR 6a)**. The current install
+pin is older: `config validate` warns `claudna-harvest-pin` until that separate bump.
+Move assignments of these variables out of `.env` tiers and `env:` into `claudna:`;
+`claudna-env` warns because tier values are overridden by composition while bot
+`env:` is emitted afterwards and overrides the mapping. The state-root invariant
+remains reserved and is refused in `env:`/`secret_files:`.
+`claudna_version` stays a separate flat field: it exports `CLAUDNA_VERSION` but
+plugin startup still updates marketplace-latest. `CLAUDNA_TELEMETRY` is an operator
+`env:` knob outside this mapping.
+
+Arm one bot, stage `config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`
+in an independent canary root, then operator-activate and inspect the next sealed
+segment's `session_summary` event. The job is on by default, every 15 minutes;
+`SESSION_EXPORT_ENABLED=0` is its loud fleet-tier opt-out. Complete the
+[old-root cutover](runbooks/claudna-state-dir-cutover.md) after 6b.

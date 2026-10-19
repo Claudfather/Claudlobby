@@ -1,10 +1,10 @@
 ---
 title: "Runtime-neutral observability and memory for mixed Claude/Codex teams — plan (epic)"
 type: plan
-status: draft
+status: in progress; goal not met
 owner: chrisrogers37
 created: 2026-10-04
-updated: 2026-10-05
+updated: 2026-10-16
 issue: "#2145"
 spec: documentation/plans/2026-08-18-observable-plane-design-v2.md
 repos: [Claudfather/Claudlobby, Claudfather/clauDNA, Claudfather/Claudron]
@@ -12,7 +12,7 @@ repos: [Claudfather/Claudlobby, Claudfather/clauDNA, Claudfather/Claudron]
 
 # Runtime-neutral observability and memory for mixed Claude/Codex teams
 
-> **Status:** draft. Nothing here is built. **Forks F1–F18 locked (F3, F4, F5, F17 amended 2026-10-05); no open
+> **Status:** in progress; the goal is not met. Current delivery and remaining gates are in §10.0b and the single run log; dated checkpoints remain historical. **Forks F1–F18 locked (F3, F4, F5, F17 amended 2026-10-05); no open
 > amendments; no holds.** F1–F17 were ratified by the operator on 2026-10-04 (F4 as amended there); on 2026-10-05 the
 > operator ruled every open item — F18 locked (a), D2 ratified, A-F3, A-F4 (with A-F4b), A-F5 and A-F17 ratified, A-F1,
 > A-F6 and A-F10 declined, A-F14 lapsed (§16 *Rulings*). The plan was fleshed out with `/claudna:forge` and
@@ -1543,8 +1543,9 @@ Claudlobby:
   ledger pre-read of the derived ids, emitting only the unseen) and an ack per `sid` right after its items
   land, never one batch per bot: a batch mixing a duplicate with a new item rolls back and raises
   `RuntimeError("… mixed state")` (`ingest.py:548-552,598-605`), which `emit_batch` does not spool
-  (`emit_api.py:273-280`), so a run that emitted [seg1, seg2] and died before `--ack` would wedge the bot
-  forever with the tick exiting 0 (ironclad cycle 1, critical). A deterministic refusal
+  (`emit_api.py:273-280`). The 2026-10-15 real-backend combined-batch mutant converted that refusal into
+  unexportable statuses and acknowledged the new segment, losing its normal summary; per-item emission
+  preserves the normal content on replay. A deterministic refusal
   (`ContractViolation`/`RuntimeError`) becomes a `status: skipped, skipped_reason: unexportable` item so the
   cursor advances; after N consecutive failures per bot the job emits an `export_stalled` system event at `notice`
   (the record; the registry's severity rule holds) and pages through the existing alert door,
@@ -1753,7 +1754,7 @@ transcript pointer to the `segment` object and computed the volume fields from i
 | `digest_chars`, `model` | `producer.duration_ms` / `producer.cost_usd` / `producer.model` |
 | `context` | `journey.title` + `journey.intent` |
 | `worked` | `journey.done` (+ `journey.outcome`) |
-| `failed` | `journey.outcome` when not `completed`, with `failures` |
+| `failed` | `journey.outcome` when not `shipped`, with `failures` |
 | `would_change` | `journey.next` (the nearest field; the digest's "what the operator would change" has no direct successor — the monitor's prompt asks for it from `next` + `in_progress`) |
 | `reusable` | `blocks.count` / `blocks.kinds` (what harvest will offer Claudron) |
 | `error` | `skipped_reason` |
@@ -1767,7 +1768,7 @@ not include `fleet-monitoring.md`; what binds the protocol rewrite to the regist
 positive control at `:323`, so both land in one PR (P3 Claudlobby). The monitor also gains the stop rule for
 the window P3 actually produces (ironclad cycle 1): `session-export` ships on, so week one is one status row per
 sealed segment with `journey: null` unless a bot is armed — `fleet-digest` stops on "every row `skipped` →
-COVERAGE: summaries armed on 0 of N bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
+COVERAGE: summaries available on 0 of N represented bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
 `fleet-monitoring.md:39-41` "Nothing watches for sessions ending" joins the edit range). The per-session tool
 totals: P2-a2 writes the `session.tool_calls` samples, but the first reader it repoints is `usage_read`/`brief_read`
 (`session.tokens`, `session.api_requests`; A-F3), and no P2 PR grants `fleet-digest` the `plane samples` door
@@ -1784,7 +1785,9 @@ which one item collides and another is new (`RuntimeError("… mixed state")`, `
 `emit_batch` does not spool that (`emit_api.py:273-280`), so ~~one batch per bot per run~~ becomes **one
 `emit_batch` per item** (or a ledger pre-read of the derived ids, emitting only the unseen) with an ack per `sid`
 as its items land; the test "emit seg1 without acking, seal seg2, run → seg2 `committed`, seg1 `duplicate`, both
-acked" pins it. A deterministic refusal becomes a `skipped_reason: unexportable` status item so the cursor
+acked" pins it. A real-backend combined-batch mutation instead loses the normal new summary and lands
+unexportable fallbacks before advancing the cursor; the invariant is content preservation, not a claim that
+every refusal wedges. A deterministic refusal becomes a `skipped_reason: unexportable` status item so the cursor
 advances; N consecutive failures per bot raise `export_stalled`; `doctor` reports per-bot cursor age. Emits go
 through `emit_batch` in-process (`claudlobby/plane/emit_api.py:149-153`) — `session-export` is a one-shot Python
 tick under the transport rule stated once in the §6 P2 intake spec (ironclad cycle 2) —
@@ -2080,6 +2083,70 @@ as soon as an install exists, in parallel with orders 2–8; nothing in them blo
 parallel-optional to it — they pay for a Claude-only fleet (§1) and neither blocks P4. The calendar gates the size
 table does not price are listed in §9.
 
+### 10.0 Status (2026-10-13)
+
+Orders 1–6 are merged and live on the floor host. Nothing is in flight. Order 10 has a ready runbook; 7–9, 11
+and 12 are not started. The run log has the evidence for each done item.
+
+| Order | Item | Status |
+|---|---|---|
+| 1 | P0, Claude-only batch (C6a, C10, C11) | Done (run log 2026-10-05). C10 leaked; Half A carries the scrub. |
+| 2 | P2-b, marker-only `bot-vitals.sh` | Merged (#2173), activated on the floor host (run log 2026-10-06). |
+| 3 | Per-bot `CLAUDNA_STATE_DIR` | Merged (#2172), activated on the floor host with the old root's stranded sessions sealed (run log 2026-10-06). |
+| 4 | Claudron boundary spec | Merged (Claudron#224). Register row 10 flipped to shipped (Claudron#226). |
+| 5 | P1 Claudlobby Half A | Merged (#2203). Activated on the floor host 2026-10-11 after two watchdog resets, recovered by `host repair-after-reset` (#2312). Rollout check passed. |
+| 6 | clauDNA runtime-at-open | Merged (clauDNA#407), released as v0.27.0 (clauDNA#408). Live on every bot. |
+| 7 | P2-a1 ∥ (P3 clauDNA 0.28 → P3 Claudlobby 6b) | Not started. Plans 4, 5, 6. |
+| 8 | P2-a2 ∥ P3 Claudlobby 6a | Not started. Plans 4, 6. Waits on order 7 (P2-a2 also on P2-a1's canary week). |
+| 9 | P1 Claudlobby Half B | Not started. Its gates are met: Half A merged, C11 in the run log, the C10 scrub live on every bot since 2026-10-11. Plan 2. |
+| 10 | P0, Codex batch (C1–C5, C7–C9) | Not run. `documentation/runbooks/runtime-neutral-codex-canary-batch.md`; needs a machine with the Codex CLI and its login. |
+| 11 | P4 per repo | Blocked on order 10. Its plans are written once the canary answers are in the run log (§10.1). |
+| 12 | Companions (#2149, clauDNA#404) | Blocked on order 11. |
+
+Register rows still **planned** in the boundary spec: row 11 (P3 clauDNA Task 9 opens the Claudron PR that flips
+it) and row 12 (P4 Claudron flips it).
+
+### 10.0a Continuation status (2026-10-15)
+
+The 2026-10-13 table above is historical. Current verification and the full remaining
+work list live in the [single sprint ledger](2026-10-04-runtime-neutral-observability-run-log.md#2026-10-15--build-all-sprint-ledger).
+
+- **7b integrated:** clauDNA#411 and #412 released v0.28.0; Claudron#228 marks register row 11 shipped.
+- **7c integrated:** summary consumer [#2361](https://github.com/Claudfather/Claudlobby/pull/2361) merged
+  `b4ae5dae` after independent simplify/code/verification convergence, full before/after comparison,
+  native composed-producer/cache observations, direct harness and Linux CI. Production activation is separate.
+- **7a under verification:** telemetry rebased onto that actual merged tree. Receiver/sink review and local
+  canary passed; full-suite parser-isolation and privacy-fixture findings are being closed before a fresh final run.
+  The seven-day independent floor-host/RC canary remains a pre-merge gate.
+- **8b started:** a fresh 6a branch from `b4ae5dae` owns its before-leg, Claudron v0.9.0 pin and migration warning.
+  Its real scratch-vault migration and harvest canary are still required. **8a** waits for 7a's week and token ratios.
+- **9 remains draft:** [#2360](https://github.com/Claudfather/Claudlobby/pull/2360) passed local full comparison,
+  four simplify lenses, native protocol checks and all reported CI. Literal `/clear`, native lifecycle and both 48-hour windows remain.
+- **10–12 remain dependent:** isolated Codex authentication choice and real canary measurements precede P4 plans,
+  owner adapters and the two execution/behavior companions. No authenticated Codex measurement is claimed.
+
+### 10.0b Closeout continuation (2026-10-16 UTC)
+
+**Goal condition: NOT MET.** Orders 7b, 7c and 8b (6a) are delivered. Corrected 6a passed its terminal full/harness, native and CI gates and merged normally. Frozen telemetry and Half B full suites and local canaries passed. Telemetry’s later 20-second startup correction also failed on macOS before readiness; diagnostic-only head `9d998d94` passed affected checks and awaits fresh CI. Half B literal clear is now independently verified; both remain draft because required live and timed observations have not occurred. Codex measurements and independent report review have converged under explicit private-auth authority. P4 and execution/behavior companions remain open. This section supersedes current-state claims in earlier dated checkpoints, which remain as history. The [single run log](2026-10-04-runtime-neutral-observability-run-log.md#2026-10-16-utc--corrected-candidate-closeout) carries the terminal evidence and [owner queue](2026-10-04-runtime-neutral-observability-run-log.md#owner-decision-and-external-evidence-queue).
+
+| Order | Phase / plan | Current disposition | Evidence / remaining gate | Reachability |
+|---|---|---|---|---|
+| 7b | P3 clauDNA export / plan 5 | DONE: implementation, releases and register integrated | [clauDNA #411](https://github.com/Claudfather/clauDNA/pull/411), [#412](https://github.com/Claudfather/clauDNA/pull/412), strict-reader [#413](https://github.com/Claudfather/clauDNA/pull/413), release [#414](https://github.com/Claudfather/clauDNA/pull/414); [v0.28.1](https://github.com/Claudfather/clauDNA/releases/tag/v0.28.1) published; [Claudron #228](https://github.com/Claudfather/Claudron/pull/228) marks row 11 shipped | Published owner contract; production host update/restart is separate. |
+| 7c | P3 summary consumer / plan 6, 6b | DONE: reviewed, verified and merged | [#2361](https://github.com/Claudfather/Claudlobby/pull/2361), `b4ae5dae`; recorded full comparison, direct harness, CI and native protocol/cache evidence | Merged; no production activation claimed. |
+| 8b | P3 Claudron pin / plan 6, 6a | DONE: reviewed, verified and merged | [#2363](https://github.com/Claudfather/Claudlobby/pull/2363), reviewed `15ea28db`, normal merge `e7a14ea1`; full 9595→9667 passed, both 78 skipped / 2 warnings / exit 0; direct harness 359/0 both; all CI green before merge; native migration/harvest sample passed | Merged with reviewed ancestry and identical tree; production host migration/activation remains separate. |
+| 7a | P2-a1 telemetry intake / plan 4, Tasks 3–8 | BLOCKED: startup diagnostic CI and seven-day observation pending | Draft [#2364](https://github.com/Claudfather/Claudlobby/pull/2364), current `9d998d94`; affected 46 passed, exit 0. Prior `56a59f9f` macOS CI failed before port readiness (2 failed / 9753 passed / 77 skipped / 1 deselected / exit 1). Frozen `e644d07d` full comparison and intake canary remain historical exact-head evidence | The test-only diagnostic preserves 20s/5s/3s budgets; production cause is unproven. Complete floor-host RC/Telegram C6b week still required before merge. |
+| 8a | P2-a2 Plane rows/readers / plan 4, Task 9 | BLOCKED: dependent phase not implemented | Requires 7a week and measured token/coverage ratios, then its own implementation, checks and 48-hour observation | No Plane telemetry ingestion/readers delivered by 7a. |
+| 9 | P1 Half B session joins / plan 2 | BLOCKED: literal clear passed; real native lifecycle and two timed windows absent | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), unchanged `5f979881`; full 9667→9698 passed, both 78 skipped / 2 warnings / exit 0; direct harness 359/0; five native protocol arms and separate literal `/clear` replay passed; independent clear review NO FINDINGS | Real service/tmux/supervisor acceptance and full 48-hour BEFORE and AFTER remain. |
+| 10 | P0 Codex batch / existing runbook | DONE: actual native measurements and independent evidence review converged | Codex CLI `0.162.0-alpha.17.2`; authorized private auth-only reuse; reviewed C1–C5/C7–C9 report and sanitized actual fixtures; Claude C3 separately reviewed NO FINDINGS; protected originals unchanged and owned jobs terminal | Measured answers unlock P4; no fleet activation or mixed-runtime acceptance claimed. |
+| 11 | P4 owner adapters / measured per-repo plans | IN PROGRESS: measured phase plans being prepared | C1 now records actual native stdin; clauDNA and Claudron depend on their additional observed answers and independent evidence review | No adapter parity or release claimed yet; composition remains in the companions. |
+| 12 | Execution and behavior companions | BLOCKED: requires P4 and mixed-runtime acceptance | [Claudlobby #2149](https://github.com/Claudfather/Claudlobby/issues/2149), [clauDNA #404](https://github.com/Claudfather/clauDNA/issues/404); then the complete mixed-runtime week | Mixed-runtime goal is not met. |
+
+**Active topology:** corrected 6a [#2363](https://github.com/Claudfather/Claudlobby/pull/2363) merged normally as `e7a14ea1d158eb272566f81a3e2c2ad1bb459ae7` on 2026-10-16 at 01:48:40 UTC. Its parents are actual main `b4ae5dae` and reviewed `15ea28db`; candidate/merge trees both equal `06daa0c1797ae80f815c1eaa36c28d620a36f23b`. All exact-head CI, including both supported platforms, completed successfully before merge. The retarget checkpoint used telemetry `e644d07d` and Half B `5f979881`, both containing the correction through normal merges. Telemetry now adds test-only readiness commit `56a59f9f`; all runtime files are unchanged. Their unchanged-head retarget/base/scope and current CI readbacks belong in the [integration evidence](2026-10-04-runtime-neutral-observability-run-log.md#integration-and-invariant-evidence); no history rewrite is needed. Other delivered PRs used squash merges. Retargeting does not satisfy a child's mandatory live or timed gate.
+
+**Post-6a invariants:** 39 Lobby identity/receipt/instruction checks, 197 released-owner activity/export/hook checks and 914 owner runtime checks passed, all exit 0 with empty failed/error names. Before/after source checks preserve all 1357 Lobby and 401 owner files/modes. Owner imports resolve to released v0.28.1 under Python 3.12.13; this is not a fresh Python 3.9 floor claim.
+
+**Smallest remaining actions:** obtain scoped independent floor-host/channel authority and observe the complete seven-day C6b window; complete Half B's literal clear, real lifecycle and both full 48-hour windows; resolve isolated Codex authentication and run its documented measurements. Measured results then ground Task 9, P4 and companion implementation. No timed gate or unsupported feature is waived. Production delivery/migration/activation remains an operator action against a concrete staged host plan; the run log includes the manual command templates.
+
 ### 10.1 Per-PR plans (forge, 2026-10-04)
 
 One plan per PR beside this file, each with `epic:` pointing here. P4 and the companions get theirs when
@@ -2094,6 +2161,8 @@ One plan per PR beside this file, each with `epic:` pointing here. P4 and the co
 | 5 | 7 | `2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md` | clauDNA | M (nearer S–M); Task 1's `segment` object is `{sealed_at, sealed_by, counts}` (A-F6 declined) |
 | 6 | 3 (Task 1 Steps 1–2), 7 (6b), 8 (6a) | `2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md` | Claudlobby | ~~M → L (eight tasks; seam after the Claudron pin)~~ **M → L** for the reason plan 6 now gives — Task 4's wedge-proofing (ironclad cycle 2) — in three PRs: order 3 (Task 1 Steps 1–2; Step 2 the operator-run canary-root check and F14(a)'s seal), 6b (Task 1 Steps 3–11, Tasks 2, 4–7, 7c and 8; Task 7's runbook document ships in 6b and the operator runs it after 6b), then 6a S (Task 3, the pin bump) |
 
+**Measured P4 plan:** [Lobby hook conformance](2026-10-16-runtime-neutral-p4-lobby-hook-conformance.md) (S; C1 recorded 2026-10-16). Owner plans follow their own measured dependencies.
+
 Plan 2 splits at its marked seam: Half A carries the vocabulary, the derivation, the F18 mission text, Task 7b and
 Task 9b — which P3 clauDNA's Task 5, P2-a1 and P3 Claudlobby consume — and Half B the doors (F1(c)) with the
 null-normalized receipt projection (F17(c)). No release-level split is required (no receipt changes format), so
@@ -2103,7 +2172,7 @@ are ratified (2026-10-05) and ride two PRs — Half A carries F18's, plan 3 carr
 cites the rulings and waits on neither, and plan 1 writes the Codex names plainly. *(Ironclad cycle 1:)* the per-bot `CLAUDNA_STATE_DIR` one-liner (§10 order 3) needs no
 plan file — one composer line, one test, a CHANGELOG line — and plan 6's Task 1 is its spec: Step 1 is that PR,
 Step 2 its activation, which carries F14(a)'s seal of the old root's bot sessions (§16 A-F14; ironclad cycle 2), and
-6b's share of Task 1 verifies that the line landed. Plans 4 and 6 edit the same files (`test_event_type_registry.py`, `fleet-observability.md`, the switch
+6b's share of Task 1 verifies that the line landed. **Topology update (2026-10-16): §10.0b governs the already published 6a/telemetry/Half B stack; the design-era rebase instruction below remains historical and is not an instruction to rewrite those branches.** Plans 4 and 6 edit the same files (`test_event_type_registry.py`, `fleet-observability.md`, the switch
 tables, `system.yaml`, `observable-plane.md`, both `CLAUDE.md`/`AGENTS.md` pairs) with no ordering between P2
 and P3: whichever merges second rebases, regenerates the three switch tables and `system.yaml.example`,
 re-copies both `AGENTS.md`, and re-runs `tests/test_instruction_budget.py`, `tests/test_switches.py` and
@@ -2157,7 +2226,10 @@ An adversarial review of the first draft corrected its evidence and sequencing.
 
 ## 13. Disposition
 
-Draft. Next:
+In progress; goal not met. Current delivery and blockers are in §10.0b and the single run log. The original planning checklist below remains historical.
+
+Original planning sequence:
+
 1. ~~The operator ratifies F1–F17.~~ Done, 2026-10-04.
 2. ~~`/claudna:forge`~~ done 2026-10-04 (specs in §6, per-PR plans in §10.1, open questions in §14).
    ~~`/claudna:ironclad` next.~~ Cycle 1 done 2026-10-05 (§15, §16), ~~then cycle 2 or the fold closes~~. Cycle 2

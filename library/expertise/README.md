@@ -15,7 +15,7 @@ One `.md` file per expertise area. Each should cover:
 ## The bright line: expertise vs voice
 
 - **Expertise** = domain knowledge, responsibilities, workflows, boundaries. "What you do."
-- **Voice** (in `voices/`) = personality, tone, humor, character. "Who you sound like."
+- **Voice** (in `library/voices/`) = personality, tone, humor, character. "Who you sound like."
 
 These are independent axes. Any expertise can pair with any voice — an `seo` expertise works with any voice or none at all. If your expertise file includes personality traits, humor style, or communication mannerisms, it's leaking voice into expertise — fix it.
 

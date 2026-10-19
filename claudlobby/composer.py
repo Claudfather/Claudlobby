@@ -1340,6 +1340,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
         )
 
+    # #2145 P3: clauDNA reads these at session open. Its summary_gate checks
+    # SESSION_SUMMARY before the bot/headless gate (project.py): harvest alone
+    # cannot summarize a bot. Always compose 0 for an unarmed bot (disabled).
+    lines.append(f"export CLAUDNA_SESSION_SUMMARY={1 if (bot.claudna.session_summary or bot.claudna.harvest) else 0}")
+    if bot.claudna.harvest is not None:
+        lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
+
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.
@@ -1968,6 +1975,7 @@ def resolve_effective_protocols(
     facts = defaults.Facts(
         shared_docs=paths.shared_docs is not None,
         vault_wired=bot_is_vault_wired(bot),
+        telegram_channel=_has_telegram_channel(bot.channels),
     )
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
@@ -2045,6 +2053,7 @@ def resolve_effective_skills(
             shared_docs=paths.shared_docs is not None,
             vault_wired=bot_is_vault_wired(bot),
             available_skills=frozenset(paths.expand_skill_folder("")),
+            telegram_channel=_has_telegram_channel(bot.channels),
         )
         for name in defaults.resolve(
             "skills", default_roles(bot, fleet, is_manager=is_manager)
@@ -2696,6 +2705,7 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             grants.append(f"Bash(claudlobby --json bot logs {target})")
             grants.append(f"Bash(claudlobby --json bot logs {target} --lines *)")
             grants.append(f"Bash(claudlobby --json bot handoff {target})")
+            grants.append(f"Bash(claudlobby --json bot handoff {target} --check)")
             grants.append(f"Bash(claudlobby --json bot interrupt {target})")
             grants.append(f"Bash(claudlobby --json bot compact {target})")
             for verb in ("start", "stop", "restart"):
@@ -2871,9 +2881,11 @@ def compose_settings_local(
     # Build permissions block — layered composition
     deny_patterns: list[str] = []
 
-    # Operator-only destructive doors are never bot equipment. These narrow
-    # command denies catch ordinary direct invocations before the CLI guard;
-    # native ancestry still supplies the selected-host accidental-context check.
+    # Operator-only doors, destructive or deciding for a human, are never bot
+    # equipment. These narrow command denies catch ordinary direct invocations
+    # before the CLI guard; native ancestry still supplies the selected-host
+    # accidental-context check. A bot's own permission verbs (request, check,
+    # show) stay reachable.
     deny_patterns.extend((
         "Bash(claudlobby bot remove *)", "Bash(claudlobby * bot remove *)",
         "Bash(claudlobby fleet move *)", "Bash(claudlobby * fleet move *)",
@@ -2881,6 +2893,9 @@ def compose_settings_local(
         "Bash(claudlobby host repos pull *)", "Bash(claudlobby * host repos pull *)",
         "Bash(claudlobby host channels approve*)", "Bash(claudlobby * host channels approve*)",
         "Bash(claudlobby host owner *)", "Bash(claudlobby * host owner *)",
+        "Bash(claudlobby task permission approve*)", "Bash(claudlobby * task permission approve*)",
+        "Bash(claudlobby task permission decline*)", "Bash(claudlobby * task permission decline*)",
+        "Bash(claudlobby task permission revoke*)", "Bash(claudlobby * task permission revoke*)",
     ))
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
@@ -4330,6 +4345,7 @@ def _write_timer_units(
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
+    time_limit: tuple[int, int] | None = None,
     extra_env: dict[str, str] | None = None,
     abandon_children: bool = False,
 ) -> None:
@@ -4436,6 +4452,11 @@ def _write_timer_units(
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
         service_lines.append(unit_systemd_environment(var, value))
+    if time_limit:
+        # The job's own bound: systemd ends a run its command cannot stop, then
+        # waits TimeoutStopSec= in each kill phase.
+        service_lines.append(f"TimeoutStartSec={time_limit[0]}")
+        service_lines.append(f"TimeoutStopSec={time_limit[1]}")
     if abandon_children:
         # The script backgrounds work that must outlive the job (keepalive's
         # per-bot plane emit, reaped on its own clock). With the default
@@ -5162,6 +5183,12 @@ def compose_fleet_timers(
         seconds = _calendar_seconds(
             {name: _resolve_timer_schedule(cfg, merged_defaults)
              for name, cfg in merged_defaults.get("jobs", {}).items()}, slot)
+        # Imported here: at module level it would add the CLI's runtime modules to
+        # composer's. The pulse bounds its own runs (claudlobby/fleet_pulse.py).
+        from .fleet_pulse import UNIT_STOP_S, unit_time_limit
+
+        pulse_limit = (unit_time_limit(fleet.fleet_pulse.timeout_s if fleet.fleet_pulse else None),
+                       UNIT_STOP_S)
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults, slot, seconds.get(name))
             script = cfg.get("script", "")
@@ -5182,6 +5209,7 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
+                time_limit=pulse_limit if name == _FLEET_PULSE_JOB else None,
                 extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
             )
             composed_jobs.add(f"{prefix}.{name}")

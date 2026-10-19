@@ -48,7 +48,7 @@ library/                                         ├── CLAUDE.md      (compo
   permissions/                                   └── projects/      (git checkouts, gitignored)
   post_actions/
   tools/
-voices/
+  voices/
 templates/claude.md.j2
 ```
 
@@ -63,7 +63,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 - **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
 - **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
 - **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
-- **Voices** — Optional personality overlays from `voices/`.
+- **Voices** — Optional personality overlays in `library/voices/`.
 
 ### Runtime model
 
@@ -125,7 +125,6 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `plane-host-probe.sh` — per-minute host samples: load, RAM, disk, swap, iowait, thermal
 - `plane-lookup.py` — read-only plane lookups by task id, assignment, escalation, event
 - `plane-readers.py` — stdlib list readers shared by the bash doors
-- `plane-session-start.sh` — SessionStart hook: session and process ids for the plane
 - `plane-dispatch-in.sh` — UserPromptSubmit hook: records what the receiving bot actually got
 - `plane-telegram-in.sh` — UserPromptSubmit hook: records the operator's Telegram messages
 - `plane-telegram-out.sh` — PostToolUse hook on the Telegram reply tool: records the reply
@@ -141,7 +140,6 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `creds-check.sh` — validate fleet credentials, including GitHub App mode
 - `orphan-browser-reaper.sh` — Linux-only reap of browser processes orphaned by dead automation
 - `notify-behind.sh` — daily report of framework checkouts behind their newest release
-- `transcript-digest.sh` — SessionEnd hook: a model-written digest per session (opt-in: spends)
 - `selfstart-snapshot.sh` — after an unplanned reboot, counts which bots self-started; run it before any rescue
 - `boot-capture.sh` — records every declared bot at each host boot (opt-in)
 
@@ -181,8 +179,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 Everything in these top-level directories is committed and shared:
 
-- `library/` — All composable building blocks (see Architecture above)
-- `voices/` — Personality overlays
+- `library/` — All composable building blocks, voices included (see Architecture above)
 - `templates/` — Jinja2 templates for CLAUDE.md generation
 - `claudlobby/_runtime_scripts/` — Lifecycle and utility scripts
 - `claudlobby/` — Python compositor source
@@ -194,7 +191,7 @@ Everything in these top-level directories is committed and shared:
 These are ALL gitignored — never commit them:
 
 - `fleet.yaml` — Your active fleet config. Copy from `fleet.yaml.example`.
-- `local/` — Fleet overlays. Each `local/<fleet>/` contains fleet.yaml, local library overrides, voices, and runtime output. **All fleet-specific content lives here.**
+- `local/` — Fleet overlays. Each `local/<fleet>/` contains fleet.yaml, local library overrides (voices in `library/voices/`), and runtime output. **All fleet-specific content lives here.**
 - `local/<fleet>/runtime/bots/` — Generated bot directories
 - `local/<fleet>/library/` — Fleet-specific library content not general enough for shared
 - `.env` — Secrets (tokens, PATs, OAuth credentials). Never committed.

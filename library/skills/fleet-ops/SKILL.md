@@ -1,8 +1,8 @@
 ---
 name: fleet-ops
-description: "Read fleet work, admit tasks, deliver and route assignments as manager, and accept or report assigned work as worker. Use the canonical claudlobby CLI and verify recorded results."
+description: "Use when fleet work or a framework message reaches you, or before you read, admit, assign, deliver, accept or report fleet work, message another bot, or mint a request ID. Covers the canonical claudlobby CLI for managers and workers, and how to verify each recorded result."
 tool_grants:
-  - "Bash(uuidgen)"
+  - "Bash(python3 -I -c 'import uuid; print(uuid.uuid4())')"
   - "Bash(claudlobby --help)"
   - "Bash(claudlobby brief --help)"
   - "Bash(claudlobby library list --help)"
@@ -98,15 +98,38 @@ tool_grants:
   - "Bash(claudlobby --json fleet usage)"
   - "Bash(claudlobby --json fleet usage *)"
   - "Bash(claudlobby --json fleet reconcile)"
+  - "Bash(claudlobby bot capabilities --help)"
+  - "Bash(claudlobby bot show --help)"
+  - "Bash(claudlobby project list --help)"
+  - "Bash(claudlobby project show --help)"
+  - "Bash(claudlobby task permission request --help)"
+  - "Bash(claudlobby task permission show --help)"
+  - "Bash(claudlobby task permission check --help)"
+  - "Bash(claudlobby --json bot capabilities *)"
+  - "Bash(claudlobby --json bot show *)"
+  - "Bash(claudlobby --json project list)"
+  - "Bash(claudlobby --json project show *)"
+  - "Bash(claudlobby --json task permission request *)"
+  - "Bash(claudlobby --json task permission show *)"
+  - "Bash(claudlobby --json task permission check *)"
 ---
 
 # Fleet operations
 
-Before a new mutation, run the granted standalone `uuidgen` command once. Convert
-its hex letters to lowercase when copying the UUID into the CLI argument. Retain
-that literal UUID with the operation; never reuse a tutorial UUID or mint a new
-one to retry the same uncertain effect. A distinct operation gets a fresh UUID.
-Do not wrap UUID generation and a mutation in one shell command.
+Before a new mutation, run this granted standalone command once to mint its
+request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
+lowercase form the CLI requires. `-I` keeps the current directory off the import
+path and ignores `PYTHON*` variables, so a `uuid.py` in a checkout under review
+cannot run in place of the standard library's. `uuidgen` is not granted: a stock
+Debian host does not have it.
+
+```bash
+python3 -I -c 'import uuid; print(uuid.uuid4())'
+```
+
+Retain that literal UUID with the operation; never reuse a tutorial UUID or mint
+a new one to retry the same uncertain effect. A distinct operation gets a fresh
+UUID. Do not wrap UUID generation and a mutation in one shell command.
 
 Use `claudlobby --json config explain` to inspect environment declarations and
 which tier supplies or blanks each variable. `config explain KEY --bot BOT`
@@ -192,7 +215,12 @@ use `/restart` for that sequence. Use `claudlobby bot start --help`, `claudlobby
 `claudlobby bot restart --help` for the exact syntax. A manager can request a
 worker's handoff without stopping it with `claudlobby --json bot handoff WORKER`.
 Only `data.handoff=saved` confirms a fresh handoff file; `skipped` and an
-unavailable result do not. The request does not commit a Plane record:
+unavailable result do not. The request waits 30 s and a handoff often takes
+minutes: after `unknown` with reason `timeout`, `claudlobby --json bot handoff
+WORKER --check` sends nothing and reads the handoff file against the request,
+as `saved` (written since), `pending` (not yet) or `unknown`. Do not request
+another handoff while it reads `pending`. The request does not commit a Plane
+record.
 
 Use `claudlobby --json bot interrupt WORKER` to submit one Ctrl-C to a
 worker's selected private session, or `claudlobby --json bot compact WORKER`
@@ -403,3 +431,48 @@ Stop on permission, scope, or release errors. Do not substitute raw SQL,
 hand-built plane events, shell dispatch helpers, or tmux keystrokes for a
 refused CLI operation. Stop at an unsupported operation; do not invent another
 way to deliver work.
+
+## Orientation reads and permission requests
+
+These reads change nothing:
+
+```bash
+claudlobby --json bot show BOT
+claudlobby --json bot capabilities BOT
+claudlobby --json project list
+claudlobby --json project show PROJECT
+```
+
+`bot show BOT` answers what a bot has at hand: its role and manager and what is
+composed into it (`data.bot.effective_configuration.equipment`: skills, MCP
+servers, protocols, guardrails, principles and the rest). `bot capabilities BOT`
+adds its permission rules as SHA-256 hashes, the arguments withheld, and is about
+four times as long; read it to compare rule sets, not to learn the equipment. Both
+describe what was composed, not what a running session enforces:
+`permissions.enforcement` and `runtime_observed` always read `unknown` or
+`not_probed`, because nothing probes the session, and unknown is not "off". `project list` and
+`project show PROJECT` read the fleet's declared projects: key, title, repos,
+validation tier (how work in them is closed) and mission file. A manager's
+CLAUDE.md carries that table; a worker reads it here.
+
+To ask for a `merge`, `deploy`, `spend` or `delete` that needs a person's approval,
+record a request. A message, an escalation, a comment or a passing review does not
+grant permission:
+
+```bash
+claudlobby --json task permission request TASK_ID --scope-file FILE --reason "Why" --request-id REQUEST_UUID
+claudlobby --json task permission show PERMISSION_ID
+claudlobby --json task permission check PERMISSION_ID --scope-file FILE
+```
+
+The scope file is JSON with exactly `action`, `target` and `constraints`: the exact
+revision, environment, budget ceiling or selection, never a credential. Only the
+task's assignee or the fleet manager can request. `show` reads the request and its
+latest decision. `check` tests this bot and this exact scope and executes nothing;
+an approval covers those exact terms only while the task and its assignment stay
+unchanged. The decisions (`approve`, `decline`, `revoke`) are a local operator's
+and are denied to generated bots.
+
+Two commands are not yours to run. `task feedback` takes an explicit local human
+and refuses every generated bot session. `task recheck` is run by the fleet timer,
+which sends the manager one digest of overdue work.

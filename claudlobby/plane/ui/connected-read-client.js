@@ -188,7 +188,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (url === '/api/owner/status' && pending) return { status: 200, json: async () => pending.data };
     const action = { '/api/owner/status': 'status', '/api/owner/renew': 'renew', '/api/owner/logout': 'logout' }[url];
     if (action) {
-      if (!valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
+      // No session has expired before the first admitted host challenge.
+      // Retained binding/uncertain issuance still follows normal expiry handling.
+      if ((action === 'status' && !token && !binding) || !valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         { method: action === 'status' ? 'GET' : 'POST', ...(action !== 'status' ? { body: {} } : {}), signal: options.signal });
       if (result.status === 200 && action !== 'logout') admission(result.data, result.start, action === 'renew');

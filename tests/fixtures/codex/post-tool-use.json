@@ -1,0 +1,15 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "turn_id": "00000000-0000-4000-8000-000000000002",
+  "transcript_path": "/tmp/rnc-codex-home/sessions/2000/01/01/rollout-example.jsonl",
+  "cwd": "/tmp/rnc-codex-work",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "<redacted-command>"
+  },
+  "tool_response": "",
+  "tool_use_id": "call_redacted_0001"
+}

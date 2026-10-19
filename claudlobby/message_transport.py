@@ -206,6 +206,11 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
         # bytes never crossed the pane, and must not be reported as sent proof.
         return TransportOutcome("failed",
                                 reason="recipient input already held text; nothing was sent")
+    if (rc == result.returncode == 4
+            and b"pane_send: recipient-menu-open; no payload or Enter was sent\n" in stderr):
+        # A menu would read typed keys as choices, so the helper typed nothing.
+        return TransportOutcome("failed",
+                                reason="recipient pane showed a menu; nothing was sent")
     return TransportOutcome("unknown", digest, length, result.returncode,
                             "native submission did not complete with a valid success result")
 

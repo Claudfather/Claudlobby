@@ -27,7 +27,7 @@
 #   eng-1:
 #     <<: *engineer-base                         # merges all keys from anchor
 #     expertise: [software-engineering]           # bot-specific keys override
-#     voice: voices/dinesh.md
+#     voice: voices/dinesh-chugtai.md
 
 fleet:
   name: example-fleet
@@ -319,8 +319,8 @@ fleet:
 #     # unset (omit Option A above to use this).
 #     dangerously_skip_permissions: true
 #
-#     # remote_control — enable --remote-control flag (default: true)
-#     # Allows dispatch via tmux send-keys. Disable for standalone bots.
+#     # remote_control — run with --remote-control (default: true for the
+#     # fleet manager, false for every other bot). Set true to opt a worker in.
 #     remote_control: true
 #
 #     # channels — Claude Code channel plugins for messaging (default: [plugin:telegram@claude-plugins-official])
@@ -334,7 +334,9 @@ fleet:
 #
 #     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
 #     # All optional. Can also be set in defaults: for fleet-wide values.
-#     claudna_version: "0.2.0"                    # pin clauDNA plugin version
+#     claudna: {session_summary: true, harvest: false}  # OPTIONAL strict booleans
+#     # harvest needs Claudron >= 0.8.0 on the host first (PR 6a).
+#     claudna_version: "0.2.0"                    # exports a version hint; pins nothing
 #     claudron_vault_path: "/srv/vaults/my-vault"  # points AT a vault, not into one
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
 #

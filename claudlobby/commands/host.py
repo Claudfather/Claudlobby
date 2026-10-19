@@ -17,6 +17,9 @@ from uuid import uuid4
 from ..command_result import CommandFailure, CommandOutput
 from .releases import _executing_release, _host_releases, _host_root
 
+# The activation store's ID grammar, checked before any owner runs.
+_ACTIVATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+
 
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
@@ -146,7 +149,7 @@ def _activate(args, root):
         raise CommandFailure("invalid_argument", "invalid argument: invalid configuration plan ID")
     if getattr(args, "resume", None) and args.adopt_existing:
         raise CommandFailure("invalid_argument", "invalid argument: --resume and --adopt-existing are exclusive")
-    if getattr(args, "resume", None) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.resume):
+    if getattr(args, "resume", None) and not _ACTIVATION_ID.fullmatch(args.resume):
         raise CommandFailure("invalid_argument", "invalid argument: invalid activation resume ID")
     directory = Path(args.install_directory).expanduser()
     if not directory.is_absolute():
@@ -269,7 +272,7 @@ def _abort(args, root):
     never starts bots or ingest, changes selection, or restores SQL.
     """
     activation_id = args.abort_activation_id  # its own dest: request_id stays null
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", activation_id):
+    if not _ACTIVATION_ID.fullmatch(activation_id):
         raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
     reason = args.reason.strip()
     if not reason or len(reason) > 500 or not reason.isprintable():
@@ -349,68 +352,99 @@ def _abort(args, root):
         "verified. Bots, ingest, selection and SQL were not touched.",))
 
 
-def _repair_start(args, root):
-    """Archive one verified-dead unresolved bot start; the sealed resume restarts it."""
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.repair_activation_id):
-        raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
-    executing = _executing_release(root)
-    data = {"activation_id": args.repair_activation_id, "fleet": args.repair_fleet, "bot": args.bot,
-            "executing_release_id": executing, "recorded_activation": None, "recording": "unchanged"}
-    from ..activation import repair_failed_bot_start
+def _run_repair(what, run, *, data, root, unknown_hint):
+    """Map one repair backend's outcome; the backend raises every failure before
+    its single journal write as a refusal, so only a later failure is unknown."""
     from ..activation_state import ANOTHER_ACTIVATION, ActivationError, ActivationRefusal, lock_busy
+    activation_id, executing = data["activation_id"], data["executing_release_id"]
     try:
-        record = repair_failed_bot_start(root, args.repair_activation_id, fleet=args.repair_fleet,
-                                         bot=args.bot, reason=args.reason)
+        return run()
     except ActivationRefusal as exc:
-        # The backend raises every failure before its single journal write as a refusal.
         held = lock_busy(str(exc))
         raise CommandFailure("conflict", "conflict: host activation lock is held; no change recorded"
                              if str(exc) == ANOTHER_ACTIVATION else
                              f"conflict: {exc}; no change recorded" if held
-                             else f"conflict: start repair refused: {exc}; no change recorded",
-                             data={**data, "recorded_activation": _recorded(root, args.repair_activation_id)},
+                             else f"conflict: {what} refused: {exc}; no change recorded",
+                             data={**data, "recorded_activation": _recorded(root, activation_id)},
                              release_id=executing,
                              hint="inspect running host operations and activation.lock holders before retrying"
                              if held else _hint(root)) from exc
     except (ActivationError, ValueError, OSError) as exc:
         # The atomic replace may have landed before its fsync or reread failed.
-        raise CommandFailure("unavailable", "unavailable: start repair outcome is unknown",
+        raise CommandFailure("unavailable", f"unavailable: {what} outcome is unknown",
                              data={**data, "recording": "unknown",
-                                   "recorded_activation": _recorded(root, args.repair_activation_id)},
-                             release_id=executing,
-                             hint="inspect the activation record's start_effects and start_repairs "
-                                  "before any further repair or resume") from exc
+                                   "recorded_activation": _recorded(root, activation_id)},
+                             release_id=executing, hint=unknown_hint) from exc
+
+
+def _resume_line(root, intent, activation_id) -> str:
+    """The sealed candidate's one resume command, which every repair hands back to."""
+    return (f"Next, with release {intent['release_id']}'s sealed CLI: "
+            f"claudlobby --root {shlex.quote(str(root))} host activate {intent['plan_id']} "
+            f"--install-directory {shlex.quote(intent['install_directory'])} --resume {activation_id}")
+
+
+def _repair_start(args, root):
+    """Archive one verified-dead unresolved bot start; the sealed resume restarts it."""
+    if not _ACTIVATION_ID.fullmatch(args.repair_activation_id):
+        raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
+    executing = _executing_release(root)
+    data = {"activation_id": args.repair_activation_id, "fleet": args.repair_fleet, "bot": args.bot,
+            "executing_release_id": executing, "recorded_activation": None, "recording": "unchanged"}
+    from ..activation import repair_failed_bot_start
+    record = _run_repair(
+        "start repair", lambda: repair_failed_bot_start(root, args.repair_activation_id, fleet=args.repair_fleet,
+                                                        bot=args.bot, reason=args.reason),
+        data=data, root=root, unknown_hint="inspect the activation record's start_effects and start_repairs "
+                     "before any further repair or resume")
     archived = record.body["start_repairs"][-1]
     intent = record.body["intent"]
     data.update(recorded_activation=_recorded(root, args.repair_activation_id), recording="committed",
                 target_release_id=intent["release_id"], plan_id=intent["plan_id"],
                 archived_target=archived["attempt"]["target"], archived_fence=archived["attempt"]["fence"])
-    resume = (f"claudlobby --root {shlex.quote(str(root))} host activate {intent['plan_id']} "
-              f"--install-directory {shlex.quote(intent['install_directory'])} "
-              f"--resume {args.repair_activation_id}")
     return CommandOutput(data, executing, (
         f"Archived the failed start of {args.repair_fleet}/{args.bot}; nothing was started.",
-        f"Next, with release {intent['release_id']}'s sealed CLI: {resume}"))
+        _resume_line(root, intent, args.repair_activation_id)))
+
+
+def _repair_after_reset(args, root):
+    """Archive every verified-dead start after a host reset; the sealed resume restarts them."""
+    if not _ACTIVATION_ID.fullmatch(args.reset_activation_id):
+        raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
+    executing = _executing_release(root)
+    data = {"activation_id": args.reset_activation_id, "executing_release_id": executing,
+            "recorded_activation": None, "recording": "unchanged"}
+    from ..activation import repair_starts_after_host_reset
+    repair = _run_repair(
+        "host-reset repair", lambda: repair_starts_after_host_reset(root, args.reset_activation_id,
+                                                                    reason=args.reason),
+        data=data, root=root, unknown_hint="inspect the activation record's pending step, start_effects and "
+                     "start_repairs before any further repair or resume")
+    intent = repair.record.body["intent"]
+    data.update(recorded_activation=_recorded(root, args.reset_activation_id), recording="committed",
+                target_release_id=intent["release_id"], plan_id=intent["plan_id"],
+                pending=repair.record.body["pending"], archived_targets=list(repair.archived_targets))
+    return CommandOutput(data, executing, (
+        (f"Archived {len(repair.archived_targets)} dead candidate start(s) and reopened ingest_started; "
+         "nothing was started."),
+        _resume_line(root, intent, args.reset_activation_id)))
 
 
 def dispatch(args):
     activating = args.public_command == "host.activate"
-    repairing = args.public_command == "host.repair-start"
     aborting = args.public_command == "host.abort-adoption"
+    # Operator verbs; each backend also checks recorded native ancestry.
+    operator = {"host.activate": _activate, "host.repair-start": _repair_start,
+                "host.repair-after-reset": _repair_after_reset, "host.abort-adoption": _abort}
     try:
-        if activating or repairing or aborting:
-            _operator_shell()  # refuses bot callers; activation also checks native ancestry
+        if args.public_command in operator:
+            _operator_shell()  # refuses bot callers
         if args.root is None:
             raise CommandFailure("invalid_argument", "invalid argument: an explicit --root is required",
                                  hint=f"supply claudlobby --root PATH {args.public_command.replace('.', ' ')}")
         if args.public_command == "host.status":
             return _passive_status(args)
-        root = _host_root(args)
-        if repairing:
-            return _repair_start(args, root)  # The backend checks recorded native ancestry.
-        if aborting:
-            return _abort(args, root)
-        return _activate(args, root)
+        return operator.get(args.public_command, _activate)(args, _host_root(args))
     except CommandFailure as exc:
         if activating:
             exc.data.setdefault("activation_id", args.activation_id)

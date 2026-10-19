@@ -1,6 +1,6 @@
 ---
 name: cross-fleet-initiative
-description: "Coordinate a multi-team initiative across multiple manager fleets via a 7-stage operating loop (FRAME, DECOMPOSE, GATE, DISPATCH, MONITOR, SYNTHESIZE, CLOSE). Use when a strategic goal spans more than one fleet and needs the senior-management layer to keep both aligned, surface forks to the owner, and drive to a defined done state."
+description: "Use when a strategic goal spans more than one fleet and needs the senior-management layer to keep both aligned, surface forks to the owner, and drive to a defined done state. Coordinates a multi-team initiative across multiple manager fleets via a 7-stage operating loop (FRAME, DECOMPOSE, GATE, DISPATCH, MONITOR, SYNTHESIZE, CLOSE)."
 argument-hint: "<stage> <initiative-name> | bootstrap <initiative-name> <one-line-goal> | next <initiative-name>"
 tool_grants:
   - "Bash(python3 *issue-intake.py* list *)"

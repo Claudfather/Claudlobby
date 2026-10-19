@@ -154,7 +154,7 @@ class ServePrincipalVerifier:
     WhoIs; unsupported realms never reuse the official principal namespace.
     """
 
-    def __init__(self, *, tailscale_binary: Path):
+    def __init__(self, *, tailscale_binary: Path, tailscale_socket: Path | None = None):
         try:
             binary = Path(tailscale_binary)
             if not binary.is_absolute() or not stat.S_ISREG(binary.stat().st_mode) or not os.access(binary, os.X_OK):
@@ -162,6 +162,13 @@ class ServePrincipalVerifier:
         except (TypeError, ValueError, OSError):
             raise ValueError("an absolute configured native Tailscale executable is required") from None
         self.binary = str(binary)
+        if tailscale_socket is not None:
+            socket = Path(tailscale_socket)
+            if not socket.is_absolute():
+                raise ValueError("an absolute native Tailscale control socket is required")
+            self.socket_option = "--socket=" + str(socket)
+        else:
+            self.socket_option = None
         self._slots = asyncio.BoundedSemaphore(_CONCURRENCY)
         self._pending = 0
 
@@ -170,7 +177,8 @@ class ServePrincipalVerifier:
         tasks = []
         io_complete = False
         try:
-            proc = await asyncio.create_subprocess_exec(self.binary, *args,
+            options = (self.socket_option,) if self.socket_option is not None else ()
+            proc = await asyncio.create_subprocess_exec(self.binary, *options, *args,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, env=_ENV.copy(), start_new_session=True)
             tasks = [asyncio.create_task(_bounded_read(proc.stdout, _MAX_OUTPUT)),

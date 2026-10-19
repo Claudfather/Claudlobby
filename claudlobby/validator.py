@@ -20,8 +20,8 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-from . import dotenv, tool_resolve
-from .claudron_compat import CLAUDRON_INTEGRATION_URL
+from . import claudron_compat, dotenv, tool_resolve
+from .claudron_compat import CLAUDRON_INTEGRATION_URL, MigrationReader
 from .config import (
     _RETIRED_BOT_KEYS,
     _RETIRED_OBSERVABILITY_KEYS,
@@ -154,8 +154,10 @@ RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
 #: is a KIND of finding, grouped by remedy; the value is the one line a reader
 #: gets when a category appears that a baseline did not have.
 WARNING_CATEGORIES: dict[str, str] = {
+    "claudna-env": "a clauDNA composed knob is assigned in .env or bot.env; move it to claudna:",
     # a declared reference that resolves to nothing
-    "voice-missing": "a declared voice is not in voices/",
+    "voice-missing": "a declared voice is not in any library/voices/",
+    "voice-legacy-path": "a voice resolves from the overlay's old voices/; move it to library/voices/ before #2202 stops reading there",
     "skill-missing": "a declared skill or skill folder is not in any library/skills/",
     "integration-missing": "a declared integration is not in any library/integrations/",
     "mcp-missing": "a declared MCP fragment is not in any library/mcp/",
@@ -181,6 +183,8 @@ WARNING_CATEGORIES: dict[str, str] = {
     "isolation-env-read": "a bot with shared-config isolation on is told to read ~/.env itself, a read its own rules deny",
     "isolation-gap": "a bot's shared-config isolation rules fall short of the host roster",
     # host facts every bot inherits
+    "claudron-migration": "a session-loop vault has pending migrations or unequal vault and engine formats",
+    "claudron-doctor": "a session-loop vault's migration state could not be checked",
     "claudron-path": "a vault is wired but the claudron CLI is not on PATH",
     "vault-path": "claudron_vault_path is not a directory, or does not resolve to a vault",
     "git-identity": "the operator gitconfig the composed .gitconfig includes sets no identity",
@@ -636,8 +640,11 @@ def _validate_bots(
     paths: Paths,
     fleet_env: dict[str, str],
     report: ValidationReport,
+    *, migration_reader: MigrationReader | None = None,
 ) -> None:
     """Per-bot validation: expertise, voice, skills, MCP, env vars, integrations, etc."""
+    if migration_reader is None:
+        migration_reader = claudron_compat.vault_migration_reader()
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
@@ -735,10 +742,19 @@ def _validate_bots(
 
         # Voice (warn)
         if bot.voice:
-            if paths.find_voice_file(bot.voice) is None:
+            voice_file = paths.find_voice_file(bot.voice)
+            if voice_file is None:
                 report.warn(
                     "voice-missing",
                     f"bot '{bot_name}': voice file '{bot.voice}' not found — bare expertise will be used"
+                )
+            elif voice_file.is_relative_to(paths.legacy_overlay_voices):
+                # One file, one line: every bot that declares it folds in.
+                shared.add(
+                    "voice-legacy-path",
+                    f"voice file {voice_file} is at the old voices/ path; "
+                    f"move it to {paths.overlay_voices}/",
+                    bot_name,
                 )
 
         # Skills (warn). Accepts:
@@ -842,6 +858,26 @@ def _validate_bots(
                         f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
                         f"won't migrate ({hint})"
                     )
+
+        # Authored tiers only: an operator's os.environ is not fleet config.
+        from .env_tiers import ResolverUnavailable, resolve as resolve_claudna_tiers
+        try:
+            claudna_tiers = resolve_claudna_tiers(paths, bot_name=bot_name, fleet_name=fleet.name)
+        except ResolverUnavailable:
+            claudna_tiers = {}
+            shared.add("claudna-env", "authored .env tiers could not be resolved; claudna: override coverage is unknown", bot_name)
+        for key in ("CLAUDNA_STATE_DIR", "CLAUDNA_SESSION_SUMMARY", "CLAUDNA_HARVEST"):
+            resolution = claudna_tiers.get(key)
+            if resolution is not None:
+                finding = (f"{key} assigned in {resolution.tier} tier ({resolution.path}) is overridden "
+                           "by bot.conf; use claudna: as the one knob")
+                if resolution.tier == "bot":
+                    report.warn("claudna-env", f"bot '{bot_name}': {finding}")
+                else:
+                    shared.add("claudna-env", finding, bot_name)
+            if key in bot.env:
+                report.warn("claudna-env", f"bot '{bot_name}': env: assigns {key} after the composed lines "
+                            "and overrides the claudna: mapping; move it to claudna:")
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
         # var names (the same names composer puts into the rendered
@@ -1406,6 +1442,26 @@ def _validate_bots(
                         f"(see {CLAUDRON_INTEGRATION_URL})",
                         bot_name,
                     )
+                elif claudron_on_path:
+                    from .composer import _session_loop_enabled
+
+                    if _session_loop_enabled(bot):
+                        state = migration_reader(key)
+                        if state.status in ("pending", "old_format"):
+                            ids = ", ".join(ident for ident, _ in state.pending) or "see D001"
+                            count = len(state.pending) or sum(code == "D001" for code, _ in state.findings)
+                            cause = (f"has {count} pending migration(s) ({ids})"
+                                     if state.status == "pending" else
+                                     f"records vault format {state.vault_format} but the engine is at {state.engine_format}")
+                            shared.add(
+                                "claudron-migration",
+                                f"claudron_vault_path '{key}' {cause} — the session loop would run hooks on an unmigrated vault. "
+                                f"Once per vault, from one clone, a human runs `claudron doctor --fix --json --vault {key}` "
+                                "(it commits), then pulls on every clone (vault-sync), then plans again.",
+                                bot_name,
+                            )
+                        elif state.status == "unknown":
+                            shared.add("claudron-doctor", state.detail, bot_name)
 
         # Ecosystem: the session loop (L2) needs a vault to run against. An
         # explicit `claudron_session_loop: true` with no `claudron_vault_path` is
@@ -2590,7 +2646,9 @@ def _validate_mcp_packages(
         report.warn(mcp_kind.get(finding.kind, UNCATEGORIZED), finding.message())
 
 
-def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
+def validate(
+    fleet: FleetConfig, paths: Paths, *, migration_reader: MigrationReader | None = None,
+) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
 
@@ -2601,7 +2659,9 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
 
     fleet_env = dotenv.read(paths.env_file)
     _warn_dead_flags(fleet_env, paths, report)
-    _validate_bots(fleet, paths, fleet_env, report)
+    if migration_reader is None:
+        migration_reader = claudron_compat.vault_migration_reader()
+    _validate_bots(fleet, paths, fleet_env, report, migration_reader=migration_reader)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)

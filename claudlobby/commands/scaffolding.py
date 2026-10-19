@@ -63,7 +63,7 @@ def cmd_new_bot(args):
             mcp=csv(args.mcp), skills=csv(args.skills), guardrails=csv(args.guardrails),
             protocols=csv(args.protocols), resources=csv(args.resources),
             lessons=csv(args.lessons), integrations=csv(args.integrations),
-            remote_control=False if args.no_remote_control else None,
+            remote_control=args.remote_control,
             dangerously_skip_permissions=True if args.dangerously_skip_permissions else None,
             extra_flags=csv(args.extra_flags), scope_org=args.scope_org,
             scope_repos=csv(args.scope_repos),
@@ -97,6 +97,9 @@ def cmd_new_bot(args):
             paths.assert_writable(voice_path)
             if voice_path.resolve() != voice_path or voice_path.exists() or voice_path.is_symlink():
                 raise CommandFailure("conflict", "fleet voice source already exists")
+            legacy = paths.legacy_overlay_voices / f"{inp.name}.md"
+            if legacy.exists() or legacy.is_symlink():
+                raise CommandFailure("conflict", "fleet voice source already exists at the old voices/ path")
         if inp.telegram_token:
             paths.assert_writable(paths.env_file)
             if paths.env_file.resolve() != paths.env_file:

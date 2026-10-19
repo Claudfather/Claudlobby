@@ -43,6 +43,7 @@ def test_owner_service_keeps_literal_arguments_and_operator_environment(tmp_path
     binary.chmod(0o700)
     cfg = {"unit": "service", "script": "$CLAUDLOBBY_CLI", "enroll": True,
            "origin": "https://host.example.test", "tailscale": str(binary),
+           "tailscale_socket": str(tmp_path / "headless control.sock"),
            "socket": str(tmp_path / "private socket"),
            "workspace_issuer": "https://app.example.test",
            "workspace_origin": "https://plane.example.test"}
@@ -51,11 +52,18 @@ def test_owner_service_keeps_literal_arguments_and_operator_environment(tmp_path
     argv = doc["ProgramArguments"]
     assert argv[1:6] == ["--root", str(tmp_path), "host", "owner", "serve"]
     assert argv[argv.index("--tailscale") + 1] == str(binary)
+    assert argv[argv.index("--tailscale-socket") + 1] == cfg["tailscale_socket"]
+    assert argv[argv.index("--socket") + 1] == cfg["socket"]
     assert argv[argv.index("--workspace-origin") + 1] == "https://plane.example.test"
     assert "FLEET_ROOT" not in doc["EnvironmentVariables"]
     assert doc["KeepAlive"] is True
     assert "$$CLAUDLOBBY_ROOT %% tailscale" in (out / "claudlobby-plane-owner.service").read_text()
     assert not (out / "claudlobby-plane-owner.timer").exists()
+    with pytest.raises(ValueError, match="socket requires"):
+        _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "socket": "relative.sock"}})
+    _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "socket": None}})
+    with pytest.raises(ValueError, match="absolute native Tailscale control socket"):
+        _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "tailscale_socket": "relative.sock"}})
 
 
 def test_owner_service_is_dormant_until_configured(tmp_path, monkeypatch):

@@ -373,6 +373,7 @@ VARIABLE_ROWS = {
 }
 # A Python helper that takes a type as its first argument.
 PY_WRITERS = {
+    "claudlobby/session_export.py": "_system_event",
     "claudlobby/plane/daemon.py": "_emit_system",
     RS + "heavy-slot.py": "_emit",
     RS + "public-write-guard.py": "_emit",
@@ -429,12 +430,12 @@ def _py_writer_sites() -> tuple[tuple, ...]:
 def test_the_row_and_python_scans_find_the_writers():
     """Positive control, both scans."""
     rows = {t for *_, types, _f in _row_sites() if types for t in types}
-    for t in ("vault_sync", "session_digest", "operator_first_seen", "task_recheck",
+    for t in ("vault_sync", "operator_first_seen", "task_recheck",
               "task_recheck_noop", "workstream_prune_noop", "reports_acked", "report_status",
               "checkin_decision", "checkin_dispatch"):
         assert t in rows, t
     helpers = {lit for *_, lit, _arg in _py_writer_sites()}
-    for t in ("daemon_started", "daemon_stopping", "spool_drain_completed",
+    for t in ("session_summary", "export_stalled", "daemon_started", "daemon_stopping", "spool_drain_completed",
               "heavy_slot_acquired", "heavy_slot_refused", "public_write_refused",
               "fleet_alert", "fleet_notice", "delivery_enter_repaired"):
         assert t in helpers, t
@@ -514,7 +515,7 @@ def test_no_file_builds_a_system_row_the_scans_cannot_see():
               if _names_a_system_row(p)}
     for m in ("claudlobby/brief.py", "claudlobby/task_recheck.py",
               "claudlobby/workstream_operations.py", "claudlobby/report_payload.py",
-              RS + "vault-sync.sh", RS + "transcript-digest.sh"):
+              RS + "vault-sync.sh"):
         assert m in marked, m                                    # the markers still match
     seen = {where for where, *_ in _row_sites()} | set(PY_WRITERS)
     assert marked - seen == set()

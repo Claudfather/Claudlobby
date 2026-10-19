@@ -2,10 +2,10 @@
 
 Every test drives the REAL keepalive.sh tick (real lib-common, real
 usage-limit.py) against a stateful tmux stub that serves live Claude Code
-frames (tests/fixtures/pane-states/usage-limit-*.txt, captured from 2.1.292),
-records every key it is sent, and moves the frame the way Claude Code does: a
-typed prompt shows in the input box, an Enter submits it, and an Enter on the
-usage-limit menu closes it. The reset time in each frame is rewritten relative
+frames (tests/fixtures/pane-states/usage-limit-*.txt, captured from 2.1.292,
+and from 2.1.299 for press-to-continue), records every key it is sent, and
+moves the frame the way Claude Code does: a typed prompt shows in the input
+box, an Enter submits it, and an Enter on the usage-limit menu closes it. The reset time in each frame is rewritten relative
 to now, so "before the reset" and "after the reset" are the real clock's.
 
 The failures each test names are the ones #996 ruled out: another menu gets no
@@ -103,7 +103,12 @@ def _clock(epoch: int) -> str:
 
 def _frame(name: str, reset_text: str) -> str:
     text = (FIXTURES / f"usage-limit-{name}.txt").read_text()
-    for old in ("10:36am (America/New_York)", "10:45am (America/New_York)", "10:45am"):
+    for old in (
+        "10:36am (America/New_York)",
+        "10:45am (America/New_York)",
+        "10:21am (America/New_York)",
+        "10:45am",
+    ):
         text = text.replace(
             old, reset_text if "(" in old else reset_text.split(" (")[0]
         )
@@ -220,6 +225,39 @@ def test_a_held_frame_reads_limit_with_its_reset_not_idle(rig):
     assert screen == "limit" and int(reset_epoch) > time.time()
     assert int(anchor) == hit
     assert r.keys() == []
+
+
+def test_a_line_the_reader_did_not_know_under_the_limit_still_reads_limit(rig):
+    """#2348: every production stop read IDLE with the hook's record in place.
+    A line Claude Code draws under the limit line that #996 never measured
+    ("Press ⏎ to continue after reset", live from 2.1.299 with a server flag
+    on) made the reader call it the bot moving on."""
+    r = rig(armed=False)
+    hit, reset = _future_reset()
+    r.show(_frame("press-to-continue", reset))
+    r.hook_record(hit)
+    r.tick()
+    assert f"LIMIT — held by a usage limit (session limit), resets {reset}" in r.log()
+    assert "IDLE" not in r.log() and not r.data(".idle").exists()
+
+
+def test_an_idle_tick_names_a_record_the_pane_did_not_confirm(rig):
+    """A record newer than the last tool call that the pane does not confirm
+    (here a newer prompt under the limit line) reads IDLE, and the IDLE line
+    says so, so a stop that is missed again names itself (#2348 left none)."""
+    r = rig()
+    hit, reset = _past_reset()
+    r.show(_frame("resumed", reset))
+    r.hook_record(hit)
+    r.tick()
+    stamp = datetime.datetime.fromtimestamp(hit, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    assert (
+        f"IDLE — at prompt; a usage-limit record from {stamp} is newer than the "
+        "last tool call, but the pane shows no limit as its last word"
+    ) in r.log()
+    assert "LIMIT" not in r.log() and r.keys() == []
 
 
 def test_a_limit_line_with_no_hook_record_is_not_a_limit(rig):

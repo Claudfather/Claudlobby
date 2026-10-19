@@ -442,6 +442,7 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot restart lead)" in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in lead_grants
         assert "Bash(claudlobby --json bot handoff worker)" in lead_grants
+        assert "Bash(claudlobby --json bot handoff worker --check)" in lead_grants
         assert "Bash(claudlobby --json bot interrupt worker)" in lead_grants
         assert "Bash(claudlobby --json bot compact worker)" in lead_grants
         assert "Bash(claudlobby --json bot stop worker --reason *)" in lead_grants
@@ -451,6 +452,7 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot restart worker)" in worker_grants
         assert "Bash(claudlobby --json bot handoff lead)" not in worker_grants
         assert "Bash(claudlobby --json bot handoff worker)" not in worker_grants
+        assert "Bash(claudlobby --json bot handoff worker --check)" not in worker_grants
         assert "Bash(claudlobby --json bot interrupt worker)" not in worker_grants
         assert "Bash(claudlobby --json bot compact worker)" not in worker_grants
         assert "Bash(claudlobby --json fleet notify --level * --event * --message *)" not in worker_grants
@@ -618,6 +620,14 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby host channels approve*)" in deny
         assert "Bash(claudlobby host owner *)" in deny
         assert "Bash(claudlobby * host owner *)" in deny
+        for verb in ("approve", "decline", "revoke"):
+            assert f"Bash(claudlobby task permission {verb}*)" in deny
+            assert f"Bash(claudlobby * task permission {verb}*)" in deny
+        # A bot's own permission verbs stay reachable: no deny names them.
+        from tests.test_checkin_library import _bash_grant_matches
+        bash = [rule for rule in deny if rule.startswith("Bash(")]
+        for own in ("task permission request t1", "task permission check p1", "task permission show p1"):
+            assert not any(_bash_grant_matches(rule, f"claudlobby --json {own}") for rule in bash), own
 
     def test_tool_allow_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -3082,7 +3092,7 @@ class TestComposeBotEventsDir:
         )
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "lib").mkdir()
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
 
         paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
@@ -3283,7 +3293,7 @@ class TestComposePermissions:
             (perm_dir / f"{name}.md").write_text(content)
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
         paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_claude_md, paths
 
@@ -3585,6 +3595,43 @@ class TestDefaultStartupPromptIgnition:
         assert not any("brief --bot" in p for p in allow)
 
 
+class TestVoiceLayouts:
+    """#2150 moves voices into library/; only the location moves, so the
+    composed text must not."""
+
+    def _setup(self, tmp_path):
+        from claudlobby.composer import compose_claude_md
+
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        install_real_template(root)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"],
+                        voice="voices/custom.md")
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
+        return compose_claude_md, paths, bot, fleet
+
+    def test_an_overlay_voice_composes_the_same_bytes_from_the_old_and_new_path(self, tmp_path):
+        compose_claude_md, paths, bot, fleet = self._setup(tmp_path)
+        paths.legacy_overlay_voices.mkdir()
+        old = paths.legacy_overlay_voices / "custom.md"
+        old.write_text("---\nname: Custom\n---\n\nSpeak plainly.\n")
+        before = compose_claude_md(bot, fleet, paths)
+        assert "## Voice: Custom" in before and "Speak plainly." in before
+        paths.overlay_voices.mkdir(parents=True)
+        old.rename(paths.overlay_voices / "custom.md")
+        assert compose_claude_md(bot, fleet, paths) == before
+
+    def test_a_package_voice_composes_the_same_under_either_spelling(self, tmp_path):
+        compose_claude_md, paths, bot, fleet = self._setup(tmp_path)
+        short = compose_claude_md(replace(bot, voice="voices/vito-corleone.md"), fleet, paths)
+        assert "## Voice: Vito Corleone" in short
+        spelled = compose_claude_md(replace(bot, voice="library/voices/vito-corleone.md"), fleet, paths)
+        assert spelled == short
+
+
 class TestComposeAutonomousRunner:
     """compose_claude_md renders the autonomous_runner block when configured."""
 
@@ -3597,7 +3644,7 @@ class TestComposeAutonomousRunner:
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
         paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_claude_md, paths
 
@@ -5756,3 +5803,45 @@ class TestAccessJsonKeepsItsMode:
         compose_bot(bot, fleet, make_paths(fleet_dir))
         assert access.is_file(), "precondition: the first write ran"
         assert seen == [0o600], seen
+
+
+@pytest.mark.parametrize(
+    "summary,harvest,value",
+    [
+        (None, None, 0),
+        (False, None, 0),
+        (True, None, 1),
+        (None, True, 1),
+        (None, False, 0),
+    ],
+)
+def test_claudna_summary_is_always_composed(tmp_path, summary, harvest, value):
+    from claudlobby.config import ClaudnaConfig
+
+    bot = BotConfig(
+        bot_id="b", name="b", expertise=["x"], claudna=ClaudnaConfig(summary, harvest)
+    )
+    fleet = FleetConfig(
+        name="canary", service_prefix="com.canary", manager="b", bots={"b": bot}
+    )
+    paths = _make_paths(tmp_path)
+    text = compose_bot_conf(bot, fleet, paths)
+    assert text.count('export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"') == 1
+    assert text.count("export CLAUDNA_SESSION_SUMMARY=") == 1
+    assert f"export CLAUDNA_SESSION_SUMMARY={value}" in text
+    assert text.index("BOT_DIR=") < text.index("CLAUDNA_STATE_DIR=")
+    if harvest is not None:
+        assert f"export CLAUDNA_HARVEST={int(harvest)}" in text
+
+
+def test_no_retired_hook_is_composed(tmp_path):
+    bot = BotConfig(bot_id="b", name="b", expertise=["x"])
+    fleet = FleetConfig(
+        name="canary", service_prefix="com.canary", manager="b", bots={"b": bot}
+    )
+    text = json.dumps(compose_settings_local(bot, fleet, _make_paths(tmp_path)))
+    assert "transcript-digest" not in text and "plane-session-start" not in text
+    package = yaml.safe_load(
+        (Path(__file__).parent.parent / "claudlobby/system.yaml").read_text()
+    )
+    assert "SessionEnd" not in package["defaults"]["hooks"]

@@ -24,7 +24,7 @@ def _setup(tmp_path: Path) -> Paths:
     (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
     install_real_template(root)
     (root / "runtime" / "bots").mkdir(parents=True)
-    (root / "voices").mkdir()
+    (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
     return Paths(root=root, fleet_dir=root, package=source_package())
 
 

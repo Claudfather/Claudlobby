@@ -1,6 +1,6 @@
 ---
 name: printify
-description: "Direct Printify v1 REST actuator — the reads the MCP is weak at (real shop/status, lossless descriptions, orders) AND the draft-first writes the MCP is buggy/limited at (create a product from a PNG, migrate a discontinued product onto a new provider, publish). Shares the PRINTIFY_API_KEY + PRINTIFY_SHOP_ID contract with the printify MCP. Writes leave a DRAFT and never auto-publish."
+description: "Use when a Printify read must be exact (real shop/status, lossless descriptions, orders) or a product must be created, migrated or published. Direct Printify v1 REST actuator — the reads the MCP is weak at AND the draft-first writes the MCP is buggy/limited at (create a product from a PNG, migrate a discontinued product onto a new provider, publish). Shares the PRINTIFY_API_KEY + PRINTIFY_SHOP_ID contract with the printify MCP. Writes leave a DRAFT and never auto-publish."
 argument-hint: "[status|products [limit]|product <id>|orders [limit]|order <id>|raw <path>|create …|migrate …|publish …]"
 ---
 

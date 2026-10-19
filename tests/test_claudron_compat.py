@@ -8,6 +8,7 @@ not out-live it).
 """
 
 import inspect
+import json
 import re
 from pathlib import Path
 
@@ -325,3 +326,159 @@ def test_docstring_names_a_real_consumer():
         "doctor.check_claudron no longer reads COMPAT_FLOOR — the docstring's "
         "'reads this table' claim is stale"
     )
+
+
+class TestVaultMigrationProbeBudget:
+    def test_status_and_doctor_share_one_total_budget(self, monkeypatch):
+        ticks = iter([0.0, 0.0, 9.0])
+        monkeypatch.setattr(claudron_compat, "monotonic", lambda: next(ticks))
+        calls = []
+        def run(argv, timeout=10.0):
+            calls.append((argv, timeout))
+            if argv[1] == "status":
+                return 0, '{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}'
+            return 124, ""
+        state = claudron_compat.vault_migration_state("/scratch/vault", run=run, timeout=10.0)
+        assert state.status == "unknown"
+        assert [timeout for _, timeout in calls] == [10.0, 1.0]
+        assert "10s" in state.detail and "unknown" in state.detail
+
+    def test_exhausted_budget_does_not_start_doctor(self, monkeypatch):
+        ticks = iter([0.0, 0.0, 60.0])
+        monkeypatch.setattr(claudron_compat, "monotonic", lambda: next(ticks))
+        calls = []
+        def run(argv, timeout=10.0):
+            calls.append(argv)
+            return 0, '{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}'
+        state = claudron_compat.vault_migration_state("/scratch/vault", run=run)
+        assert state.status == "unknown" and "60s" in state.detail
+        assert len(calls) == 1
+
+    def test_status_timeout_is_unknown(self):
+        state = claudron_compat.vault_migration_state("/scratch/vault", run=lambda *a, **kw: (124, ""))
+        assert state.status == "unknown" and "status" in state.detail and "60s" in state.detail
+
+
+def test_live_v090_pending_migration_shape():
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    answers = {"status": (0, (fixtures / "status-v090.json").read_text()),
+               "doctor": (1, (fixtures / "doctor-format2.json").read_text())}
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return answers[argv[1]]
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    doctor_data = json.loads(answers["doctor"][1])["data"]
+    assert state.status == "pending" and state.vault_format == 2 and state.engine_format == 3
+    assert state.pending == (("m003", doctor_data["pending"][0]["title"]),)
+    assert [code for code, _ in state.findings] == ["D001"]
+    assert "engine 0.9.0" in state.probe_detail
+    assert [argv[1] for argv in calls] == ["status", "doctor"]
+    assert not any("--fix" in argv for argv in calls)
+
+
+@pytest.mark.parametrize("capabilities", [42, "doctor", {"doctor": True}, None])
+def test_malformed_capabilities_are_unknown_without_doctor(capabilities):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return 0, json.dumps({"ok": True, "command": "status", "data": {"capabilities": capabilities}, "warnings": [], "errors": []})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "capabilit" in state.detail
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [
+    {"ok": False, "command": "status", "data": {"capabilities": ["doctor"]}},
+    {"ok": True, "command": "other", "data": {"capabilities": ["doctor"]}},
+    {"command": "status", "data": {"capabilities": ["doctor"]}},
+    {"ok": 1, "command": "status", "data": {"capabilities": ["doctor"]}},
+])
+def test_wrong_status_envelope_does_not_open_doctor(status):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return 0, json.dumps({"warnings": [], "errors": [], **status})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and state.probe_status == "warn"
+    assert "status" in state.detail and "envelope" in state.detail
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("ok,errors", [(False, []), (True, [{"code": "D009", "message": "finding"}]), (1, [])])
+def test_doctor_ok_must_match_its_authoritative_error_list(ok, errors):
+    def run(argv, **kwargs):
+        if argv[1] == "status":
+            return 0, json.dumps({"ok": True, "command": "status", "data": {"capabilities": ["doctor"]}, "warnings": [], "errors": []})
+        return 1 if errors else 0, json.dumps({"ok": ok, "command": "doctor", "data": {
+            "vault_format": 3, "engine_format": 3, "pending": []}, "errors": errors, "warnings": []})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "envelope" in state.detail
+
+
+@pytest.mark.parametrize("field,value", [
+    ("errors", [{"code": "D001", "message": "failed"}]),
+    ("errors", {}), ("warnings", [7]), ("warnings", "broken"),
+])
+def test_status_finding_lists_must_match_its_success(field, value):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        envelope = {"ok": True, "command": "status", "data": {"capabilities": ["doctor"]},
+                    "errors": [], "warnings": []}
+        if argv[1] == "status":
+            envelope[field] = value
+        else:
+            envelope.update(command="doctor", data={"vault_format": 3, "engine_format": 3, "pending": []})
+        return 0, json.dumps(envelope)
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and state.probe_status == "warn"
+    assert len(calls) == 1
+
+
+def test_probe_expands_home_in_both_cli_arguments(tmp_path, monkeypatch):
+    home = tmp_path / "private-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        name, rc = ("status-v090.json", 0) if argv[1] == "status" else ("doctor-format2.json", 1)
+        return rc, (fixtures / name).read_text()
+    state = claudron_compat.vault_migration_state("~/vault", run=run)
+    assert state.status == "pending"
+    assert [argv[-1] for argv in calls] == [str(home / "vault"), str(home / "vault")]
+
+
+@pytest.mark.parametrize("rc,errors", [(1, []), (0, [{"code": "D009", "message": "finding"}])])
+def test_doctor_exit_code_must_match_findings(rc, errors):
+    def run(argv, **kwargs):
+        if argv[1] == "status":
+            return 0, json.dumps({"ok": True, "command": "status", "data": {"capabilities": ["doctor"]},
+                                  "errors": [], "warnings": []})
+        return rc, json.dumps({"ok": not errors, "command": "doctor", "data": {
+            "vault_format": 3, "engine_format": 3, "pending": []}, "errors": errors, "warnings": []})
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "envelope" in state.detail
+
+
+def test_live_v090_migrated_shape_is_current():
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    def run(argv, **kwargs):
+        return 0, (fixtures / ("status-v090.json" if argv[1] == "status" else "doctor-format3.json")).read_text()
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "ok" and state.vault_format == state.engine_format == 3
+    assert state.pending == () and state.findings == ()
+
+
+@pytest.mark.parametrize("phase", ["status", "doctor"])
+@pytest.mark.parametrize("malformed", ["[" * 2000 + "0" + "]" * 2000, "9" * 5000], ids=["nested", "large-integer"])
+def test_decoder_limit_errors_are_unknown(phase, malformed):
+    fixtures = ROOT / "tests" / "fixtures" / "claudron_v090"
+    def run(argv, **kwargs):
+        if argv[1] == phase:
+            return 0, malformed
+        return 0, (fixtures / ("status-v090.json" if argv[1] == "status" else "doctor-format3.json")).read_text()
+    state = claudron_compat.vault_migration_state("/example/vault", run=run)
+    assert state.status == "unknown" and "envelope" in state.detail

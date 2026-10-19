@@ -246,6 +246,24 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
 #: warning is the enforcement (a flag no row claims is reported as dead).
 SWITCHES: tuple[Switch, ...] = (
     # ---------------- the target workflow, on ------------------------------
+    Switch(key="session-export", scope=FLEET_JOB, polarity=OPT_OUT, carrier=ENV_FLEET,
+           env="SESSION_EXPORT_ENABLED", job="session-export", plane=True,
+           what="every 15 min, read each bot's clauDNA export door, record one session_summary per sealed segment, then ack"),
+    Switch(key="claudna-session-summary", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.session_summary",
+           why_opt_in="model spend (one Haiku call per sealed segment, in the background of the bot's session)",
+           what="let clauDNA summarize this bot's sealed segments; session-export carries the journey to the plane",
+           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
+           takes_effect_off="from the next session on, sealed segments export as skipped: disabled"),
+    Switch(key="claudna-harvest", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.harvest",
+           why_opt_in="model spend (summaries) and draft-note writes through claudron capture",
+           what="opt this bot into clauDNA harvest: composition arms summaries too; typed blocks become unverified "
+                "drafts in CLAUDRON_VAULT_PATH; needs Claudron >= 0.8.0 on the host (PR 6a)",
+           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
+           takes_effect_off="no harvest from the bot's next session on"),
     Switch(
         key="task-recheck",
         scope=FLEET_JOB,
@@ -406,7 +424,7 @@ SWITCHES: tuple[Switch, ...] = (
         key="pane-send-chunking",
         scope=DOOR,
         polarity=OPT_OUT,
-        # bot.conf, for the same reason session-digest and spindown-receipt use
+        # bot.conf, for the same reason spindown-receipt use
         # it: the door runs inside a bot's own session (every dispatch, every
         # boot, every keepalive reload), and start-bot.sh sources the .env tiers
         # BEFORE `set -a`, so a bare tier assignment never reaches it. A
@@ -537,18 +555,6 @@ SWITCHES: tuple[Switch, ...] = (
         what="stamp the instant start-bot.sh actually injects a payload into a "
              "pane, which the service rung is not a proxy for (measured: rungs "
              "fire to the second, sessions appear 36-168s later)",
-    ),
-    Switch(
-        key="session-digest",
-        scope=DOOR,
-        polarity=OPT_IN,
-        # The SessionEnd hook runs inside the bot's Claude session, so bot.conf
-        # is the only carrier that reaches it.
-        carrier=BOT_CONF,
-        env="SESSION_DIGEST_ENABLED",
-        why_opt_in="model spend (a Haiku pass per finished session)",
-        what="distil each finished session into one structured JSONL row for "
-             "the fleet monitor",
     ),
     Switch(
         key="keepalive-limit-resume",

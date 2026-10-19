@@ -1,14 +1,15 @@
 ---
-title: "Run log — runtime-neutral observability (#2145): P0 canaries"
+title: "Run log — runtime-neutral observability (#2145): canaries and build-all delivery"
 type: run-log
-status: P0 Claude legs done; §10 orders 2–3 merged and activated on the floor host (2026-10-06)
+status: build-all in progress; goal not met; owner export, consumer and Claudron pin merged; mandatory live/timed/Codex gates remain
 created: 2026-10-05
+updated: 2026-10-16
 epic: 2026-10-04-runtime-neutral-observability-plan.md
 issue: Claudfather/Claudlobby#2145
 pr: Claudfather/Claudlobby#2144
 ---
 
-# P0 run log
+# Runtime-neutral observability run log
 
 Epic §6 P0 and §10 order 1. Instrument: `harness/runtime-neutral-canary.py` (stdlib; `receiver` is a raw
 OTLP/HTTP-JSON receiver on `127.0.0.1` that answers 200 first, the shape the `plane-otel` intake takes; `hook`
@@ -16,6 +17,8 @@ logs hook payloads; `c10` probes tmux env inheritance; `report` prints the verdi
 temporality, event names, attribute *keys*, and the values of a short allowlist of id/enum keys. Every other
 value is kept as its type and length. Prompts, tool inputs and responses never reach a log
 (`tests/test_runtime_neutral_canary.py` pins that).
+
+The historical P0 measurements follow. Current implementation, review and integration state is in the [2026-10-16 closeout](#2026-10-16-utc--corrected-candidate-closeout); the sprint ledger retains its dated delivery history.
 
 ## Summary
 
@@ -159,8 +162,8 @@ every row; the one exported `session.id` matched the hook's, none without; delta
 **21 MB**. **F4 stays locked, confirmed on the floor host.**
 
 **Measured, leg 3 — a borrowed production worker instead of a canary root (operator decision).** No canary root
-existed on the Pi (55 production `com.crog.*` units). The operator chose to arm one idle production worker, `rajan`
-(fleet `crog-eng-team`, 38.5 % busy over 24 h), by appending the six telemetry exports to its own `.env` (backed
+existed on the Pi (55 production units). The operator chose to arm one idle production worker
+(38.5 % busy over 24 h), by appending the six telemetry exports to its own `.env` (backed
 up, restored byte-identical afterwards) and restarting it twice through the release's `bot restart`. Armed
 **21.3 minutes**, not 24 h: the soak was compressed into a driven exercise.
 - **RC: PASS twice** (21:35 and 21:47), DM in, reply delivered, with telemetry on — #533's failure mode did not occur.
@@ -246,6 +249,105 @@ Both merged, with #2191 (getting-started: the `[plane-ui]` extra) and clauDNA #4
 - The stale local-scope clauDNA records in `installed_plugins.json` are harmless (the bots run the user-scope
   release), but `claude plugin list` can't say which one applies. The session-store format is the reliable signal.
 
+### 2026-10-06 to 2026-10-07 — Half A's pre-merge check, the `agent_cli` rename, and §10 orders 4–6 merged
+
+Run by a Claude Code session on the operator's Mac mini, over SSH for the Pi leg. Full report kept by the operator
+(`~/rnc-results-5.md`).
+
+**#2203 (P1 Half A) pre-merge live check, on `8e99743`, before the rename: PASS.** No bot touched, nothing activated.
+- **The marker scrub, interactive** (macOS, Claude Code 2.1.291, tmux; both arms export the three markers with a
+  foreign session id first).
+  - Control: the footer shows `Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker`, the session
+    takes a fresh id, and no transcript file is written.
+  - #2203's line (`unset …; exec claude`): no warning, the session's own id, and a 267 KB transcript.
+  - Inside the scrubbed session the tool shell still sees `CLAUDE_CODE_CHILD_SESSION=1` and `CLAUDECODE=1`, with
+    its own session id: Claude sets them on its own children (C10/C11). The evidence for the scrub is the absent
+    warning, the saved transcript and the own id, not an empty marker.
+- **The field and its refusal, read-only on the floor host's real manifests** (PR checkout outside the live root,
+  login shell).
+  - `config validate` for all four fleets: rc 0, 0 errors, warning counts, categories and text identical to the
+    selected release's.
+  - `config explain` for the field: `source: built_in`. The selected release answers "not a declared model field".
+  - On a copy of one fleet's `fleet.yaml`: `codex` on one bot gives rc 4, naming the bot and `execution adapter not
+    shipped`; `claude` gives rc 0. The live checkout's `git status` was empty before and after.
+- **Runbook lessons.** macOS `printenv A B` reads only `A`: use `env | grep`. A tmux server started from a Claude Code
+  session hands the pane that session's markers, so a test arm starts from an `env -i` base. `config explain` for a
+  bot key needs `--bot` and reports the source, not the value. Fleets live at `local/home/<fleet>/`. The warning
+  names `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` as the override, should a bot ever need to run with an inherited
+  marker.
+
+**The rename (operator, 2026-10-06 and 2026-10-07).** `runtime` already names release activation (#1997), so the
+value is spelled `agent_cli` everywhere: the `fleet.yaml` key, `KNOWN_AGENT_CLIS`, `CLAUDLOBBY_AGENT_CLI` in
+`bot.conf`, `BotPayload.agent_cli`, `session_alias(id, agent_cli)` and the `(agent_cli, session_id)` join key. The
+OTel resource attribute the P2 plan composes is `claudlobby.agent_cli`, not `agent.runtime`. A leftover `runtime:`
+key in `fleet.yaml` warns (`retired-key`), and is refused when its value isn't the CLI the bot runs. This log's
+earlier entries keep the spelling they measured. #2203's squash commit on `main` kept its pre-rename title; its code
+and CHANGELOG carry the new names.
+
+**Merged 2026-10-07.**
+- Claudron#224 (§10 order 4): the boundary spec, `(agent_cli, session_id)` throughout.
+- #2201: the canary harness records Codex hook payloads, `CODEX_*` env names and the ancestor walk; it composes
+  `claudlobby.agent_cli`.
+- #2203 (order 5): P1 Half A.
+- clauDNA#407 (order 6): `session.opened.agent_cli`, `session.json` as `claudna.session/2`, the export item's
+  `session.agent_cli`, `session:<agent_cli>/<sid>:<seg>` provenance for non-Claude sessions (F9), the spec rules 1
+  and 4 amended (F15) and the mission amended (D2). Released as clauDNA v0.27.0 (#408).
+
+**Outstanding.**
+- Half A's activation and rollout check on the floor host (`~/rnc-results-6.md`, by 2026-10-09 per #2203). It also
+  moves every bot to clauDNA 0.27 at its restart. The Claudron PR that flips register row 10 to shipped follows it.
+- The Codex batch (C1–C5, C7–C9; `~/rnc-results-4.md`). It was numbered before the Half A check but hasn't run. C1's
+  `session_id` answer gates Claudron's ops-log id regex, P4 and #2149.
+
+### 2026-10-10 to 2026-10-11 — Half A activated on the floor host, after two watchdog resets and a recovery
+
+Run by a Claude Code session on the operator's Mac mini, over SSH to the Pi. Full reports kept by the operator
+(`~/rnc-results-6.md`, `~/rnc-results-7.md`; logs on the Pi under `~/rnc-release-6/`).
+
+**The activation stranded (2026-10-10 18:27Z to 2026-10-11 00:22Z).** Activation `728eb2c3…` moved the floor host
+(Pi 5 on an SD card, 21 bots, four fleets) to Half A's release `r-f4555c47…` (source `c28c91c`). The host reset
+twice under its systemd runtime watchdog (`RuntimeWatchdogSec=14`):
+- **During `backup_saved`.** `PRAGMA quick_check` on the 1.19 GB plane-DB copy sorted through SQLite temp files on
+  the card for about 22 minutes (#2313). Resumed with `SQLITE_TMPDIR=/dev/shm`, the same check passed in about 4.
+- **During `bots_started`,** at the 16th bot start and load 13 to 14. Each started bot's resumed work piled onto
+  the next start (#2314).
+
+After the second reset nothing could continue the activation. The resume only re-observes recorded starts,
+`repair-start` fit one bot of 15, native admission refused every unit, and rollback has no CLI verb. No record was
+edited by hand.
+
+**The recovery (2026-10-11).** #2312 adds `host repair-after-reset`.
+- Run from a scratch CLI built from its branch (`d132dd6`), it proved the 16 recorded starts dead (the plane
+  daemon, the 14 bots with results, and one bot start with none), archived them as `kind: host_reset` and reopened
+  `ingest_started`, in one write that started nothing (17:49Z).
+- The sealed release's own `--resume` then started the plane daemon and all 21 bots fresh, about 45 s per bot, and
+  committed at 19:02:28Z. The activation is `active`. The bots were down about 24.5 hours.
+- The watchdog was off for the resume, through a drop-in removed afterwards (14 s again at 19:21Z). A longer
+  timeout isn't an option on this host: its own watchdog drop-in says the BCM2835 caps the timeout at 15 s (#2315).
+  Peak load was 17.5 during the starts and about 27 just after, with the CPU mostly idle. Nothing reset.
+
+**Half A's rollout check: PASS.**
+- `CLAUDLOBBY_AGENT_CLI=claude` in 21 of 21 `bot.conf` (control: 0).
+- The marker scrub: none of the three markers in the environ of three new bots' `claude`. Their transcripts are
+  saved, and no pane shows "Transcript saving is off".
+- clauDNA 0.27: the three current sessions are `claudna.session/2` with `agent_cli: "claude"`, and their
+  `session.opened` carries it.
+- The refusals, on a copy of one fleet's `fleet.yaml`: `agent_cli: codex` and a `runtime:` key each give rc 4
+  naming the bot. The restored copy is byte-identical to the live file.
+- The fleet-event row: `fleet notify` stored `source_ref` `fleet-events:sha:` + 32 hex.
+- All 21 bots `healthy` and `ready`; a manager and a worker answered a DM. `host doctor` is rc 6, as on 2026-10-10.
+  `plane doctor`: quarantine 27 (unchanged since 2026-10-07) and 14 reaped emits in 24 h (155 on 2026-10-10).
+
+**Runbook lessons.**
+- `fleet notify --event` takes `[a-z][a-z0-9_]{0,63}`: `rollout_check`, not `rollout-check`.
+- `event show` doesn't print `source_ref`; read it from the stored row.
+- A bot's current clauDNA session is the `open` one whose `claude_pid` is the bot's running `claude`, not the
+  newest directory: an older, closed session's directory was touched a second after that bot's new one opened.
+- `repair-after-reset --json` prints the envelope only; the resume command is the runbook's.
+
+**Follow-ups.** Claudron#226 flips register row 10 to shipped (P1 Claudlobby Task 10's Half A step). The Codex
+batch (`~/rnc-results-4.md`) is still outstanding.
+
 ## Plan changes this log caused (2026-10-05)
 
 - **Epic §6 P0:** C6a, C10 and C11 carry their measured answers and what is still owed. §4 corrects what
@@ -312,3 +414,373 @@ through the canary CLI. Record:
 Remove the lines from `$BOT_DIR/.env` and restart the bot when done.
 
 Paste each `report` and the notes here, as a new timestamped entry.
+
+
+## 2026-10-15 — Build-all sprint ledger
+
+### Kickoff gates and goal
+
+**Goal condition:** complete the remaining epic verification checklist (§8), integrate each planned phase in its declared dependency order, publish the releases its sibling consumers require, and verify deploy reachability and mixed-runtime acceptance. A code merge alone does not satisfy a live or timed observation. Any unreached check stays named below; the epic is not complete while one remains.
+
+- **Passed (recorded evidence):** orders 1–6, including clauDNA v0.27.0 and Half A's rollout; see the dated entries above. These are historical observations, not a fresh claim about the production fleet.
+- **Passed:** phase docs and execution rationale are in epic §10/§10.1. The export release precedes its consumer; the telemetry canary precedes the plane-reader leg; measured Codex behavior precedes owner-side adapters and execution companions.
+- **Authorized by the operator in this chat:** execute the entire planned bill of work without inter-phase confirmation. For code review, “just use subagent reviewers to run simplify, review, and verify procedures”; after convergence, admin merge is authorized. This replaces the prior human code-review gate only; it is not evidence that a runtime observation passed.
+- **Constraint:** use Codex for reasoning and delegation; do not spend Claude model quota. Non-model CLI operations against the software under test are distinguished from Claude model turns.
+- **Passed for the candidate code:** actual installed-CLI hook dispatch against a local fixed-response provider stub; prompt activity, sealing, private entrypoint and recorded-door exports observed. This proves the CLI/plugin protocol, not provider authentication or model acceptance. The published-version check is repeated at release 0.28.
+- **Blocking at their dependent phases:** P2-a1's seven-day independent-root canary and day-1/day-7 reply, coverage, RSS and latency evidence; Half B's 48-hour keepalive/restart observation; the Codex batch's isolated authentication and measured feature support. No timer is silently shortened and no unsupported field is invented.
+- **Planning inputs pending:** P4 and companion phase docs are written from the Codex measurements, as the epic requires. Existing locked decisions remain binding.
+
+### Invariant registry
+
+| Invariant | Check | On breakage |
+|---|---|---|
+| Claudlobby instructions remain byte-identical copies | `cmp CLAUDE.md AGENTS.md`; `cmp claudlobby/_runtime_scripts/CLAUDE.md claudlobby/_runtime_scripts/AGENTS.md`; `pytest tests/test_instruction_budget.py` in a prepared disposable export | Repair the authored Claude-side file, copy, and re-check before merge. |
+| Existing Claude session aliases and receipt replay remain compatible | `pytest tests/test_plane_ids.py tests/test_request_receipts.py` (resolve names against each phase's current tree) | Stop integration; repair against before-leg behavior. |
+| clauDNA activity stays frozen; export is additive and private records withheld | clauDNA `pytest tests/test_session_store_activity.py tests/test_session_store_export.py tests/test_session_store_hook.py`; `make test-runtime` | Fix before any release or consumer integration. |
+| No consumer or register claims an unreleased sibling surface | Verify `gh release view` for the exact pinned tag and run the sibling contract/conformance suite before register/pin merges | Hold the dependent merge; publish through the owner's release process first. |
+| Telemetry stays local and explicitly armed, raw storage bounded and private | P2 parser/composer/intake/sink tests and actual loopback CLI probe once the surface exists; repeat after each integration affecting it | Refuse activation; fix the producer/receiver contract. |
+| Phase scope and public assets stay clean | `git diff --check`; `git diff origin/main...HEAD --stat`; review the staged diff for identifiers/secrets and unrelated cargo | Unstage or repair; never force a source change onto main. |
+
+Run all applicable checks after every phase merge, recording exact output and any not-yet-created test path explicitly. A missing check is not a green result.
+
+### Merge topology and reachability
+
+**Current topology (2026-10-16 UTC):** the delivered owner/register/consumer PRs used authorized exact-head squash merges. Corrected 6a [#2363](https://github.com/Claudfather/Claudlobby/pull/2363) merged normally at **01:48:40 UTC** as `e7a14ea1d158eb272566f81a3e2c2ad1bb459ae7`, with parents `b4ae5dae` and reviewed `15ea28db`. The merge and candidate tree both equal `06daa0c1797ae80f815c1eaa36c28d620a36f23b`; all exact-head checks, including Ubuntu/Python 3.10 and macOS/Python 3.11, passed before merge. At retarget, its telemetry `e644d07d` and Half B `5f979881` children already contained that correction through normal merges. Telemetry now adds test-only readiness commit `56a59f9f` atop that ancestry; all 1367 other tracked files/modes remain unchanged. Child retarget and final CI readbacks are recorded in the [closeout integration evidence](#integration-and-invariant-evidence). No force push or history rewrite is authorized or needed. Each child retains its own live/timed gates. Preserve unrelated worktrees and untracked files.
+
+**Superseded kickoff topology, retained as history:** ~~Use fresh branches from the latest `origin/main`, squash merges with exact-head matching, and no direct commits or force-pushes to main. Avoid stacked phases; if parallel phases overlap, the second rebases and regenerates switch tables, system example and instruction copies before fresh checks. Preserve unrelated working trees and untracked files.~~
+
+- **clauDNA:** export PR → release 0.28 through `scripts/release.sh` → exact tag/readback → Claudron row-11 register PR and Claudlobby 6b consumer. The plugin becomes live on a host only through the host's managed update/restart path.
+- **Claudlobby:** telemetry 7a and export 7b are independent; 7c follows release 0.28. Half B is an independent ready phase. P2-a2 waits for the 7a canary week; 6a waits for 6b. Each release still needs an independent-root staged activation and observed rollout to be live.
+- **Claudron:** row 11 cites released clauDNA 0.28; the Codex adapter and row 12 wait for actual Codex measurements and the owning release. Do not edit the engine's main checkout.
+- **Codex:** the canary batch may run alongside the Claude-path phases. Its results ground P4, then the execution and clauDNA companions. Record unsupported features and unresolved decisions rather than constructing fixtures from presumed producer behavior.
+
+### Phase results
+
+| Order | Phase / plan | Current disposition | Evidence / remaining gate | Reachability |
+|---|---|---|---|---|
+| 7b | P3 clauDNA export / plan 5 | DONE: implementation, releases and register integrated | [clauDNA #411](https://github.com/Claudfather/clauDNA/pull/411), [#412](https://github.com/Claudfather/clauDNA/pull/412), strict-reader [#413](https://github.com/Claudfather/clauDNA/pull/413), release [#414](https://github.com/Claudfather/clauDNA/pull/414); [v0.28.1](https://github.com/Claudfather/clauDNA/releases/tag/v0.28.1) published; [Claudron #228](https://github.com/Claudfather/Claudron/pull/228) marks row 11 shipped | Published owner contract; production host update/restart is separate. |
+| 7c | P3 summary consumer / plan 6, 6b | DONE: reviewed, verified and merged | [#2361](https://github.com/Claudfather/Claudlobby/pull/2361), `b4ae5dae`; recorded full comparison, direct harness, CI and native protocol/cache evidence | Merged; no production activation claimed. |
+| 8b | P3 Claudron pin / plan 6, 6a | DONE: reviewed, verified and merged | [#2363](https://github.com/Claudfather/Claudlobby/pull/2363), reviewed `15ea28db`, normal merge `e7a14ea1`; full 9595→9667 passed, both 78 skipped / 2 warnings / exit 0; direct harness 359/0 both; all CI green before merge; native migration/harvest sample passed | Merged with reviewed ancestry and identical tree; production host migration/activation remains separate. |
+| 7a | P2-a1 telemetry intake / plan 4, Tasks 3–8 | BLOCKED: startup diagnostic CI and seven-day observation pending | Draft [#2364](https://github.com/Claudfather/Claudlobby/pull/2364), current `9d998d94`; affected 46 passed, exit 0. Prior `56a59f9f` macOS CI failed before port readiness (2 failed / 9753 passed / 77 skipped / 1 deselected / exit 1). Frozen `e644d07d` full comparison and intake canary remain historical exact-head evidence | The test-only diagnostic preserves 20s/5s/3s budgets; production cause is unproven. Complete floor-host RC/Telegram C6b week still required before merge. |
+| 8a | P2-a2 Plane rows/readers / plan 4, Task 9 | BLOCKED: dependent phase not implemented | Requires 7a week and measured token/coverage ratios, then its own implementation, checks and 48-hour observation | No Plane telemetry ingestion/readers delivered by 7a. |
+| 9 | P1 Half B session joins / plan 2 | BLOCKED: literal clear passed; real native lifecycle and two timed windows absent | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), unchanged `5f979881`; full 9667→9698 passed, both 78 skipped / 2 warnings / exit 0; direct harness 359/0; five native protocol arms and separate literal `/clear` replay passed; independent clear review NO FINDINGS | Real service/tmux/supervisor acceptance and full 48-hour BEFORE and AFTER remain. |
+| 10 | P0 Codex batch / existing runbook | DONE: actual native measurements and independent evidence review converged | Codex CLI `0.162.0-alpha.17.2`; authorized private auth-only reuse; reviewed C1–C5/C7–C9 report and sanitized actual fixtures; Claude C3 separately reviewed NO FINDINGS; protected originals unchanged and owned jobs terminal | Measured answers unlock P4; no fleet activation or mixed-runtime acceptance claimed. |
+| 11 | P4 owner adapters / measured per-repo plans | IN PROGRESS: measured phase plans being prepared | C1 now records actual native stdin; clauDNA and Claudron depend on their additional observed answers and independent evidence review | No adapter parity or release claimed yet; composition remains in the companions. |
+| 12 | Execution and behavior companions | BLOCKED: requires P4 and mixed-runtime acceptance | [Claudlobby #2149](https://github.com/Claudfather/Claudlobby/issues/2149), [clauDNA #404](https://github.com/Claudfather/clauDNA/issues/404); then the complete mixed-runtime week | Mixed-runtime goal is not met. |
+
+### Phase entries
+
+**Export evidence carried forward:** at `0e6e0ea`, all eight GitHub verification checks pass; paid Claude routing evaluation is skipped. Local pinned `make check`: 2058 passed, 9 skipped, one pre-existing macOS sed failure (`tests/test_pretooluse_permissions_hook.py::TestWriteRedirectionKeepsThePrompt::test_dev_null_still_approves`), exit 2. Python 3.9 runtime: 875 passed, exit 0. Existing export suite: 63 passed before and after simplify. Offline canary: seven checks, 15 real shell-hook calls with synthetic payloads, zero model calls and unexpected errors. These results do not prove an authenticated host dispatch or a production rollout.
+
+### Review rounds and class sweeps
+
+Historical export review fixed retired-only exhaustion and unreadable-manifest gaps, then canonicalized the owned telemetry role. The actual local built-in simplify prompt ran through four independent Codex lenses in two waves: reuse and altitude clean; redundant archive scans and eager live projection reads fixed. A fresh exact-head convergence review follows under the operator's new review authority. Cross-repository class sweeps and final verdicts are appended per round below.
+
+### Owner-decision and external-evidence queue
+
+Code review and admin integration are delegated and authorized. The local verification, 6a merge and post-merge invariants below have finished. Remaining work includes telemetry diagnostic CI, a concrete host and channel authority, the required observations, and review/implementation of the now-authorized Codex measurements.
+
+| Item | Smallest unblock | Required evidence / disposition |
+|---|---|---|
+| 6a host delivery and vault migration | Select one authorized canary host and vault clone; deliver the sealed reviewed release and its hash-pinned `[vault]` dependencies using the per-host [Claudron runbook](../integrations/claudron-integration.md) | Separately upgrade any host-managed Claudron CLI. From one clone run the explicit doctor fix, push/sync its commit, pull every peer and rebuild every local index; plan/diff with the exact delivered CLI and confirm the migration warning clears. The scratch-vault proof does not migrate production. |
+| Telemetry CI | Inspect exact `9d998d94` terminal CI and any captured startup stack | The `56a59f9f` 20s startup wait also failed on macOS; cause remains unproven. Diagnostic-only follow-up has 46 affected passes and independent NO FINDINGS, with all production blobs unchanged. |
+| Telemetry week | Obtain a concrete independent floor host, root/unit/fleet labels, scoped RC/Telegram channel authority and dated activation schedule | Observe seven consecutive days, including day-1/day-7 delivered replies, hourly checks, coverage/token ratios, RSS/storage/latency and scrub evidence. No start/end or completed window exists yet; this remains a pre-merge gate. |
+| Task 9 | After that week and its measured ratios, execute its own reviewed implementation plan | Plane rows/readers, affected/full/harness/native evidence and its own 48-hour observation; not part of the intake-only draft. |
+| Half B live acceptance | Select an authorized independent live canary and schedule the complete BEFORE and AFTER windows | Literal `/clear` replay is now independently verified. Real service/tmux/supervisor acceptance and both full 48-hour windows still need UTC endpoints, restart causes and pulse/heartbeat evidence. |
+| Codex batch | DONE: reviewed actual native report and redacted fixture provenance | The user explicitly authorized copying only existing authentication into private CODEX_HOME. Actual turns, measurements, sanitized fixture provenance and independent review are complete; source authentication/configuration remain unchanged. |
+| P4 | Turn the Codex observations into concrete per-repo plans | Implement owner adapters, publish required releases and prove parity before the companions. |
+| Companions | Follow P4 with #2149 and clauDNA#404 | Own verification plus the complete mixed-runtime acceptance week; unsupported capabilities stay explicit. |
+| Production activation | Select a concrete staged host plan and scope deliberate migration/outbound channels | Operator-owned activation and rollout observations remain separate from merged code and local samples. No new production activation is recorded in this closeout. |
+
+**Operator command templates, after selecting the host and scope:** use the exact sealed candidate CLI in that host's independent canary root, with its declared fleet, labels, Plane state and channels. Follow the [fleet update lifecycle](../fleet-update-lifecycle.md) for delivery and the [Claudron runbook](../integrations/claudron-integration.md) for the one-clone migration. Replace every placeholder with that authorized host's values before running:
+
+```bash
+claudron doctor --fix --json --vault <VAULT_CLONE>
+# Push/sync the migration commit; pull every peer before rebuilding its index.
+claudron index --full --json --vault <VAULT_CLONE>
+<CANDIDATE_CLI> config plan --release <RELEASE_ID>
+<CANDIDATE_CLI> config diff <PLAN_ID>
+<CANDIDATE_CLI> host activate <PLAN_ID> --install-directory <NATIVE_UNIT_DIRECTORY>
+```
+
+These are manual templates, not executed commands or authorization for an unspecified production host. Missing authority or elapsed time never grants approval or waives a gate.
+
+**Review round 1 — export convergence at `0e6e0ea`:** code clean; two source-plan omissions found (phase-3 C10/C11 evidence fold and export module docstring status flag). A clauDNA worker owns both. Class sweep also found an unconditional flag/cursor-equality claim in plan5; corrected here to untruncated pages, matching the existing bounded-status test and normative spec. The concurrent branches carry the same pre-integration plan copy and will receive this ledger/plan correction on rebase; no duplicate conflicting edit is assigned. P1 Task7b stale marker prose is assigned to the session-joins phase worker.
+
+
+**Class-sweep evidence — round 1:** tracked text across the three repositories, their main snapshots and active sprint branches was searched for `CLAUDE_CODE_CHILD_SESSION|CLAUDLOBBY_HOOK_CHILD|SUBAGENT_SHELL_SHARES_SESSION_ID` and export/status descriptions. Nine initial snapshots yielded 867 matching lines (copies and broad vocabulary counted separately): Claudlobby source 44/101, ledger 85/101, telemetry 85/101, session joins 86/101; clauDNA export 5/73, source 2/38, main 2/41; Claudron source 0/0, main 1/1 (marker/export matches). Executable pins and dated/struck history are legitimate; active clauDNA phase-3 evidence and export docstring omissions are fixed at `3c857c3`; active P1 Task 7b prose is owned by the session-joins branch. A narrow `git grep -n -I -F '`next` is the same with or without the flag' -- .` sweep found five copies: the ledger copy is now qualified to untruncated pages; two active phase copies receive that fix when rebased onto this ledger merge; source/main copies describe their pre-integration snapshot. clauDNA and Claudron have no match for that literal. The actual bounded-page behavior is already pinned in the export suite. No producer-source reconstruction was accepted as a live fixture.
+
+**Export candidate evidence — `3c857c3`, 2026-10-15:** the docs-only correction leaves executable AST unchanged. Affected export/runtime-layout checks: 148 passed, exit 0; skill/integration/changelog checks exit 0 (39 skills, 61 existing warnings); Ruff and diff checks exit 0. The repeated offline canary passes seven checks through 15 real shell-hook invocations, peak 60.13 ms, no unexpected hook errors and zero model calls. Its first invocation used the system interpreter while wrappers deliberately selected the development venv; the interpreter-identity assertion failed. Running the documented venv interpreter passed; this was a harness invocation mismatch, not a product change.
+
+**Native CLI protocol canary — `3c857c3`, 2026-10-15 21:25–21:27 UTC:** installed Claude Code 2.1.301 loaded the real candidate plugin in private HOME/config/state, with empty MCP configuration, real hooks and native OTel exporters. A loopback Messages stub returned fixed SSE responses under a fake key; no Claude model quota was used. Both the one-response arm and a bounded `Bash true` arm exited 0. Actual hooks recorded one prompt, opened/sealed/closed the session, and wrote a schema-valid mode-0600 entrypoint pointing at the candidate package (`agent_cli=claude`, current pre-release manifest 0.27.0). Exports invoked through that record both exited 0 and validated: plain zero items; flagged one disabled-status item with `counts.prompts=1`, `sealed_by=session_end`. Summary generation was deliberately off. The short arm reported its asynchronous prompt hook response cancelled after its event had already landed; the tool arm reported hook success and recorded the same one prompt. Actual OTLP/HTTP JSON logs/metrics, including native `tool_result`, were captured privately mode 0600 for the intake fixture. A refusing proxy rejected auxiliary requests, but environment proxies are not proof of OS-level egress confinement. This is protocol evidence with a local provider stub, not a real-provider or production-bot claim. The isolated plugin-manager update check separately observed the old cache directory surviving an update; release-version/native-dispatch readback follows the actual 0.28 release candidate.
+
+**Parallel-merge adjustment:** P2-a1 remains subject to its seven-day pre-merge canary. To preserve the epic's P2/P3 parallelism, 6b may land first with the identical reviewed strict-mapping helpers currently implemented by the telemetry worker. In that order 7a rebases onto 6b and keeps only its telemetry registration; no duplicate helper implementation is introduced. Consumer fields remain owned by 6b.
+
+**Review round 2 — clean:** an independent exact-head read of clauDNA `3c857c305a0201d56bdd1da96db67e167b699614` against `046115e42540f5073c7d51aaaff33600d73c9244` returned **NO FINDINGS**. Both prior omissions are closed; no new implementation or requirement gap was identified. The same reviewer returned **NO FINDINGS** on this two-document governance diff, including its protocol/provider/rollout distinctions and timed gates. The review used supplied canary evidence and performed no tests, network or model calls. The final candidate is pushed once for fresh CI; a clean candidate check run precedes its authorized admin merge.
+
+
+**7b integrated:** clauDNA#411 merged by authorized admin squash on 2026-10-15 at `312e93cf279f1431825becf8c6cf040e28856509`, from the exact reviewed/green head `3c857c3`. Fresh CI on that head passed all eight verification jobs; paid routing evaluation was skipped. The candidate's frozen activity/export/entrypoint and Python 3.9 runtime gates passed in CI; Lobby source was unchanged by this owner-side feature merge. Release #412 is a fresh branch from that merged main, not a stacked feature branch.
+
+**0.28 release candidate:** repository `scripts/release.sh minor` produced `de3a606a047bce69a92cd18ca1b498cc5d1fc50b`; only both plugin versions and the dated changelog heading changed. Independent review: **NO FINDINGS**. Manifest/changelog validators passed. A fresh actual installed-CLI tool arm against the same fixed local provider protocol exited 0 and wrote a valid mode-0600 entrypoint with `plugin_version=0.28.0`; recorded-door plain/flagged exports validated (zero plain items, one disabled item with one prompt). No executable source changed. Only the branch is pushed, with follow-tags explicitly disabled; the main-push workflow must create the remote tag at the later merged SHA. Release/tag readback is required before row 11 or 6b can claim the released contract.
+
+**7a implementation checkpoint:** local `218a016a` has a separately prepared before/after comparison: 858 / 925 passed, both exit 0, no failing names. Direct harness before/after: 352 passed, zero failed, exit 0. Ten targeted mutants each failed as expected. An actual local CLI receiver/sink sample accepted captured native logs/metrics with HTTP 200, compact private files (0600/0700), stripped metadata-mode forbidden attributes, refused protobuf with 415, exited cleanly on SIGTERM and passed the sink doctor check without creating Plane state. These local protocol/storage results do not satisfy the seven-day floor-host/RC acceptance. The fixture is a redacted actual Claude 2.1.301 exporter body captured from the local-provider CLI arm, explicitly distinct from the older C6a floor-host evidence.
+
+**Half B implementation checkpoint:** implementation `5d27470c` plus docs `c09656b1`; source correctness review returned **NO FINDINGS**. Focused before/after: 172 / 203 passed, both exit 0; an exact-head broader affected set passed 323 tests, exit 0. Direct harness before/after: 352 passed, zero failed, exit 0. Three receipt/session/reader mutants failed as expected, then restored checks passed 66 tests. A real installed CLI/Plane sample proved committed A attribution survives retry B, prepared-unrecorded legs can use B, task-history/session lookup and format-1 receipt intent compatibility. Supervisor lifecycle was simulated, with no live bot/model; report commit succeeded and delivery could not reach a nonexistent bot, as expected. Actual rollback previews to the Half A and pre-P1 releases exited 0 without receipt-format refusal. Full-suite comparison, real live-session/subagent reference and both before/after 48-hour windows remain pending. Simplify reuse and complexity lenses are clean for production code; one minor duplicated test encoder fixture is queued for the batch convergence fix.
+
+
+**7b release and register complete — 2026-10-15:** clauDNA#412 merged `fe665ea6ce6cdaba95bc8692de09b1f1f6b87b77`; all nine reported verification checks passed on its reviewed head. [Release-tag run 38811482187](https://github.com/Claudfather/clauDNA/actions/runs/38811482187) succeeded and [v0.28.0](https://github.com/Claudfather/clauDNA/releases/tag/v0.28.0) published at 21:39:15 UTC. Remote annotated tag `667fef0a57f8b13d24809a9deb81e711f56651d8` peels to that merged commit; its tree equals the actual native-tested release candidate. Only the runner-created unpublished local tag was removed before fetching the published tag. Claudron#228 then passed independent review (**NO FINDINGS**) and both CI checks, and merged `bb4b72f4bf5c0623a0391bda9cd8bd59031aa793` at 21:49:49 UTC. Row 11 now points at the versioned owner's §8 and distinguishes the planned consumer from the shipped owner. No engine behavior changed and no production fleet installation is claimed. 6b is now implementing against that released contract.
+
+**Invariant checkpoint after the owner release:** from the prepared independent before export, `pytest tests/test_plane_ids.py tests/test_request_receipts.py tests/test_instruction_budget.py -q` returned `39 passed in 0.26s`, exit 0. Both source instruction-copy comparisons passed. clauDNA's frozen activity/export/hook/runtime gates passed in its exact release-candidate CI, and released bytes match the checked candidate tree. The owner tag and Claudron register readback above close the unshipped-surface invariant. New telemetry surfaces remain unmerged and opt-in; their actual local storage/protocol evidence is recorded separately. Scope/diff checks pass for all three integrated PRs.
+
+**7a review round 1:** independent spec review found malformed gzip can raise uncaught `zlib.error` instead of HTTP 400/refusal accounting, plus missing host-job operational comments (runtime retention parsing, shared port and disarm recipe). Both are assigned together; a real malformed-DEFLATE HTTP regression first failed (one failed, 72 passed, exit 1). The class sweep also found the current P0 capture harness's decoder, which remains used by this sprint; it is included in the fix batch while preserving that instrument's deliberate immediate-200 semantics. The optional prune-after-append 503 diagnostic is not a spec violation because the declared append includes retention; evidence will explicitly distinguish an unacknowledged append from proven body loss. No mapping-helper changes are needed.
+
+**Half B simplify round complete:** reuse, complexity, efficiency and altitude have no production-code findings. The duplicate report-test encoder wrapper was removed and six affected tests passed at `81147ec2`; indexes suggested for optional session-query efficiency require a schema migration and remain explicitly excluded by this phase's no-migration boundary. A separate native local-provider experiment now observes real CLI hook-store IDs and the actual Bash acceptance door: the independent store ID derives to the recorded Plane UID, and a second actual session replays without changing that first attribution. Fresh-session replay is not a claim of literal `/clear`; supervisor, Agent and timed legs remain explicitly bounded by the final protocol report. Full before/after suites are still pending until their actual terminal output exists.
+
+
+**Native environment check — 2026-10-15:** installed Claude Code 2.1.301 with the released 0.28 plugin and an explicit parent OTel exporter block ran a names-only recorder through actual SessionStart, UserPromptSubmit, PreToolUse and SessionEnd hooks, plus actual Bash. All five observed environments contain no `OTEL_*` names; `CLAUDE_CODE_ENABLE_TELEMETRY` remains. Native OTel requests still reached the private loopback receiver. This local fixed-provider protocol sample confirms the scrub premise without claiming the floor-host/RC week or changing the historical summarizer evidence.
+
+**Verification ownership correction:** the first Half B full-suite processes ended without terminal counts or exit files after their worker returned; partial before/after logs are retained and excluded from evidence. A persistent verification agent verified 881 tracked code/test files in each prepared export against the intended baseline/candidate and restarted only the missing full pair, remaining active through terminal results. Affected results, native samples and mutants above remain valid. 7a's 858/925 and 88 results are affected checks, not its full-suite gate. Both full 7a legs remain queued for the final post-6b base/rebased candidate, avoiding an obsolete long run followed by another after the already planned rebase.
+
+**7a quality round:** four confirmed findings are assigned as one batch: rollback a partial raw write before any future acknowledged append (and refuse if rollback cannot preserve the line boundary); guard invalid-Unicode serialization and recursively unparsable tool parameters; accumulate tiny chunks without one retained object per chunk; establish the socket timeout before header parsing so an incomplete header cannot indefinitely block graceful shutdown. Existing malformed-gzip and operating-comment fixes were verified first. Common mapping helpers remain unchanged. Full gates and the week are still pending; no source-ready claim is made while these findings remain.
+
+**6b contract class sweep:** released 0.28 summaries use an array of `{step, result}` arc entries, structured journey lists and successful outcome `shipped`. The consumer follows that actual schema. Across the three repo/main/sprint snapshots, the specific stale-shape/`completed` outcome claim yields four hits per old Lobby snapshot: three in the P3 consumer plan, fixed by its worker, and one canonical epic table row, corrected here to `shipped`. clauDNA/Claudron scans have zero hits for that class. The worker's remaining nested-arc stress-test wording is a legitimate new-contract match. Old snapshot copies receive the correction on integration; dated history is retained. Real native 0.28 summary generation against a fixed local structured-output provider produced the captured `ok` fixture; the actual released export door validates/maps it with the disabled segment. No source-derived producer fixture or real Claude model call was used.
+
+
+**Ledger integration:** docs-only Claudlobby#2359 merged `9cd03abf59a12988c014200481d4f3e4d9ea45d1` at 22:05:22 UTC after independent review, diff/copy checks, the 39-check invariant sample and passing rollout/vault/conformance/harness checks. The three optional full-platform jobs were still running; no green full-suite result is claimed. The live repository ruleset requires one review and declares no required status checks; the operator's delegated review/admin-merge authorization covers this docs-only integration. Executable base bytes remain those of `18f01cba`, so source phases adopt the initial ledger/plan fix by rebase. Subsequent progress and the canonical stale-outcome correction travel with 6b in a separate parent-owned docs commit before its reviewed push.
+
+
+**Native Half B protocol result — `81147ec2`:** all five actual Claude Code 2.1.301 arms exited successfully against a fixed loopback provider, using the released 0.28 plugin and a sealed installed CLI whose 329 executable package files match the candidate. Independent hook-store session IDs derive to the Plane UIDs observed through the actual Bash assignment-accept and report doors. Fresh sessions replay the original receipt and preserve its first session attribution; exactly one accept/report row exists per request. A real advertised `Agent` tool launched a linked child Bash report, with one native `subagent_completed` event; the child door's UID matches the parent hook store. Report receipt commits succeeded and delivery returned the expected failure because no manager bot existed. Five Agent-arm Messages requests were all loopback; no real provider/model quota was used. The supervisor adapter was explicitly simulated. Literal interactive `/clear`, real service/tmux/supervisor acceptance, the before/after 48-hour observations and real-provider acceptance remain pending. The Agent leg exercised a report, not the plan's literal assignment-progress door.
+
+**6b implementation checkpoint — `b084858c`:** 68 owned files implement the released export consumer, strict `claudna` mapping, composed summary/harvest gates, timer/switches, bounded reader-visible events, per-item durable emit before ack, stall handling, captured contract/conformance and retirement of both old hooks. No Claudron pin bump is included. Final focused checks: `668 passed`, exit 0; affected shell/doctor/package checks: `328 passed`, exit 0. Direct harness: `359 passed, 0 failed` (before `352 passed, 0 failed`); all seven new checks passed by name. All 13 configured mutants failed with a named test and exit 1; a later verification audit found the two-item cell only proved cardinality, leaving 12 exact required procedures plus that surrogate. Genuine mixed-batch consumer evidence remains pending below. The real released export door validates/maps two native-capture-backed items. A separate sealed installed-CLI sample passed host setup, staged config plan/diff, actual export and ack, reader-visible journey/disabled events, and a second empty tick. Its lifecycle adapter was simulated; actual installed CLI/Plane/export operations were real and executable source equivalence was checked. The full before/after suites remain active. The broad after5 leg predates the final private-tick local `--json` parser flag, estate-silencer no-op, and harness call correction; those bounded deltas have the exact-final focused/affected/sample evidence above. It must not be described as an exact-HEAD full-suite run. Independent simplify/code/spec review remains required before push.
+
+**7a quality-fix verification:** the four intake findings and the current P0 decoder sibling regressions reproduced as `12 failed, 53 passed`, exit 1, then passed as `65 passed`, exit 0. The in-scope Plane socket reader also retained one bytes object per receive; its bounded bytearray replacement preserves the existing size cap, absolute deadline, EOF/error behavior and bytes return. The many-short-receive regression failed before (`1 failed, 113 passed`, exit 1; peak 12,301,074 bytes) and the fresh final affected export passed `114 passed`, exit 0. This is a transport memory fix, not P2-a2's Task 9 mapping or wire contract. Final class sweep, commit and independent clean review follow before any ready claim.
+
+
+**6b review round 1 — two findings reproduced/assigned:** a successful ack for an earlier session reset the bot's tick-level failure streak before a later session could fail, suppressing the three-tick stall page. The fresh regression failed with `1 failed`, exit 1; the worker is moving failure/stall reset to complete-tick success and preserving per-ack timestamps. The reset-class sweep found eight sites in the old consumer; the corrected candidate has six legitimate skip/full-success reset sites, with none inside the session loop. Other active sprint branches and both siblings have no consumer implementation of that class. Separately, all-skipped rows cannot establish summary configuration: trivial/no-transcript/gave-up/retired/unexportable can occur while armed. The observed metric is now summaries available on k of N represented bots. The old consumer branch has seven claim matches; the phase worker corrects its six, and this parent-owned canonical table corrects the seventh. Old Lobby main/other sprint snapshots have three copies each, to be replaced on integration; clauDNA/Claudron snapshots have zero. Actual builtin simplify reuse is clean; other independent lenses and final convergence follow the fix.
+
+**Native exact Agent progress extension:** one additional actual CLI arm against the frozen Half B installed release committed `assignment progress` from a linked Agent child Bash. Both its communication and task-event session UIDs equal the installed derivation of the independent parent hook-store ID; one native `subagent_completed` event and five loopback provider requests were observed. CLI exit 0; the door's notification exit 5 is expected with no manager bot and does not negate committed recording. This closes the exact progress-door protocol leg without real provider inference or service-supervisor claims. Two bounded interactive attempts stopped at the native first-run Anthropic connectivity check, refused by the sample's deliberate proxy, before any model request. Literal `/clear` remains unobserved; the attempts do not count as successful session or canary evidence.
+
+
+**6b broad baseline terminal result:** the separately prepared before export finished normally: `9553 passed, 78 skipped, 2 warnings in 2185.99s (0:36:25)`, exit 0, 9631 collected. The broad after5 leg remains running; no before/after verdict is claimed yet. Native simplify complexity is clean; efficiency found three bounded cleanups now assigned: avoid serializing the whole unbounded journey before trimming, group export items once by session instead of rescanning per cursor, and retain mapped records only in dry runs. Required per-item durable emits and producer ordering remain unchanged.
+
+**Additional canary boundary:** 6b's source plan requires a real armed/unarmed bot pair under the candidate composition. The sealed-CLI/Plane sample with simulated supervision proves export/ack/readback and does not satisfy that remaining bot-host leg by assertion. A private interactive Half B attempt with only fresh onboarding state reached the real terminal/trust prompts, but automatic approval review rejected the proposed receipt-replay input twice, citing possible quota/data exposure under the operator's Codex-only instruction. The process was cancelled without any Messages request (zero model calls); the specific fixed-loopback/fake-key test authorization is pending in chat. No alternate input transport or real credential was introduced. Isolated Codex login choice is separately pending. Continue all unaffected code and test work; do not merge past the unobserved mandatory sample.
+
+
+**6b review-fix batch — `f3b0abce`:** two correctness/prose findings and three efficiency findings are folded into one separate commit. Emit/ack failure matrix reproduced two failures before the fix; the final affected suite passes `798 passed in 52.65s`, exit 0. Failure streaks reset only after complete tick success, with progress/failure/recovery cells. Bounding now trims without a full serialization of unbounded journey input (the old path's measured peak was 60,121,381 bytes for 30 million source characters); session grouping preserves producer cursor and per-session order; normal ticks retain no preview records. Actual builtin reuse, complexity and altitude lenses are clean; final convergence review is pending on the fixed head. Fixture capture README now cites actual CLI 2.1.301, matching both native command records, without rewriting legitimate dated floor-host 2.1.263 evidence. The old broad after5 leg continues to terminal; a new separately prepared exact-final after leg is required for this runtime-fix head, paired with the completed unchanged before leg. Parent canonical-doc changes are separate from the worker's seven-file fix commit.
+
+
+**Half B full comparison and draft:** both authoritative prepared runs terminated normally. Before `18f01cba`: `9553 passed, 78 skipped, 2 warnings`, exit 0; candidate `81147ec2`: `9584 passed, 78 skipped, 2 warnings`, exit 0. Summary-scoped failing/error names are empty in both; passing delta +31. Post-run proof confirms 881 source/test files unchanged and the source tree clean. Earlier interrupted logs remain excluded. Authorized draft #2360 is published at that exact reviewed head, body read back and attached to the chat; CI is running. Literal `/clear`, native service acceptance and both full 48-hour windows remain explicit pre-merge blockers; the PR stays draft.
+
+**6b fresh composed-producer sample passed:** the final consumer bytes at `f3b0abce` were sealed in a new independent root; equivalence covers 655 distributed runtime/native/contract/library files, zero mismatches. Two actual native 2.1.301 `--print` sessions ran from their bot directories with unchanged candidate-composed `bot.conf` and settings, released clauDNA 0.28 and fresh stores. The armed session completed its actual detached summary through fixed loopback protocol; the unarmed session produced disabled. Both native SessionEnd paths closed. The actual sealed tick committed one event per bot, reader output rendered the journey/disabled fields, each real cursor advanced through segment 1, and the second tick added zero. No store was copied into this sample. Service actions were simulated, with no native-supervisor or real-provider quality claim; Task 8 explicitly permits SessionEnd. Scoped tool approval covered this separate noninteractive sample; it did not execute the denied literal `/clear` input. Its first preparation attempt failed before any SUT start because an output parent directory was absent; the unchanged runner passed after that directory was created.
+
+**6b X18 cache observation passed:** actual native plugin-manager commands in that same bot's private HOME/config installed released 0.27.0 from a unique local marketplace, then updated to released 0.28.0. Cache versions changed `[0.27.0]` → `[0.27.0, 0.28.0]`; the older directory and manifest survived unchanged. CLI 2.1.301, no auth or model command, no remote marketplace/default or production-config change. This observes the independent bot context, not a production host rollout.
+
+**6b verification audit and integration findings:** the older after5 full run terminated with `11 failed, 9576 passed, 77 skipped, 2 warnings`, exit 1. These are real omitted integration updates: new job startup delay and deterministic timer expectations, a state-path/skill-reference false match, and new vendored contracts missing from build identity inventory; the old harness snapshot also lacked the timer composition call already fixed before `f3b0abce`. A separately prepared correction passes `200 passed, 6 skipped`, exit 0; its wrapper and final integration commit are pending. No full green result is claimed. The audit also found the required two-item mutant used a cardinality surrogate; the separate ingest proof did not measure the mutated consumer's ack behavior. A private evidence worker now exercises real seen/new batching and the terminal fallback honestly. Any old 'cursor always holds' prose will be corrected from that observation, without weakening the protection. The exact-f3 full run remains active; after the final integration/premise batch a new exact final leg is required.
+
+**7a simplify convergence — `a09d7215`:** all four actual builtin lenses and final code review are clean. The efficiency finding changed pruning from every append to the specified rotation/hourly cadence, including failed-rotation finalization to preserve the count ceiling. Affected checks reproduced `1 failed, 48 passed`, exit 1, then passed `50 passed`, exit 0. Controlled ordinary append at 30 files reduced `lstat` calls 61→1 and directory scans 1→0; existing open/close/fstat/pread counts are unchanged. Three-repo/17-ref/10-worktree class sweep records legitimate hourly and constructor checks. Post-6b rebase/full comparison, Linux CI and the seven-day floor-host/RC canary remain pending.
+
+**Baseline CI readback:** docs-only #2359's tests run 38810734507 has now finished successfully, including Linux default, Ubuntu/Python 3.10, macOS/Python 3.11 and harness. This is the unchanged executable baseline, not candidate CI for either runtime phase.
+
+
+**Genuine mutation procedures closed:** fresh private prepared exports exercised the production consumer with the real Plane emitter, actual seen seg1/new seg2, and observed rows at acknowledgement. Baseline: `4 passed`, exit 0; genuine combined-batch mutation: `1 failed, 3 passed`, exit 1; original-ID fallback mutation: `1 failed, 3 passed`, exit 1; restored: `4 passed`, exit 0. The combined batch produced real mixed-state refusals, retained normal seg1, replaced the new normal summary with unexportable statuses, then acked through 2 with pending 0. Original-ID fallback produced two real ledger/family refusals, no visible skipped row, recorded both errors in `last_unexportable`, then acked through 1. Neither held the cursor. The old cardinality surrogate and isolated ingest proof remain correctly narrower historical evidence; the required real procedure is now performed. The active source plan/canonical epic replace false unconditional cursor-wedge claims with normal-summary/fallback-status preservation and retain terminal acknowledgement. Four real behavior cells are being adapted into the existing committed suite, without private trace paths. Sweep covers 22 surfaces across three repositories; legitimate owner cursor monotonicity and harvest holds remain. Source equivalence checked 1,353 files per arm; only the intended consumer mutation differed, with identical Python 3.11.5/34 dependencies.
+
+
+**6b final verification and integration — 2026-10-15 23:31:25 UTC:** [#2361](https://github.com/Claudfather/Claudlobby/pull/2361)
+merged by authorized exact-head admin squash as `b4ae5dae86e7f8b62894dd8a500e24e2201cd17d`, from reviewed
+`92e7e4e9707042094065da9fe39c8d9968167f38`. Independent completion review returned **NO FINDINGS**.
+The separate prepared before/final runs terminated normally: `9553 passed, 78 skipped, 2 warnings` versus
+`9595 passed, 78 skipped, 2 warnings`, both exit 0; scoped failed/error names are empty, and the +42 collected
+cases equal +42 passes. Source proof covers 1,353 tracked files with zero mismatches and identical interpreter
+and 33 non-Lobby dependency versions. The dated f3 run completed with ten known integration failures; it is
+retained separately from the corrected final verdict. Final integration checks passed 222 with six platform
+skips; direct harness passed 352/0 before and 359/0 after. Genuine mixed-batch/fallback procedures, actual
+fresh armed/unarmed native SessionEnd sample, bot-context old-cache retention and final sealed replay/equivalence
+were independently audited. The [default Linux pytest and harness jobs](https://github.com/Claudfather/Claudlobby/actions/runs/38819899651)
+and [released export contract/conformance](https://github.com/Claudfather/Claudlobby/actions/runs/38819899677)
+passed on that head. Supported Ubuntu/Python 3.10 and macOS/Python 3.11 were still running at merge; all-CI-green
+is not claimed. Merged and candidate tree IDs both equal `0d927ef306efefa22d7a1fe38c02151a0df82d2e`.
+Production activation remains a separately authorized host operation.
+
+**Post-6b invariant checkpoint:** existing prepared isolated exports returned `39 passed` for Lobby identity,
+receipt and instruction-budget checks, `197 passed` for released clauDNA activity/export/hook checks, and
+`875 passed` for `make test-runtime` on the existing Python 3.12 environment; all exit 0. Both Lobby instruction
+copy pairs match. The tested release tree equals published v0.28.0 (`fe665ea6`); release CI separately covers
+Python 3.9. This checkpoint makes no new production or real-provider claim.
+
+**7a parallel topology and integration review:** telemetry first rebased from `a09d7215` onto frozen consumer
+`92e7e4e` so independent verification could continue. The planned post-squash rebase then moved it onto actual
+`b4ae5dae`; its candidate tree was unchanged (`cdb1c9eb17caad0ee3d337b9d6e7b909e6edfd38`), and the baseline
+tree equals actual main. The earlier integration-only review at `f4c524a6` preserved the prior blobs/modes of
+52 consumer-only and 24 telemetry-only paths, shared mapping helpers and config-explain, both registrants/jobs/
+doctor rungs and hook retirements. The subsequent parser fix below deliberately changes its own parser/reexport
+files; the actual-main rebase preserves that fixed candidate tree. Integration
+checks passed 982; final generated/instruction checks passed 87. The exact installed intake canary again observed
+logs/metrics HTTP 200, protobuf 415, private directory/file modes, no Plane writes and clean SIGTERM. The sole
+integration review finding was a blank line splitting a reference table, fixed on the authored Claude side and
+copied. A tracked-Markdown sweep across three repositories, 17 ref snapshots and ten active worktrees found 28
+occurrences belonging to three intentional table boundaries and zero remaining accidental headerless continuations.
+
+**7a full-suite findings, still under verification:** the old frozen after export exposed eager backend imports
+while constructing any CLI parser. The existing isolated parser/host subset reproduced `52 failed, 49 passed`,
+exit 1, against baseline `101 passed`, exit 0. Moving the shared port/retention grammar into the existing
+stdlib-only parser-module convention preserves public imports/defaults and the unchanged import blocklist;
+the affected set then passed 1,084, exit 0. Reuse review is clean. A separate intake-before-sink privacy-negative
+fixture/order finding is being reproduced and corrected; no terminal final full result is claimed. Old baseline
+and failing after exports remain immutable through terminal output, and a fresh corrected after leg is required.
+The seven-day floor-host/RC gate and P2-a2 dependency remain unchanged.
+
+**6a preflight and start:** its fresh branch is based on actual merged `b4ae5dae`, and its own separately prepared
+before-leg is running. Read-only contract analysis identified the need to preserve doctor's D001/D007/D008 and
+other-code presentation while sharing the migration prober and a request-local 60-second status-plus-doctor
+budget across validation and doctor. Source-only canary preparation found that released v0.6.1 creates format 2,
+and a legacy harvest draft is needed for the real v0.9.0 m003 migration branch. No migration or harvest observation
+is claimed until the actual private scratch-vault/native canary runs. Refreshed companion issues #2149 and
+clauDNA#404 remain open and explicitly depend on measured Codex owner adapters; no speculative fixture or plan
+was substituted for those missing observations.
+
+
+**Supported-platform CI readback:** all reported checks for merged #2361 and draft #2360 now completed successfully,
+including Ubuntu/Python 3.10 and macOS/Python 3.11. The earlier statements that those jobs were running describe
+the merge/publication instant, not the refreshed state. #2360 remains draft because its live/timed acceptance is
+independent of green CI.
+
+**6a live-plan finding before migration:** actual released Claudron v0.6.1 created a format-2 scratch vault with
+a legacy harvested draft; actual v0.9.0 status/doctor reported pending m003 and D001. The exact `983ac22b` wheel
+was assembled into a sealed independent CLI. Its real `config plan` succeeded but exposed only generic
+“configuration warning reported by the validator” lines: the existing metadata-only command discarded the new
+category and fix instruction. The canary stopped before applying the migration, and the phase worker owns a
+category-only/static-guidance correction that preserves redaction of authored paths and warning text. No
+migration or harvested-draft success is claimed at this checkpoint. A private runner syntax typo and a build
+from the commit-free prepared test index failed before host setup; the separate exact-commit packaging checkout
+corrected the build provenance without changing the test export.
+
+**Claudron response-reader class sweep:** an independent owner-contract read confirmed clauDNA treated present
+malformed capabilities as a legacy empty set and filtered malformed resolve items into an apparently empty
+search. A bounded owner fix at `070f80a1` rejects those unusable reads, preserves existing harvest cursors and
+allows valid retries; valid legacy absence, empty results, authored sources and additive fields remain supported.
+Test-first failures: 18; affected suites: 175 passed; local runtime: 901 passed; actual released v0.9.0/v0.6.1
+engine lanes: 7/2 passed with 2/7 expected lane skips. Unsandboxed owner `make check`: 2084 passed, 9 skipped,
+the same pre-existing macOS sed failure, exit 2; this is not a green local full check. Independent review and
+exact-head CI precede integration. Lobby's shared reader has the corresponding capability/pending/finding
+shape guard, and its status-envelope check is being tightened in the same phase.
+
+
+## 2026-10-16 UTC — Corrected candidate closeout
+
+The epic goal remains unmet. The frozen full suites for `15ea28db`, `e644d07d` and `5f979881` are terminal and green; 6a is merged after successful exact-head CI, and the post-merge invariant registry is green. Telemetry’s subsequent test-only readiness correction has passing affected checks and fresh CI in progress; the older full/native observations remain attributed to `e644d07d`. Telemetry and Half B remain draft with mandatory live/timed gates open. Earlier dated red, partial, quarantine and observer-failure records are retained; those snapshots do not describe the current corrected heads. The [phase table](#phase-results) and epic §10.0b agree on DONE/BLOCKED dispositions.
+
+### Delivered owner contract and consumer
+
+- **7b DONE:** [clauDNA #411](https://github.com/Claudfather/clauDNA/pull/411) and [#412](https://github.com/Claudfather/clauDNA/pull/412) delivered v0.28.0; [Claudron #228](https://github.com/Claudfather/Claudron/pull/228) marks the released export contract's row 11 shipped. The follow-on strict reader in [clauDNA #413](https://github.com/Claudfather/clauDNA/pull/413) rejects malformed capabilities/resolve replies without consuming work as an empty result. [Release #414](https://github.com/Claudfather/clauDNA/pull/414) published [v0.28.1](https://github.com/Claudfather/clauDNA/releases/tag/v0.28.1) on 2026-10-16 at 00:21:44 UTC, tag target `5025af58273b2150bf479c745729bb62dab4228b`. The tested release candidate and published tag have identical trees; [release workflow](https://github.com/Claudfather/clauDNA/actions/runs/38829036126) is retained. Post-release invariants returned **197 passed** for owner activity/export/hooks and **39 passed** for Lobby identity/receipts/instructions, both exit 0. Final strict-reader local full qualification: **2097 passed, 9 skipped, one known pre-existing macOS sed failure, exit 2**, versus the earlier **2058 passed, 9 skipped, the same failure, exit 2** baseline; this is not a green local full run. The failure is `tests/test_pretooluse_permissions_hook.py::TestWriteRedirectionKeepsThePrompt::test_dev_null_still_approves`. Final runtime checks passed **914**, exit 0. All eight exact-head CI checks passed, and release #414 completed successfully. The dated 2084/901 checkpoint above describes the earlier candidate, not these final counts. Publishing the plugin does not prove a production host updated or restarted.
+- **7c DONE:** [summary consumer #2361](https://github.com/Claudfather/Claudlobby/pull/2361) merged as `b4ae5dae` after its own before **9553 passed, 78 skipped, 2 warnings, exit 0** and after **9595 passed, 78 skipped, 2 warnings, exit 0**, empty failed/error names and +42 passes. Its direct harness and required Linux/contract jobs passed. Genuine mixed-batch/fallback mutants, actual armed/unarmed native SessionEnd, bot-context cache retention and sealed export/replay evidence remain the consumer's recorded proof. The old failing f3 export stays excluded from that final comparison. Consumer delivery does not claim production activation.
+
+### Corrected 6a and child integration
+
+The ten failures in the old frozen full runs came from existing standalone `_validate_bots` callers after the migration reader became a required keyword. The correction makes that seam optional, creates a reader only when none is supplied, and expands the existing per-vault/fresh-request test across public validation, standalone bots and an explicitly supplied shared reader. The host plan still creates one reader outside its fleet loop, and doctor shares its request reader. Scope is two files; no assertions or skip policy were weakened.
+
+The exact red check was **10 failed, 29 passed, exit 1**; corrected focused checks were **190 passed, exit 0**. Four actual local builtin simplify lenses and an independent correction/integration read returned **NO FINDINGS**. This closes the reviewed source defect; it does not turn any older red full run green.
+
+| Frozen run / head | Terminal outcome | Use in the final verdict |
+|---|---|---|
+| 6a before / `b4ae5dae` | **9595 passed, 78 skipped, 2 warnings, exit 0**; failed/error names empty | Completed before leg for corrected 6a. |
+| Old 6a / `80c2d297` | **10 failed, 9655 passed, 78 skipped, 2 warnings, exit 1** | Retained red history; the ten helper-call names match the old telemetry run. |
+| Old telemetry / `3e762644` | **10 failed, 9742 passed, 78 skipped, 2 warnings, exit 1** | Same ten scoped failures; no before-only/after-only failure names. Not final corrected evidence. |
+| Obsolete Half B / `0a60a9eb` | Interrupted: **10 failed, 5209 passed, 65 skipped, 2 warnings, exit 2** | Partial SIGINT result excluded from terminal full comparison. |
+| Corrected 6a / `15ea28db` | **9667 passed, 78 skipped, 2 warnings, exit 0**; failed/error names empty | Final paired result versus `b4ae5dae`: +72 passes; direct harness **359 passed / 0 failed, exit 0** in both legs. |
+| Corrected telemetry / `e644d07d` | **9754 passed, 78 skipped, 2 warnings, exit 0**; failed/error names empty | Final paired result versus corrected `15ea28db` (9667/78/2, exit 0): +87 passes, no failing-name differences. |
+| Corrected Half B / `5f979881` | **9698 passed, 78 skipped, 2 warnings, exit 0**; failed/error names empty | Final result versus corrected `15ea28db` (9667/78/2, exit 0): +31 passes; final direct harness **359 passed / 0 failed, exit 0**. |
+
+Normal child merges preserve the published histories and the reviewed correction: telemetry `e644d07d` has parents `3e762644` and `15ea28db`; Half B `5f979881` has parents `0a60a9eb` and `15ea28db`. Independent Git tree comparison confirms exactly `claudlobby/validator.py` and `tests/test_claudron_loop.py` changed per child. All other **1366 telemetry** and **1356 Half B** blobs/modes are preserved. Telemetry retains its own validator registration; Half B's two corrected blobs match 6a exactly. The shared migration request budget and prior summary/session-join ownership are intact. Terminal source inventories preserve **1353 baseline / 1357 corrected 6a**, **1368 telemetry** and **1358 Half B** archived files with zero mismatches. The three full legs use the same Python 3.11.5 binary and **33** non-Lobby dependency versions. The actual full command is the prepared interpreter running `-m pytest --tb=no -ra`, with separate private HOME/TMPDIR; the direct harness command is `bash harness/validate-bot-change.sh`. Final 6a direct-harness pairing matches all 359 named results after normalizing 18 scratch-path differences. Half B preserves all 1358 source files/modes across both its final full and direct-harness runs.
+
+Corrected Half B affected checks returned **640 passed, 6 optional-vault skips, exit 0**, failed/error names `[]`. Corrected telemetry affected checks returned **1 failed, 1308 passed, 6 skipped, exit 1**: the sole failure is the already-quarantined PAT bridge timeout [#2362](https://github.com/Claudfather/Claudlobby/issues/2362), whose runtime/test assertions/timeouts remain unchanged. Its narrow rerun returned **1 passed, exit 0**. Both affected results remain recorded; the narrow rerun is not a green affected/full verdict. The later final full suite independently passed 9754 tests, including this quarantined cell. Default local suites include quarantine; the marker assigns a separate CI lane and does not remove the test locally. Final corrected 6a and Half B direct-harness results above supersede the earlier-head harness result for those heads.
+
+### Exact corrected-head observations and their limits
+
+**6a `15ea28db`:** an independently sealed candidate with real released Claudron 0.9.0 and published clauDNA 0.28.1 planned against an actual old-release format-2 scratch vault with a legacy draft. It showed the named migration category and static remedy. Explicit operator-style m003 fix, normal local-clone propagation and both index rebuilds produced format 3/no pending; the same plan cleared the warning. A fresh native Claude Code 2.1.301 `--print` session used candidate-composed settings and fixed localhost Messages/SSE under a fake key. SessionEnd sealed a real summary; explicit forced harvest created one external-trust draft through capture/amend, advanced the cursor, and replay wrote nothing. **664** distributed source-backed files and **665** installed files matched the exact source/package. All software-under-test commands passed. The first read-only observer lacked a separately captured owner resolve and initially matched the deliberately seeded legacy draft; both failures were retained. A constrained real owner read let the unchanged verifier pass without repeating producer or harvest writes. Native service actions were simulated; cleanup left no owned process. No real provider inference, automatic next-SessionStart harvest, production rollout or timed acceptance is claimed.
+
+**Telemetry `e644d07d`:** the fresh installed intake accepted sanitized live-captured native JSON logs and metrics with HTTP 200 and one complete raw line per body. Unsupported protobuf returned 415. Directory/file modes were 0700/0600; forbidden metadata keys were absent; SIGTERM and `plane doctor` exited 0, with no Plane dependency. This proves local protocol/storage behavior. It supplies neither the mandatory seven-day floor-host resource/coverage observation nor real RC/Telegram delivery. The #2362 quarantine tracks its unchanged timing cell; it is not a runtime fix or a reason to omit that test locally.
+
+**Half B `5f979881`:** five fresh actual native CLI arms, real hooks/Bash/Agent and Plane readbacks passed with clauDNA 0.28.1 and sealed Claudron 0.9.0. Two sessions replayed one acceptance and retained the first uid; two more replayed one communication and retained its original uid. One linked native Agent child recorded one communication and progress event matching the independently read parent hook-store uid. All five CLI arms exited 0. Report/progress doors deliberately exited 5 after committed recording and failed notification because no manager process was running. **664** source-backed distributed files and **665** installed wheel files matched before/after. Fixed localhost responses and a fake key made **13** local Messages requests without real provider inference. There were no setup/observer failures or repeated arms in this corrected-head run; cleanup found no owned process. Native supervision alone was simulated. Literal interactive `/clear`, real service/tmux/supervisor acceptance and both complete 48-hour windows remain unexecuted.
+
+All three corrected-head canary packages received an independent read-only procedure/evidence audit with **NO FINDINGS**. Real native CLI/hook/Bash/Agent, Plane and owner-command observations are distinguished from replayed captured telemetry. Fixed localhost fake-provider responses consumed no real model inference. NativeHost service actions were simulated, and refusing environment proxies do not prove OS-level egress confinement. Literal interactive `/clear`, real service/tmux/supervisor behavior, the seven-day and 48-hour windows, production rollout and provider/model quality remain unproven by these samples.
+
+**Documentation claim convergence:** the final independent review found five active epic-issue claims that still prescribed the original Collector, hard plan refusal or old runtime naming. All five were corrected to the ratified direct `plane-otel` intake, named warning/doctor check, internal vendor→house mapping, `claudlobby.agent_cli` and `(agent_cli, session_id)`. The bounded pre-publication sweep covered eight Git snapshots across three repositories (2001 tracked Markdown instances), the two canonical drafts and the issue draft: **2004 document instances, 516 broad-pattern matching lines**. Current merged main and both child snapshots each had 101 matches: 55 dated history/spec quotes, 38 correct amendment/negation lines and 8 unrelated legitimate terms/refusals. The private canonical pair had 49 historical/spec and 25 correct current lines; the corrected issue had zero matches. The remaining matches were two unrelated clauDNA console-collector lines and 137 lines in the older, unrelated Lobby checkout. No obsolete active prescription remained in current delivery scope. Dated design text and unrelated checkouts were preserved. Independent follow-up returned **NO FINDINGS**.
+
+### Integration and invariant evidence
+
+**6a actual normal merge:** [#2363](https://github.com/Claudfather/Claudlobby/pull/2363) merged at **2026-10-16 01:48:40 UTC** as `e7a14ea1d158eb272566f81a3e2c2ad1bb459ae7`, with parents `b4ae5dae86e7f8b62894dd8a500e24e2201cd17d` and reviewed `15ea28db9b03e93eb635a5ab0c17e9ce931c320a`. Merge/candidate trees match `06daa0c1797ae80f815c1eaa36c28d620a36f23b`; the reviewed head is an ancestor. No force push or branch deletion occurred. [Linux pytest, harness and both supported-platform jobs](https://github.com/Claudfather/Claudlobby/actions/runs/38832586770), [vault/export/rename conformance](https://github.com/Claudfather/Claudlobby/actions/runs/38832586933), [quarantine](https://github.com/Claudfather/Claudlobby/actions/runs/38832586824) and [rollout check](https://github.com/Claudfather/Claudlobby/actions/runs/38837033320) all completed successfully before merge. This is source integration, not production activation.
+
+**Child topology and CI readback — 2026-10-16 02:01:58 UTC:** [telemetry #2364](https://github.com/Claudfather/Claudlobby/pull/2364) and [Half B #2360](https://github.com/Claudfather/Claudlobby/pull/2360) are retargeted from `codex/2145-claudron-pin` at `15ea28db` to main at `e7a14ea1`; both remain OPEN/DRAFT. Reviewed `15ea28db` remains their merge base and an ancestor of actual main. Exact head/tree identities and all content stayed unchanged: telemetry `e644d07d03231320ae465812454bf6ac5ebcc104` / `fa0830479126ec982ce35dcac940f216a5911a3e`, Half B `5f9798810034209a21c6f84ffebd857184bf34e6` / `b290c4ba8da242dde49797ee4ad79745d0f1faa5`. Child-only scope remains **48 telemetry** and **28 Half B** paths; exact PR bodies were read back. No source/code change, push, rebase, merge or cancellation request occurred in the metadata closeout.
+
+Half B's latest [Linux, Ubuntu/Python 3.10, macOS/Python 3.11 and harness checks](https://github.com/Claudfather/Claudlobby/actions/runs/38833735626), [vault/export/rename conformance](https://github.com/Claudfather/Claudlobby/actions/runs/38833735463), [quarantine](https://github.com/Claudfather/Claudlobby/actions/runs/38833735471) and [post-retarget rollout check](https://github.com/Claudfather/Claudlobby/actions/runs/38838083519) all succeeded. Telemetry's [supported macOS/Python 3.11 job](https://github.com/Claudfather/Claudlobby/actions/runs/38833549968/job/116757908848) **failed**; all other latest [Linux, Ubuntu/Python 3.10 and harness checks](https://github.com/Claudfather/Claudlobby/actions/runs/38833549968), [vault/export/rename conformance](https://github.com/Claudfather/Claudlobby/actions/runs/38833549912), [quarantine](https://github.com/Claudfather/Claudlobby/actions/runs/38833549930) and [post-retarget rollout check](https://github.com/Claudfather/Claudlobby/actions/runs/38838057559) succeeded. That failed macOS result remains historical evidence: its sole failure was the five-second startup port-file wait, before incomplete headers or SIGTERM were exercised; the underlying startup delay cause is unproven. A green local full run does not replace that result. Earlier retarget-triggered rollout checks are retained as cancelled, with the subsequent latest checks successful. Both PRs retain their mandatory empirical gates regardless of retarget or CI status.
+
+**Telemetry test-only follow-up:** current public head `56a59f9faa646cf8f201f5df6d7abe0a7a0433f5`, tree `aaaa81f54afde8c8b514fc32f8743361a13c73eb`, changes only `tests/test_plane_otel_intake.py`; all **1367** other tracked files/modes match `e644d07d`. The real six-second startup control reproduced the old readiness failure (**1 failed, 1 passed, exit 1**). Separate 20-second startup and five-second handler waits produced **46 passed, exit 0**, while the original three-second SIGTERM drain, success assertions and cleanup remain byte-identical. Removing the accepted-socket header timeout still failed both arms at that original drain check (**2 failed, exit 1**). An early-exit control produced bounded, scratch-redacted stderr (**1 failed, exit 1**). Independent source/procedure review returned **NO FINDINGS**. This corrects a test readiness budget; it does not establish the underlying CI delay cause or change production behavior. The [fresh exact-head Linux/platform/harness workflow](https://github.com/Claudfather/Claudlobby/actions/runs/38839339370) is running; current vault/export/rename, quarantine and rollout checks have passed. No full-suite success is assigned to this new head from the earlier frozen `e644d07d` run. Both the prior failure and new CI remain separate; the seven-day gate is unchanged.
+
+**Startup-readiness class sweep:** five recorded snapshots across three repositories (local `origin/main` refs plus telemetry/Half B heads; no claim of remote freshness) were searched with `git grep` for deadline assignments, readiness-marker existence and `wait`/`communicate` timeouts, plus an AST count of actual subprocess calls. Raw matching-line counts for those three patterns were Lobby **69/21/63**, Claudron **0/7/3**, clauDNA **0/3/0**, telemetry **71/22/66** and Half B **69/21/63**; repeated main/child matches are not unique defects. Inspection covered **33** stored relevant deadline contexts and all **8** telemetry literal five-second deadlines. It found **one unique evidenced fixture defect, already corrected; zero new siblings**. Other waits separate readiness from behavior, govern in-process recovery or implement an independent measurement contract; no other timeout or source was changed.
+
+**Post-6a invariant registry:** Lobby identity/receipts/instructions returned **39 passed**; released clauDNA activity/export/hooks returned **197 passed**; `make test-runtime` returned **914 passed**. Every command exited 0, scoped failed/error names are empty, and before/after checks preserve **1357 Lobby** and **401 owner** files/modes with zero mismatches. Lobby imports resolve to the prepared reviewed `15ea28db` tree, identical to the actual normal merge. Owner imports resolve to released v0.28.1 `5025af58` under the existing **Python 3.12.13** interpreter; this runtime check is not a new Python 3.9 floor claim. No installs, source edits, production activation or live/timed observations occurred in this invariant checkpoint.
+
+The [owner queue](#owner-decision-and-external-evidence-queue) contains the current telemetry CI readback plus the remaining host/auth/measurement and dependent-implementation gates. Merged software, source equality and green local/CI checks do not close those gates.
+
+### Goal verdict and remaining work
+
+**Goal NOT MET.** Code convergence and local protocol samples do not close the real acceptance gaps. There is no completed seven-day floor-host RC/Telegram canary for 7a, no Task 9 Plane leg or its own 48-hour record, no real native-lifecycle/two-window proof for Half B, no measured P4 implementation/release and no mixed-runtime companion week. The queue above gives the smallest unblock for each. No runtime gate is waived by the delegated source review or authorized admin integration. Production host migration, activation and outbound channel use remain scoped operator actions.
+
+
+## 2026-10-16 UTC — Authorized native measurements and P4 continuation
+
+This entry supersedes the authentication and literal-clear blockers in the earlier dated closeout. The operator explicitly authorized private reuse of existing Codex authentication and the local fake-provider Claude software canary. Source review and eligible admin integration remain delegated; live host/channel authority and elapsed observation gates remain separate.
+
+### Half B literal clear
+
+At unchanged `5f979881`, actual Claude Code 2.1.301 with released clauDNA 0.28.1 and sealed Claudron 0.9.0 ran literal interactive `/clear` in an independent private canary. Before clear, one acceptance and one progress report committed. After clear, the native hook store had a distinct session/derived UID; replaying the identical request IDs returned replayed receipts, kept exactly one accepted event and one communication under the first UID, and left the second UID lookup empty. Format-1 intent omitted session attribution. Both sessions closed; CLI exit 0; all 664 source-backed/665 installed files matched bytes/modes. Expected report-door exit 5 means recording committed while manager notification was unavailable.
+
+Six fixed localhost Messages responses (two Bash replies) and a fake key exercised the actual native CLI, hooks, doors and Plane. Twenty-six proxy refusals prove proxy-aware refusal, not OS-level network confinement. The first authorized arm exposed only a private canned-response scheduling error, invoked no receipt door and did not run clear; it remains separate from the corrected pass. Independent inspection of the receipts, hooks, rows, lookups and package proof returned **NO FINDINGS**. The PR body was updated and read back exactly with unchanged head and draft state. Real service/supervision and both full 48-hour windows are still absent.
+
+### P0 native Codex observations (independent review: NO FINDINGS)
+
+Installed SUT: **Codex 0.162.0-alpha.17.2**. The unmodified main shape-only harness SHA256 is `d84982af190ce84292456744a678cb0d007671500d1fccd03bb291c0008afbec`. Measurements use private HOME/CODEX_HOME, no daemon and explicitly authorized auth-only reuse. The authenticated smoke used `-s read-only`; interactive sessions used `-a never -s workspace-write` in the private scratch root. Native `permission_mode=bypassPermissions` is recorded separately and does not establish filesystem sandbox authority. Analytics was disabled and metrics exporter set to none before the first turn. The authenticated strict-config smoke exited 0. Original auth/config/Claude settings hashes and mtimes remained unchanged at batch cleanup; the additional sanitized-fixture arm is separately checked before final review.
+
+| Canary | Actual observation | Consequence / limit |
+|---|---|---|
+| C1 | Native stdin emitted SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd, PreCompact, PostCompact and Interrupt. Common keys include `session_id`, `transcript_path`, `cwd`, `hook_event_name`; observed tool name `Bash`, `tool_input.command` string and PostToolUse `tool_response` empty string. UUID session IDs match the existing SID grammar. | Use captured shapes, never producer-source reconstructions. Non-null transcript paths in observed arms do not prove universal non-nullability. No PostToolUseFailure capture is claimed. |
+| C1 lifecycle budget | SessionEnd 800ms completed (~0.84s); 2500ms did not complete with the native default 1s; explicit timeout 3s completed (~2.54s). | Composition must declare the budget it needs; no default-3s assumption. |
+| C2 | Hook environment has CODEX_HOME but neither CODEX_SESSION_ID nor CODEX_THREAD_ID. Actual tool shell has both IDs, equal to the hook UUID. Native owner ancestry is stable `codex → tmux → launchd`, Codex one level above the hook. | Owner PID must come from a bounded own-ancestry walk, not an assumed hook PID env or unrelated process-table search. |
+| C3 Codex | Startup stdout marker matched the actual model reply. Successful compact emitted PreCompact/PostCompact; the later SessionStart(source=compact) marker replaced the old marker in the reply. `continue:false` blocked the second manual compact (two PreCompact, one PostCompact). | Injection and manual block work in this installed version. A sandbox-limited tmux observer read initially failed; the owned CLI stayed alive and compaction succeeded. |
+| C4 | Native rollout is append-only across exact-ID resume: 162197→181134 bytes, full previous prefix hash unchanged. Filename UUID matches hook ID. Types include session_meta, event_msg, response_item, world_state, turn_context, token_usage_record, compacted; records carry ordinal. Token usage is present in token_usage_record payload; actual tool calls use custom_tool_call/custom_tool_call_output records. | Reader dispatch must use recorded agent_cli, avoid duplicate event_msg/response_item text and keep tool/system/context content out of summaries. Golden excerpt will preserve actual shapes with content redacted. |
+| C5 | Twenty-eight HTTP-JSON log requests reached `/v1/logs`; zero metrics/traces requests were observed with metrics disabled. Configured environment carrier is resource `env`, not `deployment.environment`. Foreground `conversation.id` equals hook UUID. An additional OTel conversation has no hook or rollout, and both API log records lack an ID (two of 84 total records). | Do not infer global one-to-one attribution or assign the unmatched ID to the bot session. Peer snapshots show loopback and model-host DNS-matching peers; they are observations, not exhaustive egress enforcement. |
+| C7 | Native `/status` executed; idle glyph `›`; both busy Enter submission and explicit Tab queue executed after the busy tool. Owned tmux kill exited the CLI, and exact UUID resume executed a recovery turn. | This is private tmux behavior, not fleet service/supervisor acceptance. |
+| C8 | Native local marketplace/plugin installation and packaged hook execution worked. PLUGIN_ROOT/PLUGIN_DATA and CLAUDE_PLUGIN_ROOT/CLAUDE_PLUGIN_DATA are all set, root/data aliases equal and inside the private installation/home. Public clauDNA v0.28.1 marketplace fetch exited 0; plugin install exited 1: `plugin claudna was not found in marketplace Claudfather`. | A Codex manifest is still required. No released clauDNA hooks were installed, trusted or executed by that failed attempt. Plugin install and hook trust are separate. |
+| C9 | The second SessionStart command populated its own selected log; native trust-all persisted the private hook hashes across restart. | Explicit hook-command selection is viable. Global trust/config was untouched. |
+
+### Claude C3 request-delivery evidence (independent review: NO FINDINGS)
+
+A separate native 2.1.301 fixed-localhost-provider arm used fake credentials and no Anthropic inference. Manual PreCompact `decision:block` stopped the compact request and showed its throwaway reason; the reason reached a later explicitly submitted main request, not an unattended follow-up. Successful compaction after disabling only that private test block emitted SessionStart(source=compact); its stdout marker appeared in the next main request and the old reason did not. Fixed responses deliberately omitted both markers, so these observations prove delivery into requests, not semantic uptake by a real Claude model.
+
+A bounded automatic arm used the native supported `--autocompact 100k` with explicitly synthetic usage counters to trigger an actual PreCompact with `trigger:auto`. The worker observed a subsequent native main request without further user input and without either marker, with no SessionStart(compact). Independent review checked the chronology, cleanup and configured fixed print branch/hash and returned **NO FINDINGS**. The auto hook preceded the same-turn main request by 10.544 ms. Actual stdout bytes were not separately captured. The result supports Claudron#179's planned conditional owner-contract correction for unreliable unattended block-reason delivery; successful SessionStart(compact) delivery was measured on the manual path only. These are controlled trigger measurements, not real usage/token behavior.
+
+A post-manual-run privacy walker followed a native-created URL-handler symlink and temporarily removed the installed Claude binary's execute bits. The retained-path audit found one external target; correction-time bytes were unchanged. Standard npm executable mode 0755 and version operation were restored before the auto arm; no pre-run mode capture exists, so exact original-mode proof is not claimed. Future walkers use lstat, skip symlinks and require resolved private descendants. This observer mistake does not change the earlier native request observations.
+
+### Measured P4 planning premises
+
+The measured common C1 fields already match Lobby's two hook readers. The Lobby phase first proves conformance using redacted actual stdin; it adds runtime normalization only if a captured field requires it. Main still emits legacy `tool_call` rows: #2173 explicitly retained them under Q17 until P2-a2 names tools from OTel. The old shorthand “marker-only P2-b” is not evidence that removal shipped. P4 must preserve that deferred retirement boundary.
+
+The clauDNA phase must resolve the design-era layer mismatch: rank-5 detached readers cannot import rank-6 host adapters, and strict downward imports forbid peer host type imports. Keep shared types/reader dispatch below consumers or pass callbacks; do not relax the layering gate. Owner PID feeds the child guard, clear links and abandoned sweep, so a Codex hook with no PID env must not record None by default when its own ancestry is available. The summarizer runner remains Claude under locked F10.
+
+No completed live floor-host week, Half B observation windows, Task 9 Plane phase, owner adapter release or mixed-runtime acceptance is claimed by this continuation. Work proceeds along measured P4 dependencies while those external/timed gates stay named.
+
+**Final P0 artifacts:** the authorized `rnc-results-4.md` report and private copy match SHA256 `4d13c914c1227807d736293573b24e10ac9f055a504f298c6955288369bc9cb7`. Eleven native hook/source fixtures plus a 17-record actual-rollout golden excerpt are redacted before export; manifest SHA256 `8ca604533fe6d6f509d75a832938f422fac3aa8c2512db95592f97b07eae8c2a`, golden `85dc581b6c525be0412dff6713f3cc8e9b45e7ec09cdc7108fa07a08b245164c`. Ten tracked native owner PIDs, receiver and private tmux are gone. Protected originals match hashes/modes/sizes/mtimes; retained private auth is 0600. The fixture driver's initial early compact submission produced no compact observation; its separate bounded idle correction captured actual PreCompact/PostCompact/SessionStart(compact), then closed normally.
+
+
+### P4 Lobby conformance — local verification
+
+The measured per-PR [Lobby plan](2026-10-16-runtime-neutral-p4-lobby-hook-conformance.md) has no runtime edit. Three actual native stdin fixtures were redacted before write, with original/sanitized hashes and a redaction recipe. Existing tests now exercise the captured UserPromptSubmit envelope across sender-wire shapes and both JSON encodings, ordinary-prompt no-row control, and Pre/PostToolUse marker/event/no-BOT_DIR paths. In separate prepared exports with Python 3.11.5 and identical pinned dependencies, affected command `.venv/bin/python -m pytest --tb=no -ra tests/test_plane_dispatch_in.py tests/test_plane_cutover_keepalive.py` returned **60 passed / exit 0** before and **83 passed / exit 0** after. Failed/error names are empty both; **+23 passes**. Source bytes/modes are unchanged through each run (1357/1363 paths); every one of the **723 non-test/non-documentation paths** matches across legs. No broader new-head full-suite result or live fleet activation is inferred. Independent simplify/spec/evidence review and CI remain pending.
+
+**P0 review correction:** final C5 count is 84 records across 28 JSON requests, with two API records and both missing conversation.id. Independent review and root recount agreed; both report copies and this ledger are corrected. The original report/cleanup snapshot is retained privately, and no measurement was rerun.
+
+
+### P0 and Lobby review convergence
+
+Independent review covered every native fixture/transform, the actual-rollout golden, C1–C5/C7–C9 records, protected originals, cleanup, both complete changed test modules, phase plan and paired raw test artifacts. Two findings closed: (1) the newly authored stronger “read-only operation” claim was corrected to read-only smoke versus interactive workspace-write, with native permission enum kept separate; (2) final C5 missing-ID API count was corrected from one to two of 84 records in both current report copies and the canonical ledger. The pre-review report is preserved privately. Source-wide claim checks and exact report readback closed the class; owner plans received the corrected report hash/count. No source finding remained. Reuse, simplification, efficiency and altitude lenses returned **NO FINDINGS**. The final reviewed report SHA is `4d13c914c1227807d736293573b24e10ac9f055a504f298c6955288369bc9cb7`.
+
+Lobby receipt/vitals conformance review also returned **NO FINDINGS**, with all three published fixtures byte-identical to their sanitized native captures and +23 focused cases independently verified. Exact-head CI remains a separate integration gate. Claudron's owner adapter is now review-ready locally (full 856→887 passed / exit 0; affected 146 passed / exit 0; ten actual owner CLI/local-Git arms passed); clauDNA's owner adapter is in implementation. No unmerged owner surface is claimed as released or live.

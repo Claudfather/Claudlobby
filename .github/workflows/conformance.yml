@@ -34,7 +34,7 @@ jobs:
       - name: Install git (the N-bot contention test drives real vault clones)
         run: sudo apt-get update && sudo apt-get install -y git
       - name: Install package + the pinned [vault] extra (claudron)
-        # The pin lives in pyproject's [vault] extra (F1 lock, currently v0.6.1 —
+        # The pin lives in pyproject's [vault] extra (F1 lock, currently v0.9.0 —
         # bump policy: documentation/integrations/claudron-integration.md). Parity holds against the pin; the gate fails if
         # the composer's rendered copy ever drifts from it.
         run: pip install -e '.[dev,vault]'
@@ -71,3 +71,32 @@ jobs:
         env:
           CLAUDNA_SKILLS_DIR: ${{ github.workspace }}/.claudna-checkout/skills
         run: python -m claudlobby.conformance rename-map
+
+  # P3 export contract: optional hosted convenience, never a required check.
+  # An unavailable checkout skips with notice, so a sibling outage cannot block merges.
+  export-contract-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: pip install -e '.[dev]'
+      - name: Read consumed clauDNA ref
+        id: export-ref
+        run: echo "ref=$(cat claudlobby/contracts/claudna.ref)" >> "$GITHUB_OUTPUT"
+      - name: Check out clauDNA export contract
+        id: export-checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: Claudfather/clauDNA
+          ref: ${{ steps.export-ref.outputs.ref }}
+          path: .claudna-export-checkout
+      - name: Skip unavailable clauDNA checkout
+        if: steps.export-checkout.outcome != 'success'
+        run: echo '::notice::SKIP export-contract - clauDNA checkout unavailable (local-first)'
+      - name: Run released export contract gate
+        if: steps.export-checkout.outcome == 'success'
+        run: python -m claudlobby.conformance export-contract .claudna-export-checkout

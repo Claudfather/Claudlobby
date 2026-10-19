@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: "Route fleet work and inspect or manage declared bots through the public CLI."
+description: "Use when a manager hands work to a declared bot, or checks on, restarts or surveys its bots. Routes fleet work and inspects or manages declared bots through the public CLI."
 argument-hint: "[dispatch|status|restart|fleet] <bot> [task description]"
 ---
 
@@ -17,8 +17,10 @@ tasks. For `fleet`, read `claudlobby --json fleet status` and
 
 For `restart BOT`, first follow safe-worker-restart and honor all operator
 holds. Request `claudlobby --json bot handoff BOT` and require
-`data.handoff=saved` before `claudlobby --json bot restart BOT`. Inspect the
-returned readiness and native outcome before claiming the bot is back.
+`data.handoff=saved` before `claudlobby --json bot restart BOT`; after a
+`timeout`, read `claudlobby --json bot handoff BOT --check` until it reads
+`saved`. Inspect the returned readiness and native outcome before claiming the
+bot is back.
 Uncertain handoff/control outcomes require inspection, never automatic retries.
 
 Use `claudlobby --json message send --to BOT --text "QUESTION" --request-id UUID`

@@ -340,7 +340,7 @@ class TestCheckClaudron:
                 "#!/bin/sh\n"
                 'if [ "$1" = "status" ]; then\n'
                 '  echo \'{"ok":true,"command":"status","data":'
-                '{"engine_version":"0.3.0","root":"/v","total_docs":7}}\'\n'
+                '{"engine_version":"0.3.0","root":"/v","total_docs":7},"warnings":[],"errors":[]}\'\n'
                 "fi\n"
                 "exit 0\n"
             ),
@@ -648,6 +648,22 @@ class TestClaudronDoctorRung:
         assert "vault format 2, engine format 2" in row.detail
         assert "1 other finding(s) (D004)" in row.detail
         assert set(rows) == {"claudron-doctor"}
+
+    def test_run_doctor_shares_its_probe_with_fleet_validation(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _, paths = doctor_fleet
+        vault = TestCheckClaudron._vault(tmp_path)
+        fleet = TestCheckClaudron._wire(root, vault)
+        log = self._engine(tmp_path, monkeypatch, envelope=_doctor_envelope(
+            vault_format=2, engine_format=3, pending=PENDING, errors=D001), rc=1)
+        report = run_doctor(fleet, paths, delivery=False)
+        calls = log.read_text().splitlines()
+        assert len([c for c in calls if c.startswith("status ")]) == 1
+        assert len([c for c in calls if c.startswith("doctor ")]) == 1
+        fleet_row = next(c for c in report.checks if c.name == "fleet-yaml")
+        assert "claudron-migration" in fleet_row.detail
+        assert any(c.name == "claudron-doctor" and "m001" in c.detail for c in report.checks)
 
     def test_fix_is_never_passed(self, doctor_fleet, tmp_path, monkeypatch):
         vault, _, doctor_calls, calls = self._diagnose(
@@ -1362,7 +1378,7 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     as ARMED and every disarmed scenario in this file silently collapses to
     PASS. The `.env` then disarms it so "no door armed" is reachable at all.
     """
-    from claudlobby.config import DEFAULT_GUARDRAILS
+    from tests.conftest import write_default_stubs
 
     root = tmp_path / "r"
     for kind in (
@@ -1410,10 +1426,7 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     (fleet_ops / "SKILL.md").write_bytes(
         (REPO / "library" / "skills" / "fleet-ops" / "SKILL.md").read_bytes()
     )
-    for name in DEFAULT_GUARDRAILS:
-        (root / "library" / "guardrails" / f"{name}.md").write_text(
-            f"---\ntitle: {name}\n---\n\nDefault guardrail.\n"
-        )
+    write_default_stubs(root / "library")
     (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
     (root / "fleet.yaml").write_text(dedent(fleet_yaml))
     (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")

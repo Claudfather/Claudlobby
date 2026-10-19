@@ -34,6 +34,7 @@ from tests.test_releases import installed
 from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
 from tests.test_activation_units import _pause_all, _prepare as _prepare_pause, enrollment  # noqa: F401
+from tests.test_activation_enrollment import unit_properties
 
 
 @pytest.fixture
@@ -77,6 +78,12 @@ class NativeHost:
             rc = self.external_result
         elif function == "svc_inventory_state":
             output = self.states.get(args[1], "not-found not-found inactive")
+        elif function == "svc_inventory_properties":
+            # systemctl show for a unit the manager still has loaded: after a host
+            # reset, every enabled candidate is loaded again at boot.
+            output = unit_properties(self.directory, args[0], self.by_name[args[0]][0],
+                                     active=self.states.get(args[0], "inactive").split()[-1],
+                                     unit_file_state="enabled")
         elif function == "svc_activation_snapshot":
             output = self.states[args[1]]
             if self.bad_enablement:
@@ -1132,6 +1139,231 @@ def test_start_repair_interruption_keeps_history(cold, monkeypatch):
     assert record["start_repairs"] == archived and record["pending"] == "bots_started"
     fresh = [e for e in record["start_effects"].values() if e["target"] == _WORKER_UNIT]
     assert len(fresh) == 1 and fresh[0]["result"] is None
+
+
+_PLANE_UNIT = "claudlobby-plane-daemon.service"
+_MANAGER_UNIT = "com.example.manager.service"
+_KEEPALIVE_TIMER = "claudlobby-keepalive.timer"
+
+
+def _after_reset(host, monkeypatch, targets):
+    """What a reset leaves once the operator stops and resets each candidate:
+    loaded but inactive, and the plane socket down."""
+    for target in targets:
+        host.states[target] = "enabled loaded inactive"
+    monkeypatch.setattr(activation, "_plane_state", lambda _root: "down")
+
+
+def _host_reset(cold, monkeypatch):
+    """A watchdog reset mid bots_started: every started candidate process is gone.
+
+    The plane daemon and the manager started with results, the worker's start
+    has none, and afterwards nothing runs and the plane socket is down.
+    """
+    stranded = _failed_worker_start(cold).body
+    assert {e["target"]: e["result"] is not None for e in stranded["start_effects"].values()} == {
+        _PLANE_UNIT: True, _MANAGER_UNIT: True, _WORKER_UNIT: False}
+    _after_reset(cold[3], monkeypatch, (_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT))
+    return stranded
+
+
+def _rewrite(root, change):
+    """Edit the record body in place, as a corrupt or partial record would read."""
+    with state.locked_activation(root) as store:
+        record = state.read_activation(root, "cold")
+        change(store, record.body)
+        store._save(record)
+    return state.read_activation(root, "cold").body
+
+
+def test_host_reset_repair_archives_every_dead_start_then_resume_starts_them_once(cold, monkeypatch):
+    root, _, plan, host = cold
+    stranded = _host_reset(cold, monkeypatch)
+    starts = list(host.starts)
+    repaired = activation.repair_starts_after_host_reset(root, "cold", reason="watchdog reset", adapter=host)
+    assert host.starts == starts  # The repair itself starts nothing.
+    assert repaired.archived_targets == tuple(sorted([_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT]))
+    body = repaired.record.body
+    assert body["pending"] == "ingest_started" and body["start_effects"] == {}
+    assert body["completed"] == list(state.STEPS[:state.STEPS.index("ingest_started")])
+    assert not {"ingest_started", "bots_started"} & set(body["evidence"])
+    archived = body["start_repairs"]
+    assert sorted(r["attempt"]["target"] for r in archived) == list(repaired.archived_targets)
+    assert all(r["kind"] == "host_reset" and r["reason"] == "watchdog reset" for r in archived)
+    assert all(r["host_boot"] == activation._host_boot() for r in archived)
+    assert all(r["attempt"] == stranded["start_effects"][r["source"]] for r in archived)
+    assert all(r["dead_evidence"]["details"]["native"] == "inactive\tno-cgroup-witness" for r in archived)
+    bots = [r for r in archived if r["attempt"]["phase"] == "bots"]
+    assert all(r["dead_evidence"]["details"]["socket_state"] == "absent" for r in bots)
+    # Everything else the resume needs survives: selection, publication, identity.
+    kept = ("intent", "previous_selection", "start_phases", "identity_bindings")
+    assert all(body[key] == stranded[key] for key in kept)
+    with pytest.raises(state.ActivationRefusal, match="no candidate start is recorded"):
+        activation.repair_starts_after_host_reset(root, "cold", reason="again", adapter=host)
+    host.fail_bot = None
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active" and tuple(resumed.body["completed"]) == state.STEPS
+    assert host.starts == starts + [_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT, _KEEPALIVE_TIMER]
+    assert resumed.body["start_repairs"] == archived
+    assert all(e["result"] is not None for e in resumed.body["start_effects"].values())
+
+
+def _stray_fence(_store, body):
+    effects = body["start_effects"]
+    plane = next(source for source, effect in effects.items() if effect["phase"] == "ingest")
+    effects[plane]["fence"] = {"ceiling": 210, "fence": "RR_FENCE_stray"}
+
+
+def _oneshot_producer(store, body):
+    service = next(entry for entry in activation.enrollment.candidate_entries(store, "cold", "producers")
+                   if entry["target"] == "claudlobby-keepalive.service")
+    body["start_effects"][service["source"]] = {"phase": "producers", "target": service["target"],
+                                                "sha256": service["after"]["sha256"], "fence": None,
+                                                "result": None}
+
+
+def _unrecorded_worker(_store, body):
+    # The reset landed before the worker's start intent was durable.
+    effects = body["start_effects"]
+    del effects[next(s for s, effect in effects.items() if effect["target"] == _WORKER_UNIT)]
+
+
+@pytest.mark.parametrize("case, message", [
+    ("serving", "plane socket is serving, not down"),
+    ("hung", "plane socket is unanswered, not down"),
+    ("live-bot", f"not quiet.*not quiescent: {_MANAGER_UNIT}"),
+    ("live-plane", f"not quiet.*not quiescent: {_PLANE_UNIT}"),
+    ("two-live", f"not quiescent: {_MANAGER_UNIT}; candidate target is not quiescent: {_PLANE_UNIT}"),
+    ("unrecorded", f"not quiet.*not quiescent: {_WORKER_UNIT}"),
+    ("hosted", "hosted or cannot be proved external"),
+    ("reason", "short reason on one printable line"),
+    ("locked", "holds the lock"),
+    ("stray-fence", f"recorded start of {_PLANE_UNIT} differs from frozen publication"),
+    ("oneshot", "one-shot producer start of claudlobby-keepalive.service has an unknown effect"),
+])
+def test_host_reset_repair_refuses_unless_every_start_is_proved_dead(cold, monkeypatch, case, message):
+    root, _, _, host = cold
+    stranded = _host_reset(cold, monkeypatch)
+    if case in ("serving", "hung"):
+        plane = "serving" if case == "serving" else "unanswered"
+        monkeypatch.setattr(activation, "_plane_state", lambda _root: plane)
+    elif case in ("live-bot", "live-plane", "two-live"):
+        live = {"live-bot": (_MANAGER_UNIT,), "live-plane": (_PLANE_UNIT,)}.get(case, (_PLANE_UNIT, _MANAGER_UNIT))
+        for unit in live:
+            host.states[unit] = "enabled loaded active"
+    elif case == "unrecorded":
+        stranded = _rewrite(root, _unrecorded_worker)
+        host.states[_WORKER_UNIT] = "enabled loaded failed"  # Looping on admission refusals.
+    elif case == "hosted":
+        host.external_result = 1
+    elif case in ("stray-fence", "oneshot"):
+        stranded = _rewrite(root, _stray_fence if case == "stray-fence" else _oneshot_producer)
+    starts = list(host.starts)
+    reason = "two\nlines" if case == "reason" else "watchdog reset"
+    lock = (state.locked_activation(root) if case == "locked" else nullcontext())
+    with lock, pytest.raises(state.ActivationRefusal, match=message):
+        activation.repair_starts_after_host_reset(root, "cold", reason=reason, adapter=host)
+    assert state.read_activation(root, "cold").body == stranded  # Nothing changed.
+    assert host.starts == starts
+
+
+def test_host_reset_repair_reopens_a_failed_verification(cold, monkeypatch):
+    """A reset after bots_started leaves verified next with nothing pending."""
+    root, _, plan, host = cold
+
+    def lost(*_args, **_kwargs):
+        raise state.ActivationError("candidate bot lost readiness before producer admission")
+
+    verify = activation._verify_candidate_startup
+    monkeypatch.setattr(activation, "_verify_candidate_startup", lost)
+    with pytest.raises(state.ActivationError, match="lost readiness"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation, "_verify_candidate_startup", verify)
+    stopped = state.read_activation(root, "cold")
+    assert activation.resumable_running_step(stopped) == "verified"
+    assert stopped.body["pending"] in (None, "verified")
+    _after_reset(host, monkeypatch, (_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT))
+    repaired = activation.repair_starts_after_host_reset(root, "cold", reason="reset", adapter=host)
+    assert repaired.record.body["pending"] == "ingest_started"
+    assert "bots_started" not in repaired.record.body["completed"]
+    assert len(repaired.archived_targets) == 3
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active"
+
+
+def test_host_reset_repair_recovers_a_reset_during_producers_resumed(cold, monkeypatch):
+    """The producer timer started, then the host reset before producers_resumed completed."""
+    root, _, plan, host = cold
+    verify = activation.enrollment.verify_candidate_enablement
+
+    def reset_during_producers(store, activation_id, phase, *, adapter):
+        if phase == "producers":
+            raise state.ActivationError("watchdog reset")
+        return verify(store, activation_id, phase, adapter=adapter)
+
+    monkeypatch.setattr(activation.enrollment, "verify_candidate_enablement", reset_during_producers)
+    with pytest.raises(state.ActivationError, match="watchdog reset"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation.enrollment, "verify_candidate_enablement", verify)
+    stopped = state.read_activation(root, "cold").body
+    assert stopped["pending"] == "producers_resumed" and "producers" in stopped["start_phases"]
+    timer = next(e for e in stopped["start_effects"].values() if e["target"] == _KEEPALIVE_TIMER)
+    assert timer["result"] is not None
+    everything = (_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT, _KEEPALIVE_TIMER)
+    _after_reset(host, monkeypatch, everything[:-1])
+    host.states[_KEEPALIVE_TIMER] = "enabled loaded active"  # Enabled timers start again at boot.
+    with pytest.raises(state.ActivationRefusal, match=f"not quiescent: {_KEEPALIVE_TIMER}"):
+        activation.repair_starts_after_host_reset(root, "cold", reason="reset", adapter=host)
+    assert state.read_activation(root, "cold").body == stopped
+    _after_reset(host, monkeypatch, everything)  # The operator stops the timer too.
+    starts = list(host.starts)
+    repaired = activation.repair_starts_after_host_reset(root, "cold", reason="reset", adapter=host)
+    assert repaired.archived_targets == tuple(sorted(everything))
+    assert repaired.record.body["pending"] == "ingest_started"
+    assert repaired.record.body["start_phases"] == stopped["start_phases"]
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active" and tuple(resumed.body["completed"]) == state.STEPS
+    assert host.starts == starts + [_PLANE_UNIT, _MANAGER_UNIT, _WORKER_UNIT, _KEEPALIVE_TIMER]
+
+
+@pytest.mark.parametrize("change", ["partial", "mismatched", "abort-marker", "no-install-directory"])
+def test_host_reset_archive_takes_exactly_the_recorded_starts_of_a_resumable_record(cold, monkeypatch, change):
+    root = cold[0]
+    stranded = _host_reset(cold, monkeypatch)
+    effects = stranded["start_effects"]
+    attempts, evidence = effects, {source: {} for source in effects}
+    if change == "partial":
+        attempts = dict(list(effects.items())[:-1])
+        evidence = {source: {} for source in attempts}
+    elif change == "mismatched":
+        evidence = dict(list(evidence.items())[:-1])
+    elif change == "abort-marker":
+        stranded = _rewrite(root, lambda _store, body: body.update(adoption_abort={"reason": "fixture"}))
+    else:
+        stranded = _rewrite(root, lambda _store, body: body["intent"].pop("install_directory"))
+    with state.locked_activation(root) as store, pytest.raises(state.ActivationRefusal, match="not the admitted set"):
+        store.archive_starts_after_host_reset("cold", attempts=attempts, evidence=evidence,
+                                              reason="reset", repair_artifact="a", host_boot=None)
+    assert state.read_activation(root, "cold").body == stranded
+
+
+def test_host_boot_reads_the_kernel_or_sysctl_and_records_none_when_unreadable(monkeypatch):
+    linux = activation._host_boot()
+    assert linux is None or set(linux) == {"boot_id", "booted_at"}
+    answer = ["8C1F2B6A-0D0E-4C55-9C1E-2D7B9E1A0F33\n"]
+
+    def sysctl(argv, **_kwargs):
+        assert argv[-1] == "kern.bootsessionuuid"
+        if answer[0] is None:
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 0, answer[0], "")
+
+    monkeypatch.setattr(activation.sys, "platform", "darwin")
+    monkeypatch.setattr(activation.subprocess, "run", sysctl)
+    assert activation._host_boot() == {"boot_id": "8C1F2B6A-0D0E-4C55-9C1E-2D7B9E1A0F33", "booted_at": None}
+    for unreadable in ("\n", None):
+        answer[0] = unreadable
+        assert activation._host_boot() is None
 
 
 def test_selected_bindings_refuse_loss_foreign_scope_and_ambiguous_actors(cold):

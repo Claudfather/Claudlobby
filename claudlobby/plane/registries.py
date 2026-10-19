@@ -226,6 +226,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hook), moved off the retired transcript-digest-<date>.jsonl onto the
     # plane. Informational — the monitor's substrate, never an alert.
     "session_digest": "notice",
+    # #2145 F6: session-export records each sealed clauDNA segment. The old
+    # session_digest entry above stays so historical rows classify.
+    "session_summary": "notice",
+    # Record only; the independent alert door pages and records fleet_alert.
+    "export_stalled": "notice",
     # One Claude Code compaction, from its compact_boundary transcript row,
     # recorded once by the pulse (claudlobby.compactions, #2206).
     "compaction": "notice",

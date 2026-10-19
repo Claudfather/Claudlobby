@@ -516,12 +516,32 @@ class TestComposeFleetTimers:
         svc_text = svc.read_text()
         assert "Type=oneshot" in svc_text
         assert '"--fleet" "test-fleet" "fleet" "pulse"' in svc_text
+        # The unit's own limit: the 240 s ceiling plus the stop, the reap and the
+        # summary, then 1 s per systemd kill phase (#2347). Only the pulse has one.
+        assert "TimeoutStartSec=254" in svc_text and "TimeoutStopSec=1" in svc_text
+        keepalive = (timers_dir / "com.test.keepalive.service").read_text()
+        assert "TimeoutStartSec" not in keepalive
 
         timer_text = timer.read_text()
         # Every 300 s, anchored to the clock at minute 0 of each five (#1654).
         assert "OnCalendar=*-*-* *:00/5:" in timer_text and "-- tick every 300s" in timer_text
         assert "OnUnitActiveSec" not in timer_text
         assert "OnBootSec" not in timer_text
+
+    def test_the_pulse_units_limit_follows_a_configured_cap(self, tmp_path):
+        from claudlobby.composer import compose_fleet_timers
+        from claudlobby.config import FleetPulseConfig
+
+        fleet = FleetConfig(
+            manager="lead",
+            bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])},
+            name="test-fleet",
+            service_prefix="com.test",
+            fleet_pulse=FleetPulseConfig(timeout_s=600),
+        )
+        timers_dir = compose_fleet_timers(fleet, self._paths(tmp_path), _default_merged())
+        svc_text = (timers_dir / "com.test.fleet-pulse.service").read_text()
+        assert "TimeoutStartSec=614" in svc_text
 
     def test_timer_units_carry_telegram_group_chat_id(self, tmp_path):
         """Fleet timers carry the fleet Telegram group, so a scheduled job's
@@ -770,6 +790,7 @@ _ALL_JOB_NAMES = {
     "data-sweep",
     "task-recheck",
     "manager-checkin",
+    "session-export",
 }
 
 
