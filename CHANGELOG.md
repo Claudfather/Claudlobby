@@ -8,15 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added — a blocking check on every pull request for use-case-specific data (#2042)
 
-`.github/actions/leak-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
+`.github/actions/content-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
 
 - **Layer 1, generic patterns kept in the repository:** Telegram chat ids and bot tokens, GitHub and vendor API tokens, email addresses outside the reserved example domains, home paths, IPv4 addresses outside localhost and the documentation ranges, and UUIDs. The placeholders CLAUDE.md prescribes pass, and so do other obvious stand-ins.
-- **Layer 2, an operator's private list, only for authors who can already read it:** one case-insensitive pattern per line, from the `LEAK_CHECK_TERMS` Actions secret. It runs for a pull request whose head branch is in the repository, which only an author with write access can push, and not for Dependabot's runs, which receive no Actions secrets. There, an unset or empty secret fails the check closed after layer 1 has reported its hits, saying that a maintainer must set the secret and that nothing in the change caused it. Every other pull request gets layer 1 only: it never receives the secret, never fails for its absence, and says in one fixed line that layer 2 did not run.
+- **Layer 2, an operator's private list, only for authors who can already read it:** one case-insensitive pattern per line, from the `PRIVATE` Actions secret. It runs for a pull request whose head branch is in the repository, which only an author with write access can push, and not for Dependabot's runs. There, an unset or empty secret fails the check closed after layer 1 has reported its hits, saying that a maintainer must set the secret and that nothing in the change caused it. Every other pull request gets layer 1 only: it never receives the secret, never fails for its absence, and says in one fixed line that layer 2 did not run.
 - **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value. No warning from compiling the list is printed, since a warning can quote a pattern.
-- **The escape is visible:** `.github/leak-check-allow.txt` (`<path glob> <class> <reason>`), read from the base branch and never from the pull request, so an entry is reviewed and merged in a pull request of its own before it exempts anything. The private list has no escape.
+- **The escape is visible:** `.github/content-check-allow.txt` (`<path glob> <class> <reason>`), read from the base branch and never from the pull request, so an entry is reviewed and merged in a pull request of its own before it exempts anything. The private list has no escape.
 - **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit with `actions/checkout` pinned by commit, and reads the head as git objects, so no code from the pull request runs. One run at a time per pull request, for at most ten minutes. The other three repositories call the action pinned by sha.
 - **The diff is read by its own structure:** each hunk by its line counts, and in `--git` mode every path from git's own list, renames and binary files included. A binary file's bytes are checked against the private list only.
-- **Tests:** `tests/test_leak_check.py` covers:
+- **Tests:** `tests/test_content_check.py` covers:
   - a planted positive for each class, and an invented private term, each failing the check;
   - the placeholders, passing;
   - no matched text in any output;

@@ -1,4 +1,4 @@
-name: leak-check
+name: content-check
 
 # Every pull request's added lines, checked for use-case-specific data (#2042).
 # pull_request_target, so a pull request from a fork is checked too: this job
@@ -16,11 +16,11 @@ permissions:
 # The trigger skips the approval wait, so any pull request can start a job on
 # every push: one at a time per pull request, and bounded.
 concurrency:
-  group: leak-check-${{ github.event.pull_request.number }}
+  group: content-check-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  leak-check:
+  content-check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -29,8 +29,8 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/leak-check
+      - uses: ./.github/actions/content-check
         with:
           # The list goes only to a run whose private layer is on: the action's
           # own test, repeated here so that an outside run never holds it.
-          private-terms: ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id && github.actor != 'dependabot[bot]' && secrets.LEAK_CHECK_TERMS || '' }}
+          private-terms: ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id && github.actor != 'dependabot[bot]' && secrets.PRIVATE || '' }}

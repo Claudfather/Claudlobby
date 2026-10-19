@@ -1,4 +1,4 @@
-"""leak-check (#2042): the script behind .github/actions/leak-check, driven as CI runs it.
+"""content-check (#2042): the script behind .github/actions/content-check, driven as CI runs it.
 
 Every planted value is FAKE and built from fragments at run time, so this file
 never holds a string the check itself would flag. The private-list term is
@@ -18,10 +18,10 @@ from typing import NamedTuple
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / ".github" / "actions" / "leak-check" / "leak_check.py"
-spec = importlib.util.spec_from_file_location("leak_check", SCRIPT)
-lc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(lc)
+SCRIPT = REPO / ".github" / "actions" / "content-check" / "content_check.py"
+spec = importlib.util.spec_from_file_location("content_check", SCRIPT)
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
 
 INVENTED = "zqxv[ ._-]?wombat"  # an invented private-list pattern
 INVENTED_TEXT = "notes for Zqxv " + "Wombat, the account"  # holds it
@@ -84,10 +84,10 @@ def run(tmp_path, diff: str, terms: str | None = INVENTED, allow: str = "", extr
     env = {
         k: v
         for k, v in os.environ.items()
-        if k not in ("LEAK_CHECK_TERMS", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY")
+        if k not in ("CONTENT_CHECK_TERMS", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY")
     }
     if terms is not None:
-        env["LEAK_CHECK_TERMS"] = terms
+        env["CONTENT_CHECK_TERMS"] = terms
     if summary is not None:
         env["GITHUB_STEP_SUMMARY"] = str(summary)
     p = subprocess.run(
@@ -108,7 +108,7 @@ def test_each_layer1_class_fires_on_its_planted_positive(tmp_path, cls):
 
 
 def test_every_class_is_planted():
-    assert set(PLANTED) == set(lc.CLASSES)
+    assert set(PLANTED) == set(cc.CLASSES)
 
 
 def test_the_private_list_fires_on_an_invented_term(tmp_path):
@@ -119,7 +119,7 @@ def test_the_private_list_fires_on_an_invented_term(tmp_path):
 def test_a_failing_check_says_what_to_do_and_a_passing_one_says_nothing(tmp_path):
     rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT, PLANTED["email"]))
     assert rc == 1
-    advice = [ln for ln in out.splitlines() if ln.startswith("leak-check: replace each value")]
+    advice = [ln for ln in out.splitlines() if ln.startswith("content-check: replace each value")]
     assert len(advice) == 1, out
     assert "allow.txt as `<path glob> <class> <reason>`" in advice[0]
     assert "A private term cannot be allowed" in advice[0]
@@ -157,7 +157,7 @@ def test_no_matched_text_and_no_pattern_ever_reaches_the_output(tmp_path):
 def test_no_list_is_loud_and_fails_closed(tmp_path):
     for terms in (None, "", "# only a comment\n\n"):
         rc, out, err = run(tmp_path, diff_of("ok line"), terms=terms)
-        assert rc == 2 and "NOT ARMED" in err and "LEAK_CHECK_TERMS" in err, (
+        assert rc == 2 and "NOT ARMED" in err and "the PRIVATE Actions secret" in err, (
             terms,
             err,
         )
@@ -172,11 +172,11 @@ def test_no_list_is_loud_and_fails_closed(tmp_path):
 
 def test_unarmed_still_reports_layer1_hits_before_it_fails(tmp_path):
     """No list: layer 1 runs and its hits are printed above the NOT ARMED
-    failure, so a contributor still sees the leaks they can fix."""
+    failure, so a contributor still sees the hits they can fix."""
     d = tmp_path / "change.diff"
     d.write_text(diff_of("ok line", PLANTED["email"]))
     env = {k: v for k, v in os.environ.items()
-           if k not in ("LEAK_CHECK_TERMS", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY")}
+           if k not in ("CONTENT_CHECK_TERMS", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY")}
     p = subprocess.run([sys.executable, str(SCRIPT), "--diff", str(d), "--allow", str(tmp_path / "none")],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, timeout=60)
     assert p.returncode == 2, p.stdout
@@ -184,7 +184,7 @@ def test_unarmed_still_reports_layer1_hits_before_it_fails(tmp_path):
     hit = lines.index("docs/notes.md:2: email")
     failure = next(i for i, ln in enumerate(lines) if "NOT ARMED" in ln)
     assert hit < failure, p.stdout
-    assert any(ln.startswith("leak-check: replace each value") for ln in lines[:failure])
+    assert any(ln.startswith("content-check: replace each value") for ln in lines[:failure])
 
 
 def test_an_address_at_a_target_domain_is_still_an_address(tmp_path):
@@ -267,7 +267,7 @@ def test_in_actions_each_hit_is_an_annotation_without_its_text(tmp_path):
     summary = tmp_path / "summary.md"
     env = dict(
         os.environ,
-        LEAK_CHECK_TERMS=INVENTED,
+        CONTENT_CHECK_TERMS=INVENTED,
         GITHUB_ACTIONS="true",
         GITHUB_STEP_SUMMARY=str(summary),
     )
@@ -286,8 +286,8 @@ def test_in_actions_each_hit_is_an_annotation_without_its_text(tmp_path):
         timeout=60,
     )
     assert p.returncode == 1
-    assert "::error file=docs/notes.md,line=1::leak-check: private term #1" in p.stdout
-    assert "::error file=docs/notes.md,line=2::leak-check: email" in p.stdout
+    assert "::error file=docs/notes.md,line=1::content-check: private term #1" in p.stdout
+    assert "::error file=docs/notes.md,line=2::content-check: email" in p.stdout
     text = p.stdout + p.stderr + summary.read_text()
     assert "wombat" not in text.lower() and "fastmail" not in text
 
@@ -299,7 +299,7 @@ def test_git_mode_reads_the_change_as_data_and_its_allowlist_from_base(tmp_path)
     (tmp_path / "a.md").write_text(PLANTED["email"] + "\n")  # already committed: never read
     base = _commit(g, env, "base")
     (tmp_path / ".github").mkdir()
-    (tmp_path / ".github" / "leak-check-allow.txt").write_text("*.json uuid synthetic fixture\n")
+    (tmp_path / ".github" / "content-check-allow.txt").write_text("*.json uuid synthetic fixture\n")
     merged_first = _commit(g, env, "the entry, merged first")
     (tmp_path / "b.json").write_text(PLANTED["uuid"] + "\n")
     _commit(g, env, "change")
@@ -351,7 +351,7 @@ def _commit(g, env, msg):
 
 def _check_git(tmp_path, base, env, extra=()):
     e = {k: v for k, v in env.items() if k != "GITHUB_ACTIONS"}
-    e["LEAK_CHECK_TERMS"] = INVENTED
+    e["CONTENT_CHECK_TERMS"] = INVENTED
     return subprocess.run([sys.executable, str(SCRIPT), "--git", base, "HEAD", *extra],
                           capture_output=True, text=True, env=e, cwd=tmp_path, timeout=60)
 
@@ -377,7 +377,7 @@ def test_a_change_that_edits_the_allowlist_says_so(tmp_path):
     (tmp_path / "a.md").write_text("plain\n")
     base = _commit(g, env, "base")
     (tmp_path / ".github").mkdir()
-    (tmp_path / ".github" / "leak-check-allow.txt").write_text("*.json uuid synthetic\n")
+    (tmp_path / ".github" / "content-check-allow.txt").write_text("*.json uuid synthetic\n")
     _commit(g, env, "allow")
     p = _check_git(tmp_path, base, env)
     assert p.returncode == 0 and "edits the allowlist" in p.stdout
@@ -387,11 +387,11 @@ def test_a_change_that_edits_the_allowlist_says_so(tmp_path):
 def test_annotation_values_are_escaped(tmp_path):
     d = tmp_path / "change.diff"
     d.write_text(diff_of(PLANTED["uuid"], path="docs/a,b:c%d.md"))
-    env = dict(os.environ, LEAK_CHECK_TERMS=INVENTED, GITHUB_ACTIONS="true")
+    env = dict(os.environ, CONTENT_CHECK_TERMS=INVENTED, GITHUB_ACTIONS="true")
     env.pop("GITHUB_STEP_SUMMARY", None)
     p = subprocess.run([sys.executable, str(SCRIPT), "--diff", str(d), "--allow", str(tmp_path / "none")],
                        capture_output=True, text=True, env=env, timeout=60)
-    assert "::error file=docs/a%2Cb%3Ac%25d.md,line=1::leak-check: uuid" in p.stdout, p.stdout
+    assert "::error file=docs/a%2Cb%3Ac%25d.md,line=1::content-check: uuid" in p.stdout, p.stdout
 
 
 def test_the_workflow_keeps_its_own_safety_properties():
@@ -400,11 +400,11 @@ def test_the_workflow_keeps_its_own_safety_properties():
     expanded into a shell line."""
     import yaml
 
-    wf = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())
+    wf = yaml.safe_load((REPO / ".github" / "workflows" / "content-check.yml").read_text())
     on = wf.get("on", wf.get(True))
     assert set(on) == {"pull_request_target"}
     assert wf["permissions"] == {"contents": "read"}
-    steps = wf["jobs"]["leak-check"]["steps"]
+    steps = wf["jobs"]["content-check"]["steps"]
     checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert checkout["with"]["persist-credentials"] is False
@@ -419,21 +419,21 @@ def test_nothing_from_the_pull_request_is_checked_out_or_run():
     taken from that checkout, and the head fetched as git objects to be diffed."""
     import yaml
 
-    wf = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())
-    job = wf["jobs"]["leak-check"]
+    wf = yaml.safe_load((REPO / ".github" / "workflows" / "content-check.yml").read_text())
+    job = wf["jobs"]["content-check"]
     assert "permissions" not in job  # the workflow's `contents: read` is the job's
     steps = job["steps"]
     uses = [str(s.get("uses", "")) for s in steps]
     checkouts = [u for u in uses if u.startswith("actions/checkout")]
     assert len(checkouts) == 1 and re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkouts[0]), checkouts
-    assert uses.index("./.github/actions/leak-check") > uses.index(checkouts[0])
+    assert uses.index("./.github/actions/content-check") > uses.index(checkouts[0])
     assert not [u for u in uses if u.startswith(("actions/cache", "actions/upload-artifact"))]
     action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
     runs = [str(s.get("run", "")) for s in steps + action["runs"]["steps"]]
     verbs = r"\bgit\s+(?:checkout|switch|worktree|reset|merge|pull|apply|am|cherry-pick|submodule)\b"
     assert not [r for r in runs if re.search(verbs, r)], runs
-    assert [r for r in runs if "refs/pull/${PR}/head:refs/leak-check/head" in r]
-    assert [r for r in runs if r.startswith('python3 "$GITHUB_ACTION_PATH/leak_check.py"')]
+    assert [r for r in runs if "refs/pull/${PR}/head:refs/content-check/head" in r]
+    assert [r for r in runs if r.startswith('python3 "$GITHUB_ACTION_PATH/content_check.py"')]
 
 
 def test_no_diff_driver_runs_even_when_git_configuration_names_one(tmp_path):
@@ -464,11 +464,11 @@ def test_the_action_never_traces_or_echoes_the_list():
     only: no `set -x`, and the secret is never expanded into a shell line."""
     action = (SCRIPT.parent / "action.yml").read_text()
     assert "set -x" not in action and "xtrace" not in action
-    assert "LEAK_CHECK_TERMS: ${{ inputs.private-terms }}" in action
+    assert "CONTENT_CHECK_TERMS: ${{ inputs.private-terms }}" in action
     run_lines = [
         ln
         for ln in action.splitlines()
-        if "private-terms" in ln and "LEAK_CHECK_TERMS" not in ln
+        if "private-terms" in ln and "CONTENT_CHECK_TERMS" not in ln
     ]
     assert all("run:" not in ln and "echo" not in ln for ln in run_lines)
 
@@ -563,7 +563,7 @@ def test_all_mode_reads_text_and_binary_files(tmp_path):
     (tmp_path / "b.bin").write_bytes(b"\x00" + INVENTED_TEXT.encode())
     _commit(g, env, "tip")
     e = _git_env(tmp_path)
-    e["LEAK_CHECK_TERMS"] = INVENTED
+    e["CONTENT_CHECK_TERMS"] = INVENTED
     p = subprocess.run([sys.executable, str(SCRIPT), "--all", "--allow", "none"],
                        capture_output=True, text=True, env=e, cwd=tmp_path, timeout=60)
     assert p.returncode == 1, p.stdout + p.stderr
@@ -582,7 +582,7 @@ def test_a_write_access_run_arms_layer_2_and_fails_closed_without_its_list(tmp_p
     on = ["--private-layer", "on"]
     rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT), extra=on)
     assert rc == 1 and "docs/notes.md:2: private term #1" in out, (out, err)
-    assert lc.PRIVATE_OFF not in out
+    assert cc.PRIVATE_OFF not in out
     rc, out, err = run(tmp_path, diff_of("ok line"), terms=None, extra=on)
     assert rc == 2 and "NOT ARMED" in err, (out, err)
 
@@ -597,8 +597,8 @@ def test_an_outside_run_reads_no_list_and_never_fails_unarmed(tmp_path, terms):
     rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT), terms=terms, extra=OFF, summary=summary)
     assert rc == 0, (out, err)
     assert "private term" not in out and "NOT ARMED" not in err and "pattern #" not in err
-    assert out.splitlines().count("leak-check: " + lc.PRIVATE_OFF) == 1, out
-    assert summary.read_text().count(lc.PRIVATE_OFF) == 1
+    assert out.splitlines().count("content-check: " + cc.PRIVATE_OFF) == 1, out
+    assert summary.read_text().count(cc.PRIVATE_OFF) == 1
     rc, out, err = run(tmp_path, diff_of("ok line", PLANTED["email"]), terms=terms, extra=OFF)
     assert rc == 1 and "docs/notes.md:2: email" in out, (out, err)
 
@@ -643,45 +643,45 @@ def test_the_workflow_and_the_action_keep_exactly_their_reviewed_shape():
     two copies of the private-layer test are one string."""
     import yaml
 
-    wf = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())
+    wf = yaml.safe_load((REPO / ".github" / "workflows" / "content-check.yml").read_text())
     assert _without_descriptions(wf) == {
-        "name": "leak-check",
+        "name": "content-check",
         True: {"pull_request_target": {"types": ["opened", "synchronize", "reopened"]}},  # YAML 1.1: `on` is true
         "permissions": {"contents": "read"},
-        "concurrency": {"group": "leak-check-${{ github.event.pull_request.number }}", "cancel-in-progress": True},
-        "jobs": {"leak-check": {
+        "concurrency": {"group": "content-check-${{ github.event.pull_request.number }}", "cancel-in-progress": True},
+        "jobs": {"content-check": {
             "runs-on": "ubuntu-latest",
             "timeout-minutes": 10,
             "steps": [
                 {"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
                  "with": {"ref": "${{ github.event.pull_request.base.sha }}", "fetch-depth": 0,
                           "persist-credentials": False}},
-                {"uses": "./.github/actions/leak-check",
-                 "with": {"private-terms": "${{ " + SAME_REPO + " && secrets.LEAK_CHECK_TERMS || '' }}"}},
+                {"uses": "./.github/actions/content-check",
+                 "with": {"private-terms": "${{ " + SAME_REPO + " && secrets.PRIVATE || '' }}"}},
             ],
         }},
     }
     action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
     assert _without_descriptions(action) == {
-        "name": "leak-check",
+        "name": "content-check",
         "inputs": {
             "private-terms": {"required": False, "default": ""},
-            "allowlist": {"required": False, "default": ".github/leak-check-allow.txt"},
+            "allowlist": {"required": False, "default": ".github/content-check-allow.txt"},
         },
         "runs": {"using": "composite", "steps": [
             {"name": "Fetch the pull request as data", "shell": "bash",
              "env": {"PR": "${{ github.event.pull_request.number }}"},
              "run": 'if [ -z "$PR" ]; then\n'
-                    '  echo "::error::leak-check runs on pull_request_target: no pull request in this event"\n'
+                    '  echo "::error::content-check runs on pull_request_target: no pull request in this event"\n'
                     "  exit 2\n"
                     "fi\n"
-                    'git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/leak-check/head"\n'},
+                    'git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/content-check/head"\n'},
             {"name": "Check the added lines", "shell": "bash",
-             "env": {"LEAK_CHECK_TERMS": "${{ inputs.private-terms }}",
+             "env": {"CONTENT_CHECK_TERMS": "${{ inputs.private-terms }}",
                      "PRIVATE_LAYER": "${{ " + SAME_REPO + " && 'on' || 'off' }}",
                      "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                      "ALLOW": "${{ inputs.allowlist }}"},
-             "run": 'python3 "$GITHUB_ACTION_PATH/leak_check.py" --git "$BASE_SHA" refs/leak-check/head'
+             "run": 'python3 "$GITHUB_ACTION_PATH/content_check.py" --git "$BASE_SHA" refs/content-check/head'
                     ' --allow "$ALLOW" --private-layer "$PRIVATE_LAYER"'},
         ]},
     }
@@ -758,10 +758,10 @@ def _run_the_action(tmp_path, head_files, head_repo, actor="maintainer", secret=
             "base": {"sha": base, "repo": {"id": 1001}},
             "head": {"sha": head, "repo": None if head_repo is None else {"id": head_repo}},
         }}},
-        "secrets": {} if secret is None else {"LEAK_CHECK_TERMS": secret},
+        "secrets": {} if secret is None else {"PRIVATE": secret},
     }
-    checkout, call = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())[
-        "jobs"]["leak-check"]["steps"]
+    checkout, call = yaml.safe_load((REPO / ".github" / "workflows" / "content-check.yml").read_text())[
+        "jobs"]["content-check"]["steps"]
     subprocess.run(["git", "clone", "-q", str(origin), str(ws)], check=True, env=env)
     subprocess.run(["git", "-C", str(ws), "checkout", "-q", "--detach", _gh_value(checkout["with"]["ref"], ctx)],
                    check=True, env=env)
@@ -790,7 +790,7 @@ def test_end_to_end_a_write_access_run_checks_both_layers(tmp_path):
     head's added lines only, and without the list the check fails closed."""
     r = _run_the_action(tmp_path / "1", {"b.md": "ok\n" + INVENTED_TEXT + "\n"}, head_repo=1001, secret=INVENTED)
     assert r.rc == 1 and "b.md:2: private term #1" in r.out, (r.out, r.err)
-    assert r.inputs["private-terms"] == INVENTED and "a.md" not in r.out and lc.PRIVATE_OFF not in r.out
+    assert r.inputs["private-terms"] == INVENTED and "a.md" not in r.out and cc.PRIVATE_OFF not in r.out
     r = _run_the_action(tmp_path / "2", {"b.md": "ok\n"}, head_repo=1001)
     assert r.rc == 2 and "NOT ARMED" in r.err, (r.out, r.err)
 
@@ -798,20 +798,18 @@ def test_end_to_end_a_write_access_run_checks_both_layers(tmp_path):
 @pytest.mark.parametrize("head_repo, actor", [(2002, "outsider"), (None, "outsider"), (1001, "dependabot[bot]")],
                          ids=["fork", "deleted fork", "dependabot"])
 def test_end_to_end_an_outside_run_never_holds_the_list(tmp_path, head_repo, actor):
-    """A fork, a deleted fork, and Dependabot, which pushes branches here but
-    whose runs receive no Actions secrets. Each is handed the list anyway (for
-    Dependabot, as if a Dependabot secret had the same name): it never reaches
-    the action, layer 2 does not run and says so, and nothing fails for want
-    of it."""
+    """A fork, a deleted fork, and Dependabot, which pushes branches here. Each
+    is handed the list anyway: it never reaches the action, layer 2 does not
+    run and says so, and nothing fails for want of it."""
     r = _run_the_action(tmp_path, {"b.md": "ok\n" + INVENTED_TEXT + "\n"}, head_repo=head_repo, actor=actor,
                         secret=INVENTED)
     assert r.rc == 0, (r.out, r.err)
     assert r.inputs["private-terms"] == "" and "private term" not in r.out and "NOT ARMED" not in r.err
-    assert "leak-check: " + lc.PRIVATE_OFF in r.out and lc.PRIVATE_OFF in r.summary
+    assert "content-check: " + cc.PRIVATE_OFF in r.out and cc.PRIVATE_OFF in r.summary
 
 
 def test_end_to_end_a_fork_s_own_allowlist_cannot_silence_its_hit(tmp_path):
-    head = {"b.json": PLANTED["uuid"] + "\n", ".github/leak-check-allow.txt": "*.json uuid synthetic fixture\n"}
+    head = {"b.json": PLANTED["uuid"] + "\n", ".github/content-check-allow.txt": "*.json uuid synthetic fixture\n"}
     r = _run_the_action(tmp_path, head, head_repo=2002, actor="outsider", secret=INVENTED)
     assert r.rc == 1 and "b.json:1: uuid" in r.out, (r.out, r.err)
     assert "an entry takes effect only once merged" in r.out

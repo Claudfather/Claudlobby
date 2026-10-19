@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""leak-check: refuse a change that adds use-case-specific data (#2042).
+"""content-check: refuse a change that adds use-case-specific data (#2042).
 
 Two layers, one verdict:
 
 1. Generic patterns, kept here: Telegram chat ids and bot tokens, GitHub and
    vendor API tokens, email addresses outside the reserved example domains,
    home paths, IPv4 addresses outside localhost and the documentation ranges,
-   and UUIDs. The spec is CLAUDE.md's "No PII in committed assets".
+   and UUIDs. The spec is CLAUDE.md's list of what no committed file may hold.
 2. An operator's private terms, which never go in a repository: one
    case-insensitive regular expression per line (``#`` starts a comment line),
-   read from the environment variable ``LEAK_CHECK_TERMS`` (an Actions secret).
+   read from the environment variable ``CONTENT_CHECK_TERMS``, which the
+   workflow fills from the ``PRIVATE`` Actions secret.
    ``--private-layer off`` skips this layer without reading the variable, even
    when it is set, and says so in one fixed line. The action passes it for
    every pull request whose author cannot already read the secret, since a hit
@@ -38,9 +39,9 @@ contributor sees what they can fix; only then does the check fail, saying that a
 maintainer must set the list and that nothing in the change caused it.
 
 usage:
-  leak_check.py --git BASE HEAD [--allow PATH] [--terms-optional] [--private-layer on|off]
-  leak_check.py --diff FILE [--allow FILE] [--terms-optional] [--private-layer on|off]
-  leak_check.py --all [--allow FILE] [--terms-optional] [--private-layer on|off]
+  content_check.py --git BASE HEAD [--allow PATH] [--terms-optional] [--private-layer on|off]
+  content_check.py --diff FILE [--allow FILE] [--terms-optional] [--private-layer on|off]
+  content_check.py --all [--allow FILE] [--terms-optional] [--private-layer on|off]
 exit: 0 clean, 1 hits, 2 could not check.
 """
 
@@ -271,7 +272,7 @@ def load_terms(raw: str | None, required: bool) -> list[re.Pattern]:
         if required:
             raise NotArmed(
                 "layer 2 is NOT ARMED: the private list is empty or unset, so no private term "
-                "was checked. A maintainer must set the LEAK_CHECK_TERMS Actions secret (one "
+                "was checked. A maintainer must set the PRIVATE Actions secret (one "
                 "case-insensitive pattern per line); nothing in this change caused this."
             )
         return []
@@ -474,7 +475,7 @@ def all_files():
             text = data.decode("utf-8", "replace")
             lines += [(path, n, ln) for n, ln in enumerate(text.split("\n"), 1)]
     if missing:
-        print(f"leak-check: {missing} tracked file(s) missing from the working tree were not read",
+        print(f"content-check: {missing} tracked file(s) missing from the working tree were not read",
               file=sys.stderr)
     return lines, paths, blobs
 
@@ -557,9 +558,9 @@ def note_allowlist_edit(allow_path: str, paths, out=sys.stdout) -> None:
     if rel not in paths:
         return
     text = "this change edits the allowlist: an entry takes effect only once merged; review its entries"
-    print(f"leak-check: {text} ({_shown(rel)})", file=out)
+    print(f"content-check: {text} ({_shown(rel)})", file=out)
     if _in_actions():
-        print(f"::notice file={_prop(rel)}::{_msg('leak-check: ' + text)}", file=out)
+        print(f"::notice file={_prop(rel)}::{_msg('content-check: ' + text)}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
@@ -572,11 +573,11 @@ PRIVATE_OFF = "layer 2 did not run: the private list is not checked for this aut
 
 def private_layer_off(out=sys.stdout) -> None:
     """One fixed line, in the log and the step summary, whatever the change holds."""
-    print(f"leak-check: {PRIVATE_OFF}", file=out)
+    print(f"content-check: {PRIVATE_OFF}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
-            fh.write(f"**leak-check:** {PRIVATE_OFF}.\n\n")
+            fh.write(f"**content-check:** {PRIVATE_OFF}.\n\n")
 
 
 def report(hits, out=sys.stdout) -> None:
@@ -586,16 +587,16 @@ def report(hits, out=sys.stdout) -> None:
         print(f"{where}: {label}", file=out)
         if _in_actions():
             line = f",line={n}" if n > 0 else ""
-            print(f"::error file={_prop(path)}{line}::{_msg('leak-check: ' + label)}", file=out)
+            print(f"::error file={_prop(path)}{line}::{_msg('content-check: ' + label)}", file=out)
     counts = {}
     for _, _, label in hits:
         counts[label] = counts.get(label, 0) + 1
     summary = ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"
-    print(f"leak-check: {len(hits)} hit(s): {summary}", file=out)
+    print(f"content-check: {len(hits)} hit(s): {summary}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
-            fh.write("### leak-check\n\n")
+            fh.write("### content-check\n\n")
             fh.write("| rule | hits |\n|---|---|\n")
             for k, v in sorted(counts.items()):
                 fh.write(f"| {k} | {v} |\n")
@@ -610,7 +611,7 @@ def advise(allow_path: str, out=sys.stdout) -> None:
             f"the check reads that file from the base branch, so the entry must be merged first, "
             f"in a pull request of its own. A private term cannot be allowed: if you think one is "
             f"wrong, ask a maintainer, who can see the list.")
-    print(f"leak-check: {text}", file=out)
+    print(f"content-check: {text}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
@@ -620,9 +621,9 @@ def advise(allow_path: str, out=sys.stdout) -> None:
 def cannot_check(exc: CannotCheck) -> int:
     """Exit 2, saying why, after whatever was already reported."""
     sys.stdout.flush()  # the hits above stay above the failure in a merged log
-    print(f"leak-check: CANNOT CHECK: {exc}", file=sys.stderr)
+    print(f"content-check: CANNOT CHECK: {exc}", file=sys.stderr)
     if _in_actions():
-        print(f"::error::{_msg('leak-check: ' + str(exc))}", file=sys.stderr)
+        print(f"::error::{_msg('content-check: ' + str(exc))}", file=sys.stderr)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
@@ -636,7 +637,7 @@ def main(argv=None) -> int:
     src.add_argument("--git", nargs=2, metavar=("BASE", "HEAD"))
     src.add_argument("--diff", metavar="FILE")
     src.add_argument("--all", action="store_true")
-    ap.add_argument("--allow", default=".github/leak-check-allow.txt",
+    ap.add_argument("--allow", default=".github/content-check-allow.txt",
                     help="allowlist path; with --git it is read from BASE, never from HEAD")
     ap.add_argument("--terms-optional", action="store_true",
                     help="run layer 1 alone when no private list is set (local runs)")
@@ -649,7 +650,7 @@ def main(argv=None) -> int:
             terms = []
         else:
             try:
-                terms = load_terms(os.environ.get("LEAK_CHECK_TERMS"), required=not args.terms_optional)
+                terms = load_terms(os.environ.get("CONTENT_CHECK_TERMS"), required=not args.terms_optional)
             except NotArmed as exc:
                 terms, unarmed = [], exc  # layer 1 still runs and reports first
         if args.git:
@@ -679,12 +680,12 @@ def main(argv=None) -> int:
     if args.private_layer == "off":
         private_layer_off()
     elif not terms and unarmed is None:
-        print("leak-check: layer 2 not armed (--terms-optional): layer 1 only", file=sys.stderr)
+        print("content-check: layer 2 not armed (--terms-optional): layer 1 only", file=sys.stderr)
     if binaries:
         how = ("not checked: the diff does not carry their content" if blobs is None
                else "their bytes checked against the private list only" if terms
                else "not checked: only the private list reads their bytes, and it did not run")
-        print(f"leak-check: {len(binaries)} binary file(s): {how}", file=sys.stderr)
+        print(f"content-check: {len(binaries)} binary file(s): {how}", file=sys.stderr)
     if not args.all:
         note_allowlist_edit(args.allow, paths)
     hits = scan(lines, paths, allow, terms, blobs or ())

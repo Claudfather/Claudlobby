@@ -1,4 +1,4 @@
-name: leak-check
+name: content-check
 description: >-
   Refuse a pull request that adds use-case-specific data (#2042): generic
   identifiers (layer 1) and an operator's private terms (layer 2, from an
@@ -7,7 +7,7 @@ description: >-
 inputs:
   private-terms:
     description: >-
-      The operator's private list: pass secrets.LEAK_CHECK_TERMS, and only to a
+      The operator's private list: pass secrets.PRIVATE, and only to a
       run whose private layer is on (the test in the check step below), so a run
       that does not use the list never holds it. One case-insensitive pattern
       per line, # for comments. Where the private layer is on, unset or empty
@@ -19,7 +19,7 @@ inputs:
       The repository's layer-1 allowlist, read from the base commit, never from
       the pull request: an entry takes effect once it is merged.
     required: false
-    default: .github/leak-check-allow.txt
+    default: .github/content-check-allow.txt
 runs:
   using: composite
   steps:
@@ -29,20 +29,20 @@ runs:
         PR: ${{ github.event.pull_request.number }}
       run: |
         if [ -z "$PR" ]; then
-          echo "::error::leak-check runs on pull_request_target: no pull request in this event"
+          echo "::error::content-check runs on pull_request_target: no pull request in this event"
           exit 2
         fi
-        git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/leak-check/head"
+        git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/content-check/head"
     - name: Check the added lines
       shell: bash
       env:
-        LEAK_CHECK_TERMS: ${{ inputs.private-terms }}
+        CONTENT_CHECK_TERMS: ${{ inputs.private-terms }}
         # The private layer is on only for a pull request whose head branch is
         # in this repository, which only an author with write access can push,
         # so its answers tell that author nothing they cannot already read. Ids,
         # not names: a deleted fork has no head repository and compares unequal.
-        # Dependabot's runs receive no Actions secrets, so they are off as well.
+        # Dependabot's runs are off as well.
         PRIVATE_LAYER: ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id && github.actor != 'dependabot[bot]' && 'on' || 'off' }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         ALLOW: ${{ inputs.allowlist }}
-      run: python3 "$GITHUB_ACTION_PATH/leak_check.py" --git "$BASE_SHA" refs/leak-check/head --allow "$ALLOW" --private-layer "$PRIVATE_LAYER"
+      run: python3 "$GITHUB_ACTION_PATH/content_check.py" --git "$BASE_SHA" refs/content-check/head --allow "$ALLOW" --private-layer "$PRIVATE_LAYER"
