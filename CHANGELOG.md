@@ -18,6 +18,27 @@ Nothing reported a bot's current context or recorded a compaction, so a manager 
   - An unreadable transcript records nothing, is named with its reason and keeps its cursor, so its rows wait for a pass that reads. Bytes appended past 8 MiB in one pass are skipped and counted.
 - **No bound yet.** A threshold that acts on the context is the operator's cost decision (#2206's proposal 3).
 
+### Added — a blocking check on every pull request for use-case-specific data (#2042)
+
+`.github/actions/content-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
+
+- **Layer 1, generic patterns kept in the repository:** Telegram chat ids and bot tokens, GitHub and vendor API tokens, email addresses outside the reserved example domains, home paths, IPv4 addresses outside localhost and the documentation ranges, and UUIDs. The placeholders CLAUDE.md prescribes pass, and so do other obvious stand-ins.
+- **Layer 2, an operator's private list, only for authors who can already read it:** one case-insensitive pattern per line, from the `PRIVATE` Actions secret. It runs for a pull request whose head branch is in the repository, which only an author with write access can push, and not for Dependabot's runs. There, an unset or empty secret fails the check closed after layer 1 has reported its hits, saying that a maintainer must set the secret and that nothing in the change caused it. Every other pull request gets layer 1 only: it never receives the secret, never fails for its absence, and says in one fixed line that layer 2 did not run.
+- **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value. No warning from compiling the list is printed, since a warning can quote a pattern.
+- **The escape is visible:** `.github/content-check-allow.txt` (`<path glob> <class> <reason>`), read from the base branch and never from the pull request, so an entry is reviewed and merged in a pull request of its own before it exempts anything. The private list has no escape.
+- **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit with `actions/checkout` pinned by commit, and reads the head as git objects, so no code from the pull request runs. One run at a time per pull request, for at most ten minutes. The other three repositories call the action pinned by sha.
+- **The diff is read by its own structure:** each hunk by its line counts, and in `--git` mode every path from git's own list, renames and binary files included. A binary file's bytes are checked against the private list only.
+- **Tests:** `tests/test_content_check.py` covers:
+  - a planted positive for each class, and an invented private term, each failing the check;
+  - the placeholders, passing;
+  - no matched text in any output;
+  - the fail-closed paths;
+  - the allowlist, read from the base, and a fork whose own allowlist tries to silence its hit;
+  - who gets layer 2: both author classes, a deleted fork and Dependabot, end to end through the workflow's and the action's own wiring;
+  - the exact shape of the workflow and the action;
+  - `--git` mode, renames and binary files, and a binary file whose name would run a command in a shell;
+  - a diff crafted to steer the reader (a line shaped like a file header, a carriage return, a hunk that does not match its counts).
+
 ### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
 
 - Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,
