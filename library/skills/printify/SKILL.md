@@ -1,26 +1,32 @@
 ---
 name: printify
-description: "Use when a Printify read must be exact (real shop/status, lossless descriptions, orders) or a product must be created, migrated or published. Direct Printify v1 REST actuator — the reads the MCP is weak at AND the draft-first writes the MCP is buggy/limited at (create a product from a PNG, migrate a discontinued product onto a new provider, publish). Shares the PRINTIFY_API_KEY + PRINTIFY_SHOP_ID contract with the printify MCP. Writes leave a DRAFT and never auto-publish."
+description: "Use when a Printify read or write is needed: the real shop and its status, products with their full descriptions, orders, or a product created from a PNG, migrated onto a new print provider, or published. Calls the Printify v1 REST API directly through printify_api.sh, the tool of the printify integration. Reads run without a prompt; writes ask, create and migrate leave a DRAFT, and nothing publishes without an explicit publish --yes."
 argument-hint: "[status|products [limit]|product <id>|orders [limit]|order <id>|raw <path>|create …|migrate …|publish …]"
+tool_grants:
+  - "Bash(.claude/skills/printify/printify_api.sh status *)"
+  - "Bash(.claude/skills/printify/printify_api.sh products *)"
+  - "Bash(.claude/skills/printify/printify_api.sh product *)"
+  - "Bash(.claude/skills/printify/printify_api.sh orders *)"
+  - "Bash(.claude/skills/printify/printify_api.sh order *)"
+  - "Bash(.claude/skills/printify/printify_api.sh raw *)"
+  - "Bash(.claude/skills/printify/printify_api.sh help *)"
 ---
 
 # Printify
 
-Direct reads **and draft-first writes** against the Printify v1 REST API — the sanctioned actuator that complements the `printify` MCP for everything the MCP does poorly. See [mcp-vs-api.md](./mcp-vs-api.md) for the full "which tool when" guide.
+Direct reads **and draft-first writes** against the Printify v1 REST API. This skill is the tool of the `printify` integration (`library/integrations/printify.md`), which declares the env contract and carries the API reference. The Printify MCP server is deprecated; [mcp-vs-api.md](./mcp-vs-api.md) says what that means for a bot that still lists it.
 
-The **read** doors are unchanged and always safe. The **write** doors (`create` / `migrate` / `publish`) are direct-REST because the MCP is weak exactly on the write path (Markdown-only returns, hardcoded image geometry, no tags, and a mock-shop fabrication bug in some builds). Direct REST returns clean JSON, controls the full product model, and inherits this script's honesty guarantee (it surfaces the real HTTP error, never fabricates). **Every write leaves the product as a DRAFT — nothing auto-publishes.**
-
-**One env contract, two tools.** This skill and `library/mcp/printify.json` both read the same fleet-tier vars, so a bot can declare either or both:
+The **read** doors are always safe and run without a prompt. The **write** doors (`create` / `migrate` / `publish`) return clean JSON, control the full product model, and surface the real HTTP error on failure. **Every write leaves the product as a DRAFT — nothing auto-publishes** — and each one asks before it runs.
 
 ```yaml
 # in fleet.yaml, per bot:
-skills: [printify]     # this REST actuator (reads + draft-first writes)
-mcp:    [printify]     # the MCP (optional — only if you also want the MCP tools, e.g. Replicate image-gen)
+skills: [printify]          # this tool: reads + draft-first writes
+integrations: [printify]    # the guide, and the PRINTIFY_* env contract that doctor checks
 ```
 
 ## Environment
 
-Uses the fleet Printify contract (already exported from `local/<fleet>/.env`, no setup needed):
+Uses the Printify env contract that `integrations: [printify]` declares, exported from the fleet-tier `.env`:
 
 - `PRINTIFY_API_KEY` — Printify Personal Access Token / API key (JWT). Also honors `PRINTIFY_API_TOKEN`.
 - `PRINTIFY_SHOP_ID` — Printify shop id (e.g. `1234567`).
@@ -29,21 +35,21 @@ Uses the fleet Printify contract (already exported from `local/<fleet>/.env`, no
 
 ## The tool
 
-Run the co-located helper (resolves via the skill symlink, so the path is the same whether this skill is a fleet overlay or promoted to the shared library):
+Run the co-located helper from your bot directory, where every session starts. `.claude/skills/printify/` is this skill's copy inside the bot, the same path whether the skill comes from a fleet overlay or the shared library:
 
 ```bash
-"$BOT_DIR/.claude/skills/printify/printify_api.sh" <command>
+.claude/skills/printify/printify_api.sh <command>
 ```
 
 ### Read doors (GET — always safe)
 
-| Command | Returns | Why (vs MCP) |
-|---------|---------|--------------|
-| `status` | real shop(s) + which is current | The MCP faked this with "Mock Shop 1" on a transient failure. This is the **real** shop, never a mock. |
-| `products [limit]` | product list: id, title, **description length**, tags, visible | The MCP list drops the description entirely. |
-| `product <id>` | ONE product with its **full description** (lossless), tags, variant count | The MCP `get_product` truncates/drops the description — this is the headline gap. |
-| `orders [limit]` | recent orders: id, `#label`, status, created_at, line-item count | The MCP's order coverage is thin. |
-| `order <id>` | one full order (raw JSON) | — |
+| Command | Returns | Notes |
+|---------|---------|-------|
+| `status` | real shop(s) + which is current | The real shop list: a failed call prints the real HTTP error. |
+| `products [limit]` | product list: id, title, **description length**, tags, visible | — |
+| `product <id>` | ONE product with its **full description** (lossless), tags, variant count | — |
+| `orders [limit]` | recent orders: id, `#label`, status, created_at, line-item count | No customer details. |
+| `order <id>` | one full order (raw JSON) | Includes the customer's details. |
 | `raw <api/path.json>` | raw authenticated GET | escape hatch for any v1 endpoint |
 | `help` | usage | — |
 
@@ -56,6 +62,13 @@ Run the co-located helper (resolves via the skill symlink, so the path is the sa
 | `publish` | push a DRAFT to Shopify | `--product <id> --yes` | **EXPLICIT + human-gated**: refuses without `--yes`. `create`/`migrate` never call it. opt: `--dry-run`. |
 
 Always run `--dry-run` first: `create`/`migrate` print the exact request body (and, for migrate, the coverage delta) **without sending**. The script surfaces the **real HTTP error** on failure (401/404/422/…) and never fabricates data.
+
+## Permissions
+
+This skill's `tool_grants` allow the read commands (`status`, `products`, `product`, `orders`, `order`, `raw`, `help`) in the form above, so they run without a prompt. The write commands are not granted, so `create`, `migrate` and `publish` each ask first; a bot that must write unattended grants the exact command in fleet.yaml `tool_permissions.allow`.
+
+- **Run it from the bot directory.** The grants name a path relative to it. After a `cd` elsewhere, go back to the bot directory by its absolute path first.
+- **Write values out.** `"$BOT_DIR/.claude/skills/printify/printify_api.sh" <command>` runs from anywhere, but every call asks: Claude Code allows a command that contains a `$VARIABLE` only through an exact-text rule. The same goes for a `$VARIABLE` in an argument, so write a shop or product id literally.
 
 ## Draft-first & coverage — mandatory
 
@@ -70,31 +83,29 @@ Order objects contain real customer PII (`address_to`: name, email, phone, addre
 ## Examples
 
 ```bash
-S="$BOT_DIR/.claude/skills/printify/printify_api.sh"
+# reads: run without a prompt
+.claude/skills/printify/printify_api.sh status        # is Printify really connected, and to which shop?
+.claude/skills/printify/printify_api.sh products 20   # catalog overview with description lengths
+.claude/skills/printify/printify_api.sh product aaaaaaaaaaaaaaaaaaaaaaaa   # the full PDP copy
+.claude/skills/printify/printify_api.sh orders 10     # recent order pipeline (no customer details)
 
-# reads
-"$S" status                         # is Printify really connected, and to which shop?
-"$S" products 20                    # catalog overview with description lengths
-"$S" product aaaaaaaaaaaaaaaaaaaaaaaa | jq -r .description   # the full PDP copy
-"$S" orders 10                      # recent order pipeline (no PII)
-
-# writes — always dry-run first (prints the exact request, sends nothing)
-"$S" create --png ./art.png --title "New Sticker" --blueprint 400 --provider 99 --price 500 --dry-run
-"$S" migrate --product <legacy_sticker_id> --to-provider 99 --dry-run   # coverage report: White retained, Transparent dropped
+# writes: each asks; always dry-run first (prints the exact request, sends nothing)
+.claude/skills/printify/printify_api.sh create --png ./art.png --title "New Sticker" --blueprint 400 --provider 99 --price 500 --dry-run
+.claude/skills/printify/printify_api.sh migrate --product <legacy_sticker_id> --to-provider 99 --dry-run   # coverage report: White retained, Transparent dropped
 
 # live write leaves a DRAFT + prints the Printify edit URL and mockup URLs
-"$S" create --png ./art.png --title "New Sticker" --blueprint 400 --provider 99 --price 500
+.claude/skills/printify/printify_api.sh create --png ./art.png --title "New Sticker" --blueprint 400 --provider 99 --price 500
 
 # publish is explicit + human-gated (refuses without --yes)
-"$S" publish --product <draft_id> --yes
+.claude/skills/printify/printify_api.sh publish --product <draft_id> --yes
 ```
 
 ## Instructions
 
-1. **Prefer this over the MCP** for real shop/status verification, lossless descriptions, order reads, and **all product writes** (create/migrate/publish) — direct REST returns clean JSON and controls the full model. The MCP's one non-redundant capability for this fleet is Replicate image generation (a separate design-gen flow that hands a PNG to `create`).
+1. **Use this skill for every Printify read and write.** Direct REST returns clean JSON and controls the full product model. The skill does not generate images: make the PNG elsewhere and hand it to `create --png`.
 2. **Never fabricate** — if the script errors (401/404/422/network), report the real error; do not invent shop/product/order/ids.
 3. **Redact PII** from any order output before sharing.
-4. **Order-list caps at 10** per page (a Printify constraint); paginate with `raw "shops/$PRINTIFY_SHOP_ID/orders.json?limit=10&page=N"` for more.
+4. **Order-list caps at 10** per page (a Printify constraint); paginate with `raw "shops/<shop_id>/orders.json?limit=10&page=N"`, the shop id written out (from `status`).
 5. **Writes are draft-first.** `create`/`migrate` leave a DRAFT and print the edit URL — report that URL + the mockup image(s) and stop. **Publishing is a distinct, human-approved step** (`publish --product <id> --yes`); never publish without an explicit human go. Always `--dry-run` before a live write.
 6. **`migrate` is a reporter at a coverage cliff.** Surface the retained/dropped delta and let a human make the merchandising call; never auto-decide a coverage drop and never retire the source product.
 

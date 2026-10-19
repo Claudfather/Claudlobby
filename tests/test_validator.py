@@ -980,6 +980,26 @@ class TestToolGrantsValidation:
         report = validate(fleet, _make_paths(fleet_dir))
         assert not any("tool_grants" in w for w in report.warnings)
 
+    def test_deprecated_mcp_warns_once_and_skips_the_migration_gap(self, fleet_dir, monkeypatch):
+        import json
+
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        p = fleet_dir / "library" / "mcp" / "github.json"
+        frag = json.loads(p.read_text())
+        frag["_permissions_contract"] = {"tools": ["search_code"]}  # grants, unmirrored
+        frag["_deprecated"] = "Use the gh CLI."
+        p.write_text(json.dumps(frag))
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        deprecated = [w for w in report.warnings if "is deprecated" in w]
+        assert len(deprecated) == 1, report.warnings
+        assert "Use the gh CLI." in deprecated[0] and "lead" in deprecated[0]
+        assert report.warning_categories.get("mcp-deprecated") == 1
+        # No migration hint to re-add the grants, and compose keeps the fragment's own.
+        assert not any("tool_grants" in w for w in report.warnings)
+        assert not any("drop legacy MCP grants" in e for e in report.errors), report.errors
+
     def test_malformed_mid_string_wildcard_warns(self, fleet_dir, monkeypatch):
         self._env(monkeypatch)
         self._give_lead_github_mcp(fleet_dir)

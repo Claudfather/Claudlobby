@@ -1,7 +1,7 @@
 """Tests for library/skills/printify — the first skill to ship an executable helper.
 
 Wrapped in Python so CI enforces it (the #723 shell-tests-not-in-CI lesson).
-Three surfaces:
+Four surfaces:
 
   - ``printify/test.sh``: the skill's own suite, run with the PRINTIFY_* env
     scrubbed so only the hermetic arm executes — the write-door ``--dry-run``
@@ -9,9 +9,11 @@ Three surfaces:
   - The **execute bit**, in the git index. Skills are symlinked rather than
     rendered, so ``printify_api.sh`` runs at whatever mode git recorded. A
     helper checked in 100644 is a skill that cannot run on a fresh clone.
-  - The **shared env contract**. SKILL.md and mcp-vs-api.md both promise "one
-    env contract, two tools" against library/mcp/printify.json — pin it, or the
-    two halves drift apart silently.
+  - The **env contract**. library/integrations/printify.md declares it for the
+    skill, and the deprecated MCP fragment declares the same vars — pin both
+    against what the script reads, or they drift apart silently.
+  - The **grants**. The skill's reads run without a prompt and its writes ask,
+    so its ``tool_grants`` must allow every read call it documents and no write.
 
 Why not ``tests/test_sh_suites.py``: that glob covers ``tests/test_*.sh`` and
 passes the ambient env, on a contract that a suite never reaches a real service.
@@ -40,6 +42,7 @@ SKILL_DIR = REPO_DIR / "library" / "skills" / "printify"
 SCRIPT = SKILL_DIR / "printify_api.sh"
 SUITE = SKILL_DIR / "test.sh"
 MCP_FRAGMENT = REPO_DIR / "library" / "mcp" / "printify.json"
+INTEGRATION = REPO_DIR / "library" / "integrations" / "printify.md"
 
 # The suite's write-door assertions build and inspect JSON with jq.
 needs_jq = pytest.mark.skipif(
@@ -137,20 +140,22 @@ def test_helper_executable_on_disk(script):
     assert os.access(script, os.X_OK), f"{script.name} is not executable"
 
 
-def test_env_contract_matches_the_mcp_fragment():
-    """ "One env contract, two tools" — the claim SKILL.md and mcp-vs-api.md make.
+def test_env_contract_is_what_the_script_reads():
+    """The integration declares the skill's env contract, and the deprecated MCP
+    fragment declares the same vars, so a bot moving off the MCP keeps its .env.
 
-    Every var the MCP fragment declares must be one the script actually reads,
-    so a bot can equip the skill, the MCP, or both off a single secret set.
+    Every declared var must be one the script actually reads.
     """
-    declared = set(json.loads(MCP_FRAGMENT.read_text())["_env_contract"])
+    meta, _ = parse_frontmatter(INTEGRATION.read_text())
+    declared = set(meta["env_contract"])
+    assert declared == set(json.loads(MCP_FRAGMENT.read_text())["_env_contract"])
     body = SCRIPT.read_text()
     # Braced and bare forms both count — the script uses ${PRINTIFY_API_KEY:-}
     # and bare $PRINTIFY_FIXTURE_VARIANTS.
     read_by_script = set(re.findall(r"\$\{?(PRINTIFY_[A-Z_]+)", body))
     assert declared <= read_by_script, (
-        f"MCP fragment declares {sorted(declared - read_by_script)}, "
-        "which printify_api.sh never reads — the shared contract has drifted"
+        f"the env contract declares {sorted(declared - read_by_script)}, "
+        "which printify_api.sh never reads — the contract has drifted"
     )
 
 
@@ -193,3 +198,59 @@ def test_fixtures_are_synthetic():
         json.loads(raw)  # must parse
         for host in ("printify.com", "cdn.shopify.com"):
             assert host not in raw, f"{fixture.name} references a live host ({host})"
+
+
+HELPER = ".claude/skills/printify/printify_api.sh"
+READ_DOORS = ("status", "products", "product", "orders", "order", "raw", "help")
+WRITE_DOORS = ("create", "migrate", "publish")
+
+
+def _grant_allows(grant: str, command: str) -> bool:
+    """A ``Bash(...)`` grant's wildcard as measured on Claude Code 2.1.281: ``*``
+    matches any run of characters, and a trailing `` *`` also matches nothing, so
+    ``Bash(x status *)`` allows ``x status`` and ``x status 2`` but not ``x statuses``."""
+    spec = re.fullmatch(r"Bash\((.*)\)", grant)
+    assert spec, grant
+    body = spec.group(1)
+    tail = body.endswith(" *")
+    head = body[:-2] if tail else body
+    pattern = ".*".join(re.escape(part) for part in head.split("*"))
+    return re.fullmatch(pattern + (r"(?: .*)?" if tail else ""), command) is not None
+
+
+def _skill_grants() -> list[str]:
+    meta, _ = parse_frontmatter((SKILL_DIR / "SKILL.md").read_text())
+    return meta["tool_grants"]
+
+
+def test_the_reads_are_granted_and_the_writes_ask():
+    """Each grant names the helper by its path from the bot directory, with no
+    variable: Claude Code allows a command that contains a ``$VARIABLE`` only
+    through an exact-text rule, and a leading ``*`` would allow any program whose
+    arguments contain the helper's path."""
+    grants = _skill_grants()
+    for grant in grants:
+        assert grant.startswith(f"Bash({HELPER} ") and "$" not in grant, grant
+    for door in READ_DOORS:
+        for command in (f"{HELPER} {door}", f"{HELPER} {door} 20"):
+            assert any(_grant_allows(g, command) for g in grants), command
+    for door in WRITE_DOORS:
+        for command in (f"{HELPER} {door}", f"{HELPER} {door} --product 1 --yes"):
+            assert not any(_grant_allows(g, command) for g in grants), command
+
+
+def test_every_call_the_skill_documents_is_granted_exactly_when_it_reads():
+    """The SKILL.md examples are the calls a bot copies: each read among them
+    runs without a prompt, and each write asks."""
+    grants = _skill_grants()
+    calls = [
+        line.split(" #")[0].strip()
+        for line in (SKILL_DIR / "SKILL.md").read_text().splitlines()
+        if line.startswith(f"{HELPER} ") and "<command>" not in line
+    ]
+    assert len(calls) >= 8, calls
+    for call in calls:
+        door = call.split()[1]
+        assert door in READ_DOORS + WRITE_DOORS, call
+        allowed = any(_grant_allows(g, call) for g in grants)
+        assert allowed == (door in READ_DOORS), call
