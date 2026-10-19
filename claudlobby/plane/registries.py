@@ -295,6 +295,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # and update-siblings.
     "source_behind": "notice",
     "source_release_gap": "notice",
+    "source_unknown": "notice",
     "sibling_update_blocked": "notice",
     "sibling_update_failed": "notice",
     "sibling_updated": "notice",

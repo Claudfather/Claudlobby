@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — notify-behind counts the data root from the release it runs (#2322)
+
+`notify-behind.sh` counted the data root's own checkout, which nothing runs
+from under sealed releases and nothing pulls, so its daily `source_behind`
+notice grew with every merge and no activation cleared it. The root now counts
+the commits on `origin/<branch>` missing from the source revision of the
+release the host has selected, read with the package's `read_selection` and
+`read_release`, the two reads runtime admission makes before a bot starts
+(`host status` hashes every installed release first). The tagged path counts
+from the same commit; sibling checkouts still count from their `HEAD`. When
+the release cannot be read, a new `source_unknown` notice says so and nothing
+is counted.
+
 ### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
 
 - Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,
