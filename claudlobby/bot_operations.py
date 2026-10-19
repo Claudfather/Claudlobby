@@ -22,6 +22,9 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import time
+from typing import NamedTuple
 from uuid import uuid4
 
 from .activation_enrollment import selected_bot_entry, _target
@@ -32,12 +35,19 @@ from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .loader import parse_frontmatter
 from .operation_context import resolve_operation_scope
+from .plane.emit_api import emit_batch
+from .plane.fleet_events import fleet_event_request
 from .runtime_admission import RuntimeIdentity, mutation_admission, validate_unit_admission
+from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
 
 
 _SELF_RESPONSE_WAIT_S = 30
+# A KillMode=process bot unit reads stopped once its ExecStop returns, while the
+# session it started (tmux, claude, MCP servers) is still exiting. The stop's
+# quiet check waits this long for that session to leave the unit's cgroup (#2227).
+_STOP_SETTLE_S = 30
 
 
 class BotLifecycleError(RuntimeError):
@@ -70,6 +80,13 @@ class BotLifecycleResult:
     request_id: str | None = None
     log_path: str | None = None
     reason: str | None = None
+    # A stop: whether its local record and its plane row landed; a start: whether its
+    # plane row landed (#2243).
+    recording: str | None = None
+    # A start that could not remove the stop record (#2243): while it stays, a later
+    # loss of the bot's unit reads as a deliberate stop. None when it was removed or
+    # there was none.
+    stop_record_kept: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +99,24 @@ class BotHandoffResult:
     reason: str
 
 
+class HandoffState(NamedTuple):
+    state: str  # saved, pending or unknown
+    reason: str
+    requested_at: str | None = None
+    written_at: str | None = None
+
+
+@dataclass(frozen=True)
+class BotHandoffCheck:
+    fleet: str
+    bot: str
+    release_id: str
+    handoff: str
+    reason: str
+    requested_at: str | None
+    written_at: str | None
+
+
 @dataclass(frozen=True)
 class BotControlResult:
     fleet: str
@@ -92,8 +127,8 @@ class BotControlResult:
     outcome: str
 
 
-def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
-    """Require a fresh owned handoff; explicit capture already witnessed its write.
+def _handoff_capture(bot_dir: Path) -> tuple[float, datetime]:
+    """The owned handoff file's mtime and its session capture's last_updated.
 
     The session capture's own frontmatter decides. Under the activation's
     reference refresh envelope (#2094) that is the capture below it: the
@@ -142,15 +177,105 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> Non
             raise ValueError("invalid handoff timestamp")
         if stamp.tzinfo is None or stamp.utcoffset() is None:
             raise ValueError("naive handoff timestamp")
-        age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
-        mtime_age = datetime.now(timezone.utc).timestamp() - info.st_mtime
-        # Explicit capture's changed checksum proves a fresh write, but resume
-        # still reads last_updated. Require a recent model timestamp on both
-        # paths; tolerate future clock skew observed in the live canary.
-        if not (-30 <= mtime_age <= 300) or age > 300:
-            raise ValueError("handoff is stale")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
+    return info.st_mtime, stamp
+
+
+def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
+    """Require a fresh owned handoff; explicit capture already witnessed its write."""
+    mtime, stamp = _handoff_capture(bot_dir)
+    age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
+    mtime_age = datetime.now(timezone.utc).timestamp() - mtime
+    # Explicit capture's changed checksum proves a fresh write, but resume
+    # still reads last_updated. Require a recent model timestamp on both
+    # paths; tolerate future clock skew observed in the live canary.
+    if not (-30 <= mtime_age <= 300) or age > 300:
+        raise BotLifecycleError("self restart requires a fresh owned session handoff") from ValueError(
+            "handoff is stale")
+
+
+_HANDOFF_REQUEST = ".handoff-request"
+
+
+def _record_handoff_request(bot_dir: Path, requested_at: float) -> bool:
+    """Record when the door asked for a handoff, in the bot's data/ (#990).
+
+    The door waits 30 s and a handoff is a model turn of minutes (#963), so
+    `bot handoff BOT --check` reads the handoff file against this record
+    later. When the write fails, the previous record is removed, so it never
+    answers for this request.
+    """
+    data = bot_dir / "data"
+    try:
+        data.mkdir(mode=0o700, exist_ok=True)
+        info = data.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return False
+    record = data / _HANDOFF_REQUEST
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(requested_at)))
+    try:
+        fd, tmp = tempfile.mkstemp(dir=data, prefix=_HANDOFF_REQUEST + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps({"requested_at": stamp}) + "\n")
+            os.replace(tmp, record)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+    except OSError:
+        try:
+            record.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def handoff_state(bot_dir: Path) -> HandoffState:
+    """What came of the door's last recorded handoff request, from files only (#990).
+
+    saved: the handoff file was written after the request, and its capture's
+    own last_updated is no older than the request less the 300 s
+    `_fresh_self_handoff` allows a model's timestamp, so a rewrite with no new
+    capture (activation's reference refresh) is not one. pending: not written
+    since the request; the bot may still be writing it, or may never, since a
+    turn can end without writing it (#963). unknown: no request is recorded,
+    or the file cannot be verified.
+    """
+    try:
+        record = json.loads((bot_dir / "data" / _HANDOFF_REQUEST).read_text(encoding="utf-8"))
+        requested_at = record["requested_at"]
+        requested = datetime.strptime(requested_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except FileNotFoundError:
+        return HandoffState("unknown", "no_request_recorded")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return HandoffState("unknown", "request_unreadable")
+    pending = HandoffState("pending", "not_written_since_request", requested_at)
+    try:
+        info = (bot_dir / ".claude" / "session.md").lstat()
+    except FileNotFoundError:
+        return pending
+    except OSError:
+        return HandoffState("unknown", "file_unverified", requested_at)
+    if stat.S_ISREG(info.st_mode) and info.st_mtime < requested:
+        return pending
+    try:
+        mtime, stamp = _handoff_capture(bot_dir)
+    except BotLifecycleError:
+        return HandoffState("unknown", "file_unverified", requested_at)
+    if mtime < requested:
+        return pending
+    written_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
+    if stamp.timestamp() < requested - 300:
+        return HandoffState("unknown", "capture_predates_request", requested_at, written_at)
+    return HandoffState("saved", "written_after_request", requested_at, written_at)
 
 
 def _self_restart_log(bot_dir: Path) -> tuple[int, Path]:
@@ -405,21 +530,27 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "skipped", "no_session")
             if session != "ready":
                 raise BotLifecycleError("private bot session is unverified", unavailable=True)
+            requested_at = time.time()
             try:
                 outcome = adapter.call("svc_activation_handoff", spec.bot_dir, spec.label,
                                        spec.environment["TMUX_TMPDIR"], "explicit", timeout=45)
             except (OSError, subprocess.SubprocessError) as exc:
+                _record_handoff_request(spec.bot_dir, requested_at)
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"]) from exc
             marker = outcome.stdout.strip().splitlines()[-1:] if outcome.stdout else []
+            skipped = (["handoff-skipped:recent"], ["handoff-skipped:capability"],
+                       ["handoff-skipped:no-session"])
+            if outcome.returncode or marker not in skipped:
+                # A handoff can land minutes after this 30 s wait (#963), so
+                # `bot handoff BOT --check` reads it against this record (#990).
+                _record_handoff_request(spec.bot_dir, requested_at)
             if marker == ["handoff-timeout"]:
                 raise BotLifecycleError("bot handoff timed out after 30 seconds", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"], handoff_reason="timeout")
-            if outcome.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"],
-                                                    ["handoff-skipped:capability"],
-                                                    ["handoff-skipped:no-session"]):
+            if outcome.returncode or marker not in (["handoff-saved"], *skipped):
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"])
@@ -434,6 +565,28 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "saved", "fresh_file_verified")
             return BotHandoffResult(destination.fleet.name, bot, release.release_id,
                                     entry["target"], "skipped", marker[0].split(":", 1)[1])
+
+
+def check_handoff(*, root: Path, fleet: str | None, bot: str) -> BotHandoffCheck:
+    """Read the door's last handoff request against the handoff file (#990).
+
+    It sends nothing and takes neither mutation admission nor the lifecycle
+    lock, so it answers while another bot operation runs.
+    """
+    if not isinstance(bot, str) or not bot or Path(bot).name != bot or bot in {".", ".."}:
+        raise BotLifecycleError("supply one exact bot ID")
+    destination, origin = resolve_operation_scope(root=root, fleet=fleet)
+    if origin is not None and (origin.fleet.name != destination.fleet.name
+                               or origin.bot_id == bot
+                               or origin.bot_id != destination.fleet.manager):
+        raise BotLifecycleError("only the selected fleet manager may check another bot's handoff")
+    if bot not in destination.fleet.bots:
+        raise BotLifecycleError("bot is not declared in the selected active fleet")
+    selected = read_selection(root)
+    if selected is None:
+        raise BotLifecycleError("a handoff check requires an active selected release")
+    return BotHandoffCheck(destination.fleet.name, bot, selected["release_id"],
+                           *handoff_state(destination.paths.bot_runtime(bot)))
 
 
 def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
@@ -497,13 +650,46 @@ def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
                                     entry["target"], control, "submitted")
 
 
-def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False):
+def _record_lifecycle(root: Path, fleet: str, bot: str, event: str, *, by: str,
+                      reason: str | None, request_id: str, changed: bool) -> str:
+    """The plane's audit row for a stop or a start (#2243): "committed", or "degraded"
+    when the plane did not take it. Never raises: a stop must not depend on the plane,
+    and the sweep reads the local stop record, not this row."""
+    raw = fleet_event_request(event, fleet=fleet, subject_kind="actor", subject=f"bot:{fleet}/{bot}",
+                              source="lifecycle", key=request_id,
+                              data={"by": by, "reason": reason, "request_id": request_id,
+                                    "changed": changed})
+    try:
+        recorded = emit_batch(root, [raw], require_commit=True)[0]
+    except Exception:
+        return "degraded"
+    return "committed" if recorded.status in {"committed", "duplicate"} else "degraded"
+
+
+def _started(root: Path, fleet: str, bot: str, bot_dir: Path, by: str, request_id: str, *,
+             changed: bool) -> tuple[str | None, bool | None]:
+    """A start that left the bot running: the unit is back, so the stop record goes,
+    and a start that changed something or cleared a record leaves a bot_started row.
+    Returns the row's recording, and True when the record could not be removed."""
+    try:
+        cleared, kept = clear_stop(bot_dir), None
+    except OSError:
+        cleared, kept = False, True
+    if not (changed or cleared):
+        return None, kept
+    return _record_lifecycle(root, fleet, bot, "bot_started", by=by, reason=None,
+                             request_id=request_id, changed=changed), kept
+
+
+def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False,
+                     settle_s=0):
     state = _native(adapter, "svc_inventory_state", installed, target)
     if state not in {"not-found not-found inactive", "unchanged unloaded inactive"}:
         raise BotLifecycleError("bot de-enrollment is not established",
                                 effect_attempted=effect_attempted)
     try:
-        assert_quiescent(adapter, installed_file=installed, target=target, socket_path=socket_path)
+        assert_quiescent(adapter, installed_file=installed, target=target, socket_path=socket_path,
+                         settle_s=settle_s)
     except (ActivationError, OSError) as exc:
         raise BotLifecycleError("bot native/session quiescence is unavailable",
                                 effect_attempted=effect_attempted, unavailable=True) from exc
@@ -523,10 +709,16 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     restart: bool = False, ceiling: int | None = None,
                     identity: RuntimeIdentity | None = None,
                     adapter: Adapter | None = None, _self_child: bool = False,
-                    _on_lock=None) -> BotLifecycleResult:
+                    _on_lock=None, reason: str | None = None) -> BotLifecycleResult:
     """Start, stop or restart one exact selected bot; prove native effects."""
     if restart and not running:
         raise BotLifecycleError("restart requires a running target")
+    if reason is not None and running:
+        raise BotLifecycleError("a reason is recorded only for a stop")
+    try:
+        reason = check_reason(reason)
+    except StopRecordError as exc:
+        raise BotLifecycleError(str(exc)) from exc
     if ceiling is not None and (not restart or isinstance(ceiling, bool)
                                 or not isinstance(ceiling, int) or ceiling <= 0):
         raise BotLifecycleError("restart ceiling must be a positive integer")
@@ -577,7 +769,20 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             installed = Path(entry["installed"])
             socket = Path(spec.environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / spec.label
             unit = _observed(root, declarations, adapter, entry["target"], installed)
+            by = (f"bot:{origin.fleet.name}/{origin.bot_id}" if origin is not None
+                  else "operator")
+            request_id = str(uuid4())
             if not running:
+                # #2243: the stop door always records that the stop was meant, and
+                # first, so no sweep sees the unit file gone without the record.
+                # fleet-pulse reads this record, never the plane row below, so a
+                # stop made while the plane is down stays quiet. A record that
+                # cannot be written does not hold the stop up.
+                try:
+                    write_stop(spec.bot_dir, by=by, reason=reason, request_id=request_id)
+                    recorded = True
+                except (StopRecordError, OSError):
+                    recorded = False
                 if unit.installed:
                     effect_begun = False
                     try:
@@ -586,13 +791,19 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                 spec.environment["TMUX_TMPDIR"])
                         effect_begun = True
                         _confirm_stopped(adapter, installed, entry["target"], socket,
-                                         effect_attempted=True)
+                                         effect_attempted=True, settle_s=_STOP_SETTLE_S)
                         after = _observed(root, declarations, adapter, entry["target"], installed)
                         if after.installed:
                             raise BotLifecycleError("bot unit remains installed")
                     except (BotLifecycleError, ActivationError, InventoryError, OSError) as exc:
                         attempted = effect_begun or (isinstance(exc, BotLifecycleError)
                                                      and exc.effect_attempted)
+                        if not attempted:
+                            # refused before any effect: nothing was stopped
+                            try:
+                                clear_stop(spec.bot_dir)
+                            except OSError:
+                                pass
                         stage = str(exc) if isinstance(exc, BotLifecycleError) else type(exc).__name__
                         raise BotLifecycleError(f"bot stop refused or proof is incomplete: {stage}",
                                                 effect_attempted=attempted,
@@ -600,9 +811,14 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                                 release_id=release.release_id,
                                                 target=entry["target"]) from exc
                 else:
-                    _confirm_stopped(adapter, installed, entry["target"], socket)
+                    _confirm_stopped(adapter, installed, entry["target"], socket,
+                                     settle_s=_STOP_SETTLE_S)
+                row = _record_lifecycle(root, destination.fleet.name, bot, "bot_stopped", by=by,
+                                        reason=reason, request_id=request_id,
+                                        changed=bool(unit.installed))
                 return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
-                                          entry["target"], "stopped", bool(unit.installed), "not_running")
+                                          entry["target"], "stopped", bool(unit.installed), "not_running",
+                                          recording=row if recorded else "degraded")
             bot_conf = spec.bot_dir / "bot.conf"
             changes = [change for change in plan.changes if change.target == str(bot_conf)]
             if len(changes) != 1 or changes[0].after.get("kind") != "file" or path_state(bot_conf)["node"] != changes[0].after:
@@ -655,9 +871,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     if session == "ready":
                         _confirm_running(adapter, installed, entry["target"], manager,
                                          session_ready=True)
+                        recording, kept = _started(root, destination.fleet.name, bot, spec.bot_dir,
+                                                   by, request_id, changed=False)
                         return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                                   entry["target"], "running", False,
-                                                  "current_session_ready")
+                                                  "current_session_ready",
+                                                  recording=recording, stop_record_kept=kept)
                     if session != "absent":
                         raise BotLifecycleError("current bot session readiness is indeterminate; "
                                                 "inspect the session or explicitly restart",
@@ -709,6 +928,9 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                         effect_attempted=True,
                                         release_id=release.release_id,
                                         target=entry["target"]) from exc
+            recording, kept = (None, None) if restart else _started(
+                root, destination.fleet.name, bot, spec.bot_dir, by, request_id, changed=True)
             return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                       entry["target"], "running", True,
-                                      readiness.replace("-", "_"), handoff)
+                                      readiness.replace("-", "_"), handoff,
+                                      recording=recording, stop_record_kept=kept)

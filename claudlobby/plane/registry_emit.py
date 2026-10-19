@@ -54,7 +54,7 @@ from pathlib import Path
 
 from ..claude_version import measure as measure_claude_version
 from ..claudron_compat import COMPAT_FLOOR
-from ..paths import _iter_fleet_dirs
+from ..paths import INSTRUCTION_FILE_NAMES, _iter_fleet_dirs
 from .canonical import CanonicalizationError, canonical_hash
 
 log = logging.getLogger("claudlobby.plane.registry")
@@ -429,11 +429,20 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         "vault_rev": vault_rev,
         "schema_version": _SCHEMA,
     }
+    # #2145: the agent CLI rides only when it carries information — a non-claude
+    # bot. generate writes with its own contract, but a keyframe spooled on a
+    # busy db is drained by the daemon, and a daemon older than this field
+    # quarantines the key (#1724); a claude keyframe keeps the shape every
+    # daemon accepts, and absence reads as claude.
+    agent_cli = {"agent_cli": bot.agent_cli} if bot.agent_cli != "claude" else {}
+    payload.update(agent_cli)
     # declared = the declaration's stable projection (equipment + org +
-    # posture + model), independent of composed artifacts
+    # posture + model), independent of composed artifacts. The agent CLI is a
+    # declaration fact, hashed only when present, so a claude bot's hash is
+    # byte-identical to the one before #2145.
     payload["declared_hash"] = canonical_hash(
         {"org": org, "equipment": equipment, "posture": posture,
-         "model": payload["model"], "effort": bot.effort})
+         "model": payload["model"], "effort": bot.effort, **agent_cli})
     return payload
 
 
@@ -453,7 +462,10 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
             tier = "shared" if is_shared else "fleet-overlay"
             prefix = "shared" if is_shared else fleet_name
             for entry in sorted(base.iterdir()):
-                if entry.name.startswith(".") or entry.name == "README.md":
+                # A folder's CLAUDE.md/AGENTS.md describes the folder and is
+                # never an item in it (library/voices/ carries one, #2150).
+                if (entry.name.startswith(".") or entry.name == "README.md"
+                        or entry.name in INSTRUCTION_FILE_NAMES):
                     continue
                 try:
                     if entry.is_dir():

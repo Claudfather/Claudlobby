@@ -65,7 +65,7 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
     feeds into the allow list, recomputed here independently so a divergence
     between the composed output and the declared contracts surfaces. Excludes
     the always-injected ``BASE_TOOLS`` floor and the ad-hoc fleet
-    ``tools.allow`` override, which are classified separately.
+    ``tool_permissions.allow`` override, which are classified separately.
 
     Skill grants are resolved from the EFFECTIVE skill set
     (:func:`resolve_effective_skills`, spec §10), never ``bot.skills`` alone —
@@ -98,7 +98,7 @@ _GRANT_KINDS: dict[str, tuple[str, str]] = {
     ),
     "unsourced_grant": (
         WARN,
-        "granted via fleet tools.allow but no equipped source declares it",
+        "granted via fleet tool_permissions.allow but no equipped source declares it",
     ),
     "under_grant": (
         FAIL,
@@ -121,7 +121,7 @@ def classify_grants(
       - ``orphan_grant`` (fail): an allow entry tracing to no source, base floor,
         or fleet override — composition emitted a grant nothing produced.
       - ``unsourced_grant`` (warn): an allow entry present only via the ad-hoc
-        fleet ``tools.allow`` override (drift signal — no source contract).
+        fleet ``tool_permissions.allow`` override (drift signal — no source contract).
       - ``under_grant`` (fail): a source-declared grant that is not denied yet
         never reached the allow list (the bot would rely on the retired global).
     """
@@ -699,12 +699,13 @@ def _fleet_pulse_env_findings(
     """#1120: a fleet-pulse escalation knob sitting in ANY ``.env`` tier.
 
     ``claudlobby/_runtime_scripts/fleet-pulse.sh`` runs from a composed timer unit that sources no
-    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — so
-    a ``FLEET_PULSE_*`` key in any of them reaches nothing and the script keeps
-    its own default. The operator sees no change and cannot tell "ignored" from
-    "applied, and the condition is genuinely still firing". That is the shape
-    this rung exists to make audible: without it the only feedback is an audit
-    weeks later.
+    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — and
+    ``fleet notify`` and a message write's alert read the same keys from the
+    active fleet.yaml block (#2234), so a ``FLEET_PULSE_*`` key in any tier
+    reaches nothing and the script keeps its own default. The operator sees no
+    change and cannot tell "ignored" from "applied, and the condition is
+    genuinely still firing". That is the shape this rung exists to make
+    audible: without it the only feedback is an audit weeks later.
 
     FAIL at every tier, deliberately, and not the F5 rung's tier-derived
     severity — for the same reason ``_env_secret_leak_findings`` departs from
@@ -733,10 +734,12 @@ def _fleet_pulse_env_findings(
                             "fleet_pulse_env_inert",
                             FAIL,
                             f"{path}: {key} is set but reaches nothing — the "
-                            "composed fleet-pulse timer unit sources no .env, so "
-                            "this is silently ignored and the script keeps its "
-                            "default. Move it to the fleet.yaml `fleet_pulse:` "
-                            "block, which composes into the unit's Environment=.",
+                            "composed fleet-pulse timer unit sources no .env, and "
+                            "`fleet notify` and a message write's alert read the "
+                            "fleet.yaml block, so this is silently ignored and the "
+                            "script keeps its default. Move it to the fleet.yaml "
+                            "`fleet_pulse:` block, which composes into the unit's "
+                            "Environment=.",
                         )
                     )
     return findings

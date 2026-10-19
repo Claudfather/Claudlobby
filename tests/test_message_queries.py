@@ -1,12 +1,16 @@
 """Read-only message proof against actual SQL, with no transports or emitters."""
 
+from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 from types import SimpleNamespace
 import sqlite3
+import time
 
 import pytest
 
@@ -14,6 +18,7 @@ from claudlobby import message_queries as q
 from claudlobby.plane.db import db_file
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files, migrate
 from claudlobby.task_operations import TaskActor, TaskOperationContext
+from tests.ingest_listener import DAEMON_ANSWER, listening_socket, short_socket_dir
 
 
 HOST = "host_" + "0" * 32
@@ -202,8 +207,36 @@ def staged_receipt(root, number=1, name="1-ev_staged.batch"):
     return staged / name
 
 
-def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_wins(estate, monkeypatch):
+@contextmanager
+def ingest_daemon(monkeypatch, *, answer=DAEMON_ANSWER):
+    """Where the receipt check probes the ingest daemon, a real listener on a
+    short socket: the daemon's own answer, or with answer=None a listener that
+    never answers, as a daemon slower than the check's 0.5 s probe (#2086)."""
     from claudlobby.plane import daemon
+    directory = short_socket_dir("rq-")
+    try:
+        with listening_socket(directory / "s", answer=answer) as path, \
+                monkeypatch.context() as scoped:
+            scoped.setattr(daemon, "socket_path", lambda _root: path)
+            yield path
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def stage(staged, name, events, written):
+    """A stage file as a stager leaves it (empty when events is None), last
+    written at `written` (epoch seconds)."""
+    path = staged / name
+    path.write_text("" if events is None else json.dumps({"events": events}) + "\n")
+    os.utime(path, (written, written))
+    return path
+
+
+#: An hour before the fixture's messages are recorded (2026-09-28T00:00:00Z).
+BEFORE_THE_MESSAGE = datetime(2026, 9, 27, 23, 0, tzinfo=timezone.utc).timestamp()
+
+
+def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_wins(estate, monkeypatch):
     from claudlobby.plane.spool import spool_write
     ctx, conn = estate
     ident = communication(conn)
@@ -212,8 +245,7 @@ def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_
     clock = Clock()
     monkeypatch.setattr(q, "time", clock)
     staged = staged_receipt(ctx.root, number=3, name="1-ev_unrelated.batch").parent
-    with monkeypatch.context() as healthy:
-        healthy.setattr(daemon, "probe_daemon", lambda _path, timeout: True)
+    with ingest_daemon(monkeypatch):
         assert q.receipt(ctx, ident, wait=1).receipt_observation == "missing"  # unrelated work is no gate
         batch = staged_receipt(ctx.root)
         before = sorted(path.name for path in staged.iterdir())
@@ -247,6 +279,92 @@ def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_
     transmission(conn, "received")  # committed receiver proof beside unavailable queues
     final = q.receipt(ctx, ident)
     assert (final.receipt_observation, final.integrity_verdict, final.exit_code) == ("received", "delivered", 0)
+
+
+def test_orphaned_stages_written_before_the_message_neither_hold_its_proof_nor_fill_the_bound(
+        estate, monkeypatch):
+    """#2086, path 1. Stagers reaped before their rename leave hidden temp
+    stages, and the daemon replays one only once it is an hour old. Past 256
+    queued entries, every receipt check whose proof was not yet committed read
+    "Plane ingest is down" for that hour, with ingest up. A file last written
+    before the message existed cannot hold proof of its transmission, so it is
+    neither read nor counted. One written since may hold it: it is still read,
+    and still counts toward the bound, which the reason now names."""
+    from claudlobby.message_operations import _retry_has_no_submission_proof
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "pane_submitted", fleet="a")
+    transmission(conn, "received", number=2)  # destination history exists
+    staged = ctx.root / "state/plane/staged"
+    staged.mkdir(parents=True)
+    for n in range(300):
+        stage(staged, f".{n}-ev_{n:032x}.batch.{4_000_000 + n}.tmp", [received_event(3)],
+              BEFORE_THE_MESSAGE)
+    with ingest_daemon(monkeypatch):
+        quiet = q.receipt(ctx, ident, wait=0)
+        assert (quiet.receipt_observation, quiet.exit_code, quiet.code) == ("missing", 8, "timeout"), \
+            quiet.reason
+        # The retry gate has no recorded instant: every entry counts, so a resend stays refused.
+        assert q.pending_transmission_proof(ctx.root, ident) == "unavailable"
+        assert _retry_has_no_submission_proof(ctx.root, None, ident, None) is False
+        late = stage(staged, f".9-ev_{'a' * 32}.batch.{os.getpid()}.tmp", [received_event()],
+                     time.time())
+        pending = q.receipt(ctx, ident, wait=0)
+        assert pending.receipt_observation == "unavailable" and "staged (pending" in pending.reason
+        late.unlink()
+        for n in range(257):
+            stage(staged, f"{n}-ev_{n:032x}.batch", [received_event(3)], time.time())
+        bound = q.receipt(ctx, ident, wait=0)
+    assert (bound.receipt_observation, bound.exit_code, bound.code) == ("unavailable", 6, "unavailable")
+    assert bound.reason == ("257 queued Plane entries that may hold this message's proof are more than"
+                            " the 256 a receipt check reads; receipt absence is unproven")
+
+
+def test_an_empty_orphan_written_before_the_message_is_no_torn_entry_for_it(estate, monkeypatch):
+    """#2086, at any queue depth. A stager reaped between creating its temp file
+    and writing it leaves the file empty (#2164) until replay at the hour, and an
+    empty entry reads as torn: every uncommitted receipt check said "Plane ingest
+    is down", with one file queued. Written before the message, it cannot hold
+    the proof. Written since, it may be a write in progress, so the check still
+    cannot tell, and names the entry."""
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "received", number=2)
+    staged = ctx.root / "state/plane/staged"
+    staged.mkdir(parents=True)
+    stage(staged, f".1-ev_{'1' * 32}.batch.4000001.tmp", None, BEFORE_THE_MESSAGE)
+    with ingest_daemon(monkeypatch):
+        quiet = q.receipt(ctx, ident, wait=0)
+        assert (quiet.receipt_observation, quiet.exit_code) == ("missing", 8), quiet.reason
+        name = f".2-ev_{'2' * 32}.batch.{os.getpid()}.tmp"
+        stage(staged, name, None, time.time())
+        torn = q.receipt(ctx, ident, wait=0)
+    assert (torn.receipt_observation, torn.exit_code, torn.code) == ("unavailable", 6, "unavailable")
+    assert torn.reason == (f"queued Plane entry {name} is not a whole batch (a write in progress,"
+                           " or one cut short); receipt absence is unproven")
+
+
+def test_a_listening_daemon_slower_than_the_probe_leaves_absence_unproven_not_ingest_down(
+        estate, monkeypatch):
+    """#2086, path 2, below the bound. Under #1693's load the daemon answered in
+    1-3 s, so the check's 0.5 s probe missed a serving daemon and the receipt
+    read "Plane ingest is down". A daemon that has not answered may still hold
+    unstaged proof, so absence stays unproven, but the reason says what the
+    probe saw. Only a socket nothing listens on reads as ingest down."""
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "received", number=2)
+    (ctx.root / "state/plane/staged").mkdir(parents=True)  # the staged handshake: a daemon must answer
+    with ingest_daemon(monkeypatch, answer=None):
+        slow = q.receipt(ctx, ident, wait=0)
+        assert q.pending_transmission_proof(ctx.root, ident) == "unavailable"  # a resend stays refused
+    assert (slow.receipt_observation, slow.exit_code, slow.code) == ("unavailable", 6, "unavailable")
+    assert slow.reason == ("the Plane daemon is listening but did not answer within 0.5s, so it is"
+                           " slow or stuck (a stopped daemon refuses the connection); receipt"
+                           " absence is unproven")
+    down = q.receipt(ctx, ident, wait=0)  # nothing listens on the root's own socket
+    assert down.reason == ("Plane ingest is down: nothing listens on its socket; receipt absence"
+                           " is unproven")
 
 
 def test_reply_wait_ignores_wrong_peer_and_descendants_then_returns_first_direct_reply(estate, monkeypatch):

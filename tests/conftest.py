@@ -23,7 +23,7 @@ REALBOOT_HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
 if Path(claudlobby.__file__).resolve().parent != _TEST_TREE / "claudlobby":
     raise pytest.UsageError("test package origin does not match the tree under test")
 
-from claudlobby.config import DEFAULT_GUARDRAILS
+from claudlobby.config import DEFAULT_GUARDRAILS, DEFAULT_RESOURCES
 
 
 def _require_prepared_resources():
@@ -37,7 +37,7 @@ def _require_prepared_resources():
             raise ValueError("missing source inventory")
         indexed = subprocess.check_output(
             ["git", "ls-files", "-z", "--", "claudlobby/_runtime_scripts", "library",
-             "templates", "voices", "fleet.yaml.seed", "fleet.yaml.example",
+             "templates", "fleet.yaml.seed", "fleet.yaml.example",
              "projects.yaml.seed", ".env.seed.example", "missions/fleet.md.seed"],
             cwd=_TEST_TREE, timeout=10).decode().split("\0")
         indexed = {name for name in indexed if name and name not in {
@@ -495,6 +495,19 @@ def sysbin_excluding(tmp_path_factory):
     return _build
 
 
+@pytest.fixture(scope="session")
+def native_stand_ins(tmp_path_factory):
+    """`bun` and `claude` stand-ins for node, built once per session and shared by
+    every test that needs a native process by those names
+    (tests/stand_in_fixtures.py). A test keeps its own scripts and state under
+    its own tmp_path."""
+    from tests.stand_in_fixtures import NODE, make_stand_ins
+
+    if NODE is None:
+        pytest.skip("native stand-ins need node (a claudlobby prerequisite)")
+    return make_stand_ins(tmp_path_factory.mktemp("native-bins"), NODE)
+
+
 def call_lib_fn(fn: str, value: str) -> str:
     """Source lib-common.sh and call one function on a single value, returning
     stdout. The value travels as a positional arg so the shell never
@@ -600,6 +613,19 @@ def report_row(bot, ts, status="completed", task_id=None, **extra):
     return row
 
 
+def write_default_stubs(library: Path) -> None:
+    """Stub every list default that `load_fleet` merges onto every bot.
+
+    A minimal library must carry them, or the validator warns per bot about an
+    item it cannot resolve. Call it before a fixture writes its own copy of one,
+    so that copy's text wins.
+    """
+    for kind, names in (("guardrails", DEFAULT_GUARDRAILS), ("resources", DEFAULT_RESOURCES)):
+        (library / kind).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (library / kind / f"{name}.md").write_text(f"---\ntitle: {name}\n---\n\nDefault stub.\n")
+
+
 def load_test_fleet(fleet_dir: Path):
     """load_fleet against a fleet_dir fixture, returning just the FleetConfig."""
     from claudlobby.config import load_fleet
@@ -694,16 +720,11 @@ def fleet_dir(tmp_path: Path) -> Path:
         "# Engineer\n\nBuild things.\n"
     )
 
+    write_default_stubs(root / "library")
     # A guardrail and protocol the defaults reference
     (root / "library" / "guardrails" / "no-push-main.md").write_text(
         "---\ntitle: No push to main\n---\n\nNever push to main.\n"
     )
-    # Every bot composes DEFAULT_GUARDRAILS, so the minimal library must carry
-    # them or the validator warns per bot about a guardrail it cannot resolve.
-    for _default_guardrail in DEFAULT_GUARDRAILS:
-        (root / "library" / "guardrails" / f"{_default_guardrail}.md").write_text(
-            f"---\ntitle: {_default_guardrail}\n---\n\nDefault guardrail.\n"
-        )
     (root / "library" / "protocols" / "report-back.md").write_text(
         "---\ntitle: Report-Back Protocol\n---\n\nReport back when done.\n"
     )
@@ -749,7 +770,7 @@ def fleet_dir(tmp_path: Path) -> Path:
     )
 
     # Voices dir
-    (root / "voices").mkdir()
+    (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
 
     # Runtime dir
     (root / "runtime" / "bots").mkdir(parents=True)

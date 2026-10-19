@@ -27,6 +27,424 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `--git` mode, renames and binary files, and a binary file whose name would run a command in a shell;
   - a diff crafted to steer the reader (a line shaped like a file header, a carriage return, a hunk that does not match its counts).
 
+### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
+
+- Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,
+  subject-filing and memory-home capabilities composed clauDNA harvest needs.
+  Remove the temporary `claudna-harvest-pin` warning. Upgrade one host first;
+  from one vault clone run `claudron doctor --fix --json --vault <vault>`, sync
+  its migration commit to every clone, and rebuild each local index before planning.
+- `config plan`, validation and host doctor share one bounded migration probe per
+  vault per request. Session-loop bots warn `claudron-migration` for pending
+  migrations or unequal formats, naming the human fix; `config plan` prints the
+  category and a static remedy while keeping authored paths and values private.
+  An unavailable check warns
+  `claudron-doctor`. Other engine findings remain in doctor's detailed rows.
+
+### Added — clauDNA summary export (#2145 P3)
+
+- A default-on 15-minute `session-export` fleet job reads clauDNA's recorded export
+  door, lands one reader-visible `session_summary` per sealed segment, then acks.
+  Per-item replay, separate unexportable fallback IDs and independent stall-record /
+  alert retries keep cursors moving. Doctor and the four monitor consumers read the
+  new records and per-bot progress; skipped-only windows stop at coverage.
+
+### Changed — composed clauDNA spend switches (#2145 P3)
+
+- Strict field-wise `claudna: {session_summary, harvest}` opt-ins replace the digest
+  spend switch. Every bot composes `CLAUDNA_SESSION_SUMMARY=0` unless armed;
+  harvest implies summaries and needs Claudron >= 0.8.0 on the host (separate 6a).
+  Move `CLAUDNA_SESSION_SUMMARY` / `CLAUDNA_HARVEST` from `.env` or bot `env:` into
+  `claudna:`: composed lines override tier values, while bot `env:` overrides the
+  mapping. `config validate` warns `claudna-env`. The old state-root seal/rename /
+  retention sequence is in `documentation/runbooks/claudna-state-dir-cutover.md`,
+  operator-run after 6b.
+
+### Removed — duplicate summary and session-start hooks (#2145 F2/F6/F15)
+
+- Retire the transcript digest and SessionStart plane hooks with every live
+  consumer. F15 waives the old-vs-new summary comparison; clauDNA owns summaries,
+  and Python `derive_session_uid` is now the single session-id derivation.
+
+### Fixed — a handoff that lands after `bot handoff` returns reads `saved` on `bot handoff BOT --check` (#963, #990)
+
+`claudlobby bot handoff` waits 30 s, and a handoff is a model turn that often takes minutes, so the door read `unknown` on handoffs the bot went on to write. A manager had no supported way to see one land: its permissions deny it the worker's handoff file.
+
+- **The door records when it asked.** Each request it sends writes `data/.handoff-request` in the bot's directory; a request it skips writes nothing.
+- **`claudlobby --json bot handoff BOT --check` reads the handoff file against that record.** It sends nothing and takes no lifecycle lock. `saved`: written since the request, by a capture whose own `last_updated` says so (a reference refresh written over an older capture is not one). `pending`: not written since the request. `unknown`: no request recorded, or a file it cannot verify. The fleet manager's composed grants include it for each worker.
+- **The restart guidance names it.** `safe-worker-restart`, `fleet-ops`, `delegate` and the orchestration expertise accept `saved` from the request or from the check, say never to request another handoff while one reads `pending`, and say what to do when one still reads `pending` once the bot is idle.
+
+### Fixed — `fleet notify` escalates to the fleet.yaml `fleet_pulse` target, as the pulse does (#2234)
+
+`claudlobby fleet notify`, and the alert a failed message write raises, now read the escalation chat, its sender, `renotify_after_s` and `rearm_window_s` from the active fleet.yaml `fleet_pulse:` block, where fleet-pulse reads them. They read them from the manager's `.env` tiers before, so a pair set in fleet.yaml left `fleet notify` with no Telegram target, and a pair set in a `.env` tier reached `fleet notify` but not the pulse.
+
+- **A fleet that sets `FLEET_PULSE_ESCALATION_CHAT_ID` and `FLEET_PULSE_ESCALATION_STATE_DIR` in a `.env` tier** moves them to `fleet_pulse.escalation_chat_id` and `escalation_state_dir` in the configuration it activates with this release, or `fleet notify` has no Telegram target. In that block they also send the pulse's escalations to that chat. `config validate --runtime` names each `.env` copy (`fleet_pulse_env_inert`).
+- **The Telegram pair and token** (`TELEGRAM_GROUP_CHAT_ID`, `TELEGRAM_STATE_DIR`, `TELEGRAM_BOT_TOKEN`) are still read from the manager's `.env` tiers.
+- **When those tiers cannot be read,** an alert still reaches the `fleet_pulse` target, and a message write's result reports it as sent.
+
+### Fixed — a usage-limit stop reads `LIMIT` whatever Claude Code draws under the limit line (#2348)
+
+Every usage-limit stop since the #996 fix went live read `IDLE` in production, so none was named and none paged. The hook's record was in place and no turn had ended since, but `usage-limit.py` took a line under the limit line that it did not know for the bot moving on. Claude Code changes what it draws there between releases and from the server: with a server flag on, 2.1.299 adds `Press ⏎ to continue after reset` under the limit line, and in an offline reproduction keepalive read that frame `IDLE` on every tick.
+
+- **Only a newer prompt drawn under the limit line, or Claude Code's own "Usage limit available again" notice, counts as moving on.** A turn that ended normally since the stop has already removed the hook's record, which keepalive checks before it asks the reader.
+- **An `IDLE` tick names a record the pane does not confirm.** When `data/.usage-limit` is newer than the last tool call and the reader answers `none`, or gives no answer, keepalive's `IDLE` line says so.
+
+### Fixed — a fleet pulse run ends by 260 s, whatever the load (#2347)
+
+A scheduled pulse run now ends by the largest cap (240 s unset), counted from its unit's start. A wait for admission while an activation holds the lock, or a slow interpreter start on a loaded host, cuts the sweep short instead of lengthening the run, and a run with no time left starts no sweep. Stopping a sweep that reached its cap waits for its output only through the 10 s grace, then at most 1 s for the sweep to exit, and writing the `TIMED OUT` summary no longer imports the composer. The pulse's systemd unit carries its own limit for a run that cannot stop itself: `TimeoutStartSec=` at the largest cap plus 14 s (254 s unset), with `TimeoutStopSec=1`. A timed-out run's message and summary say how long the sweep ran of its cap and how far into the run it began.
+
+### Changed — the voices renovation: every voice is a reusable archetype; six voices are renamed; only the new names compose
+
+Voices now follow their folder's rules: a voice is an archetype (tone, cadence, how it pushes back), not a real person and not a bot's name, and it carries no domain knowledge. A bot whose voice changed composes the new voice text after its next activation.
+
+- **Renamed:** `aswath-damodaran` → `valuation-professor`, `john-carmack` → `optimization-engineer`, `issey-miyake` → `minimalist-designer`, `srinivasa-ramanujan` → `intuitive-mathematician`, `casual-degenerate` → `deadpan-wit`, `stoner-creative` → `meandering-creative`.
+- **The old names no longer resolve.** A bot that still declares one composes with no voice, and `config validate` reports it as `voice-missing`. Change its `voice:` to the new name from the map above in the configuration you activate with this release.
+- **Rewritten:** the four voices named after real people keep their flavor without the names or the quotes. `agreeable-workhorse`, `high-energy-jester`, `deadpan-wit` and `meandering-creative` keep their humor without insults or profanity, and `conspiracy-theorist` becomes a playful skeptic. `alex`, `astrid` and `ari-gold` address the bot as `{{BOT_NAME}}`; `alex` and `astrid` are titled by archetype. `bob-porter`, `bob-slydell`, `joanna`, `samir-nagheenanajar`, `michael-bolton` and `tom-smykowski` lose their domain knowledge, which belongs in expertise files. `takahashi` and the two design lessons name the minimalist and maximalist designers instead of a person.
+- **Added:** eight archetypes, `skeptical-auditor`, `patient-teacher`, `pragmatic-shipper`, `calm-incident-commander`, `plain-spoken-editor`, `curious-researcher`, `diplomatic-facilitator` and `meticulous-archivist`.
+
+### Changed — voices live in `library/voices/`; a fleet's old `voices/` is read for one more release (#2150)
+
+Voices are library content, so the package's `voices/` moved to `library/voices/`, and a fleet overlay's `local/<fleet>/voices/` becomes `local/<fleet>/library/voices/`. Only the location moved: each bot that composes a voice composes a byte-identical `CLAUDE.md` before and after (measured on a live host's fleets; the PR has the hashes).
+
+- **`voice: voices/<name>.md` in fleet.yaml is unchanged.** It names a voice. `library/voices/<name>.md` and a bare name resolve the same way.
+- **A fleet voice still at the old `voices/` composes in this release.** Lookup reads the overlay's `library/voices/`, then its old `voices/`, then the package. `config validate` and doctor's fleet-yaml rung name each file still at the old path, once per file (`voice-legacy-path`). Move it before #2202 stops reading the old path in the next release.
+- **`bot create --voice-text` writes `library/voices/<name>.md`,** and refuses a name whose voice is still at the old path, which the new file would outrank.
+- **The wheel ships voices at `_resources/library/voices/`,** and `host setup` requires them there.
+- **The plane's library registry now records the packaged voices** (`shared/voices/<name>`). It discovers categories from `library/`'s folders, and voices used to sit outside it. It skips a folder's `CLAUDE.md`/`AGENTS.md`.
+- **The plane's content room counts a declared voice as in use.** A bot declares `voice: voices/<name>.md`, and the voice's library item is `voices/<name>`. The inventory now joins the two, so each voice names the bots that use it instead of reading unused.
+
+### Added — a fixed system-orientation section in every bot's CLAUDE.md, and the orientation commands taught where they belong
+
+Every composed CLAUDE.md now carries a short `## System orientation` section (under 1 KB): what the plane is, the doors a bot reads and writes through (only doors every role is granted), a task versus an assignment, and `claudlobby --json bot show BOT` for what the bot has at hand. fleet-ops teaches `bot show`, `bot capabilities`, `project list`, `project show` and `task permission request|show|check` in a new section, with their grants; the check-in skill teaches `checkin show`. `task feedback` and `task recheck` are named there as not a bot's; `checkin selection` waits for the sprint action that produces its input. #2331.
+
+### Changed — `library list` includes principles
+
+The list left out the principles kind, so a bot asking what the library holds got an incomplete answer. A test now fails for any library directory that holds items and is not listed.
+
+### Changed — library skills say when to use them, and `fleet-ops` mints request IDs without `uuidgen` (#2330, #2061)
+
+Every library skill's description opens with its trigger ("Use when …"), and `tests/test_skill_descriptions.py` fails one that does not. `fleet-ops` mints request IDs with `python3 -I -c 'import uuid; print(uuid.uuid4())'`, granted exactly, instead of `uuidgen`, which a stock Debian host lacks (#2061). Isolated mode keeps a `uuid.py` in the bot's working directory from running in place of the standard library's.
+
+### Added — registry defaults for the guidance every fleet copied by hand (#1168)
+
+The registry has defaults for the guardrails `no-push-main`, `no-destructive-git`, `pii-protection`, `no-fabrication` and `confirm-before-send`; the protocols `context-management`, `telegram-routing` and `telegram-formatting` (the last two only for a bot with a Telegram channel); and the resource `timezone`. Added the `system_defaults.resources` opt-out. The `resources` registry tier moves from WIRE to INSTRUCT.
+
+### Changed — `remote_control` defaults to the fleet manager only (#2325)
+
+Unset, it is true for `fleet.manager` and false for every other bot; an explicit value on the bot or in `defaults:` wins either way. `config explain bot.remote_control` names the role default. `bot create` takes `--remote-control` / `--no-remote-control` as one option, and its wizard offers the inherited value.
+
+### Fixed — no framework send types into a menu (#2325)
+
+`pane_send_verified` refuses while a menu holds the pane (rc 4, `recipient-menu-open`), so a delivery's text can no longer choose an option in Claude Code's usage-limit menu, usage credits included.
+
+### Added — `host repair-after-reset`: recover an activation a host reset stranded during its start steps
+
+A host that reset or lost power while `ingest_started`, `bots_started`, `verified` or `producers_resumed` was next could not be recovered. Every started candidate died with the host. The resume only re-observes recorded starts, so it failed on the first one that had a recorded result. `repair-start` covers only a bot start with no result. Native admission refuses every unit while the activation is unfinished. A floor host hit this after a watchdog reset at its 16th bot start and stayed down with no supported way back.
+
+`claudlobby --root DATA host repair-after-reset ACTIVATION_ID --reason TEXT` (operator only; starts nothing):
+- **What it checks.** The activation is selected and stopped at one of those steps. Each recorded start's frozen unit bytes match and its unit is verified inactive; a one-shot producer service with no recorded result is refused, as the resume refuses it. Every published candidate unit is quiet, as the resume's republish requires, and a refusal lists each one that is not. Each bot's private tmux server is gone. The plane socket is down (no socket file, or nothing listening); a slow or garbled listener refuses. The caller is outside every unit the activation recorded.
+- **What it writes.** One atomic write moves every recorded start and its dead evidence into `start_repairs`, tagged `host_reset` with the boot id where the host reports one (Linux's kernel boot id, macOS's boot session UUID). It reopens `ingest_started`. Selection, publication and identity bindings are not changed. The store refuses a record the resume would not admit (an early-abort marker, no install directory).
+- **Then the resume.** The sealed candidate's `--resume` starts every candidate fresh and finishes the activation. Like `repair-start`, the new verb can run from a newer CLI than the sealed release.
+
+`documentation/existing-host-release-conversion.md` gives the procedure, with the Linux (`systemctl --user stop` and `reset-failed`) and macOS (`launchctl bootout`) commands for units left running or looping on admission refusals.
+
+`repair-start` and the new verb share their admission, frozen-intent and dead-start checks and their CLI error mapping; `repair-start`'s refusal texts now name the bot, with the same meaning.
+
+Tests: `tests/test_activation.py` reproduces the reset mid-`bots_started`:
+- one bot started with a result, one without, then everything dead;
+- the repair, then the resume to `active`, with each unit started once more;
+- the `verified` and `producers_resumed` variants, the latter refusing first on the producer timer systemd started at boot;
+- refusals, each matched by text and changing nothing: a serving or hung plane socket, a live bot, a live plane unit, a looping unit with no recorded start, a hosted caller, a bad reason, a held lock, an ingest start with a stray fence, and a one-shot producer start with no result;
+- the store taking exactly the recorded starts of a record the resume would admit;
+- the boot id on Linux and macOS.
+
+The fake host now answers `svc_inventory_properties` like `systemctl show`, a timer's `Triggers=` included, so the loaded-but-stopped candidate check runs as on Linux. `tests/test_host_commands.py` covers the verb's guard, its output and a refusal.
+
+### Added — a workflow builds the release inputs for one commit on a Linux arm64 runner
+
+`release-bundle.yml` builds the wheel, the offline wheelhouse and the hash lock that `claudlobby host setup` takes, for any commit, on `ubuntu-24.04-arm` with CPython 3.11. It uploads them with their checksums once its offline assembly rehearsal has passed. Inputs: the commit, extras (`plane-ui`) and dependency pins. A host no longer has to build the wheel or download its dependencies. CI-only.
+
+### Fixed — a bot stopped on purpose no longer pages as an outage, and one fault is one alert (#2243)
+
+A bot stopped through `bot stop` paged as an outage. fleet-pulse read the missing session and the down unit as a death: `session_missing` and `service_down` every sweep, both pushed to the manager, and two stopped bots reached the fleet escalation once per type, every 10 to 20 minutes, for hours. Over seven days on one host, all 230 escalation-type rows came from four deliberate stops and none from a real death (the issue's pre-scope comment has the measurement).
+
+- **A recorded stop is silent.** `bot stop` now writes a local record of the stop before the unit file goes, whatever the plane does: who made it, when, and an optional `--reason TEXT`, in the bot's `data/.stopped`. fleet-pulse reads that record beside the missing unit file, the fact activation, keepalive and reconcile already read, and raises no row, push or escalation for the bot. `bot start` removes the record. The plane gets notice rows, `bot_stopped` and `bot_started`, as the audit trail. The sweep never reads them, so a stop made while the plane is down stays quiet, and the stop reports `recording: degraded`.
+- **No unit file and no record is its own fault, `unit_missing`** (critical): a unit lost with nobody having stopped it, which a botched disenroll, a broken activation or a deleted unit directory leaves. It records one row every sweep and pushes once per episode, and the escalation counts it with today's threshold and window, in place of the `service_down` and `session_missing` such a bot raised. A bot stopped before this change has no record and reads as `unit_missing` until `bot stop` runs on it again; on a bot already stopped, that writes the record and changes nothing else.
+- **One fault, one alert.** A down unit raises `service_down` alone, and its payload's new `session` field (`up` or `missing`) carries what `session_missing` said. `session_missing` is for a session gone under an active unit, or on a bot with no service configured.
+- **One FLEET ALERT per sweep.** Every cause over its threshold goes out in one message; a single cause reads as before.
+- **A forgotten stop gets a reminder, never a page.** After `fleet_pulse.stopped_remind_days` days (default 3, `0` off), the manager gets one push, then one every as many days again.
+- **`stopped` everywhere.** The pulse summary shows `stopped` in both columns and `stopped since <UTC> by <caller>`. `fleet status` reports `state: "stopped"` with `stopped_since`, `stopped_by` and `stop_reason`. `fleet reconcile` reports `stopped` for a recorded stop with no enrolled unit and no ready session. A missing unit with no record never reads as stopped.
+- **A stop record cannot outlive its stop.** A record beside an installed unit is from a stop that is over: the unit came back through another door, or a start or a stop failed partway. fleet-pulse removes it once it is 15 minutes old, so a later loss of that unit pages `unit_missing`. A record it cannot remove is pushed to the manager as `stop_record_kept` until it is gone, and a `bot start` that cannot remove it says so (`stop_record_kept: true`).
+- A recorded stop with no session also skips the activity checks: a stopped bot has no turn to be stuck in. `bot move` clears the record it copies to the moved bot.
+- The held-push and debounce-recipient rehearsals drew their two alerts from one such bot. Each now uses two workers with one alert each.
+
+### Fixed — a newer push to a pull request cancels the test run for the commit it replaced (#2269)
+
+`test.yml` sets a concurrency group per pull request with `cancel-in-progress`, so the run for a replaced commit stops instead of running to the end. On the morning of 2026-10-10, 23% of macOS runner-minutes ran after a pull request's head had moved (9.3% over the week ending that morning). A push to main falls back to its own run id, so pushes to main are never grouped, cancelled or queued behind each other. CI-only.
+
+### Fixed — `declared_bots_strict` takes its output file only as `--bad-out` and never truncates it, and `bot create` writes `fleet.yaml` atomically (#1131)
+
+`declared_bots_strict` finds every manifest itself. Its one argument named an output for the broken-manifest lines, and both of its last branches overwrote that path in place, so a `fleet.yaml` passed there as the manifest to check was emptied whenever every manifest parsed.
+
+- **`declared_bots_strict [--bad-out FILE]`.** Any other argument is refused with rc 2 before anything is read or written, as is a FILE that already holds content. FILE is only appended to, and stderr stays the default. The doc comment says what FILE holds after each outcome.
+- **A break for outside scripts:** the helper takes no positional argument, so a script outside this repository that passes it a file now gets rc 2 and must pass `--bad-out FILE` instead.
+- **Its four callers pass `--bad-out`.** `boot-capture` clears its per-boot file first, since each tick writes there again.
+- **`bot create` writes `fleet.yaml` through `fleet setup`'s atomic writer**: a temporary file beside it, then a rename, so a reader or a crash never meets a truncated manifest. That writer gives the file mode 0600, as `fleet setup` does.
+
+### Fixed — the native tests link node instead of copying it for every case (#2239)
+
+`tests/test_bridge_state.py` copied the host's `node` twice for each of its four native cases, and `tests/test_claude_session_pid.py` once for each of three cases, into pytest's `tmp_path`. On a Raspberry Pi, `node` is 122,159,120 bytes and `tmp_path` sits on the SD card, so a local run of the two files wrote 1,343,750,320 bytes of copies of it, and 35,008,480 more of copies of `bash`.
+
+- **One set of stand-ins per session, shared by both files.** `native_stand_ins` in `tests/conftest.py` makes `bun` and `claude` once. Every native case runs them and keeps its own scripts and state under its own `tmp_path`.
+- **On Linux each stand-in is a symbolic link, so nothing is copied.** Linux names a process after the path it was started from: a link named `bun` reads as `bun` in `/proc/<pid>/comm` and in `ps`, and its command line starts with the link's path. Those are what the tests and the code they test read; only `/proc/<pid>/exe` names `node`, and nothing reads it. The `bash` stand-ins in `tests/test_bridge_state.py` are links too.
+- **Elsewhere each stand-in is still a copy, now made once per session.** Whether macOS names a linked `node` after the link has not been checked, and #1012 and #1087 are why the stand-ins there are real `node` binaries.
+- **`harness/validate-bot-change.sh` uses the same helper.** Its session-scope scenario copied `node` twice per run (244,318,240 bytes) and now links it on Linux.
+- **`tests/test_stand_in_fixtures.py` pins it** with a small file in `node`'s place. It fails if a Linux stand-in holds a copy, if a copy is made more than once per name, if a copy loses its `libnode` link, or if either test file copies a file itself.
+
+### Added — private-socket owner ingress and recorder-source binding
+
+`host owner serve` runs the protected canonical Plane behind an explicitly
+configured Tailscale Serve Unix socket, with native numeric human identity,
+bounded CLI lookups and no TCP fallback. `host owner bind-source` requires local
+terminal attestation before the recorder can be served; protected queries refuse
+foreign or mixed-host storage in the same SQLite snapshot they read. Socket
+permissions, restart cleanup and revocation are exercised on disposable data.
+This adds an opt-in foreground door; it does not change the default Plane
+service, configure Tailscale, activate a fleet, or grant bot messaging. Actual
+Serve/HTTPS and Mini/Pi acceptance remain deployment work.
+
+### Added — local owner approval and direct-host sign-in page
+
+`host owner initialize|confirm|revoke` require an explicit installation root
+and interactive operator terminal; pairing codes are read with hidden input,
+never as command arguments. The terminal shows the exact principal before
+approval, and stale revocation cannot remove a replacement pairing.
+`host owner status --json` inspects authority without creating it. The internal
+browser factory serves a self-contained `/owner` page for pairing, sign-in and
+sign-out, with no website dependency or persistent browser credential storage.
+Existing private reads remain gated. Trusted Tailscale ingress and network
+activation remain separate; the default Plane service keeps its existing
+read-only behavior and serves the new inert static assets without owner APIs.
+
+### Fixed — `bot stop` waits for the stopped session to exit before proving it quiet, and `bot session` reads a cleanly stopped bot as absent (#2227)
+
+A bot unit runs with `KillMode=process`, so systemd marks it stopped as soon as its `ExecStop` (`tmux kill-server`) returns, while the session it started (the tmux server, `claude`, its MCP servers) is still exiting. `bot stop` read the unit's cgroup once, right then, so it refused and reported a stop that had worked as "bot lifecycle effect is unverified". Two stops on another fleet read that way on 2026-10-07, and each session had left the cgroup within about 2 s.
+
+- **The stop's quiet check waits, within a bound.** `svc_activation_quiet` takes an optional wait in seconds, and `assert_quiescent(..., settle_s=N)` passes it. Only "inactive, with processes still in the cgroup" is re-read, every 0.25 s, from the cgroup first seen, because systemd stops reporting the cgroup once it collects the emptied unit. Processes left after the wait still refuse, so the stop still reads unverified. Every other refusal returns at once. `bot stop` waits up to 30 s, on both of its branches. Every other caller still reads the cgroup once.
+- **A cgroup that vanishes while it is read counts as empty.** systemd removes an emptied unit's cgroup, and the kernel removes only an empty one. So the read no longer refuses at the moment the session finishes exiting.
+- **`bot session` and `fleet reconcile` read a cleanly stopped bot as absent.** tmux leaves its socket file behind after a clean exit, and `bot stop` keeps it, so the session observer read `unknown` and the bot `indeterminate`. `bot move` already handles this case, and these commands now use its kernel proof: an inactive exact unit, an empty cgroup where one is witnessed, and a socket that refuses connections. When all three hold, the session reads `absent`. Nothing is removed.
+- **Not changed:** `bot restart` (#1586), `bot start`, activation and `bot move` keep their single reading.
+- **Tests:**
+  - `tests/test_activation_supervisor.sh`: the wait, the cgroup kept as the witness, the bound, an immediate refusal and the range of the wait.
+  - `tests/test_activation_runtime.py`: the wait reaches the native check, with a call budget that covers it.
+  - `tests/test_bot_operations.py`: the stop waits, and both a session that never exits and a stop that never happened read unverified.
+  - `tests/test_fleet_operations.py`: a stale socket reads absent only by the proof.
+
+### Added — internal direct-host browser session transport
+
+An internal factory connects an explicitly verified principal to local owner
+pairing and protected Plane reads. Exact status, pairing, sign-in, renewal and
+sign-out routes reuse the existing owner authority; session credentials stay
+in a Secure/HttpOnly host cookie. Host, Origin and explicit request-intent checks
+guard lifecycle writes, while static files and SSE retain the read gate's
+per-delivery checks. No runtime command enables it. A production identity
+verifier, local confirmation UI and actual HTTPS browser validation remain
+required; website OAuth and bot action endpoints are outside this increment.
+
+### Added — internal owner-authorized ordinary-message adapter
+
+An explicitly paired host owner can receive a separately approved message grant
+for one fleet and existing human actor. The internal adapter checks that grant,
+current identities and active-release admission before using the same send and
+receiver-integrity workflow as the CLI. It retains request evidence for recovery
+without resending, including when communication recording failed. Reader sessions
+remain read-only by default. No browser endpoint or runtime service enables this
+adapter; trusted ingress, local confirmation UI and real bot canary validation
+remain required before browser operations are activated.
+
+### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
+
+`test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.
+
+### Fixed — a usage-limit stop is named, paged, and (opt-in) resumed once after its reset (#996)
+
+A claude.ai usage limit ends a bot's turn with one line, `You've hit your session limit · resets 10:50pm (America/New_York)`, and on this estate nothing resumed it. Every bot ran with `--remote-control`, and while that bridge is up Claude Code (2.1.291 and 2.1.292, read from the binary and reproduced) arms neither its own automatic continue nor its limit menu. The pane sat at an empty prompt that keepalive read as IDLE, so `data/.idle` also kept `activity_stuck` quiet, and bots sat 75 to 85 minutes past the reset until someone noticed.
+
+- **keepalive reads that frame as `LIMIT`, not `IDLE`.** It takes two facts, never one. The first is the bot's own record: `usage-limit-hook.sh`, a new StopFailure and Stop hook, writes `data/.usage-limit` when Claude Code ends a turn with `error: rate_limit` and clears it when a turn ends normally. The second is the whole pane: the new `usage-limit.py` reads the limit line, which sits above `tail -10`, as the bot's last word, with its reset time and what holds the screen. A limit line a bot merely quotes writes no record, so it is never a stop. `LIMIT` writes `data/.limit`, no `.idle`, and sends no reload and no bridge heal. It rides the heartbeat sample, and `fleet status` shows `limit`.
+- **The reset is read as Claude Code prints it.** A time with no date is within 24 hours after the hit that printed it, since Claude Code adds the date only beyond 24 hours. In the hour that repeats when DST ends, it is the later pass: an hour late delays a resume, an hour early would type it while the limit holds. A later hit in the same hold that prints the same limit and reset reads the reset the hold first read, so a hit after the reset is not read as tomorrow's.
+- **fleet-pulse pages `usage_limit_held` (critical) in place of `activity_stuck`** when a bot is still held after its reset: the printed minute, plus 60 s (the print drops the seconds), plus keepalive's resume grace, plus `OBSERVABILITY_USAGE_LIMIT_SLACK_S` (300 s). The page names the limit, the reset and the remedy. Before the reset, a held bot pages nobody: that wait is expected.
+- **The resume is opt-in per bot (`KEEPALIVE_LIMIT_RESUME_ENABLED=1` in its `fleet.yaml` env).** Runtime scripts are in force on every bot at activation, and this door types into a bot's pane, so one armed bot is the only canary. Once the reset has passed, it takes one action per reset, recorded before its first key and emitted as `keepalive_limit_resume`:
+  - If the usage-limit menu is up with its pointer on the exact label "Stop and wait for limit to reset", it sends one Enter. It never chooses by position: a server flag can put usage credits first, and a pointer anywhere else gets no keys.
+  - It then sends the resume prompt.
+  - Any other menu or dialog, a box holding text, or a running turn gets no keys. Neither does a second limit with the same reset: that one goes to an operator.
+- **`usage_limit_hit`** records each stop with the limit line, and the protocol's "no instrument reports `rate_limit`" now reads: a limit that trips is recorded; position against the ceiling still is not.
+
+### Fixed — each fleet's copy of an interval timer is anchored to the clock at its own second on the host (#1654)
+
+On a host with several fleets, every fleet composed the same interval timers, and each job's copies fired together: four keepalives and the host probe in one second every minute, four pulse sweeps every five minutes. A first-run offset alone does not last. A timer that counts from its last start (`OnUnitActiveSec=`) moves all its later ticks whenever a start is pulled early by a wake of the user manager or delayed by load, and copies that meet share a wake from then on. Measured on a four-fleet host, offset copies merged again within minutes to an hour with `AccuracySec=10`, and two of five merged within 75 minutes with `AccuracySec=1`.
+
+- **Anchored to the clock.** An interval of whole minutes that divides an hour, or of whole hours that divides a day, is now `OnCalendar=` in UTC with `AccuracySec=1`. The minute splits into one band of seconds per fleet plus one for the host (12 s each with four fleets), and each job takes its own second in its fleet's band; a job longer than a minute also runs a minute after the previous fleet's copy. No two interval units on a host are due in the same second, and a late start delays only that run. In a soak on this host, five copies 12 s apart kept five separate 10 s windows on all 120 ticks of two hours paired with the interval form, and on 1,436 of 1,440 ticks over 24 hours; each of the other four held one or two starts the user manager made 2 to 23 s late, and the next tick was back on its points. The job's `startup_delay`, rounded down to the minute, places it in its cycle.
+- **First runs.** A unit's first run after any start is its next point. `host activate` starts timers only after every bot is verified ready, so none runs into a starting bot there; at a user-manager start, timers and bots start together, as before.
+- **Cost.** Keepalive and the probe now run 60 times an hour, against about 53.5 when each start could come up to 10 s late: about +131 CPU-s an hour on a four-fleet host, 0.9% of four cores. Some job now holds the activation lock about 61% of the time in normal operation (21% before) and about 83% in the three hours after an activation (40% before), which is why #2208's wait ships with this.
+- **Kept as it was:** an interval that has no clock points (a fleet's `pulse_interval: 420`, a 30 s job) keeps `OnActiveSec=`/`OnUnitActiveSec=` with a slot for its first run only. launchd keeps `StartInterval` with no slot. An anchored job never emits `Persistent=`. Calendar jobs are unchanged.
+- **What the docs claimed, corrected.** `system.yaml` and the schema doc said an activation runs an overdue job at once; for the interval form it counts every first run from its last daemon-reload instead. They also said a job's later ticks keep their slots; under `OnUnitActiveSec=` they do not.
+- **Tests:** `tests/test_timer_phase.py` composes four fleets and the host's jobs on one data root and checks that no two interval units share a second. When `systemd-analyze` is present, systemd's own calendar parser checks each expression.
+
+### Changed — Home Assistant: the library grants hass-mcp's 17 read tools by name, not the whole server
+
+Until now a bot that attached `homeassistant` composed `mcp__homeassistant__*`, so all 29 hass-mcp tools ran without a prompt, `restart_ha` and nine tools that rewrite dashboards included.
+
+- **`library/mcp/homeassistant.json` declares `read_only_tools`:** the 17 tools that only read, each checked in the hass-mcp 0.6.0 source. The composer emits one `mcp__homeassistant__<tool>` allow for each and never the wildcard, and the `tool_grants` of `library/integrations/homeassistant.md` mirror the list, as compose requires.
+- **The other 12 prompt:** `entity_action`, `call_service_tool`, `restart_ha` and nine dashboard tools. So does any tool a later release adds, until it is listed.
+- **Upgrade:** a bot that controls devices unattended needs `mcp__homeassistant__entity_action` and `mcp__homeassistant__call_service_tool` in `bots.<name>.tool_permissions.allow` before this reaches it. Without them, its device control waits on a prompt.
+- **Not a hard boundary:** `call_service_tool` can still call `homeassistant.restart`, and every tool has the token's full reach. The integration doc says so.
+- **The per-bot grant is named by its real key.** Two compose errors and the docs for the read-only split told operators to grant a write in fleet.yaml `tools.allow`, a shape that now fails to parse. They name `tool_permissions.allow`.
+- **Tests:** `tests/test_readonly_mcp_grants.py` composes a bot from the shipped library and pins the 17, the 19 with the device-control grant, and no wildcard. The shipped-library pins cover `homeassistant` too.
+
+### Fixed — The Home Assistant MCP fragment runs the server its tool list, doc and skills describe
+
+`library/mcp/homeassistant.json` pointed at HA's built-in MCP endpoint, `${HA_URL}/api/mcp/`, while its tool list, `library/integrations/homeassistant.md` and the `home`, `weather` and `status-personal` skills named the tools of the community server hass-mcp. The built-in endpoint answers only without the trailing slash and needs an HA integration set up first, so the server failed to connect at session start; connected, it would have offered none of the tools the docs and skills name.
+
+- **The fragment runs hass-mcp 0.6.0 over stdio:** `uvx --from hass-mcp==0.6.0 hass-mcp`, the shape the library's other pinned Python servers use, so `host cache warm` and `doctor` cover it. `HA_URL` and `HA_TOKEN` pass through the same env contract.
+- **`_permissions_contract.tools` lists the 29 tools 0.6.0 serves.** The 12 it listed are all among them. The entry above narrows what the library grants.
+- **The `/home` skill calls the tools as 0.6.0 takes them.** `entity_action` accepts only `on`, `off` or `toggle`, with service data in `params`, so the skill's `turn_on` and `turn_off` examples returned an error. `call_service_tool` takes the `entity_id` inside `data`.
+- **The integration doc** says what a host installs, what the token can reach, how to check the connection, and which REST calls to use when the server does not connect.
+
+### Fixed — `host activate` waits up to 300 s for running jobs before refusing, and jobs that start meanwhile back off (#2208)
+
+`host activate` took the host activation lock without waiting, and every composed timer job, host operation and native bot start holds that lock shared while it runs. An activation attempted while any of them ran was refused, and the refusal said another activation held the lock. On a four-fleet host some job held it 21% of the time in normal operation; per-fleet timer slots (#2209) raise that to about 61%.
+
+- **It marks itself pending, then waits.** Every activation first holds `state/activation-pending.lock` exclusively until it ends. A job or operation that starts meanwhile takes the path it already took during an activation: a scheduled job waits for it, a CLI mutation refuses, and the watchdog pauses. `host activate` (first adoption, upgrade and resume) then polls the lock for up to 300 s while the holders already running finish. The longest timer job, the pulse, is capped under its 300 s cadence.
+- **Refusals say why.** Another activation, running or pending, still refuses at once. A job or operation that outlasts the wait refuses with "a running job or host operation still holds the lock after a 300 s wait", and the CLI reports that no activation record was created. Start repair, early abort and fleet move still refuse at once, but now name a running job or operation instead of another activation.
+- **Tests:** `tests/test_activation_lock_wait.py` covers the wait, the back-off and the refusals; `tests/test_activation.py` has bootstrap, upgrade and resume each waiting for a job.
+
+### Added — a bot declares its agent CLI, and the plane's session uid is qualified by it (#2145 P1, Half A)
+
+The vocabulary and the join key the runtime-neutral observability epic (#2145) builds on. Nothing here launches, composes hooks for or validates a Codex bot, and no request receipt changes.
+
+- **`agent_cli: claude | codex` in `fleet.yaml`** (`bots.<name>.agent_cli`, or under `defaults:`; default `claude`). `known_values.KNOWN_AGENT_CLIS` is the one vocabulary. `codex` parses but `config validate` refuses it with `execution adapter not shipped`, so `config plan` refuses it too, until the Codex execution adapter (#2149) lands. A misspelt value fails to parse with a suggestion. An explicit `null` reads as `claude`; any other value outside the set, a falsy one included, fails to parse. `config explain bot.agent_cli --bot B` names its source. The key is `agent_cli`, not `runtime`, because `runtime` already names release activation (#1997; operator, 2026-10-06), and `agent_cli` is the one name for the value everywhere below: `bot.conf`, the bot keyframe and the session join key. A leftover `runtime:` key (the draft spelling) is not read: `config validate` warns (`retired-key`, naming `agent_cli:`), and refuses it when its value is not the CLI the bot runs, so `runtime: codex` never quietly runs `claude`.
+- **`bot.conf` exports `CLAUDLOBBY_AGENT_CLI`** on every bot, from `agent_cli` (`claude` today). Like every `bot.conf` line, a running bot sees it from its next restart. It names the rule the doors will derive the caller's session uid with; nothing reads it yet.
+- **The bot keyframe may carry `agent_cli`**. `BotPayload.agent_cli` is optional, declared as an additive `wire_additions` row in the migration plan, with no payload-schema bump. It is written only for a non-`claude` bot, so every keyframe today keeps the shape every daemon accepts (#1724) and every bot's `declared_hash` is unchanged; absence reads as `claude`.
+- **`plane/ids.session_alias(id, agent_cli="claude")` is the one place the session join key `(agent_cli, session_id)` is spelled** (#2145 F2): the raw id for `claude`, `"<agent_cli>:" + id` for any other agent CLI. `derive_session_uid(id, agent_cli="claude")` now composes it, so a `claude` uid is byte-identical to before and the bash mirror in `plane-session-start.sh` is unchanged.
+- **Design v2 records the #2145 amendments** (`documentation/plans/2026-08-18-observable-plane-design-v2.md`): the `(agent_cli, session_id)` derivation, `process_uid` unminted once the SessionStart hook retires (P3), the LangSmith pilot superseded, the tmux-boundary trace instrumentation deferred, the OTel direction inverted (inbound, P2) with its outbound half deferred, and §19 item 9. `documentation/architecture/observable-plane.md` says the bash parity pin covers agent CLI `claude` only.
+- **The mission admits Codex by name** (F18 (a), ratified 2026-10-05, [FORK-LOCK F18](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806)): "Claudlobby composes and supervises agent CLIs — Claude Code today, Codex through #2149; a further CLI enters by its own ratified fork." `PROJECT_MISSION.md` gains the dated ratification paragraph, rewrites its Claude-Code-only lines and the LLM-provider non-goal, adds sprint-focus item 3 (#2145), defers item 2 (the Claudosseum emitter) under #2145 so it carries a ref, and adds "a new agent CLI runtime" to Requires approval. `README.md` and `CLAUDE.md` (and `AGENTS.md`) carry the same scope in one line each. The decision record is `documentation/decisions/2026-10-05-f18-agent-cli-runtimes.md`.
+- **One Python helper builds the fleet-event row** (`plane/fleet_events.fleet_event_request`), parity-pinned byte for byte to bash `emit_fleet_event` for the actor, fleet and host anchors. It carries an optional `observed_at`, written only when given. `fleet notify` and the held-delivery Enter repair (`delivery_enter_repaired`) now build their rows through it instead of by hand. Both `source_ref` digests shrink from 64 to 32 hex; readers match the `fleet-events:` prefix only and no row is re-keyed. Enter repair's `emitter` becomes its `source`, `message` (it was `message-enter-repair`; nothing selects on it), and both rows now carry `occurred_at` from the writer's clock. The P2 intake and the P3 session export call this helper rather than adding a third and fourth copy.
+- **`start-bot.sh` scrubs a parent Claude Code session's markers before it launches the bot** (#2145 C10). A tmux server started from inside a Claude Code session hands its panes `CLAUDECODE=1`, `CLAUDE_CODE_CHILD_SESSION=1` and that session's `CLAUDE_CODE_SESSION_ID`, and an interactive `claude` that inherits the child marker boots with "Transcript saving is off": no transcript, so no `--resume` and nothing for a transcript reader (measured 2026-10-05, run log). The launch command now unsets all three after sourcing the env file and right before `exec`; the bot's own `claude` sets them for its children. `claudlobby/_runtime_scripts/` is read on demand, so this is live on every bot at its next start after activation.
+
+### Added — the P0 canary harness records Codex hook payloads (#2145, Codex batch)
+
+`harness/runtime-neutral-canary.py hook` now serves the Codex batch (C1–C3) as well as Claude's. Each line keeps every payload key's name and type (a string's length, never its value), the names of the process's `CODEX_*` variables with values only for `CODEX_SESSION_ID`/`CODEX_THREAD_ID`, and its ancestors' command names from one `ps` snapshot, basenames only (the owner-process walk, C2). `--stdout TEXT` prints a nonce or a JSON decision for the runtime to read (C3), and `--hold MS` marks the line, sleeps, then logs a second line under the same pid, so a hook the runtime kills shows as a hold that never completed (C1's `SessionEnd` budget). `report` adds the payload keys per event, the env names and values seen, the ancestor chains, and each hold with whether it completed and after how long. A measurement instrument; nothing in production calls it.
+
+### Fixed — a receipt check and `plane doctor` no longer call a working ingest down (#2086)
+
+When a receipt check could not settle whether its message's proof was still queued, it said "Plane ingest is down or its pending queues cannot be inspected", whatever had stopped it. `plane doctor` called the hour an orphaned stage waits for replay "not keeping up or is paused", and called a daemon that missed one 2 s probe "not serving". On a loaded host all three appeared while ingest was up.
+
+- **A queued file written before a message no longer counts against that message's receipt check.** A stager reaped before its rename leaves a hidden `.<name>.tmp`, which the daemon replays once it is an hour old. A burst of these held the queue over the 256 entries the check reads, for that hour. So every receipt whose proof was not yet committed read `unavailable`. A file last written before the message existed cannot hold its proof, so the check now sets it aside, allowing 5 minutes for the clock. Files written since are still read and counted, because an orphan may hold the proof.
+- **An empty orphan no longer reads as a torn entry for later messages.** A stager reaped between creating its file and writing to it leaves the file empty (#2164). The check read it as torn and answered `unavailable` at any queue depth. The same rule sets it aside for messages sent after it.
+- **The reason names what the check saw:** the count and the bound, the entry it could not read, or what the daemon probe saw.
+  - "Plane ingest is down" now means nothing listens on the socket.
+  - A daemon that takes the connection but gives no answer within the check's 0.5 s reads as listening but slow or stuck.
+  - Absence stays unproven in every case: the observation is still `unavailable` (exit 6).
+- **`plane doctor` reports orphaned stages apart from batches.** The staged-depth rung gives their count and the oldest's age. It reads ATTENTION for an orphan only once it is 300 s past the hour; measured, they leave within about 50 s. A renamed batch older than 300 s still reads "not keeping up or is paused". `plane status` and its JSON gain the orphaned count.
+- **`plane doctor` calls a listening daemon that does not answer slow, not stopped.** The daemon rung says it is listening but gave no answer within 2 s, and to run doctor again before restarting it. A daemon that refuses the connection, or has no socket, reads as before. The staged rung no longer calls that daemon's queue unrecorded.
+- **The retry gate decides as before.** It has no message instant, so it reads every queued entry, and a burst of orphans still refuses an uncertain resend.
+- **Tests:**
+  - `tests/test_message_queries.py` has a case for each path and one for the empty orphan; each fails on main.
+  - `tests/test_plane_doctor_result.py` covers both doctor rungs.
+  - `tests/test_plane_daemon.py` covers the probe's answers against a real daemon and real listeners.
+  - Two existing tests stood in for a healthy daemon by stubbing `probe_daemon`. They now run a real listener that gives the daemon's answer, so they drive the probe the code calls.
+
+### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
+
+#2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.
+
+- **`gh api … --input FILE` is a writer,** and the guard scans FILE.
+- **The scan reads JSON decoded.** Each string value is checked as text, so a handle at the start of a body line counts. In raw JSON that line reads `\n` then the handle, and the `n` hides it from the scan. A code fence counts as it does in a body file. Text that is not JSON is read as text.
+- **What the guard cannot read before the post, or cannot pin to the file gh will send, is refused,** never allowed unread and never guessed:
+  - `--input -` (STDIN);
+  - a path the shell builds as the command runs: a variable, `$(…)`, backticks, `~`, a glob or an escape;
+  - a relative path in a command that runs anything besides `gh`. The hook runs before the command, from the directory the command starts in, so a `cd`, `pushd`, subshell or sourced script before `gh` makes gh send a different file. With a clean file of the same name where the hook ran, a dirty body passed. No list of the ways to change directory is complete, so the rule is that `gh` is the whole command;
+  - a file the same command writes, such as `jq … > review.json; gh api … --input review.json`, since the hook would read the old content or none;
+  - a file that does not exist yet.
+
+  Each refusal names the route that works: an absolute path, or the body written in one command and posted, with `gh` alone, in the next.
+- **The body-file forms read what they missed.** A quoted path (`--body-file "FILE"`, `'FILE'`, `--body-file="FILE"`, `-F body=@"FILE"`) was never scanned, because the pattern could not start a path with a quote. A relative path in a command that can change directory (`cd`, `pushd`, `popd`, `source`, `eval`, `.`, `env -C`, `find -execdir`) is now refused. There, unlike `--input`, a relative path beside other commands is still read, and a path built at run time still passes unread: the one-line form that writes the body with a heredoc and posts it carries the text in the command, which the guard rewrites.
+- **A command split with a backslash-newline is read joined.** The writer test reads one line at a time, so `gh api … \` with `--input FILE` or `-f body=…` on the next line passed as a read.
+- **The reviewer instructions agree.** `same-identity-fallback` says to run the two steps as two commands, the post with nothing else in it, and that a nonzero exit prints gh's error rather than a URL. `code-review`'s same-identity section, `worker-lifecycle`'s completion step and row, `report-back`'s unlinked example, `fleet-ops` and the GitHub integration's review route now all name the verdict's URL with `--artifact`. So do `task reviews`' advice and OFF-STANDARD texts. The verdict anchor reads `— reviewed at <full sha>` wherever it is taught: the merge gate pins the 40-character form.
+- **Tests:**
+  - The harness's #1019 scenario runs the real guard on 36 new cases. Against main's guard, 29 of its 59 checks fail; against this PR's first round, 19.
+  - `tests/test_mention_rewrite.py` covers the JSON mode.
+
+### Docs — the cold-host build shows how to include the plane UI
+
+`documentation/getting-started.md` built the wheelhouse without the `[plane-ui]` extra and never said how to add it, though the plane-view runbook pointed there for exactly that. A release built that way has no fastapi or uvicorn, composes no `claudlobby-plane-view` unit, and activating it removes a running view. The walkthrough now takes the requirement as `WHEEL_REQ`, shows the `[plane-ui]` form, and says to match the selected release's extras when upgrading. Found while staging a production upgrade (#2145).
+
+### Fixed — bot-vitals never falls back to the working directory (#874, #2145 P2-b)
+
+`bot-vitals.sh` used `${BOT_DIR:-$PWD}` both for the activity marker and as the bot dir it handed the plane emit. Run without `BOT_DIR`, it wrote `data/.last-tool-call` into whatever directory it ran in, which for a bot is its project checkout, and recorded a `tool_call` row against that directory.
+
+- **Without a usable `BOT_DIR`, the hook now does nothing.** Unset, empty, relative or not a directory all count as unusable. It writes no marker, records no row, notes the reason on stderr and exits 0, so a tool call is never blocked. The check runs before `lib-common.sh` is sourced, so the no-op path is one fork. Every composed bot has an absolute `BOT_DIR` from `bot.conf`, so its markers and `tool_call` rows are unchanged.
+- **The double registration of #2062 now gets a warning, and the example no longer teaches it.** Hook dedup keys on `(command, matcher)`, so a manifest hook at the retired `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh` ran beside the release's default and recorded every tool call twice.
+  - `config validate` now warns `hook-retired-path` on any hook command under the retired root `lib/`, once per hook event that names it (a bot whose manifest names it under two events gets two). It is a warning, not an error, so existing manifests still compose. Delete those entries, then activate: a bot keeps running the hooks of the plan it was last activated with, so a cleaned manifest stops the double row only at the next activation.
+  - `fleet.yaml.example` uses the release's `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh` and explains the dedup key.
+  - The script's header says not to declare the hook again.
+- **`tool_call` rows stay.** They are the only record of which MCP tool ran until the plane takes tool names from OpenTelemetry (#2145 §14 Q17, P2-a2).
+- **Tests:** `tests/test_plane_cutover_keepalive.py::test_the_vitals_hook_never_falls_back_to_the_cwd` covers an unset, empty and relative `BOT_DIR`, replaying staged batches before it counts rows. `tests/test_validate_warning_discipline.py` raises `hook-retired-path`.
+
+### Changed — each bot keeps its clauDNA state under its own runtime dir (#2145 F14)
+
+Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"`, for every bot and with no knob. Until now all bots on a host and the operator's own sessions shared `~/.claudna`, so no single bot's sessions could be sealed, swept or exported alone.
+
+- **The whole clauDNA root moves, not just the session store.** That includes harvest and review status (`harvest/liveness.txt`, `review.txt`), the ops log (`runs/`), hook logs and the pre-compact markers. A bot's SessionStart harvest and review status lines start empty until its own root records a run. The history stays in `~/.claudna`.
+- **It cannot be overridden per bot.** `config validate` refuses `CLAUDNA_STATE_DIR` in a bot's `env:` or `secret_files:`, which are composed after it. Because `start-bot.sh` sources `bot.conf` after the `.env` tiers, a value set in a `.env` no longer applies to a bot.
+- **`spin-down-bot.sh --purge` now deletes the bot's clauDNA sessions with its runtime dir.** Export or harvest anything you need from a throwaway bot before purging it.
+- **It takes effect per bot at its next restart.** New sessions open in `runtime/bots/<bot>/data/claudna/`. Sessions the bot left open in `~/.claudna` stay there.
+- **Activation step (operator).** A clean restart closes the bot's old-root session itself. Once a bot has restarted onto its own root, seal whatever it still has open in the old root by bot name: only sessions a crash, kill or hard reboot stranded. Never seal before the restart, which labels a clean close `abandoned`. Never seal all open sessions: that closes live interactive ones. `list --bot` matches a name and never a fleet, so where two fleets on the host have a bot with the same name, wait until both have switched. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
+- **Readers** build a bot's root as `bot_runtime(bot) / CLAUDNA_STATE_SUBDIR` (`composer.py`). `bot.conf`'s `$BOT_DIR/...` text is expanded only by a sourcing shell.
+
+### Fixed — `fleet status` names a bot's current task by state, then latest transition, and says when more than one is open (#2179)
+
+A bot with two or more open assignments had its `current_task` read from whichever had the lowest task id. Task ids are random, so the pick was arbitrary. An assignment recorded but never delivered could read as the work in progress while the bot worked on another, and a manager routing by that line could skip the delivery.
+
+- **The order:** `read_fleet_work` ranks a bot's open assignments `active`, then `blocked`, then `assigned`. Within a state, the latest transition comes first, in the Plane's ingest order. That is the assignment's newest state-changing event (`accepted`, `progress`, `resumed` or `blocked_waiting`), else its own record. A manager's or the operator's act on the task (`escalated`, `nudged`) is not the bot moving to it. Delivery is a communication, not a task event. So neither moves the order. The ids only break a tie. `current_task` is the first.
+- **More than one is said, never picked silently:**
+  - `fleet status --json` and `fleet utilization --json` carry `open_assignments` beside `current_task`. It is null when the work is unavailable.
+  - The status table adds `(+N open)` after the task, kept clear of the column's truncation.
+  - The bot detail reads `Task: <title> (1 of N open)` above its assignment lines.
+- **One source:** both commands read the same `read_fleet_work`, so utilization inherits the order.
+- **The check-in skill:** it names `open_assignments`. Before a manager dispatches to a worker with more than one open, the skill has it check the worker's `assigned` rows: one still awaiting delivery is delivered, not assigned again.
+- **Tests:** `tests/test_current_task_order.py` covers:
+  - an active assignment beside a newer assigned one, in both task-id orders;
+  - active, blocked and assigned against the id order;
+  - two assigned ones by their latest transition, in both id orders;
+  - two active ones where a later progress event decides;
+  - an escalation, or a nudge on the older assigned row, does not decide, in both id orders;
+  - the count, including null when the work is unavailable;
+  - the status JSON, table and detail;
+  - utilization's count.
+
+### Fixed — `task reviews` attributes a verdict to the reviewed report that names its URL, before any time window (#1537)
+
+`task reviews` tied a verdict to a reviewed report only by time: the report had to land from 10 s before the verdict to 120 s after it. So a careful write-up (a report 332 s after its verdict), a corrected verdict (posted 115 s after the report already on file) and two reviewers posting 5 s apart read UNKNOWN or AMBIGUOUS. A block nobody could attribute could not be superseded either, so it outlived its own reviewer's later approve.
+
+- **The URL decides first.** A reviewed report that names the verdict's URL in `--artifact` is that verdict's report, at any distance in time. Two bots naming one verdict's URL read AMBIGUOUS, never a guess.
+- **The window is the fallback,** and only for a report that names no verdict URL. A report that names one verdict is never another's by timing, so a corrected verdict needs its own report naming its own URL.
+- **A comment's URL comes with `gh pr view`; a review's does not,** since `gh pr view` gives a review only an opaque node id. When a report names a review URL, `task reviews` reads the REST review listing (`gh api --paginate …/pulls/N/reviews?per_page=100`) and joins on its `node_id`. If that read fails (an HTTP error, a timeout, an unreadable body), the affected verdicts fall back to the window, and each says so.
+- **Every attributed event carries its method:** `url`, `window` or `window-after-failure`, plus the URL it joined on or the reason the URL could not be read. Each PR's `review_urls` says whether the REST listing was needed, read or unavailable, and `observed_attribution.methods` counts the verdicts by method.
+- **A report's URLs live in its body,** which is content: metadata capture withholds them, and those reports are matched by the window as before. Every fleet on the default `full` capture keeps them.
+- **The reviewer protocols say to pass the URL:** `same-identity-fallback` posts the verdict review through `gh api`, which returns its `html_url`, and names it on the report with `--artifact`; `report-back`, `review-flow`, `paired-work-review`, `pr-comment-hygiene`, `code-review` and the GitHub integration say the same. The verdict header and its `— reviewed at <sha>` anchor are unchanged.
+- **Tests:** `tests/test_who_reviewed.py` replays the four cases measured in #1537 through a real Plane with the report door's own encoding, a comment-URL and a review-URL join, the REST listing's failures (HTTP 403, a timeout, an error body at exit 0, a non-JSON body), a review past the first page of the listing (merged and back-to-back pages), and the URL shapes that name a verdict.
+
+### Fixed — the protocols name only addresses a reader can open, never a bot's own `data/` (#1708)
+
+`token-efficiency` and `comms-topology` listed a path under the author's own `data/` as a stable address for compressed detail, and `report-back` sent a report's detail to "a doc in your `data/`". That directory exists and stays put, but the composed rules of every other bot in the fleet deny reading anything in a bot's directory, the manager's included, so the pointer arrived unreadable. In one fleet's recorded reports over 16 days, 13 of 1,502 handed the reader such a path.
+
+- **The test, stated where the addresses are listed:** "The detail must be at an address the addressee can open, not merely one that exists." The addresses that pass are a PR or issue (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, and a repo path at a pushed commit or the pushed branch. Never the author's own `data/` or anything else in its bot directory, which stays for scratch only its author re-reads.
+- **`token-efficiency`:** rule zero states the test, and the bars table sends a report summary's overflow to `shared/` instead of `data/`.
+- **`comms-topology`:** *Bot to bot* opens with the test, and *To disk* asks for an address its reader can open. "A worklog" leaves the list, since its spec (#881) puts worklogs in the worker's `data/`. The claim that the deny does not block is replaced by the measurement that it does.
+- **`report-back`:** the detail goes to an address the manager can open.
+- `tests/test_report_addresses.py` pins every `data/` line in `library/` per file with its reason, the text a worker's composed `CLAUDE.md` carries, and the manager's composed deny rules the text relies on.
+
 ### Added — each bot session gets its own child subreaper, so its orphans never re-parent to the user manager (#2158)
 
 On 2026-10-05 a kill loop killed a pattern match and then its parent. The match was an orphaned job, and an orphan in a bot session re-parented to the systemd user manager, which runs every bot: it exited on SIGTERM, and every bot on the host stopped for 15 hours. #1069's guard refuses that command; this bounds the damage when one gets past it.
@@ -1788,7 +2206,7 @@ glob-enroll that never disables, by design.
 Measured on this host: `plane-shadow` went from `system.yaml` at the F18 R2a
 closure (a299272) **together with the `lib/plane-shadow.sh` it execs**, and
 eighteen days later the nightly `reload-fleet` was still re-creating
-`~/Library/LaunchAgents/com.artemis.engineering.plane-shadow.plist` — a unit whose
+`~/Library/LaunchAgents/com.example.engineering.plane-shadow.plist` — a unit whose
 script does not exist, exiting 78 (`EX_CONFIG`) every night, sitting beside the
 `.retired-20260922` copy of itself an operator had already walked back by hand.
 The second fleet on the same host held the same stale composed units, one reload
@@ -3146,7 +3564,7 @@ rule.
 - **Stayed opt-in, and now genuinely off.** `update-siblings` (mutates operator source), `session-digest` (model spend), `code-audit-sweep` (spend + outbound issues), `weekly-worker-restart` (above). **`update-siblings`'s `enroll: false` previously had NO code effect at all** (#1385): `compose_host_timers` read `enroll` only in the `unit: service` branch and `setup-system` enrolled every composed `claudlobby-*` unit it found, so the one host job that mutates operator source was enrolled on every host that ran the installer, with a comment beside it claiming otherwise. Survivable while everything shipped dormant; not survivable under a rule that ships doors on, because "stays opt-in" becomes the only thing between a root pull and the four categories. **An unarmed host job now composes no unit at all** — the contract host services already had — and `lib/setup-system` **walks back** any `claudlobby-*` unit an earlier release installed that the current compose no longer emits (refusing on an empty compose, so a torn `generate` cannot tear down a healthy host).
 - **The switch registry (`claudlobby/switches.py`).** Every knob declared ONCE, with its polarity (`opt-out` / `opt-in` / `silencer`), what it does, and both directions' one-line command. Four copies of "what knobs exist" is how the estate ended up with a `.env` full of flags nothing reads, so every consumer DERIVES from it: `composer.FLEET_JOB_ARMING` / the new `HOST_JOB_ARMING` (`keepalive`'s hand-written row left the fleet table with **no change to composed output** — the baseline stamp already put that flag on every fleet job unit), the validator's dead-flag sweep, and the rendered tables. Only an exact `0`/`1` decides anywhere: an empty assignment wins at its tier (#1213) and is not a `0`, which the shell gates, the composer and the table all read identically.
 - **The composer now stamps the RESOLVED value, not a hardcoded `1`** — the load-bearing half of an opt-out default. A timer runs in a CLOSED env and sources no `.env`, so under the old rule only an arming `1` was worth carrying; now absence means ON and it is the **`0`** that has to reach the door. Without this a fleet writing `TASK_RECHECK_ENABLED=0` would watch the timer keep firing with nothing to explain why — #1383's class, inverted. `PLANE_EMIT_ENABLED` deliberately keeps its armed-only stamp: it is read at GENERATE time by the compositor, not by any timer script, and a stamp exists so a script can read its own flag.
-- **The switches surface (N2).** `claudlobby doctor` gains a `switches` rung — every knob, its state here, the tier that set it, and the line that flips it, with the opt-ins FIRST because a table that buries three off switches under nine on ones has named them without showing them. Never a failure and never a warning: a fleet that turned the re-check off did so on purpose, and flagging it would train operators to ignore the rung. `claudlobby doctor --switches` prints the table alone (no service probes, no credential curls) and is what `lib/setup-fleet` and `lib/setup-system` call at the end of a run — ONE renderer, never a bash copy that drifts. `claudlobby plane doctor` renders the plane-scoped subset. `claudlobby status`'s header names any REACTION door that is off (`task-recheck off on artemis-data — this reaction will not happen`), scoped to the doors whose being off changes whether anything happens at all (three at the time; `pane-send-chunking` joined them in the chunk-O fold); `--json` carries the same as `switches_off`. An unreachable env resolver reports `unknown` rather than printing the shipped defaults as if they had been measured.
+- **The switches surface (N2).** `claudlobby doctor` gains a `switches` rung — every knob, its state here, the tier that set it, and the line that flips it, with the opt-ins FIRST because a table that buries three off switches under nine on ones has named them without showing them. Never a failure and never a warning: a fleet that turned the re-check off did so on purpose, and flagging it would train operators to ignore the rung. `claudlobby doctor --switches` prints the table alone (no service probes, no credential curls) and is what `lib/setup-fleet` and `lib/setup-system` call at the end of a run — ONE renderer, never a bash copy that drifts. `claudlobby plane doctor` renders the plane-scoped subset. `claudlobby status`'s header names any REACTION door that is off (`task-recheck off on example-data — this reaction will not happen`), scoped to the doors whose being off changes whether anything happens at all (three at the time; `pane-send-chunking` joined them in the chunk-O fold); `--json` carries the same as `switches_off`. An unreachable env resolver reports `unknown` rather than printing the shipped defaults as if they had been measured.
 - **The validator warns on EVERY dead flag (N3),** not two prefixes. Three tiers, each carrying what it knows: a RETIRED name gets its own sentence (`PLANE_SHADOW_ENABLED` — the shadow was deleted in F18 R2a, and the Mini's engineering `.env` still carried it); a retired prefix covers its family; and any `*_ENABLED` key in one of **our** namespaces — derived from the registry, never listed — that no switch claims is reported as dead. That last tier is the one that keeps working: delete a door tomorrow and its leftover flag warns without anyone touching the validator. Bounded to claudlobby's namespaces on purpose, so a fleet's own `MYTOOL_ENABLED` stays quiet — warning about it would teach operators to skim the check, which costs more than the flag it caught.
 - **Docs (N4).** A "Defaults" section stating the rule in `documentation/system-yaml-schema.md` and `documentation/fleet-yaml-schema.md`, each carrying a GENERATED switch table (below); the #1385 gap section rewritten as history now that it is closed; `documentation/architecture/observable-plane.md`'s arming-carriers section replaced with what is on, what is opt-in (nothing, plane-side) and how to turn each door off; `CLAUDE.md`'s dormancy rows corrected to the truth and the rule stated once above the lifecycle table.
 - **Gates (N5).** `lib/validate-bot-change.sh` gains the chunk-N leg on a real composed fleet: a fleet declaring NOTHING enrols the re-check, the three host sweeps and the two resident services while `update-siblings` composes nothing at all; a fleet `.env` saying `0` REACHES both the systemd unit and the launchd plist (composition is unit-tested, but "the .env says 0" and "the unit carries the 0" are different facts and the second is what production depends on); the launcher no-ops cleanly AND loudly with it; a silent tier stamps nothing; a fleet-tier silencer reaches both the unit and `bot.conf`; and `doctor --switches` names every opt-in with its arm line. Unit pins in `tests/test_switches.py`, with the flip's polarity re-pinned in `tests/test_composer.py`, `tests/test_system_defaults.py`, `tests/test_validator.py`, `tests/test_plane_{retention,expiry,host_probe,daemon_units,registry,readers_matcher}.py`.
@@ -3285,7 +3703,7 @@ rule.
 
 ### Fixed — the legacy importer fits an over-cap summary instead of refusing the report (#1467 chunk D)
 
-- `legacy_import.fit_to_cap`: a legacy report whose summary exceeds the task family's 4096-byte cap is IMPORTED — the summary cut on a UTF-8 boundary with the cut disclosed in its own tail (`… [plane-import: cut at 4096 of N bytes]`), the communication body (cap 16384) carrying the full text — rather than refused as `invalid`. The contracts reject authored content over cap at emit time, where it is a caller bug; a legacy row is history, and a refused unit is a report the plane never holds. Measured on artemis-data's ledger before the fix: 15 of 47 reports refused, every one a long review verdict. Pinned in `tests/test_plane_cutover_parity.py`; the two pins that certified the refusal now certify the fit.
+- `legacy_import.fit_to_cap`: a legacy report whose summary exceeds the task family's 4096-byte cap is IMPORTED — the summary cut on a UTF-8 boundary with the cut disclosed in its own tail (`… [plane-import: cut at 4096 of N bytes]`), the communication body (cap 16384) carrying the full text — rather than refused as `invalid`. The contracts reject authored content over cap at emit time, where it is a caller bug; a legacy row is history, and a refused unit is a report the plane never holds. Measured on example-data's ledger before the fix: 15 of 47 reports refused, every one a long review verdict. Pinned in `tests/test_plane_cutover_parity.py`; the two pins that certified the refusal now certify the fit.
 
 ### Added — cutover chunk A2: the workstream registry, the last file-backed record, moves to the plane (#1444)
 
@@ -3373,7 +3791,7 @@ rule.
 
 ### Added — the F18 cutover, chunk 2: the operator's parity door and the parity-gap importer (#1444)
 
-- **`claudlobby plane parity`** — are the legacy ledgers fully in the plane? Bakes in the two ledgers and their join keys, names a cause for every missing row (`pre-go-live` / `unstamped` / `stamped-lost`) and counts multiplicity per (source_ref, kind, event). rc 0 clean, 1 gaps, 3 unreachable — an absent ledger or db never reads as clean; `--json` for machines. First live run of the door (Mini, whole ledgers): dispatch-log 194/307 matched (75 pre-go-live, 38 from the unarmed fleet, 0 lost emits); report-back 253/316 (63 pre-go-live). The importer's dry run for artemis-engineering planned 60 dispatches + 62 reports and wrote nothing.
+- **`claudlobby plane parity`** — are the legacy ledgers fully in the plane? Bakes in the two ledgers and their join keys, names a cause for every missing row (`pre-go-live` / `unstamped` / `stamped-lost`) and counts multiplicity per (source_ref, kind, event). rc 0 clean, 1 gaps, 3 unreachable — an absent ledger or db never reads as clean; `--json` for machines. First live run of the door (Mini, whole ledgers): dispatch-log 194/307 matched (75 pre-go-live, 38 from the unarmed fleet, 0 lost emits); report-back 253/316 (63 pre-go-live). The importer's dry run for example-engineering planned 60 dispatches + 62 reports and wrote nothing.
 - **`claudlobby --fleet <f> plane import [--apply]`** — lands the rows the plane is missing for THIS fleet through normal ingest with `origin=legacy` + an `import_batch`: four events per dispatch (so status never reads `created_not_sent`), communication + task event per report, attribution by the fleet's own report ledger only (unattributable rows skipped and disclosed), stamped rows keep their ids, unstamped rows get content-hashed ids, and a re-run classifies `duplicate`. Dry-run by default.
 
 ### Added — the F18 cutover, chunk 1: the plane answered by legacy task id (#1444)

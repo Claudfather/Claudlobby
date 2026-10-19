@@ -48,7 +48,7 @@ def assembly(tmp_path, monkeypatch):
         "claudlobby/system.yaml": "system: fixture\n",
         "claudlobby/_runtime_scripts/run.sh":"#!/bin/sh\nexit 0\n",
         "claudlobby/_resources/library/fixture.md": "fixture",
-        "claudlobby/_resources/voices/fixture.md": "fixture",
+        "claudlobby/_resources/library/voices/fixture.md": "fixture",
         "claudlobby/_resources/templates/fixture.j2": "fixture",
         "claudlobby/_resources/seeds/fleet.yaml.seed": "fixture",
         "claudlobby-0.1.0.dist-info/METADATA": "Name: claudlobby\nVersion: 0.1.0\n",

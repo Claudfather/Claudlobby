@@ -522,6 +522,28 @@ def test_assembly_is_deterministic(tmp_path):
     assert canonical_hash(a) == canonical_hash(b)
 
 
+def test_bot_payload_names_the_agent_cli_only_when_it_says_something(tmp_path):
+    """#2145: a claude bot's keyframe has no `agent_cli` key and its declared_hash is
+    the one computed without it (the shape every daemon accepts, #1724); a
+    non-claude bot carries the key and hashes differently."""
+    from dataclasses import replace
+
+    from claudlobby.plane.canonical import canonical_hash
+
+    root = _fleet_root(tmp_path)
+    fleet, _ = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root, package=source_package())
+    bot = fleet.bots["lead"]
+    claude = bot_payload(paths, fleet, bot, "v1")
+    assert "agent_cli" not in claude
+    assert claude["declared_hash"] == canonical_hash(
+        {"org": claude["org"], "equipment": claude["equipment"], "posture": claude["posture"],
+         "model": claude["model"], "effort": bot.effort})
+    codex = bot_payload(paths, fleet, replace(bot, agent_cli="codex"), "v1")
+    assert codex["agent_cli"] == "codex"
+    assert codex["declared_hash"] != claude["declared_hash"]
+
+
 def test_scan_completed_names_scope_and_counts(tmp_path, *, scratch_plane_env):
     root = _fleet_root(tmp_path)
     _scan(root, scratch_plane_env=scratch_plane_env)
@@ -717,6 +739,23 @@ def test_library_walk_discovers_integrations(tmp_path, *, scratch_plane_env):
         " WHERE entity_type='library_item'")]
     conn.close()
     assert "shared/integrations/github-app" in aliases
+
+
+def test_library_walk_records_voices_and_skips_folder_instructions(tmp_path):
+    """#2150: voices are a library folder now, so the discovered walk records
+    each packaged voice. The folder's CLAUDE.md/AGENTS.md describe it and are
+    never items (the package ships both, so this is a live case)."""
+    from claudlobby.plane.registry_emit import library_items
+
+    paths = Paths(root=tmp_path, package=source_package())
+    assert (paths.base_voices / "CLAUDE.md").is_file()
+    items, skipped = library_items(paths, "test-fleet", None)
+    aliases = {alias for alias, _payload in items}
+    assert skipped == 0
+    assert "shared/voices/vito-corleone" in aliases
+    assert not {"shared/voices/CLAUDE", "shared/voices/AGENTS"} & aliases
+    assert {payload["category"] for alias, payload in items
+            if alias.startswith("shared/voices/")} == {"voices"}
 
 
 # ---------------------------------------------------------------------------

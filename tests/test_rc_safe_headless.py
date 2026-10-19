@@ -7,6 +7,8 @@ still arrives. The composer must never emit those on any bot; the validator
 must reject operator env that reintroduces them on an RC bot.
 """
 
+import shlex
+
 from claudlobby.composer import compose_bot_conf
 from claudlobby.known_values import HEADLESS_TRIM_VARS, RC_KILLING_ENV_VARS
 from claudlobby.validator import validate
@@ -24,6 +26,22 @@ def _append_bot_yaml(fleet_dir, *lines: str) -> None:
     (fleet_dir / "fleet.yaml").write_text(
         MINIMAL_FLEET_YAML + "".join(f"      {ln}\n" for ln in lines)
     )
+
+
+def _claude_flags(fleet_dir, bot_id):
+    line = next(line for line in _bot_conf(fleet_dir, bot_id).splitlines()
+                if line.startswith("CLAUDE_FLAGS="))
+    return shlex.split(line.partition("=")[2])[0].split()
+
+
+def test_remote_control_is_composed_for_the_manager_only(fleet_dir):
+    """#2325: unset, remote_control follows the role, so the composed flags
+    carry --remote-control for the fleet manager and for no other bot; a
+    worker opts in with an explicit value."""
+    assert "--remote-control" in _claude_flags(fleet_dir, "lead")
+    assert "--remote-control" not in _claude_flags(fleet_dir, "worker-1")
+    _append_bot_yaml(fleet_dir, "remote_control: true")
+    assert "--remote-control" in _claude_flags(fleet_dir, "worker-1")
 
 
 def test_trim_default_emits_granular_never_umbrella(fleet_dir):

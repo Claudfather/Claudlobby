@@ -266,29 +266,58 @@ def _native(adapter, function, *args):
 
 
 def _check_targets(adapter, enrollment, entries, *, allow_candidate):
-    manager, domain, directories, _, loaded = _catalog_now(adapter, enrollment)
+    catalog = _catalog_now(adapter, enrollment)
     original = {unit["target"]: unit for unit in enrollment["units"]}
     for entry in entries:
-        _check_enablement(entry, allow_candidate=allow_candidate)
-        destination = Path(entry["installed"])
-        if destination.parent not in directories or destination.parent.resolve() != destination.parent:
-            raise ActivationError("candidate destination left verified search paths")
-        candidate_exists = False
-        for directory in directories:
-            path = directory / destination.name
-            state = path_state(path)["node"]
-            if state["kind"] != "absent" and (not allow_candidate or path != destination or state != entry["after"]):
-                if (manager == "Linux" and path != destination
-                        and _owned_pause_mask(path, entry, original.get(entry["target"]))):
-                    continue  # native quiescence below still requires it inactive
-                raise ActivationError(f"foreign or changed candidate collision: {path}")
-            candidate_exists |= path == destination and state == entry["after"]
-        # A new unit cannot inherit an unrelated loaded definition. Original
-        # targets were proved owned by the frozen enrollment, then parked.
-        if destination.name in loaded and not entry["original"] and not allow_candidate:
-            raise ActivationError(f"foreign loaded candidate collision: {entry['target']}")
-        _native_quiet(adapter, manager, destination, entry["target"],
-                      candidate=entry if candidate_exists else None)
+        _check_target(adapter, catalog, original, entry, allow_candidate=allow_candidate)
+
+
+def _check_target(adapter, catalog, original, entry, *, allow_candidate):
+    manager, _, directories, _, loaded = catalog
+    _check_enablement(entry, allow_candidate=allow_candidate)
+    destination = Path(entry["installed"])
+    if destination.parent not in directories or destination.parent.resolve() != destination.parent:
+        raise ActivationError("candidate destination left verified search paths")
+    candidate_exists = False
+    for directory in directories:
+        path = directory / destination.name
+        state = path_state(path)["node"]
+        if state["kind"] != "absent" and (not allow_candidate or path != destination or state != entry["after"]):
+            if (manager == "Linux" and path != destination
+                    and _owned_pause_mask(path, entry, original.get(entry["target"]))):
+                continue  # native quiescence below still requires it inactive
+            raise ActivationError(f"foreign or changed candidate collision: {path}")
+        candidate_exists |= path == destination and state == entry["after"]
+    # A new unit cannot inherit an unrelated loaded definition. Original
+    # targets were proved owned by the frozen enrollment, then parked.
+    if destination.name in loaded and not entry["original"] and not allow_candidate:
+        raise ActivationError(f"foreign loaded candidate collision: {entry['target']}")
+    _native_quiet(adapter, manager, destination, entry["target"],
+                  candidate=entry if candidate_exists else None)
+
+
+def unquiet_candidates(adapter, enrollment: dict, entries) -> tuple[str, ...]:
+    """Read-only: why each frozen candidate entry would fail a fresh publication.
+
+    Runs the exact per-target check :func:`install_candidate_units` makes
+    before it republishes a phase with nothing started, over one native
+    catalog read, so a caller can report every unit at once instead of the
+    first. Empty means all quiet.
+    """
+    try:
+        catalog = _catalog_now(adapter, enrollment)
+    except ActivationError as exc:
+        return (str(exc),)
+    original = {unit["target"]: unit for unit in enrollment["units"]}
+    problems = []
+    for entry in entries:
+        try:
+            _check_target(adapter, catalog, original, entry, allow_candidate=True)
+        except ActivationError as exc:
+            problems.append(str(exc))
+        except (ValueError, OSError) as exc:  # Native stderr stays out of the report.
+            problems.append(f"{entry['target']}: native observation failed ({type(exc).__name__})")
+    return tuple(problems)
 
 
 def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
@@ -463,9 +492,15 @@ def candidate_entries(store: ActivationStore, activation_id: str, phase: str) ->
     """Read verified frozen native placements; never derive installed paths again."""
     if phase not in PHASES:
         raise ActivationError("unknown enrollment phase")
-    _, plans = _load(store, activation_id, _record(store, activation_id))
-    entries = plans[PHASES.index(phase)].effects["entries"]
-    return tuple(json.loads(json.dumps(entry)) for entry in entries if entry["phase"] == phase)
+    return candidate_placements(store, activation_id)[1][phase]
+
+
+def candidate_placements(store: ActivationStore, activation_id: str) -> tuple[dict, dict[str, tuple[dict, ...]]]:
+    """The frozen enrollment and every phase's verified placements, from one load."""
+    enrollment, plans = _load(store, activation_id, _record(store, activation_id))
+    return enrollment, {phase: tuple(json.loads(json.dumps(entry)) for entry in plan.effects["entries"]
+                                     if entry["phase"] == phase)
+                        for phase, plan in zip(PHASES, plans)}
 
 
 def _selected_phase(root: Path, phase: str) -> tuple[ConfigPlan, tuple[dict, ...]]:

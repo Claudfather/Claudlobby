@@ -169,7 +169,7 @@ def test_all_twelve_types_have_an_explicit_disposition():
         p.name
         for p in (REPO_ROOT / "library").iterdir()
         if p.is_dir() and p.name != "__pycache__"
-    }
+    } - set(registry.NON_ENTITY_FOLDERS)
     assert set(registry.REGISTRY) == library_types
     assert len(registry.REGISTRY) == 12
 
@@ -211,17 +211,18 @@ def test_declaring_a_list_does_not_act_as_an_opt_out(etype, monkeypatch):
 #: Entity types that have a `system_defaults.<type>` opt-out key today.
 #: Inverted one at a time as Phase 2 builds them — `guardrails` at Phase 1,
 #: `protocols` when `shared-documentation` was admitted to the registry,
-#: `skills` with the manager role's `status` default (#2010).
-TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols", "skills"}
+#: `skills` with the manager role's `status` default (#2010), `resources` with
+#: the `timezone` default (#1168).
+TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols", "skills", "resources"}
 
 
-def test_the_opt_out_surface_does_not_exist_for_nine_of_twelve_types():
+def test_the_opt_out_surface_does_not_exist_for_eight_of_twelve_types():
     """MEASURED, and this test records a GAP rather than blessing it.
 
     `SystemDefaultsConfig` reads a FIXED set of keys, not one per entity type.
-    Nine of the twelve still have no opt-out, so the plan's checklist item — "for
+    Eight of the twelve still have no opt-out, so the plan's checklist item — "for
     each of the 12 types, `system_defaults.<type>: false` demonstrably removes
-    the default" — remains unsatisfiable for those nine.
+    the default" — remains unsatisfiable for those eight.
 
     Worse, and UNCHANGED by Phase 2 so far: an unrecognised key is accepted
     silently. `_coerce_system_defaults` drops it and `generate` exits 0, so a
@@ -249,8 +250,8 @@ def test_the_opt_out_surface_does_not_exist_for_nine_of_twelve_types():
         "the per-entity-type opt-out surface changed — re-run "
         "harness/naked-bot-observe.py and update the baseline record"
     )
-    assert still_on and len(still_on) == 9, (
-        f"expected nine types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
+    assert still_on and len(still_on) == 8, (
+        f"expected eight types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
     )
 
 
@@ -383,8 +384,8 @@ def test_the_two_always_present_files_have_a_content_probe():
 def test_inert_flags_a_registry_entry_that_composed_nothing():
     """The Phase 2 trap: the constant moves and no bot changes.
 
-    `config.py` consumes only `DEFAULT_GUARDRAILS`; nothing feeds
-    `resolve(<type>)` into the merge for the other eleven. Measured with a REAL
+    `config.py` consumes only `DEFAULT_GUARDRAILS` and `DEFAULT_RESOURCES`; nothing
+    feeds `resolve(<type>)` into that merge for the other ten. Measured with a REAL
     skill (`doctor`): in the registry it composed no symlink, declared in
     fleet.yaml it composed one.
     """
@@ -694,7 +695,7 @@ def leaf_manager_compose(tmp_path_factory):
     assert candidate.package.is_relative_to(root.resolve() / ".probe-release")
     unavailable = root / "source-unavailable"
     unavailable.mkdir()
-    for name in ("claudlobby", "library", "templates", "voices"):
+    for name in ("claudlobby", "library", "templates"):
         (root / name).rename(unavailable / name)
     # Poison any accidental source/module or ambient CLI selection. The real
     # candidate has already been installed, so neither is part of this run.

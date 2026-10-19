@@ -24,12 +24,14 @@ library/skills/
 ```yaml
 ---
 name: status
-description: "Manager self-diagnostic. Reports session health, MCP connectivity, tmux fleet state, and fleet-state ledger."
-argument-hint: "[full|mcp|telegram]"
+description: "Use when the human asks a manager what's the latest, what moved, or what is waiting on them. Manager readout for the human: what moved, and what is waiting on their decision."
+argument-hint: "[24h|7d|since <ISO>]"
 ---
 
 # Status
 ```
+
+**Open the description with when to use the skill.** Claude Code lists every installed skill to the model by its description, so the description is what gets a skill invoked without someone pointing at it. Say the situation first, in a sentence that opens with `Use when` (or `Use before`, `Use to`, `You MUST use this before`), then what the skill does. `tests/test_skill_descriptions.py` fails any skill here whose description does not open with one (#2330).
 
 The H1 is a human-cased version of `name` (`status` → `# Status`, `fleet-pulse` → `# Fleet Pulse`), but unlike every other library category it is **not** stripped or demoted — `composer.py::link_skills` only creates a filesystem symlink into the bot's `.claude/skills/`; it never reads or parses `SKILL.md` content, so it never passes through `load_library_item`/`_demote_headings`. Claude Code reads the file natively at invocation time, H1 and all.
 

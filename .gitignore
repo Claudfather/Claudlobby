@@ -19,7 +19,7 @@ runtime/
 # runtime, .env, etc. Never committed to the public claudlobby repo.
 local/
 
-# Local-only voices (legacy path — use local/<fleet>/voices/ now)
+# Local-only voices (legacy path — use local/<fleet>/library/voices/ now)
 voices/local/
 
 # Claude Code state (auth, channels, sessions) — but allow project-level skills

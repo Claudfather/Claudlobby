@@ -1,0 +1,23 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; color: #342c27; background: #f5f1eb; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 3rem 1rem; }
+.owner-card { max-width: 42rem; margin: auto; padding: 2rem; border: 1px solid #d5cbbf; border-radius: 1rem; background: #fffcf7; }
+.brand { font-weight: 750; letter-spacing: .02em; }
+.brand span { font-weight: 400; color: #6b594c; }
+h1 { margin-top: 1.5rem; font-size: 2rem; }
+h2 { font-size: 1.2rem; }
+p, li { line-height: 1.6; }
+#owner-status { padding: 1rem; background: #eee6dc; border-radius: .5rem; }
+dl { display: grid; grid-template-columns: 1fr 2fr; gap: .7rem 1rem; }
+dt { font-weight: 650; }
+dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.pairing-code, code { font-family: ui-monospace, monospace; }
+.pairing-code { user-select: all; }
+.actions { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1.5rem 0; }
+button, .actions a { font: inherit; padding: .7rem 1rem; border: 1px solid #715945; border-radius: .4rem; background: #fffaf2; color: #443123; cursor: pointer; text-decoration: none; }
+button:disabled { opacity: .6; cursor: wait; }
+:focus-visible { outline: 3px solid #986b35; outline-offset: 3px; }
+.session-note { font-size: .9rem; color: #65564b; }
+[hidden] { display: none !important; }
+@media (max-width: 32rem) { body { padding: 1rem; } .owner-card { padding: 1.2rem; } dl { grid-template-columns: 1fr; gap: .3rem; } dd { margin-bottom: .7rem; } }
+@media (prefers-color-scheme: dark) { :root { color: #efe7dc; background: #201e1b; } .owner-card { background: #2a2621; border-color: #625347; } .brand span, .session-note { color: #c9b8a7; } #owner-status { background: #3c342c; } button, .actions a { background: #3a3027; color: #f5e7d7; border-color: #ad8f72; } }

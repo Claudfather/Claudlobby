@@ -49,10 +49,19 @@ bot_tmux() {
         send-keys) shift 3; printf '%s\n' "$*" >> "$SENT_LOG" ;;
         capture-pane)
             local remaining fixture
+            # The pre-write look observes the last readiness frame. Future
+            # frames describe the authored payload after send-keys, not input
+            # that existed before it. Keep this snapshot across subshells.
+            if [ "${FUNCNAME[1]:-}" = _pane_send_verified_locked ] &&
+                [ ! -s "$SENT_LOG" ] && [ -s "$TMPD/last-ready" ]; then
+                fixture=$(cat "$TMPD/last-ready")
+                cat "$fixture"; return 0
+            fi
             remaining=$(cat "$PANE_SCRIPT")
             fixture=$(printf '%s\n' "$remaining" | head -1)
             printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
             [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+            printf '%s' "$fixture" > "$TMPD/last-ready"
             cat "$fixture"
             ;;
         *) return 0 ;;
@@ -60,7 +69,7 @@ bot_tmux() {
 }
 
 echo "== trace is off by default =="
-: > "$SENT_LOG"; printf '%s\n' "$TYPED" "$TYPED" "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$TYPED" "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
 unset PANE_VERIFY_TRACE
 pane_send_verified sock sess "hello world payload" >/dev/null 2>&1 || true
 assert_eq "nothing is written when the knob is unset" "0" "$(find "$TMPD" -name 'tick-*.pane' | wc -l | tr -d ' ')"
@@ -70,10 +79,10 @@ echo "== decisions are identical with the trace on =="
 # retry: text, Enter and the retry Enter, the trace on or off. Two Enters in
 # all: the bound is not under test here, only that the trace changes nothing.
 export PANE_SEND_ENTER_TRIES=2
-: > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
 pane_send_verified sock sess "/claudna:session resume --auto" >/dev/null 2>&1 || true
 sends_off=$(wc -l < "$SENT_LOG" | tr -d ' ')
-: > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
 export PANE_VERIFY_TRACE="$TMPD/trace1.jsonl"
 pane_send_verified sock sess "/claudna:session resume --auto" >/dev/null 2>&1 || true
 sends_on=$(wc -l < "$SENT_LOG" | tr -d ' ')
@@ -82,7 +91,7 @@ assert_eq "the same keystrokes are sent with the trace on as off" "$sends_off" "
 unset PANE_VERIFY_TRACE PANE_SEND_ENTER_TRIES
 
 echo "== a tick record carries what tells the three candidates apart =="
-: > "$SENT_LOG"; printf '%s\n' "$TYPED" "$TYPED" "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$TYPED" "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
 TRACE_DIR="$TMPD/trace2"; export PANE_VERIFY_TRACE="$TRACE_DIR"
 pane_send_verified sock sess "hello world payload" >/dev/null 2>&1 || true
 unset PANE_VERIFY_TRACE

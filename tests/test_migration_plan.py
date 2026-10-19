@@ -216,6 +216,16 @@ def test_wal_mode_read_only_preview_binds_only_sqlites_empty_sidecar(releases, m
         keeper.close()
 
 
+def test_wire_additions_declare_the_bot_keyframe_agent_cli(releases):
+    """#2145 P1: `agent_cli` on the bot keyframe is additive optional metadata — no
+    payload-schema bump — so the plan declares it the way it declares waiting_on."""
+    root, source, target = releases
+    plan = build_migration_manifest(root, source, target, initialize_empty=True)
+    assert {"family": "registry_snapshot", "field": "agent_cli", "location": "payload (entity bot)",
+            "classification": "optional_metadata",
+            "old_reader": "a keyframe without it reads as agent_cli claude"} in plan.operational["wire_additions"]
+
+
 def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases):
     root, source, target = releases
     absent = build_migration_manifest(root, source, target)

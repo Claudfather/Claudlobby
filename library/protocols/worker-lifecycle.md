@@ -165,7 +165,8 @@ claudlobby --json assignment complete ASSIGNMENT_ID --summary "<summary>" --pr <
 ```
 
 Use `--pr-role authored` only for a PR you authored; use `reviewed` for a
-reviewed PR. Omit both optional flags when neither applies.
+reviewed PR, and add `--artifact <the verdict's URL>` so the verdict joins your
+report (`same-identity-fallback`). Omit these flags when neither applies.
 
 If no assignment exists, use `fleet reports submit` as in `/fleet-ops`.
 
@@ -204,5 +205,5 @@ current assignment.
 | Assignment received | — | `assignment accept ASSIGNMENT_ID --request-id UUID` |
 | Planning start (if applicable) | "Planning: ..." | — |
 | Scope surprise | "Scope note: ..." | `assignment progress ASSIGNMENT_ID --summary "Scope: ..." --request-id UUID` |
-| Completion | "Done: ... PR: <url>" | `assignment complete ASSIGNMENT_ID --summary "..." --pr URL --pr-role ROLE --request-id UUID` (choose authored or reviewed) |
+| Completion | "Done: ... PR: <url>" | `assignment complete ASSIGNMENT_ID --summary "..." --pr URL --pr-role ROLE --request-id UUID` (choose authored or reviewed; a reviewed report adds `--artifact <verdict URL>`) |
 | Blocked | "Blocked: ..." | `assignment block ASSIGNMENT_ID --reason "..." --request-id UUID` |

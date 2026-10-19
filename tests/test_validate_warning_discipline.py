@@ -84,6 +84,31 @@ class TestSharedCauseIsOneLine:
         assert hits[0].endswith("affects 6 bot(s): lead, worker-1, w2, w3 (+2 more)")
         assert report.warning_categories["retired-key"] == 1
 
+    def test_a_voice_at_the_old_path_is_one_line_per_file_until_it_moves(
+        self, fleet_dir, monkeypatch
+    ):
+        """#2150: the old overlay voices/ still composes for one release, and
+        validate names each file there once, however many bots declare it."""
+        _env(monkeypatch)
+        _grow(fleet_dir, bots={"w2": "      voice: voices/old-one.md\n",
+                               "w3": "      voice: voices/old-one.md\n",
+                               "w4": "      voice: voices/moved.md\n"})
+        paths = _paths(fleet_dir)
+        paths.legacy_overlay_voices.mkdir(exist_ok=True)
+        old = paths.legacy_overlay_voices / "old-one.md"
+        old.write_text("---\nname: Old\n---\n\nOld.\n")
+        paths.overlay_voices.mkdir(parents=True, exist_ok=True)
+        (paths.overlay_voices / "moved.md").write_text("---\nname: Moved\n---\n\nMoved.\n")
+        report = _validate(fleet_dir)
+        assert _of(report, "voice-legacy-path") == [
+            f"voice file {old} is at the old voices/ path; move it to "
+            f"{paths.overlay_voices}/ — affects 2 bot(s): w2, w3"
+        ]
+        assert _of(report, "voice-missing") == []
+        old.rename(paths.overlay_voices / "old-one.md")
+        report = _validate(fleet_dir)
+        assert _of(report, "voice-legacy-path") == [] and _of(report, "voice-missing") == []
+
     def test_a_retired_key_in_one_bots_own_stanza_stays_that_bots(
         self, fleet_dir, monkeypatch
     ):
@@ -94,6 +119,25 @@ class TestSharedCauseIsOneLine:
             "bot 'w3': observability.reap_days has no reader since the F18 closure"
             f" — remove it ({validator_module._RETIRED_OBSERVABILITY_KEYS['reap_days']})"
         ]
+
+    def test_a_defaults_level_runtime_key_warns_once_naming_agent_cli(self, fleet_dir, monkeypatch):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:` and nothing
+        reads it. An unknown bot key is otherwise ignored; this one is said."""
+        _env(monkeypatch)
+        _grow(fleet_dir, defaults="    runtime: claude\n")
+        report = _validate(fleet_dir)
+        hits = _of(report, "retired-key")
+        assert hits == ["defaults.runtime has no reader — the key is agent_cli: (#2145); rename or remove it"
+                        " — affects 6 bot(s): lead, worker-1, w2, w3 (+2 more)"], report.categorized()
+        assert not report.has_errors, report.errors
+
+    def test_a_runtime_key_in_one_bots_own_stanza_stays_that_bots(self, fleet_dir, monkeypatch):
+        _env(monkeypatch)
+        _grow(fleet_dir, bots={"w3": "      runtime: claude\n"})
+        report = _validate(fleet_dir)
+        assert _of(report, "retired-key") == [
+            "bot 'w3': runtime has no reader — the key is agent_cli: (#2145); rename or remove it"]
+        assert not report.has_errors, report.errors
 
     def test_an_env_var_set_empty_above_the_bot_tier_warns_once_and_a_bot_tier_one_stays_its_own(
         self, fleet_dir, monkeypatch
@@ -181,15 +225,16 @@ def test_every_warning_has_a_category_and_the_counts_sum(fleet_dir, monkeypatch)
         bots={
             "w2": "      voice: no-such-voice\n      skills: [no-such-skill]\n",
             "w3": "      guardrails: [no-such-guardrail]\n      mcp: [no-such-mcp]\n",
-            "w4": "      model: gpt-banana\n      reports_to: nobody\n",
-            "w5": "      observability:\n        pulse_interval: 0\n",
+            "w4": "      model: gpt-banana\n      reports_to: nobody\n      runtime: claude\n",
+            "w5": "      observability:\n        pulse_interval: 0\n"
+                  '      hooks:\n        PreToolUse:\n          - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"\n',
         },
     )
     report = _validate(fleet_dir)
     raised = set(report.warning_categories)
     assert {
         "voice-missing", "skill-missing", "guardrail-missing", "mcp-missing",
-        "model-unknown", "topology", "obs-range", "retired-key", "env-unset",
+        "model-unknown", "topology", "obs-range", "retired-key", "env-unset", "hook-retired-path",
     } <= raised, report.categorized()
     assert UNCATEGORIZED not in raised, report.categorized()
     assert raised <= set(WARNING_CATEGORIES), raised - set(WARNING_CATEGORIES)
@@ -382,3 +427,61 @@ class TestWarnBaseline:
         assert _public_rc(fleet_dir, warn_baseline=str(base), write=True) == 0
         assert _public_rc(fleet_dir, warn_baseline=str(base), strict=True) == 4
         assert _public_rc(fleet_dir, strict=True) == 4
+
+
+class TestClaudnaWarnings:
+    def test_harvest_pin_is_satisfied(self, fleet_dir, monkeypatch):
+        _env(monkeypatch)
+        _grow(fleet_dir, defaults="    claudna: {harvest: true}\n")
+        assert not _of(_validate(fleet_dir), "claudna-harvest-pin")
+        assert "claudna-harvest-pin" not in WARNING_CATEGORIES
+
+    def test_tier_override_warns_without_reading_operator_environment(
+        self, fleet_dir, monkeypatch
+    ):
+        _env(monkeypatch)
+        monkeypatch.setenv("CLAUDNA_SESSION_SUMMARY", "1")
+        assert not _of(_validate(fleet_dir), "claudna-env")
+        (fleet_dir / ".env").write_text("CLAUDNA_SESSION_SUMMARY=1\n")
+        report = _validate(fleet_dir)
+        rows = _of(report, "claudna-env")
+        assert len(rows) == 1 and "fleet tier" in rows[0] and "claudna:" in rows[0]
+        assert not any("CLAUDNA_SESSION_SUMMARY" in e for e in report.errors)
+
+    def test_bot_env_override_names_the_bot(self, fleet_dir, monkeypatch):
+        _env(monkeypatch)
+        p = fleet_dir / "fleet.yaml"
+        p.write_text(
+            p.read_text().replace(
+                "    lead:", "    lead:\n      env: {CLAUDNA_HARVEST: '1'}"
+            )
+        )
+        report = _validate(fleet_dir)
+        rows = _of(report, "claudna-env")
+        assert (
+            len(rows) == 1
+            and "lead" in rows[0]
+            and "env:" in rows[0]
+            and "claudna:" in rows[0]
+        )
+
+
+class TestClaudronMigrationWarningFold:
+    def test_each_vault_cause_is_one_named_warning(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby import claudron_compat as compat
+        _env(monkeypatch)
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True)
+        _grow(fleet_dir, defaults=f"    claudron_vault_path: {vault}\n")
+        original_which = validator_module.shutil.which
+        monkeypatch.setattr(validator_module.shutil, "which", lambda exe: "/fake/claudron" if exe == "claudron" else original_which(exe))
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        for state, category in [
+            (compat.VaultMigrationState("old_format", (), 2, 3, ""), "claudron-migration"),
+            (compat.VaultMigrationState("unknown", (), None, None, f"{vault}: probe unavailable"), "claudron-doctor"),
+        ]:
+            report = validate(fleet, _paths(fleet_dir), migration_reader=lambda path: state)
+            rows = _of(report, category)
+            assert len(rows) == 1 and "affects 6 bot(s)" in rows[0] and str(vault) in rows[0]
+            assert category in WARNING_CATEGORIES
+            assert not report.errors

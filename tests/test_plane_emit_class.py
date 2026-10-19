@@ -409,10 +409,10 @@ CLASSES = {
     "plane-telegram-out.sh": "hook",
     "plane-dispatch-in.sh": "hook",
     "plane-rc-relay-out.sh": "hook",
+    "usage-limit-hook.sh": "hook",
     "vault-git-guard.sh": "hook",
     "credential-echo-guard.sh": "hook",
     "signal-guard.sh": "hook",
-    "transcript-digest.sh": "background",  # a hook, but at SessionEnd no turn waits
     "keepalive.sh": "background",
     "plane-host-probe.sh": "background",
     "tg-post.sh": "background",

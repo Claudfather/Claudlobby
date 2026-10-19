@@ -20,6 +20,18 @@ from tests.test_activation_units import empty_enrollment, enrollment, RecordedAd
 from tests.test_releases import installed, r
 
 
+def unit_properties(directory, target, declaration, *, active="inactive", unit_file_state="disabled") -> str:
+    """``systemctl show`` for a loaded candidate unit, as the inventory reads it."""
+    properties = {"Id": target, "FragmentPath": str(directory / target),
+                  "DropInPaths": "", "NeedDaemonReload": "no",
+                  "LoadState": "loaded", "ActiveState": active, "UnitFileState": unit_file_state,
+                  "TriggeredBy": "", "ExecStart": "recorded candidate command",
+                  "WorkingDirectory": str(declaration.working_directory),
+                  "Environment": shlex.join(f"{key}={value}" for key, value in declaration.environment),
+                  "Triggers": declaration.service or ""}
+    return ''.join(f"{key}={value}\n" for key, value in properties.items())
+
+
 class Manager(RecordedAdapter):
     def __init__(self, inventory, plan):
         super().__init__(inventory)
@@ -39,16 +51,7 @@ class Manager(RecordedAdapter):
             text = self.states.get(target, "disabled loaded inactive" if file.exists() or target in self.loaded_foreign
                                    else "not-found not-found inactive")
         elif function == "svc_inventory_properties":
-            target = args[0]
-            declaration, metadata = self.declarations[target]
-            properties = {"Id": target, "FragmentPath": str(self.directory / target),
-                          "DropInPaths": "", "NeedDaemonReload": "no",
-                          "LoadState": "loaded", "ActiveState": "inactive", "UnitFileState": "disabled",
-                          "TriggeredBy": "", "ExecStart": "recorded candidate command",
-                          "WorkingDirectory": str(declaration.working_directory),
-                          "Environment": shlex.join(f"{key}={value}" for key, value in declaration.environment),
-                          "Triggers": declaration.service or ""}
-            text = ''.join(f"{key}={value}\n" for key, value in properties.items())
+            text = unit_properties(self.directory, args[0], self.declarations[args[0]][0])
         else:
             return super().call(function, *args, **kwargs)
         self.calls.append((function, tuple(map(str, args))))

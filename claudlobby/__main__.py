@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--fleet",
-        help="Fleet overlay name (uses local/<fleet>/ for fleet.yaml, library overlay, voices overlay, runtime/). "
+        help="Fleet overlay name (uses local/<fleet>/ for fleet.yaml, library overlay, runtime/). "
         "Public fleet operations default to generated session context when available; "
         "host-wide preparation does not inherit that scope. "
         "Naming the root manifest's own fleet.name (no overlay) also resolves to root mode.",

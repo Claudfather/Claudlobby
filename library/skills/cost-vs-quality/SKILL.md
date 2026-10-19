@@ -1,6 +1,6 @@
 ---
 name: cost-vs-quality
-description: "Decide whether a cheaper configuration is actually cheaper — measure spend and quality on the SAME runs and report the frontier, so a saving that quietly degrades output is visible rather than banked. Dry-run by default; real runs are opt-in."
+description: "Use when choosing a cheaper model tier, protocol or prompt, or auditing one already in production on suspicion it is cheap-and-worse. Decides whether a cheaper configuration is actually cheaper — measure spend and quality on the SAME runs and report the frontier, so a saving that quietly degrades output is visible rather than banked. Dry-run by default; real runs are opt-in."
 argument-hint: "[--dry-run|--real] [--variants <a,b>] [--reps N]"
 ---
 

@@ -55,7 +55,7 @@ def _fleet(bots: dict[str, BotConfig], *, manager: str) -> FleetConfig:
 
 
 def test_fleet_override_grant_with_no_source_is_flagged_unsourced(tmp_path):
-    """A ``tools.allow`` grant no equipped source declares is reported (drift signal)."""
+    """A ``tool_permissions.allow`` grant no equipped source declares is reported (drift signal)."""
     root = tmp_path / "claudlobby"
     _build_library(root)
     paths = Paths(root=root, fleet_dir=root, package=source_package())

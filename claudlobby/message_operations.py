@@ -11,7 +11,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from hashlib import sha256
+from functools import partial
 from pathlib import Path
 import re
 import sqlite3
@@ -27,6 +27,7 @@ from . import message_transport as _native_transport
 from .message_transport import TransportOutcome, send as native_send
 from .plane.db import connect_ro, db_file
 from .plane.emit_api import _load_capture_config, emit_batch, validate_item
+from .plane.fleet_events import fleet_event_request
 from .plane.ids import ID_PATTERNS, mint_event_id, mint_msg_id
 from .plane.schema_state import require_current_schema
 from .recording_alerts import (ChannelOutcome, RecordingAlertOutcome,
@@ -327,9 +328,11 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
     """
     if (not isinstance(store, RequestStore) or not isinstance(receipt, RequestReceipt)
             or receipt.request_id != request_id or receipt.intent.operation not in {
-                "task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
+                "task.nudge", "task.recheck", "task.feedback", "assignment.deliver", "assignment.progress", "assignment.block",
                 "assignment.return", "assignment.complete", "assignment.fail"}):
         raise MessageConflict("strict native attempt requires a frozen task or linked report request")
+    if receipt.intent.operation == "task.feedback" and retry_uncertain:
+        raise MessageConflict("feedback notification cannot retry an uncertain attempt")
     if (not isinstance(envelope, RenderedNativeEnvelope) or
             not isinstance(envelope.body, str)):
         raise MessageConflict("typed rendered native envelope required")
@@ -358,6 +361,11 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
                                          persistence=persistence, strict=True)
     at = datetime.now(timezone.utc)
     parties = {route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid}
+    if intent.operation == "task.feedback":
+        # JSON quoting can expand the accepted 16 KiB comment to about 96 KiB.
+        # Allow the native lock/chunk/display budgets without changing pacing,
+        # replay policy or the shorter deadline used by other operations.
+        transport = partial(transport, timeout=120)
     return transmit_native_attempt(route, package, intent, request_id=request_id,
                                    reservation=reservation, envelope=envelope, modes=modes,
                                    parties=parties, persistence=persistence, store=store, at=at,
@@ -367,6 +375,7 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
 def send_message(route: MessageRoute, package: PackageResources, body: MessageBody, *,
                  request_id: str, kind: str = "chat", retry_uncertain: bool = False,
                  parent_message_id: str | None = None,
+                 require_durable_request: bool = False,
                  trusted_tiers: Mapping[str, str],
                  transport: Callable = native_send,
                  notify: Callable = notify_recording_degraded,
@@ -377,6 +386,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     ReceiptBusy/ReceiptError/MessageConflict and capture-policy failures are
     refusals. Recording outages alone permit the ordinary native attempt (O1).
     IDs and route are frozen before any effect. No request body enters a receipt.
+    ``require_durable_request`` refuses before transport unless preparation and
+    the native reservation were durably retained. Later recording failures still
+    leave an uncertain outcome to inspect, never permission to send again.
     """
     if not isinstance(route, MessageRoute) or not isinstance(body, MessageBody):
         raise MessageConflict("frozen route and validated body required")
@@ -498,7 +510,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         elif store is not None:
             try:
                 receipt = store.prepare(intent)
-            except OSError:
+            except OSError as exc:
+                if require_durable_request:
+                    raise ReceiptConflict("durable request preparation failed; inspect the request") from exc
                 persistence[0] = False
                 # A failure after rename may still have left the prepare
                 # visible. Inspect under the held lock; never assume absence.
@@ -508,9 +522,15 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         else:
             receipt = None
 
-        reservation = reserve_native_attempt(store, route, receipt,
-                                             retry_uncertain=retry_uncertain,
-                                             persistence=persistence)
+        try:
+            reservation = reserve_native_attempt(store, route, receipt,
+                                                 retry_uncertain=retry_uncertain,
+                                                 persistence=persistence,
+                                                 strict=require_durable_request)
+        except OSError as exc:
+            if not require_durable_request:
+                raise
+            raise ReceiptConflict("durable native reservation failed; inspect the request") from exc
 
         comm_status = _record(root, route, raw, facts, store=store, stage=0,
                               attempt_no=None, persistence=persistence)
@@ -538,7 +558,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                      "unknown" not in (comm_status, tx_status) else "unknown")
         degraded = recording != "committed" or not persistence[0]
         alert = None
-        if degraded:
+        # Strict owner replay inspects retained evidence only. An absent or
+        # expired alert debounce must not turn it into a new outbound page.
+        if degraded and not (require_durable_request and not reservation.new):
             component = ("request_receipt" if not persistence[0] else
                          ("report_intent" if _report is not None else "message_intent")
                          if comm_status != "committed" else "transmission_record")
@@ -573,7 +595,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     try:
         lock = locked_request(root, route.selected_fleet_uid, request_id)
         store = lock.__enter__()
-    except OSError:
+    except OSError as exc:
+        if require_durable_request:
+            raise ReceiptConflict("durable request history cannot be locked") from exc
         path = root / "state/requests" / route.selected_fleet_uid / (request_id + ".json")
         try:
             path.lstat()
@@ -787,18 +811,16 @@ def _record_enter_repair(route: MessageRoute, message_id: str,
     at = datetime.now(timezone.utc)
     pressed = next(attempt for attempt in attempts if attempt.pressed)
     chip = pressed.match if pressed.match and pressed.match.startswith("chip") else None
-    raw = {"event_id": mint_event_id(), "event_type": "system", "emitter": "message-enter-repair",
-           "fleet": route.peer_destination.fleet,
-           "source_ref": "fleet-events:sha:" + sha256(
-               f"delivery_enter_repaired:{message_id}".encode("ascii")).hexdigest(),
-           "payload": {"event": "delivery_enter_repaired", "subject_kind": "actor",
-                       "subject": route.peer.alias,
-                       "data": {"source": "message", "legacy_ts": at.isoformat(),
-                                "data": {"msg_id": message_id, "sender": route.caller.alias,
-                                         "match": "chip" if chip else "text", "chip": chip,
-                                         "enters": sum(1 for attempt in attempts if attempt.pressed),
-                                         "attempts": [asdict(attempt) for attempt in attempts],
-                                         "receipt": getattr(observed, "receipt_observation", None)}}}}
+    raw = fleet_event_request(
+        "delivery_enter_repaired", fleet=route.peer_destination.fleet, subject_kind="actor",
+        subject=route.peer.alias, source="message",
+        data={"msg_id": message_id, "sender": route.caller.alias,
+              "match": "chip" if chip else "text", "chip": chip,
+              "enters": sum(1 for attempt in attempts if attempt.pressed),
+              "attempts": [asdict(attempt) for attempt in attempts],
+              "receipt": getattr(observed, "receipt_observation", None)},
+        occurred_at=at.isoformat(), legacy_ts=at.isoformat(),
+        key=f"delivery_enter_repaired:{message_id}")
     try:
         recorded = emit_batch(route.selected.paths.root, [raw], require_commit=True)[0]
     except Exception:

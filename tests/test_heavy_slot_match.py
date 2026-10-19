@@ -155,7 +155,7 @@ NOT_GATED = [
     "pytest tests/test_x.py",
     "pytest tests/test_x.py::TestA::test_b -q",
     "pytest -k foo tests/test_a.py tests/test_b.py",
-    "python -m pytest tests/test_sh_suites.py -k transcript_digest",
+    "python -m pytest tests/test_sh_suites.py -k boot_admission",
     "npx vitest run src/a.test.ts",
     "npx vitest run src/__tests__/api/x.test.ts src/y.test.ts",
     "vitest run shopify",

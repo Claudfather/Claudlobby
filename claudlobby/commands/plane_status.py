@@ -68,8 +68,10 @@ def dispatch(args) -> CommandOutput:
         if staged["state"] == "unreadable":
             lines.append("staged: unreadable — cannot count (a gap, not a zero)")
         else:
+            orphaned = (f"; {staged['orphaned']} orphaned, replayed at the hour"
+                        if staged["orphaned"] else "")
             lines.append(f"staged: {staged['pending']} pending, NOT committed"
-                         f" ({staged['bytes']} bytes, oldest {staged['oldest_age_s']}s)")
+                         f" ({staged['bytes']} bytes, oldest {staged['oldest_age_s']}s{orphaned})")
         quarantine = {"state": scan.quarantine_state, "count": None}
         if scan.quarantine_state == "unreadable":
             lines.append("quarantine: unreadable — cannot count")

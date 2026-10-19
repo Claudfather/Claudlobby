@@ -23,7 +23,8 @@ import pytest
 from claudlobby import config, defaults
 from claudlobby.composer import compose_bot, compose_claude_md
 from claudlobby.config import load_fleet
-from claudlobby.defaults import REGISTRY, TIER_TESTS, Disposition, Tier, resolve
+from claudlobby.defaults import (NON_ENTITY_FOLDERS, REGISTRY, TIER_TESTS, Disposition,
+                                 Tier, resolve)
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
@@ -78,7 +79,7 @@ def _library_entity_types() -> set[str]:
     """
     return {
         d.name for d in LIBRARY.iterdir() if d.is_dir() and not d.name.startswith(".")
-    }
+    } - set(NON_ENTITY_FOLDERS)
 
 
 class TestCompleteness:
@@ -92,6 +93,15 @@ class TestCompleteness:
             f"disposition before it composes.\n  only on disk: {sorted(on_disk - registered)}"
             f"\n  only in registry: {sorted(registered - on_disk)}"
         )
+
+    def test_every_non_entity_folder_exists_is_unregistered_and_says_why(self):
+        # The one way out of the guard above, so it must not rot: a name for a
+        # folder that is gone, or one that is also registered, would hide a
+        # real type (#2150: voices are library content, not an entity type).
+        for name, reason in NON_ENTITY_FOLDERS.items():
+            assert (LIBRARY / name).is_dir(), f"{name}: no such library folder"
+            assert name not in REGISTRY, f"{name}: both registered and excluded"
+            assert reason.strip(), f"{name}: no reason given"
 
     def test_every_disposition_states_a_reason(self):
         # An empty default is a valid answer; an unexplained one is not. This is
@@ -111,7 +121,7 @@ class TestCompleteness:
         # and they must be enumerable rather than discovered one at a time.
         unsettled = sorted(t for t, d in REGISTRY.items() if not d.settled)
         settled = sorted(t for t, d in REGISTRY.items() if d.settled)
-        assert settled == ["guardrails", "protocols", "skills"], (
+        assert settled == ["guardrails", "protocols", "resources", "skills"], (
             "the settled set moved. Every entry here changes what a bot composes "
             "on the default path, so it lands by editing this list deliberately — "
             f"never by a default arriving unannounced: {settled}"
@@ -122,18 +132,22 @@ class TestCompleteness:
 class TestRegistryIsTheSource:
     """F4, binding: the registry is where the constant lives, not a mirror."""
 
-    def test_config_reexports_the_registry_value_by_identity(self):
+    @pytest.mark.parametrize("name", ["DEFAULT_GUARDRAILS", "DEFAULT_RESOURCES"])
+    def test_config_reexports_the_registry_value_by_identity(self, name):
         # IDENTITY, not equality. Equality would still pass if someone
         # re-declared `DEFAULT_GUARDRAILS = ["claudlobby-dev-in-projects"]` in
         # config.py — two sources holding the same value today and drifting
         # tomorrow, which is the exact failure this refinement exists to stop.
-        assert config.DEFAULT_GUARDRAILS is defaults.DEFAULT_GUARDRAILS, (
-            "config.DEFAULT_GUARDRAILS is no longer the registry's value — it has "
+        assert getattr(config, name) is getattr(defaults, name), (
+            f"config.{name} is no longer the registry's value — it has "
             "been re-declared. The registry must be the single source."
         )
 
-    def test_the_derived_constant_matches_what_the_registry_resolves(self):
-        assert defaults.DEFAULT_GUARDRAILS == resolve("guardrails")
+    @pytest.mark.parametrize(
+        "name, etype", [("DEFAULT_GUARDRAILS", "guardrails"), ("DEFAULT_RESOURCES", "resources")]
+    )
+    def test_the_derived_constant_matches_what_the_registry_resolves(self, name, etype):
+        assert getattr(defaults, name) == resolve(etype)
 
     def test_the_composer_consumes_the_registry_value(self, tmp_path):
         # Through `load_fleet`, the real door — NOT `_coerce_bot`. The default is
@@ -163,7 +177,14 @@ class TestRoleOverlay:
     """F2, generalised: keyed on role, shipping with one role populated."""
 
     def test_global_entries_apply_with_no_role(self):
-        assert resolve("guardrails") == ["claudlobby-dev-in-projects"]
+        assert resolve("guardrails") == [
+            "claudlobby-dev-in-projects",
+            "no-push-main",
+            "no-destructive-git",
+            "pii-protection",
+            "no-fabrication",
+            "confirm-before-send",
+        ]
 
     def test_a_role_overlay_is_unioned_on_top_of_the_global(self):
         d = Disposition(

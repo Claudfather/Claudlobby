@@ -96,14 +96,17 @@ def test_exactly_the_categories_that_ship_off():
     This list is an allowlist on purpose: adding to it is meant to cost a
     visible test edit and an argued reason, never a silent registry entry."""
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
-    assert opt_in == {"update-siblings", "session-digest", "code-audit-sweep",
+    assert opt_in == {"update-siblings", "claudna-session-summary", "claudna-harvest", "code-audit-sweep",
+                      # Explicit private write-capable serving; owner grants
+                      # and native endpoint configuration remain separate.
+                      "plane-owner",
                       "weekly-worker-restart",
                       # mutates operator source — update-siblings' OWN
                       # category, not a new one: armed, vault-sync commits and
                       # pushes the vault on every host it runs on.
                       "vault-sync",
                       # model spend — same class as code-audit-sweep /
-                      # session-digest, not a new category
+                      # clauDNA summaries, not a new category
                       "manager-checkin",
                       # no deployment gate — see the docstring
                       "boot-capture", "boot-capture-stamp",
@@ -114,6 +117,12 @@ def test_exactly_the_categories_that_ship_off():
                       # Nothing from the four list: its prune deletes only
                       # versions it staged itself, never one a process runs.
                       "claude-staged-update",
+                      # no deployment gate, and the door it gates TYPES INTO
+                      # a bot's pane (#996): keepalive is a runtime script, in
+                      # force on every bot at activation, so one armed bot's
+                      # bot.conf is the only canary. Nothing from the four
+                      # list: its one prompt resumes work the limit stopped.
+                      "keepalive-limit-resume",
                       # pages a human with no rate guard beyond the debounce
                       # — outbound-to-people-at-scale's risk, not its volume
                       "worker-unassigned",
@@ -354,8 +363,8 @@ def test_an_enrolled_job_whose_own_flag_is_off_still_reads_off(tmp_path):
 
 
 def test_an_armed_opt_in_names_what_armed_it(tmp_path):
-    rows = _resolve(tmp_path, "SESSION_DIGEST_ENABLED=1\n")
-    st = _state(rows, "session-digest")
+    rows = _resolve(tmp_path, "OBSERVABILITY_UNASSIGNED_CHECK=1\n")
+    st = _state(rows, "worker-unassigned")
     assert st.on is True and ".env" in st.source
 
 
@@ -414,7 +423,7 @@ def test_doctor_switches_prints_the_table_alone(tmp_path):
     assert "arm: unset TASK_RECHECK_ENABLED" in r.stdout
     assert "turn off: PLANE_EXPIRE_ENABLED=0" in r.stdout
     assert "update-siblings" in r.stdout          # the opt-ins are always listed
-    assert "session-digest" in r.stdout
+    assert "claudna-harvest" in r.stdout
     assert "code-audit-sweep" in r.stdout
     # ...and ONLY the table: the shell setup doors call this, and a health
     # command's service probes / credential curls have no business in a
@@ -444,10 +453,10 @@ def test_status_header_names_a_disabled_reaction(tmp_path):
     from claudlobby.status import switches_off_note
 
     rows = _resolve(tmp_path, "TASK_RECHECK_ENABLED=0\n")
-    note = switches_off_note("artemis-data", rows)
-    assert "task-recheck off on artemis-data" in note
+    note = switches_off_note("example-data", rows)
+    assert "task-recheck off on example-data" in note
     assert "doctor --switches" in note
-    assert switches_off_note("artemis-data", _resolve(tmp_path / "b")) == ""
+    assert switches_off_note("example-data", _resolve(tmp_path / "b")) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +700,10 @@ def test_the_validator_namespaces_come_from_the_registry():
         # dead. CLAUDLOBBY_ cannot collide with a fleet's own tooling, which is
         # the bound this test's docstring exists to hold.
         "CLAUDLOBBY",
+        # keepalive-limit-resume (#996). keepalive's own knobs already live
+        # here (KEEPALIVE_ACTIVE_WINDOW_S, KEEPALIVE_BUSY_PATTERNS), none of
+        # them an *_ENABLED key, so claiming it flags no existing setting.
+        "KEEPALIVE",
     }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
@@ -734,7 +747,7 @@ def test_every_switch_declares_a_carrier_and_derives_its_two_lines():
 def test_the_four_corrected_carriers():
     """Each was measured, not argued:
 
-    * `session-digest` / `spindown-receipt` run INSIDE a bot session, and
+    * `spindown-receipt` run INSIDE a bot session, and
       start-bot.sh sources the .env tiers before `set -a` — so a tier line is
       assigned unexported and never reaches them. bot.conf is the carrier.
     * `plane-host-probe` is a host timer with no flag of its own; naming the
@@ -742,12 +755,11 @@ def test_the_four_corrected_carriers():
     * `plane-recording` keeps the .env tier — and the composer now carries the
       resolved value to BOTH places that cannot read a tier themselves.
     """
-    assert sw.by_key("session-digest").carrier == sw.BOT_CONF
     assert sw.by_key("spindown-receipt").carrier == sw.BOT_CONF
     assert sw.by_key("plane-host-probe").carrier == sw.ENROLL_HOST
     assert "PLANE_EMIT_DISABLED" not in sw.by_key("plane-host-probe").arm
     assert sw.by_key("plane-recording").carrier == sw.ENV_FLEET
-    for key in ("session-digest", "spindown-receipt"):
+    for key in ("spindown-receipt",):
         # whichever direction is the non-default one names the carrier: an
         # opt-in says it in `arm`, an opt-out in `disarm`.
         sd = sw.by_key(key)
@@ -801,7 +813,7 @@ def test_pane_send_chunking_is_a_registered_switch(tmp_path):
     s = sw.by_key("pane-send-chunking")
     assert s.polarity == sw.OPT_OUT and s.scope == sw.DOOR
     assert s.env == "PANE_SEND_CHUNK_BYTES"
-    # bot.conf, for session-digest's reason: the door runs inside a bot session
+    # bot.conf, for the session-door reason: the door runs inside a bot session
     # and start-bot.sh sources the .env tiers before `set -a`.
     assert s.carrier == sw.BOT_CONF
     assert "bots.NAME.env:" in s.disarm
@@ -958,7 +970,7 @@ def test_the_remaining_shell_launchers_call_the_shared_gate(script, var):
 def test_the_doc_switch_tables_ARE_the_registrys_render(doc):
     """Three hand-written tables were a fourth copy of the registry, and the
     estate's recurring defect is a copy drifting (#892/#1143) — two of them
-    were already wrong about `session-digest`'s carrier. The block is
+    were already wrong about the session-door carrier. The block is
     generated; regenerate with `claudlobby host doctor --switches --markdown`."""
     text = (REPO / doc).read_text()
     assert sw.DOC_BEGIN in text, f"{doc}: no generated block"
@@ -984,3 +996,38 @@ def test_doctor_switches_markdown_prints_every_block(tmp_path):
     for doc in sw.DOC_BLOCKS:
         assert doc in r.stdout
     assert r.stdout.count(sw.DOC_BEGIN) == len(sw.DOC_BLOCKS)
+
+
+def test_claudna_switch_carriers_and_export_enrollment(tmp_path):
+    for key in ("claudna-session-summary", "claudna-harvest"):
+        row = sw.by_key(key)
+        assert (row.scope, row.polarity, row.carrier) == (
+            sw.DOOR,
+            sw.OPT_IN,
+            sw.COMPOSE_BOT,
+        )
+        assert row.config.startswith("claudna.")
+    export = sw.by_key("session-export")
+    assert (export.scope, export.polarity, export.carrier) == (
+        sw.FLEET_JOB,
+        sw.OPT_OUT,
+        sw.ENV_FLEET,
+    )
+    assert export.env == "SESSION_EXPORT_ENABLED" and export.job == "session-export"
+    assert sw.jobs_with_env(sw.FLEET_JOB)["session-export"] == (
+        "SESSION_EXPORT_ENABLED",
+    )
+    root = _root(tmp_path)
+    p = root / "fleet.yaml"
+    text = p.read_text()
+    text = (
+        text.replace("    kev:", "    kev:\n      claudna: {harvest: true}")
+        + "    helper:\n      expertise: [software-engineering]\n"
+    )
+    p.write_text(text)
+    fleet, _ = load_fleet(p)
+    row = _state(
+        sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), fleet),
+        "claudna-harvest",
+    )
+    assert row.on is True and "1 of 2" in row.source and "claudna.harvest" in row.source

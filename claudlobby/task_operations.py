@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping, TYPE_CHECKING
 
 from .plane.db import connect_ro, db_file
+from .message_payload import MessageBody
 from .plane.ids import ID_PATTERNS, mint_assignment_id, mint_event_id, mint_msg_id, mint_work_item_id
 from .plane.queries import checkin_event_scope_sql, fleet_alias_range, fleet_range_params
 from .plane.schema_state import PendingMigrationError, require_current_schema
@@ -156,6 +157,24 @@ def _reader(ctx):
             yield conn
         except sqlite3.Error as exc:
             raise TaskOperationUnavailableError("task operation Plane storage is unavailable") from exc
+
+
+@contextmanager
+def _read_snapshot(conn, admit_read=None):
+    """Optional trusted source admission covers the same snapshot as its read.
+
+    End it before emit_batch: recording and its fresh proof use different
+    snapshots. Ordinary local operations keep their existing read behavior.
+    """
+    if admit_read is None:
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        admit_read(conn)
+        yield
+    finally:
+        conn.rollback()
 
 
 def _identities(ctx, conn, actors):
@@ -342,7 +361,7 @@ def _result(ctx, conn, receipt, replayed):
                                recipient_uid=receipt.intent.recipient_uid)
 
 
-def _commit(store, ctx, conn, receipt, raws, check_lock):
+def _commit(store, ctx, conn, receipt, raws, check_lock, *, admit_read=None):
     from .plane.emit_api import emit_batch
     check_lock()
     store.begin_attempt()
@@ -353,25 +372,26 @@ def _commit(store, ctx, conn, receipt, raws, check_lock):
         # Do not turn an exception into an unchanged result, even if it looks
         # like a connection failure. The next invocation reconciles exact IDs.
         raise TaskRecordingError(receipt.request_id, str(exc)) from exc
-    proof = reconcile_facts(conn, receipt.intent.stages[0].facts)
-    if proof.status == "conflict":
-        raise ReceiptConflict("committed result differs from the frozen request facts")
-    if proof.status != "committed":
-        raise TaskRecordingError(receipt.request_id, proof.reason)
-    try:
-        receipt = store.outcome(0, "committed")
-    except OSError as exc:
-        # Exact Plane facts have already been proved. The final receipt
-        # outcome write can fail after rename; disclose the lost persistence
-        # guarantee and never attempt a notification from this invocation.
-        intent = receipt.intent
-        raise TaskRecordingError(receipt.request_id, "request outcome persistence failed",
-                                 recording="committed", task_id=intent.task_id,
-                                 assignment_id=intent.assignment_id,
-                                 message_id=intent.message_id,
-                                 recipient_uid=intent.recipient_uid,
-                                 request_persisted=False) from exc
-    return _result(ctx, conn, receipt, False)
+    with _read_snapshot(conn, admit_read):
+        proof = reconcile_facts(conn, receipt.intent.stages[0].facts)
+        if proof.status == "conflict":
+            raise ReceiptConflict("committed result differs from the frozen request facts")
+        if proof.status != "committed":
+            raise TaskRecordingError(receipt.request_id, proof.reason)
+        try:
+            receipt = store.outcome(0, "committed")
+        except OSError as exc:
+            # Exact Plane facts have already been proved. The final receipt
+            # outcome write can fail after rename; disclose the lost persistence
+            # guarantee and never attempt a notification from this invocation.
+            intent = receipt.intent
+            raise TaskRecordingError(receipt.request_id, "request outcome persistence failed",
+                                     recording="committed", task_id=intent.task_id,
+                                     assignment_id=intent.assignment_id,
+                                     message_id=intent.message_id,
+                                     recipient_uid=intent.recipient_uid,
+                                     request_persisted=False) from exc
+        return _result(ctx, conn, receipt, False)
 
 
 def admit(ctx: TaskOperationContext, request_id: str, *, title: str, body: str | None = None,
@@ -622,8 +642,25 @@ def nudge_body(task_id: str, assignment_id: str | None, by: str, reason: str) ->
                       ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+# Omission preserves CLI semantics; explicit None requires still-queued work.
+UNSPECIFIED_ASSIGNMENT = object()
+
+
+def nudge_semantic_digest(task_id: str, *, reason: str, by: str,
+                          expected_assignment_id=UNSPECIFIED_ASSIGNMENT) -> str:
+    """Pure canonical intent digest; omission and explicit null stay distinct."""
+    semantic_fields = dict(task_id=task_id, reason=reason, by=by)
+    if expected_assignment_id is not UNSPECIFIED_ASSIGNMENT:
+        if expected_assignment_id is not None and (not isinstance(expected_assignment_id, str)
+                or not re.fullmatch(ID_PATTERNS["assignment"], expected_assignment_id)):
+            raise TaskQueryError("expected assignment must be a canonical assignment ID or null")
+        semantic_fields["expected_assignment_id"] = expected_assignment_id
+    return semantic_digest(semantic_fields)
+
+
 def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: str,
-          route: MessageRouteBinding, by: str | None = None) -> TaskOperationResult:
+          route: MessageRouteBinding, by: str | None = None,
+          expected_assignment_id=UNSPECIFIED_ASSIGNMENT, admit_read=None) -> TaskOperationResult:
     """Commit one work-level nudge and manager ask before native notification."""
     _own_fleet(ctx)
     _reason(reason)
@@ -635,41 +672,110 @@ def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: s
             or route.recipient_alias != manager.alias or route.manager_alias != manager.alias
             or route.manager_uid != manager.uid):
         raise ReceiptConflict("nudge route differs from the frozen caller or fleet manager")
-    semantic = semantic_digest(dict(task_id=task_id, reason=reason, by=by_alias))
+    semantic = nudge_semantic_digest(task_id, reason=reason, by=by_alias,
+                                     expected_assignment_id=expected_assignment_id)
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
         previous = _existing(store, ctx, "task.nudge", semantic, manager.uid,
                              fact_count=2, notification=True, route=route)
         with _reader(ctx) as conn:
-            first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _read_snapshot(conn, admit_read):
+                first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
             with _locked_task(store, first.task_id) as check:
-                if _replayed(store, previous, conn):
-                    return _result(ctx, conn, previous, True)
-                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
-                if not task.open:
-                    raise TaskConflictError("terminal task cannot be nudged")
-                assignment_id = (task.current_assignment.assignment_id
-                                 if task.current_assignment else None)
-                if previous and previous.intent.assignment_id != assignment_id:
-                    raise TaskConflictError("nudge's original assignment changed")
-                provenance = _provenance(ctx, conn, by)
-                _identities(ctx, conn, (ctx.caller, provenance, manager))
-                message_id = previous.intent.message_id if previous else mint_msg_id()
-                task_raw = _raw(ctx, request_id, "task", dict(
-                    work_item_id=task_id, assignment_id=assignment_id, event="nudged",
-                    actor=ctx.caller.alias, by=provenance.alias, reason=reason), previous)
-                body = nudge_body(task_id, assignment_id, provenance.alias, reason)
-                ask_raw = _raw(ctx, request_id, "communication", dict(
-                    msg_id=message_id, sender=ctx.caller.alias, recipient=manager.alias,
-                    recipient_raw=ctx.context.fleet.manager, message_class="task_request",
-                    command_type="query", work_item_id=task_id, body=body,
-                    **({"assignment_id": assignment_id} if assignment_id else {})),
-                    previous, fact_index=1)
-                raws = (task_raw, ask_raw)
-                receipt = _prepare(store, ctx, "task.nudge", semantic, raws, task_id,
-                                   assignment_id, manager.uid, (provenance, manager),
-                                   message_id=message_id, notification=True,
-                                   route=previous.intent.route if previous else route)
-                return _commit(store, ctx, conn, receipt, raws, check)
+                with _read_snapshot(conn, admit_read):
+                    if _replayed(store, previous, conn):
+                        return _result(ctx, conn, previous, True)
+                    task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                    if not task.open:
+                        raise TaskConflictError("terminal task cannot be nudged")
+                    assignment_id = (task.current_assignment.assignment_id
+                                     if task.current_assignment else None)
+                    if expected_assignment_id is not UNSPECIFIED_ASSIGNMENT and expected_assignment_id != assignment_id:
+                        raise TaskConflictError("task assignment changed since the nudge was selected")
+                    if previous and previous.intent.assignment_id != assignment_id:
+                        raise TaskConflictError("nudge's original assignment changed")
+                    provenance = _provenance(ctx, conn, by)
+                    _identities(ctx, conn, (ctx.caller, provenance, manager))
+                    message_id = previous.intent.message_id if previous else mint_msg_id()
+                    task_raw = _raw(ctx, request_id, "task", dict(
+                        work_item_id=task_id, assignment_id=assignment_id, event="nudged",
+                        actor=ctx.caller.alias, by=provenance.alias, reason=reason), previous)
+                    body = nudge_body(task_id, assignment_id, provenance.alias, reason)
+                    ask_raw = _raw(ctx, request_id, "communication", dict(
+                        msg_id=message_id, sender=ctx.caller.alias, recipient=manager.alias,
+                        recipient_raw=ctx.context.fleet.manager, message_class="task_request",
+                        command_type="query", work_item_id=task_id, body=body,
+                        **({"assignment_id": assignment_id} if assignment_id else {})),
+                        previous, fact_index=1)
+                    raws = (task_raw, ask_raw)
+                    receipt = _prepare(store, ctx, "task.nudge", semantic, raws, task_id,
+                                       assignment_id, manager.uid, (provenance, manager),
+                                       message_id=message_id, notification=True,
+                                       route=previous.intent.route if previous else route)
+                return _commit(store, ctx, conn, receipt, raws, check, admit_read=admit_read)
+
+
+def feedback_semantic_digest(task_id: str, *, body: MessageBody,
+                             expected_assignment_id: str | None) -> str:
+    """A task comment pins authored bytes and an explicit assignment or null."""
+    if not isinstance(task_id, str) or not re.fullmatch(ID_PATTERNS["work_item"], task_id):
+        raise TaskQueryError("feedback requires a canonical task ID")
+    if not isinstance(body, MessageBody):
+        raise TaskQueryError("feedback requires a validated message body")
+    if expected_assignment_id is not None and (not isinstance(expected_assignment_id, str)
+            or not re.fullmatch(ID_PATTERNS["assignment"], expected_assignment_id)):
+        raise TaskQueryError("expected assignment must be a canonical assignment ID or null")
+    return semantic_digest(dict(task_id=task_id, body=body.text,
+                                expected_assignment_id=expected_assignment_id, kind="task_feedback"))
+
+
+def feedback(ctx: TaskOperationContext, request_id: str, task_id: str, *, body: MessageBody,
+             expected_assignment_id: str | None, route: MessageRouteBinding,
+             admit_read=None) -> TaskOperationResult:
+    """Record one human comment on resolved work, including terminal work.
+
+    Existing requests are reconciliation-only. They cannot repeat recording or
+    become a notification retry, even when no original fact can be proved.
+    """
+    if ctx.caller_fleet_uid is not None or not re.fullmatch(r"human:[^\s:/]+", ctx.caller.alias):
+        raise TaskConflictError("task feedback requires an existing local human actor")
+    manager = _worker(ctx, ctx.context.fleet.manager)
+    if (not isinstance(route, MessageRouteBinding) or route.caller_alias != ctx.caller.alias
+            or route.caller_fleet_uid is not None or route.peer_fleet_uid != ctx.fleet_uid
+            or route.recipient_alias != manager.alias or route.manager_alias != manager.alias
+            or route.manager_uid != manager.uid):
+        raise ReceiptConflict("feedback route differs from the frozen human or fleet manager")
+    semantic = feedback_semantic_digest(task_id, body=body,
+                                        expected_assignment_id=expected_assignment_id)
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.feedback", semantic, manager.uid,
+                             notification=True, route=route)
+        with _reader(ctx) as conn:
+            with _read_snapshot(conn, admit_read):
+                first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                with _read_snapshot(conn, admit_read):
+                    if _replayed(store, previous, conn):
+                        return _result(ctx, conn, previous, True)
+                    if previous is not None:
+                        raise TaskRecordingError(request_id,
+                            "retained feedback is inspection-only; recording cannot be repeated",
+                            task_id=previous.intent.task_id, assignment_id=previous.intent.assignment_id,
+                            message_id=previous.intent.message_id, recipient_uid=manager.uid,
+                            request_persisted=True)
+                    task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                    assignment_id = task.current_assignment.assignment_id if task.current_assignment else None
+                    if expected_assignment_id != assignment_id:
+                        raise TaskConflictError("task assignment changed since feedback was selected")
+                    _identities(ctx, conn, (ctx.caller, manager))
+                    message_id = mint_msg_id()
+                    raw = _raw(ctx, request_id, "communication", dict(
+                        msg_id=message_id, sender=ctx.caller.alias, recipient=manager.alias,
+                        recipient_raw=ctx.context.fleet.manager, message_class="chat",
+                        work_item_id=task_id, assignment_id=assignment_id, body=body.text), None)
+                    receipt = _prepare(store, ctx, "task.feedback", semantic, (raw,), task_id,
+                        assignment_id, manager.uid, (manager,), message_id=message_id,
+                        notification=True, route=route)
+                return _commit(store, ctx, conn, receipt, (raw,), check, admit_read=admit_read)
 
 
 def reassign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,

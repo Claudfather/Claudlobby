@@ -17,7 +17,9 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
+import time
 
 from .config_plan import ConfigPlan, read_plan
 from .releases import read_release
@@ -31,6 +33,9 @@ STEPS = (
     "selection_switched", "configuration_applied", "ingest_started",
     "bots_started", "verified", "producers_resumed",
 )
+# The candidate start steps. A host reset strands any of them with every
+# started candidate dead; ``host repair-after-reset`` reopens them all.
+START_STEPS = STEPS[STEPS.index("ingest_started"):]
 ROLLBACK_STEPS = (
     "producers_paused", "sessions_quiesced", "ingest_quiesced",
     "compatibility_verified", "candidate_units_removed", "configuration_restored",
@@ -148,6 +153,41 @@ def read_selection(root: Path) -> dict | None:
             or result["schema"] != 1):
         raise ActivationError("invalid release selection")
     return result
+
+
+_RESUMABLE_RUNNING_STEPS = frozenset({
+    "queues_classified", "backup_saved", "migration_applied",
+    "selection_switched", "configuration_applied",
+})
+_BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
+                                    "sessions_quiesced", "ingest_quiesced"})
+_RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
+
+
+def resumable_running_step(record: ActivationRecord) -> str | None:
+    """Return a supported same-ID stage; a missing start journal never implies no effect."""
+    completed = record.body["completed"]
+    # An early adoption abort in progress refuses forward steps; only its
+    # explicit abort-adoption rerun can continue that record.
+    if (record.status != "activating" or "adoption_abort" in record.body
+            or completed != list(STEPS[:len(completed)])
+            or not isinstance(record.body["intent"].get("install_directory"), str)
+            or len(completed) >= len(STEPS)):
+        return None
+    step = STEPS[len(completed)]
+    bootstrap = (record.body["previous_selection"] is None
+                 and record.body["intent"].get("source_kind") != "legacy-unsealed")
+    supported = step in _RESUMABLE_RUNNING_STEPS or bootstrap and step in _BOOTSTRAP_EMPTY_STEPS
+    if not bootstrap and step in _RUNNING_QUIESCE_STEPS:
+        # Parking and native pause converge; a begun handoff needs a per-bot
+        # witness with no unknown intent, or it stays refused for inspection.
+        effects = record.body.get("handoff_effects")
+        supported = (step != "sessions_handed_off" or record.body["pending"] is None
+                     or isinstance(effects, dict) and None not in effects.values())
+    if step in START_STEPS:
+        supported = (isinstance(record.body.get("start_effects"), dict)
+                     and isinstance(record.body.get("start_phases"), dict))
+    return step if supported and record.body["pending"] in (None, step) else None
 
 
 _LOCK_TOKEN = object()
@@ -446,6 +486,46 @@ class ActivationStore:
         del body["start_effects"][source]
         return self._save(record)
 
+    def archive_starts_after_host_reset(self, activation_id: str, *, attempts: dict, evidence: dict,
+                                        reason: str, repair_artifact: str,
+                                        host_boot: dict | None) -> ActivationRecord:
+        """Archive every verified-dead candidate start and reopen ``ingest_started``.
+
+        For a host that lost every started candidate process at once: a reset
+        or power loss while a start step (:data:`START_STEPS`) is
+        next, which for ``verified`` can be with nothing pending. Each attempt
+        and its dead evidence move into ``start_repairs``, the start steps the
+        resume must redo leave ``completed`` with their evidence, and
+        ``ingest_started`` becomes pending, all in one atomic write. The sealed
+        candidate's resume then starts every candidate fresh, as on a first
+        start. ``attempts`` must be exactly the recorded start effects, so none
+        stays behind unverified. Selection, publication and identity bindings
+        stay. The guard is the resume's own admission
+        (:func:`resumable_running_step`), so no caller can reopen a record the
+        resume would refuse.
+        """
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        effects = body.get("start_effects")
+        repairs = body.setdefault("start_repairs", [])
+        if (resumable_running_step(record) not in START_STEPS
+                or not effects or attempts != effects
+                or set(evidence) != set(effects) or not isinstance(repairs, list)
+                or not isinstance(reason, str) or not reason.strip() or not reason.isprintable()):
+            # Raised before the single write, so nothing changed.
+            raise ActivationRefusal("host-reset repair is not the admitted set of dead candidate starts")
+        for source in sorted(effects):
+            repairs.append({"source": source, "attempt": effects[source], "dead_evidence": evidence[source],
+                            "reason": reason, "repair_artifact": repair_artifact,
+                            "kind": "host_reset", "host_boot": host_boot})
+        body["start_effects"] = {}
+        body["completed"] = list(STEPS[:STEPS.index(START_STEPS[0])])
+        for step in START_STEPS:
+            body["evidence"].pop(step, None)
+        body["pending"] = "ingest_started"
+        return self._save(record)
+
     def record_identity_bindings(self, activation_id: str, bindings: dict, *, package) -> ActivationRecord:
         """Persist verified IDs once, before the first candidate bot can start."""
         self.assert_locked()
@@ -619,22 +699,83 @@ class ActivationStore:
         return self._complete(activation_id, "selection_restored", evidence_digest=_digest(previous))
 
 
-@contextmanager
-def locked_activation(root: Path):
-    """Nonblocking process lock; retain the lock file to avoid inode races."""
-    state = _state(root)
-    state.mkdir(parents=True, exist_ok=True)
-    lock = state / "activation.lock"
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    store = None
+# A refusal whose text is one of these changed nothing: the lock was busy
+# (lock_busy). Callers turn it into "lock held, no record created".
+ANOTHER_ACTIVATION = "another host activation holds the lock"
+_JOBS_HOLD = "a running job or host operation"
+# How long host activate waits for the jobs and operations already holding the
+# activation lock shared to let go. Ones that start while it waits back off, so
+# the wait is bounded by the longest run in progress; the pulse, the longest
+# timer job, is capped under its 300 s cadence.
+ACTIVATION_WAIT_S = 300.0
+
+
+def lock_busy(message: str) -> bool:
+    """Whether a refusal says the activation lock was busy, so nothing changed."""
+    return message == ANOTHER_ACTIVATION or message.startswith(_JOBS_HOLD + " ")
+
+
+def _exclusively_held(path: Path) -> bool:
+    """Whether some other holder has *path* exclusively: a shared probe would block."""
+    probe = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
+        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(probe)
+
+
+def _take(fd: int, path: Path, deadline: float, interval: float, busy: str,
+          notice: str | None = None) -> None:
+    """Take *path* exclusively by *deadline*; an exclusive holder is another activation."""
+    while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ActivationError("another host activation holds the lock") from exc
+            return
+        except BlockingIOError:
+            if _exclusively_held(path):
+                raise ActivationError(ANOTHER_ACTIVATION) from None
+            if time.monotonic() >= deadline:
+                raise ActivationError(busy) from None
+            if notice:
+                print(notice, file=sys.stderr, flush=True)
+                notice = None
+            time.sleep(interval)
+
+
+@contextmanager
+def locked_activation(root: Path, *, wait: float = 0.0):
+    """Exclusive host lock; retain the lock files to avoid inode races.
+
+    Another activation, running or pending, refuses at once. Running jobs and
+    host operations hold activation.lock shared. Every activation first holds
+    activation-pending.lock exclusively, until it ends, so a job or operation
+    that starts while it waits backs off as if it were already running. With a
+    positive *wait* it then polls until the holders already running let go,
+    refusing only if one outlasts the wait; without one it refuses at once.
+    """
+    state = _state(root)
+    state.mkdir(parents=True, exist_ok=True)
+    lock, marker = state / "activation.lock", state / "activation-pending.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    pending = None
+    store = None
+    try:
+        pending = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        # A starting job holds the marker shared only while it takes its own lock.
+        _take(pending, marker, time.monotonic() + 5.0, 0.01, f"{_JOBS_HOLD} holds the pending lock")
+        _take(fd, lock, time.monotonic() + max(wait, 0.0), 0.5,
+              f"{_JOBS_HOLD} still holds the lock after a {wait:.0f} s wait" if wait > 0
+              else f"{_JOBS_HOLD} holds the lock",
+              f"waiting up to {wait:.0f} s for running jobs to release the host activation lock"
+              if wait > 0 else None)
         store = ActivationStore(state.parent, fd, _LOCK_TOKEN)
         yield store
     finally:
         if store is not None:
             store.held = False
         os.close(fd)
+        if pending is not None:
+            os.close(pending)

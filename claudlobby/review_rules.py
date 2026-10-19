@@ -360,7 +360,8 @@ def attribution_advice(info: dict) -> str:
                 f"report.{tail}")
     return (f"Plane attribution found no citing report for these {dated} verdict(s), which "
             f"are INSIDE the plane's epoch ({epoch}) — so this is a missing report, not an "
-            f"impossible one, and a report filed later would resolve it.{tail}")
+            f"impossible one, and a report filed later that names the verdict's URL "
+            f"with --artifact would resolve it.{tail}")
 
 
 # --------------------------------------------------------------------------
@@ -825,7 +826,8 @@ def render(results: list[dict], canonical: bool) -> str:
         if canonical and OFF_STANDARD in r["flags"]:
             lines.append(
                 f"      {OFF_STANDARD}: verdict landed on .comments[]; "
-                "`gh pr review --comment` writes .reviews[]"
+                "a COMMENT review posted through `gh api … /pulls/N/reviews` "
+                "(the same-identity-fallback protocol) writes .reviews[]"
             )
         if UNATTRIBUTED in r["flags"]:
             lines.append(

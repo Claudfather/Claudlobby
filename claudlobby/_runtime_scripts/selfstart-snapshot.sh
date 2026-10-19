@@ -614,7 +614,7 @@ N_RESCUE_NAMED="$(sort -u "$TMP/rescued_names" | grep -c . || true)"
 
 : > "$TMP/declared"
 : > "$TMP/badman"
-declared_bots_strict "$TMP/badman" > "$TMP/declared"
+declared_bots_strict --bad-out "$TMP/badman" > "$TMP/declared"
 
 PARTIAL=0
 if [ -s "$TMP/badman" ]; then

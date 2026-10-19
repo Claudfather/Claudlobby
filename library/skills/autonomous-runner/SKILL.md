@@ -1,6 +1,6 @@
 ---
 name: autonomous-runner
-description: "Generic continuous-job wrapper for procedural skills. Configurable per bot via fleet.yaml. Picks work items per cadence, classifies risk, invokes the configured skill with --auto, parses the structured result, and reports back to Telegram."
+description: "Use when a cadence tick fires on a bot that declares an autonomous_runner block. Generic continuous-job wrapper for procedural skills. Configurable per bot via fleet.yaml. Picks work items per cadence, classifies risk, invokes the configured skill with --auto, parses the structured result, and reports back to Telegram."
 tool_grants:
   - "Bash(python3 *issue-intake.py* list *)"
   - "Bash(python3 *issue-intake.py* quote *)"

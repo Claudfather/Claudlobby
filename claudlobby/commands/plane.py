@@ -70,6 +70,10 @@ def _switch_fleet(paths):
         return None
 
 
+#: The doctor's one daemon probe. A miss is reported as what it saw (#2086).
+_DAEMON_PROBE_S = 2.0
+
+
 def cmd_plane_doctor(args) -> int:
     """Kernel-scoped health rungs (§10/§17 — the golden-path doctor grows in
     Phase 2; these are the checks the kernel alone can answer)."""
@@ -204,7 +208,10 @@ def cmd_plane_doctor(args) -> int:
         # ok only before the plane exists: once it does, the daemon is the only
         # recorder for hooks and timers and the only replayer of what they
         # stage, so its absence is ATTENTION, never a green "unarmed" (S5a-02).
-        from ..plane.daemon import probe_daemon, socket_path
+        # A listener that leaves the probe unanswered is a fourth state (#2086):
+        # under #1693's load one probe missed while the same daemon answered
+        # minutes later, and "not serving" pointed its reader at a restart.
+        from ..plane.daemon import probe_daemon_state, socket_path
 
         # Honor PLANE_SOCKET like the shim does (gauntlet round): doctor used
         # to probe only the default path, so an overridden-socket fleet read
@@ -212,7 +219,8 @@ def cmd_plane_doctor(args) -> int:
         # test could never reach the serving branch against a live fixture.
         sock = Path(os.environ["PLANE_SOCKET"]) if os.environ.get("PLANE_SOCKET") \
             else socket_path(root)
-        serving = sock.exists() and probe_daemon(sock)
+        daemon_state = probe_daemon_state(sock, _DAEMON_PROBE_S) if sock.exists() else "down"
+        serving = daemon_state == "serving"
         started = 0
         last_ingest = None
         if path.exists():
@@ -229,6 +237,12 @@ def cmd_plane_doctor(args) -> int:
                 conn.close()
         if serving:
             rung(True, "daemon", f"serving on {sock}")
+        elif daemon_state == "unanswered":
+            rung(False, "daemon",
+                 f"listening on {sock} but no answer within {_DAEMON_PROBE_S:g}s — slow or"
+                 " stuck, not stopped (a stopped daemon refuses the connection; under load"
+                 " see #1693). Doors stage input meanwhile (pending, not committed). Run"
+                 " doctor again before restarting it")
         elif started:
             rung(False, "daemon",
                  f"started {started}x historically but not serving — check:"
@@ -246,7 +260,9 @@ def cmd_plane_doctor(args) -> int:
         # the daemon cannot answer. Non-empty with no serving daemon, full, or
         # stale is ATTENTION; unreadable is a gap, never a zero.
         from ..plane.health import scan_staged, staged_rung
-        staged_ok, staged_detail = staged_rung(scan_staged(root), serving)
+        # A slow daemon still replays, so its queue is not "NOT recorded".
+        staged_ok, staged_detail = staged_rung(scan_staged(root),
+                                               daemon_state in ("serving", "unanswered"))
         rung(staged_ok, "staged depth", staged_detail)
         # scan_spool — the same shared definition the trust panel and
         # status consume; an unreadable enumeration is a FAILING rung and a

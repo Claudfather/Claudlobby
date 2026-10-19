@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Admit fleet work, assign a declared worker, and deliver the recorded assignment through the public CLI."
+description: "Use when you manage a fleet and work should go to one of your workers, whether a human asked for it or you chose it. Admits the fleet work, assigns a declared worker, and delivers the recorded assignment through the public CLI."
 argument-hint: "<bot> <task description> [--repo <repo>]"
 ---
 

@@ -79,7 +79,7 @@ def _assigned(root):
     return ctx, task, assigned
 
 
-def _native(monkeypatch, calls, *, operation="send_message"):
+def _native(monkeypatch, calls, *, operation="send_message", telegram="unconfigured"):
     real = getattr(message_operations, operation)
     def wrapped(*args, **kwargs):
         def transport(*_, **native):
@@ -87,7 +87,7 @@ def _native(monkeypatch, calls, *, operation="send_message"):
             return TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0)
         return real(*args, transport=transport,
                     notify=lambda *a, **k: RecordingAlertOutcome(
-                        ChannelOutcome("submitted", True), ChannelOutcome("unconfigured", True)),
+                        ChannelOutcome("submitted", True), ChannelOutcome(telegram, True)),
                     clear=lambda *a, **k: None, **kwargs)
     monkeypatch.setattr(message_operations, operation, wrapped)
 
@@ -178,6 +178,30 @@ def test_recording_outage_keeps_submitted_effect_and_alert_truth(active, monkeyp
     assert "recording unrecorded" in error and "delivery submitted" in error
     assert "manager=submitted" in error and "do not automatically resend" in error
     assert "Private O1 body" not in error and len(calls) == 1
+
+
+def test_unread_tiers_fail_only_a_telegram_alert_with_no_target(active, monkeypatch, capsys):
+    """The escalation target comes from the active fleet.yaml, so an alert can
+    reach Telegram while the .env tiers are unreadable, and it stays reported as
+    sent (#2234). Only an alert with no target fails for the unread tiers."""
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    from claudlobby.commands import message_write
+    monkeypatch.setattr(message_write, "_alert_tiers", lambda route: ({}, False))
+    original = message_operations.emit_batch
+    def recorder(root_path, raws, **kwargs):
+        if raws[0]["event_type"] == "communication":
+            raise sqlite3.OperationalError("private recorder outage")
+        return original(root_path, raws, **kwargs)
+    monkeypatch.setattr(message_operations, "emit_batch", recorder)
+    for telegram, reported in (("carrier_accepted", ("carrier_accepted", None)),
+                               ("unconfigured", ("failed", "selected_tiers_unavailable"))):
+        with monkeypatch.context() as patch:
+            _native(patch, [], telegram=telegram)
+            output = _call(capsys, root, "--to", "worker", "--text", "Private body",
+                           "--request-id", str(uuid4()), expected=11)
+        alert = output["data"]["alert"]["telegram"]
+        assert (alert["status"], alert["reason"]) == reported
 
 
 def test_busy_send_request_is_retryable_with_same_uuid(active, monkeypatch, capsys):

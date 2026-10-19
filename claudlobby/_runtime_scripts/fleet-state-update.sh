@@ -94,7 +94,7 @@ if [ "${1:-}" = "prune" ]; then
     # the SILENT zero was unguarded, which is why a readability check would not
     # have closed this.
     _BAD_MANIFESTS=$(safe_mktemp) || exit 2
-    if ! ATTR=$(declared_bots_strict "$_BAD_MANIFESTS" | cut -f1,2); then
+    if ! ATTR=$(declared_bots_strict --bad-out "$_BAD_MANIFESTS" | cut -f1,2); then
         echo "fleet-state-update: refusing to prune — cannot establish which bots this host declares. No rows touched." >&2
         sed 's/^/  /' "$_BAD_MANIFESTS" >&2
         emit_fleet_event "script_error" "fleet-state-update" \

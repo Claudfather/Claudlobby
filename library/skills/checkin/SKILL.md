@@ -1,10 +1,11 @@
 ---
 name: checkin
-description: "The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
+description: "Use when the check-in beat sends /checkin to an idle manager, or an idle manager must choose its next move. The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
 argument-hint: "[--dry-run]"
 tool_grants:
   - "Bash(claudlobby --json --fleet * checkin list *)"
   - "Bash(claudlobby --json --fleet * checkin record *)"
+  - "Bash(claudlobby --json --fleet * checkin show *)"
   - "Bash(claudlobby --fleet * brief *)"
   - "Bash(claudlobby --fleet * fleet status *)"
   - "Bash(claudlobby --json fleet inbox)"
@@ -85,8 +86,14 @@ A step that fails is **recorded, never guessed around**: add its name to
    `utilization` entry (#891) is **not an input** of this skill; ignore it.
 1b. **The roster, and who is idle** — `claudlobby --fleet "$FLEET_NAME" fleet status
    --json`: `data.bots[]`, each with `name` (the id the ACT line takes as `<worker>`),
-   `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`, and
-   `plane_unreachable` (non-null when the plane could not be read for that bot). A
+   `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`,
+   `open_assignments`, and `plane_unreachable` (non-null when the plane could not be
+   read for that bot). With more than one open assignment, `current_task` is the
+   first of them (active, then blocked, then assigned, latest transition first), and
+   `work_assignments` lists every one with its state: an `assigned` one there may
+   still await delivery. Before dispatching to such a worker, check its `assigned`
+   rows: one still awaiting delivery is delivered with `assignment deliver`, not
+   assigned again, and `current_task` is not the only work the worker holds. A
    `null` `pane_state` — with or without `plane_unreachable` set (a fleet with no
    heartbeats yet) — means the worker is UNOBSERVED, not idle. `dispatch` needs an
    alive, observed, idle worker; the rationale names the worker and its observed
@@ -231,6 +238,10 @@ proceeding; never mint another UUID or resend automatically. If an act is
 confirmed failed, record a follow-up `nothing` check-in with
 `prev_checkin_id=CHECKIN_ID` and name the failed step. Do not report a failed
 notification as an unrecorded task.
+
+To re-read one recorded decision with the assignments joined to it
+(`data.decision.dispatches`), run
+`claudlobby --json --fleet "$FLEET_NAME" checkin show CHECKIN_ID`.
 
 Under `--dry-run`, pass the same file and request UUID to `checkin record --dry-run`.
 Its `validated: true` output has no committed check-in ID. Print the

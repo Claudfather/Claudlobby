@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
+import time
 from types import SimpleNamespace
 
 from claudlobby.__main__ import main
 from claudlobby.commands import plane
 from claudlobby.plane.schema_state import PendingMigrationError
+from tests.ingest_listener import listening_socket, short_socket_dir
 from tests.package_fixtures import source_package
+from tests.plane_setup import initialize_plane
 
 
 def test_plane_doctor_json_on_unused_root(tmp_path, monkeypatch, capsys):
@@ -101,3 +106,67 @@ def test_plane_doctor_switch_resolution_failure_is_attention(tmp_path, monkeypat
     assert result["data"]["status"] == "attention"
     assert any(row["name"] == "switches" and row["status"] == "attention"
                for row in result["data"]["rungs"])
+
+
+def test_orphaned_stages_awaiting_their_hour_are_not_a_paused_replay(tmp_path):
+    """#2086. The daemon replays a stage that was never renamed only once it is
+    an hour old (STAGED_ORPHAN_AGE_S), so until then its age is that rule, not
+    a lag. The staged-depth rung read every such wait as "replay is not keeping
+    up or is paused". It now reports them apart, and calls one late only once it
+    is STAGED_STALE_S past the hour (measured, they leave within ~50 s)."""
+    from claudlobby.plane import health
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+    staged = tmp_path / "state" / "plane" / "staged"
+    staged.mkdir(parents=True)
+    now = time.time()
+
+    def stage(name, age):
+        path = staged / name
+        path.write_text('{"events": []}\n')
+        os.utime(path, (now - age, now - age))
+        return path
+
+    for n in range(3):
+        stage(f".{n}-ev_{n:032x}.batch.{4_000_000 + n}.tmp", STAGED_ORPHAN_AGE_S - 600)
+    ok, detail = health.staged_rung(health.scan_staged(tmp_path), True)
+    assert ok, detail
+    assert "3 of them orphaned stage(s)" in detail and "paused" not in detail
+    assert health.staged_summary(tmp_path)["orphaned"] == 3
+    batch = stage("1-ev_x.batch", health.STAGED_STALE_S + 100)  # a renamed batch this old is stalled
+    ok, detail = health.staged_rung(health.scan_staged(tmp_path), True)
+    assert not ok and detail.endswith("replay is not keeping up or is paused; see the daemon log")
+    batch.unlink()
+    stage(f".9-ev_{'9' * 32}.batch.4000009.tmp", STAGED_ORPHAN_AGE_S + health.STAGED_STALE_S + 60)
+    ok, detail = health.staged_rung(health.scan_staged(tmp_path), True)
+    assert not ok and "past its replay at the hour" in detail
+
+
+def test_a_daemon_listening_past_the_probe_deadline_reads_slow_not_stopped(tmp_path, monkeypatch,
+                                                                         capsys):
+    """#2086. One 2 s probe that a listening daemon left unanswered read "started
+    Nx historically but not serving", pointing at the service, and under #1693's
+    load the same daemon answered minutes later. A stopped daemon refuses the
+    connection; one that takes it and does not answer is slow or stuck, and its
+    queue is still replayed, so the staged rung does not call it unrecorded."""
+    from claudlobby.plane.emit_api import emit_batch
+    from claudlobby.plane.ids import ensure_host_uid
+    monkeypatch.setattr("claudlobby.context.get_resources", source_package)
+    initialize_plane(tmp_path)
+    emit_batch(tmp_path, [{"event_type": "system", "emitter": "plane-daemon",
+                           "payload": {"event": "daemon_started", "subject_kind": "host",
+                                       "subject_uid": ensure_host_uid(tmp_path / "state")}}])
+    (tmp_path / "state" / "plane" / "staged").mkdir()
+    (tmp_path / "state" / "plane" / "staged" / "1-ev_x.batch").write_text('{"events": []}\n')
+    directory = short_socket_dir("pd-")
+    try:
+        with listening_socket(directory / "s", answer=None) as sock:
+            monkeypatch.setenv("PLANE_SOCKET", str(sock))
+            rc = plane.cmd_plane_doctor(SimpleNamespace(root=str(tmp_path), json=True))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    rungs = {row["name"]: row for row in json.loads(capsys.readouterr().out)["data"]["rungs"]}
+    assert rc == 4 and rungs["daemon"]["status"] == "attention"
+    assert rungs["daemon"]["detail"].startswith(f"listening on {sock} but no answer within 2s"
+                                                " — slow or stuck, not stopped"), rungs["daemon"]
+    assert "historically but not serving" not in rungs["daemon"]["detail"]
+    assert rungs["staged depth"]["status"] == "ok", rungs["staged depth"]

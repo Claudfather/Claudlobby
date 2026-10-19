@@ -15,6 +15,8 @@
 # Usage: PLANE_EMIT_CLI=/selected/venv/bin/claudlobby bash harness/validate-bot-change.sh
 #   Exit 0 = all observations matched intent, 1 = a behavior did not fire.
 set -euo pipefail
+# A host override is operator state, never input to disposable scenarios (#2145 B9).
+export CLAUDLOBBY_HOST_SYSTEM_YAML=/nonexistent/claudlobby-harness-host.yaml
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 # shellcheck source=lib-common.sh
@@ -1742,21 +1744,16 @@ val_scenario "validate-bot-change: session-scoped readiness (#1530)"
 _scope_fail_before=$fail
 _SC_BIN="$RB_ROOT/scopebin"
 mkdir -p "$_SC_BIN"
-# Reuse the native stand-in from test_bridge_state: framework Python re-execs
-# as Python on macOS, so a symlink named bun cannot satisfy the real classifier.
-# Node retains the copied executable's name and exposes its launch environment.
-# Preserve Homebrew's executable-relative libnode dependency when present.
-"$VAL_PY" -I -B - "$(command -v node)" "$_SC_BIN" <<'BINS'
-import os
-from pathlib import Path
-import shutil
+# The tests' native stand-ins (tests/stand_in_fixtures.py) are node: framework
+# Python re-execs as Python on macOS, so not even a symlink named bun passes
+# the real classifier there, while node keeps its stand-in's name and exposes
+# its launch environment. On Linux each stand-in is a link to node.
+"$VAL_PY" -I -B - "$VAL_REPO" "$(command -v node)" "$_SC_BIN" <<'BINS'
 import sys
-source, target = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
-for name in ("bun", "claude"):
-    shutil.copy(source, target / name)
-    os.chmod(target / name, 0o755)
-for library in (source.parent.parent / "lib").glob("libnode*.dylib"):
-    (target / library.name).symlink_to(library)
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from tests.stand_in_fixtures import make_stand_ins
+make_stand_ins(Path(sys.argv[3]), sys.argv[2])
 BINS
 cat > "$_SC_BIN/leaf.js" <<'LEAF'
 require('fs').writeFileSync(require('path').join(process.env.TELEGRAM_STATE_DIR, 'bot.pid'), String(process.pid));
@@ -1841,8 +1838,9 @@ rm -f "$RB_DIR/state/bot.pid"
 # fleet-pulse runs from a stub lib dir whose tg-post.sh RECORDS the page instead of sending it,
 # so the assertion is the alert message the burst-detector actually produced. A single bot
 # (below threshold) must stay silent. 2b + 2c together cover #533 items 3-4 end-to-end: emit
-# then escalate. The incidental service_down / session_missing pages are the sandbox bots
-# having no live session; the assertions target the rc_timeout line.
+# then escalate. The sandbox bots have no installed unit and no stop record, so the same
+# sweep also counts them as unit_missing, and every cause over its threshold shares one
+# page (#2243); the assertions target the page's rc_timeout part.
 val_scenario "validate-bot-change: RC readiness ESCALATION page (#533 items 3-4)"
 _esc_fail_before=$fail
 _esc_fleet="valesc"
@@ -1887,7 +1885,7 @@ esc_run() {  # <fleet>
 esc_seed "$_esc_fleet" escone yes
 esc_seed "$_esc_fleet" esctwo yes
 esc_run "$_esc_fleet"
-grep -q 'FLEET ALERT: rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
+grep -q '^FLEET ALERT: .*rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
 harness_check "rc_timeout burst on >= threshold bots FIRES the escalation page" "$r"
 
 # Negative: only 1 bot with rc_timeout -> below threshold -> no rc_timeout page.
@@ -1903,6 +1901,167 @@ harness_check "a single rc_timeout (below threshold) does NOT page (no false ala
 if [ "$fail" -gt "$_esc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: escalation pages recorded ---"
     sed 's/^/    /' "$_esc_pages" 2>/dev/null || echo "    (none)"
+fi
+
+# === Scenario 2c': a stopped bot is silent; a lost unit and a dead one page (#2243) ===
+# The REAL sweep on a fleet of its own. svc_is_registered reads the unit file
+# under $HOME, so the sweep runs with this scenario's HOME and reads or writes
+# no unit outside this run; a `systemctl` stub answers from per-unit state files;
+# the pushes land in this scenario's own manager pane, whose --log records each
+# one submitted, and tg-post.sh records the fleet page. Four bots:
+#   vsbench no unit file, a stop record (what bot stop leaves)  -> silent
+#   vslost  no unit file and no record (a botched disenroll)    -> unit_missing
+#   vsdead  its unit installed and failed (a death)              -> service_down
+#   vsleft  its unit installed again (spin-up-bot.sh clears no record) beside
+#           an hour-old record: the sweep removes the record, so when the unit
+#           is later lost, that loss pages too
+# vsbench sweeps first, so the rows and pushes that later bots land prove the
+# sweep got past it. Then the escalation: the two unit_missing bots are ONE
+# page, sent once.
+val_scenario "validate #2243: a stopped bot is silent; a lost unit and a dead one page"
+if [ "$_OS" != Linux ]; then
+    echo "  SKIP: this scenario drives the systemd branch; the launchd branch is unit-tested"
+else
+_st_fail_before=$fail
+_st_fleet="valstop"
+_st_mgr="valstopmgr"
+_st_home="$ROOT/stop-home"
+_st_units="$ROOT/stop-units"
+_st_bin="$ROOT/stop-bin"
+_st_lib="$ROOT/stoplib"
+_st_pages="$ROOT/stop-pages.log"
+_st_pushes="$ROOT/stop-pushes.log"
+_st_bots="$ROOT/local/$_st_fleet/runtime/bots"
+mkdir -p "$_st_home/.config/systemd/user" "$_st_units" "$_st_bin" "$_st_lib" "$_st_bots"
+for _st_f in fleet-pulse.sh lib-common.sh supervisor.sh; do ln -s "$LIB_DIR/$_st_f" "$_st_lib/$_st_f"; done
+val_link_plane_shim "$_st_lib"
+: > "$_st_pages"
+cat > "$_st_lib/tg-post.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$1" >> "$_st_pages"
+STUB
+# A unit's state is $ST_UNITS/<label> (ACTIVE=, SUB=); a unit with no state
+# file reads as one systemd cannot find. is-active and show are all the sweep asks.
+cat > "$_st_bin/systemctl" <<'STUB'
+#!/bin/bash
+a=("$@"); [ "${a[0]:-}" = "--user" ] && a=("${a[@]:1}")
+verb="${a[0]:-}"; a=("${a[@]:1}")
+props=","; value=0; unit=""
+while [ "${#a[@]}" -gt 0 ]; do
+  case "${a[0]}" in
+    -p) props="$props${a[1]},"; a=("${a[@]:2}") ;;
+    --property=*) props="$props${a[0]#--property=},"; a=("${a[@]:1}") ;;
+    --value) value=1; a=("${a[@]:1}") ;;
+    -*) a=("${a[@]:1}") ;;
+    *) unit="${a[0]%.service}"; a=("${a[@]:1}") ;;
+  esac
+done
+st="${ST_UNITS:?}/$unit"
+if [ -n "$unit" ] && [ -f "$st" ]; then
+  load=loaded; active=$(sed -n 's/^ACTIVE=//p' "$st"); sub=$(sed -n 's/^SUB=//p' "$st")
+else
+  load=not-found; active=inactive; sub=dead
+fi
+case "$verb" in
+  is-active) echo "$active"; [ "$active" = active ]; exit $? ;;
+  show)
+    enter=$(awk '{printf "%.0f", ($1 - 5000) * 1000000}' /proc/uptime)
+    for kv in "Id=$unit.service" "LoadState=$load" "ActiveState=$active" "SubState=$sub" \
+              "NRestarts=0" "ExecMainStartTimestampMonotonic=$enter" \
+              "InactiveExitTimestampMonotonic=$enter"; do
+      k="${kv%%=*}"
+      if [ "$props" = "," ] || [[ "$props" == *",$k,"* ]]; then
+        if [ "$value" = 1 ]; then echo "${kv#*=}"; else echo "$kv"; fi
+      fi
+    done ;;
+esac
+exit 0
+STUB
+chmod +x "$_st_lib/tg-post.sh" "$_st_bin/systemctl"
+val_plane_ready "$ROOT" "$_st_fleet"
+tmux new-session -d -x 250 -y 60 -s "$_st_mgr" "$VAL_BOX --log '$_st_pushes'"
+sleep 1  # let the box render
+
+st_bot() {  # <bot> <unit: none|active|failed> <stop record: none|seconds ago>
+    local d="$_st_bots/$1" label="com.valstop.$1" at
+    mkdir -p "$d/data"
+    printf 'BOT_ID=%s\nBOT_NAME=%s\nBOT_SERVICE=%s\nMANAGER_TMUX=%s\nMANAGER_TMUX_SOCKET=%s\n' \
+        "$1" "$1" "$label" "$_st_mgr" "$(vsock "$_st_mgr")" > "$d/bot.conf"
+    if [ "$2" != none ]; then
+        printf '[Service]\n' > "$_st_home/.config/systemd/user/$label.service"
+        printf 'ACTIVE=%s\nSUB=%s\n' "$2" "$([ "$2" = active ] && echo running || echo failed)" > "$_st_units/$label"
+    fi
+    if [ "$3" != none ]; then
+        at=$(( $(date +%s) - $3 ))
+        printf '{"by": "operator", "reason": "parked by the harness", "request_id": "r-2243", "stopped_at": "%s", "stopped_epoch": %s}\n' \
+            "$(val_iso "$at")" "$at" > "$d/data/.stopped"
+    fi
+    return 0
+}
+st_run() {
+    CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_st_fleet" HOME="$_st_home" ST_UNITS="$_st_units" \
+        PATH="$_st_bin:$PATH" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
+        "$_st_lib/fleet-pulse.sh" "$_st_fleet" >/dev/null 2>&1 || true
+}
+st_count() {  # <bot> <type>: how many of the bot's rows are of that type
+    val_events "$ROOT" "$_st_fleet" "$1" "$2" | grep -c "\"type\":\"$2\"" || true
+}
+
+st_bot vsbench none 3600
+st_bot vslost none none
+st_bot vsdead failed none
+st_bot vsleft active 3600
+st_run
+# The positive rows first, polled (a row can land in the background), so the
+# absence checks below read a plane the sweep is known to have reached.
+_st_lost=$(val_poll 20 0.5 st_count vslost unit_missing)
+[ "${_st_lost:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#2243 a unit lost with no stop recorded is unit_missing" "$r"
+_st_dead=$(val_poll 20 0.5 st_count vsdead service_down)
+_st_dead_rows="$(val_events "$ROOT" "$_st_fleet" vsdead)"
+[ "${_st_dead:-0}" -ge 1 ] && printf '%s' "$_st_dead_rows" | grep '"type":"service_down"' | grep -q '"session":"missing"' && r=yes || r=no
+harness_check "#2243 a unit that dies on its own still pages: service_down, carrying the session" "$r"
+printf '%s' "$_st_dead_rows" | grep -q '"type":"session_missing"' && r=no || r=yes
+harness_check "#2243   ...as ONE alert: no session_missing beside it" "$r"
+_st_stop_rows="$(val_events "$ROOT" "$_st_fleet" vsbench)"
+printf '%s' "$_st_stop_rows" | grep -Eq '"type":"(unit_missing|service_down|session_missing|crash_loop)"' && r=no || r=yes
+harness_check "#2243 a recorded stop raises no row" "$r"
+grep -qF '[FLEET-PULSE] vslost unit_missing' "$_st_pushes" 2>/dev/null && r=yes || r=no
+harness_check "#2243 the manager is pushed the lost unit" "$r"
+grep -qF '[FLEET-PULSE] vsdead service_down' "$_st_pushes" 2>/dev/null && r=yes || r=no
+harness_check "#2243 the manager is pushed the dead unit" "$r"
+grep -qF '[FLEET-PULSE] vsbench' "$_st_pushes" 2>/dev/null && r=no || r=yes
+harness_check "#2243 the manager is pushed nothing for the recorded stop" "$r"
+grep -Eq '^vsbench[[:space:]]+stopped[[:space:]]+stopped' "$ROOT/state/pulse/$_st_fleet.pulse-summary.txt" 2>/dev/null && r=yes || r=no
+harness_check "#2243 the summary reads the recorded stop as stopped" "$r"
+[ ! -e "$_st_bots/vsleft/data/.stopped" ] && r=yes || r=no
+harness_check "#2243 a stop record left beside an installed unit is removed" "$r"
+
+# vsleft's unit is lost too, without bot stop: with its old record gone, the
+# loss pages. Two sweeps, so the escalation page has the window it needs even
+# when a sweep's own row lands after that sweep read the window.
+rm -f "$_st_home/.config/systemd/user/com.valstop.vsleft.service" "$_st_units/com.valstop.vsleft"
+st_run
+st_run
+_st_left=$(val_poll 20 0.5 st_count vsleft unit_missing)
+[ "${_st_left:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#2243 ...so a later loss of that unit is unit_missing, not silence" "$r"
+grep -qF '[FLEET-PULSE] vsleft unit_missing' "$_st_pushes" 2>/dev/null && r=yes || r=no
+harness_check "#2243   ...and the manager is pushed it" "$r"
+# one line, both bots, in either order
+_st_esc=$(grep -c 'unit_missing on 2 bots (' "$_st_pages" || true)
+_st_esc_line=$(grep 'unit_missing on 2 bots (' "$_st_pages" || true)
+[ "${_st_esc:-0}" -eq 1 ] && printf '%s' "$_st_esc_line" | grep -q 'vsleft' \
+    && printf '%s' "$_st_esc_line" | grep -q 'vslost' && r=yes || r=no
+harness_check "#2243 two unit_missing bots are ONE fleet page, sent once" "$r"
+
+if [ "$fail" -gt "$_st_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: #2243 rows, pages and pushes ---"
+    val_diag val_events "$ROOT" "$_st_fleet"
+    sed 's/^/    [page] /' "$_st_pages" 2>/dev/null || true
+    sed 's/^/    [push] /' "$_st_pushes" 2>/dev/null || true
+fi
 fi
 
 # === Scenario 2d: plugin marketplace registration — positional add, verified, loud on failure (#596) ===
@@ -3086,6 +3245,96 @@ harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
 grep -q 'worker-2' "$GM_DIRTY" && r=yes || r=no
 harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
 
+# --- gh api --input: the review and comment POSTs the same-identity protocol
+# teaches (#1537). The request body is JSON, read with each string decoded, so a
+# handle at a body line's start (`\n@name` in the raw text) counts too. A body
+# the hook cannot read before the post (stdin, a file this same command writes,
+# a file that does not exist yet) is refused, never allowed unread.
+GM_JDIRTY="$GM_ROOT/dirty.json"; jq -Rs '{event: "COMMENT", body: .}' "$GM_DIRTY" > "$GM_JDIRTY"
+GM_JCLEAN="$GM_ROOT/clean.json"; jq -Rs '{event: "COMMENT", body: .}' "$GM_CLEAN" > "$GM_JCLEAN"
+GM_JSTART="$GM_ROOT/linestart.json"
+printf 'verdict\n@worker-2 please re-run\n' | jq -Rs '{event: "COMMENT", body: .}' > "$GM_JSTART"
+for _shape in "-X POST repos/o/r/pulls/1/reviews --input $GM_JDIRTY" \
+              "-X POST repos/o/r/issues/1/comments --input $GM_JDIRTY" \
+              "-X POST repos/o/r/pulls/1/reviews --input=$GM_JDIRTY" \
+              "-X POST repos/o/r/pulls/1/reviews --input $GM_JSTART" \
+              "-X POST repos/o/r/pulls/1/reviews --input $GM_ROOT/missing.json"; do
+    [ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh api '"$_shape"'"}}')" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: gh api --input with a mention or unreadable is REFUSED ($_shape)" "$r"
+done
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh api -X POST repos/o/r/pulls/1/reviews --input '"$GM_JCLEAN"'"}}')" = none ] && r=yes || r=no
+harness_check "  BY-REF: gh api --input with a clean body passes untouched" "$r"
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"jq -Rs . x.md | gh api -X POST repos/o/r/issues/1/comments --input -"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: gh api --input - (STDIN) is refused" "$r"
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"jq -Rs . x.md > '"$GM_JCLEAN"'; gh api -X POST repos/o/r/pulls/1/reviews --input '"$GM_JCLEAN"'"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: gh api --input of a file the same command writes is refused" "$r"
+grep -q 'worker-2' "$GM_JDIRTY" && r=yes || r=no
+harness_check "  BY-REF: the refused --input file is NOT modified on disk" "$r"
+
+# --- a path the hook cannot pin to the file gh sends (#1537's review) ---------
+# The hook runs BEFORE the command, in the Bash tool's current directory, so it
+# reads a relative path from where the command STARTS. A `cd` earlier in the same
+# command sends gh a different file, and with a clean twin where the hook runs a
+# dirty body would pass. So the hook never guesses: --input reads a relative path
+# only when gh is the whole command (the taught route), the body-file forms
+# refuse one in a command that can change directory, and a path built when the
+# command runs ($VAR, ~, a glob) is refused as such. An absolute path is read.
+mkdir -p "$GM_ROOT/sub"
+cp "$GM_JCLEAN" "$GM_ROOT/review.json"; cp "$GM_CLEAN" "$GM_ROOT/body.md"          # clean twins where the hook runs
+cp "$GM_JDIRTY" "$GM_ROOT/sub/review.json"; cp "$GM_DIRTY" "$GM_ROOT/sub/body.md"  # what gh sends after `cd sub`
+_payload() { jq -nc --arg c "$1" '{tool_name: "Bash", tool_input: {command: $c}}'; }
+_dec_cmd() { ( cd "$GM_ROOT" && _dec "$(_payload "$1")" ); }  # the hook's cwd is the case dir, as live
+_why_cmd() {
+    ( cd "$GM_ROOT" && gm_inv "$(_payload "$1")" ) | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null
+}
+_r='gh api -X POST repos/o/r/pulls/1/reviews'
+[ "$(_dec_cmd "cd sub && $_r --input review.json")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: a relative --input after cd is REFUSED, though a clean twin sits where the hook runs" "$r"
+_why_cmd "cd sub && $_r --input review.json" | grep -q 'absolute path' && r=yes || r=no
+harness_check "  BY-REF: ...and the refusal names the route that works (an absolute path)" "$r"
+[ "$(_dec_cmd "cd sub && gh pr comment 1 --body-file body.md")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: a relative --body-file after cd is REFUSED, though a clean twin sits where the hook runs" "$r"
+for _c in "pushd sub && $_r --input review.json" "(cd sub && $_r --input review.json)" \
+          "bash -c 'cd sub && $_r --input review.json'" "source env.sh && $_r --input review.json" \
+          "env -C sub $_r --input review.json" "ls && $_r --input review.json" \
+          "$_r --input review.json && cd sub"; do
+    [ "$(_dec_cmd "$_c")" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a relative --input where gh is not the whole command is REFUSED ($_c)" "$r"
+done
+[ "$(_dec_cmd "$_r --input review.json --jq .html_url")" = none ] && r=yes || r=no
+harness_check "  BY-REF: the taught route, a relative --input with gh the whole command, is read (clean passes)" "$r"
+[ "$(_dec_cmd "$(printf '%s \\\n  --input review.json' "$_r")")" = none ] && r=yes || r=no
+harness_check "  BY-REF: ...also split over lines with a backslash" "$r"
+# The writer test reads one line at a time, so `gh api … \` and its --input on the
+# next line never met, and the post passed as a read. Its clean twin above
+# cannot tell that from a read, so this is the check that can.
+[ "$(_dec_cmd "$(printf '%s \\\n  --input sub/review.json' "$_r")")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: a dirty --input split over lines with a backslash is REFUSED (no longer read as a read)" "$r"
+_gm=$(cd "$GM_ROOT" && gm_inv "$(_payload "$(printf 'gh api repos/o/r/issues/1/comments \\\n  -f body="thanks @worker-2"')")")
+printf '%s' "$_gm" | grep -q '"updatedInput"' && ! printf '%s' "$_gm" | grep -q '@worker-2' && r=yes || r=no
+harness_check "  a gh api body= split over lines with a backslash is rewritten, sigil gone" "$r"
+[ "$(_dec_cmd "$_r --input sub/review.json")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: ...and a dirty one there is refused" "$r"
+[ "$(_dec_cmd "cd sub && $_r --input $GM_JCLEAN")" = none ] && r=yes || r=no
+harness_check "  BY-REF: an ABSOLUTE --input after cd is read (clean passes)" "$r"
+[ "$(_dec_cmd "cd sub && $_r --input $GM_ROOT/sub/review.json")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: ...and a dirty absolute one is refused" "$r"
+[ "$(_dec_cmd "ls && gh pr comment 1 --body-file body.md")" = none ] && r=yes || r=no
+harness_check "  BY-REF: a relative --body-file in a command that cannot change directory is read (clean passes)" "$r"
+for _p in '"$D/review.json"' '~/review.json' 'sub/revie*.json' '"$(ls sub/*.json)"'; do
+    _why_cmd "$_r --input $_p" | grep -q 'built when the command runs' && r=yes || r=no
+    harness_check "  BY-REF: an --input path built when the command runs is REFUSED as such ($_p)" "$r"
+done
+# A QUOTED body-file path was never scanned: the pattern could not start a path
+# with a quote, so the commonest way to write one passed unread.
+for _c in "gh issue comment 1 --body-file \"$GM_DIRTY\"" "gh issue comment 1 --body-file '$GM_DIRTY'" \
+          "gh issue comment 1 --body-file=\"$GM_DIRTY\"" "gh api repos/o/r/issues/1/comments -F body=@\"$GM_DIRTY\""; do
+    [ "$(_dec_cmd "$_c")" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a QUOTED body-file path with a mention is REFUSED ($_c)" "$r"
+done
+[ "$(_dec_cmd "gh issue comment 1 --body-file \"$GM_CLEAN\"")" = none ] && r=yes || r=no
+harness_check "  BY-REF: ...and a quoted clean one passes untouched" "$r"
+
 rm -rf "$GM_ROOT"
 
 # ===========================================================================
@@ -3592,11 +3841,11 @@ harness_check "  ...and a fleet that says nothing carries nothing (the door owns
 env -u FLEET_NAME -u CLAUDLOBBY_FLEET "$VAL_CLI" --root "$SW_ROOT" host doctor --switches \
     > "$SW_ROOT/sw.txt" 2>&1 || true
 r=yes
-for _k in update-siblings session-digest code-audit-sweep; do
+for _k in update-siblings claudna-harvest code-audit-sweep; do
     grep -q "$_k" "$SW_ROOT/sw.txt" || r=no
 done
 harness_check "chunk N doctor --switches names every opt-in that ships OFF" "$r"
-grep -q "arm: SESSION_DIGEST_ENABLED=1" "$SW_ROOT/sw.txt" && r=yes || r=no
+grep -q "bots.<bot>.claudna.harvest: true" "$SW_ROOT/sw.txt" && r=yes || r=no
 harness_check "  ...each with the one line that arms it" "$r"
 
 rm -rf "$SW_ROOT"
@@ -4594,6 +4843,78 @@ _lk_r=$(_lk_pair "" "")
 [ "$_lk_r" = whole ] && r=yes || r=no
 harness_check "#2036: two senders to one real pane arrive as two whole payloads, one submit each ($_lk_r)" "$r"
 command tmux -L "$(vsock "$LK")" kill-server 2>/dev/null || true
+
+
+val_scenario "validate #2145 P3: session-export composition, per-item replay and ack"
+SE_ROOT="$ROOT/session-export"
+mkdir -p "$SE_ROOT"
+# The source harness has no selected release. Exercise its consumer in process;
+# the separately staged sealed-CLI sample owns selected-scope validation.
+cat > "$STUB_BIN/claudron" <<'SECLAUDRON'
+#!/bin/bash
+printf '%s\n' '{"ok":true,"data":{"capabilities":["doctor"],"pending":[],"vault_format":3,"engine_format":3,"findings":[]}}'
+SECLAUDRON
+chmod +x "$STUB_BIN/claudron"
+val_read "session-export source probe" env PATH="$STUB_BIN:$PATH" "$VAL_PY" - "$SE_ROOT" "$VAL_REPO" <<'SEPY' > "$SE_ROOT/result.json"
+import json, os, sys
+from dataclasses import asdict
+from pathlib import Path
+from claudlobby.config import load_fleet
+from claudlobby.composer import compose_fleet, compose_fleet_timers
+from claudlobby.paths import Paths
+from claudlobby.resources import get_resources
+from claudlobby.plane.registry_emit import run_generate_scan
+from claudlobby.session_export import export_bot
+sys.path.insert(0,sys.argv[2])
+from tests.plane_setup import initialize_plane
+root=Path(sys.argv[1]);repo=Path(sys.argv[2])
+(root/"fleet.yaml").write_text("fleet:\n  name: summary-probe\n  service_prefix: com.summary-probe\n  manager: lead\n  bots:\n    lead: {expertise: [orchestration], channels: []}\n")
+(root/".env").write_text("SESSION_EXPORT_ENABLED=0\n")
+fleet,merged=load_fleet(root/"fleet.yaml");paths=Paths(root=root,package=get_resources())
+os.environ["PLANE_EMIT_DISABLED"]="1"
+compose_fleet(fleet,paths)
+compose_fleet_timers(fleet,paths,merged)
+os.environ.pop("PLANE_EMIT_DISABLED",None)
+initialize_plane(root)
+run_generate_scan(paths,fleet,require_commit=True)
+store=paths.bot_runtime("lead")/"data/claudna";store.mkdir(parents=True,exist_ok=True)
+doc=json.loads((repo/"tests/fixtures/claudna_export/envelopes.json").read_text())[0]
+(store/"envelope.json").write_text(json.dumps(doc))
+door=store/"door.py"
+door.write_text("import json,sys\nfrom pathlib import Path\np=Path(__file__).parent\n"
+    "if '--ack' in sys.argv:\n with (p/'acks.jsonl').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\n print('{}')\n"
+    "else:print((p/'envelope.json').read_text())\n")
+entry={"schema":"claudna.entrypoint/1","plugin_version":"0.28.0","python":sys.executable,"entrypoint":str(door)}
+(store/"entrypoint.json").write_text(json.dumps(entry))
+first=export_bot(root,fleet.name,"lead",store,fleet_state=paths.fleet_state)
+second=export_bot(root,fleet.name,"lead",store,fleet_state=paths.fleet_state)
+entry["entrypoint"]="/nonexistent/summary-store";(store/"entrypoint.json").write_text(json.dumps(entry))
+stale=export_bot(root,fleet.name,"lead",store,fleet_state=paths.fleet_state)
+acks=[json.loads(line) for line in (store/"acks.jsonl").read_text().splitlines()]
+assert len(acks)==2*len(doc["next"])
+assert {a[a.index('--sid')+1]:int(a[a.index('--through')+1]) for a in acks}==doc["next"]
+print(json.dumps({"first":asdict(first),"second":asdict(second),"stale":asdict(stale),"acks":len(acks)}))
+SEPY
+r=no; grep -q '"emitted": 2' "$SE_ROOT/result.json" && grep -q '"duplicate": 2' "$SE_ROOT/result.json" && r=yes
+harness_check "#2145 session-export lands two items individually, then duplicate-only replay acks again" "$r"
+r=no; grep -q '"skipped": "stale_entrypoint"' "$SE_ROOT/result.json" && r=yes
+harness_check "#2145 session-export refuses a stale entrypoint without guessing" "$r"
+SE_EVENTS=$(val_events "$SE_ROOT" summary-probe lead session_summary)
+r=no; [ "$(printf '%s\n' "$SE_EVENTS" | wc -l | tr -d ' ')" = 2 ] && printf '%s' "$SE_EVENTS" | grep -q '"status":"ok"' && printf '%s' "$SE_EVENTS" | grep -q '"status":"skipped"' && printf '%s' "$SE_EVENTS" | grep -q 'session_uid' && r=yes
+harness_check "#2145 session_summary reader renders ok and disabled with stable session uid; replay adds no row" "$r"
+SE_CONF="$SE_ROOT/runtime/bots/lead/bot.conf"
+r=no; grep -qF 'export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"' "$SE_CONF" && grep -qF 'export CLAUDNA_SESSION_SUMMARY=0' "$SE_CONF" && r=yes
+harness_check "#2145 unarmed composition exports its own root and explicit summary off" "$r"
+r=yes
+for _se_retired in SESSION_""DIGEST transcript-""digest plane-session-""start; do
+    grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true
+done
+harness_check "#2145 composed bot has no retired summary or SessionStart hook" "$r"
+r=no; grep -q '^Environment=SESSION_EXPORT_ENABLED=0$' "$SE_ROOT/runtime/fleet/timers/com.summary-probe.session-export.service" && r=yes
+harness_check "#2145 session-export fleet opt-out reaches its closed unit environment" "$r"
+SE_OFF=$(SESSION_EXPORT_ENABLED=0 "$VAL_CLI" --root "$SE_ROOT" _session-export-tick summary-probe)
+r=no; printf '%s' "$SE_OFF" | grep -q 'session-export: OFF here' && r=yes
+harness_check "#2145 session-export off tick is a loud clean no-op" "$r"
 
 # A refusal no check reported still fails the run: a read that could not run
 # is never dropped on the floor.

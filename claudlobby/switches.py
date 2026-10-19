@@ -246,6 +246,24 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
 #: warning is the enforcement (a flag no row claims is reported as dead).
 SWITCHES: tuple[Switch, ...] = (
     # ---------------- the target workflow, on ------------------------------
+    Switch(key="session-export", scope=FLEET_JOB, polarity=OPT_OUT, carrier=ENV_FLEET,
+           env="SESSION_EXPORT_ENABLED", job="session-export", plane=True,
+           what="every 15 min, read each bot's clauDNA export door, record one session_summary per sealed segment, then ack"),
+    Switch(key="claudna-session-summary", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.session_summary",
+           why_opt_in="model spend (one Haiku call per sealed segment, in the background of the bot's session)",
+           what="let clauDNA summarize this bot's sealed segments; session-export carries the journey to the plane",
+           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
+           takes_effect_off="from the next session on, sealed segments export as skipped: disabled"),
+    Switch(key="claudna-harvest", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.harvest",
+           why_opt_in="model spend (summaries) and draft-note writes through claudron capture",
+           what="opt this bot into clauDNA harvest: composition arms summaries too; typed blocks become unverified "
+                "drafts in CLAUDRON_VAULT_PATH; needs Claudron >= 0.8.0 on the host (PR 6a)",
+           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
+           takes_effect_off="no harvest from the bot's next session on"),
     Switch(
         key="task-recheck",
         scope=FLEET_JOB,
@@ -308,6 +326,18 @@ SWITCHES: tuple[Switch, ...] = (
         plane=True,
         what="the read-only operator plane on localhost (needs the [plane-ui] "
              "extra; fronting it with Tailscale Serve stays yours)",
+    ),
+    Switch(
+        key="plane-owner",
+        scope=HOST_SERVICE,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="plane-owner",
+        config_extra="origin, tailscale and optional socket/workspace origins",
+        requires_extra="plane-ui",
+        plane=True,
+        why_opt_in="private write-capable endpoint can spend model budget and mutate operator configuration",
+        what="private owner server under native supervision; grants and Tailscale Serve stay separate",
     ),
     Switch(
         key="plane-host-probe",
@@ -394,7 +424,7 @@ SWITCHES: tuple[Switch, ...] = (
         key="pane-send-chunking",
         scope=DOOR,
         polarity=OPT_OUT,
-        # bot.conf, for the same reason session-digest and spindown-receipt use
+        # bot.conf, for the same reason spindown-receipt use
         # it: the door runs inside a bot's own session (every dispatch, every
         # boot, every keepalive reload), and start-bot.sh sources the .env tiers
         # BEFORE `set -a`, so a bare tier assignment never reaches it. A
@@ -527,16 +557,21 @@ SWITCHES: tuple[Switch, ...] = (
              "fire to the second, sessions appear 36-168s later)",
     ),
     Switch(
-        key="session-digest",
+        key="keepalive-limit-resume",
         scope=DOOR,
         polarity=OPT_IN,
-        # The SessionEnd hook runs inside the bot's Claude session, so bot.conf
-        # is the only carrier that reaches it.
+        # keepalive reads each bot's bot.conf on its tick, so this one bot's
+        # conf arms it there and nowhere else; a .env tier never reaches it.
         carrier=BOT_CONF,
-        env="SESSION_DIGEST_ENABLED",
-        why_opt_in="model spend (a Haiku pass per finished session)",
-        what="distil each finished session into one structured JSONL row for "
-             "the fleet monitor",
+        env="KEEPALIVE_LIMIT_RESUME_ENABLED",
+        why_opt_in="no deployment gate: claudlobby/_runtime_scripts/ is in "
+                   "force on every bot at activation, and this door types into "
+                   "a bot's pane, so one armed bot is the only canary",
+        what="once a usage limit's printed reset has passed, confirm the limit "
+             "menu's \"Stop and wait for limit to reset\" by its label if the "
+             "menu is up, then submit one resume prompt: one action per limit "
+             "(#996). Off, keepalive still names the stop (LIMIT) and "
+             "fleet-pulse pages usage_limit_held after the reset",
     ),
     Switch(
         key="code-audit-sweep",

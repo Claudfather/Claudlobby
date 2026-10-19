@@ -29,6 +29,7 @@ from pathlib import Path
 from .config import FleetConfig
 from .plane.presence import derive_presence
 from .paths import Paths, tmux_socket_for_bot
+from .stop_record import read_stop, unit_installed
 from .task_work_queries import CurrentWork, read_fleet_work
 from .uptime import _fmt_duration
 
@@ -85,8 +86,11 @@ _SVC_UNDETERMINED = "undetermined"
 @dataclass
 class BotStatus:
     name: str
-    state: str = "unknown"  # idle/working/blocked/offline/unknown
+    state: str = "unknown"  # idle/working/blocked/offline/unknown/stopped
     current_task: str | None = None
+    # How many assignments are open: more than one means current_task is the
+    # first by state, then latest transition, of several (#2179).
+    open_assignments: int | None = None
     last_completed: str | None = None
     work_assignments: tuple[CurrentWork, ...] = ()
     work_issues: tuple[dict, ...] = ()
@@ -113,6 +117,11 @@ class BotStatus:
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
     busy_age_secs: int | None = None
+    # #2243: a bot the stop door stopped (state "stopped"): when, by whom and why,
+    # from the stop door's record
+    stopped_since: str | None = None
+    stopped_by: str | None = None
+    stop_reason: str | None = None
 
     @property
     def service_undetermined(self) -> bool:
@@ -388,6 +397,7 @@ def collect_fleet_status(
         if work is not None:
             bot_work = work.bots[bot_id]
             bs.current_task = bot_work.current_task
+            bs.open_assignments = bot_work.open_assignments
             bs.last_completed = bot_work.last_completed
             bs.work_assignments = bot_work.assignments
             bs.work_issues = tuple(asdict(issue) for issue in work.issues)
@@ -429,6 +439,18 @@ def collect_fleet_status(
             bs.state = "unknown"
         else:
             bs.state = "unknown"
+        # #2243 F8: stopped on purpose, not down. fleet-pulse's two facts: no
+        # installed unit file (svc_is_registered) and the stop door's record. A
+        # missing unit with no record is never `stopped` (the sweep calls it
+        # unit_missing), nor is a bot whose session is still up.
+        if label and not bs.tmux_alive and not unit_installed(label, system=platform.system()):
+            record = read_stop(bot_dir)
+            if record is not None:
+                bs.state = "stopped"
+                bs.stopped_since, bs.stopped_by, bs.stop_reason = (
+                    value if isinstance(value, str) else None
+                    for value in (record.get("stopped_at"), record.get("by"),
+                                  record.get("reason")))
 
         results.append(bs)
 
@@ -439,7 +461,10 @@ def collect_fleet_status(
 
 
 def _health_indicator(bs: BotStatus) -> str:
-    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known."""
+    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known,
+    - stopped on purpose (#2243)."""
+    if bs.state == "stopped":
+        return _dim("-")
     if not bs.tmux_alive:
         return _red("x")
     if not bs.service_active:
@@ -466,7 +491,7 @@ def _health_indicator(bs: BotStatus) -> str:
 def _state_display(bs: BotStatus) -> str:
     """Colorized state string."""
     s = bs.state
-    if s == "idle":
+    if s in {"idle", "stopped"}:
         return _dim(s)
     if s == "working":
         return _green(s)
@@ -523,6 +548,9 @@ def _tmux_display(bs: BotStatus) -> str:
             # #2070: text sits unsubmitted in the input box; an operator Enter
             # clears it, a restart would discard it.
             return _yellow("held")
+        if bs.pane_state == "LIMIT":
+            # #996: a claude.ai usage limit stopped it; it waits for the reset.
+            return _yellow("limit")
         return "up"
     return _red("down")
 
@@ -652,9 +680,14 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
     for bs in statuses:
         indicator = _health_indicator(bs)
         activity = ("work unresolved" if bs.work_unresolved else
-                    bs.current_task or bs.last_completed or
+                    bs.current_task or _stopped_note(bs) or bs.last_completed or
                     ("work unknown" if bs.work_unavailable else ""))
-        activity = _truncate(activity, 40)
+        # Never pick silently (#2179): the count of the other open assignments
+        # is kept clear of the column's truncation.
+        others = ((bs.open_assignments or 1) - 1
+                  if bs.current_task and activity == bs.current_task else 0)
+        more = f" (+{others} open)" if others > 0 else ""
+        activity = _truncate(activity, 40 - len(more)) + more
         if bs.work_unresolved or bs.work_unavailable:
             activity_display = _yellow(activity)
         elif bs.current_task:
@@ -712,12 +745,22 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
     return "\n".join(lines) + "\n"
 
 
+def _stopped_note(bs: BotStatus) -> str:
+    """`stopped since <UTC> by <caller>` for a recorded stop, else ""."""
+    if bs.state != "stopped":
+        return ""
+    return f"stopped since {bs.stopped_since or 'unknown'} by {bs.stopped_by or 'unknown'}"
+
+
 def format_bot_detail(bs: BotStatus) -> str:
     """Detailed view for a single bot (claudlobby status --bot <name>)."""
     lines: list[str] = []
     lines.append(_bold(bs.name))
     lines.append("")
     lines.append(f"  State:      {_state_display(bs)}")
+    if bs.state == "stopped":
+        lines.append(f"  Stopped:    {_stopped_note(bs)}"
+                     + (f" ({bs.stop_reason})" if bs.stop_reason else ""))
     lines.append(f"  Service:    {_service_display(bs)} ({bs.service_sub})")
     lines.append(f"  Tmux:       {_tmux_display(bs)}")
     lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}"
@@ -729,7 +772,9 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Busy age:   {_busy_age_display(bs)}")
 
     if bs.current_task:
-        lines.append(f"  Task:       {bs.current_task}")
+        of = (f" (1 of {bs.open_assignments} open)"
+              if bs.open_assignments and bs.open_assignments > 1 else "")
+        lines.append(f"  Task:       {bs.current_task}{of}")
     for assignment in bs.work_assignments:
         lines.append(f"  Assignment: {assignment.assignment_id} / {assignment.task_id} ({assignment.state})")
     if bs.last_completed:
@@ -770,11 +815,16 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 # The observed BUSY run, separate from assignment state.
                 "busy_age_secs": bs.busy_age_secs,
                 "current_task": bs.current_task,
+                "open_assignments": bs.open_assignments,
                 "last_completed": bs.last_completed,
                 "work_assignments": [asdict(a) for a in bs.work_assignments],
                 "work_issues": list(bs.work_issues),
                 "work_unresolved": bs.work_unresolved,
                 "work_unavailable": bs.work_unavailable or None,
+                # #2243: null unless state is "stopped"
+                "stopped_since": bs.stopped_since,
+                "stopped_by": bs.stopped_by,
+                "stop_reason": bs.stop_reason,
             }
         )
     payload: dict = {"fleet": fleet_name, "bots": bots}

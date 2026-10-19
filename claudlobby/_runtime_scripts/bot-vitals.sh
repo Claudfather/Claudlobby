@@ -10,12 +10,15 @@
 # NOTE: context_warning and rate_limit are NOT available via the Claude Code
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 #
-# Usage in fleet.yaml:
-#   hooks:
-#     PreToolUse:
-#       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
-#     PostToolUse:
-#       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+# Composed into every bot by the release's defaults (claudlobby/system.yaml) as
+# "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" for PreToolUse and PostToolUse. A fleet
+# manifest must not declare it again: a second entry, such as the retired
+# "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh", runs the hook twice and records every
+# tool call twice (#2062).
+#
+# It needs BOT_DIR, an existing absolute dir (bot.conf exports it). Without one it
+# does nothing (#874): a bot's working directory is its project checkout, so
+# neither the marker nor a plane row may fall back to it.
 #
 # Each event: <type>\t<data-json>, handed to emit_fleet_event (source "vitals").
 
@@ -24,6 +27,13 @@
 trap 'exit 0' ERR
 
 set -euo pipefail
+
+# #874 (see header). Checked before lib-common is sourced: the no-op path is one fork.
+if [[ "${BOT_DIR:-}" != /* || ! -d "$BOT_DIR" ]]; then
+    cat >/dev/null 2>&1 || true   # drain the payload; the writer must not see a closed pipe
+    echo "bot-vitals: BOT_DIR unset or not an absolute directory — recording nothing, touching no marker (#874)" >&2
+    exit 0
+fi
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its socket deadline (#1693, claudlobby/_runtime_scripts/plane-emit.sh)
@@ -79,7 +89,7 @@ for e in events:
     print(e)
 " <<< "$payload" 2>/dev/null | while IFS=$'\t' read -r _etype _edata; do
     [ -n "$_etype" ] || continue
-    emit_fleet_event "$_etype" vitals "$_edata" "${BOT_DIR:-${PWD}}" "$bot" || true
+    emit_fleet_event "$_etype" vitals "$_edata" "$BOT_DIR" "$bot" || true
 done
 
 # --- Activity marker ---
@@ -87,7 +97,7 @@ done
 # its mtime to detect an "activity_stuck" bot — one whose pane is animating but
 # has made no tool call for a long time (the case pane_stuck can't see). Cheaper
 # and more portable than parsing the last tool_call timestamp out of the JSONL.
-touch "${BOT_DIR:-${PWD}}/data/.last-tool-call" 2>/dev/null || true
+touch "$BOT_DIR/data/.last-tool-call" 2>/dev/null || true
 
 # Non-blocking hook — always exit 0
 exit 0

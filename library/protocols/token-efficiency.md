@@ -7,7 +7,7 @@ description: Lossless brevity for outbound comms — reference-don't-paste, TLDR
 
 Every outbound message costs tokens twice — once to write, once in every context that reads it. Compress losslessly: cut tokens, never signal.
 
-**Rule zero — lossless, never lossy.** A cut is a pointer or an expand-on-demand, never an omission. Before compressing, the full detail must exist at a stable address (PR, issue, shared doc, repo path, your `data/`). No address → don't compress.
+**Rule zero — lossless, never lossy.** A cut is a pointer or an expand-on-demand, never an omission. Before compressing, the full detail must exist at a stable address. **The detail must be at an address the addressee can open, not merely one that exists:** a PR or issue (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, a repo path at a pushed commit. Never your own `data/` or anything else in your bot directory: no other bot in your fleet can open it, your manager included, so it is only for your scratch. No address → don't compress.
 
 - **Reference, don't paste.** Work products travel as `path-or-URL + one-line what`. Never paste file bodies, diffs, or logs when an address exists — create the address first if needed.
 - **Telegram = TLDR-first.** Outcome in 1–3 sentences + pointer(s). When someone asks for detail, give it in full — an explicit request is never re-summarized.
@@ -20,7 +20,7 @@ A rule needs a unit that bounds size. "Outcome in 1–3 sentences" *is* a count 
 | Surface | Bar | Basis | Overflow goes |
 |---|---|---|---|
 | Telegram / chat message | **≤ 600 chars** | roughly a phone screen without scrolling | a pointer — issue, PR, doc path |
-| linked report summary | **≤ 200 chars**, one line | measured: real verdicts carrying finding + pointer land at 155–165 | the PR/issue body, or your `data/` |
+| linked report summary | **≤ 200 chars**, one line | measured: real verdicts carrying finding + pointer land at 155–165 | the PR/issue body, or a doc in the fleet's `shared/` |
 | Progress post | **≤ 200 chars** | same class as a report summary | the work itself |
 | Dispatch payload | **≤ 2000 chars** | measured 1,400–1,600 of load-bearing content; loosest because its reader is a fresh agent with no shared context, so it must stand alone | paths and issue refs the worker reads |
 

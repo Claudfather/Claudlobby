@@ -3,6 +3,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import shutil
+import socket
 import subprocess
 
 import pytest
@@ -11,6 +13,7 @@ from claudlobby import fleet_operations as fleet
 from claudlobby import fleet_pulse
 from claudlobby.bot_operations import BotLifecycleError, BotLifecycleResult
 from claudlobby.config import FleetPulseConfig
+from tests.ingest_listener import short_socket_dir
 
 
 def _scope(tmp_path, *, origin=None):
@@ -162,14 +165,11 @@ def test_pulse_preserves_native_warning_and_summary(capfd, tmp_path):
 
 
 def test_pulse_timeout_kills_its_private_process_group(monkeypatch, tmp_path):
-    child = SimpleNamespace(pid=731, calls=0)
-    def communicate(*, timeout=None):
-        child.calls += 1
-        if timeout is not None:
-            raise subprocess.TimeoutExpired("pulse", timeout)
-        return b"", None
-    child.communicate = communicate
-    child.returncode = -9
+    child = SimpleNamespace(pid=731, waits=[])
+    def wait(*, timeout):  # a sweep that has not exited, even after SIGKILL
+        child.waits.append(timeout)
+        raise subprocess.TimeoutExpired("pulse", timeout)
+    child.communicate = child.wait = wait
     monkeypatch.setattr(fleet_pulse.subprocess, "Popen", lambda *a, **k: child)
     killed = []
     monkeypatch.setattr(fleet_pulse.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
@@ -178,6 +178,22 @@ def test_pulse_timeout_kills_its_private_process_group(monkeypatch, tmp_path):
     assert failure.value.code == "timeout" and failure.value.effect_attempted
     # SIGTERM first, so the sweep's own traps can clean up; SIGKILL what is left.
     assert killed == [(731, fleet_pulse.signal.SIGTERM), (731, fleet_pulse.signal.SIGKILL)]
+    # Every wait is bounded, so a sweep that will not die still ends the stop.
+    assert child.waits[1:] == [fleet_pulse.TERM_GRACE_S, fleet_pulse.REAP_WAIT_S]
+
+
+def test_pulse_stop_takes_eperm_as_a_group_with_no_live_member(monkeypatch):
+    """macOS refuses a signal to a group none of whose members can take one (EPERM),
+    as after the sweep exits and before it is reaped. The stop goes on to reap it."""
+    child = SimpleNamespace(pid=731, waits=[])
+    def wait(*, timeout):
+        child.waits.append(timeout)
+    child.communicate = child.wait = wait
+    def refuse(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(fleet_pulse.os, "killpg", refuse)
+    fleet_pulse._stop(child)
+    assert child.waits == [fleet_pulse.REAP_WAIT_S]
 
 
 def test_selected_private_pulse_refuses_direct_entry(tmp_path):
@@ -235,3 +251,140 @@ def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monke
     expected_bots = iter(("worker-a",))
     one = fleet.reconcile_fleet(root=tmp_path, fleet="example", bot="worker-a", adapter=Native())
     assert [(row.bot, row.state) for row in one.bots] == [("worker-a", "unsupervised_down")]
+
+
+def test_reconcile_reads_a_cleanly_stopped_session_absent_only_by_the_quiet_proof(tmp_path, monkeypatch):
+    """#2227: tmux leaves its socket file after a clean exit and bot stop keeps it,
+    so the session observer reads unknown. As bot move does, only the kernel proof
+    (inactive exact unit, empty cgroup where witnessed, socket refusing
+    connections) reads that as absent; anything less stays unknown."""
+    destination, _, selected = _scope(tmp_path)
+    monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
+    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
+    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
+    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
+        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
+    tmux_dir = short_socket_dir("sq-")
+    stale = tmux_dir / f"tmux-{os.getuid()}" / "private"
+    stale.parent.mkdir()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(stale))  # bound, never listening: what a clean tmux exit leaves
+    monkeypatch.setattr(fleet, "build_supervision_spec", lambda _b, _f, _p: SimpleNamespace(
+        bot_dir=tmp_path, label="private", environment={"TMUX_TMPDIR": str(tmux_dir)}))
+    unit = SimpleNamespace(declaration=SimpleNamespace(scope="bot", fleet="example", bot="worker-a",
+                                                       working_directory=tmp_path),
+                           target="worker-a.service", installed=(),
+                           properties=(("ActiveState", "inactive"),))
+    monkeypatch.setattr(fleet, "collect_enrollment", lambda *_a, **_k: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(units=[unit])))
+    native = {"session": "unknown", "quiet": (0, "inactive\tno-cgroup-witness\n")}
+    calls = []
+
+    class Native:
+        package = destination.paths.package
+
+        def read(self, function):
+            assert function == "svc_inventory_catalog"
+            return f"manager\tLinux\ndirectory\t{tmp_path}\n"
+
+        def call(self, function, *args, timeout=30):
+            calls.append(function)
+            if function == "svc_bot_session_observe":
+                return subprocess.CompletedProcess([], 0, native["session"] + "\n", "")
+            assert function == "svc_activation_quiet"
+            assert args[:2] == (tmp_path / "worker-a.service", "worker-a.service")
+            rc, out = native["quiet"]
+            return subprocess.CompletedProcess([], rc, out, "")
+
+    def session():
+        calls.clear()
+        row, = fleet.reconcile_fleet(root=tmp_path, fleet="example", bot="worker-a",
+                                     adapter=Native()).bots
+        return row.session, row.state
+
+    try:
+        assert session() == ("absent", "unsupervised_down")
+        assert calls == ["svc_bot_session_observe", "svc_activation_quiet"]
+        assert stale.exists()  # the proof never removes the socket file
+        native["quiet"] = (3, "")  # the unit still active, or its session still exiting
+        assert session() == ("unknown", "indeterminate")
+        native["quiet"] = (0, "inactive\tno-cgroup-witness\n")
+        stale.unlink()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as live:
+            live.bind(str(stale))
+            live.listen(1)  # a server still answers on the socket: never absent
+            assert session() == ("unknown", "indeterminate")
+        for observed in ("ready", "absent"):  # a definite observation needs no proof
+            native["session"] = observed
+            session()
+            assert calls == ["svc_bot_session_observe"]
+    finally:
+        shutil.rmtree(tmux_dir, ignore_errors=True)
+
+
+def test_reconcile_reads_a_recorded_stop_as_stopped(tmp_path, monkeypatch):
+    """#2243 F8: not enrolled, no ready session and the stop door's record is `stopped`, whatever
+    the session probe could tell: `absent`, or `unknown` when the quiet proof fails (#2227). With
+    no record the states are unchanged."""
+    destination, _, selected = _scope(tmp_path)
+    monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
+    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
+    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
+    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
+        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
+    monkeypatch.setattr(fleet, "build_supervision_spec", lambda bot, _f, _p: SimpleNamespace(
+        bot_dir=tmp_path / bot, label="private", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    observed = {"worker-a": (True, "absent"), "worker-b": (True, "unknown"),
+                "manager": (False, "absent")}
+    destination.fleet.bots = {bot: bot for bot in observed}
+    for bot, (record, _session) in observed.items():
+        (tmp_path / bot / "data").mkdir(parents=True)
+        if record:
+            (tmp_path / bot / "data" / ".stopped").write_text(
+                '{"by": "operator", "reason": null, "request_id": "r", '
+                '"stopped_at": "2026-10-09T20:40:00Z", "stopped_epoch": 1791578400}\n')
+    units = [SimpleNamespace(declaration=SimpleNamespace(scope="bot", fleet="example",
+             bot=bot, working_directory=tmp_path / bot), target=bot + ".service",
+             installed=(), properties=(("ActiveState", "inactive"),))
+             for bot in observed]
+    monkeypatch.setattr(fleet, "collect_enrollment", lambda *_a, **_k: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(units=units)))
+    class Native:
+        package = destination.paths.package
+        def read(self, function):
+            return f"manager\tLinux\ndirectory\t{tmp_path}\n"
+        def call(self, function, *args, timeout=30):
+            if function == "svc_activation_quiet":
+                # the quiet proof fails, so an unknown session stays unknown (#2227)
+                return subprocess.CompletedProcess([], 3, "", "")
+            assert function == "svc_bot_session_observe"
+            return subprocess.CompletedProcess([], 0, observed[args[0].name][1] + "\n", "")
+    result = fleet.reconcile_fleet(root=tmp_path, fleet="example", adapter=Native())
+    assert [(row.bot, row.enrolled, row.session, row.state) for row in result.bots] == [
+        ("worker-a", False, "absent", "stopped"),
+        ("worker-b", False, "unknown", "stopped"),
+        ("manager", False, "absent", "unsupervised_down")]
+
+
+def test_fleet_lifecycle_lines_carry_what_each_bot_start_says(tmp_path, monkeypatch):
+    """#2243: `fleet start --workers` prints, under each bot, what `bot start` prints: a stop
+    record the start could not remove keeps a later loss of that bot's unit silent."""
+    from argparse import Namespace
+
+    from claudlobby import context
+    from claudlobby.commands import fleet_runtime
+
+    monkeypatch.setattr(context, "resolve_paths", lambda root=None: SimpleNamespace(root=tmp_path))
+    kept = BotLifecycleResult("example", "worker-a", "selected-release", "worker-a-unit",
+                              "running", True, "bridge_ready", recording="committed",
+                              stop_record_kept=True)
+    clean = BotLifecycleResult("example", "worker-b", "selected-release", "worker-b-unit",
+                               "running", True, "bridge_ready", recording="committed")
+    monkeypatch.setattr(fleet, "set_fleet_running", lambda **_k: fleet.FleetLifecycleResult(
+        "example", "selected-release", "start", True, (kept, clean)))
+    out = fleet_runtime.dispatch(Namespace(public_command="fleet.start", seed=False,
+                                           fleet="example", workers=True, root=str(tmp_path)))
+    first, note, last = out.lines
+    assert first == "example/worker-a: running; readiness=bridge_ready"
+    assert note.startswith("example/worker-a: ") and "could not remove this bot's stop record" in note
+    assert last == "example/worker-b: running; readiness=bridge_ready"

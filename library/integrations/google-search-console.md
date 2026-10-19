@@ -72,7 +72,7 @@ one layer is misconfigured:
    headless bot keeps prompting on them instead of running them unattended.
 
 Never set `GSC_ALLOW_DESTRUCTIVE=true`, and never add a write tool to a bot's
-`tools.allow` — the whole point is a read-only SEO reader.
+`tool_permissions.allow` — the whole point is a read-only SEO reader.
 
 ## Auth model
 

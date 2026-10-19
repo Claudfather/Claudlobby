@@ -6,9 +6,22 @@ from pathlib import Path
 from ..command_result import CommandFailure, CommandOutput
 
 
+def lifecycle_notes(result) -> tuple[str, ...]:
+    """What a stop or a start owes its caller when its record did not land (#2243)."""
+    if result.stop_record_kept:
+        return ("The start could not remove this bot's stop record (data/.stopped in its "
+                "directory); until it is removed, a loss of the bot's unit reads as a "
+                "deliberate stop and pages no one.",)
+    if result.state == "stopped" and result.recording == "degraded":
+        return ("The stop's local record or its plane row did not land; "
+                "run bot stop again to record it.",)
+    return ()
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..bot_operations import BotLifecycleError, control_bot, handoff_bot, set_bot_running
+    from ..bot_operations import (BotLifecycleError, check_handoff, control_bot, handoff_bot,
+                                  set_bot_running)
     from ..config_plan import PlanError
     from ..context import resolve_paths
     from ..operation_context import OperationContextError
@@ -26,18 +39,27 @@ def dispatch(args) -> CommandOutput:
     if ceiling is not None and ceiling <= 0:
         raise CommandFailure("invalid_argument", "--ceiling must be a positive integer")
     running = action != "stop"
+    reason = getattr(args, "reason", None)
+    if reason is not None:
+        from ..stop_record import StopRecordError, check_reason
+        try:
+            check_reason(reason)
+        except StopRecordError as exc:
+            raise CommandFailure("invalid_argument", str(exc)) from exc
     data = {"fleet": args.fleet, "bot": args.bot_id, "requested": action,
             "native_outcome": "unattempted", "runtime_state": "unknown"}
     try:
         root = resolve_paths(root=args.root).root
-        if action == "handoff":
+        if action == "handoff" and getattr(args, "check", False):
+            result = check_handoff(root=root, fleet=args.fleet, bot=args.bot_id)
+        elif action == "handoff":
             result = handoff_bot(root=root, fleet=args.fleet, bot=args.bot_id)
         elif action in {"interrupt", "compact"}:
             result = control_bot(root=root, fleet=args.fleet, bot=args.bot_id, control=action)
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
-                                     ceiling=ceiling)
+                                     ceiling=ceiling, reason=reason)
     except BotLifecycleError as exc:
         if exc.busy:
             raise CommandFailure("conflict", str(exc), data=data, retryable=True,
@@ -54,7 +76,8 @@ def dispatch(args) -> CommandOutput:
                 data["handoff"] = "unknown"
                 data["reason"] = exc.handoff_reason or "unverified"
                 message = str(exc) if exc.handoff_reason else "bot handoff outcome is unverified; inspect its private session"
-                hint = "inspect the private session and handoff file; do not automatically resend the handoff"
+                hint = (f"the handoff can still land: read claudlobby --json bot handoff {args.bot_id} "
+                        "--check until it reads saved; do not automatically resend the handoff")
             else:
                 message = "bot lifecycle effect is unverified; inspect native state"
                 hint = "inspect the exact bot's native unit and private session before retrying"
@@ -77,6 +100,13 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete", data=data) from exc
     except (InventoryError, OSError) as exc:
         raise CommandFailure("unavailable", "bot native state cannot be established", data=data) from exc
+    if action == "handoff" and getattr(args, "check", False):
+        data = {key: value for key, value in asdict(result).items() if value is not None}
+        when = "".join((f"; requested {result.requested_at}" if result.requested_at else "",
+                        f"; written {result.written_at}" if result.written_at else ""))
+        return CommandOutput(data, release_id=result.release_id,
+                             lines=(f"{result.fleet}/{result.bot}: handoff {result.handoff} "
+                                    f"({result.reason}){when}.",))
     if action == "handoff":
         data = asdict(result)
         data["native_outcome"] = "observed" if result.handoff == "saved" else "skipped"
@@ -104,4 +134,4 @@ def dispatch(args) -> CommandOutput:
     else:
         lines = (f"{result.fleet}/{result.bot}: supervised running; "
                  f"readiness={result.readiness}.",)
-    return CommandOutput(data, release_id=result.release_id, lines=lines)
+    return CommandOutput(data, release_id=result.release_id, lines=lines + lifecycle_notes(result))

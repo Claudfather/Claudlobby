@@ -27,6 +27,14 @@ release files or generated bot output. See [getting started](getting-started.md)
 for cold-host assembly and the [implementation record](plans/2026-09-28-unified-cli-run-log.md)
 for measured canary evidence and remaining platform limits.
 
+**While jobs run.** Every composed timer job, host operation and native bot start holds
+the host activation lock shared while it runs, and activation takes it exclusively.
+`host activate` first marks itself pending, so a job or operation that starts meanwhile
+backs off as if the activation were already running. It then waits up to 300 s for the
+ones already running to finish; the longest timer job, the pulse, is capped under its
+300 s cadence. It refuses at once only when another activation is running or pending. A
+refusal after the wait names a running job or host operation, not another activation (#2208).
+
 A canary must have its own root, Plane and native unit names. Activation is scoped
 to that selected root; using a second fleet inside the production root does not
 provide an independent release switch. On-demand skills, hooks and permissions
@@ -402,10 +410,9 @@ the problem, the solution and the procedure:
 > without a canary. Arm per fleet in fleet.yaml `env:`, canary on a throwaway
 > first.`
 
-The second is `SESSION_DIGEST_ENABLED` (`claudlobby/_runtime_scripts/transcript-digest.sh:41`). That is
-**two instances, not an established convention** — a grep for `*_ENABLED` across
-`claudlobby/_runtime_scripts/*.sh` and `claudlobby/*.py` returns exactly those two. Whether other
-staging paths exist has not been checked.
+The digest hook retired in #2145 P3. Its model-spending switches now live in
+`claudna:` composition and take effect at the next session open. The spindown
+receipt remains a session-door example; switch carriers are in `host doctor --switches`.
 
 A stronger form of this row — "no staging by construction" — was proposed,
 refuted and retracted within the hour (#1078). The surviving claim is about
@@ -441,11 +448,8 @@ in the repo `CLAUDE.md`).
 
 **If you re-measure this by grep, expect an ambiguous answer**, and this is why:
 `SPINDOWN_RECEIPT_ENABLED` appears in 0 of 21 composed bot `CLAUDE.md` on this
-host, but `SESSION_DIGEST_ENABLED` appears in 1 — carried by a monitoring caveat
-("absence of rows means the instrument is off, not that the fleet is quiet"),
-which is the same string serving an entirely different purpose. So a grep for
-the flag names returns a hit that is *not* the rationale. Search for the
-rationale, not the flag.
+host in that historical snapshot. The old monitor caveat mixed coverage with
+rollout rationale; that hook is now retired. Search for rationale, not a flag.
 
 **And take the denominator from the manifest, not the filesystem.** 21 is the
 union of bots declared across every `fleet.yaml`; a `find` over `runtime/bots/`

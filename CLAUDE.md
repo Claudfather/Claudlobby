@@ -1,6 +1,6 @@
 # claudlobby
 
-Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` into runnable bot directories with isolated identities, MCP servers, skills, and systemd/launchd supervision.
+Compositor for agent-CLI fleets — Claude Code today, Codex through the execution adapter (#2149). Transforms `fleet.yaml` + `library/` into runnable bot directories with isolated identities, MCP servers, skills, and systemd/launchd supervision.
 
 **North star:** Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal (fleets know the mission they serve, pick work that advances it, and close it at each project's declared rigor).
 
@@ -48,7 +48,7 @@ library/                                         ├── CLAUDE.md      (compo
   permissions/                                   └── projects/      (git checkouts, gitignored)
   post_actions/
   tools/
-voices/
+  voices/
 templates/claude.md.j2
 ```
 
@@ -63,7 +63,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 - **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
 - **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
 - **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
-- **Voices** — Optional personality overlays from `voices/`.
+- **Voices** — Optional personality overlays in `library/voices/`.
 
 ### Runtime model
 
@@ -84,11 +84,13 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
+- `usage-limit.py` — reads a pane for a usage-limit stop and its reset time
+- `usage-limit-hook.sh` — StopFailure/Stop hook: records a usage-limit stop
 - `keepalive-all.sh` — run keepalive for every bot
 - `reconcile-fleet.sh` — audit supervision state: healthy, orphan, missing, unsupervised-down, unbound
-- `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls (other files are ratcheted at their current count)
+- `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls
 - `supervisor-caller.py` — kernel ancestry check for the adapter, so a bot cannot stop its own coordinator
-- `bot-unit-owner.py` — reads a unit's working directory for the adapter without running it; foreign units are left alone, unreadable ownership refuses
+- `bot-unit-owner.py` — reads a unit's working directory for the adapter without running it
 - `runtime-admission.sh` — startup and watchdog release check, and the activation lock
 - `rolling-restart.sh` — restart bots one at a time, each gated on a fresh Telegram `BRIDGE_READY`
 - `weekly-worker-restart.sh` — weekly lossless restart of workers (not managers) onto the staged binary (opt-in)
@@ -123,7 +125,6 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `plane-host-probe.sh` — per-minute host samples: load, RAM, disk, swap, iowait, thermal
 - `plane-lookup.py` — read-only plane lookups by task id, assignment, escalation, event
 - `plane-readers.py` — stdlib list readers shared by the bash doors
-- `plane-session-start.sh` — SessionStart hook: session and process ids for the plane
 - `plane-dispatch-in.sh` — UserPromptSubmit hook: records what the receiving bot actually got
 - `plane-telegram-in.sh` — UserPromptSubmit hook: records the operator's Telegram messages
 - `plane-telegram-out.sh` — PostToolUse hook on the Telegram reply tool: records the reply
@@ -139,7 +140,6 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `creds-check.sh` — validate fleet credentials, including GitHub App mode
 - `orphan-browser-reaper.sh` — Linux-only reap of browser processes orphaned by dead automation
 - `notify-behind.sh` — daily report of framework checkouts behind their newest release
-- `transcript-digest.sh` — SessionEnd hook: a model-written digest per session (opt-in: spends)
 - `selfstart-snapshot.sh` — after an unplanned reboot, counts which bots self-started; run it before any rescue
 - `boot-capture.sh` — records every declared bot at each host boot (opt-in)
 
@@ -149,7 +149,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `git-pull-all.sh` — pull every repo in a bot's `projects/`
 - `data-sweep.sh` — weekly purge of vetted ephemeral files in bots' `data/`
 - `check-npx-cache.sh` — check that MCP server packages are cached
-- `update-claude-code.sh` — daily Claude Code update, no fleet bounce; in place by default (a failed install leaves no runnable `claude`), staged only when armed (opt-in)
+- `update-claude-code.sh` — daily Claude Code update, no fleet bounce; in place by default, staged only when armed (opt-in)
 - `update-siblings.sh` — weekly fast-forward of sibling checkouts to their newest release (opt-in)
 - `bot-sweep-cron.sh` — periodic bot sweep via cron
 - `code-audit-sweep.sh` — picks the stalest repo for a code audit, hands it to its owner (opt-in)
@@ -179,8 +179,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 Everything in these top-level directories is committed and shared:
 
-- `library/` — All composable building blocks (see Architecture above)
-- `voices/` — Personality overlays
+- `library/` — All composable building blocks, voices included (see Architecture above)
 - `templates/` — Jinja2 templates for CLAUDE.md generation
 - `claudlobby/_runtime_scripts/` — Lifecycle and utility scripts
 - `claudlobby/` — Python compositor source
@@ -192,7 +191,7 @@ Everything in these top-level directories is committed and shared:
 These are ALL gitignored — never commit them:
 
 - `fleet.yaml` — Your active fleet config. Copy from `fleet.yaml.example`.
-- `local/` — Fleet overlays. Each `local/<fleet>/` contains fleet.yaml, local library overrides, voices, and runtime output. **All fleet-specific content lives here.**
+- `local/` — Fleet overlays. Each `local/<fleet>/` contains fleet.yaml, local library overrides (voices in `library/voices/`), and runtime output. **All fleet-specific content lives here.**
 - `local/<fleet>/runtime/bots/` — Generated bot directories
 - `local/<fleet>/library/` — Fleet-specific library content not general enough for shared
 - `.env` — Secrets (tokens, PATs, OAuth credentials). Never committed.

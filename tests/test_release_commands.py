@@ -164,6 +164,49 @@ def test_config_plan_covers_declared_and_explicit_fleets_and_diff_never_dumps_by
     assert "ACTUAL_STAGED_SECRET" not in capture.out + capture.err and not secret_target.exists()
 
 
+
+@pytest.mark.parametrize("kind,hint", [
+    ("claudron-migration", "claudron doctor --fix --json --vault <vault>"),
+    ("claudron-doctor", "claudron doctor --json --vault <vault>"),
+])
+def test_config_plan_names_migration_warning_and_safe_remedy_without_authored_values(
+    staging_case, tmp_path, capsys, monkeypatch, kind, hint
+):
+    from claudlobby import claudron_compat, validator
+    case = staging_case
+    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
+    vault = tmp_path / "SECRET-vault-path"
+    (vault / "_shared").mkdir(parents=True)
+    manifest = case.paths.fleet_yaml
+    manifest.write_text(manifest.read_text().replace("    channels: []\n",
+        f"    channels: []\n    claudron_vault_path: {vault}\n"))
+    actual_which = validator.shutil.which
+    monkeypatch.setattr(validator.shutil, "which", lambda exe: "/fake/claudron" if exe == "claudron" else actual_which(exe))
+    state = (claudron_compat.VaultMigrationState("pending", (("SECRET-pending-id", "SECRET-title"),), 2, 3, "")
+             if kind == "claudron-migration" else
+             claudron_compat.VaultMigrationState("unknown", (), None, None, "SECRET-provider-detail"))
+    monkeypatch.setattr(claudron_compat, "vault_migration_state", lambda *a, **kw: state)
+    result, capture = _call(capsys, ["--root", str(case.root), "config", "plan", "--release",
+                                     case.release.release_id, "--json"])
+    assert result["data"]["plan_id"]
+    assert f"[{kind}]" in capture.err and hint in capture.err
+    assert "config validate" in capture.err
+    assert "SECRET-" not in capture.out + capture.err
+
+
+def test_config_plan_never_echoes_an_unknown_warning_category(staging_case, capsys, monkeypatch):
+    from claudlobby import config_staging, validator
+    case = staging_case
+    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
+    report = validator.ValidationReport()
+    report.warn("SECRET-category", "SECRET-warning-value")
+    monkeypatch.setattr(config_staging, "validate", lambda *a, **kw: report)
+    _, capture = _call(capsys, ["--root", str(case.root), "config", "plan", "--release",
+                               case.release.release_id, "--json"])
+    assert "[uncategorized]" in capture.err
+    assert "SECRET-" not in capture.out + capture.err
+
+
 def test_config_diff_current_reports_drift_without_values_or_retired_routes(staging_case, capsys, monkeypatch):
     case = staging_case
     monkeypatch.setattr(context, "get_resources", lambda: case.package)

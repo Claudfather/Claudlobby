@@ -54,7 +54,7 @@ def _root(tmp_path: Path, extra_protocols: dict[str, str] | None = None) -> Path
         "library/guardrails",
         "runtime/bots",
         "lib",
-        "voices",
+        "library/voices",
         "templates",
     ):
         (root / sub).mkdir(parents=True, exist_ok=True)

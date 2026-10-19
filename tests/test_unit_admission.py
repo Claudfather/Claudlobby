@@ -71,6 +71,27 @@ def test_interrupted_activation_and_reboot_refuse_before_producer_effect(proposa
         pass  # normal one-shot cleanup and refusal leave no lock behind
 
 
+def test_a_one_shot_learns_when_its_unit_started(proposal):
+    """Its command counts a time limit from the unit's start, the wait for
+    admission included, so it learns that start, scoped to admission's pid."""
+    builder, _, _ = proposal
+    plan = builder.seal()
+    release = read_release(builder.root, plan.release_id)
+    env, identity = _environment(release), _identity(builder)
+    argv = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
+                            mode="oneshot", argv=["/bin/sh", "-c", "exit 0"])
+    stamps = []
+
+    def producer(*args, **kwargs):
+        stamps.append(kwargs["env"][r.UNIT_STARTED_ENV])
+        return SimpleNamespace(returncode=0)
+
+    _active(plan)
+    assert r.run_unit(argv, identity=identity, environment=env, runner=producer) == 0
+    pid, started = stamps[0].split()
+    assert int(pid) == os.getpid() and float(started) <= time.monotonic()
+
+
 def test_due_timer_service_waits_for_its_verified_candidate_then_runs_once(proposal, monkeypatch):
     import threading
     from claudlobby.config_units import unit_family

@@ -13,9 +13,10 @@ import time
 
 import pytest
 
-from claudlobby import activation, bot_operations, context
+from claudlobby import activation, activation_handoffs, bot_operations, context
 from claudlobby.__main__ import main
 from claudlobby.activation_enrollment import selected_bot_entry
+from claudlobby.activation_runtime import RuntimeEvidenceError
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units
 from tests.package_fixtures import source_package
@@ -218,6 +219,49 @@ def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
     handoff.symlink_to(foreign)
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
         bot_operations._fresh_self_handoff(bot_dir)
+
+
+def test_a_late_handoff_is_read_against_the_request_the_door_recorded(tmp_path):
+    """#963/#990: the door waits 30 s and a handoff takes minutes. Saved means
+    written after the recorded request, by a capture that says so."""
+    bot_dir = tmp_path / "bot"
+    (bot_dir / ".claude").mkdir(parents=True)
+    (bot_dir / "data").mkdir()
+    handoff = bot_dir / ".claude/session.md"
+
+    def stamp(epoch):
+        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def write(text, at):
+        handoff.write_text(text)
+        os.utime(handoff, (at, at))
+
+    now = int(time.time()) + 0.5  # mid-second, so each stamp reads the same second
+    asked = now - 600  # the door asked ten minutes ago
+    older = f"---\nlast_updated: {stamp(asked - 3600)}\n---\nolder context\n"
+    write(older, asked - 3600)
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "no_request_recorded")
+    assert bot_operations._record_handoff_request(bot_dir, asked)
+    # Not written since: also what a turn that ends without writing it leaves (#963).
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("pending", "not_written_since_request")
+    handoff.unlink()
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("pending", "not_written_since_request")
+
+    write(f"---\nlast_updated: {stamp(now)}\n---\nnew context\n", now)
+    saved = bot_operations.handoff_state(bot_dir)
+    assert saved[:2] == ("saved", "written_after_request")
+    assert (saved.requested_at, saved.written_at) == (stamp(asked), stamp(now))
+
+    # Activation's reference refresh rewrites the file over the old capture.
+    handoff.write_bytes(activation_handoffs._refresh_envelope(bot_dir, stamp(now)) + older.encode())
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "capture_predates_request")
+    foreign = tmp_path / "foreign.md"
+    foreign.write_text(f"---\nlast_updated: {stamp(now)}\n---\nnew context\n")
+    handoff.unlink()
+    handoff.symlink_to(foreign)
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "file_unverified")
+    (bot_dir / "data/.handoff-request").write_text("not a record\n")
+    assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "request_unreadable")
 
 
 def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path):
@@ -706,6 +750,47 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert len(native.actions) == before_failed + 1
 
 
+def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold, monkeypatch, capsys):  # noqa: F811
+    """#963/#990: a handoff takes minutes and the door waits 30 s. The door
+    records its request; `bot handoff BOT --check` reads the handoff file
+    against it later, sends nothing and takes no lifecycle lock."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    root, release, native, call = worker.root, worker.release, worker.native, worker.call
+    handoff = root / "runtime/bots/worker/.claude/session.md"
+    handoff.parent.mkdir(exist_ok=True)
+    older = time.time() - 3600
+    stamp = datetime.fromtimestamp(older, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    handoff.write_text(f"---\nlast_updated: {stamp}\n---\nolder context\n")
+    os.utime(handoff, (older, older))
+    assert call("bot", "handoff", "worker", "--check")["data"]["reason"] == "no_request_recorded"
+
+    native.explicit_handoff = "handoff-timeout"
+    native.handoff_rc = 3
+    timed_out = call("bot", "handoff", "worker", expected=6)
+    assert timed_out["data"]["reason"] == "timeout"
+    assert "bot handoff worker --check" in timed_out["error"]["hint"]
+    native.calls.clear()
+    with bot_operations._operation_lock(root):  # another lifecycle operation is running
+        pending = call("bot", "handoff", "worker", "--check")["data"]
+    assert (pending["handoff"], pending["reason"]) == ("pending", "not_written_since_request")
+
+    now = datetime.now(timezone.utc)
+    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\nnew context\n")
+    saved = call("bot", "handoff", "worker", "--check")["data"]
+    assert (saved["handoff"], saved["reason"]) == ("saved", "written_after_request")
+    assert saved["requested_at"] <= saved["written_at"]
+    assert "svc_activation_handoff" not in native.calls and native.actions == []
+
+    monkeypatch.setenv("FLEET_NAME", "example")
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
+    monkeypatch.setenv("FLEET_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    refused = call("bot", "handoff", "manager", "--check", expected=4)
+    assert refused["error"]["code"] == "conflict"
+
+
 def test_a_staggered_unit_restarts_and_starts_within_its_boot_delay(cold, monkeypatch, capsys):  # noqa: F811
     """systemctl restart and enable --now block through ExecStartPre. A worker
     staggered 30 s returned at 32.9 s on the host, past the enroll call's fixed
@@ -747,3 +832,176 @@ def test_a_changed_unit_is_refused_before_any_effect(cold, monkeypatch, capsys):
     refused = worker.call("bot", "restart", "worker", expected=4)
     assert refused["error"]["code"] == "conflict"
     assert "svc_bot_enroll_exact" not in worker.native.calls and worker.native.actions == []
+
+
+def test_a_stop_waits_for_the_session_it_stopped_to_exit(cold, monkeypatch, capsys):  # noqa: F811
+    """#2227: KillMode=process marks a bot unit stopped while its session is still
+    exiting, so the stop's quiet check gets a bounded wait instead of one read.
+    A repeated stop of the de-enrolled bot waits the same way."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    waits = []
+    monkeypatch.setattr(bot_operations, "assert_quiescent",
+                        lambda *args, **kwargs: waits.append(kwargs.get("settle_s", 0)))
+    stopped = worker.call("bot", "stop", "worker")["data"]
+    assert stopped["state"] == "stopped" and stopped["changed"] is True
+    assert stopped["native_outcome"] == "observed"
+    again = worker.call("bot", "stop", "worker")["data"]
+    assert again["state"] == "stopped" and again["changed"] is False
+    assert waits == [bot_operations._STOP_SETTLE_S] * 2 and 0 < waits[0] <= 60
+
+
+def test_a_stop_whose_session_never_exits_still_reads_unverified(cold, monkeypatch, capsys):  # noqa: F811
+    """The wait is bounded: a session still in the cgroup at the bound refuses,
+    and the stop reads unverified, never stopped."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+
+    def still_exiting(*args, **kwargs):
+        raise RuntimeEvidenceError("svc_activation_quiet", kwargs["target"], "native refusal (3)")
+    monkeypatch.setattr(bot_operations, "assert_quiescent", still_exiting)
+    stuck = worker.call("bot", "stop", "worker", expected=6)
+    assert stuck["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
+    assert stuck["data"]["native_outcome"] == "unknown"
+    assert worker.native.actions == ["stop"]
+
+
+def test_a_stop_that_did_not_happen_reads_unverified_without_waiting(cold, monkeypatch, capsys):  # noqa: F811
+    """A unit still enrolled and active after the stop call is refused on its
+    state read, before any quiet wait: the wait covers only a session exiting."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.host.states[worker.native.target] = "enabled loaded active"
+    waits = []
+    monkeypatch.setattr(bot_operations, "assert_quiescent",
+                        lambda *args, **kwargs: waits.append(kwargs))
+    real_call = worker.native.call
+
+    def nothing_stops(function, *args, timeout=30):
+        if function == "svc_bot_disenroll_exact":  # the call returns; the unit runs on
+            worker.native.actions.append("stop")
+            return subprocess.CompletedProcess([function], 0, "effect-attempted\n", "")
+        return real_call(function, *args, timeout=timeout)
+    monkeypatch.setattr(worker.native, "call", nothing_stops)
+    failed = worker.call("bot", "stop", "worker", expected=6)
+    assert failed["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
+    assert failed["data"]["native_outcome"] == "unknown"
+    assert worker.native.actions == ["stop"] and waits == []
+
+
+def _plane_rows(monkeypatch, *, refuse=False):
+    """The rows the lifecycle door hands the plane, or a plane that refuses them."""
+    rows = []
+
+    def emit(_root, events, require_commit=False):
+        if refuse:
+            raise OSError("the plane is unavailable")
+        rows.extend(events)
+        return [SimpleNamespace(status="committed") for _ in events]
+    monkeypatch.setattr(bot_operations, "emit_batch", emit, raising=False)
+    return rows
+
+
+def test_bot_stop_records_the_stop_locally_and_on_the_plane_and_start_clears_it(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: the stop door always leaves its local record, the fact fleet-pulse reads to keep a
+    stopped bot silent, and a bot_stopped row naming the caller; bot start removes the record and
+    writes bot_started. Stopping a bot that is already stopped records it too (the rollout path
+    for a bot stopped before the record existed)."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    record = worker.root / "runtime/bots/worker/data/.stopped"
+
+    stopped = worker.call("bot", "stop", "worker", "--reason", "parked until the review lands")["data"]
+    assert stopped["state"] == "stopped" and stopped["changed"] is True
+    assert stopped["recording"] == "committed" and worker.native.actions == ["stop"]
+    saved = json.loads(record.read_text())
+    assert saved["by"] == "operator" and saved["reason"] == "parked until the review lands"
+    assert abs(saved["stopped_epoch"] - time.time()) < 300 and saved["stopped_at"].endswith("Z")
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_stopped"
+    assert row["payload"]["subject"] == f"bot:{stopped['fleet']}/worker"
+    data = row["payload"]["data"]["data"]
+    assert (data["by"], data["reason"], data["changed"]) == ("operator", "parked until the review lands", True)
+    assert data["request_id"] == saved["request_id"]
+
+    rows.clear()
+    again = worker.call("bot", "stop", "worker")["data"]
+    assert again["state"] == "stopped" and again["changed"] is False
+    assert json.loads(record.read_text())["reason"] is None
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_stopped" and row["payload"]["data"]["data"]["changed"] is False
+
+    rows.clear()
+    started = worker.call("bot", "start", "worker")["data"]
+    assert started["state"] == "running" and started["recording"] == "committed"
+    assert not record.exists()
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_started" and row["payload"]["data"]["data"]["by"] == "operator"
+
+
+def test_a_plane_that_refuses_the_row_neither_blocks_the_stop_nor_its_record(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243 F3: a stop must not depend on the plane. The record the sweep reads is local and
+    written first; the refused row is reported as recording degraded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch, refuse=True)
+    stopped = worker.call("bot", "stop", "worker")["data"]
+    assert stopped["state"] == "stopped" and stopped["recording"] == "degraded"
+    assert worker.native.actions == ["stop"]
+    saved = json.loads((worker.root / "runtime/bots/worker/data/.stopped").read_text())
+    assert saved["by"] == "operator"
+
+
+def test_a_stop_reason_is_one_printable_line(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    refused = worker.call("bot", "stop", "worker", "--reason", "two\nlines", expected=2)
+    assert refused["error"]["code"] == "invalid_argument"
+    assert worker.native.actions == []
+    assert not (worker.root / "runtime/bots/worker/data/.stopped").exists()
+
+
+def test_a_stop_refused_before_any_effect_leaves_no_record(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: the stop door writes its record first. A stop refused before any native effect
+    stopped nothing, so its record goes again: the bot was never stopped on purpose."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    record = worker.root / "runtime/bots/worker/data/.stopped"
+    real_call = worker.native.call
+    seen = []
+
+    def refuses(function, *args, timeout=30):
+        if function == "svc_bot_disenroll_exact":  # refused, and no effect-attempted marker
+            seen.append(record.exists())
+            return subprocess.CompletedProcess([function], 3, "", "")
+        return real_call(function, *args, timeout=timeout)
+    monkeypatch.setattr(worker.native, "call", refuses)
+    refused = worker.call("bot", "stop", "worker", expected=6)
+    assert refused["error"]["code"] == "unavailable"
+    assert refused["data"]["native_outcome"] == "unattempted"
+    assert seen == [True]  # the record was written before the native call
+    assert not record.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file whatever its directory's mode")
+def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: a stop record left behind keeps a later loss of the bot's unit silent, so a start
+    that cannot remove it says so, as `stop_record_kept` in the JSON and a line in the text. The
+    start itself stands, and its plane row is recorded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    data = worker.root / "runtime/bots/worker/data"
+    worker.call("bot", "stop", "worker")
+    rows.clear()
+    data.chmod(0o500)
+    try:
+        started = worker.call("bot", "start", "worker")["data"]
+        assert started["state"] == "running" and started["changed"] is True
+        assert started["stop_record_kept"] is True and started["recording"] == "committed"
+        (row,) = rows
+        assert row["payload"]["event"] == "bot_started"
+        assert (data / ".stopped").exists()
+        # a start that finds the bot running retries the removal, and its text says so too
+        assert main(["--root", str(worker.root), "bot", "start", "worker"]) == 0
+        out = capsys.readouterr().out
+        assert "could not remove this bot's stop record" in out, out
+    finally:
+        data.chmod(0o700)
+    again = worker.call("bot", "start", "worker")["data"]
+    assert "stop_record_kept" not in again and not (data / ".stopped").exists()

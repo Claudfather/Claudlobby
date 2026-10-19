@@ -22,7 +22,12 @@ warning about the absence of a door nobody shipped is the exact failure this
 table's consumer was built to stop doing.
 """
 
+import json
+import os
+import subprocess
 from dataclasses import dataclass
+from time import monotonic
+from typing import Callable, Literal
 
 #: Canonical any-agent integration front door — Claudron owns this text; every
 #: claudlobby message that tells an operator how bots reach a vault cites it.
@@ -73,9 +78,183 @@ COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
         probe=PROBE_VERB_PREFIX + "hooks",
     ),
     ClaudronCapability(
+        feature="clauDNA harvest from a composed bot (CLAUDNA_HARVEST=1 → claudron capture --stdin / amend)",
+        requires="capture --stdin + amend --stdin with expect_trust (subject-filing), memory homes",
+        default_order_release="0.8.0",
+        probe=PROBE_VERB_PREFIX + "amend",
+    ),
+    ClaudronCapability(
         feature="MCP fragment library/mcp/claudron.json",
         requires="claudron-mcp stdio server",
         default_order_release="unbuilt — demand-gated",
         parked="decision C",
     ),
 )
+
+
+#: Combined status + doctor budget per distinct vault, shared by both readers.
+CLAUDRON_DOCTOR_TIMEOUT_S = 60.0
+_RC_TIMEOUT = 124
+Run = Callable[..., tuple[int, str]]
+
+
+@dataclass(frozen=True)
+class VaultMigrationState:
+    """CLI-owned migration state, with diagnostics retained for doctor's rows.
+
+    ``old_format`` means unequal formats, including a vault newer than its engine.
+    Findings are normalized (code, message) pairs; no vault contents are read here.
+    """
+
+    status: Literal["ok", "pending", "old_format", "unknown"]
+    pending: tuple[tuple[str, str], ...]
+    vault_format: int | None
+    engine_format: int | None
+    detail: str
+    findings: tuple[tuple[str, str], ...] = ()
+    probe_status: str = "warn"
+    probe_detail: str = ""
+
+
+MigrationReader = Callable[[str], VaultMigrationState]
+
+
+def _run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
+    """Absent binary ⇒ 127; no answer within the budget ⇒ 124."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return result.returncode, result.stdout
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return _RC_TIMEOUT, ""
+    except (OSError, UnicodeError):
+        return 1, ""
+
+
+def _is_finding(value: object) -> bool:
+    return (isinstance(value, dict) and isinstance(value.get("code"), str)
+            and isinstance(value.get("message"), str))
+
+
+def _vault_argv(verb: str, vault: str) -> list[str]:
+    # The CLI never expands a tilde; match the validator's accepted address.
+    return ["claudron", verb, "--json", "--vault", os.path.expanduser(vault)]
+
+
+def _claudron_probe(vault: str, *, run: Run, timeout: float) -> tuple[str, str, dict | None]:
+    """Sanctioned capability probe; doctor capability, never version, gates the next call."""
+    rc, out = run(_vault_argv("status", vault), timeout=timeout)
+    if rc == 3:
+        return "warn", f"claudron installed but no vault resolved at {vault}", None
+    if rc != 0:
+        return "warn", f"`claudron status --json` exited {rc} for {vault}", None
+    try:
+        envelope = json.loads(out)
+        data = envelope["data"]
+        warnings = envelope["warnings"]
+        shaped = (envelope.get("ok") is True and envelope.get("command") == "status"
+                  and isinstance(data, dict) and envelope.get("errors") == []
+                  and isinstance(warnings, list) and all(_is_finding(f) for f in warnings))
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        shaped = False
+    if not shaped:
+        return "warn", "`claudron status --json` did not return the CLI envelope", None
+    version = data.get("engine_version", "unknown (pre-0.3.0)")
+    return "pass", (
+        f"engine {version}, vault {data.get('root', vault)} "
+        f"({data.get('total_docs', '?')} notes)"
+    ), data
+
+
+def vault_migration_state(
+    vault: str, *, run: Run | None = None, timeout: float | None = None
+) -> VaultMigrationState:
+    """Read status then doctor under one deadline, never applying a migration.
+
+    Only the CLI is consulted. An unusable answer is unknown, never healthy;
+    exit 1 is a valid doctor answer when it carries error findings.
+    """
+    run = _run if run is None else run
+    budget = CLAUDRON_DOCTOR_TIMEOUT_S if timeout is None else timeout
+    deadline = monotonic() + budget
+    remaining = max(0.0, deadline - monotonic())
+    if remaining == 0:
+        return VaultMigrationState("unknown", (), None, None,
+            f"{vault}: capability probe budget ({budget:g}s) exhausted; pending migrations are unknown")
+    probe_status, probe_detail, probe = _claudron_probe(vault, run=run, timeout=min(10.0, remaining))
+
+    def state(status, detail="", *, pending=(), vault_format=None, engine_format=None, findings=()):
+        return VaultMigrationState(status, pending, vault_format, engine_format, detail,
+                                   findings, probe_status, probe_detail)
+
+    if probe is None:
+        return state("unknown", f"{vault}: {probe_detail}; pending migrations are unknown "
+                     f"(status + doctor budget {budget:g}s)")
+    capabilities = probe.get("capabilities", [])
+    if not isinstance(capabilities, list) or any(not isinstance(cap, str) for cap in capabilities):
+        return state("unknown", f"{vault}: `claudron status --json` did not report a string capability list; "
+                     "pending migrations are unknown")
+    if "doctor" not in capabilities:
+        return state("unknown", (
+            f"{vault}: this claudron does not declare the `doctor` capability, so pending "
+            f"migrations cannot be checked — upgrade Claudron (engine "
+            f"{probe.get('engine_version', 'unknown')})"
+        ))
+    remaining = max(0.0, deadline - monotonic())
+    if remaining == 0:
+        rc, out = _RC_TIMEOUT, ""
+    else:
+        rc, out = run(_vault_argv("doctor", vault), timeout=remaining)
+    if rc == _RC_TIMEOUT:
+        return state("unknown", (
+            f"{vault}: `claudron doctor` did not answer within {budget:g}s, "
+            f"so pending migrations are unknown (shared status + doctor budget) — walking a vault root that holds large "
+            f"ignored trees takes minutes (Claudron #201); run `claudron doctor --vault "
+            f"{vault}` by hand"
+        ))
+    if rc == 3:
+        return state("unknown", f"{vault}: `claudron doctor` found no vault there (exit 3)")
+    try:
+        envelope = json.loads(out)
+        data = envelope["data"]
+        errors, warnings = envelope["errors"], envelope["warnings"]
+        shaped = (envelope.get("command") == "doctor" and isinstance(data, dict)
+                  and isinstance(errors, list) and isinstance(warnings, list)
+                  and envelope.get("ok") is (not errors) and rc == (1 if errors else 0))
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        shaped = False
+    if rc not in (0, 1) or not shaped:
+        return state("unknown", f"{vault}: `claudron doctor --json` exited {rc} without its envelope")
+    raw_findings = errors + warnings
+    findings = tuple((f["code"], f["message"]) for f in raw_findings if _is_finding(f))
+    if len(findings) != len(raw_findings):
+        return state("unknown", f"{vault}: `claudron doctor --json` returned malformed findings; "
+                     "pending migrations are unknown", findings=findings)
+    vault_format, engine_format = data.get("vault_format"), data.get("engine_format")
+    if type(vault_format) is not int or type(engine_format) is not int:
+        return state("unknown", f"{vault}: `claudron doctor --json` did not report integer vault and engine formats; "
+                     "pending migrations are unknown", findings=findings)
+    raw_pending = data.get("pending")
+    if not isinstance(raw_pending, list) or any(
+        not isinstance(p, dict) or not isinstance(p.get("id"), str) or not isinstance(p.get("title"), str)
+        for p in raw_pending
+    ):
+        return state("unknown", f"{vault}: `claudron doctor --json` returned a malformed pending list; "
+                     "pending migrations are unknown", findings=findings)
+    pending = tuple((p["id"], p["title"]) for p in raw_pending)
+    status = ("pending" if pending or any(code == "D001" for code, _ in findings)
+              else "old_format" if vault_format != engine_format else "ok")
+    return state(status, pending=pending, vault_format=vault_format, engine_format=engine_format, findings=findings)
+
+
+def vault_migration_reader(*, run: Run | None = None, timeout: float | None = None) -> MigrationReader:
+    """One memo per request; resolve the current prober when called, not at import."""
+    states: dict[str, VaultMigrationState] = {}
+
+    def read(vault: str) -> VaultMigrationState:
+        if vault not in states:
+            states[vault] = vault_migration_state(vault, run=run, timeout=timeout)
+        return states[vault]
+
+    return read

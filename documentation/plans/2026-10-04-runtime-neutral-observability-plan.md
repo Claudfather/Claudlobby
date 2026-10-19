@@ -1,10 +1,10 @@
 ---
 title: "Runtime-neutral observability and memory for mixed Claude/Codex teams — plan (epic)"
 type: plan
-status: draft
+status: in progress; goal not met
 owner: chrisrogers37
 created: 2026-10-04
-updated: 2026-10-05
+updated: 2026-10-16
 issue: "#2145"
 spec: documentation/plans/2026-08-18-observable-plane-design-v2.md
 repos: [Claudfather/Claudlobby, Claudfather/clauDNA, Claudfather/Claudron]
@@ -12,7 +12,7 @@ repos: [Claudfather/Claudlobby, Claudfather/clauDNA, Claudfather/Claudron]
 
 # Runtime-neutral observability and memory for mixed Claude/Codex teams
 
-> **Status:** draft. Nothing here is built. **Forks F1–F18 locked (F3, F4, F5, F17 amended 2026-10-05); no open
+> **Status:** in progress; the goal is not met. Current delivery and remaining gates are in §10.0b and the single run log; dated checkpoints remain historical. **Forks F1–F18 locked (F3, F4, F5, F17 amended 2026-10-05); no open
 > amendments; no holds.** F1–F17 were ratified by the operator on 2026-10-04 (F4 as amended there); on 2026-10-05 the
 > operator ruled every open item — F18 locked (a), D2 ratified, A-F3, A-F4 (with A-F4b), A-F5 and A-F17 ratified, A-F1,
 > A-F6 and A-F10 declined, A-F14 lapsed (§16 *Rulings*). The plan was fleshed out with `/claudna:forge` and
@@ -67,7 +67,7 @@ This epic does four things:
    messages, delivery evidence, liveness). clauDNA owns session segmentation, summaries and
    harvest; Claudlobby's dormant `transcript-digest.sh` retires. Claudron keeps durable reviewed
    knowledge.
-3. **One join key:** `(runtime, session_id)`. Today no door writes the plane's session slots
+3. **One join key:** `(agent_cli, session_id)`. Today no door writes the plane's session slots
    (`events.session_uid`, `communications.sender_session_uid`), so tasks cannot be joined to the
    sessions that ran them.
 4. **Runtime-specific at the edges, runtime-neutral in the middle.** Each repo gets a thin adapter
@@ -125,16 +125,16 @@ owner's hook adapter installed for the bot's runtime.
 
 ### 2.2 The join key
 
-`(runtime, session_id)`, where `session_id` is what the runtime gives its hooks and `runtime` is
+`(agent_cli, session_id)`, where `session_id` is what the runtime gives its hooks and `agent_cli` is
 `claude` or `codex`.
 
 - **Plane.** `session_uid = "sess_" + sha256(<input>)[:32]`. `<input>` is the raw id for `claude`
   (byte-identical to today's `derive_session_uid`, `claudlobby/plane/ids.py:79-89`, so existing
-  rows still join) and `"<runtime>:" + id` otherwise (F2). One implementation per language
+  rows still join) and `"<agent_cli>:" + id` otherwise (F2). One implementation per language
   (`derive_session_uid` in Python; `plane-session-start.sh`'s Claude-only bash mirror stays
   parity-tested until it retires in P3). The material rule itself is one Python function,
-  `ids.session_alias(platform_session_id, runtime="claude") -> str` (P1 Claudlobby), with
-  `derive_session_uid(id, runtime) = derive_uid("sess", session_alias(id, runtime))`; the P2 intake's
+  `ids.session_alias(platform_session_id, agent_cli="claude") -> str` (P1 Claudlobby), with
+  `derive_session_uid(id, agent_cli) = derive_uid("sess", session_alias(id, agent_cli))`; the P2 intake's
   `session` subjects call the same function, so the F2 rule is never spelled twice (ironclad cycle 1).
 - **Where it is written (F1).** The worker's task doors (`assignment accept|progress|block|return|
   complete|fail`) and `fleet reports submit` / `message send` attach it: `task`-kind events already
@@ -149,13 +149,13 @@ owner's hook adapter installed for the bot's runtime.
   `data/.plane-session`, which is bot-global and latest-writer-wins and can name another session
   (`plane-session-start.sh:17-23`). With no session-id env, the door records no uid rather than a
   possibly wrong one.
-- **clauDNA store.** Sessions keyed by `session_id` as today; `runtime` recorded at open.
+- **clauDNA store.** Sessions keyed by `session_id` as today; `agent_cli` recorded at open.
 - **Claudron.** Provenance `session:<sid>:<seg>` stays opaque to the engine
   (`claudron/engine.py:160-161`); clauDNA writes a runtime-qualified ref for non-Claude runtimes
   (F9).
 - **Telemetry.** The intake's mapping dict (F5 as amended) keys Claude's `session.id` — and, from the companion
-  on, Codex's `conversation.id` *(doc)* — onto one internal session key beside `agent.runtime`; the plane's
-  `session` subject is `ids.session_alias(id, runtime)`, so its uid is `derive_session_uid(id, runtime)`.
+  on, Codex's `conversation.id` *(doc)* — onto one internal session key beside `claudlobby.agent_cli`; the plane's
+  `session` subject is `ids.session_alias(id, agent_cli)`, so its uid is `derive_session_uid(id, agent_cli)`.
 
 ### 2.3 Runtime-specific signals are enrichment only
 
@@ -203,6 +203,7 @@ which writes the raw files; C6a confirms the direct export on the floor host (§
 - Lean: **(a)**: ids from two vendors must not collide, and Claude rows must keep joining.
 - Ratifier: operator. Status: locked (lean), 2026-10-04; reaffirmed 2026-10-05.
 - Evidence: [Locked by ratifier](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000052137)
+- 2026-10-06: the parameter and field are spelled `agent_cli` (operator); the rule is unchanged.
 
 *Forge note (2026-10-04), F2:* the one Python derivation is also what the plane's identity resolver must
 use for `session` subjects — today `identity.resolve` mints a random uid on first sight
@@ -263,8 +264,10 @@ two-field mapping, so it follows the `observability`/`isolation` parsing precede
 
 **F5 — Normalized attribute names.**
 - Options: (a) OTel GenAI semantic conventions (`gen_ai.conversation.id`, `gen_ai.tool.name`,
-  `gen_ai.usage.*`) plus `agent.runtime`; (b) house names.
+  `gen_ai.usage.*`) plus `claudlobby.agent_cli`; (b) house names.
 - Lean: **(a)**.
+- 2026-10-07: the attribute is `claudlobby.agent_cli`, not `agent.runtime`: it names what it is and sits in the
+  house namespace beside `claudlobby.fleet`/`claudlobby.bot`, since no OTel convention covers it (operator).
 - Ratifier: operator. Status: locked (lean), 2026-10-04; re-locked 2026-10-05 (A-F5).
 - Amended 2026-10-05 (A-F5 ratified by the operator): Decision: **(a) narrowed** — the GenAI semconv names are the
   intake's internal vendor→house mapping (the F5 artefact is the mapping dict: no OTTL, no semconv pin, raw files
@@ -329,6 +332,7 @@ row would render `data: {}`; (2) a `system` row cannot carry the `session_uid` s
 - Lean: **(a)**, mirroring F2.
 - Ratifier: operator. Status: locked (lean), 2026-10-04; reaffirmed 2026-10-05.
 - Evidence: [Locked by ratifier](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000052137)
+- 2026-10-06: the parameter and field are spelled `agent_cli` (operator); the rule is unchanged.
 
 *Forge note (2026-10-04), F9:* provenance is one function, `filing.evidence_ref(sid, index)`
 (`lib/claudna/session_store/filing.py:97-99`), and it feeds two Claudron channels — `source_url`
@@ -888,11 +892,12 @@ Claudron:
 - [ ] Confirm that the ops-log id regex admits Codex ids (C1). If it doesn't, widen it together with its doc-parity update.
 
 Claudlobby:
-- [ ] `BotConfig.runtime: str = "claude"`, parsed with `_select_bot_scalar` and validated by `_parse_enum(…, KNOWN_RUNTIMES)` (plan 2's form; the earlier `Literal["claude","codex"]` spelling is corrected — ironclad cycle 1).
+- [ ] `BotConfig.agent_cli: str = "claude"`, parsed with `_select_bot_scalar` and validated by `_parse_enum(…, KNOWN_AGENT_CLIS)` (plan 2's form; the earlier `Literal["claude","codex"]` spelling is corrected — ironclad cycle 1).
   - **Key name (§14 Q1):** #1997 proposes `agent_cli:` because `runtime` already names release activation,
     the Claude Code binary update and the composed-output audit. Forge's lean is to keep `runtime:` (it is
     the cross-repo vocabulary F2/F9 already use, and `host update runtime` already means the agent binary)
     and to document the distinction from `runtime/`; the operator decides before this PR opens.
+    **Answered 2026-10-06 (operator): `agent_cli:`** (§14 Q1).
   - **Mission (§14 Q2; D1 in §16, ratified 2026-10-05):** `PROJECT_MISSION.md:114` excludes "per-bot LLM provider
     abstraction", and `:5`/`:11`, `README.md:3,12`, `CLAUDE.md:3` say Claude Code. F11 decides *where* Codex
     launching lives, not *whether*; F18, locked (a) on 2026-10-05, decides that Claudlobby composes agent CLIs —
@@ -904,14 +909,14 @@ Claudlobby:
   - The validator rejects unknown values.
   - A `codex` bot fails validation with "execution adapter not shipped" until the companion lands.
   - Docs: `documentation/fleet-yaml-schema.md`, `fleet.yaml.example`, `config_explain`.
-- [ ] Composed `CLAUDLOBBY_RUNTIME` in `bot.conf`, so the doors know the runtime for `derive_session_uid(…, runtime)`. Add a row in `documentation/environment-variables.md` and a composer test.
-- [ ] `BotPayload.runtime` in the registry keyframe (`contracts.py:670-688`, `extra="forbid"`) and `registry_emit.bot_payload`.
+- [ ] Composed `CLAUDLOBBY_AGENT_CLI` in `bot.conf`, so the doors know the runtime for `derive_session_uid(…, agent_cli)`. Add a row in `documentation/environment-variables.md` and a composer test.
+- [ ] `BotPayload.agent_cli` in the registry keyframe (`contracts.py:670-688`, `extra="forbid"`) and `registry_emit.bot_payload`.
   - Decided in the per-PR plan: an **additive optional field with a `wire_additions` declaration, no
     payload-schema bump** (the `WorkstreamEvent.waiting_on` precedent, `migration_plan.py:421-424`), written
     only when it carries information — `registry_emit.py:170-173`'s rule, so a keyframe drained by an older
     daemon keeps the shape every daemon accepts. In P1 every bot is `claude`, so no keyframe carries the key
     until the companion ships on a release whose floor includes this contract.
-- [ ] `ids.session_alias(platform_session_id, runtime="claude") -> str` (the raw id for `claude`, `f"{runtime}:{id}"` otherwise — the one statement of F2's material rule) and `derive_session_uid(platform_session_id, runtime="claude") = derive_uid("sess", session_alias(…))` per F2, in Python (the doors' only derivation; the P2 intake's `session` subjects call `session_alias` too — ironclad cycle 1). The bash mirror in `plane-session-start.sh` stays Claude-only until it retires in P3 (no Codex bot can run before the companion). Extend `tests/test_plane_ids.py` with a Codex case that pins the composition.
+- [ ] `ids.session_alias(platform_session_id, agent_cli="claude") -> str` (the raw id for `claude`, `f"{agent_cli}:{id}"` otherwise — the one statement of F2's material rule) and `derive_session_uid(platform_session_id, agent_cli="claude") = derive_uid("sess", session_alias(…))` per F2, in Python (the doors' only derivation; the P2 intake's `session` subjects call `session_alias` too — ironclad cycle 1). The bash mirror in `plane-session-start.sh` stays Claude-only until it retires in P3 (no Codex bot can run before the companion). Extend `tests/test_plane_ids.py` with a Codex case that pins the composition.
 - [ ] Task and report doors attach `session_uid` per F1(c), derived from the caller's session-id env (§2.2) — plan 2
   Half B (Tasks 6–9), after Half A merges, C11 is in the run log and, if C10 leaked, Task 7b's scrub is live on
   every bot:
@@ -938,13 +943,13 @@ Claudlobby:
   ruling is item 6, `:606`; `:603` is the bracketed-note form).
 
 clauDNA:
-- [ ] `session.opened.data.runtime`: optional, top-level, `choices=("claude","codex")`; when absent it reads as `claude`.
-- [ ] `session.json` gains `runtime`: tag `claudna.session/2`, `claudna.session/1` added to `OLDER_PROJECTIONS`, and the stale-projection sweep taught about `session.json`. Mixed 0.26/0.27 **readers** then converge instead of
+- [ ] `session.opened.data.agent_cli`: optional, top-level, `choices=("claude","codex")`; when absent it reads as `claude`.
+- [ ] `session.json` gains `agent_cli`: tag `claudna.session/2`, `claudna.session/1` added to `OLDER_PROJECTIONS`, and the stale-projection sweep taught about `session.json`. Mixed 0.26/0.27 **readers** then converge instead of
   rewriting each other's file (a 0.26 reader folds a `/2` file in memory and writes nothing). A 0.26 **writer** —
   a bot not yet restarted onto 0.27, or its detached summarizer/harvest/sweep — still rebuilds the file to `/1`
-  on its own writes and 0.27 rebuilds it forward: one rebuild each, lossless (the log holds `runtime`), ending
+  on its own writes and 0.27 rebuilds it forward: one rebuild each, lossless (the log holds `agent_cli`), ending
   when the last 0.26 process restarts. The per-PR plan pins both halves with tests.
-- [ ] `claudna.export/1` items gain `runtime` (additive). Document it in spec §8.
+- [ ] `claudna.export/1` items gain `agent_cli` (additive). Document it in spec §8.
 - [ ] Harvest provenance per F9. Add a case to `tests/test_claudron_live.py`.
 - [ ] Amend spec §1.1: rule 1 (the plane no longer records every tool call after P2) and, F15(a) being ratified, rule 4 (the comparison is waived; the store's summarizer is the single owner; the coverage concern is kept by F6). The waiver cites and withdraws the frozen pre-registration (`documentation/plans/2026-09-30-summarizer-comparison-preregistration.md`, #373 — `**Status:** withdrawn 2026-10-04 — Claudlobby#2145 F15; the battery period never started; the digest retires in P3`) with a dated spec §11 item in the #203-reversal form (`:466`), per `ab-gating-rollout.md:39` (§4.2); and spec §10 `:453` gains "or Codex" (ironclad cycle 1).
 - [ ] clauDNA's mission amendment (D2, §16 — ratified 2026-10-05; the wording corrected in ironclad cycle 2), carried by plan 3's PR (Task 5 Step 2b): `PROJECT_MISSION.md:5` names the hosts clauDNA ships to and the surfaces each carries, each by an approval-gated decision (Cursor: skills and agents, no hooks, #315; Codex: the session store's hooks only, F7/F12); `:33`/`:62` say clauDNA writes only to the user's disk — the session store and, with `CLAUDNA_TELEMETRY=1`, the `skill_invocation` lines Claudosseum ingests — and never transmits; `:24` gains the F10(a) clause ("…; a Codex host's summaries run through `claude -p` under F10(a)" — A-F10 declined); F8 stays the direction for `:33`/`:62`. clauDNA's approval gate is met by the ratification (the reaffirmation comment on #2144 records D2), which the PR cites.
@@ -1016,9 +1021,9 @@ SESSION_COLUMNS = ("session_uid", "sender_session_uid")   # F17(c): observations
   still name the first.
 - **Resolution, once per invocation.** P1's `caller_session_uid()` in `operation_context` (plan 2 Task 7; bound
   by `bind_task_context`, `claudlobby/operation_context.py:109-136`, and by the message routes; the caller
-  selectors are read at `:182-210`) maps `CLAUDLOBBY_RUNTIME` (default `claude`) to that runtime's session-id
+  selectors are read at `:182-210`) maps `CLAUDLOBBY_AGENT_CLI` (default `claude`) to that runtime's session-id
   env — only `claude` → `CLAUDE_CODE_SESSION_ID` today, so `codex` (or any other runtime) → `None` until C1 names
-  Codex's variable and the companion adds the row — and returns `derive_session_uid(id, runtime=runtime)` when
+  Codex's variable and the companion adds the row — and returns `derive_session_uid(id, agent_cli=agent_cli)` when
   the id is present and `None` otherwise (§2.2: "with no session-id env, the door records no uid rather
   than a possibly wrong one"), and `TaskOperationContext` (`claudlobby/task_operations.py:46-66`) carries it.
   Canary C11 measured (2026-10-05, headless) that a subagent's shell sees the same id as the main thread's, and
@@ -1090,7 +1095,7 @@ warning, the one-week canary — then **P2-a2** (S–M) — the plane leg, landi
   - `CLAUDE_CODE_ENABLE_TELEMETRY=1`;
   - `OTEL_METRICS_EXPORTER=otlp` and `OTEL_LOGS_EXPORTER=otlp`;
   - `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>` — the `plane-otel` intake's port;
-  - `OTEL_RESOURCE_ATTRIBUTES` with `claudlobby.fleet=<fleet name>` (the alias, never a uid), `claudlobby.bot=bot:<fleet>/<bot>`, `claudlobby.content` and `agent.runtime=claude`;
+  - `OTEL_RESOURCE_ATTRIBUTES` with `claudlobby.fleet=<fleet name>` (the alias, never a uid), `claudlobby.bot=bot:<fleet>/<bot>`, `claudlobby.content` and `claudlobby.agent_cli=claude`;
   - `OTEL_LOG_TOOL_DETAILS=1` on every armed bot (§14 Q17, ruled 2026-10-05: tool, MCP, skill and subagent names come
     only with it; the intake trims the inputs it also carries), and `OTEL_LOG_USER_PROMPTS` only when `content: full`.
 
@@ -1206,7 +1211,7 @@ vendor's (v2 §11, `:534`) and stay off until the operator discloses `full` (iro
 
 **What the composer writes** (`compose_bot_conf`, `claudlobby/composer.py:977`; the block goes beside
 `# Observability`, `:1177-1225`, and follows its shell-boolean rule — `'1'`/`'0'`, never `_shq(bool)`),
-only when `bot.telemetry.enabled` and only for `runtime: claude` (a Codex bot's `[otel]` block is the
+only when `bot.telemetry.enabled` and only for `agent_cli: claude` (a Codex bot's `[otel]` block is the
 companion's, F11):
 
 ```bash
@@ -1216,7 +1221,7 @@ export OTEL_METRICS_EXPORTER=otlp
 export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>
-export OTEL_RESOURCE_ATTRIBUTES="claudlobby.fleet=<fleet>,claudlobby.bot=bot:<fleet>/<bot>,claudlobby.content=metadata,agent.runtime=claude"
+export OTEL_RESOURCE_ATTRIBUTES="claudlobby.fleet=<fleet>,claudlobby.bot=bot:<fleet>/<bot>,claudlobby.content=metadata,claudlobby.agent_cli=claude"
 # every armed bot (§14 Q17): names for MCP tools, skills and subagents; the intake drops the inputs it carries
 export OTEL_LOG_TOOL_DETAILS=1
 # content: full only — the disclosed act (design v2 §11); claudlobby.content=full above, and:
@@ -1411,9 +1416,9 @@ launched by `_runtime_scripts/plane-otel.sh` from the `system.yaml` entry — `-
   `gen_ai.conversation.id`, `gen_ai.tool.name`, `gen_ai.request.model` — used inside the intake only: no pin, no
   contract) → the plane's registry names (`session.*`, the allowlist below). Claude's `claude_code.*` metrics and
   events come first — `session.id` is the session key; `tool_name`, `model`, the `api_request` token attributes and
-  `cost_usd` follow; the runtime is `agent.runtime` from `OTEL_RESOURCE_ATTRIBUTES`. The Codex table
-  (`conversation.id`, the `codex.*` names, the `service.name == "codex_cli_rs"` runtime rule) lands at the companion,
-  from C5. Everything is keyed on `(agent.runtime, session key)`.
+  `cost_usd` follow; the agent CLI is `claudlobby.agent_cli` from `OTEL_RESOURCE_ATTRIBUTES`. The Codex table
+  (`conversation.id`, the `codex.*` names, the `service.name == "codex_cli_rs"` agent-CLI rule) lands at the companion,
+  from C5. Everything is keyed on `(claudlobby.agent_cli, session key)`.
 - **A translator, not a plane writer (P2-a2).** It posts `{"events": […]}` batches to the daemon's socket
   (`<root>/state/plane/ingest.sock`, `daemon.py:207-208`; protocol `:16-24`) through
   `daemon.send_batch(sock_path, events, timeout=5.0)` (`daemon.py:917-941`, signature `send_batch(sock_path, events,
@@ -1427,7 +1432,7 @@ launched by `_runtime_scripts/plane-otel.sh` from the `system.yaml` entry — `-
   Python CLI doors and one-shot Python ticks (`_task-recheck-tick`, `session-export`) → `emit_batch` in-process, as
   the task doors do (`task_operations.py:351`). Transport never changes semantics — the daemon runs the same
   `emit_batch` (`daemon.py:1-30`).
-- `claudlobby.content` joins `agent.runtime`, `claudlobby.fleet` and `claudlobby.bot` in the Claude bot's
+- `claudlobby.content` joins `claudlobby.agent_cli`, `claudlobby.fleet` and `claudlobby.bot` in the Claude bot's
   `OTEL_RESOURCE_ATTRIBUTES` (F4 spec); Claude Code also copies these keys onto every datapoint and event *(doc)*,
   which is what lets the intake attribute a session to its bot. For a Codex bot the companion's lean is `[otel]
   environment = "bot:<fleet>/<bot>"` (a free string stamped as `env` on every event *(doc)*), checked by C5; until
@@ -1443,10 +1448,10 @@ mapping dict, from C5.*
 | `session.tool_calls` | metric | `{calls, failures}` (delta) | count of `tool_result` events; `success == "false"` → failures | count of `codex.tool_result` events; `success == false` |
 | `session.api_requests` | metric | `{requests, errors, models}` (delta; `models` is the set of model ids seen in the window — the first reader prints `models=`, `usage_read.py:56,72`; A-F3's "the grain that reader needs") | `api_request` events; `api_error` + `api_retries_exhausted` → errors; `model` attribute → models | `codex.api_request` events; `error.message != nil` or `http.response.status_code ≥ 400` → errors |
 | `session.active_time_s` | metric, **enrichment only** (§2.3: Claude-only; load-bearing for nothing — busy % is `plane/utilization.py:1-17` from `bot.heartbeat`) | seconds (delta) | `claude_code.active_time.total` | — (absent) |
-| `api_error` | system event, `notice` | `data.data = {runtime, session_id, session_uid, model, status_code, attempt, exhausted, count}` | one per `api_error` / `api_retries_exhausted` (`exhausted: true`), ~~debounced to one event per session per 5-minute window~~ one event per session per **60 s intake window** with `count` (the window is the intake's only clock; see *Window*) | `codex.api_request` with an error |
-| `tool_failure_streak` | system event, `notice` | `data.data = {runtime, session_id, session_uid, tool, count}` | ≥ 3 consecutive `tool_result success=="false"` for one tool (`tool_name`, normalized to the intake-internal `gen_ai.tool.name`) in a session, counted **inside one 60 s window**; reset on success; no cross-window state (see *Window*) | same, from `codex.tool_result` |
+| `api_error` | system event, `notice` | `data.data = {agent_cli, session_id, session_uid, model, status_code, attempt, exhausted, count}` | one per `api_error` / `api_retries_exhausted` (`exhausted: true`), ~~debounced to one event per session per 5-minute window~~ one event per session per **60 s intake window** with `count` (the window is the intake's only clock; see *Window*) | `codex.api_request` with an error |
+| `tool_failure_streak` | system event, `notice` | `data.data = {agent_cli, session_id, session_uid, tool, count}` | ≥ 3 consecutive `tool_result success=="false"` for one tool (`tool_name`, normalized to the intake-internal `gen_ai.tool.name`) in a session, counted **inside one 60 s window**; reset on success; no cross-window state (see *Window*) | same, from `codex.tool_result` |
 
-- **Window.** Metric samples are emitted once per `(runtime, session)` per 60-second window (Claude's
+- **Window.** Metric samples are emitted once per `(agent_cli, session)` per 60-second window (Claude's
   metric export interval *(doc)*; Codex's exporter batches asynchronously), carrying the window's **delta**
   (Claude's default temporality is delta *(doc)*; the intake sums datapoints and event counts inside the
   window). "What did session X cost" is `SUM(value)` over its samples — the intake keeps no cross-window
@@ -1470,13 +1475,13 @@ mapping dict, from C5.*
   fold; the cycle-1 bucket is dropped).
 - **Subject and identity (the derive-not-mint rule).** Samples are `metric_sample` requests with
   `subject_kind = "session"` (legal everywhere: `contracts.py:86,732-733`, `samples.py:24`, the DDL
-  CHECKs) and `subject = ids.session_alias(id, runtime)` (P1 Claudlobby Half A: the raw id for `claude`,
-  `f"{runtime}:{id}"` otherwise — the one Python statement of F2's material rule; the intake never builds the
+  CHECKs) and `subject = ids.session_alias(id, agent_cli)` (P1 Claudlobby Half A: the raw id for `claude`,
+  `f"{agent_cli}:{id}"` otherwise — the one Python statement of F2's material rule; the intake never builds the
   string itself — ironclad cycle 1). Today
   `MetricSample` has only the alias form and `identity.resolve` mints a **random** uid on first sight
   (`identity.py:36`, via `ingest._batch_resolver.entity`, `ingest.py:136-149`), which would break the
   §2.2 join. P2-a2 adds one rule to `_batch_resolver.entity`: for `kind == "session"`, the uid is
-  `"sess_" + sha256(alias)[:32]` — by construction `derive_session_uid(id, runtime)` (`ids.py:79-89`
+  `"sess_" + sha256(alias)[:32]` — by construction `derive_session_uid(id, agent_cli)` (`ids.py:79-89`
   extended per F2) — inserted `INSERT OR IGNORE` with `provisional = 0` and `parent_uid` = the bot's
   actor uid when `claudlobby.bot` is present. `MetricSample` has no slot to name that parent, so P2-a2
   adds an additive `subject_parent` alias, legal only for `session` subjects and declared in
@@ -1487,7 +1492,7 @@ mapping dict, from C5.*
   (`fleet_event_request`, `claudlobby/plane/fleet_events.py`, plan 2 Task 9b, §6 P1; `source_ref = "fleet-events:…"` as the helper writes it — the
   `otel:<session_uid>:<window>` sub-grammar is dropped, `event_id` already carries the dedup key;
   `data = {"source": "plane-otel", "legacy_ts": …, "data": {…}}`), subject `actor bot:<fleet>/<bot>` when the
-  bot is known and otherwise `subject_kind="session", subject=ids.session_alias(id, runtime)` — the alias, never a
+  bot is known and otherwise `subject_kind="session", subject=ids.session_alias(id, agent_cli)` — the alias, never a
   `sess_…` value in the alias slot, which would derive a uid of a uid (~~the anchor pair `session`/`sess_…`~~;
   ironclad cycle 2), so `claudlobby event list --type api_error`
   renders them (`plane-readers.py:1155-1164,1226-1228`). `event_id` is derived (`derive_uid("ev", …)`
@@ -1538,8 +1543,9 @@ Claudlobby:
   ledger pre-read of the derived ids, emitting only the unseen) and an ack per `sid` right after its items
   land, never one batch per bot: a batch mixing a duplicate with a new item rolls back and raises
   `RuntimeError("… mixed state")` (`ingest.py:548-552,598-605`), which `emit_batch` does not spool
-  (`emit_api.py:273-280`), so a run that emitted [seg1, seg2] and died before `--ack` would wedge the bot
-  forever with the tick exiting 0 (ironclad cycle 1, critical). A deterministic refusal
+  (`emit_api.py:273-280`). The 2026-10-15 real-backend combined-batch mutant converted that refusal into
+  unexportable statuses and acknowledged the new segment, losing its normal summary; per-item emission
+  preserves the normal content on replay. A deterministic refusal
   (`ContractViolation`/`RuntimeError`) becomes a `status: skipped, skipped_reason: unexportable` item so the
   cursor advances; after N consecutive failures per bot the job emits an `export_stalled` system event at `notice`
   (the record; the registry's severity rule holds) and pages through the existing alert door,
@@ -1569,13 +1575,13 @@ clauDNA:
 - [ ] Export gains `--include-skipped`: status-only items for skipped segments (F6). Default output unchanged (#387's no-item default, preserved); spec §8 — *extending* the "Item fields and rules" table P1 writes (one author per section: rows for `segment`, `skipped` and the status items; grammar, `--since-seg`/`--limit`, ack and additive rules stay where P1 put them — ironclad cycle 1).
 - [ ] The store's own SessionStart handling (`boundaries._session_start`, not the briefing hook) writes
   `<CLAUDNA_STATE_DIR>/entrypoint.json` (F16): the absolute path of the store entrypoint for the running
-  plugin version, with the join key spelled `runtime` (not `host`) and the staleness semantics the consumer
+  plugin version, with the join key spelled `agent_cli` (not `host`) and the staleness semantics the consumer
   relies on stated on the writer side too. Spec §8; tested.
 - [ ] Freeze the activity layer per F8, with a spec note. `TestFrozenLayer`'s docstring says the freeze covers the store's hooks and kinds and not `plugin-hooks/telemetry-emit.sh` (Claudosseum's `skill_invocation` writer, its own hook entry by owner decision, phase-4 plan `:97-99`; §11).
 - [ ] ~~Child guard reads `CLAUDE_CODE_CHILD_SESSION=1` first, keeping the pid and entrypoint checks as fallbacks.~~ *(P0 fold, 2026-10-05: struck — the marker is on every hook of every session (C11), so this would ignore every event. Plan 5 Task 5 is now a pin that the guard does **not** read it.)* This step waits on P1 Claudlobby Task 7b (Half A; `tests/test_boot_policy_conformance.py`) if C10 shows a leak; the 0.28 release does not wait. If C11's hook-env leg shows a subagent's `PostToolUse` carrying the marker with the parent's `session_id`, the marker check is restricted to the lifecycle events. Update the `SETUP_GUIDE.md` env table (`:309-317`) if any documented semantics change; fix the "Claudlobby sets `CLAUDNA_TELEMETRY=1`" claims (`SETUP_GUIDE.md:704`, `telemetry.py:3`, phase-4 plan `:68` — it never has, `composer.py:1319-1330`); and close Claudlobby#1961's `CLAUDLOBBY_HOOK_CHILD` thread in spec §11.5 (never built; superseded by Claude Code's own marker, spec §4.4 `:145`, §11.5 `:464`).
 - [ ] Release clauDNA 0.28.0.
 
-#### Spec: the clauDNA export contract additions (`--include-skipped`, `runtime`, `entrypoint.json`)
+#### Spec: the clauDNA export contract additions (`--include-skipped`, `agent_cli`, `entrypoint.json`)
 
 *Added by `/claudna:forge`, 2026-10-04. Grounded in clauDNA v0.26.0 (`71f983d`). These are spec §8
 contract changes (Claudron register rule R3 applies: Claudlobby conforms to this text).*
@@ -1584,7 +1590,7 @@ contract changes (Claudron register rule R3 applies: Claudlobby conforms to this
 `{"sid": str, "seg": int, "session": {...}, "summary": {...}}` (`export.py:124-128`); `session` is the
 `session.json` subset `SESSION_FIELDS = ("sid", "status", "opened_at", "closed_at", "close_reason",
 "chain_id", "parent_sid", "actor", "origin")` (`:46-47`), taken from the first `session.opened`
-(`project.py:364-382`). P1 adds `"runtime"` to `SESSION_FIELDS` once `session.json` carries it
+(`project.py:364-382`). P1 adds `"agent_cli"` to `SESSION_FIELDS` once `session.json` carries it
 (`claudna.session/2`); absent means `claude`. The envelope keeps `schema: "claudna.export/1"` — both
 changes are additive and a consumer that ignores unknown keys is unaffected.
 
@@ -1617,7 +1623,7 @@ which bots turn off (`CLAUDNA_SESSION_BRIEFING=0`, `session-start.sh:26-29`) and
  "plugin_root": "/abs/path/to/plugin",
  "plugin_version": "0.28.0",
  "python": "/usr/bin/python3",
- "runtime": "claude",
+ "agent_cli": "claude",
  "written_at": "2026-10-04T12:00:00.000Z"}
 ```
 
@@ -1627,11 +1633,11 @@ which bots turn off (`CLAUDNA_SESSION_BRIEFING=0`, `session-start.sh:26-29`) and
   execs as `[sys.executable, "-S", str(package), …]` (`boundaries.py:174-177`); `plugin_root` is
   `package.parents[2]` (cf. `__main__.py:16`); `plugin_version` is read from
   `<plugin_root>/.claude-plugin/plugin.json` (the first time `lib/` reads that file; a missing or
-  unparsable manifest leaves the key `null`, never an error); `runtime` is the selected host's name — a host's
-  name *is* its runtime value, so the contract surface spells the join key the way `session.opened.runtime` and
+  unparsable manifest leaves the key `null`, never an error); `agent_cli` is the selected host's name — a host's
+  name *is* its runtime value, so the contract surface spells the join key the way `session.opened.agent_cli` and
   the export item do ("host" stays the adapter-module vocabulary; for Codex, `actor.entrypoint` carries the
   launch mode C1 exposes, or `null`); `written_at` is `ev.now_ts()`'s millisecond form (`events.py:218-221`).
-  *(Corrected, ironclad cycle 1: `"host"` → `"runtime"`; `0.27.0` → `0.28.0`, the P3 clauDNA release.)*
+  *(Corrected, ironclad cycle 1: `"host"` → `"runtime"`, spelled `"agent_cli"` since 2026-10-06; `0.27.0` → `0.28.0`, the P3 clauDNA release.)*
 - The consumer invocation is `python3 -S <entrypoint> export --consumer <name> [--include-skipped] --json`
   and `… --ack --sid <sid> --through <seg>`. A consumer that finds `entrypoint` missing on disk treats the
   record as **stale** (a plugin version replaced underneath a running session, `reload-fleet.sh`) and
@@ -1706,7 +1712,7 @@ ironclad cycle 1):
 ```json
 {"schema": "session_summary/1",
  "status": "ok",                                 "skipped_reason": null,
- "runtime": "claude",                            "session_id": "<raw id>",   "session_uid": "sess_<32 hex>",
+ "agent_cli": "claude",                            "session_id": "<raw id>",   "session_uid": "sess_<32 hex>",
  "seg": 3,                                       "sealed_at": "…",           "sealed_by": "precompact",
  "opened_at": "…",  "closed_at": "…",  "close_reason": "clear",   "actor_kind": "bot",
  "turns": 41,  "transcript_bytes": 183004,
@@ -1719,14 +1725,14 @@ ironclad cycle 1):
 ```
 
 Sources (clauDNA): `status`/`skipped_reason` from the export item (`summary` present → `ok`; a status item
-→ `skipped` with its `skipped.reason`, see the export-contract spec); `runtime`, `session_id` (= `sid`),
+→ `skipped` with its `skipped.reason`, see the export-contract spec); `agent_cli`, `session_id` (= `sid`),
 `opened_at`, `closed_at`, `close_reason` and `actor_kind` (`actor.kind`) from the item's `session` subset
-(`export.py:46-47`); `session_uid = derive_session_uid(session_id, runtime)` computed by the job (F2);
+(`export.py:46-47`); `session_uid = derive_session_uid(session_id, agent_cli)` computed by the job (F2);
 `turns` from `summary.input.turns`, `transcript_bytes = input.range.end - input.range.start`
 (`claudna.segment-summary/1`: `input {transcript_path, range{start,end}, sha256, turns}`);
 `sealed_at`/`sealed_by` and `prompts`/`skills`/`failures`/`interrupts` from the segment projection
 (`claudna.segment/2` `counts`) — **the export item does not carry them today**; P3's clauDNA PR adds a
-`segment: {sealed_at, sealed_by, counts}` object to the item (additive, like `runtime`); `journey`,
+`segment: {sealed_at, sealed_by, counts}` object to the item (additive, like `agent_cli`); `journey`,
 `blocks` (count and per-kind tally only — the block text is Claudron's through harvest, never the plane's),
 `procedures` (count) and `producer` from the summary document; `blocks.kinds` is
 `Counter(b["home"] for b in summary["blocks"])` — the block type key is `home`. ~~A skipped item carries the
@@ -1742,13 +1748,13 @@ transcript pointer to the `segment` object and computed the volume fields from i
 | Digest field the consumers read | `session_summary` field |
 |---|---|
 | `status` (`ok · skipped · error`) | `status` (`ok · skipped`; a summarizer that gave up is `skipped` with `skipped_reason: gave_up`; an item the plane deterministically refused is `skipped` with `skipped_reason: unexportable`, the job's own reason — there is no separate `error` class) |
-| `session_id`, `bot`, `fleet`, `ts` | `session_id` (+ `session_uid`, `runtime`); `bot`/`fleet`/`ts` on the row as before |
+| `session_id`, `bot`, `fleet`, `ts` | `session_id` (+ `session_uid`, `agent_cli`); `bot`/`fleet`/`ts` on the row as before |
 | `turns`, `transcript_bytes` | same names — `null` on a skipped row |
 | `tool_calls` | **gone** (clauDNA records no generic tool-call event, spec §1.1 rule 1); `failures` is the tool-failure count; per-session tool totals are the `session.tool_calls` metric samples P2-a2 writes |
 | `digest_chars`, `model` | `producer.duration_ms` / `producer.cost_usd` / `producer.model` |
 | `context` | `journey.title` + `journey.intent` |
 | `worked` | `journey.done` (+ `journey.outcome`) |
-| `failed` | `journey.outcome` when not `completed`, with `failures` |
+| `failed` | `journey.outcome` when not `shipped`, with `failures` |
 | `would_change` | `journey.next` (the nearest field; the digest's "what the operator would change" has no direct successor — the monitor's prompt asks for it from `next` + `in_progress`) |
 | `reusable` | `blocks.count` / `blocks.kinds` (what harvest will offer Claudron) |
 | `error` | `skipped_reason` |
@@ -1762,7 +1768,7 @@ not include `fleet-monitoring.md`; what binds the protocol rewrite to the regist
 positive control at `:323`, so both land in one PR (P3 Claudlobby). The monitor also gains the stop rule for
 the window P3 actually produces (ironclad cycle 1): `session-export` ships on, so week one is one status row per
 sealed segment with `journey: null` unless a bot is armed — `fleet-digest` stops on "every row `skipped` →
-COVERAGE: summaries armed on 0 of N bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
+COVERAGE: summaries available on 0 of N represented bots" (mirrored in `fleet-observe`, reconciled with its `:47-49`;
 `fleet-monitoring.md:39-41` "Nothing watches for sessions ending" joins the edit range). The per-session tool
 totals: P2-a2 writes the `session.tool_calls` samples, but the first reader it repoints is `usage_read`/`brief_read`
 (`session.tokens`, `session.api_requests`; A-F3), and no P2 PR grants `fleet-digest` the `plane samples` door
@@ -1779,7 +1785,9 @@ which one item collides and another is new (`RuntimeError("… mixed state")`, `
 `emit_batch` does not spool that (`emit_api.py:273-280`), so ~~one batch per bot per run~~ becomes **one
 `emit_batch` per item** (or a ledger pre-read of the derived ids, emitting only the unseen) with an ack per `sid`
 as its items land; the test "emit seg1 without acking, seal seg2, run → seg2 `committed`, seg1 `duplicate`, both
-acked" pins it. A deterministic refusal becomes a `skipped_reason: unexportable` status item so the cursor
+acked" pins it. A real-backend combined-batch mutation instead loses the normal new summary and lands
+unexportable fallbacks before advancing the cursor; the invariant is content preservation, not a claim that
+every refusal wedges. A deterministic refusal becomes a `skipped_reason: unexportable` status item so the cursor
 advances; N consecutive failures per bot raise `export_stalled`; `doctor` reports per-bot cursor age. Emits go
 through `emit_batch` in-process (`claudlobby/plane/emit_api.py:149-153`) — `session-export` is a one-shot Python
 tick under the transport rule stated once in the §6 P2 intake spec (ironclad cycle 2) —
@@ -1848,7 +1856,7 @@ activity payload fields (`activity.py:26-29,93-133`), the `"claude"` process-nam
 the Claude JSONL reader (`transcript.py:50-95`, including the byte prefilter `:86-88`), and the
 `source`/`reason`/`trigger` vocabularies (`events.py:97,117,142`). The summarizer runner (`summarize.py:73-84`)
 stays as it is (F10) — (a) covers the **model call**; the transcript **reader** is per runtime and is selected
-*inside the detached worker* by the session's recorded `runtime` (`SessionFacts.runtime`, which the worker folds from
+*inside the detached worker* by the session's recorded `agent_cli` (`SessionFacts.agent_cli`, which the worker folds from
 the lifecycle log, `summarize.py:169`; P1 adds the field — ~~`session.json.runtime`~~, ironclad cycle 2): the summarizer
 (`summarize.py:184`, `read_range`'s only caller), harvest's `resummarize` and the sweep's `close_abandoned` have
 no `--host`, and `_seal` reads no transcript (it records `file_size`, `boundaries.py:247-254`). A Codex-only
@@ -1893,14 +1901,14 @@ class Normalized:
 
 @dataclass(frozen=True)
 class Host:
-    name: str                                                    # "claude" | "codex" — the session.opened.runtime value (P1)
+    name: str                                                    # "claude" | "codex" — the session.opened.agent_cli value (P1)
     events: Mapping[str, Optional[str]]                          # host event name → store event, or None = ignore
     normalize: Callable[[str, dict], Normalized]                 # (host event, raw payload) → Normalized
     owner_pid: Callable[[Mapping[str, str]], Optional[int]]      # env → pid of the owning agent process (F13: stored as claude_pid)
     walk_matches: Callable[[str], bool]                          # process-name predicate for lineage.claude_pid's fallback walk
     actor: Callable[[Mapping[str, str]], dict]                   # env → actor; must satisfy actor_or_null (session.schema.json:55-67)
     inherited: Callable[[str, Normalized, "SessionFacts", Mapping[str, str]], bool]   # the nested-child guard
-    read_range: Callable[[Path, int, Optional[int]], list]       # transcript reader (path, start, end) → list[Turn]; consumed by the detached worker (summarize.py:184), which selects HOSTS[SessionFacts.runtime] — never by the hook path
+    read_range: Callable[[Path, int, Optional[int]], list]       # transcript reader (path, start, end) → list[Turn]; consumed by the detached worker (summarize.py:184), which selects HOSTS[SessionFacts.agent_cli] — never by the hook path
 
 HOST = Host(name="claude", events={e: e for e in ("SessionStart", "PreCompact", "SessionEnd",
             "UserPromptSubmit", "PostToolUse", "PostToolUseFailure")}, ...)
@@ -1918,12 +1926,12 @@ host=host_claude.HOST, spawn=None, find_pid=None)`:
 3. `host.inherited(store_event, n, facts, env)` → `"ignored: nested child …"` (unchanged text).
 4. On an opening `SessionStart`: `handle.open_session(n.source, actor=host.actor(env),
    origin=origin_from_cwd(n.cwd or os.getcwd()), transcript_path=n.transcript_path,
-   claude_pid=host.owner_pid(env), harvest=harvest_choice(env), runtime=host.name, parent_sid=…,
-   chain_id=…)` (`store.py:206-216`; `runtime` is P1's additive kwarg). The clear-link `find_pid` default
+   claude_pid=host.owner_pid(env), harvest=harvest_choice(env), agent_cli=host.name, parent_sid=…,
+   chain_id=…)` (`store.py:206-216`; `agent_cli` is P1's additive kwarg). The clear-link `find_pid` default
    (`:343`) becomes `lambda: host.owner_pid(env) or lineage.claude_pid(matches=host.walk_matches)`.
 5. `_seal` (`:247-254`) ~~reads the transcript through `host.read_range`~~ records only the transcript's size
    (`file_size(transcript_path)`) — it reads nothing; `host.read_range` is consumed by the detached worker, which
-   selects `HOSTS[runtime].read_range` from the session's recorded `runtime` for the summarizer, `resummarize`
+   selects `HOSTS[agent_cli].read_range` from the session's recorded `agent_cli` for the summarizer, `resummarize`
    and `close_abandoned` (corrected, ironclad cycle 1; the field stays on `Host`, the consumer is the worker).
    `_record_activity` (`:257-275`) passes `n.activity` to `activity.event_for`.
 
@@ -1932,7 +1940,7 @@ link (`links/<pid>.json`, `lineage.py:26-27,73-97`) and the abandoned-session sw
 `os.kill(pid, 0)`). Whatever C2 finds for Codex must serve all three.
 
 **Selection (C9): by the hook command, never by sniffing** — for the hook path; the detached worker dispatches
-on `SessionFacts.runtime` (above; ironclad cycle 2). "Host" is clauDNA's adapter-module vocabulary, and a host's name is its
+on `SessionFacts.agent_cli` (above; ironclad cycle 2). "Host" is clauDNA's adapter-module vocabulary, and a host's name is its
 runtime value; Claudron's `--host codex` would overload a term D009/D010 already use for machine/settings file,
 so the P4 Claudron plan picks `--front-end codex` or `--agent codex`, or documents the overload (§5.1).
 
@@ -1956,7 +1964,7 @@ documentation until C1–C4/C8 record it:
 | `walk_matches` | `lambda name: "codex" in name` | C2 |
 | `actor` | `kind` is `bot` when `BOT_ID` is set, `interactive` otherwise (`headless` only if C1/C2 expose a non-interactive signal, e.g. `codex exec`); `entrypoint` is `"codex"`; `fleet`/`bot_id`/`bot_name`/`model` from the same Claudlobby variables `actor_from_env` reads (`boundaries.py:61-72`). All six keys present (`actor_or_null`). | C1, C2 |
 | `inherited` | the owner-pid check and the fresh-start check (`startup\|clear` naming a known session); the entrypoint check is moot (one entrypoint) | C1, C2 |
-| `read_range` | the rollout reader over the C4 record types, replacing both `turn_of` and the byte prefilter; selected in the detached worker by `SessionFacts.runtime` | C4 |
+| `read_range` | the rollout reader over the C4 record types, replacing both `turn_of` and the byte prefilter; selected in the detached worker by `SessionFacts.agent_cli` | C4 |
 
 A Codex session id must match `paths._SID_RE` (`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`); C1 checks the format.
 
@@ -1981,7 +1989,7 @@ adapters (P4) in the same C1 captures, per its "live capture, never the producer
   - P2-b: the harness marker scenarios plus 48 h of unchanged keepalive and fleet-pulse verdicts on the canary
     root (C6a's 24 h overlap sample is a separate, informational measurement); P2-a2: the intake's straddle test;
     `session-export`'s seg1-unacked test (§6 P3).
-- Contract tests: clauDNA's live suite covers runtime-qualified provenance and export `runtime`/skipped items, and Claudron's consumers job runs it.
+- Contract tests: clauDNA's live suite covers runtime-qualified provenance and export `agent_cli`/skipped items, and Claudron's consumers job runs it.
 - Fixtures: a recorded Codex hook payload per event (C1) and a Codex rollout excerpt (C4), both redacted;
   one Claude OTLP/JSON window from C6a for the intake — the Codex window arrives with C5 at the companion (the
   deferred Codex leg, plan 4; ironclad cycle 2). Every externally produced shape is grounded in
@@ -2075,6 +2083,70 @@ as soon as an install exists, in parallel with orders 2–8; nothing in them blo
 parallel-optional to it — they pay for a Claude-only fleet (§1) and neither blocks P4. The calendar gates the size
 table does not price are listed in §9.
 
+### 10.0 Status (2026-10-13)
+
+Orders 1–6 are merged and live on the floor host. Nothing is in flight. Order 10 has a ready runbook; 7–9, 11
+and 12 are not started. The run log has the evidence for each done item.
+
+| Order | Item | Status |
+|---|---|---|
+| 1 | P0, Claude-only batch (C6a, C10, C11) | Done (run log 2026-10-05). C10 leaked; Half A carries the scrub. |
+| 2 | P2-b, marker-only `bot-vitals.sh` | Merged (#2173), activated on the floor host (run log 2026-10-06). |
+| 3 | Per-bot `CLAUDNA_STATE_DIR` | Merged (#2172), activated on the floor host with the old root's stranded sessions sealed (run log 2026-10-06). |
+| 4 | Claudron boundary spec | Merged (Claudron#224). Register row 10 flipped to shipped (Claudron#226). |
+| 5 | P1 Claudlobby Half A | Merged (#2203). Activated on the floor host 2026-10-11 after two watchdog resets, recovered by `host repair-after-reset` (#2312). Rollout check passed. |
+| 6 | clauDNA runtime-at-open | Merged (clauDNA#407), released as v0.27.0 (clauDNA#408). Live on every bot. |
+| 7 | P2-a1 ∥ (P3 clauDNA 0.28 → P3 Claudlobby 6b) | Not started. Plans 4, 5, 6. |
+| 8 | P2-a2 ∥ P3 Claudlobby 6a | Not started. Plans 4, 6. Waits on order 7 (P2-a2 also on P2-a1's canary week). |
+| 9 | P1 Claudlobby Half B | Not started. Its gates are met: Half A merged, C11 in the run log, the C10 scrub live on every bot since 2026-10-11. Plan 2. |
+| 10 | P0, Codex batch (C1–C5, C7–C9) | Not run. `documentation/runbooks/runtime-neutral-codex-canary-batch.md`; needs a machine with the Codex CLI and its login. |
+| 11 | P4 per repo | Blocked on order 10. Its plans are written once the canary answers are in the run log (§10.1). |
+| 12 | Companions (#2149, clauDNA#404) | Blocked on order 11. |
+
+Register rows still **planned** in the boundary spec: row 11 (P3 clauDNA Task 9 opens the Claudron PR that flips
+it) and row 12 (P4 Claudron flips it).
+
+### 10.0a Continuation status (2026-10-15)
+
+The 2026-10-13 table above is historical. Current verification and the full remaining
+work list live in the [single sprint ledger](2026-10-04-runtime-neutral-observability-run-log.md#2026-10-15--build-all-sprint-ledger).
+
+- **7b integrated:** clauDNA#411 and #412 released v0.28.0; Claudron#228 marks register row 11 shipped.
+- **7c integrated:** summary consumer [#2361](https://github.com/Claudfather/Claudlobby/pull/2361) merged
+  `b4ae5dae` after independent simplify/code/verification convergence, full before/after comparison,
+  native composed-producer/cache observations, direct harness and Linux CI. Production activation is separate.
+- **7a under verification:** telemetry rebased onto that actual merged tree. Receiver/sink review and local
+  canary passed; full-suite parser-isolation and privacy-fixture findings are being closed before a fresh final run.
+  The seven-day independent floor-host/RC canary remains a pre-merge gate.
+- **8b started:** a fresh 6a branch from `b4ae5dae` owns its before-leg, Claudron v0.9.0 pin and migration warning.
+  Its real scratch-vault migration and harvest canary are still required. **8a** waits for 7a's week and token ratios.
+- **9 remains draft:** [#2360](https://github.com/Claudfather/Claudlobby/pull/2360) passed local full comparison,
+  four simplify lenses, native protocol checks and all reported CI. Literal `/clear`, native lifecycle and both 48-hour windows remain.
+- **10–12 remain dependent:** isolated Codex authentication choice and real canary measurements precede P4 plans,
+  owner adapters and the two execution/behavior companions. No authenticated Codex measurement is claimed.
+
+### 10.0b Closeout continuation (2026-10-16 UTC)
+
+**Goal condition: NOT MET.** Orders 7b, 7c and 8b (6a) are delivered. Corrected 6a passed its terminal full/harness, native and CI gates and merged normally. Frozen telemetry and Half B full suites and local canaries passed. Telemetry’s later 20-second startup correction also failed on macOS before readiness; diagnostic-only head `9d998d94` passed affected checks and awaits fresh CI. Half B literal clear is now independently verified; both remain draft because required live and timed observations have not occurred. Codex measurements and independent report review have converged under explicit private-auth authority. P4 and execution/behavior companions remain open. This section supersedes current-state claims in earlier dated checkpoints, which remain as history. The [single run log](2026-10-04-runtime-neutral-observability-run-log.md#2026-10-16-utc--corrected-candidate-closeout) carries the terminal evidence and [owner queue](2026-10-04-runtime-neutral-observability-run-log.md#owner-decision-and-external-evidence-queue).
+
+| Order | Phase / plan | Current disposition | Evidence / remaining gate | Reachability |
+|---|---|---|---|---|
+| 7b | P3 clauDNA export / plan 5 | DONE: implementation, releases and register integrated | [clauDNA #411](https://github.com/Claudfather/clauDNA/pull/411), [#412](https://github.com/Claudfather/clauDNA/pull/412), strict-reader [#413](https://github.com/Claudfather/clauDNA/pull/413), release [#414](https://github.com/Claudfather/clauDNA/pull/414); [v0.28.1](https://github.com/Claudfather/clauDNA/releases/tag/v0.28.1) published; [Claudron #228](https://github.com/Claudfather/Claudron/pull/228) marks row 11 shipped | Published owner contract; production host update/restart is separate. |
+| 7c | P3 summary consumer / plan 6, 6b | DONE: reviewed, verified and merged | [#2361](https://github.com/Claudfather/Claudlobby/pull/2361), `b4ae5dae`; recorded full comparison, direct harness, CI and native protocol/cache evidence | Merged; no production activation claimed. |
+| 8b | P3 Claudron pin / plan 6, 6a | DONE: reviewed, verified and merged | [#2363](https://github.com/Claudfather/Claudlobby/pull/2363), reviewed `15ea28db`, normal merge `e7a14ea1`; full 9595→9667 passed, both 78 skipped / 2 warnings / exit 0; direct harness 359/0 both; all CI green before merge; native migration/harvest sample passed | Merged with reviewed ancestry and identical tree; production host migration/activation remains separate. |
+| 7a | P2-a1 telemetry intake / plan 4, Tasks 3–8 | BLOCKED: startup diagnostic CI and seven-day observation pending | Draft [#2364](https://github.com/Claudfather/Claudlobby/pull/2364), current `9d998d94`; affected 46 passed, exit 0. Prior `56a59f9f` macOS CI failed before port readiness (2 failed / 9753 passed / 77 skipped / 1 deselected / exit 1). Frozen `e644d07d` full comparison and intake canary remain historical exact-head evidence | The test-only diagnostic preserves 20s/5s/3s budgets; production cause is unproven. Complete floor-host RC/Telegram C6b week still required before merge. |
+| 8a | P2-a2 Plane rows/readers / plan 4, Task 9 | BLOCKED: dependent phase not implemented | Requires 7a week and measured token/coverage ratios, then its own implementation, checks and 48-hour observation | No Plane telemetry ingestion/readers delivered by 7a. |
+| 9 | P1 Half B session joins / plan 2 | BLOCKED: literal clear passed; real native lifecycle and two timed windows absent | Draft [#2360](https://github.com/Claudfather/Claudlobby/pull/2360), unchanged `5f979881`; full 9667→9698 passed, both 78 skipped / 2 warnings / exit 0; direct harness 359/0; five native protocol arms and separate literal `/clear` replay passed; independent clear review NO FINDINGS | Real service/tmux/supervisor acceptance and full 48-hour BEFORE and AFTER remain. |
+| 10 | P0 Codex batch / existing runbook | DONE: actual native measurements and independent evidence review converged | Codex CLI `0.162.0-alpha.17.2`; authorized private auth-only reuse; reviewed C1–C5/C7–C9 report and sanitized actual fixtures; Claude C3 separately reviewed NO FINDINGS; protected originals unchanged and owned jobs terminal | Measured answers unlock P4; no fleet activation or mixed-runtime acceptance claimed. |
+| 11 | P4 owner adapters / measured per-repo plans | IN PROGRESS: measured phase plans being prepared | C1 now records actual native stdin; clauDNA and Claudron depend on their additional observed answers and independent evidence review | No adapter parity or release claimed yet; composition remains in the companions. |
+| 12 | Execution and behavior companions | BLOCKED: requires P4 and mixed-runtime acceptance | [Claudlobby #2149](https://github.com/Claudfather/Claudlobby/issues/2149), [clauDNA #404](https://github.com/Claudfather/clauDNA/issues/404); then the complete mixed-runtime week | Mixed-runtime goal is not met. |
+
+**Active topology:** corrected 6a [#2363](https://github.com/Claudfather/Claudlobby/pull/2363) merged normally as `e7a14ea1d158eb272566f81a3e2c2ad1bb459ae7` on 2026-10-16 at 01:48:40 UTC. Its parents are actual main `b4ae5dae` and reviewed `15ea28db`; candidate/merge trees both equal `06daa0c1797ae80f815c1eaa36c28d620a36f23b`. All exact-head CI, including both supported platforms, completed successfully before merge. The retarget checkpoint used telemetry `e644d07d` and Half B `5f979881`, both containing the correction through normal merges. Telemetry now adds test-only readiness commit `56a59f9f`; all runtime files are unchanged. Their unchanged-head retarget/base/scope and current CI readbacks belong in the [integration evidence](2026-10-04-runtime-neutral-observability-run-log.md#integration-and-invariant-evidence); no history rewrite is needed. Other delivered PRs used squash merges. Retargeting does not satisfy a child's mandatory live or timed gate.
+
+**Post-6a invariants:** 39 Lobby identity/receipt/instruction checks, 197 released-owner activity/export/hook checks and 914 owner runtime checks passed, all exit 0 with empty failed/error names. Before/after source checks preserve all 1357 Lobby and 401 owner files/modes. Owner imports resolve to released v0.28.1 under Python 3.12.13; this is not a fresh Python 3.9 floor claim.
+
+**Smallest remaining actions:** obtain scoped independent floor-host/channel authority and observe the complete seven-day C6b window; complete Half B's literal clear, real lifecycle and both full 48-hour windows; resolve isolated Codex authentication and run its documented measurements. Measured results then ground Task 9, P4 and companion implementation. No timed gate or unsupported feature is waived. Production delivery/migration/activation remains an operator action against a concrete staged host plan; the run log includes the manual command templates.
+
 ### 10.1 Per-PR plans (forge, 2026-10-04)
 
 One plan per PR beside this file, each with `epic:` pointing here. P4 and the companions get theirs when
@@ -2089,6 +2161,8 @@ One plan per PR beside this file, each with `epic:` pointing here. P4 and the co
 | 5 | 7 | `2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md` | clauDNA | M (nearer S–M); Task 1's `segment` object is `{sealed_at, sealed_by, counts}` (A-F6 declined) |
 | 6 | 3 (Task 1 Steps 1–2), 7 (6b), 8 (6a) | `2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md` | Claudlobby | ~~M → L (eight tasks; seam after the Claudron pin)~~ **M → L** for the reason plan 6 now gives — Task 4's wedge-proofing (ironclad cycle 2) — in three PRs: order 3 (Task 1 Steps 1–2; Step 2 the operator-run canary-root check and F14(a)'s seal), 6b (Task 1 Steps 3–11, Tasks 2, 4–7, 7c and 8; Task 7's runbook document ships in 6b and the operator runs it after 6b), then 6a S (Task 3, the pin bump) |
 
+**Measured P4 plan:** [Lobby hook conformance](2026-10-16-runtime-neutral-p4-lobby-hook-conformance.md) (S; C1 recorded 2026-10-16). Owner plans follow their own measured dependencies.
+
 Plan 2 splits at its marked seam: Half A carries the vocabulary, the derivation, the F18 mission text, Task 7b and
 Task 9b — which P3 clauDNA's Task 5, P2-a1 and P3 Claudlobby consume — and Half B the doors (F1(c)) with the
 null-normalized receipt projection (F17(c)). No release-level split is required (no receipt changes format), so
@@ -2098,7 +2172,7 @@ are ratified (2026-10-05) and ride two PRs — Half A carries F18's, plan 3 carr
 cites the rulings and waits on neither, and plan 1 writes the Codex names plainly. *(Ironclad cycle 1:)* the per-bot `CLAUDNA_STATE_DIR` one-liner (§10 order 3) needs no
 plan file — one composer line, one test, a CHANGELOG line — and plan 6's Task 1 is its spec: Step 1 is that PR,
 Step 2 its activation, which carries F14(a)'s seal of the old root's bot sessions (§16 A-F14; ironclad cycle 2), and
-6b's share of Task 1 verifies that the line landed. Plans 4 and 6 edit the same files (`test_event_type_registry.py`, `fleet-observability.md`, the switch
+6b's share of Task 1 verifies that the line landed. **Topology update (2026-10-16): §10.0b governs the already published 6a/telemetry/Half B stack; the design-era rebase instruction below remains historical and is not an instruction to rewrite those branches.** Plans 4 and 6 edit the same files (`test_event_type_registry.py`, `fleet-observability.md`, the switch
 tables, `system.yaml`, `observable-plane.md`, both `CLAUDE.md`/`AGENTS.md` pairs) with no ordering between P2
 and P3: whichever merges second rebases, regenerates the three switch tables and `system.yaml.example`,
 re-copies both `AGENTS.md`, and re-runs `tests/test_instruction_budget.py`, `tests/test_switches.py` and
@@ -2115,7 +2189,7 @@ implements (the lock comments on #2144) and names the mission text it carries, i
 - Don't put an OTel SDK in Claudron (single dependency) or clauDNA (stdlib-only `lib/`). Don't add protobuf to Claudlobby's intake; use JSON encoding.
 - Don't build a spawn-lineage tree, and don't depend on any §2.3 signal for fleet behavior.
 - Don't stop touching `.last-tool-call`, and don't remove `tool_call` from the prunable set.
-- Don't nest `runtime` inside clauDNA's `actor`.
+- Don't nest `agent_cli` inside clauDNA's `actor`.
 - Don't take a worker's session uid from the bot-global `.plane-session`; derive it from the caller's own session id with the one Python implementation.
 - Don't compose or validate a Codex bot before the companion epic.
 - Don't store raw prompts or tool bodies in telemetry by default.
@@ -2152,7 +2226,10 @@ An adversarial review of the first draft corrected its evidence and sequencing.
 
 ## 13. Disposition
 
-Draft. Next:
+In progress; goal not met. Current delivery and blockers are in §10.0b and the single run log. The original planning checklist below remains historical.
+
+Original planning sequence:
+
 1. ~~The operator ratifies F1–F17.~~ Done, 2026-10-04.
 2. ~~`/claudna:forge`~~ done 2026-10-04 (specs in §6, per-PR plans in §10.1, open questions in §14).
    ~~`/claudna:ironclad` next.~~ Cycle 1 done 2026-10-05 (§15, §16), ~~then cycle 2 or the fold closes~~. Cycle 2
@@ -2181,7 +2258,10 @@ answered are marked so (§16 *Rulings*).
 1. **The `fleet.yaml` key for the runtime.** `runtime:` (this plan) or `agent_cli:` (#1997, which documents the
    naming clash). Lean: `runtime:`, documented against `runtime/`; the cross-repo vocabulary is already in F2/F9.
    Whichever is chosen, the one-mapping-sentence approach is right; `CLAUDLOBBY_RUNTIME` joins a crowded
-   namespace (extension-check).
+   namespace (extension-check). **Answered 2026-10-06 (operator): `agent_cli:`**, and the same day the full
+   rename, no mapping sentence: the fleet.yaml key, `BotConfig.agent_cli`, `KNOWN_AGENT_CLIS`,
+   `CLAUDLOBBY_AGENT_CLI`, `BotPayload.agent_cli`, `session_alias`/`derive_session_uid(…, agent_cli=)` and the
+   `(agent_cli, session_id)` join key all say `agent_cli`; the uid material is unchanged (plan 2 Task 1 Q1).
 2. **`PROJECT_MISSION.md:114` — and `:5`/`:11`, `README.md:3,12`, `CLAUDE.md:3`.** They exclude per-bot provider
    abstraction and say Claude Code; no fork in F1–F17 decides that Claudlobby composes Codex bots (F11 decides
    *where* Codex launching lives, not *whether*). ~~Amend it in the P1 Claudlobby PR, or record that F11's
