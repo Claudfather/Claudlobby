@@ -11,7 +11,7 @@ Re-authenticate the account Claude Code runs as, without disturbing a single run
 
 **Two facts that change how urgent this is. State them to the human before they start rearranging their evening.**
 
-- **There is no downtime window.** The existing credential stays valid until the new code lands. Bots keep working throughout, and if the human never finishes the flow, nothing breaks — you are back where you started. Nobody needs to stop work for this.
+- **There is no downtime window.** The existing credential stays valid until the new code lands. Bots keep working throughout, and if the human never finishes the flow, nothing breaks — you are back where you started. Nobody needs to stop work for this. The one thing an account change does drop is Remote Control, in every running session; Step 9 restores it.
 - **The login flow does not consume model quota.** An exhausted account can still be re-authenticated. What an exhausted account prevents is *the operator being able to talk anyone through it* — so if quota is gone, expect the human to be driving from a phone with no working assistant on the other end. Write your messages accordingly: complete, self-contained, one step at a time.
 
 ## When this does and does not help
@@ -87,23 +87,29 @@ If the credential is shared, say so explicitly to the human before proceeding, w
 
 ### 3. Confirm which account, and why it matters
 
-Tell the human, in one message: the account you found in Step 1, the account they intend to end on, and the consequence of each.
+Tell the human, in one message: the account you found in Step 1, the account they intend to end on, the plan each carries (Max or Team, for example; Step 1's `subscriptionType` gives the current one), and the consequence of each. Name both plans, because usage limits differ by plan.
 
 - **Same account** → the credential is refreshed. **Quota is not.** If they are relogging to escape a weekly limit, this will not do it, and this is the moment to say so — not after.
-- **Different account** → fresh quota, **and** billing plus identity move for every bot found in Step 2.
+- **Different account** → fresh quota under the limits of that account's plan, **and** billing plus identity move for every bot found in Step 2.
 
 Get an explicit answer. Do not infer it from the fact that they asked.
 
 ### 4. Run it in a throwaway tmux server
 
 ```bash
+# The browsers running now, for Step 10 to compare against. bash -c: lib-common.sh
+# is bash, and a zsh tool shell does not load it (#1549). Linux only; macOS prints nothing.
+bash -c '. "$CLAUDLOBBY_NATIVE_DIR/lib-common.sh" >/dev/null 2>&1; python3 "$CLAUDLOBBY_NATIVE_DIR/browser-scan.py" --pattern "${BROWSER_EXE_PATTERN:?lib-common.sh did not load}" --min-age 0'
+
 tmux -L relog new-session -d
 tmux -L relog send-keys 'env -u DISPLAY WAYLAND_DISPLAY= BROWSER=true claude auth login' Enter
 ```
 
 `-L relog` is a **separate tmux server**, not a session on an existing one.
 
-- **No browser on the host.** The `env` gives the login no display and a browser that does nothing, so it prints its URL and opens no window on the host's desktop. A window opened there outlives Step 10, which stops only the tmux server (#2332). A bot session already runs this way; the `env` keeps it so from any shell.
+- **No browser on the host.** On a host with a desktop session, a shell inherits `DISPLAY` and `WAYLAND_DISPLAY` with `BROWSER` unset. From there `claude auth login`, like a `gh` or `vercel` login, has xdg-open start a GUI Chromium that holds about 600 MiB (seen 2026-10-13 and 2026-10-19) and outlives both the CLI and Step 10, which stops only the tmux server (#2332). The `env` gives the login no display and a browser that does nothing, so it prints its URL and opens no window. It sets `WAYLAND_DISPLAY` empty rather than unsetting it: unset, a Wayland client falls back to the default socket and still reaches the desktop. A bot session already runs this way; the `env` keeps it so from any shell.
+
+  Measured 2026-10-20: `env -u DISPLAY -u WAYLAND_DISPLAY BROWSER=/bin/true claude auth login` inside the throwaway tmux server still printed the URL, accepted the pasted code (`Login successful.`), and started 0 Chromium processes (checked before and after).
 
 - **Not a worker pane.** It interrupts that worker mid-task and bakes the whole auth flow into its transcript, where it stays.
 - **Not the manager pane.** Same problem, plus you lose the pane you are coordinating from.
@@ -145,13 +151,32 @@ claude auth status
 
 If they match the *old* account, the browser-already-signed-in case from Step 6 happened. Say so plainly and offer to re-run — do not report success.
 
-### 9. Probe a running bot
+### 9. Probe the peer managers, and restore Remote Control
 
-Send a trivial turn to one live bot and confirm it answers.
+Ask each peer manager to reply with one line after its next turn runs on the new login. That probe worked on 2026-10-20.
 
-Live sessions hold their credential in memory and are expected to survive a relog untouched — but "expected to" is not "observed to", and the cost of checking is one message. If it answers, no restarts are needed and you should say that explicitly, because the assumption in the room will be that everything must be bounced.
+Running sessions are expected to survive a relog — but "expected to" is not "observed to", and the cost of checking is one message each. When they answer, no restarts are needed and you should say that explicitly, because the assumption in the room will be that everything must be bounced.
 
-### 10. Kill the throwaway server
+**An account change disconnects Remote Control** in every running session. The pane reads `Remote Control disconnected — signed-in claude.ai account or organization changed on this machine — run /remote-control`. The session keeps working; only Remote Control drops. Restore it on the sessions meant to have it: the bots that run with `--remote-control` (fleet.yaml `remote_control`; by default only each fleet's manager).
+
+Restoring it never types into a busy pane or a held box. What worked on 2026-10-20, on four managers:
+
+1. Confirm the pane is idle and its input box empty.
+2. Type `/remote-control` without Enter.
+3. Confirm the box holds exactly that, its autocomplete row is highlighted, and the bot is still idle.
+4. Press Enter once, and confirm `/remote-control is active`.
+
+If any check fails, delete exactly what was typed. A manager cannot type into its own pane mid-turn, so its own restore runs after its turn ends.
+
+Pitfalls measured the same day:
+
+- The prompt glyph is followed by a no-break space (U+00A0), so an empty-box regex built on `[[:space:]]` never matches.
+- Collapsed tool lines such as `… (41s · 4 lines)` look like a spinner.
+- A pane that reads idle can start a turn a second later, so re-check right before Enter.
+- Never send a plane message to a pane while typing into it.
+- keepalive's `pane_state` reads a manager with background shells as BUSY (#2391), so a self-restore cannot wait on it.
+
+### 10. Kill the throwaway server, and stop any browser the login started
 
 ```bash
 tmux -L relog kill-server
@@ -159,7 +184,9 @@ tmux -L relog kill-server
 
 Do this even if the flow failed. A stranded server holds a pane containing the auth exchange.
 
-The login opened no browser (Step 4). A browser left running on the host anyway, from this or any other path, appears in the next fleet pulse as `browser_outside_render`, with the bot whose session started it; the pulse reports it and never stops it.
+Then run Step 4's `browser-scan.py` line again. With Step 4's `env` the login starts no browser, so the list should hold nothing new. A row whose pid and start were not in Step 4's list is a browser this login started: stop it by its pid, typed as a number (`kill <pid>`), and list again to see it gone. Never stop a browser by name: `pkill chromium` stops every bot's browsers and renders, and the signal guard refuses it, as it refuses a pid read from `ps` or `pgrep` in the same command. Around any other login on the host (`gh auth login`, `vercel login`), do the same: list before, list after, stop only what the login started.
+
+A browser left running on the host anyway, from this or any other path, appears in the next fleet pulse as `browser_outside_render`, with the bot whose session started it; the pulse reports it and never stops it.
 
 ### 11. Notify peer fleet managers
 
@@ -174,5 +201,5 @@ Tell every other fleet manager on the host: the account changed, from which to w
 - **Blast radius before credentials.** Step 2 is not optional and not reorderable — its answer determines whether this is a one-fleet action or a host-wide one, and that changes who must be told.
 - **Verify by measurement.** Step 8 is `claude auth status`, never the success string. Same rule as everywhere else: a success message is a self-report.
 - **Same account does not reset quota.** If that was the goal, say so before the human spends the effort.
-- **No downtime.** Do not stop bots, do not warn of an outage, do not schedule a window. There is none.
+- **No downtime.** Do not stop bots, do not warn of an outage, do not schedule a window. There is none: an account change drops only Remote Control, and Step 9 restores it.
 - **Never put a real email, org ID, or account UUID into a committed file, an issue, or a PR.** Report them on the channel to the human who owns them.
