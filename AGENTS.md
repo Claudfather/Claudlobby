@@ -139,7 +139,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `host-health-check.sh` — alert on Pi under-voltage/throttling and SD/MMC storage stalls
 - `creds-check.sh` — validate fleet credentials, including GitHub App mode
 - `orphan-browser-reaper.sh` — Linux-only reap of browser processes orphaned by dead automation
-- `browser-scan.py` — the browsers running outside a render scope, each with the bot whose session started it; fleet-pulse reports them, never stops them (#2332)
+- `browser-scan.py` — browsers outside a render scope, with the bot that started each; fleet-pulse reports them, never stops them
 - `notify-behind.sh` — daily report of framework checkouts behind their newest release
 - `selfstart-snapshot.sh` — after an unplanned reboot, counts which bots self-started; run it before any rescue
 - `boot-capture.sh` — records every declared bot at each host boot (opt-in)
