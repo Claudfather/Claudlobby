@@ -93,10 +93,13 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger=None):
 _REPORT_SEQ = [0]
 
 
-def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None):
+def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None,
+            link_communication=True):
     """What the REAL report door lands for one report: the `report` communication
     and, when it resolved an assignment, the task event — both under one
-    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
+    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing;
+    `link_communication=False` = a legacy report whose communication names no
+    assignment beside its linked task event.)"""
     from claudlobby.plane.emit_api import emit_batch
     initialize_plane(root)
     _REPORT_SEQ[0] += 1
@@ -106,7 +109,8 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
                "source_ref": ref, "occurred_at": ts,
                "payload": {"msg_id": msg, "sender": f"bot:{F}/{bot}", "recipient": f"bot:{F}/mgr",
                            "recipient_raw": "mgr", "message_class": "report",
-                           **({"work_item_id": wi, "assignment_id": asg} if event else {}), "body": "r"}}]
+                           **({"work_item_id": wi, "assignment_id": asg} if event and link_communication else {}),
+                           "body": "r"}}]
     if event:
         events.append({"event_type": "task", "emitter": "report-back", "fleet": F,
                        "source_ref": ref, "occurred_at": ts,

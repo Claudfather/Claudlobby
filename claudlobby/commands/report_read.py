@@ -169,8 +169,11 @@ def _read(args) -> CommandOutput:
                      "since": since, "unacknowledged": args.unacknowledged,
                      "prior_seq": prior_seq, "prior_ack_event": prior_ack_seq}
             after = None if eligible else _after(args.cursor, scope, release_id)
+            # An unacknowledged read starts at the viewer's read position, as
+            # the ACK does: nothing at or below it is unacknowledged.
             rows = session.pr.report_rows(session.conn, destination.fleet.name,
-                                          bot=args.bot, status=args.status, since=since)
+                                          bot=args.bot, status=args.status, since=since,
+                                          since_seq=prior_seq if args.unacknowledged else None)
             if args.unacknowledged:
                 rows = session.pr.unacked_rows(rows, prior_seq)
             # The shared reader's historical display order is event time. A
