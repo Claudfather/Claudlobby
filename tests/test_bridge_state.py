@@ -19,6 +19,7 @@ These tests pin the two pieces of rigor the /ironclad cycle-1 review demanded:
       single-consumer token slot while delivering nothing).
 """
 
+import functools
 import os
 import shutil
 import signal
@@ -110,8 +111,8 @@ def _fake_bins(tmp_path: Path) -> Path:
     return make_stand_ins(bindir, bash)
 
 
-def _wait_pidfile(pidfile: Path):
-    for _ in range(100):
+def _wait_pidfile(pidfile: Path, tries=100):
+    for _ in range(tries):
         if pidfile.exists() and pidfile.read_text().strip():
             return
         time.sleep(0.05)
@@ -395,6 +396,52 @@ requires_node = pytest.mark.skipif(
 )
 
 
+# A parent in the native tree: start one child and wait for it, as the `start`
+# shim and claude do, then write how it ended to the tree's stderr and exit
+# with its status. Without this, a child that never started and one still
+# starting leave the same trace: none (#2383).
+_SPAWN_AND_RECORD = """\
+const r = require('child_process').spawnSync(%(exe)r, [%(script)r, %(arg)r], {stdio: 'inherit'});
+process.stderr.write(%(parent)r + ': ' + %(child)r + ' ' + (r.error ? 'did not start: ' + r.error.code
+    : r.signal ? 'was killed by ' + r.signal : 'exited with status ' + r.status) + '\\n');
+process.exitCode = r.status === null ? 1 : r.status;
+"""
+
+
+def _wait_leaf_started(started: Path, proc, hang=60):
+    """Wait until the leaf has run its first line, which writes `started`.
+
+    A tree that exits first never ran its leaf, and a leaf that has not run
+    after `hang` seconds is hung: both fail here, at once, instead of on the
+    pidfile wait, whose timer starts only once the leaf runs (#2383).
+    """
+    deadline = time.monotonic() + hang
+    while not started.exists():
+        if proc.poll() is not None and not started.exists():
+            raise AssertionError("the leaf never ran its first line: the tree exited first")
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the leaf did not run its first line within {hang} s")
+        time.sleep(0.05)
+
+
+def _tree_report(proc, stderr: Path, launched: float) -> str:
+    """How the tree stood when the fixture gave up: its live processes, or how
+    claude exited, and everything the tree wrote to stderr."""
+    lines = [f"the tree {time.monotonic() - launched:.1f} s after launch:"]
+    if proc.poll() is None:
+        rows = subprocess.run(["ps", "-ww", "-axo", "pgid=,pid=,stat=,etime=,args="],
+                              capture_output=True, text=True, errors="replace").stdout.splitlines()
+        lines += [f"  running: {row.split(None, 1)[1]}" for row in rows
+                  if row.split() and row.split()[0] == str(proc.pid)]
+    elif proc.returncode < 0:
+        lines.append(f"  claude was killed by signal {-proc.returncode}")
+    else:
+        lines.append(f"  claude exited with status {proc.returncode}")
+    written = stderr.read_text(errors="replace").splitlines()
+    lines.append("its stderr:" + ("".join(f"\n  {line}" for line in written) or " (empty)"))
+    return "\n".join(lines)
+
+
 def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
     """Reproduce the production tree with native stand-ins:
 
@@ -402,6 +449,10 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
 
     so the lineage walk has real ancestors to traverse and `claude` is the
     GRANDPARENT, as in production.
+
+    The wait for bot.pid starts once the leaf has run its first line, so a
+    slow start cannot run it out (#2383). The tree's stderr is kept beside its
+    scripts, and any failure here carries it.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     bun, claude = bindir / "bun", bindir / "claude"
@@ -409,39 +460,63 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
     # The stand-ins are shared by the session; this case's scripts go beside
     # its state.
     scripts = state_dir.parent
+    started, stderr = scripts / "leaf.started", scripts / "tree.stderr"
 
     leaf = scripts / "leaf.js"
-    leaf.write_text(leaf_source if leaf_source is not None else
-        "require('fs').writeFileSync(%r, String(process.pid));\n"
-        "setTimeout(() => {}, 60000);\n" % str(pidfile)
+    # The fixture's own first line marks the moment the leaf starts running.
+    leaf.write_text("require('fs').writeFileSync(%r, String(process.pid));\n" % str(started)
+        + (leaf_source if leaf_source is not None else
+           "require('fs').writeFileSync(%r, String(process.pid));\n"
+           "setTimeout(() => {}, 60000);\n" % str(pidfile))
     )
     wrapper = scripts / "wrapper.js"
-    wrapper.write_text(
-        "require('child_process').spawnSync(%r, [%r, 'server.ts'], "
-        "{stdio: 'inherit'});\n" % (str(bun), str(leaf))
-    )
+    wrapper.write_text(_SPAWN_AND_RECORD % {
+        "exe": str(bun), "script": str(leaf), "arg": "server.ts",
+        "parent": "wrapper.js", "child": "the leaf"})
     tree = scripts / "tree.js"
-    tree.write_text(
-        "require('child_process').spawnSync(%r, [%r, 'start'], "
-        "{stdio: 'inherit'});\n" % (str(bun), str(wrapper))
-    )
+    tree.write_text(_SPAWN_AND_RECORD % {
+        "exe": str(bun), "script": str(wrapper), "arg": "start",
+        "parent": "tree.js", "child": "the shim"})
 
     env = {**os.environ, "TELEGRAM_STATE_DIR": str(state_dir)}
-    proc = subprocess.Popen(
-        [str(claude), str(tree)], env=env, start_new_session=True
-    )
+    with open(stderr, "wb") as err:
+        proc = subprocess.Popen(
+            [str(claude), str(tree)], env=env, stderr=err, start_new_session=True
+        )
+    launched = time.monotonic()
     try:
+        _wait_leaf_started(started, proc)
         _wait_pidfile(pidfile)
         assert proc.poll() is None, "native bridge exited before startup completed"
+    except AssertionError as failure:
+        try:
+            failure.args = (f"{failure}\n{_tree_report(proc, stderr, launched)}",)
+        finally:
+            _kill_tree(proc)
+        raise
     except BaseException:
         _kill_tree(proc)
         raise
     return proc
 
 
+# A leaf that starts later than the fixture waits for its pidfile, as the
+# session's first start of node did on a CI runner (#2383). NODE_OPTIONS
+# carries this into every node of the tree; it holds only the leaf, the one
+# started with `server.ts`, and only before the leaf's first line runs.
+_SLOW_LEAF_PRELOAD = (
+    "if (process.argv.includes('server.ts'))\n"
+    "  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);\n"
+)
+
+
 @requires_node
-@pytest.mark.parametrize("failure", ["no-pidfile", "early-exit", "pre-yield"])
-def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure,
+@pytest.mark.parametrize("failure,start", [
+    ("no-pidfile", "prompt"), ("early-exit", "prompt"), ("pre-yield", "prompt"),
+    ("no-pidfile", "slow"), ("early-exit", "slow"), ("pre-yield", "slow"),
+], ids=["no-pidfile", "early-exit", "pre-yield",
+        "no-pidfile-slow-start", "early-exit-slow-start", "pre-yield-slow-start"])
+def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure, start,
                                                   native_stand_ins):
     processes = []
     real_popen = subprocess.Popen
@@ -451,6 +526,12 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure
         leaf_source += "require('fs').writeFileSync(%r, String(process.pid));\n" % str(tmp_path / "state/bot.pid")
     leaf_source += "process.exit(1);\n" if failure == "early-exit" else "setTimeout(() => {}, 60000);\n"
     expected_failure = "pidfile never written"
+    if start == "slow":
+        preload = tmp_path / "slow-leaf.js"
+        preload.write_text(_SLOW_LEAF_PRELOAD)
+        monkeypatch.setenv("NODE_OPTIONS", f"--require={preload}")
+        # Give up on the pidfile after 0.5 s, well inside the leaf's 1.5 s start.
+        monkeypatch.setitem(globals(), "_wait_pidfile", functools.partial(_wait_pidfile, tries=10))
     if failure == "pre-yield":
         real_wait = _wait_pidfile
 
@@ -468,10 +549,11 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure
 
     monkeypatch.setattr(subprocess, "Popen", capture)
     try:
-        with pytest.raises(AssertionError, match=expected_failure):
+        with pytest.raises(AssertionError) as raised:
             _spawn_bridge_native(native_stand_ins, tmp_path / "state",
                                  leaf_source=leaf_source)
-        assert observed.exists(), "fixture failed before its leaf process executed"
+        assert observed.exists(), f"fixture failed before its leaf process executed\n{raised.value}"
+        raised.match(expected_failure)
         if failure == "pre-yield":
             assert (tmp_path / "state/bot.pid").is_file(), "failure preceded readiness"
         proc = processes[0]
@@ -489,6 +571,38 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure
         # Keep a deliberately broken cleanup mutation from leaking its tree.
         if processes:
             _kill_tree(processes[0])
+
+
+@requires_node
+@pytest.mark.parametrize("death", ["exit", "signal"])
+def test_native_bridge_leaf_that_never_ran_says_how_it_ended(tmp_path, monkeypatch, death,
+                                                            native_stand_ins):
+    """A leaf that ends before its first line runs fails the fixture with how
+    it ended and what the tree wrote to stderr, where a slow leaf would have
+    read the same (#2383): `exit` writes a line and exits 70, `signal` dies
+    silently by SIGKILL, as on the run that failed without a word."""
+    preload = tmp_path / "leaf-ends.js"
+    preload.write_text(
+        "if (process.argv.includes('server.ts')) {\n"
+        + ("  process.stderr.write('the leaf could not start\\n');\n  process.exit(70);\n"
+           if death == "exit" else "  process.kill(process.pid, 'SIGKILL');\n")
+        + "}\n"
+    )
+    monkeypatch.setenv("NODE_OPTIONS", f"--require={preload}")
+    proc = None
+    try:
+        with pytest.raises(AssertionError) as raised:
+            proc = _spawn_bridge_native(native_stand_ins, tmp_path / "state")
+    finally:
+        if proc is not None:
+            _kill_tree(proc)
+    message = str(raised.value)
+    assert "the leaf never ran its first line" in message, message
+    if death == "exit":
+        assert "the leaf exited with status 70" in message, message
+        assert "the leaf could not start" in message, message
+    else:
+        assert "the leaf was killed by SIGKILL" in message, message
 
 
 @requires_node
