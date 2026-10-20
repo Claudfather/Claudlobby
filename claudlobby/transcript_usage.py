@@ -64,6 +64,12 @@ _TAIL_BLOCK = 64 * 1024
 # finds it stops at that row, never past this cap.
 SESSION_HEAD_BYTES = 2 * 1024 * 1024
 HEADLESS_ENTRYPOINT = "sdk-cli"
+# Each session newer than the bot's own costs one head read before it is
+# passed over, and a hook can leave several in a row, so the walk examines at
+# most this many of the newest. Over 899 sessions in 21 bots' directories, the
+# longest run of headless sessions was two (#2212 review). Past the limit the
+# answer is unknown, never an older session's figure.
+SESSION_WALK_LIMIT = 16
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
                  "cache_read_input_tokens")
 
@@ -553,10 +559,13 @@ def newest_own_session(directory: Path, sessions: list, *,
     """The newest of a bot's ``sessions`` (as ``session_transcripts`` lists
     them) that is its own and not a hook's headless ``claude -p`` call: its
     first ``entrypoint`` value is not HEADLESS_ENTRYPOINT, and a session with
-    none counts as the bot's own. ``(entry, None)``; ``(None, None)`` when
-    every session is headless; ``(None, reason)`` when a newer session cannot
-    be told apart from the bot's own, which is no answer: it may be the bot's."""
-    for entry in sorted(sessions, key=lambda entry: (entry[2], entry[0]), reverse=True):
+    none counts as the bot's own. It examines at most the SESSION_WALK_LIMIT
+    newest. ``(entry, None)``; ``(None, None)`` when every session is
+    headless; ``(None, reason)`` when there is no answer: a newer session
+    cannot be told apart from the bot's own (it may be the bot's), or the
+    sessions examined are all headless and older ones are left unexamined."""
+    newest = sorted(sessions, key=lambda entry: (entry[2], entry[0]), reverse=True)
+    for entry in newest[:SESSION_WALK_LIMIT]:
         try:
             with open(directory / entry[0], "rb") as fh:
                 value, ended = _first_entrypoint(fh, entry[1], cap)
@@ -568,6 +577,8 @@ def newest_own_session(directory: Path, sessions: list, *,
             return None, "session_head_incomplete"
         if value != HEADLESS_ENTRYPOINT:
             return entry, None
+    if len(newest) > SESSION_WALK_LIMIT:
+        return None, "no_own_session_within_limit"
     return None, None
 
 
@@ -612,10 +623,11 @@ def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
 
     Cost per call: one listing of the bot's transcript directory (at most
     MAX_ENTRIES entries); the head of its own newest session and of each newer
-    one, forwards in 64 KiB blocks, stopping at the first ``entrypoint`` and
-    never past ``head_cap``; then reads from the end of its own newest session,
-    in 64 KiB blocks, stopping at the row and never past ``cap``. ``bytes_read``
-    counts that last read.
+    one, at most SESSION_WALK_LIMIT heads in all, each forwards in 64 KiB
+    blocks, stopping at the first ``entrypoint`` and never past ``head_cap``;
+    then reads from the end of its own newest session, in 64 KiB blocks,
+    stopping at the row and never past ``cap``. ``bytes_read`` counts that last
+    read.
     """
     result = {"tokens": None, "at": None, "reason": None, "session": None,
               "compacted_after": None, "bytes_read": 0, "cap": cap}

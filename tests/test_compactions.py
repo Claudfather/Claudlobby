@@ -218,6 +218,31 @@ def test_before_the_first_pass_a_hooks_headless_session_is_passed_over(tmp_path)
     assert _bot(result, "b")["reason"] is None
 
 
+def test_before_the_first_pass_the_session_walk_is_bounded(tmp_path):
+    """The first pass finds the bot's own session through the live context's
+    walk, so it has the same bound: with SESSION_WALK_LIMIT headless sessions
+    newer than the bot's own it records nothing and names why; with one fewer
+    it reads the bot's own."""
+    rec = _recorder()
+    limit = importlib.import_module("claudlobby.transcript_usage").SESSION_WALK_LIMIT
+    fleet, paths = _fleet(tmp_path, "b")
+    d = _transcripts(tmp_path, paths, "b")
+    write_jsonl(d / "s1.jsonl", [
+        {**_boundary("2026-10-07T21:30:00Z", 444180, 17000, "u1"), "entrypoint": "cli"}])
+    os.utime(d / "s1.jsonl", (1_000, 1_000))
+    for n in range(1, limit + 1):
+        write_jsonl(d / f"h{n}.jsonl", [
+            {**_said("2026-10-07T21:37:39Z", "summarize", session=f"h{n}"),
+             "entrypoint": "sdk-cli"}])
+        os.utime(d / f"h{n}.jsonl", (1_000 + n, 1_000 + n))
+    plane = Plane()
+    result = rec.record_compactions(paths, fleet, emit=plane)
+    assert (plane.sent, _bot(result, "b")["reason"]) == ([], "no_own_session_within_limit")
+    (d / f"h{limit}.jsonl").unlink()
+    result = rec.record_compactions(paths, fleet, emit=plane)
+    assert (_pre(plane), _bot(result, "b")["reason"]) == ([444180], None)
+
+
 def test_an_unreadable_transcript_records_nothing_and_says_why(tmp_path):
     if os.geteuid() == 0:
         pytest.skip("root reads a mode-000 file")

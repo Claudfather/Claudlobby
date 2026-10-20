@@ -681,6 +681,37 @@ class TestCurrentContext:
             newer.chmod(0o600)
         assert (ctx["tokens"], ctx["reason"]) == (None, "unreadable_transcript_file")
 
+    def test_the_session_walk_examines_at_most_its_limit(self, tmp_path, monkeypatch):
+        """#2212 review, the walk's bound: each session newer than the bot's
+        own costs a read of its head, so the walk examines at most
+        SESSION_WALK_LIMIT of the newest. When all of those are headless and
+        an older session is left, that is no answer, never the older one's
+        figure; when none is left, there is none."""
+        limit = tu.SESSION_WALK_LIMIT
+        heads = []
+        first_entrypoint = tu._first_entrypoint
+
+        def counted(fh, size, cap):
+            heads.append(fh.name)
+            return first_entrypoint(fh, size, cap)
+
+        monkeypatch.setattr(tu, "_first_entrypoint", counted)
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_usage("2026-10-07T21:00:00Z", 1, 2, 3)]), mtime=1_000)
+        for n in range(1, limit):
+            _session(d, f"h{n}.jsonl", _headless("2026-10-07T21:10:00Z"), mtime=1_000 + n)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["session"], len(heads)) == (6, "s1", limit)
+        heads.clear()
+        _session(d, f"h{limit}.jsonl", _headless("2026-10-07T21:10:00Z"), mtime=1_000 + limit)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["reason"], len(heads)) == (
+            None, "no_own_session_within_limit", limit)
+        heads.clear()
+        (d / "s1.jsonl").unlink()
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["reason"], len(heads)) == (None, "no_transcript", limit)
+
 
 class TestCompactionRow:
     def test_a_boundary_row_reads_trigger_tokens_and_time(self):

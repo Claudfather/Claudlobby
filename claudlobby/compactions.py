@@ -20,11 +20,13 @@ missing transcript directory, or an unreadable transcript, is that bot's
 reads. Before a bot's first pass only its own newest session is read, never a
 hook's headless one beside it (``transcript_usage.newest_own_session``), from
 at most FIRST_READ bytes before its end; a newer session that cannot be told
-apart from it is the bot's ``reason`` until a pass can. Bytes appended past
-READ_CAP in one pass are skipped and counted (``skipped_bytes``): a boundary
-row in them is not recorded. Cost per pass: one directory listing per bot and
-the bytes appended since the last pass, never more than READ_CAP per
-transcript; at a bot's first pass, the session heads that name its own.
+apart from it is the bot's ``reason`` until a pass can, and so is a run of
+headless sessions newer than it that fills the walk's limit
+(``transcript_usage.SESSION_WALK_LIMIT``). Bytes appended past READ_CAP in one
+pass are skipped and counted (``skipped_bytes``): a boundary row in them is not
+recorded. Cost per pass: one directory listing per bot and the bytes appended
+since the last pass, never more than READ_CAP per transcript; at a bot's first
+pass, the session heads that name its own, at most SESSION_WALK_LIMIT of them.
 """
 
 from __future__ import annotations
