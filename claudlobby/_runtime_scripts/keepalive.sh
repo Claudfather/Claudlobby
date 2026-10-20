@@ -654,6 +654,18 @@ fi
 UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
 UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 
+# #2391: a tick with no turn running (IDLE, HELD or LIMIT) stamps
+# data/.last-no-turn, and no verdict removes it. Once the BUSY tick of a new
+# turn removes .idle, .held or .limit, it still says when keepalive last saw no
+# turn running, which is where fleet-pulse starts that turn's stall clock. A
+# HELD tick whose whole screen shows a running turn stamps nothing: text typed
+# into a busy bot's box, a message on its way in, reads HELD on the last ten
+# lines alone (#2082), and a message must not restart a hung turn's clock.
+case "$state" in
+    IDLE|LIMIT) touch "$BOT_DIR/data/.last-no-turn" ;;
+    HELD) pane_is_busy "$pane_content" || touch "$BOT_DIR/data/.last-no-turn" ;;
+esac
+
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
@@ -686,12 +698,8 @@ case "$state" in
     IDLE)
         echo "$(ts_iso) IDLE — at prompt${_ul_note}" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
-        # Touch idle marker — fleet-pulse reads this instead of parsing panes.
-        # #2391: .last-idle gets the same stamp, and no verdict removes it. Once
-        # the BUSY tick of a new turn removes .idle, it still says when the bot
-        # was last seen idle, which is where fleet-pulse starts that turn's
-        # stall clock.
-        touch "$BOT_DIR/data/.idle" "$BOT_DIR/data/.last-idle"
+        # Touch idle marker — fleet-pulse reads this instead of parsing panes
+        touch "$BOT_DIR/data/.idle"
         rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then

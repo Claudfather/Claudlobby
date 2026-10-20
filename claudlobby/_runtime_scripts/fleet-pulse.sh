@@ -767,14 +767,14 @@ for bot_dir in "$BOTS_DIR"/*/; do
 
     # --- Check 5: activity stuck (no tool calls for extended period) ---
     # Uses marker-file comparison instead of pane-regex idle detection.
-    # keepalive.sh touches data/.idle and data/.last-idle when it sees an idle
-    # pane, and a BUSY, HELD or LIMIT verdict removes .idle, never .last-idle;
-    # bot-vitals.sh touches data/.last-tool-call on every tool call. Comparing
-    # mtimes is deterministic and harness-agnostic (works for Claude Code,
-    # Codex, Cortex).
+    # keepalive.sh touches data/.idle when it sees an idle pane, and a BUSY,
+    # HELD or LIMIT verdict removes it; a tick that sees no turn running also
+    # stamps data/.last-no-turn, which no verdict removes; bot-vitals.sh
+    # touches data/.last-tool-call on every tool call. Comparing mtimes is
+    # deterministic and harness-agnostic (works for Claude Code, Codex, Cortex).
     marker="$bot_dir/data/.last-tool-call"
     idle_marker="$bot_dir/data/.idle"
-    last_idle_marker="$bot_dir/data/.last-idle"
+    last_no_turn_marker="$bot_dir/data/.last-no-turn"
     # #2070: keepalive writes data/.held while the bot's input box holds text
     # that was never submitted and no turn runs (its HELD verdict). That bot is
     # not hung: an operator Enter submits the text, and a restart would discard
@@ -874,19 +874,19 @@ for bot_dir in "$BOTS_DIR"/*/; do
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
             now_epoch=$(date +%s)
             last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
-            # #2391: the stall runs from the later of the last tool call and the
-            # last IDLE tick, so a turn begun after a long idle is not charged
-            # that idle stretch before its first tool call. No .last-idle (never
-            # seen idle, or a keepalive older than the marker): the tool call.
-            last_idle_epoch=$(stat_mtime "$last_idle_marker" 2>/dev/null || echo null)
+            # #2391: the stall runs from the later of the last tool call and
+            # .last-no-turn, so a turn is not charged the wait before it began.
+            # No .last-no-turn (never seen without a turn, or a keepalive older
+            # than the marker): the tool call.
+            last_no_turn_epoch=$(stat_mtime "$last_no_turn_marker" 2>/dev/null || echo null)
             stall_since=$last_epoch
-            if [ "$last_idle_epoch" != null ] && [ "$last_idle_epoch" -gt "$stall_since" ]; then
-                stall_since=$last_idle_epoch
+            if [ "$last_no_turn_epoch" != null ] && [ "$last_no_turn_epoch" -gt "$stall_since" ]; then
+                stall_since=$last_no_turn_epoch
             fi
             gap=$(( now_epoch - stall_since ))
             if [ "$gap" -ge "$threshold" ]; then
                 emit_fleet_event "activity_stuck" "pulse" \
-                    '{"last_tool_call_epoch":'"$last_epoch"',"last_idle_epoch":'"$last_idle_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
+                    '{"last_tool_call_epoch":'"$last_epoch"',"last_no_turn_epoch":'"$last_no_turn_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
                 debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
                     "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)" "$_mgr_token" "$_RENOTIFY_AFTER_S"
             else
