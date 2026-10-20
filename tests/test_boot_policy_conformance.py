@@ -285,7 +285,7 @@ class TestStartBotShScrubsTheLeakedMarkers:
 
     def test_the_launch_command_unsets_the_leaked_markers(self):
         assert re.search(
-            r"CLAUDE_CMD=\"\. '\$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "
+            r"\. '\$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "
             r"CLAUDE_CODE_SESSION_ID; exec \$CLAUDE ", self._line())
 
     def test_a_bot_started_from_inside_a_claude_session_sees_no_marker(self, tmp_path):
@@ -308,3 +308,150 @@ class TestStartBotShScrubsTheLeakedMarkers:
             capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
         assert result.stdout == "unset|unset|unset|--name bot-session\n"
+
+
+class TestStartBotShKeepsSessionsOffTheDesktop:
+    """#2332: on a host with a desktop, the user manager hands every unit the
+    desktop's DISPLAY and WAYLAND_DISPLAY, so a bot session that opened a browser
+    (a login CLI, an Artifact preview, `claudlobby plane open`) put a window on the
+    host's screen, and the window outlived the command. The launch command cuts the
+    desktop before the env file: DISPLAY unset, WAYLAND_DISPLAY set empty and
+    BROWSER=true.
+
+    No real browser runs: every opener is a stand-in. The stand-in xdg-open decides
+    as xdg-utils 1.1.3's generic path does (the desktop's browser while a display is
+    named, then $BROWSER, then a console browser). The stand-in browser opens a
+    window exactly when a display server is reachable: a non-empty DISPLAY, or a
+    Wayland socket found by libwayland's rule (WAYLAND_DISPLAY when set, else
+    wayland-0, under XDG_RUNTIME_DIR), checked against libwayland itself below. The
+    test's XDG_RUNTIME_DIR holds a listening wayland-0, as a desktop session's does."""
+
+    _URL = "https://example.invalid/sign-in"
+
+    _XDG_OPEN = ('#!/bin/sh\n'
+                 'if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then exec gui-browser "$1"; fi\n'
+                 'if [ -n "$BROWSER" ]; then exec $BROWSER "$1"; fi\n'
+                 'echo "console browser" >> "$OPENER_LOG"\n'
+                 'exit 3\n')
+
+    _GUI_BROWSER = """#!/usr/bin/env python3
+import os, socket
+def wayland():
+    name = os.environ.get("WAYLAND_DISPLAY")
+    if name is None:
+        name = "wayland-0"
+    if not name:
+        return False
+    path = name if name.startswith("/") else os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), name)
+    s = socket.socket(socket.AF_UNIX)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+seen = [n for n, up in (("x11", bool(os.environ.get("DISPLAY"))), ("wayland", wayland())) if up]
+with open(os.environ["OPENER_LOG"], "a") as log:
+    log.write(("window " + ",".join(seen) if seen else "no display") + "\\n")
+raise SystemExit(0 if seen else 1)
+"""
+
+    # What the session runs: a CLI that hands its URL to xdg-open; Claude Code's own
+    # opener (2.1.303: $BROWSER, else xdg-open, and nothing at all with no display);
+    # and a tool that starts a GUI browser itself.
+    _CLI = ('#!/bin/sh\n'
+            'printf "env %s|%s|%s\\n" "${DISPLAY-unset}" "${WAYLAND_DISPLAY-unset}" "${BROWSER-unset}" >> "$OPENER_LOG"\n'
+            'xdg-open "$URL"\n'
+            'if [ -n "$BROWSER" ]; then "$BROWSER" "$URL"\n'
+            'elif [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then xdg-open "$URL"; fi\n'
+            'gui-browser "$URL"\n'
+            'exit 0\n')
+
+    def _desktop(self, tmp_path, env_file_text=""):
+        """Run the launch line as the pane runs it, in the environment a bot unit
+        gets from a desktop host's user manager; return the openers' log."""
+        import os
+        import shutil
+        import socket
+        import subprocess
+        import tempfile
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in (("xdg-open", self._XDG_OPEN), ("gui-browser", self._GUI_BROWSER),
+                           ("claude", self._CLI)):
+            (bin_dir / name).write_text(body)
+            (bin_dir / name).chmod(0o755)
+        env_file = tmp_path / "bot.env"
+        env_file.write_text(env_file_text)
+        log = tmp_path / "openers.log"
+        # a short path: a unix socket's path is limited to about 100 bytes
+        runtime = Path(tempfile.mkdtemp(prefix="xdg-", dir="/tmp"))
+        server = socket.socket(socket.AF_UNIX)
+        try:
+            server.bind(str(runtime / "wayland-0"))
+            server.listen(8)
+            script = f'{TestStartBotShScrubsTheLeakedMarkers()._line()}\nexec /bin/bash -c "$CLAUDE_CMD"\n'
+            result = subprocess.run(
+                ["/bin/bash", "-c", script],
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "BOT_ENV_FILE": str(env_file),
+                     "CLAUDE": "claude", "SESSION_NAME": "bot-session", "CLAUDE_FLAGS": "",
+                     "OPENER_LOG": str(log), "URL": self._URL,
+                     "DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0", "XDG_SESSION_TYPE": "wayland",
+                     "XDG_RUNTIME_DIR": str(runtime)},
+                capture_output=True, text=True, timeout=30)
+        finally:
+            server.close()
+            shutil.rmtree(runtime, ignore_errors=True)
+        assert result.returncode == 0, result.stderr
+        return log.read_text().splitlines()
+
+    def test_no_opener_in_a_bot_session_reaches_the_desktop(self, tmp_path):
+        lines = self._desktop(tmp_path)
+        assert [line for line in lines if line.startswith("window")] == [], lines
+        # xdg-open ran $BROWSER, not a console browser in the bot's terminal
+        assert "console browser" not in lines, lines
+        assert lines == ["env unset||true", "no display"], lines
+
+    def test_a_display_the_bots_own_config_declares_still_reaches_it(self, tmp_path):
+        lines = self._desktop(tmp_path, "export DISPLAY=:7 BROWSER=gui-browser\n")
+        assert lines[0] == "env :7||gui-browser", lines
+
+    def test_the_stand_ins_wayland_rule_is_libwaylands(self, tmp_path):
+        """Unset, WAYLAND_DISPLAY falls back to wayland-0; empty, it names no socket."""
+        import ctypes.util
+        import shutil
+        import socket
+        import subprocess
+        import sys
+        import tempfile
+
+        import pytest
+
+        lib = ctypes.util.find_library("wayland-client")
+        if not lib:
+            pytest.skip("libwayland-client is not installed here")
+        probe = ("import ctypes, sys\n"
+                 f"wl = ctypes.CDLL({lib!r})\n"
+                 "wl.wl_display_connect.restype = ctypes.c_void_p\n"
+                 "wl.wl_display_connect.argtypes = [ctypes.c_char_p]\n"
+                 "wl.wl_display_disconnect.argtypes = [ctypes.c_void_p]\n"
+                 "d = wl.wl_display_connect(None)\n"
+                 "if d:\n    wl.wl_display_disconnect(d)\n"
+                 "print('connected' if d else 'refused')\n")
+        runtime = Path(tempfile.mkdtemp(prefix="xdg-", dir="/tmp"))
+        server = socket.socket(socket.AF_UNIX)
+        try:
+            server.bind(str(runtime / "wayland-0"))
+            server.listen(8)
+            seen = {}
+            for arm, extra in (("unset", {}), ("empty", {"WAYLAND_DISPLAY": ""})):
+                result = subprocess.run([sys.executable, "-I", "-c", probe],
+                                        env={"PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": str(runtime), **extra},
+                                        capture_output=True, text=True, timeout=30)
+                seen[arm] = result.stdout.strip()
+        finally:
+            server.close()
+            shutil.rmtree(runtime, ignore_errors=True)
+        assert seen == {"unset": "connected", "empty": "refused"}

@@ -414,6 +414,15 @@ session_cli_path() {
     done
 }
 
+# --- Browser processes ------------------------------------------------------
+# What makes a process a browser: anchored alternatives over its executable's
+# name, so `chrome-notes.sh` or a checkout named `playwright-tests` is not one.
+# `headless_shell` is what recent Playwright execs; the crashpad handlers are
+# the stragglers that outlive a browser. orphan-browser-reaper.sh reaps by it
+# and fleet-pulse's browser check reports by it (#2332), so the two never
+# disagree about what a browser is.
+BROWSER_EXE_PATTERN='^(chromium|chromium-browser|chrome|google-chrome|google-chrome-stable|Google Chrome|Google Chrome Helper|chrome_crashpad_handler|crashpad_handler|headless_shell|playwright|playwright.sh|msedge|Microsoft Edge)$'
+
 # --- Portable external tools ------------------------------------------------
 # timeout(1) and flock(1) are GNU/util-linux — absent on a stock macOS host.
 # Resolve GNU variants if present (Homebrew installs them with a `g` prefix).

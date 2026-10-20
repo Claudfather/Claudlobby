@@ -275,7 +275,19 @@ CLAUDE="$(fleet_claude_bin)"
 # claude sets all three for its children, so unsetting the leaked ones costs
 # nothing. Removing the cause beats forcing persistence back on, which would
 # mask it.
-CLAUDE_CMD=". '$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
+# The host's desktop is cut first, before the env file (#2332). On a host with
+# a desktop, the user manager hands every unit the desktop's DISPLAY and
+# WAYLAND_DISPLAY, and a tmux server keeps whatever started it, so a login
+# CLI's browser, an Artifact preview or `claudlobby plane open` put a window on
+# the host's screen that outlived the command. DISPLAY is unset: X clients need
+# it. WAYLAND_DISPLAY is set EMPTY, never unset: unset, libwayland falls back to
+# $XDG_RUNTIME_DIR/wayland-0 and a Wayland client still reaches the desktop
+# (measured), while an empty value names no socket and reads as no display to
+# xdg-open and to Claude Code. BROWSER=true makes xdg-open and every CLI that
+# honours it run true instead of a browser; without it, xdg-open with no display
+# falls back to a console browser. Before the env file, so a bot that declares
+# DISPLAY, WAYLAND_DISPLAY or BROWSER in its own fleet.yaml env still gets them.
+CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
