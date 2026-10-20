@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — an unacknowledged report read starts at the viewer's read position (#2378)
+
+`fleet reports list --unacknowledged` built every report its fleet had ever
+recorded, then dropped the ones at or below the viewer's read position, so a
+manager's read after each report cost the fleet's whole report history: 36 to
+64 s on a Raspberry Pi 5 for a fleet holding about 1,900 reports, to return an
+empty page. It now starts at the read position, as `fleet reports ack` already
+did. The page, its cursors and the ACK's prefix check read the same rows.
+
+Each report the reader builds also cost lookups that walked every task event
+in the plane, or every system event of the sender, newest first, because no
+index holds an event's ref. They now seek by what is indexed: the report's
+assignment, or the sender's system events after the report's own
+`ingest_seq`. A report written without an assignment reads only its marker,
+and a legacy `report-back:` report searches the sender's own events. Building
+every report of that fleet took 54 s and now takes under 1 s, with every field
+of every row unchanged.
+
 ### Fixed — activity_stuck times a stall from the last tick keepalive saw no turn running (#2391)
 
 A bot that waited past the activity_stuck threshold, at its prompt, behind a held input box or under a usage limit, and was then started on a turn read as hung until that turn made a tool call. keepalive's BUSY tick removes `data/.idle`, `.held` and `.limit` as the turn begins, and fleet-pulse then timed the stall from the previous turn's last tool call, so the whole wait counted against a turn begun seconds earlier, whatever began it.
