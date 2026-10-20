@@ -12,6 +12,7 @@ from claudlobby.plane.owner_access import AccessDenied, OwnerAccess, PrincipalRe
 from claudlobby.plane.owner_browser import create_owner_browser_app
 from claudlobby.plane.owner_source import bind_source
 from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
+from tests.deadline_clock import bounded, move_clock, status
 from tests.test_plane_two_fleets import _Sampler, _seed
 from tests.test_plane_workspace_assertion import profile
 
@@ -277,28 +278,36 @@ def test_pool_wait_is_in_deadline_and_never_begins_late(http, monkeypatch):
 def test_late_source_never_starts_begin_and_retains_capacity(http, monkeypatch):
     import threading
     from claudlobby.plane import owner_workspace_http as module
-    monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
     consumer = http[0].workspace_bootstrap
     entered, release = threading.Event(), threading.Event()
     original = consumer._source
     def held():
         value = original()
         entered.set()
-        release.wait(3)
+        assert release.wait(30)
         return value
     monkeypatch.setattr(consumer, "_source", held)
     async def scenario():
+        advance, paused = move_clock(monkeypatch, module)
         responses = []
+        request = asyncio.create_task(_raw_challenge(consumer, responses))
+        def state():
+            return (f"request={status(request)}, entered={entered.is_set()}, "
+                    f"sent={[m.get('status', m['type']) for m in responses]}, "
+                    f"workers={len(consumer._workers)}, operations={len(consumer._operations)}")
         try:
-            await asyncio.wait_for(_raw_challenge(consumer, responses), 0.5)
-            assert responses[0]["status"] == 503
-            # The 50 ms response deadline is under test; the real source's run time
-            # is not, so the source may finish after the 503 is sent (#2374).
-            assert await asyncio.to_thread(entered.wait, 10)
-            assert len(consumer._workers) == 1
+            assert await asyncio.to_thread(entered.wait, 10), "waited 10 s for the source to run: " + state()
+            # Its deadline passes while the source is held. A 50 ms deadline could
+            # answer first on a slow runner, and then no source ran (#2374, #2409).
+            advance(module.RESPONSE_SECONDS)
+            with paused():  # the answer is due now (#2406)
+                await bounded(request, "the response (loop clock held)", state)
+            await asyncio.sleep(.01)  # a job that ended with its answer would be gone by now
+            assert responses[0]["status"] == 503 and len(consumer._workers) == 1, state()
             release.set()
-            await consumer.shutdown()
-            assert not consumer._workers and not consumer._operations
+            with paused():  # the drain ends with the source
+                await bounded(consumer.shutdown(), "shutdown (loop clock held)", state)
+            assert not consumer._workers and not consumer._operations, state()
         finally:
             release.set()
     asyncio.run(scenario())
@@ -309,9 +318,6 @@ def test_late_source_never_starts_begin_and_retains_capacity(http, monkeypatch):
 def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown(http, monkeypatch):
     import threading
     from claudlobby.plane import owner_workspace_http as module
-    # Real source validation and SQLite admission must finish before this test
-    # exercises a deadline *after* begin. A 50ms setup budget races CI disk load.
-    monkeypatch.setattr(module, "RESPONSE_SECONDS", 2, raising=False)
     app, store, _, _, _ = http
     consumer = app.workspace_bootstrap
     entered, release = threading.Event(), threading.Event()
@@ -319,7 +325,7 @@ def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown
     def held(*args, **kwargs):
         value = original(*args, **kwargs)
         entered.set()
-        release.wait(10)
+        assert release.wait(30)
         return value
     monkeypatch.setattr(consumer.workspace, "begin", held)
     observed = []
@@ -329,23 +335,34 @@ def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown
         await send({"type": "lifespan.shutdown.complete"})
     monkeypatch.setattr(app, "read_app", read_lifespan)
     async def scenario():
+        advance, paused = move_clock(monkeypatch, module)
         responses = []
+        request = asyncio.create_task(_raw_challenge(consumer, responses))
+        def state():
+            return (f"request={status(request)}, entered={entered.is_set()}, "
+                    f"sent={[m.get('status', m['type']) for m in responses]}, "
+                    f"workers={len(consumer._workers)}, stopping={consumer._stopping}, observed={observed}")
         try:
-            await asyncio.wait_for(_raw_challenge(consumer, responses), 5)
-            assert entered.is_set() and responses[0]["status"] == 503
-            assert len(consumer._workers) == 1
+            assert await asyncio.to_thread(entered.wait, 10), "waited 10 s for begin to run: " + state()
+            # Its deadline passes once begin has run. With a short deadline the
+            # setup before begin raced it on a slow runner (#2409).
+            advance(module.RESPONSE_SECONDS)
+            with paused():  # the answer is due now (#2406)
+                await bounded(request, "the response (loop clock held)", state)
+            assert responses[0]["status"] == 503 and len(consumer._workers) == 1, state()
             async def receive():
                 return {"type": "lifespan.shutdown"}
             async def send(message):
                 observed.append(message["type"])
             shutdown = asyncio.create_task(app({"type": "lifespan"}, receive, send))
             await asyncio.sleep(0.02)
-            assert consumer._stopping and not shutdown.done() and not observed
+            assert consumer._stopping and not shutdown.done() and not observed, state()
             denied = []
-            await _raw_challenge(consumer, denied)
+            await bounded(_raw_challenge(consumer, denied), "the refusal while stopping", state)
             assert denied[0]["status"] == 503
             release.set()
-            await asyncio.wait_for(shutdown, 3)
+            with paused():  # the drain ends with begin
+                await bounded(shutdown, "the lifespan shutdown (loop clock held)", state)
             assert observed == [(True, 0), "lifespan.shutdown.complete"]
         finally:
             release.set()
@@ -366,6 +383,7 @@ def test_enabled_missing_workspace_schema_has_local_initialization_remedy(http):
 
 def test_started_stage_survives_response_deadline_as_unknown(http, monkeypatch):
     import threading
+    import httpx
     from claudlobby.plane import owner_workspace_http as module
     consumer = http[0].workspace_bootstrap
     entered, release = threading.Event(), threading.Event()
@@ -373,20 +391,36 @@ def test_started_stage_survives_response_deadline_as_unknown(http, monkeypatch):
     def held(*args):
         proposal = original(*args)
         entered.set()
-        release.wait(3)
+        assert release.wait(30)
         return proposal
-    with TestClient(http[0], base_url=HOST) as client:
-        challenge = post(client, "challenge").json()
-        monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
-        monkeypatch.setattr(consumer.workspace, "stage", held)
-        try:
-            response = post(client, "stage", {"nonce": challenge["nonce"], "assertion": token(http, challenge)})
-            assert entered.is_set() and response.status_code == 503
-            assert response.json() == {"state": "unavailable"} and len(consumer._workers) == 1
-            assert http[1].workspace().inspect(challenge["nonce"]).nonce == challenge["nonce"]
-        finally:
-            release.set()
-    assert not consumer._workers
+    async def scenario():
+        advance, paused = move_clock(monkeypatch, module)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=http[0]), base_url=HOST) as client:
+            challenge = (await post(client, "challenge")).json()
+            monkeypatch.setattr(consumer.workspace, "stage", held)
+            request = asyncio.create_task(post(client, "stage",
+                {"nonce": challenge["nonce"], "assertion": token(http, challenge)}))
+            def state():
+                return (f"request={status(request)}, entered={entered.is_set()}, "
+                        f"workers={len(consumer._workers)}, operations={len(consumer._operations)}")
+            try:
+                assert await asyncio.to_thread(entered.wait, 10), "waited 10 s for the stage to run: " + state()
+                # Its deadline passes once the stage has run. A 50 ms deadline could
+                # answer first on a slow runner, before the stage was entered (#2409).
+                advance(module.RESPONSE_SECONDS)
+                with paused():  # the answer is due now (#2406)
+                    response = await bounded(request, "the response (loop clock held)", state)
+                assert response.status_code == 503 and response.json() == {"state": "unavailable"}, state()
+                await asyncio.sleep(.01)  # a job that ended with its answer would be gone by now
+                assert len(consumer._workers) == 1, state()
+                assert http[1].workspace().inspect(challenge["nonce"]).nonce == challenge["nonce"]
+                release.set()
+                with paused():  # the drain ends with the stage
+                    await bounded(consumer.shutdown(), "shutdown (loop clock held)", state)
+                assert not consumer._workers and not consumer._operations, state()
+            finally:
+                release.set()
+    asyncio.run(scenario())
 
 
 def test_shutdown_cancels_owned_identity_wait_before_read_lifespan_completion(http, monkeypatch):
