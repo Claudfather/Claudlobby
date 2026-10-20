@@ -264,16 +264,111 @@ test('finite route/query roster refuses actions, credential URLs and duplicate k
   assert.equal(h.calls.length, 2); h.api.dispose();
 });
 
-test('read endpoint500 stays local;503 recovery does not disturb independently admitted peer', async () => {
+test('read endpoint500 stays local;503 checks current authority without disturbing either admitted host', async () => {
   const a = harness(), b = harness(); await a.api.connect(); await b.api.connect();
   a.overrides.set('read/tasks', () => reply(500, { state: 'unavailable' }));
   assert.equal(await a.api.readHandle.jget('/api/tasks'), null); assert.equal(a.api.snapshot().state, 'ready');
   a.overrides.set('read/tasks', () => reply(503, { state: 'unavailable' }));
-  assert.equal(await a.api.readHandle.jget('/api/tasks'), null); assert.equal(a.api.snapshot().state, 'unavailable');
+  const epoch=a.api.snapshot().epoch;
+  assert.equal(await a.api.readHandle.jget('/api/tasks'), null); assert.equal(a.api.snapshot().state, 'ready');
+  assert.equal(a.api.snapshot().epoch,epoch);
   assert.equal((await b.api.readHandle.jget('/api/tasks')).state, 'ok');
-  a.runTimer(1000); await flush(); assert.equal(a.api.snapshot().state, 'ready');
+  assert.equal(a.calls.filter(c=>c.url.endsWith('/status')).length,1);
   assert.equal(a.calls.filter(c => c.url.endsWith('/issue')).length, 1);
   a.api.dispose(); b.api.dispose();
+});
+
+test('one fresh status probe deduplicates concurrent failed reads while preserving healthy results and the stream',async()=>{
+  const h=harness(),probe=deferred(),identity=deferred();await h.api.connect();
+  h.api.readHandle.createEventSource('/api/stream');await flush();
+  const epoch=h.api.snapshot().epoch;
+  h.overrides.set('status',()=>probe.promise);
+  h.overrides.set('read/overview',()=>reply(503,{state:'unavailable'}));
+  h.overrides.set('read/channel',()=>reply(503,{state:'unavailable'}));
+  h.overrides.set('read/identities',()=>identity.promise);
+  const tasks=await h.api.readHandle.jget('/api/tasks');
+  const identities=h.api.readHandle.jget('/api/identities');
+  const failed=[h.api.readHandle.jget('/api/overview'),h.api.readHandle.jget('/api/channel?limit=120')];
+  await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length,1);
+  assert.equal(h.api.snapshot().epoch,epoch);assert.equal(h.streams[0].init.signal.aborted,false);
+  probe.resolve(reply(200,ready()));await Promise.all(failed);
+  identity.resolve(reply(200,{state:'ok',data:{identities:[{uid:'actor'}]}}));
+  assert.equal((await identities).data.identities.length,1);assert.equal(tasks.state,'ok');
+  assert.equal(h.api.snapshot().epoch,epoch);assert.equal(h.streams.length,1);
+  // A previous success is not a lease: a later failure requires its own fresh probe.
+  await h.api.readHandle.jget('/api/overview');
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length,2);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,1);h.api.dispose();
+});
+
+for(const [label,response] of [
+  ['unavailable',()=>reply(503,{state:'unavailable'})],
+  ['revoked',()=>reply(403,{state:'denied'})],
+  ['unauthorized',()=>reply(401,{state:'denied'})],
+  ['malformed profile',()=>reply(200,{...ready(),read_profile:{host_uid:HOST}})],
+  ['changed host',()=>reply(200,{...ready(),read_profile:{...ready().read_profile,host_uid:'host_'+'b'.repeat(32)}})],
+  ['changed binding',()=>reply(200,{...ready(),session_context:{...sessionContext,binding_revision:2}})],
+])test(`failed read status probe fences siblings and stream when ${label}`,async()=>{
+  const h=harness(),held=deferred();await h.api.connect();h.api.readHandle.createEventSource('/api/stream');await flush();
+  const epoch=h.api.snapshot().epoch;
+  h.overrides.set('read/identities',()=>held.promise);
+  const sibling=h.api.readHandle.jget('/api/identities');
+  h.overrides.set('read/overview',()=>reply(503,{state:'unavailable'}));h.overrides.set('status',response);
+  assert.equal(await h.api.readHandle.jget('/api/overview'),null);
+  assert.notEqual(h.api.snapshot().state,'ready');assert.ok(h.api.snapshot().epoch>epoch);
+  assert.equal(h.streams[0].init.signal.aborted,true);
+  held.resolve(reply(200,{state:'ok',data:{identities:[{uid:'late'}]}}));assert.equal(await sibling,null);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length,1);h.api.dispose();
+});
+
+for(const change of ['disconnect','context','expiry'])test(`held read recovery cannot restore authority after ${change}`,async()=>{
+  const h=harness(),probe=deferred();await h.api.connect();
+  h.overrides.set('read/overview',()=>reply(503,{state:'unavailable'}));h.overrides.set('status',()=>probe.promise);
+  const reading=h.api.readHandle.jget('/api/overview');await flush();
+  if(change==='disconnect')await h.api.logout();
+  else if(change==='context')h.context={...h.context,context_generation:uuid(9)};
+  else{h.time=900000;h.runTimer(900000);}
+  probe.resolve(reply(200,ready()));assert.equal(await reading,null);
+  assert.notEqual(h.api.snapshot().state,'ready');
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,1);h.api.dispose();
+});
+
+test('a timed-out recovery probe closes the source instead of retrying or preserving sibling rows',async()=>{
+  const h=harness();await h.api.connect();h.api.readHandle.createEventSource('/api/stream');await flush();
+  h.overrides.set('read/overview',()=>reply(503,{state:'unavailable'}));
+  h.overrides.set('status',init=>new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(new Error('probe deadline')),{once:true})));
+  const reading=h.api.readHandle.jget('/api/overview');await flush();h.runTimer(15000);
+  assert.equal(await reading,null);assert.equal(h.api.snapshot().state,'unavailable');
+  assert.equal(h.streams[0].init.signal.aborted,true);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length,1);
+  assert.equal(h.timers.filter(t=>t.active&&t.ms===1000).length,0);h.api.dispose();
+});
+
+test('authenticated stream source loss still fences held adapter rows during a successful read recovery probe',async()=>{
+  const adapter=await readFile(new URL('../claudlobby/plane/ui/two-source-read.js',import.meta.url),'utf8');
+  const {createWorkspaceReadTransport}=await load(adapter.replace('"./owner-api-client.js"',JSON.stringify(ownerURL)));
+  const h=harness(),probe=deferred(),identities=deferred();await h.api.connect();
+  const transport=createWorkspaceReadTransport({sources:[{key:'mini',label:'Mini',reader:h.api.readHandle}]});
+  transport.createEventSource('/api/stream');await flush();
+  h.overrides.set('read/identities',()=>identities.promise);
+  h.overrides.set('read/overview',()=>reply(503,{state:'unavailable'}));h.overrides.set('status',()=>probe.promise);
+  const rows=transport.jget('/api/identities'),overview=transport.jget('/api/overview');await flush();
+  h.push('event: source\ndata: {"state":"unreadable"}\n\n');await flush();
+  probe.resolve(reply(200,ready()));await overview;
+  identities.resolve(reply(200,{state:'ok',data:{identities:[{uid:'late'}]}}));
+  assert.equal((await rows).state,'unavailable');transport.dispose();h.api.dispose();
+});
+
+test('rotating the token while read recovery is held cannot admit its old-token result',async()=>{
+  const h=harness(),probe=deferred();await h.api.connect();
+  h.overrides.set('read/overview',()=>reply(503,{state:'unavailable'}));h.overrides.set('status',()=>probe.promise);
+  const epoch=h.api.snapshot().epoch,reading=h.api.readHandle.jget('/api/overview');await flush();
+  await h.api.renew();assert.equal(h.api.snapshot().state,'ready');
+  probe.resolve(reply(200,ready()));assert.equal(await reading,null);
+  assert.ok(h.api.snapshot().epoch>epoch);assert.equal(h.api.snapshot().state,'ready');
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);h.api.dispose();
 });
 
 test('fetch SSE survives split UTF8/CRLF, parses named source/comments and retains only source-local cursor', async () => {
@@ -347,6 +442,7 @@ test('signer and lost issue deadlines stop explicitly without retrying either mu
 
 test('read timeout covers a held response body after headers without publishing late rows', async () => {
   const h = harness(); assert.equal(await h.api.connect(), true);
+  h.api.readHandle.createEventSource('/api/stream');await flush();const epoch=h.api.snapshot().epoch;
   h.overrides.set('read/tasks', init => {
     let control;
     const body = new ReadableStream({ start(c) { control = c; } });
@@ -355,8 +451,11 @@ test('read timeout covers a held response body after headers without publishing 
   });
   const read = h.api.readHandle.jget('/api/tasks'); await flush(); h.runTimer(15000);
   assert.equal(await read, null);
+  assert.equal(h.api.snapshot().state,'ready');assert.equal(h.api.snapshot().epoch,epoch);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length,1);
+  assert.equal(h.streams.length,1);assert.equal(h.streams[0].init.signal.aborted,false);
   assert.equal(h.calls.filter(c => c.url.endsWith('/read/tasks')).length, 1);
-  assert.notEqual(h.api.snapshot().state, 'ready'); h.api.dispose();
+  h.api.dispose();
 });
 
 for (const change of ['close', 'check', 'renew']) test(`buffered SSE callback ${change} retains only the delivered cursor across replacement`, async () => {
