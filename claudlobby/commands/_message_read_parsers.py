@@ -14,7 +14,8 @@ def _dispatch(args):
 def _route(children, verb, command, help_text):
     parser = children.add_parser(verb, help=help_text)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
-    parser.add_argument("message_id", metavar="MESSAGE_ID")
+    parser.add_argument("message_id", metavar="MESSAGE_ID",
+                        help="A message ID, or msg_ and at least 8 of its hex digits")
     parser.set_defaults(func=_dispatch, public_command=command)
     return parser
 

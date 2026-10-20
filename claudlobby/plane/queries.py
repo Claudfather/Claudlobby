@@ -1023,7 +1023,7 @@ _CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq D
 
 
 def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False,
-                     checkin_id: bool = False) -> str:
+                     checkin_id: bool = False, checkin_prefix: bool = False) -> str:
     """The check-in decision rows query (PR 3 chunk 4): the window, the bot
     filter and --limit bound here rather than pulled whole into Python and
     filtered there (PR 1's shape) -- a wide --since still shrinks what
@@ -1037,9 +1037,9 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     base query admits human actors only under the recorded fleet UID;
     historical bot rows retain the alias fallback.
 
-    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, alias]
-    [, since] [, limit] -- current UID scope, legacy alias fallback and
-    a separate exact bot-alias guard, so
+    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, ref low,
+    ref high] [, alias] [, since] [, limit] -- current UID scope, legacy
+    alias fallback and a separate exact bot-alias guard, so
     every optional term is appended AFTER it. `collect_checkins`
     (commands/checkins.py) gates its params list on the SAME three booleans
     this function is called with, in the SAME order, so the SQL shape and
@@ -1053,6 +1053,9 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     sql = _CHECKIN_ROWS_HEAD
     if checkin_id:
         sql += " AND e.source_ref = ?"
+    if checkin_prefix:
+        # `checkin show` with an ID prefix (#2380): the refs in [prefix, prefix + 'g').
+        sql += " AND e.source_ref >= ? AND e.source_ref < ?"
     if bot:
         sql += " AND e.subject_alias = ?"
     if since:
