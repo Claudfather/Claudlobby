@@ -4,7 +4,8 @@
 Heavy jobs stacked across fleets have stormed the primary host (load 25-57,
 iowait up to 66%, swap full), and a prose rule saying "one at a time" cannot
 hold across a score of bots in four fleets. So a bot that opted in
-(`heavy_slot: true` in fleet.yaml) runs this module three ways:
+(`heavy_slot: true` in fleet.yaml) runs this module three ways, and any bot
+runs a headless render through its render profile:
 
 ``hook``
     The PreToolUse decider behind claudlobby/_runtime_scripts/heavy-slot-guard.sh. It reads the Bash
@@ -27,13 +28,39 @@ hold across a score of bots in four fleets. So a bot that opted in
     because every slot is held or a free one is another caller's turn, takes
     a ticket in the queue (#2124) and exits 75.
 
+``run --profile render -- ARGV``
+    A headless browser render, which plain ``run`` refuses: a render is a
+    script (#2039). It starts only inside the host's render start line, read
+    in this process before the slot is asked for (MemAvailable at or above
+    4820 MiB, the 1-minute load under 16, no stop line crossed); a closed one
+    refuses at exit 75 with nothing started and no ticket taken. With the slot
+    taken through the queue, the job runs in a systemd user scope of its own,
+    its session bus pointed at nothing, and this process reads the host every
+    2 s and kills the whole scope through its cgroup when MemAvailable falls
+    under 3800 MiB, the 5-minute load passes 25 or the 1-minute load passes 40
+    (#2221), or the render outlives its time limit; it then exits 79. The
+    scope's keeper, the process systemd-run starts in the scope, holds the
+    kernel's parent-death signal, so a runner killed outright (SIGKILL) still
+    takes its render with it, and records the kill as the runner would. The
+    record and the events say how the run ended (done, refused or killed) and
+    what it measured. After a kill no render starts for 30 minutes, and two
+    kills in one local day hold renders until someone lifts the hold: the
+    runner refuses both itself, from the render record (exit 75 for the 30
+    minutes, 2 for a hold). Linux only.
+
+``lift-hold --by NAME [--reason TEXT]``
+    Lifts a render hold. Only the fleet's manager, or the operator from a
+    shell of their own, may; the lift is recorded with who lifted it. Time
+    passing never lifts a hold.
+
 ``status [--json]``
     The one-line door: who holds each slot, or who held it last and whether
     they released it, and who waits in the queue, in the order they are served.
 
 Bounds, stated rather than implied: the gate sees Bash tool calls only. A heavy
 job started from inside a script (`make test`, `python render.py`) is not seen,
-nor are dev servers, host timers or the Claudron doctor walk. A matched command
+nor are dev servers, host timers or the Claudron doctor walk (a render script
+takes the slot when its caller runs it through the render profile). A matched command
 the matcher cannot parse with certainty is left untouched and counted
 (`heavy_slot_unparsed`), because rewriting a command at a guessed position
 would corrupt it, which is worse than missing the gate.
@@ -41,9 +68,15 @@ would corrupt it, which is worse than missing the gate.
 Knobs, all host-wide: ``state/heavy-slot/slots`` holds the slot count (default
 1, the measured start); ``state/heavy-slot/disabled`` makes the hook pass every
 call through at once, without a restart; ``state/heavy-slot/no-queue`` makes
-every caller decide on the slots alone, as before the queue. The environment's
-HEAVY_SLOT_TICKET_IDLE_S overrides TICKET_IDLE_S for the process that reads it.
-Test seams: HEAVY_SLOT_DIR, HEAVY_SLOT_EVENTS_FILE, HEAVY_SLOT_BOOT_ID.
+every caller decide on the slots alone, as before the queue;
+``state/heavy-slot/render-lines`` sets the render profile's lines (``name =
+value``; RENDER_LINES names them and holds the defaults), and a file it cannot
+read refuses every render. ``state/heavy-slot/render-record`` is the render
+profile's record of kills and hold lifts, one JSON object per line; a file it
+cannot read refuses every render too. The environment's HEAVY_SLOT_TICKET_IDLE_S overrides
+TICKET_IDLE_S for the process that reads it. Test seams: HEAVY_SLOT_DIR,
+HEAVY_SLOT_EVENTS_FILE, HEAVY_SLOT_BOOT_ID, and HEAVY_SLOT_PROC (a directory
+standing in for /proc's meminfo and loadavg).
 
 Stdlib only, Python 3.9 (the system python3 on the estate's macOS hosts).
 """
@@ -51,11 +84,14 @@ Stdlib only, Python 3.9 (the system python3 on the estate's macOS hosts).
 from __future__ import annotations
 
 import calendar
+import errno
 import fcntl
 import json
 import os
 import re
+import select
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -64,7 +100,8 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-EX_TEMPFAIL = 75  # every slot is taken: retry later
+EX_TEMPFAIL = 75  # every slot is taken, or a render's start line does not hold: retry later
+EX_STOPPED = 79  # the render profile killed its render at a stop line or its time limit
 COMMAND_CAP = 200  # characters of a command kept in a record or event
 
 
@@ -1520,7 +1557,8 @@ def _decide(d: Path, n: int, tool: str, take: bool):
     return got, slots, mine, order, why
 
 
-def _refuse(d: Path, where: str, shape: str, n: int, slots, mine, order, why) -> str:
+def _refuse(d: Path, where: str, shape: str, n: int, slots, mine, order, why,
+            profile: Optional[str] = None) -> str:
     """Record a refusal on the plane and give its text."""
     now, idle = time.time(), ticket_idle_s()
     holders = [rec for _, held, rec in slots if held]
@@ -1531,6 +1569,8 @@ def _refuse(d: Path, where: str, shape: str, n: int, slots, mine, order, why) ->
         holders = [rec for _, held, rec in probe(d, n) if held] or [rec for _, _, rec in slots]
     ticket = None if mine is None else _ticket_summary(mine, order, idle)
     data = {"where": where, "shape": shape, "holders": [_holder_summary(h) for h in holders]}
+    if profile:
+        data["profile"] = profile
     if ticket is not None:
         data["ticket"] = ticket
     if why:
@@ -1565,9 +1605,11 @@ def _queue_line(place: int, t: dict, now: float, idle: int, next_places: int) ->
 
 # --- the record on the plane ---------------------------------------------------
 
-def _emit(event: str, data: dict) -> None:
-    """Best-effort and never blocking: a fleet event through the one door, in
-    a detached shell the job never waits on."""
+def _emit(event: str, data: dict, wait: bool = False) -> None:
+    """Best-effort: a fleet event through the one door, in a detached shell the
+    job never waits on. With wait, the shell runs in the foreground, bounded by
+    EMIT_WAIT_S: for a caller about to kill the cgroup that shell runs in (the
+    render keeper), where a detached shell would die before it sent anything."""
     seam = os.environ.get("HEAVY_SLOT_EVENTS_FILE")
     if seam:
         with open(seam, "a") as fh:
@@ -1579,14 +1621,922 @@ def _emit(event: str, data: dict) -> None:
     # selects installed code; a copy with no lib-common beside it emits nothing.
     lib = str(Path(__file__).resolve().parent)
     script = ('( . "$1/lib-common.sh" >/dev/null 2>&1 || exit 0; '
-              'emit_fleet_event "$2" heavy-slot "$3" ) </dev/null >/dev/null 2>&1 &')
+              'emit_fleet_event "$2" heavy-slot "$3" ) </dev/null >/dev/null 2>&1'
+              + ("" if wait else " &"))
     try:
         subprocess.run(["bash", "-c", script, "heavy-slot", lib, event,
                         json.dumps(data, sort_keys=True)],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=10)
+                       stderr=subprocess.DEVNULL, timeout=EMIT_WAIT_S if wait else 10)
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+# --- the render profile ----------------------------------------------------------
+# A headless browser render (#2039) runs only inside the host's render lines
+# (#2221, #2043), in a systemd user scope of its own, watched by the process
+# that started it. The lines are host knobs; these defaults are the primary
+# host's ruled lines (2026-10-19). A start line holds AT its number; a stop line
+# is crossed only PAST it, and one reading past it is enough: the ruled lines
+# name no debounce.
+
+RENDER_LINES = {
+    "start_mib": 4820.0,   # start only while MemAvailable is at least this
+    "start_load1": 16.0,   # ... and the 1-minute load is under this
+    "stop_mib": 3800.0,    # kill the scope once MemAvailable is under this
+    "stop_load5": 25.0,    # ... or the 5-minute load is over this
+    "stop_load1": 40.0,    # ... or the 1-minute load is over this
+    "poll_s": 2.0,         # seconds between two readings
+    "max_minutes": 45.0,   # a render still running after this is killed too
+}
+RENDER_LINES_FILE = "render-lines"
+# The job's session bus. A Chromium that reaches it asks systemd for a scope of
+# its own and moves its browser out of the job's (#2221), so the job must not
+# reach it. Unset or empty is no cut: libdbus, GDBus and sd-bus all fall back to
+# $XDG_RUNTIME_DIR/bus (measured 2026-10-19). An address that leads nowhere is.
+# systemd-run keeps the real bus, which it needs to make the scope.
+NO_BUS = "unix:path=/nonexistent"
+SCOPE_GRACE_S = 60  # systemd's own time limit on the scope trails the runner's by this
+EMIT_WAIT_S = 20  # a waited event: emit_fleet_event's own 10 s bound, and the shell around it
+SCOPE_START_S = 30.0  # systemd-run has this long to start the scope's keeper
+KILL_WAIT_S = 5.0  # a killed scope has this long to empty
+
+
+class LinesError(Exception):
+    """The host's render-lines file cannot be read as lines: every render refuses."""
+
+
+def render_lines(d: Path) -> Tuple[dict, str]:
+    """(the render lines, where they came from): RENDER_LINES with the host's own
+    numbers from state/heavy-slot/render-lines over them, read on every use. The
+    file holds `name = value` lines, and `#` starts a comment. A name it does not
+    know, a value that is not a positive number, or a file it cannot read raises
+    LinesError: a typo must never stand in for a line someone set."""
+    lines = dict(RENDER_LINES)
+    f = d / RENDER_LINES_FILE
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        return lines, "default"
+    except (OSError, UnicodeDecodeError) as e:
+        raise LinesError(f"{f} is unreadable: {getattr(e, 'strerror', None) or e}")
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, eq, value = (part.strip() for part in line.partition("="))
+        if not eq or name not in RENDER_LINES:
+            raise LinesError(f"{f} line {number} names no render line (the names: "
+                             f"{', '.join(RENDER_LINES)})")
+        try:
+            number_value = float(value)
+        except ValueError:
+            number_value = -1.0
+        if not 0 < number_value < float("inf") or (name == "poll_s" and number_value > 60):
+            raise LinesError(f"{f} line {number}: {name} needs a positive number"
+                             + (" of at most 60" if name == "poll_s" else ""))
+        lines[name] = number_value
+    return lines, str(f)
+
+
+# The retry rule (the host's render rule; its owner ruled 2026-10-19 that the
+# runner enforces it). After a render is killed, whatever killed it (a stop line,
+# the time limit, a signal, or its keeper when the runner died), no render starts
+# for RENDER_RETRY_S. After RENDER_HOLD_KILLS kills in one local day, renders are
+# held until the fleet's manager or the operator lifts the hold (`lift-hold`),
+# which names who; time passing never lifts it, and a lift starts the count
+# again. The slot's file keeps only its last run, and any job's next run replaces
+# it, so the kills and the lifts have a record of their own: RENDER_RECORD_FILE,
+# one JSON object per line, which the runner and the keeper add to under its lock.
+RENDER_RECORD_FILE = "render-record"
+RENDER_RETRY_S = 30 * 60
+RENDER_HOLD_KILLS = 2
+
+
+class RecordError(Exception):
+    """The render record cannot be read: every render refuses, as for the lines file."""
+
+
+def _flock_within(fd: int, how: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            fcntl.flock(fd, how | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+
+
+def render_record(d: Path) -> List[dict]:
+    """The render record's entries, oldest first: each a kill or a lift, with its
+    epoch. An absent file is an empty record. A file it cannot read, or a line
+    that is not such an entry, raises RecordError: a damaged record must never
+    read as no kills."""
+    f = d / RENDER_RECORD_FILE
+    try:
+        fd = os.open(f, os.O_RDONLY)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise RecordError(f"{f} is unreadable: {e.strerror or e}")
+    try:
+        if not _flock_within(fd, fcntl.LOCK_SH, QUEUE_LOCK_WAIT_S):
+            raise RecordError(f"{f} stayed locked for {QUEUE_LOCK_WAIT_S:g} s")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        text = b"".join(chunks).decode()
+    except OSError as e:
+        raise RecordError(f"{f} is unreadable: {e.strerror or e}")
+    except UnicodeDecodeError:
+        raise RecordError(f"{f} is not text")
+    finally:
+        os.close(fd)
+    entries = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            entry = None
+        epoch = entry.get("epoch") if isinstance(entry, dict) else None
+        if (not isinstance(entry, dict) or entry.get("kind") not in ("kill", "lift")
+                or isinstance(epoch, bool) or not isinstance(epoch, (int, float))):
+            raise RecordError(f"{f} line {number} is not a kill or a lift with its time")
+        entries.append(entry)
+    return entries
+
+
+def _record_render(d: Path, entry: dict) -> Optional[str]:
+    """Add one entry to the render record: None once it is written, else why not."""
+    f = d / RENDER_RECORD_FILE
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        fd = os.open(f, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    except OSError as e:
+        return f"{f} cannot be opened: {e.strerror or e}"
+    try:
+        if not _flock_within(fd, fcntl.LOCK_EX, QUEUE_LOCK_WAIT_S):
+            return f"{f} stayed locked for {QUEUE_LOCK_WAIT_S:g} s"
+        os.write(fd, (json.dumps(entry, sort_keys=True) + "\n").encode())
+        os.fsync(fd)
+        return None
+    except OSError as e:
+        return f"{f} could not be written: {e.strerror or e}"
+    finally:
+        os.close(fd)
+
+
+def _kill_entry(rec: dict, at: float, by: str) -> dict:
+    """A kill as the render record keeps it, from the killed run's record."""
+    stop = rec.get("stop") if isinstance(rec.get("stop"), dict) else {}
+    return {"kind": "kill", "epoch": round(at, 3), "at": _now_iso(at), "by": by,
+            "unit": rec.get("unit"), "line": stop.get("line"), "slot": rec.get("slot"),
+            "fleet": rec.get("fleet"), "bot": rec.get("bot")}
+
+
+def _kill_summary(kill: dict) -> dict:
+    return {k: kill.get(k) for k in ("at", "line", "by", "unit")}
+
+
+def _day(epoch: float) -> str:
+    """An instant's local date: the runner's TZ, else the host's own zone."""
+    return time.strftime("%Y-%m-%d", time.localtime(epoch))
+
+
+def render_rule(d: Path, n: int, now: float) -> dict:
+    """Where the retry rule stands at `now`: the last kill (`last`), when a
+    render may start after it (`retry_at`, None once that has passed), and the
+    hold that stands, if one does (`hold`: its day, since when, and that day's
+    kills). The kills are the render record's, and also a killed render that a
+    slot's last record holds and the record lacks (its write failed). A hold
+    counts only the kills after the last lift. RecordError when the record
+    cannot be read."""
+    entries = render_record(d)
+    kills = [e for e in entries if e["kind"] == "kill"]
+    known = {k.get("unit") for k in kills}
+    for _, _, rec in probe(d, n, extra=True):
+        released = _epoch(rec, "released")
+        if (rec.get("profile") == "render" and rec.get("ended") == "killed" and released
+                and rec.get("unit") not in known):
+            kills.append(_kill_entry(rec, released, "slot record"))
+    kills.sort(key=lambda k: k["epoch"])
+    lifts = [e["epoch"] for e in entries if e["kind"] == "lift"]
+    lifted = max(lifts) if lifts else None
+    by_day: dict = {}
+    for k in kills:
+        if lifted is None or k["epoch"] > lifted:
+            by_day.setdefault(_day(k["epoch"]), []).append(k)
+    hold = None
+    for day, day_kills in by_day.items():
+        if len(day_kills) >= RENDER_HOLD_KILLS:
+            since = day_kills[RENDER_HOLD_KILLS - 1]["epoch"]
+            if hold is None or since < hold["since"]:
+                hold = {"day": day, "since": since, "kills": day_kills}
+    last = kills[-1] if kills else None
+    retry_at = last["epoch"] + RENDER_RETRY_S if last else None
+    return {"last": last, "retry_at": retry_at if retry_at and retry_at > now else None,
+            "hold": hold}
+
+
+def _hold_text(hold: dict) -> str:
+    kills = ", ".join(f"{_clock(k['epoch'])} ({k.get('line') or '?'})" for k in hold["kills"])
+    return (f"renders are on hold on this host since {_clock(hold['since'])} on {hold['day']}: "
+            f"{len(hold['kills'])} renders were killed that day ({kills}). {RENDER_HOLD_KILLS} kills "
+            "in one local day hold renders until the fleet's manager or the operator lifts the "
+            "hold, and time passing does not lift it (#2221). To lift it, the manager or the "
+            "operator runs `heavy-slot.py lift-hold --by NAME --reason TEXT`, which records who "
+            "lifted it")
+
+
+def _rule_refusal(d: Path, n: int, shape: str) -> Optional[int]:
+    """The retry rule, read now: None when a render may start, else its exit
+    code, with the refusal printed and on the plane like the start line's."""
+    now = time.time()
+    try:
+        rule = render_rule(d, n, now)
+    except RecordError as e:
+        print(f"heavy-slot: NOT RUN: {e}. No render starts until the record reads (#2221).",
+              file=sys.stderr)
+        return 2
+    hold = rule["hold"]
+    if hold is not None:
+        why = _hold_text(hold)
+        _emit("heavy_slot_refused", {"where": "hold", "profile": "render", "shape": shape,
+                                     "day": hold["day"], "since": _now_iso(hold["since"]),
+                                     "kills": [_kill_summary(k) for k in hold["kills"]],
+                                     "why": why})
+        print(f"heavy-slot: NOT RUN: {why}. Tell your manager; retrying does not help until the "
+              "hold is lifted.", file=sys.stderr)
+        return 2
+    if rule["retry_at"] is not None:
+        last = rule["last"]
+        why = (f"a render was killed at {_clock(last['epoch'])} ({last.get('line') or '?'}), and "
+               f"no render starts for {RENDER_RETRY_S // 60} minutes after a kill (#2221). A "
+               f"render may start again at {_clock(rule['retry_at'])}")
+        _emit("heavy_slot_refused", {"where": "retry", "profile": "render", "shape": shape,
+                                     "killed": _kill_summary(last),
+                                     "retry_at": _now_iso(rule["retry_at"]), "why": why})
+        print(f"heavy-slot: NOT RUN: {why}. Do other work meanwhile; do not wait in a sleep loop.",
+              file=sys.stderr)
+        return EX_TEMPFAIL
+    return None
+
+
+def _proc_dir() -> Path:
+    return Path(os.environ.get("HEAVY_SLOT_PROC") or "/proc")
+
+
+def host_readings() -> dict:
+    """MemAvailable (MiB) and the 1- and 5-minute load, read now. OSError or
+    ValueError when the host cannot be read: a gate or a watchdog that cannot
+    read the host does not guess."""
+    proc = _proc_dir()
+    with open(proc / "loadavg") as fh:
+        load1, load5 = (float(x) for x in fh.read().split()[:2])
+    with open(proc / "meminfo") as fh:
+        for line in fh:
+            if line.startswith("MemAvailable:"):
+                return {"mem_available_mib": int(line.split()[1]) // 1024,
+                        "load1": load1, "load5": load5}
+    raise ValueError(f"no MemAvailable in {proc / 'meminfo'}")
+
+
+def _breach(r: dict, lines: dict) -> Optional[Tuple[str, str]]:
+    """(the stop line reading r is past, what it reads), or None."""
+    if r["mem_available_mib"] < lines["stop_mib"]:
+        return "stop_mib", (f"MemAvailable {r['mem_available_mib']} MiB, under "
+                            f"{lines['stop_mib']:g} MiB")
+    if r["load5"] > lines["stop_load5"]:
+        return "stop_load5", f"load5 {r['load5']:.2f}, over {lines['stop_load5']:g}"
+    if r["load1"] > lines["stop_load1"]:
+        return "stop_load1", f"load1 {r['load1']:.2f}, over {lines['stop_load1']:g}"
+    return None
+
+
+def _gate_refusal(r: dict, lines: dict) -> Optional[str]:
+    """Why a render may not start at reading r, or None when it may."""
+    if r["mem_available_mib"] < lines["start_mib"]:
+        return (f"MemAvailable {r['mem_available_mib']} MiB is under the render start line, "
+                f"{lines['start_mib']:g} MiB")
+    if not r["load1"] < lines["start_load1"]:
+        return (f"load1 {r['load1']:.2f} is not under the render start line, "
+                f"{lines['start_load1']:g}")
+    crossed = _breach(r, lines)
+    if crossed is not None:
+        return f"{crossed[1]}: past a stop line already, so the render would be killed at once"
+    return None
+
+
+def _scope_unavailable() -> Optional[str]:
+    """Why this host cannot run a render in a scope it can kill, or None."""
+    if not sys.platform.startswith("linux"):
+        return "a render runs only in a systemd user scope, and this host has no systemd"
+    if not Path("/sys/fs/cgroup/cgroup.controllers").exists():
+        return ("a render's scope is killed through its cgroup, and this host does not mount "
+                "cgroup v2 at /sys/fs/cgroup")
+    if shutil.which("systemd-run") is None:
+        return "a render runs only in a systemd user scope, and systemd-run is not on PATH"
+    return None
+
+
+def _scope_unit(fleet: str, bot: str, started: float) -> str:
+    """The render scope's unit name: whose render, when, and this runner's pid."""
+    def part(text: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_-]", "_", text)[:40] or "unknown"
+    return f"heavy-render-{part(fleet)}-{part(bot)}-{int(started)}-{os.getpid()}"
+
+
+def _arm_parent_death(signum: int) -> bool:
+    """PR_SET_PDEATHSIG: the kernel sends signum to this process when the thread
+    that started it ends, however it ends (SIGKILL included)."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(1, int(signum), 0, 0, 0) == 0  # 1 is PR_SET_PDEATHSIG
+    except (ImportError, OSError, AttributeError):
+        return False
+
+
+def _stat(pid: int) -> Optional[Tuple[int, int]]:
+    """(parent pid, start time) of a live process; None once it is gone or a zombie."""
+    try:
+        data = Path(f"/proc/{pid}/stat").read_bytes()
+        rest = data[data.rindex(b")") + 2:].split()  # the name can hold spaces and parentheses
+        if len(rest) < 20 or rest[0] in (b"Z", b"X"):
+            return None
+        return int(rest[1]), int(rest[19])
+    except (OSError, ValueError):
+        return None
+
+
+def _cgroup_of(pid) -> Optional[str]:
+    """A process's cgroup v2 path, as /proc/PID/cgroup writes it."""
+    try:
+        for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                return line[3:].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _scope_procs(cgroup: str) -> Optional[List[int]]:
+    """The pids in a cgroup: none once it is gone or being removed, None when it
+    cannot be read (which never reads as empty)."""
+    try:
+        return [int(x) for x in Path(f"/sys/fs/cgroup{cgroup}/cgroup.procs").read_text().split()]
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        return [] if e.errno == errno.ENODEV else None
+    except ValueError:
+        return None
+
+
+def _pss_mib(pids: List[int]) -> int:
+    """The summed PSS of these processes: shared pages split between them."""
+    total = 0
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/smaps_rollup", "rb") as fh:
+                for line in fh:
+                    if line.startswith(b"Pss:"):
+                        total += int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+    return total // 1024
+
+
+def _duration(seconds: float) -> str:
+    return (f"{int(seconds // 60)} min {int(seconds % 60)} s" if seconds >= 60
+            else f"{seconds:.1f} s")
+
+
+class _Scope:
+    """A render's scope, and every process found to have left it."""
+
+    def __init__(self, unit: str):
+        self.unit = unit
+        self.cgroup: Optional[str] = None
+        self.escapees: dict = {}  # pid -> start time, so one is found after it is reparented
+
+    def _inside(self, path: str) -> bool:
+        return path == self.cgroup or path.startswith(self.cgroup + "/")
+
+    def members(self) -> Tuple[Optional[List[int]], List[int]]:
+        """(the scope's pids, None when they cannot be read; the live escapees).
+        An escapee is a descendant of the scope's processes, by parent link,
+        living outside the scope: a process moved into a scope of its own (a
+        browser that reached the session bus, or `systemd-run --user` in the
+        job), which killing the scope would miss."""
+        scoped = _scope_procs(self.cgroup)
+        procs = {}
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        for name in names:
+            if name.isdigit():
+                st = _stat(int(name))
+                if st is not None:
+                    procs[int(name)] = st
+        live = {pid for pid, start in self.escapees.items()
+                if pid in procs and procs[pid][1] == start}
+        children: dict = {}
+        for pid, (ppid, _start) in procs.items():
+            children.setdefault(ppid, []).append(pid)
+        seen = set(scoped or []) | live
+        stack = list(seen)
+        while stack:
+            for child in children.get(stack.pop(), ()):
+                if child in seen:
+                    continue
+                seen.add(child)
+                stack.append(child)
+                path = _cgroup_of(child)
+                if path is not None and not self._inside(path):
+                    self.escapees[child] = procs[child][1]
+                    live.add(child)
+        return scoped, sorted(live)
+
+    def _cgroup_kill(self) -> None:
+        if not (self.cgroup and self.cgroup.endswith(f"/{self.unit}.scope")):
+            return  # never anything but the render's own scope
+        try:
+            with open(f"/sys/fs/cgroup{self.cgroup}/cgroup.kill", "w") as fh:
+                fh.write("1")
+        except OSError:
+            pass  # gone already, or a kernel before 5.14: kill() falls back to each pid
+
+    def kill(self) -> Optional[List[int]]:
+        """SIGKILL the whole scope and every escapee, then wait up to KILL_WAIT_S
+        for them to go: the pids still alive (none, as it should be), or None
+        when the scope could not be read to tell."""
+        _, live = self.members()  # escapees are found while their parents live
+        self._cgroup_kill()
+        deadline = time.monotonic() + KILL_WAIT_S
+        while True:
+            for pid in live:
+                st = _stat(pid)
+                if st is not None and st[1] == self.escapees.get(pid):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+            scoped, live = self.members()
+            if scoped == [] and not live:
+                return []
+            if time.monotonic() >= deadline:
+                return None if scoped is None else sorted(set(scoped) | set(live))
+            for pid in scoped or []:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.1)
+
+
+class _Render:
+    """One render after its slot is taken: its record, its scope and keeper,
+    what the keeper reported, the readings, and why it stopped, if it did."""
+
+    def __init__(self, record: dict, fd: int, lines: dict, start: dict):
+        self.record, self.fd, self.lines = record, fd, lines
+        self.scope = _Scope(record["unit"])
+        self.keeper: Optional[subprocess.Popen] = None
+        self.report: dict = {}
+        self.buf = b""
+        self.stop: Optional[Tuple[str, str]] = None
+        self.left_behind = 0
+        self.still_running: Optional[List[int]] = []
+        self.peak = {"mem_available_mib_start": start["mem_available_mib"],
+                     "mem_available_mib_low": start["mem_available_mib"],
+                     "load1_high": start["load1"], "load5_high": start["load5"],
+                     "job_pss_mib_high": 0, "readings": 1}
+
+    def take(self, chunk: bytes) -> None:
+        """Read the keeper's complete report lines."""
+        self.buf += chunk
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            self.report.update(msg)
+            cgroup = msg.get("cgroup")
+            if isinstance(cgroup, str) and self.scope.cgroup is None:
+                if not cgroup.endswith(f"/{self.scope.unit}.scope"):
+                    self.stop = ("scope", f"the keeper is in {cgroup}, not its scope")
+                    continue
+                self.scope.cgroup = cgroup
+                self.record["cgroup"] = cgroup
+                _write(self.fd, self.record)
+
+    def drain(self, rd: int) -> None:
+        """What the keeper said last, then the pipe closed."""
+        try:
+            while select.select([rd], [], [], 0)[0]:
+                chunk = os.read(rd, 65536)
+                if not chunk:
+                    break
+                self.take(chunk)
+        finally:
+            os.close(rd)
+
+    def read(self, r: dict) -> None:
+        p = self.peak
+        p["mem_available_mib_low"] = min(p["mem_available_mib_low"], r["mem_available_mib"])
+        p["load1_high"] = max(p["load1_high"], r["load1"])
+        p["load5_high"] = max(p["load5_high"], r["load5"])
+        p["readings"] += 1
+
+    def watch(self, argv: List[str], signals: List[int]) -> None:
+        """Start the scope and its keeper, and watch until the job ends or
+        something stops it (self.stop)."""
+        lines, scope = self.lines, self.scope
+        rd, wr = os.pipe()
+        cmd = ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={scope.unit}",
+               f"--property=RuntimeMaxSec={int(lines['max_minutes'] * 60) + SCOPE_GRACE_S}",
+               "--", sys.executable, "-I", str(Path(__file__).resolve()), "_keep", scope.unit,
+               str(wr), str(self.fd), str(os.getpid()), "--", *argv]
+        try:
+            # its own session: a signal meant for the caller's group reaches this runner,
+            # which ends the render itself, and never the render behind its back
+            self.keeper = subprocess.Popen(cmd, pass_fds=(wr, self.fd), start_new_session=True)
+        except OSError as e:
+            os.close(rd)
+            self.stop = ("scope", f"systemd-run could not start: {e.strerror or e}")
+            return
+        finally:
+            os.close(wr)
+        began = next_read = time.monotonic()
+        try:
+            while self.stop is None:
+                if signals:
+                    self.stop = ("signal", f"the runner was sent {signal.Signals(signals[0]).name}")
+                    return
+                wait = max(0.0, next_read - time.monotonic()) if scope.cgroup else 0.1
+                if select.select([rd], [], [], wait)[0]:
+                    chunk = os.read(rd, 65536)
+                    if not chunk:
+                        return  # the keeper has ended
+                    self.take(chunk)
+                    continue
+                now = time.monotonic()
+                if scope.cgroup is None:
+                    if now - began > SCOPE_START_S:
+                        self.stop = ("scope", f"no scope after {SCOPE_START_S:g} s")
+                    continue
+                if now < next_read:
+                    continue
+                next_read = now + lines["poll_s"]
+                try:
+                    r = host_readings()
+                except (OSError, ValueError) as e:
+                    self.stop = ("readings", f"the host could not be read: {e}")
+                    return
+                self.read(r)
+                scoped, live = scope.members()
+                job = [pid for pid in (scoped or []) if pid != self.keeper.pid] + live
+                self.peak["job_pss_mib_high"] = max(self.peak["job_pss_mib_high"], _pss_mib(job))
+                self.stop = _breach(r, lines)
+                if self.stop is None and now - began > lines["max_minutes"] * 60:
+                    self.stop = ("max_minutes",
+                                 f"still running after {lines['max_minutes']:g} min")
+        finally:
+            self.drain(rd)
+
+    def _reap(self) -> None:
+        try:
+            self.keeper.wait(timeout=KILL_WAIT_S)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(self.keeper.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            self.keeper.wait()
+
+    def end(self) -> Tuple[str, int]:
+        """Kill what must go, reap the keeper, and say how the run ended:
+        (done, killed or not-started; the exit status)."""
+        keeper, scope, report = self.keeper, self.scope, self.report
+        if self.stop is None and keeper is not None:
+            self._reap()  # its report pipe closed: it has ended
+            if "exit" not in report:
+                said = report.get("stop")
+                if isinstance(said, list) and len(said) == 2:
+                    self.stop = (str(said[0]), str(said[1]))
+                elif report.get("error") and "pid" not in report:
+                    self.stop = ("scope", str(report["error"]))
+                elif scope.cgroup is None:
+                    self.stop = ("scope", f"systemd-run ended (exit {keeper.returncode}) "
+                                          "before its keeper reported a scope")
+                else:
+                    self.stop = ("keeper", "the scope's keeper ended before its job did")
+        if scope.cgroup is not None:
+            if self.stop is None:  # done: anything still in the scope was left behind
+                scoped, live = scope.members()
+                self.left_behind = len(scoped or []) + len(live)
+            self.still_running = scope.kill()
+        elif keeper is not None and keeper.poll() is None:
+            try:
+                os.killpg(keeper.pid, signal.SIGKILL)  # no scope yet, so no job yet
+            except OSError:
+                pass
+        if keeper is not None and keeper.returncode is None:
+            self._reap()
+        if self.stop is None:
+            rc = report["exit"] if isinstance(report.get("exit"), int) else 1
+            return "done", (rc if rc >= 0 else 128 - rc)
+        if "pid" not in report:
+            return "not-started", 2
+        return "killed", EX_STOPPED
+
+
+def _render_line(ended: str, status: int, rec: dict) -> str:
+    """How a render ended, as its runner's last line."""
+    if ended == "not-started":
+        return f"heavy-slot: NOT RUN: the render could not start: {rec['stop']['reading']}"
+    p = rec["peak"]
+    measured = (f"MemAvailable {p['mem_available_mib_start']} MiB at the start and "
+                f"{p['mem_available_mib_low']} MiB at its lowest "
+                f"({p['mem_available_mib_start'] - p['mem_available_mib_low']} MiB down), "
+                f"load1 at most {p['load1_high']:.2f}, load5 at most {p['load5_high']:.2f}, "
+                f"the job's PSS at most {p['job_pss_mib_high']} MiB")
+    if p["readings"] < 2:
+        measured += " (it ended before the first reading after the start)"
+    if rec.get("escapees"):
+        measured += f"; {rec['escapees']} process(es) that left the scope were killed with it"
+    if rec.get("still_running"):
+        measured += f"; STILL RUNNING after the kill: {rec['still_running']}"
+    took = _duration(rec.get("duration_s") or 0.0)
+    if ended == "killed":
+        stop = rec["stop"]
+        went = ("Its scope was killed, but not all of it is gone" if rec.get("still_running")
+                else "Its whole scope went with it")
+        return (f"heavy-slot: render KILLED after {took} ({stop['line']}): {stop['reading']}. "
+                f"{went}. Measured: {measured}. Exit {status} (#2221).")
+    left = (f"; {rec['left_behind']} process(es) it left in its scope were killed"
+            if rec.get("left_behind") else "")
+    return f"heavy-slot: render done, exit {status}, after {took}: {measured}{left}."
+
+
+def _render_admission(shape: str):
+    """The render profile's checks before the slot is asked for: a host that can
+    make the scope, lines it can read, the retry rule, and the start line, read
+    now in this process. An exit code when the render may not start, else
+    (lines, reading)."""
+    why = _scope_unavailable()
+    if why:
+        print(f"heavy-slot: NOT RUN: {why} (#2221)", file=sys.stderr)
+        return 2
+    d = slot_dir()
+    try:
+        lines, _ = render_lines(d)
+    except LinesError as e:
+        print(f"heavy-slot: NOT RUN: {e}. No render starts until the file reads.",
+              file=sys.stderr)
+        return 2
+    refused = _rule_refusal(d, slot_count(d)[0], shape)
+    if refused is not None:
+        return refused
+    try:
+        start = host_readings()
+    except (OSError, ValueError) as e:
+        print(f"heavy-slot: NOT RUN: the render start line cannot be read: {e}", file=sys.stderr)
+        return 2
+    closed = _gate_refusal(start, lines)
+    if closed is None:
+        return lines, start
+    _emit("heavy_slot_refused", {"where": "gate", "profile": "render", "shape": shape,
+                                 "readings": start, "why": closed})
+    print(f"heavy-slot: NOT RUN: the render start line does not hold: {closed}. A render starts "
+          f"only with MemAvailable at or above {lines['start_mib']:g} MiB, the 1-minute load "
+          f"under {lines['start_load1']:g}, no stop line crossed and the heavy slot free "
+          "(#2221). Retry this later and do other work meanwhile; do not wait in a sleep loop.",
+          file=sys.stderr)
+    return EX_TEMPFAIL
+
+
+def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
+                argv: List[str], lines: dict, start: dict) -> int:
+    """A render, from its slot taken to its release: the record, the scope and
+    its watch, and the end, recorded in the slot's file and on the plane."""
+    signals: List[int] = []
+
+    def on_signal(signum, _frame):
+        signals.append(signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    d = slot_dir()
+    # Again, now the slot is this render's: a render killed while this one asked
+    # for the slot recorded its kill before it let the slot go.
+    refused = _rule_refusal(d, n, shape)
+    if refused is not None:
+        os.close(fd)
+        return refused
+    boot = boot_id()
+    _report_unreleased(fd, slot, boot)
+    started = time.time()
+    record = _held_record(slot, n, shape, tool, boot, started)
+    record.update(profile="render", unit=_scope_unit(record["fleet"], record["bot"], started),
+                  cgroup=None, lines=lines, start=start)
+    _write(fd, record)
+    acquired = _acquired(slot, n, shape, record, mine, why, started)
+    acquired.update(profile="render", unit=record["unit"], readings=start)
+    _emit("heavy_slot_acquired", acquired)
+    render = _Render(record, fd, lines, start)
+    if signals:
+        render.stop = ("signal", f"the runner was sent {signal.Signals(signals[0]).name}")
+    else:
+        render.watch(argv, signals)
+    ended, status = render.end()
+    if signals:  # it ends as the signal it was sent, so the record says what the caller sees
+        status = 128 + signals[0]
+    done = time.time()
+    record.update(state="released", released_at=_now_iso(done), released_epoch=round(done, 3),
+                  exit=status, duration_s=round(done - started, 1), ended=ended,
+                  peak=render.peak, escapees=len(render.scope.escapees),
+                  left_behind=render.left_behind)
+    if render.stop is not None:
+        record["stop"] = {"line": render.stop[0], "reading": render.stop[1]}
+    if render.still_running != []:
+        record["still_running"] = render.still_running or "unknown"
+    _write(fd, record)
+    hold = None
+    if ended == "killed":  # in the render record before the slot is let go
+        failed = _record_render(d, _kill_entry(record, done, "runner"))
+        if failed:
+            print(f"heavy-slot: the kill is not in the render record: {failed}. The retry rule "
+                  "reads it from the slot's record until another job replaces that.",
+                  file=sys.stderr)
+        try:
+            hold = render_rule(d, n, time.time())["hold"]
+        except RecordError:
+            pass
+    os.close(fd)
+    if render.report.get("error") and ended == "done":
+        print(f"heavy-slot: {render.report['error']}", file=sys.stderr)
+    if ended == "killed":
+        _emit("heavy_slot_stopped", {"slot": slot, "shape": shape, "profile": "render",
+                                     "unit": record["unit"], "line": render.stop[0],
+                                     "reading": render.stop[1], "peak": render.peak,
+                                     "escapees": record["escapees"],
+                                     "started_at": record["started_at"],
+                                     "duration_s": record["duration_s"],
+                                     "hold": hold is not None})
+    released = {"slot": slot, "shape": shape, "exit": status, "started_at": record["started_at"],
+                "duration_s": record["duration_s"], "profile": "render", "unit": record["unit"],
+                "ended": ended, "peak": render.peak}
+    if "stop" in record:
+        released["stop"] = record["stop"]
+    _emit("heavy_slot_released", released)
+    line = _render_line(ended, status, record)
+    if ended == "killed":
+        line += (f" Renders are now on hold: {_hold_text(hold)}." if hold is not None else
+                 f" No render starts before {_clock(done + RENDER_RETRY_S)}, "
+                 f"{RENDER_RETRY_S // 60} minutes after a kill (#2221).")
+    print(line, file=sys.stderr)
+    if signals:  # told to stop: the render went first; now end as a shell would report it
+        signal.signal(signals[0], signal.SIG_DFL)
+        os.kill(os.getpid(), signals[0])
+    return status
+
+
+def cmd_keep(args: List[str]) -> int:
+    """`_keep UNIT REPORT_FD SLOT_FD RUNNER_PID -- ARGV`: the render scope's
+    keeper, the process systemd-run starts inside the scope (the render profile's
+    own step, never run by hand). It arms the kernel's parent-death signal,
+    reports its scope to the runner, starts the job with the session bus cut, and
+    reports how the job ended. If the runner dies first, however it died, the
+    kernel sends this process SIGTERM: it kills the job, records the kill where
+    the runner would have (the slot's file, the render record and the plane), and
+    kills the whole scope, itself included: a render never outlives its
+    watchdog."""
+    try:
+        unit, report_fd, slot_fd, runner = args[0], int(args[1]), int(args[2]), int(args[3])
+        if args[4] != "--" or not args[5:]:
+            raise ValueError
+    except (IndexError, ValueError):
+        print("heavy-slot: _keep is the render profile's own step; run "
+              "`heavy-slot.py run --profile render -- COMMAND`", file=sys.stderr)
+        return 2
+    argv = args[5:]
+    cgroup = _cgroup_of("self")
+
+    def say(msg: dict) -> None:
+        try:
+            os.write(report_fd, (json.dumps(msg, sort_keys=True) + "\n").encode())
+        except OSError:
+            pass
+
+    def kill_scope() -> None:
+        if cgroup and cgroup.endswith(f"/{unit}.scope"):
+            try:
+                with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as fh:
+                    fh.write("1")
+            except OSError:  # a kernel before 5.14: each pid but this one
+                for pid in _scope_procs(cgroup) or []:
+                    if pid != os.getpid():
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+        os._exit(EX_STOPPED)
+
+    def kill_job() -> None:
+        """Every process in the scope but this one, so the render has ended
+        before its kill is recorded; kill_scope then takes whatever is left."""
+        me = os.getpid()
+        for _ in range(20):
+            pids = [pid for pid in (_scope_procs(cgroup) or []) if pid != me]
+            if not pids:
+                return
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.05)
+
+    def record_kill() -> None:
+        """The runner died with its render running. The events wait for their
+        door: the shell that carries them runs in this scope, which kill_scope
+        ends."""
+        rec = _read(slot_fd)
+        if rec.get("unit") != unit or rec.get("state") != "held":
+            return
+        now = time.time()
+        stop = {"line": "runner", "reading": "the runner died, so the keeper killed its scope"}
+        started = _epoch(rec, "started")
+        rec.update(state="released", released_at=_now_iso(now), released_epoch=round(now, 3),
+                   exit=EX_STOPPED, ended="killed", stop=stop,
+                   duration_s=round(now - started, 1) if started else None)
+        try:
+            _write(slot_fd, rec)
+        except OSError:
+            pass
+        kill_job()
+        hold = None
+        try:
+            d = slot_dir()
+            _record_render(d, _kill_entry(rec, now, "keeper"))
+            hold = render_rule(d, slot_count(d)[0], time.time())["hold"]
+        except (NoDataRoot, RecordError):
+            pass
+        common = {"slot": rec.get("slot"), "shape": rec.get("shape"), "profile": "render",
+                  "unit": unit, "started_at": rec.get("started_at"),
+                  "duration_s": rec.get("duration_s"), "by": "keeper"}
+        _emit("heavy_slot_stopped", dict(common, line="runner", reading=stop["reading"],
+                                         hold=hold is not None), wait=True)
+        _emit("heavy_slot_released", dict(common, exit=EX_STOPPED, ended="killed", stop=stop),
+              wait=True)
+
+    def on_signal(signum, _frame):
+        name = signal.Signals(signum).name
+        if os.getppid() == runner:  # the runner lives: it sees the scope end and records it
+            say({"stop": ["signal", f"the scope's keeper was sent {name}"]})
+            kill_scope()
+        try:
+            record_kill()
+        finally:
+            kill_scope()
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    if not _arm_parent_death(signal.SIGTERM):
+        say({"error": "the kernel's parent-death signal could not be armed, so the render "
+                      "could outlive its runner"})
+        return 125
+    if os.getppid() != runner:  # the runner died before the keeper could watch for it
+        on_signal(signal.SIGTERM, None)
+    if not (cgroup and cgroup.endswith(f"/{unit}.scope")):
+        say({"error": f"the keeper is not in its scope ({cgroup or 'no cgroup v2 path'})"})
+        return 125
+    say({"cgroup": cgroup})
+    try:
+        job = subprocess.Popen(argv, env=dict(os.environ, DBUS_SESSION_BUS_ADDRESS=NO_BUS))
+    except FileNotFoundError:
+        say({"exit": 127, "error": f"{argv[0]}: command not found"})
+        return 0
+    except PermissionError:
+        say({"exit": 126, "error": f"{argv[0]}: permission denied"})
+        return 0
+    say({"pid": job.pid})
+    say({"exit": job.wait()})
+    return 0
 
 
 # --- the doors -----------------------------------------------------------------
@@ -1643,12 +2593,58 @@ def cmd_hook() -> int:
     return 0
 
 
-def cmd_run(argv: List[str]) -> int:
+def _report_unreleased(fd: int, slot: int, boot: str) -> None:
+    """A slot whose holder died without a release: killed this boot, or the host
+    reset under it. The record is the evidence; report it before it is
+    overwritten."""
+    previous = _read(fd)
+    if previous.get("state") == "held":
+        _emit("heavy_slot_unreleased", {"slot": slot, "previous": _public(previous),
+                                        "across_reset": previous.get("boot_id") != boot})
+
+
+def _held_record(slot: int, n: int, shape: str, tool: str, boot: str, started: float) -> dict:
+    fleet, bot = _identity()
+    return {
+        "v": 1, "slot": slot, "slots": n, "state": "held", "fleet": fleet, "bot": bot,
+        "shape": shape, "tool": tool, "cwd": os.getcwd(), "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "boot_id": boot, "started_at": _now_iso(started), "started_epoch": int(started),
+        "released_at": None, "exit": None,
+    }
+
+
+def _acquired(slot: int, n: int, shape: str, record: dict, mine, why, started: float) -> dict:
+    acquired = {"slot": slot, "slots": n, "shape": shape, "started_at": record["started_at"]}
+    if mine is not None:  # the ticket it waited on, for joining its refusals to this
+        acquired["ticket"] = _ticket_summary(mine, [], ticket_idle_s(), started)
+    if why:
+        acquired["queue"] = why
+    return acquired
+
+
+def cmd_run(args: List[str]) -> int:
+    profile = None
+    if args[:1] == ["--profile"]:
+        profile, args = (args[1] if len(args) > 1 else ""), args[2:]
+    elif args[:1] and args[0].startswith("--profile="):
+        profile, args = args[0].split("=", 1)[1], args[1:]
+    argv = args[1:] if args[:1] == ["--"] else args
     if not argv:
-        print("usage: heavy-slot.py run -- COMMAND [ARGS...]", file=sys.stderr)
+        print("usage: heavy-slot.py run [--profile render] -- COMMAND [ARGS...]", file=sys.stderr)
+        return 2
+    if profile not in (None, "render"):
+        print(f"heavy-slot: unknown profile {profile!r}: the one profile is `render` (#2221)",
+              file=sys.stderr)
         return 2
     shape = _shape_argv(argv)
-    if not heavy_family(argv):
+    lines = start = None
+    if profile == "render":
+        admitted = _render_admission(shape)
+        if isinstance(admitted, int):
+            return admitted
+        lines, start = admitted
+    elif not heavy_family(argv):
         print(f"heavy-slot: `{shape}` is not a heavy job, so the slot does not run it; run it "
               "directly (#1686)", file=sys.stderr)
         return 2
@@ -1657,9 +2653,11 @@ def cmd_run(argv: List[str]) -> int:
     tool = _tool(argv)
     got, slots, mine, order, why = _decide(d, n, tool, take=True)
     if got is None:
-        print(_refuse(d, "wrapper", shape, n, slots, mine, order, why), file=sys.stderr)
+        print(_refuse(d, "wrapper", shape, n, slots, mine, order, why, profile), file=sys.stderr)
         return EX_TEMPFAIL
     slot, fd = got
+    if profile == "render":
+        return _render_run(slot, fd, n, mine, why, shape, tool, argv, lines, start)
     # From here the wrapper holds the slot, so a signal must reach the job and
     # the release must still be written. The handler goes in NOW: installed
     # after the job started, it left a window in which a TERM killed the
@@ -1681,29 +2679,11 @@ def cmd_run(argv: List[str]) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, forward)
     boot = boot_id()
-    previous = _read(fd)
-    if previous.get("state") == "held":
-        # Its holder died without a release: killed this boot, or the host
-        # reset under it. The record is the evidence; report it before it is
-        # overwritten.
-        _emit("heavy_slot_unreleased", {"slot": slot, "previous": _public(previous),
-                                        "across_reset": previous.get("boot_id") != boot})
+    _report_unreleased(fd, slot, boot)
     started = time.time()
-    fleet, bot = _identity()
-    record = {
-        "v": 1, "slot": slot, "slots": n, "state": "held", "fleet": fleet, "bot": bot,
-        "shape": shape, "tool": tool, "cwd": os.getcwd(), "pid": os.getpid(),
-        "host": socket.gethostname(),
-        "boot_id": boot, "started_at": _now_iso(started), "started_epoch": int(started),
-        "released_at": None, "exit": None,
-    }
+    record = _held_record(slot, n, shape, tool, boot, started)
     _write(fd, record)
-    acquired = {"slot": slot, "slots": n, "shape": shape, "started_at": record["started_at"]}
-    if mine is not None:  # the ticket it waited on, for joining its refusals to this
-        acquired["ticket"] = _ticket_summary(mine, [], ticket_idle_s(), started)
-    if why:
-        acquired["queue"] = why
-    _emit("heavy_slot_acquired", acquired)
+    _emit("heavy_slot_acquired", _acquired(slot, n, shape, record, mine, why, started))
     delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
     if delay:
         try:
@@ -1740,6 +2720,69 @@ def cmd_run(argv: List[str]) -> int:
     return status
 
 
+def cmd_lift_hold(args: List[str]) -> int:
+    """`lift-hold --by NAME [--reason TEXT]`: lift a render hold. Only the
+    fleet's manager may (a session whose MANAGER_TMUX is its own BOT_ID: the two
+    values lib-common's bot_is_manager compares, which start-bot.sh exports from
+    bot.conf), or the operator from a shell of their own, outside any bot
+    session. The lift goes in the render record and on the plane
+    (heavy_slot_hold_lifted) with who lifted it."""
+    opts: Optional[dict] = {}
+    rest = list(args)
+    while rest and opts is not None:
+        name, eq, value = rest.pop(0).partition("=")
+        if name not in ("--by", "--reason") or (not eq and not rest):
+            opts = None
+            break
+        opts[name[2:]] = value if eq else rest.pop(0)
+    if opts is None or not (opts.get("by") or "").strip():
+        print("usage: heavy-slot.py lift-hold --by NAME [--reason TEXT] (NAME: who lifts the "
+              "render hold, recorded with the lift)", file=sys.stderr)
+        return 2
+    fleet, bot = _identity()
+    if bot and os.environ.get("MANAGER_TMUX") != bot:
+        print("heavy-slot: NOT LIFTED: only the fleet's manager, or the operator from a shell of "
+              "their own, lifts a render hold (#2221). Ask your manager.", file=sys.stderr)
+        return 1
+    d = slot_dir()
+    now = time.time()
+    try:
+        rule = render_rule(d, slot_count(d)[0], now)
+    except RecordError as e:
+        print(f"heavy-slot: NOT LIFTED: {e}", file=sys.stderr)
+        return 2
+    hold = rule["hold"]
+    if hold is None:
+        print("heavy-slot: renders are not on hold, so there is nothing to lift", file=sys.stderr)
+        return 1
+    by, reason = opts["by"].strip(), (opts.get("reason") or "").strip()
+    entry = {"kind": "lift", "epoch": round(now, 3), "at": _now_iso(now), "by": by,
+             "reason": reason, "fleet": fleet, "bot": bot, "hold_since": _now_iso(hold["since"]),
+             "kills": [_kill_summary(k) for k in hold["kills"]]}
+    failed = _record_render(d, entry)
+    if failed:
+        print(f"heavy-slot: NOT LIFTED: {failed}", file=sys.stderr)
+        return 2
+    _emit("heavy_slot_hold_lifted", {k: v for k, v in entry.items() if k not in ("kind", "epoch")})
+    still = (f" The {RENDER_RETRY_S // 60}-minute rule still stands: a render may start at "
+             f"{_clock(rule['retry_at'])}." if rule["retry_at"] else "")
+    print(f"heavy-slot: render hold lifted by {by}, recorded in {d / RENDER_RECORD_FILE}.{still}")
+    return 0
+
+
+def _render_note(rec: dict) -> str:
+    """What a render's record adds to its status line."""
+    if rec.get("profile") != "render":
+        return ""
+    if rec.get("state") == "held":
+        return f" (render, scope {rec.get('unit') or '?'})"
+    note = f", render {rec.get('ended') or '?'}"
+    stop = rec.get("stop")
+    if isinstance(stop, dict) and stop.get("reading"):
+        note += f" ({stop.get('line') or '?'}): {stop['reading']}"
+    return note
+
+
 def _status_line(slot: int, held: bool, rec: dict, boot: str, now: float) -> str:
     if held:
         if rec.get("state") != "held":
@@ -1747,7 +2790,7 @@ def _status_line(slot: int, held: bool, rec: dict, boot: str, now: float) -> str
         start = _epoch(rec, "started")
         mins = _mins(start, now) if start else "? min"
         return (f"slot {slot}: HELD by {_who(rec)} since {_clock(start)} ({mins}, pid "
-                f"{rec.get('pid', '?')}) — {_public(rec)['shape'] or '?'}")
+                f"{rec.get('pid', '?')}) — {_public(rec)['shape'] or '?'}{_render_note(rec)}")
     if not rec:
         return f"slot {slot}: free — never used"
     start, end = _epoch(rec, "started"), _epoch(rec, "released")
@@ -1756,10 +2799,10 @@ def _status_line(slot: int, held: bool, rec: dict, boot: str, now: float) -> str
         how = ("before the host reset (it ran under an earlier boot)"
                if rec.get("boot_id") != boot else "its holder was killed this boot")
         return (f"slot {slot}: free — last holder NEVER RELEASED: {_who(rec)}, "
-                f"{_public(rec)['shape'] or '?'}, since {when}; {how}")
+                f"{_public(rec)['shape'] or '?'}, since {when}; {how}{_render_note(rec)}")
     mins = f" ({_mins(start, end)})" if start and end else ""
     return (f"slot {slot}: free — last: {_who(rec)}, {_public(rec)['shape'] or '?'}, "
-            f"{_clock(start)}–{_clock(end)}{mins}, exit {rec.get('exit', '?')}")
+            f"{_clock(start)}–{_clock(end)}{mins}, exit {rec.get('exit', '?')}{_render_note(rec)}")
 
 
 def cmd_status(args: List[str]) -> int:
@@ -1773,12 +2816,26 @@ def cmd_status(args: List[str]) -> int:
     q, lock_held = peek_queue(d)
     order = [] if queue_off else _served(_live(q["tickets"], counted, now, idle)[0], counted)
     next_places = max(1, sum(1 for _, held, _ in counted if not held))
+    try:
+        rule = render_rule(d, n, now)
+        render = {"hold": None if rule["hold"] is None else {
+                      "day": rule["hold"]["day"], "since": _now_iso(rule["hold"]["since"]),
+                      "kills": [_kill_summary(k) for k in rule["hold"]["kills"]]},
+                  "retry_at": rule["retry_at"] and _now_iso(rule["retry_at"]), "error": None}
+        render_line = (f"renders: ON HOLD: {_hold_text(rule['hold'])}" if rule["hold"] else
+                       f"renders: none before {_clock(rule['retry_at'])}, {RENDER_RETRY_S // 60} "
+                       f"minutes after the kill at {_clock(rule['last']['epoch'])} "
+                       f"({rule['last'].get('line') or '?'})" if rule["retry_at"] else "")
+    except RecordError as e:
+        render = {"hold": None, "retry_at": None, "error": str(e)}
+        render_line = f"renders: NOT RUN, the render record cannot be read: {e}"
     if "--json" in args:
         print(json.dumps({"dir": str(d), "slots_configured": n, "source": source,
                           "disabled": disabled, "queue_off": queue_off,
                           "queue_lock_held": lock_held, "ticket_idle_s": idle,
                           "slots": [{"slot": s, "held": h, "record": _public(r)} for s, h, r in slots],
-                          "queue": [_ticket_summary(t, order, idle, now) for t in order]},
+                          "queue": [_ticket_summary(t, order, idle, now) for t in order],
+                          "render": render},
                          sort_keys=True))
         return 0
     boot = boot_id()
@@ -1795,6 +2852,8 @@ def cmd_status(args: List[str]) -> int:
               f"{QUEUE_LOCK_WAIT_S:g} s for it and decides on the slots alone")
     for slot, held, rec in slots:
         print(_status_line(slot, held, rec, boot, now))
+    if render_line:
+        print(render_line)
     if not queue_off:
         print(f"queue: {len(order)} waiting, in the order they are served" if order
               else "queue: empty")
@@ -1805,19 +2864,23 @@ def cmd_status(args: List[str]) -> int:
 
 def main(argv: List[str]) -> int:
     if not argv:
-        print("usage: heavy-slot.py hook | run -- COMMAND... | status [--json]",
-              file=sys.stderr)
+        print("usage: heavy-slot.py hook | run [--profile render] -- COMMAND... | status [--json] "
+              "| lift-hold --by NAME [--reason TEXT]", file=sys.stderr)
         return 2
     verb, rest = argv[0], argv[1:]
     try:
         if verb == "hook":
             return cmd_hook()
         if verb == "run":
-            return cmd_run(rest[1:] if rest[:1] == ["--"] else rest)
+            return cmd_run(rest)
+        if verb == "_keep":
+            return cmd_keep(rest)
         if verb == "status":
             return cmd_status(rest)
+        if verb == "lift-hold":
+            return cmd_lift_hold(rest)
     except NoDataRoot as why:
-        # The hook's caller fails open on a nonzero exit; run and status refuse.
+        # The hook's caller fails open on a nonzero exit; run, status and lift-hold refuse.
         print(str(why), file=sys.stderr)
         return 1 if verb == "hook" else 2
     print(f"heavy-slot.py: unknown verb {verb!r}", file=sys.stderr)
