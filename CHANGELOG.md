@@ -16,6 +16,25 @@ A bot that waited past the activity_stuck threshold, at its prompt, behind a hel
 - **The page carries `last_no_turn_epoch`** beside `last_tool_call_epoch` and `elapsed_seconds`; it is null with no marker.
 - **Tests:** `tests/test_activity_stuck_no_turn.py` drives the real keepalive tick and the real sweep: a turn begun a minute after an IDLE, a HELD or a LIMIT tick and swept 5,731 s after the last tool call does not page, and a bot without the marker does; a turn past the threshold pages with three messages typed into its box and queued behind it; a usage-limit hold followed by UNKNOWN ticks does not page 63 s after its last LIMIT tick, and does 30 min later.
 
+### Fixed — `assignment show` names the delivery: its message, attempts and receipt (#2379)
+
+`assignment deliver` records its message as a communication linked to the
+task and the assignment, and each send as a transmission of that message.
+`assignment show` reported only the assignment row's `dispatch_message_id`,
+which only the retired dispatch path wrote, so it read `null` for every
+assignment the task commands made, and the delivery could be found only
+through the deliver request's UUID. A new `delivery` field reads it from
+those rows: the message ID, the request that delivered it, when it was
+recorded, how many send attempts were recorded and the newest one, and the
+receiver's newest receipt with its integrity verdict, judged as `message
+receipt` judges it. A receipt still queued for ingest reads `not_recorded`,
+since this read does not open the queues. It is the same message the plane's
+board names. After a re-delivery under a new request, the newest delivery is
+the one described, and `message_ids` lists every delivery in order. Nothing
+new is recorded, so assignments delivered before this change read the same
+way. Each added statement seeks one assignment's or one message's rows by
+index.
+
 ### Added — each bot's live context in `fleet status`, and each compaction as a plane event (#2206)
 
 Nothing reported a bot's current context or recorded a compaction, so a manager read each worker's newest transcript by hand before compacting it. Both now come from the transcript reader that `fleet usage` already uses (`transcript_usage.py`), with one reader for its usage rows.
