@@ -25,7 +25,8 @@ def _read(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError, require_current_schema
     from ..releases import ReleaseError
-    from ..task_queries import TaskQueryError, list_tasks, show_assignment, show_task
+    from ..task_queries import (TaskQueryError, assignment_delivery, list_tasks,
+                                show_assignment, show_task)
     from ..task_state import TaskStateError
 
     try:
@@ -73,10 +74,16 @@ def _read(args) -> CommandOutput:
                 lines = (f"{task.task_id}\t{task.state or 'unresolved'}\t{task.title}",)
             else:
                 view = show_assignment(conn, args.assignment_id, fleet_uid=bindings["fleet_uid"])
+                # The delivery, from the rows `assignment deliver` recorded (#2379).
+                delivery = assignment_delivery(conn, view.assignment)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "assignment": asdict(view.assignment), "task": asdict(view.task)}
+                        "assignment": asdict(view.assignment), "task": asdict(view.task),
+                        "delivery": asdict(delivery) if delivery else None}
                 lines = (f"{view.assignment.assignment_id}\t{view.assignment.state}\t"
                          f"{view.task.task_id}",)
+                if delivery:
+                    lines += (f"delivery\t{delivery.message_id}\t{delivery.receipt_observation}\t"
+                              f"{delivery.integrity_verdict}",)
         return CommandOutput(data, release_id=selected["release_id"], lines=lines)
     except CommandFailure:
         raise

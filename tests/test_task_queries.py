@@ -1,10 +1,12 @@
 """Scoped reads against actual SQL and the shared reducer's storage fixtures."""
 
+import re
 import sqlite3
 
 import pytest
 
 from claudlobby.plane.migrations import migrate
+from claudlobby.plane.queries import ASSIGNMENT_DELIVERY_MSG_SQL
 from claudlobby import task_queries
 from claudlobby.task_audit import audit_tasks
 from claudlobby.task_queries import (
@@ -234,6 +236,11 @@ def _transmission(conn, msg_id, event, attempt_no, **fields):
             attempt_no=attempt_no, **fields)
 
 
+def _board_message(conn, assignment_id):
+    """The delivery message the plane's board names for the same assignment."""
+    return conn.execute(ASSIGNMENT_DELIVERY_MSG_SQL.format(ph="?"), (assignment_id,)).fetchone()[1]
+
+
 def test_assignment_delivery_reads_each_delivery_message_and_its_attempts(conn):
     """#2379: the delivery is read from the communication `assignment deliver`
     commits and the sender's transmissions of it; nothing else counts."""
@@ -253,6 +260,7 @@ def test_assignment_delivery_reads_each_delivery_message_and_its_attempts(conn):
     _delivery_message(conn, "msg_" + "4" * 32, "wi_sent", "asg_other")
     got = delivery(conn, assignment)
     assert (got.message_id, got.message_ids) == (first, (first,))
+    assert got.message_id == _board_message(conn, "asg_sent")
     assert (got.request_id, got.recorded_at) == (_REQUEST, "2026-09-01T00:00:00Z")
     assert got.attempts == 2
     assert got.last_attempt == task_queries.DeliveryAttempt(3, "pane_submitted", "2026-09-01T00:00:05Z")
@@ -261,6 +269,7 @@ def test_assignment_delivery_reads_each_delivery_message_and_its_attempts(conn):
     _delivery_message(conn, second, "wi_sent", "asg_sent", source_ref="dispatch-log:not-a-request")
     got = delivery(conn, assignment)
     assert (got.message_id, got.message_ids) == (second, (first, second))
+    assert got.message_id == _board_message(conn, "asg_sent")
     assert (got.request_id, got.attempts, got.last_attempt) == (None, 0, None)
     assert (got.receipt_observation, got.integrity_verdict) == ("not_recorded", "unknown")
 
@@ -274,16 +283,21 @@ def test_assignment_delivery_names_a_legacy_dispatch_message(conn):
     got = task_queries.assignment_delivery(conn, assignment)
     assert (got.message_id, got.message_ids, got.recorded_at) == (legacy, (legacy,), None)
     _delivery_message(conn, legacy, "wi_old", "asg_old", source_ref="dispatch-log:old-1")
+    _delivery_message(conn, "msg_" + "6" * 32, "wi_old", "asg_old")  # a later delivery
     got = task_queries.assignment_delivery(conn, assignment)
-    assert (got.message_ids, got.recorded_at) == ((legacy,), "2026-09-01T00:00:00Z")
+    assert (got.message_id, got.recorded_at) == (legacy, "2026-09-01T00:00:00Z")
+    assert got.message_ids == (legacy, "msg_" + "6" * 32)
+    assert got.message_id == _board_message(conn, "asg_old")
 
 
 def test_assignment_delivery_reads_by_index_never_a_scan(conn):
     """The read a manager pays on every `assignment show` (the #2378 lesson):
-    each statement seeks by assignment, message or ingest sequence."""
+    each statement seeks one assignment's, message's or event's rows. A scan,
+    or a seek on a fleet or an event kind alone, walks the fleet's history."""
     statements = task_queries.ASSIGNMENT_DELIVERY_STATEMENTS
-    assert statements
+    assert set(statements) == {"deliveries", "message", "attempts", "receipt", "received_at"}
     for name, sql in statements.items():
         plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?"))]
-        assert plan, name
-        assert not [step for step in plan if step.startswith("SCAN")], (name, plan)
+        walks = [step for step in plan
+                 if step.startswith("SCAN") or re.search(r"\((fleet_uid|kind)=\?\)", step)]
+        assert plan and not walks, (name, plan)
