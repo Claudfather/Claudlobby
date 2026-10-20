@@ -15,6 +15,7 @@ from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
 from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
+from tests.test_checkin_cli import active as checkin_active  # noqa: F401 — check-in CLI fixture
 from tests.test_checkins_cli import _record
 from tests.test_message_read_cli import _communication, _generated
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
@@ -97,18 +98,12 @@ CK_BEEF1, CK_BEEF2 = "ck_" + _hex("beef0001", "1"), "ck_" + _hex("beef0001", "2"
 CK_CAFE = "ck_" + _hex("cafe0002", "3")
 
 
-def test_request_and_checkin_show_resolve_a_prefix_and_never_guess(active, capsys):  # noqa: F811
+def test_request_show_resolves_a_prefix_and_never_guesses(active, capsys):  # noqa: F811
     root, _ = active
     for request_id in (REQUEST_A, REQUEST_B, REQUEST_C):
         assert main(["--root", str(root), "--json", "task", "admit", "--title", "Prefix work",
                      "--request-id", request_id]) == 0
     capsys.readouterr()
-    now = datetime.now(timezone.utc).isoformat()
-    emit_batch(root, [{"event_type": "system", "emitter": "checkin-record", "fleet": "example",
-                       "source_ref": f"checkin:{ck}", "occurred_at": now,
-                       "payload": {"event": "checkin_decision", "subject_kind": "actor",
-                                   "subject": "bot:example/manager", "data": _record(ck)}}
-                      for ck in (CK_BEEF1, CK_BEEF2, CK_CAFE)], require_commit=True)
     before = _counts(root)
 
     assert _answers(capsys, root, "request", "show", references=(
@@ -121,6 +116,18 @@ def test_request_and_checkin_show_resolve_a_prefix_and_never_guess(active, capsy
                              "this cannot prove that no earlier best-effort message was sent", (), 0),
         "a11ce00": _refused(2, "invalid_argument", "a request ID prefix needs at least its first 8 hex digits"),
     }
+    assert _counts(root) == before
+
+
+def test_checkin_show_resolves_a_prefix_and_never_guesses(checkin_active, capsys):  # noqa: F811
+    root, _ = checkin_active
+    now = datetime.now(timezone.utc).isoformat()
+    emit_batch(root, [{"event_type": "system", "emitter": "checkin-record", "fleet": "example",
+                       "source_ref": f"checkin:{ck}", "occurred_at": now,
+                       "payload": {"event": "checkin_decision", "subject_kind": "actor",
+                                   "subject": "bot:example/manager", "data": _record(ck)}}
+                      for ck in (CK_BEEF1, CK_BEEF2, CK_CAFE)], require_commit=True)
+    before = _counts(root)
     assert _answers(capsys, root, "checkin", "show", references=(
         "ck_cafe0002", "ck_beef0001", "ck_00000000", "ck_cafe")) == {
         "ck_cafe0002": _resolved("ck_cafe0002", CK_CAFE),
@@ -156,6 +163,11 @@ def test_message_show_and_receipt_resolve_a_readable_prefix(active, monkeypatch,
                        references=("msg_77aa88bb",))["msg_77aa88bb"]
     assert (receipt["exit"], receipt["error"], receipt["resolved"]) == (
         9, "receipt_unobservable", {"prefix": "msg_77aa88bb", "id": unique})
+    # A wait resolves the same prefix; no reply is recorded, so it times out after 1 s.
+    waited = _answers(capsys, root, "message", "wait", "--for", "reply", "--timeout", "1",
+                      references=("msg_77aa88bb",))["msg_77aa88bb"]
+    assert (waited["exit"], waited["error"], waited["resolved"]) == (
+        8, "timeout", {"prefix": "msg_77aa88bb", "id": unique})
     # The sender's own session reads the same message by the same prefix.
     _generated(monkeypatch, root, "manager")
     assert _answers(capsys, root, "message", "show", references=("msg_77aa88bb",)) == {

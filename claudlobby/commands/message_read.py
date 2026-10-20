@@ -23,7 +23,8 @@ def _read(args) -> CommandOutput:
     from ..activation_state import ActivationError, read_selection
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
-    from ..message_queries import MessageQueryError, receipt, show_message, wait_for_reply
+    from ..message_queries import (MessageQueryError, receipt, resolve_message_reference, show_message,
+                                   wait_for_reply)
     from ..operation_context import (
         OperationContextError, OperationContextUnavailableError, _MissingHumanIdentity,
         _local_operator_alias, bind_task_context, resolve_operation_scope,
@@ -47,9 +48,11 @@ def _read(args) -> CommandOutput:
         caller_alias = None if origin is not None else _local_operator_alias()
         ctx = bind_task_context(destination, origin=origin, operator_alias=caller_alias)
         failure = None
+        # A read door also takes a prefix of a readable message's ID (#2380).
+        message_id = resolve_message_reference(ctx, args.message_id)
 
         if args.public_command == "message.show":
-            message = show_message(ctx, args.message_id, prefix=True)
+            message = show_message(ctx, message_id)
             data = {"message": asdict(message)}
             header = (f"{message.message_id}\t{message.sender.alias}\t"
                       f"{message.destination.alias if message.destination else '-'}\t{message.content}")
@@ -61,8 +64,7 @@ def _read(args) -> CommandOutput:
                 lines = (header, message.body if message.body is not None else "[content unavailable]")
             lines = note_prefix(data, lines, args.message_id, message.message_id)
         elif args.public_command == "message.receipt":
-            observation = receipt(ctx, args.message_id, destination=args.destination, wait=args.wait,
-                                  prefix=True)
+            observation = receipt(ctx, message_id, destination=args.destination, wait=args.wait)
             data = _receipt_data(observation)
             if observation.code is not None:
                 failure = (observation.code, observation.reason or "message receipt is incomplete")
@@ -70,7 +72,7 @@ def _read(args) -> CommandOutput:
                                        f"{observation.integrity_verdict}",),
                                 args.message_id, observation.message_id)
         else:
-            observation = wait_for_reply(ctx, args.message_id, timeout=args.timeout, prefix=True)
+            observation = wait_for_reply(ctx, message_id, timeout=args.timeout)
             data = {"message_id": observation.message_id,
                     "reply": asdict(observation.reply) if observation.reply else None}
             if observation.code is not None:

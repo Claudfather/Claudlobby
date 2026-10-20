@@ -21,6 +21,7 @@ import time
 from typing import Literal, TYPE_CHECKING
 
 from .plane.db import connect_ro, db_file
+from .plane.ids import ID_PATTERNS
 from .plane.migrations import DowngradeError
 from .plane.queries import DELIVERY_STATUS_SQL, RECEIPT_HISTORY_SQL
 from .plane.queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
@@ -265,17 +266,9 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     return QueuedProof("absent")
 
 
-def _message_id(value, prefix=False):
-    shape = id_shape(value, "msg_")
-    if shape == "canonical":
-        return
-    if not prefix:
+def _message_id(value):
+    if not isinstance(value, str) or not re.fullmatch(ID_PATTERNS["msg"], value):
         raise MessageQueryError("message ID must be canonical (msg_<32 lowercase hex digits>)")
-    if shape == "short":
-        raise MessageQueryError(f"a message ID prefix needs at least {PREFIX_MIN_HEX} hex digits after msg_")
-    if shape is None:
-        raise MessageQueryError("message ID must be canonical (msg_<32 lowercase hex digits>) or a "
-                                f"prefix of one (msg_ and at least {PREFIX_MIN_HEX} of its hex digits)")
 
 
 def _seconds(value, minimum, name):
@@ -350,15 +343,12 @@ def _show(conn, ctx, message_id):
 
 
 def _resolve(conn, ctx, reference):
-    """The message ID `reference` names: itself when canonical, else the one
-    message this caller may read that starts with it (#2380).
+    """The one message this caller may read that starts with `reference` (#2380).
 
     `_show`'s participation and operator scope decide what the caller may read,
     so a prefix never reveals a message its full ID would not. The read is
     bounded by the range seek and PREFIX_SCAN_LIMIT.
     """
-    if id_shape(reference, "msg_") == "canonical":
-        return reference
     rows = conn.execute(MESSAGE_PREFIX_SQL, (reference, reference + "g", PREFIX_SCAN_LIMIT + 1)).fetchall()
     if len(rows) > PREFIX_SCAN_LIMIT:
         raise MessageAmbiguousError(f"more than {PREFIX_SCAN_LIMIT} recorded messages start with "
@@ -380,23 +370,31 @@ def _resolve(conn, ctx, reference):
     raise MessageNotFoundError(f"no message this caller may read starts with {reference}", hint=hint)
 
 
-def _resolve_once(ctx, reference):
-    """`_resolve` in its own snapshot, so a polling read follows one full ID."""
-    if id_shape(reference, "msg_") == "canonical":
+def resolve_message_reference(ctx: TaskOperationContext, reference: str) -> str:
+    """The full message ID a read door's reference names (#2380).
+
+    A canonical ID comes back unchanged and unread. A prefix (msg_ and 8 to 31
+    hex digits) comes back as the one message this caller may read that starts
+    with it. The read doors call this first; `show_message`, `receipt` and
+    `wait_for_reply` take canonical IDs only, as a reply's parent must.
+    """
+    shape = id_shape(reference, "msg_")
+    if shape == "canonical":
         return reference
+    if shape == "short":
+        raise MessageQueryError(f"a message ID prefix needs at least {PREFIX_MIN_HEX} hex digits after msg_")
+    if shape is None:
+        raise MessageQueryError("message ID must be canonical (msg_<32 lowercase hex digits>) or a "
+                                f"prefix of one (msg_ and at least {PREFIX_MIN_HEX} of its hex digits)")
     with _snapshot(ctx) as conn:
         return _resolve(conn, ctx, reference)
 
 
-def show_message(ctx: TaskOperationContext, message_id: str, *, prefix: bool = False) -> Message:
-    """Resolve the global ID, then enforce participation or explicit operator scope.
-
-    With `prefix` (the public read doors, #2380), the one readable message a
-    prefix names also resolves. A reply's parent never passes it.
-    """
-    _message_id(message_id, prefix)
+def show_message(ctx: TaskOperationContext, message_id: str) -> Message:
+    """Resolve the global ID, then enforce participation or explicit operator scope."""
+    _message_id(message_id)
     with _snapshot(ctx) as conn:
-        return _show(conn, ctx, _resolve(conn, ctx, message_id))
+        return _show(conn, ctx, message_id)
 
 
 def _destination(conn, ctx, message, supplied):
@@ -438,16 +436,14 @@ def _recorded_instant(ctx: TaskOperationContext, message_id: str) -> float | Non
 
 
 def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | None = None,
-            wait: float = 0, prefix: bool = False) -> ReceiptObservation:
+            wait: float = 0) -> ReceiptObservation:
     """Wait for final byte integrity, never just a receipt and never a send.
 
     No-history is immediate. Qualified destinations retain their fleet; a bare
     destination resolves within the already selected fleet, including on reads.
-    With `prefix` (the public read door, #2380), a prefix resolves once, first.
     """
-    _message_id(message_id, prefix)
+    _message_id(message_id)
     _seconds(wait, 0, "wait")
-    message_id = _resolve_once(ctx, message_id)
     deadline = time.monotonic() + wait
     message = None
     since = _recorded_instant(ctx, message_id)
@@ -506,12 +502,10 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
                                   observation, verdict, exit_code, code, reason)
 
 
-def wait_for_reply(ctx: TaskOperationContext, message_id: str, *, timeout: float,
-                   prefix: bool = False) -> ReplyObservation:
+def wait_for_reply(ctx: TaskOperationContext, message_id: str, *, timeout: float) -> ReplyObservation:
     """Earliest ingest-ordered direct reply from the recorded recipient only."""
-    _message_id(message_id, prefix)
+    _message_id(message_id)
     _seconds(timeout, 1, "timeout")
-    message_id = _resolve_once(ctx, message_id)
     deadline = time.monotonic() + timeout
     parent = None
     while True:

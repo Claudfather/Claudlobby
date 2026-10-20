@@ -2,10 +2,10 @@
 
 A prefix that names exactly one record the caller may read resolves; several are
 listed and none is chosen; "0 candidates" is said only after a search by prefix.
-The query owners resolve a prefix only when the read door asks (`prefix=True`),
-so a mutation that reads a task, an assignment or a reply's parent stays
-canonical. New names are reached as module attributes, so each test fails on
-its own where the change is absent.
+The query owners resolve a prefix only when a read door asks (`prefix=True`, or
+`resolve_message_reference` before a message read), so a mutation that reads a
+task, an assignment or a reply's parent stays canonical. New names are reached
+as module attributes, so each test fails on its own where the change is absent.
 """
 
 from contextlib import closing
@@ -117,7 +117,6 @@ def test_mutation_callers_still_read_canonical_ids_only(conn):
 MSG_42A, MSG_42B = "msg_" + _hex("42664fe3", "1"), "msg_" + _hex("42664fe3", "2")
 MSG_77 = "msg_" + _hex("77aa88bb", "3")
 MSG_77_OTHER = "msg_" + _hex("77aa88bb", "5")
-REPLY = "msg_" + _hex("0f0f0f0f", "6")
 
 
 @pytest.fixture
@@ -131,20 +130,20 @@ def messages(message_estate):  # noqa: F811 — pytest fixture parameter
     return ctx, conn, receiver
 
 
-def test_a_unique_readable_message_prefix_resolves_for_show_receipt_and_wait(messages):
-    ctx, conn, receiver = messages
-    assert mq.show_message(receiver, "msg_77aa88bb", prefix=True).message_id == MSG_77
-    observed = mq.receipt(ctx, "msg_77aa88bb", prefix=True)
-    assert observed.message_id == MSG_77 and observed.receipt_observation == "no_history"
-    communication(conn, sender="bot:b/worker", recipient="bot:a/manager", reply_to_msg_id=MSG_77, msg_id=REPLY)
-    replied = mq.wait_for_reply(ctx, "msg_77aa88bb", timeout=1, prefix=True)
-    assert replied.message_id == MSG_77 and replied.reply.message_id == REPLY
+def test_a_unique_readable_message_prefix_resolves_for_its_readers(messages):
+    ctx, _, receiver = messages
+    # MSG_77_OTHER shares the prefix, between two parties neither caller is.
+    for caller in (receiver, ctx):
+        assert mq.resolve_message_reference(caller, "msg_77aa88bb") == MSG_77
+    assert mq.resolve_message_reference(receiver, MSG_77[:-1]) == MSG_77
+    # A full ID comes back unread, as the readers below take it.
+    assert mq.resolve_message_reference(receiver, "msg_" + "e" * 32) == "msg_" + "e" * 32
 
 
 def test_an_ambiguous_message_prefix_lists_only_readable_matches(messages):
     ctx, _, receiver = messages
     with pytest.raises(mq.MessageAmbiguousError) as raised:
-        mq.show_message(receiver, "msg_42664fe3", prefix=True)
+        mq.resolve_message_reference(receiver, "msg_42664fe3")
     hint = raised.value.hint
     assert raised.value.code == "ambiguous_reference" and hint.total_matches == 2
     assert [(c.id, c.command) for c in hint.candidates] == [
@@ -152,30 +151,33 @@ def test_an_ambiguous_message_prefix_lists_only_readable_matches(messages):
     # The operator may read both messages that start with msg_77aa88bb.
     operator = replace(ctx, caller=ACTORS["human:operator"], caller_fleet_uid=None)
     with pytest.raises(mq.MessageAmbiguousError) as raised:
-        mq.show_message(operator, "msg_77aa88bb", prefix=True)
+        mq.resolve_message_reference(operator, "msg_77aa88bb")
     assert raised.value.hint.total_matches == 2
 
 
 def test_a_message_prefix_with_no_readable_match_is_searched_before_not_found(messages):
-    ctx, _, receiver = messages
+    _, _, receiver = messages
     for reference in ("msg_00000000", MSG_77_OTHER[:-1]):
         with pytest.raises(mq.MessageNotFoundError) as raised:
-            mq.show_message(receiver, reference, prefix=True)
+            mq.resolve_message_reference(receiver, reference)
         assert "starts with " + reference in str(raised.value)
         assert raised.value.hint.prefix == reference and raised.value.hint.total_matches == 0
-    with pytest.raises(mq.MessageNotFoundError):
-        mq.receipt(ctx, "msg_00000000", prefix=True)
 
 
-def test_message_prefixes_are_refused_when_short_or_not_asked_for(messages):
+def test_message_prefixes_are_refused_when_short_and_by_the_canonical_readers(messages):
     _, _, receiver = messages
-    with pytest.raises(mq.MessageQueryError, match="at least 8") as raised:
-        mq.show_message(receiver, "msg_77aa", prefix=True)
-    assert raised.value.code == "invalid_argument"
-    # A reply's parent and every other caller pass no prefix: canonical only.
-    with pytest.raises(mq.MessageQueryError, match="canonical") as raised:
-        mq.show_message(receiver, "msg_77aa88bb")
-    assert raised.value.code == "invalid_argument"
+    for reference, words in (("msg_77aa", "at least 8"), ("display-id", "or a prefix of one")):
+        with pytest.raises(mq.MessageQueryError, match=words) as raised:
+            mq.resolve_message_reference(receiver, reference)
+        assert raised.value.code == "invalid_argument"
+    # show_message, receipt and wait_for_reply (a reply's parent among their
+    # callers) take full IDs only; the read doors resolve a prefix before them.
+    for read in (lambda: mq.show_message(receiver, "msg_77aa88bb"),
+                 lambda: mq.receipt(receiver, "msg_77aa88bb"),
+                 lambda: mq.wait_for_reply(receiver, "msg_77aa88bb", timeout=1)):
+        with pytest.raises(mq.MessageQueryError, match="canonical") as raised:
+            read()
+        assert raised.value.code == "invalid_argument"
 
 
 def test_a_message_prefix_reads_by_a_range_seek_and_refuses_past_its_bound(messages):
@@ -188,12 +190,12 @@ def test_a_message_prefix_reads_by_a_range_seek_and_refuses_past_its_bound(messa
     for n in range(hints.PREFIX_SCAN_LIMIT):
         communication(conn, msg_id="msg_5ca1ab1e" + f"{n:024x}")
     with pytest.raises(mq.MessageAmbiguousError) as raised:
-        mq.show_message(ctx, "msg_5ca1ab1e", prefix=True)
+        mq.resolve_message_reference(ctx, "msg_5ca1ab1e")
     assert raised.value.hint.total_matches == hints.PREFIX_SCAN_LIMIT
     assert len(raised.value.hint.candidates) == hints.PREFIX_HINT_LIMIT
     communication(conn, msg_id="msg_5ca1ab1e" + "f" * 24)
     with pytest.raises(mq.MessageAmbiguousError, match="more than 64") as raised:
-        mq.show_message(ctx, "msg_5ca1ab1e", prefix=True)
+        mq.resolve_message_reference(ctx, "msg_5ca1ab1e")
     assert raised.value.hint is None
 
 
