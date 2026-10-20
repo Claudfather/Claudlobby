@@ -129,7 +129,7 @@ def test_the_name_is_the_executables_not_its_cut_comm(tmp_path):
     # the kernel cuts comm at 15 characters: "google-chrome-s"; a replaced binary reads "(deleted)"
     proc.add(1000, parent, "/opt/google/chrome/google-chrome-stable", f"{APP}/x.scope")
     proc.add(1100, parent, "/usr/lib/chromium/chromium (deleted)", f"{APP}/y.scope")
-    proc.add(1200, parent, "/home/u/bin/not-chromium", f"{APP}/z.scope")
+    proc.add(1200, parent, "/home/user/bin/not-chromium", f"{APP}/z.scope")
     names = sorted(row[7] for row in _scan(proc.root))
     assert names == ["chromium", "google-chrome-stable"]
 
