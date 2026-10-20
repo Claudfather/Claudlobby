@@ -28,6 +28,14 @@
 # Watched set: discover_framework_checkouts (lib-common.sh) — derived from what
 # is installed, not a path list. See that helper for why.
 #
+# WHAT THE DATA ROOT COUNTS FROM (#2322): the release this host runs, never its
+# own checkout. Under sealed releases nothing runs from the root checkout and
+# nothing pulls it, so its HEAD says only how old that checkout is, and an
+# activation never moves it. The root counts from the source revision of the
+# release the host has selected; a sibling still counts from its HEAD, which
+# is what runs. A release that cannot be read is said plainly
+# (source_unknown), with no count in its place.
+#
 # Quiet-failure discipline: an offline host or a non-git root logs + exits 0,
 # leaving a script_error breadcrumb on the plane — a missed nudge is
 # low-urgency and must never become alert noise. One repo's failure never
@@ -73,6 +81,7 @@ done < <(discover_framework_checkouts)
 
 log "WATCHING ${#WATCHED[@]} repo(s): ${WATCHED[*]}"
 root_checkout=$(git -C "$CLAUDLOBBY_ROOT" rev-parse --show-toplevel 2>/dev/null) || root_checkout="$CLAUDLOBBY_ROOT"
+host="$(hostname || echo unknown-host)"
 
 # currency_outcome_phrase
 # Render the verdict notify_currency just recorded, for the audit log.
@@ -100,12 +109,53 @@ currency_outcome_phrase() {
     esac
 }
 
+# running_release
+# One line naming what this host runs: `selected <release-id> <source-revision>`,
+# or `unknown <reason>`. These are the two reads runtime admission makes before
+# it lets a bot start: the host's release selection, then that release's sealed
+# manifest, its digest checked. The package's own readers make both, under the
+# interpreter beside the composed CLI (as runtime-admission.sh runs it), so no
+# file is parsed here. Not `host status`: before answering, it hashes every
+# file of every installed release, which this answer does not need.
+running_release() {
+    # shellcheck source=cli-context.sh
+    . "$LIB_DIR/cli-context.sh"
+    local python="${CLAUDLOBBY_CLI:-}"
+    python="${python%/*}/python"
+    if ! _claudlobby_require_cli 2>>"$LOG" || [ ! -x "$python" ]; then
+        echo "unknown CLAUDLOBBY_CLI names no composed CLI with its interpreter beside it"
+        return 0
+    fi
+    "$python" -I -B - "$CLAUDLOBBY_ROOT" 2>>"$LOG" <<'PY'
+import sys
+from pathlib import Path
+
+
+def running(root):
+    from claudlobby.activation_state import read_selection
+    from claudlobby.releases import read_release
+    selected = read_selection(root)
+    if selected is None:
+        return "unknown no release is selected on this host"
+    release_id = selected["release_id"]
+    try:
+        release = read_release(root, release_id, verify_files=False)
+    except Exception as exc:
+        return f"unknown release {release_id[:10]}: {exc}"
+    return f"selected {release.release_id} {release.inputs.source_revision}"
+
+
+try:
+    line = running(Path(sys.argv[1]))
+except Exception as exc:
+    line = f"unknown {type(exc).__name__}: {exc}"
+print(" ".join(line.split()))
+PY
+}
+
 for repo in "${WATCHED[@]}"; do
     name=$(basename "$repo")
     apply_hint="git -C $repo pull --ff-only"
-    if [ "$repo" = "$root_checkout" ]; then
-        apply_hint="build and seal an immutable Claudlobby release, stage its config plan, then run host activate as the operator; do not pull the running root"
-    fi
 
     if ! with_timeout 120 git -C "$repo" fetch --quiet --tags origin 2>>"$LOG"; then
         log "[$name] FETCH FAILED — source currency unknown (nudge skipped)"
@@ -115,7 +165,32 @@ for repo in "${WATCHED[@]}"; do
     fi
 
     branch=$(repo_default_branch "$repo")
-    if ! behind=$(git -C "$repo" rev-list --count "HEAD..origin/$branch" 2>>"$LOG"); then
+    anchor=HEAD
+    subject="$name on $host"
+    if [ "$repo" = "$root_checkout" ]; then
+        apply_hint="build and seal an immutable Claudlobby release, stage its config plan, then run host activate as the operator; do not pull the running root"
+        running="$(running_release || echo "unknown its reader did not run")"
+        read -r verdict rel_id rel_source <<< "$running"
+        if [ "$verdict" != selected ]; then
+            unknown="${running#unknown }"
+            unknown="${unknown:-its reader printed nothing}"
+        elif ! built="$(git -C "$repo" log -1 --date=short --format=%cd "$rel_source^{commit}" -- 2>/dev/null || exit $?)"; then
+            unknown="release ${rel_id:0:10} was built from ${rel_source:0:8}, a commit this checkout does not have"
+        else
+            unknown=""
+        fi
+        if [ -n "$unknown" ]; then
+            notify_currency "$name" "source_unknown" "unreadable" \
+                "$subject: the running release cannot be read ($unknown), so the commits on origin/$branch it lacks are not counted — inspect claudlobby --root $CLAUDLOBBY_ROOT host releases"
+            log "[$name] RUNNING RELEASE UNKNOWN ($unknown) — nothing counted — $(currency_outcome_phrase)"
+            continue
+        fi
+        currency_clear "$name" "source_unknown"
+        log "[$name] RUNNING release $rel_id, built from $rel_source ($built)"
+        anchor="$rel_source"
+        subject+=" runs release ${rel_id:0:10} (built from ${rel_source:0:8}, $built), which"
+    fi
+    if ! behind="$(git -C "$repo" rev-list --count "$anchor..origin/$branch" 2>>"$LOG" || exit $?)"; then
         log "[$name] SKIP — no origin/$branch to compare against"
         continue
     fi
@@ -127,7 +202,7 @@ for repo in "${WATCHED[@]}"; do
     if [ -z "$tag" ]; then
         if [ "$behind" -gt 0 ]; then
             notify_currency "$name" "source_behind" "$behind" \
-                "$name on $(hostname) is $behind commit(s) behind origin/$branch — apply with: $apply_hint"
+                "$subject is $behind commit(s) behind origin/$branch — apply with: $apply_hint"
             log "[$name] BEHIND origin/$branch by $behind (untagged repo) — $(currency_outcome_phrase)"
         else
             log "[$name] IN SYNC with origin/$branch"
@@ -136,11 +211,11 @@ for repo in "${WATCHED[@]}"; do
         continue
     fi
 
-    tag_behind=$(git -C "$repo" rev-list --count "HEAD..$tag" 2>/dev/null || echo 0)
+    tag_behind=$(git -C "$repo" rev-list --count "$anchor..$tag" 2>/dev/null || echo 0)
     if [ "${tag_behind:-0}" -gt 0 ]; then
         # Behind a cut release — the case update-siblings.sh can actually fix.
         notify_currency "$name" "source_behind" "$tag_behind" \
-            "$name on $(hostname) is $tag_behind commit(s) behind release $tag — apply with: $apply_hint"
+            "$subject is $tag_behind commit(s) behind release $tag — apply with: $apply_hint"
         log "[$name] BEHIND TAG $tag by $tag_behind — $(currency_outcome_phrase)"
     elif [ "$behind" -gt 0 ]; then
         # On the newest release, but main has moved. Deliberately NOT phrased as
@@ -148,7 +223,7 @@ for repo in "${WATCHED[@]}"; do
         # dev code. The remedy named is cutting a release — a human decision.
         # This is the shape #1009 was filed from and could not previously say.
         notify_currency "$name" "source_release_gap" "$behind" \
-            "$name on $(hostname) is at its newest release ($tag) but origin/$branch is $behind commit(s) ahead — unreleased fixes are not deployed; cut a release or upgrade deliberately"
+            "$subject is at its newest release ($tag) but origin/$branch is $behind commit(s) ahead — unreleased fixes are not deployed; cut a release or upgrade deliberately"
         log "[$name] AT RELEASE $tag, main +$behind — release-gap $(currency_outcome_phrase)"
     else
         log "[$name] IN SYNC with origin/$branch and release $tag"

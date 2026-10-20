@@ -8,9 +8,12 @@ contract: the right behind-count is reported, delivery uses the FLEET NOTICE
 framing (not FLEET ALERT), and the working tree is NEVER pulled.
 """
 
+import json
 import os
 import shutil
 import subprocess
+
+import pytest
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 from tests.test_maintenance_jobs import _native_fixture
@@ -40,7 +43,8 @@ CURL_STUB = (
 
 
 def _git(cwd, *args):
-    subprocess.run(GIT + list(args), cwd=cwd, check=True, capture_output=True)
+    return subprocess.run(GIT + list(args), cwd=cwd, check=True, capture_output=True,
+                          text=True).stdout.strip()
 
 
 def _commit(repo, name):
@@ -50,11 +54,34 @@ def _commit(repo, name):
     _git(repo, "commit", "-m", name)
 
 
+def _seal_release(root, source_revision):
+    """Seal a release built from SOURCE_REVISION under ROOT; its ID.
+
+    notify-behind reads only the selection and the sealed manifest, never the
+    release's files, so the tree tests/test_releases.py seals is enough.
+    """
+    from tests.test_releases import r as releases, release_tree
+
+    inputs, paths, _, _ = release_tree(root, source_revision, "artifact-" + source_revision[:12])
+    return releases.seal_release(root, inputs, paths).release_id
+
+
+def _select(root, release_id):
+    """Write the host's release selection, the record an activation switches."""
+    state = os.path.join(root, "state")
+    os.makedirs(state, exist_ok=True)
+    with open(os.path.join(state, "selected-release.json"), "w") as f:
+        json.dump({"schema": 1, "activation_id": "a-" + release_id[2:14],
+                   "release_id": release_id, "plan_id": "p-fixture"}, f)
+
+
 class Harness:
     """origin repo + a clone acting as CLAUDLOBBY_ROOT (like the shared install).
 
     ``behind`` commits land in origin after the clone, so the root is exactly
-    that many commits behind origin/main. A bot.conf declaring the Telegram
+    that many commits behind origin/main, and so is the release the host runs:
+    one sealed from the commit the root was cloned at and selected (``select``
+    selects another, as an activation does). A bot.conf declaring the Telegram
     chat id (and a sourced-shape literal-$HOME state dir) is planted at
     ``bots_at`` (relative to root) and tg-post.sh is stubbed to capture what
     would have been sent.
@@ -63,6 +90,8 @@ class Harness:
     def __init__(self, tmp_path, behind=0, bots_at="runtime/bots",
                  tag_at_seed=None, tag_after=None, *, scratch_plane_env):
         self.scratch_plane_env = scratch_plane_env
+        # The interpreter beside it reads what the host runs (#2322).
+        self.cli = str(scratch_plane_env.cli)
         self.origin = str(tmp_path / "origin")
         self.root = str(tmp_path / "root")
         self.capture = str(tmp_path / "tg-capture")
@@ -77,6 +106,7 @@ class Harness:
         subprocess.run(
             GIT + ["clone", self.origin, self.root], check=True, capture_output=True
         )
+        self.select(self.head())
         for i in range(behind):
             _commit(self.origin, f"ahead-{i}")
         # A tag landing AFTER the clone is one the root is behind: the
@@ -95,7 +125,7 @@ class Harness:
 
     def env(self, *, socket=None):
         # a host job: no fleet, so its receipts land on the plane under _host
-        return _scrubbed_env(TG_CAPTURE=self.capture,
+        return _scrubbed_env(TG_CAPTURE=self.capture, CLAUDLOBBY_CLI=self.cli,
                             **self.scratch_plane_env(self.root, socket=socket, initialize=True))
 
     def run(self, *, serve=False):
@@ -120,11 +150,27 @@ class Harness:
         )
         return out.stdout.strip()
 
+    def select(self, source_revision):
+        """Seal a release built from SOURCE_REVISION and select it; its ID."""
+        release_id = _seal_release(self.root, source_revision)
+        _select(self.root, release_id)
+        return release_id
+
+    def origin_rev(self, ref="HEAD"):
+        return _git(self.origin, "rev-parse", ref)
+
     def captured(self):
         if not os.path.exists(self.capture):
             return []
         with open(self.capture) as f:
             return [line.strip() for line in f if line.strip()]
+
+    def messages(self):
+        return [line.split("|", 2)[2] for line in self.captured()]
+
+    def log(self):
+        p = os.path.join(self.root, "state", "notify-behind.log")
+        return open(p).read() if os.path.exists(p) else ""
 
     def events(self):
         return read_fleet_events(self.root)
@@ -375,16 +421,12 @@ class TestCurrencyOutcomeIsLogged:
     def _reject(self, h):
         _write_exec(h.native / "tg-post.sh", TG_STUB_REJECTED)
 
-    def _log(self, h):
-        p = os.path.join(h.root, "state", "notify-behind.log")
-        return open(p).read() if os.path.exists(p) else ""
-
     def test_delivered_send_is_logged_as_delivered(self, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert len(h.captured()) == 1, "precondition: the send was attempted"
-        assert "notice DELIVERED" in self._log(h)
+        assert "notice DELIVERED" in h.log()
 
     def test_rejected_send_is_not_logged_as_delivered(self, tmp_path, *, scratch_plane_env):
         # The headline defect. A dead token must never leave a log line a human
@@ -393,7 +435,7 @@ class TestCurrencyOutcomeIsLogged:
         self._reject(h)
         r = h.run()
         assert r.returncode == 0, r.stderr
-        log = self._log(h)
+        log = h.log()
         assert "NOT DELIVERED" in log
         assert "notice DELIVERED" not in log
         # The old text is the specific lie; it must not survive anywhere.
@@ -405,7 +447,7 @@ class TestCurrencyOutcomeIsLogged:
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         self._reject(h)
         assert h.run().returncode == 0
-        assert "BEHIND" in self._log(h) and "2" in self._log(h)
+        assert "BEHIND" in h.log() and "2" in h.log()
 
     def test_debounced_tick_is_not_logged_as_raised(self, tmp_path, *, scratch_plane_env):
         # Second run inside the renotify window raises nothing at all. Logging
@@ -413,9 +455,9 @@ class TestCurrencyOutcomeIsLogged:
         # notices that were never sent.
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         assert h.run().returncode == 0
-        first = self._log(h)
+        first = h.log()
         assert h.run().returncode == 0
-        second = self._log(h)[len(first):]
+        second = h.log()[len(first):]
         assert len(h.captured()) == 1, "precondition: the second tick sent nothing"
         assert "SUPPRESSED" in second
         assert "DELIVERED" not in second
@@ -426,7 +468,7 @@ class TestCurrencyOutcomeIsLogged:
         h = Harness(tmp_path, behind=2, tag_at_seed="v1.0.0", scratch_plane_env=scratch_plane_env)
         self._reject(h)
         assert h.run().returncode == 0
-        log = self._log(h)
+        log = h.log()
         assert "release-gap notice" in log
         assert "NOT DELIVERED" in log
         assert "notice raised" not in log
@@ -436,7 +478,7 @@ class TestCurrencyOutcomeIsLogged:
         h = Harness(tmp_path, behind=2, tag_after="v2.0.0", scratch_plane_env=scratch_plane_env)
         self._reject(h)
         assert h.run().returncode == 0
-        log = self._log(h)
+        log = h.log()
         assert "BEHIND TAG v2.0.0" in log
         assert "NOT DELIVERED" in log
         assert "notice raised" not in log
@@ -521,3 +563,101 @@ class TestUndeliveredNoticeIsRetried:
         assert '"exit":2' in h.events(), "precondition: no Telegram target resolved"
         assert h.run(serve=True).returncode == 0
         assert h.events().count('"type":"source_behind"') == 1, "a notice with no target was raised again"
+
+
+class TestCountsFromTheRunningRelease:
+    """#2322: the data root counts from the selected release's source revision,
+    never from the root checkout's HEAD. Nothing runs from that checkout under
+    sealed releases and nothing pulls it, so its HEAD measured how old an
+    unused checkout was: 315 commits on one host, where the release it ran
+    lacked 10."""
+
+    def _lacks(self, h, ref):
+        return int(_git(h.root, "rev-list", "--count", f"{ref}..origin/main"))
+
+    def test_a_stale_root_with_a_current_release_raises_no_source_behind(
+            self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=3, scratch_plane_env=scratch_plane_env)
+        release = h.select(h.origin_rev())
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        assert self._lacks(h, "HEAD") == 3, "control: the root checkout is stale"
+        assert h.captured() == []
+        log = h.log()
+        assert release in log and "IN SYNC with origin/main" in log, log
+
+    def test_a_release_behind_main_counts_exactly_the_commits_it_lacks(
+            self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=5, scratch_plane_env=scratch_plane_env)
+        source = h.origin_rev("HEAD~3")
+        release = h.select(source)
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        assert (self._lacks(h, source), self._lacks(h, "HEAD")) == (3, 5)
+        (msg,) = h.messages()
+        assert "FLEET NOTICE [source_behind]:" in msg, msg
+        assert "is 3 commit(s) behind origin/main" in msg, msg
+        assert f"runs release {release[:10]} (built from {source[:8]}" in msg, msg
+        assert "5 commit" not in msg, msg
+
+    def test_the_first_run_after_an_activation_clears_the_notice(
+            self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
+        marker = os.path.join(h.root, "state", "currency", "root.source_behind")
+        assert h.run().returncode == 0
+        assert len(h.captured()) == 1 and os.path.exists(marker), "precondition: notified"
+        first = h.log()
+        release = h.select(h.origin_rev())  # an activation of a release built from main
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        second = h.log()[len(first):]
+        assert release in second and "IN SYNC with origin/main" in second, second
+        assert not os.path.exists(marker)
+        assert len(h.captured()) == 1
+        # Cleared, not merely quiet: the first notice's distance is news again,
+        # which a marker left from it would hold back for a week.
+        _commit(h.origin, "after-activation-0")
+        _commit(h.origin, "after-activation-1")
+        assert h.run().returncode == 0
+        assert len(h.captured()) == 2
+        assert "is 2 commit(s) behind origin/main" in h.messages()[-1]
+
+    @pytest.mark.parametrize("case, said", [
+        ("no selection", "no release is selected"),
+        ("no such release", "r-00000000"),
+        ("no interpreter", "CLAUDLOBBY_CLI"),
+        ("source not in history", "cccccccc"),
+    ])
+    def test_a_release_it_cannot_read_is_said_and_nothing_is_counted(
+            self, case, said, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
+        if case == "no selection":
+            os.remove(os.path.join(h.root, "state", "selected-release.json"))
+        elif case == "no such release":
+            _select(h.root, "r-" + "0" * 64)
+        elif case == "no interpreter":
+            h.cli = str(tmp_path / "missing" / "claudlobby")
+        else:
+            h.select("c" * 40)
+        serve = case == "no such release"  # one case proves the new type lands
+        r = h.run(serve=serve)
+        assert r.returncode == 0, r.stderr
+        (msg,) = h.messages()
+        assert "FLEET NOTICE [source_unknown]:" in msg, msg
+        assert "the running release cannot be read (" in msg and "host releases" in msg, msg
+        assert said in msg, msg
+        assert "commit(s) behind" not in msg and "2 commit" not in msg, msg
+        if serve:
+            events = h.events()
+            assert '"type":"source_unknown"' in events and "source_behind" not in events
+
+    @pytest.mark.parametrize("tag", [{"tag_after": "v2.0.0"}, {"tag_at_seed": "v1.0.0"}],
+                             ids=["behind-a-tag", "release-gap"])
+    def test_the_tag_counts_start_from_the_running_release_too(
+            self, tag, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env, **tag)
+        h.select(h.origin_rev())
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        assert h.captured() == []
+        assert "IN SYNC with origin/main and release v" in h.log()
