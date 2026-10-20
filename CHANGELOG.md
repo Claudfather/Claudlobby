@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — activity_stuck times a stall from the last tick keepalive saw the bot idle (#2391)
+
+A bot that sat idle past the activity_stuck threshold and was then woken read as hung until its turn made a tool call. keepalive's BUSY tick removes `data/.idle` as the turn begins, and fleet-pulse then timed the stall from the previous turn's last tool call, so the whole idle stretch counted against a turn begun seconds after an IDLE tick, whatever began it.
+
+- **keepalive stamps `data/.last-idle` with `.idle` on every IDLE tick.** No verdict removes it, so once a turn begins it still says when the bot was last seen idle.
+- **fleet-pulse times a stall from the later of `.last-tool-call` and `.last-idle`.** A turn that goes past the threshold with no tool call still pages, timed from when the bot was last seen idle. A bot with no `.last-idle` (never seen idle, or a keepalive older than the marker) is timed from its last tool call, as before.
+- **The page carries `last_idle_epoch`** beside `last_tool_call_epoch` and `elapsed_seconds`; it is null with no marker.
+- **Tests:** `tests/test_activity_stuck_last_idle.py` drives the real keepalive tick (the BUSY tick of a new turn removes `.idle` and keeps `.last-idle`) and the real sweep (a sweep 65 s after the last IDLE tick and 5,731 s after the last tool call does not page; a bot without the marker, and a turn past the threshold, still do).
+
 ### Fixed — a bot session no longer opens a browser window on the host's desktop (#2332)
 
 On a host with a desktop, the user manager hands every unit the desktop's `DISPLAY` and `WAYLAND_DISPLAY`, and bot sessions inherited them. A browser that a bot session opened (a login CLI's `xdg-open`, Claude Code's Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command: one ran 4.7 h holding 867 MiB, another 29 minutes holding 428 MiB, each found and closed by hand.

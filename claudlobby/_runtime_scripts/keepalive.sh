@@ -686,8 +686,12 @@ case "$state" in
     IDLE)
         echo "$(ts_iso) IDLE — at prompt${_ul_note}" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
-        # Touch idle marker — fleet-pulse reads this instead of parsing panes
-        touch "$BOT_DIR/data/.idle"
+        # Touch idle marker — fleet-pulse reads this instead of parsing panes.
+        # #2391: .last-idle gets the same stamp, and no verdict removes it. Once
+        # the BUSY tick of a new turn removes .idle, it still says when the bot
+        # was last seen idle, which is where fleet-pulse starts that turn's
+        # stall clock.
+        touch "$BOT_DIR/data/.idle" "$BOT_DIR/data/.last-idle"
         rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then
