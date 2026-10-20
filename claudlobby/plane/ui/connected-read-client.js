@@ -14,6 +14,7 @@ const keys = (v, fields) => v !== null && typeof v === 'object' && !Array.isArra
 const uuid = v => typeof v === 'string' && v.length === 36 && UUID.test(v);
 const host = v => typeof v === 'string' && v.length === 37 && HOST.test(v);
 const positive = v => Number.isSafeInteger(v) && v > 0;
+const RENEW_WINDOW = 120000, ACTIVITY_WINDOW = 300000;
 function origin(v) {
   if (typeof v !== 'string' || v.length > 2048) return false;
   try { const u = new URL(v); return u.protocol === 'https:' && u.origin === v && !u.hostname.includes('*') && !u.username && !u.password; }
@@ -34,6 +35,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   obtainSessionAssertion, fetch = globalThis.fetch.bind(globalThis),
   documentOrigin = globalThis.location?.origin,
   monotonicNow = () => globalThis.performance.now(),
+  onContinuityChange = () => {},
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
   if (!keys(reference, ['reference_id', 'endpoint_origin', 'revision']) || !uuid(reference.reference_id)
       || !origin(reference.endpoint_origin) || !positive(reference.revision)
@@ -46,6 +48,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   const ref = Object.freeze({ ...reference }), doc = Object.freeze({ ...documentContext });
   let token = null, pending = null, binding = null, hostUID = null, expires = 0;
   let epoch = 0, disposed = false, ended = false, busy = false, lastNow = null, expiryTimer = null;
+  let continuityTimer = null, visible = false, lastActivity = null, autoAttempted = false;
+  let renewalUnknown = false, continuityPaused = false, actionRequests = 0;
+  let renewing = false, disconnectRequested = false;
   const requests = new Set(), cursors = new Map();
   let owner, handle, actions = null, actionEpoch = 0, actionSourceChanged = () => {}, unsubscribe = () => {};
   function now() {
@@ -58,8 +63,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     return value;
   }
   function wipe() {
-    token = null; pending = null; expires = 0;
+    token = null; pending = null; expires = 0; renewalUnknown = false;
     clearTimeout(expiryTimer); expiryTimer = null;
+    clearTimeout(continuityTimer); continuityTimer = null;
     for (const request of requests) request.abort();
   }
   function stop(note, permanent = false) {
@@ -92,7 +98,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     let time;
     try { time = now(); } catch { return false; }
     if (requireToken && (!token || time >= expires)) {
-      stop('The connected session expired. Sign in again explicitly.');
+      stop('The connected session expired. Choose Connect again.');
       return false;
     }
     return true;
@@ -101,8 +107,44 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     clearTimeout(expiryTimer);
     const gen = epoch;
     expiryTimer = setTimeout(() => {
-      if (!disposed && gen === epoch) stop('The connected session expired. Sign in again explicitly.');
+      if (!disposed && gen === epoch) stop('The connected session expired. Choose Connect again.');
     }, Math.max(0, expires - now()));
+  }
+  function continuity() {
+    const remaining = token ? Math.max(0, expires - now()) : 0;
+    return Object.freeze({ warning: !!token && remaining <= RENEW_WINDOW,
+      renewalUnknown, remainingSeconds: Math.ceil(remaining / 1000) });
+  }
+  function continuityChanged() {
+    try { onContinuityChange(); } catch { /* presentation cannot change admission */ }
+  }
+  function scheduleContinuity() {
+    clearTimeout(continuityTimer); continuityTimer = null;
+    if (disposed || ended || !token || continuityPaused || renewalUnknown) return;
+    const remaining = expires - now(), gen = epoch;
+    if (remaining <= 0) return; // The existing expiry gate owns termination.
+    if (remaining <= RENEW_WINDOW) {
+      continuityChanged();
+      if (!visible || lastActivity === null || now() - lastActivity > ACTIVITY_WINDOW
+          || autoAttempted || busy || actionRequests || handle.snapshot().state !== 'ready') return;
+    }
+    continuityTimer = setTimeout(() => {
+      continuityTimer = null;
+      if (disposed || gen !== epoch || !valid(true)) return;
+      if (expires - now() > RENEW_WINDOW) { scheduleContinuity(); return; }
+      continuityChanged();
+      if (visible && lastActivity !== null && now() - lastActivity <= ACTIVITY_WINDOW
+          && !autoAttempted && !busy && !actionRequests && handle.snapshot().state === 'ready') {
+        autoAttempted = true;
+        void renew();
+      }
+    }, Math.max(0, remaining - RENEW_WINDOW));
+  }
+  function activity({ visible: isVisible, userInput = false }) {
+    if (disposed || ended) return;
+    visible = isVisible === true;
+    if (visible && userInput) lastActivity = now();
+    scheduleContinuity();
   }
   function readRoute(url, streaming = false) {
     if (typeof url !== 'string' || !url.startsWith('/api/') || url.startsWith('//')) throw new Error();
@@ -155,7 +197,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         try { data = await boundedJSON(response, limit); }
         catch { if (response.status === 403) data = { state: 'denied' }; else throw new Error(); }
       }
-      if (controller.signal.aborted || disposed || gen !== epoch || !valid()) throw new Error();
+      if (controller.signal.aborted || disposed || gen !== epoch || (bearer && bearer !== token) || !valid()) throw new Error();
       return { status: response.status, data, start };
     } finally {
       clearTimeout(timer);
@@ -202,9 +244,12 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     const actionPath = /^\/api\/owner\/actions\/(context|prepare|send|receipt)$/.exec(url);
     if (actionPath) {
       if (options.method !== 'POST') throw new Error();
-      const result = await http(ref.endpoint_origin + '/api/owner/connected/actions/' + actionPath[1],
-        {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:actionPath[1] === 'context' ? 2097152 : 32768});
-      return {status:result.status,json:async () => result.data};
+      actionRequests++;
+      try {
+        const result = await http(ref.endpoint_origin + '/api/owner/connected/actions/' + actionPath[1],
+          {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:actionPath[1] === 'context' ? 2097152 : 32768});
+        return {status:result.status,json:async () => result.data};
+      } finally { actionRequests--; scheduleContinuity(); }
     }
     const route = readRoute(url);
     const result = await http(route.url, { signal: options.signal, limit: 8 * 1024 * 1024 });
@@ -314,16 +359,23 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     },
     onReadAdmitted() {
       if (!pending || !valid()) throw new Error();
+      if (token !== pending.token) autoAttempted = false;
       token = pending.token; expires = pending.expires; pending = null; armExpiry();
+      // A rotating token is retained only long enough to sign it out. Do not
+      // publish a ready session after an explicit disconnect during renewal.
+      if (disconnectRequested) throw new Error('Disconnect requested.');
+      scheduleContinuity();
     } });
   handle = owner.readHandle();
   unsubscribe = handle.subscribe(state => {
     if (['denied', 'signed_out'].includes(state.state)) { epoch++; wipe(); }
     else if (state.state === 'unavailable') pending = null;
+    if (state.state === 'ready') scheduleContinuity();
   });
   async function connect() {
     if (disposed || ended || busy || !valid()) return false;
-    busy = true; stop('Signing in to the selected computer…');
+    busy = true; disconnectRequested = false; continuityPaused = false; renewalUnknown = false; autoAttempted = false;
+    stop('Signing in to the selected computer…');
     const gen = epoch;
     try {
       const result = await http(ref.endpoint_origin + '/api/owner/connected/challenge', { method: 'POST', body: {}, bearer: null });
@@ -360,15 +412,47 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } catch {
       if (!disposed && gen === epoch) stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
       return false;
-    } finally { busy = false; }
+    } finally { busy = false; scheduleContinuity(); }
+  }
+  async function renew() {
+    if (busy || !valid(true)) return;
+    busy = true; renewing = true;
+    try {
+      await owner.sessionControls.renew();
+      renewalUnknown = handle.snapshot().state !== 'ready';
+    } finally {
+      busy = false; renewing = false;
+      if (disconnectRequested) await logout();
+      else { continuityChanged(); scheduleContinuity(); }
+    }
+  }
+  async function check() {
+    await handle.start();
+    if (handle.snapshot().state === 'ready') {
+      renewalUnknown = false; continuityPaused = false; autoAttempted = false;
+      scheduleContinuity(); continuityChanged();
+    }
+  }
+  async function logout() {
+    disconnectRequested = true; continuityPaused = true;
+    clearTimeout(continuityTimer); continuityTimer = null;
+    if (renewing) return; // The renewal completion signs out its rotated token.
+    if (busy) { stop('Disconnected. Choose Connect again to return.'); return; }
+    if (!valid(true)) return;
+    busy = true;
+    try { await owner.sessionControls.logout(); }
+    finally {
+      busy = false;
+      if (handle.snapshot().state !== 'signed_out')
+        stop('Disconnected in this view. Host sign-out was not confirmed. Choose Connect again to return.');
+    }
   }
   function dispose() {
     if (disposed) return;
     handle.dispose();
   }
-  return Object.freeze({ connect, start: () => handle.start(), check: () => handle.start(),
-    renew: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.renew(); } finally { busy = false; } } },
-    logout: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.logout(); } finally { busy = false; } } },
+  return Object.freeze({ connect, start: () => handle.start(), check, activity, continuity,
+    renew, logout,
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');
       actionSourceChanged = onSourceChange;

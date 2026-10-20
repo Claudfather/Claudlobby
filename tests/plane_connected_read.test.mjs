@@ -26,7 +26,7 @@ function deferred() { let resolve; const promise = new Promise(r => resolve = r)
 const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
 function harness(options = {}) {
   const calls = [], signings = [], timers = [], streams = [], overrides = new Map();
-  let time = 0, serverToken = null;
+  let time = 0, serverToken = null, serverExpires = 0;
   let context = { version: 2, user: { id: doc.subject }, workspace: { id: doc.workspace_id, name: 'Example' },
     context_generation: doc.context_generation, references: [{ ...ref }] };
   const dependencies = { reference: ref, documentContext: doc, documentOrigin: doc.operational_origin,
@@ -42,10 +42,10 @@ function harness(options = {}) {
       const path = new URL(url).pathname.replace('/api/owner/connected/', '');
       if (overrides.has(path)) return overrides.get(path)(init);
       if (path === 'challenge') return reply(202, challenge);
-      if (path === 'issue') { serverToken = TOKEN; return reply(200, ready(TOKEN)); }
+      if (path === 'issue') { serverToken = TOKEN; serverExpires = time + 900000; return reply(200, ready(TOKEN)); }
       if (init.headers.Authorization !== 'Bearer ' + serverToken) return reply(403, { state: 'denied' });
-      if (path === 'status') return reply(200, ready());
-      if (path === 'renew') { serverToken = ROTATED; return reply(200, ready(ROTATED)); }
+      if (path === 'status') return reply(200, {...ready(),expires_in:Math.floor((serverExpires-time)/1000)});
+      if (path === 'renew') { serverToken = ROTATED; serverExpires = time + 900000; return reply(200, ready(ROTATED)); }
       if (path === 'logout') { serverToken = null; return reply(200, { version: 1, state: 'signed_out' }); }
       if (path === 'read/stream') {
         let control;
@@ -134,7 +134,7 @@ test('renewal pauses reads, installs only admitted rotation and fences old403; m
   const late = deferred(), rotation = deferred();
   h.overrides.set('read/tasks', () => late.promise); h.overrides.set('renew', () => rotation.promise);
   const read = h.api.readHandle.jget('/api/tasks'), renewal = h.api.renew();
-  await h.api.logout(); assert.equal(h.calls.filter(c => c.url.endsWith('/logout')).length, 0);
+  await h.api.renew(); assert.equal(h.calls.filter(c => c.url.endsWith('/renew')).length, 1);
   rotation.resolve(reply(200, ready(ROTATED))); await renewal;
   h.overrides.delete('read/tasks');
   // Default synthetic server learns the deliberately held successful rotation.
@@ -145,6 +145,96 @@ test('renewal pauses reads, installs only admitted rotation and fences old403; m
   assert.equal(h.calls.filter(c => c.url.endsWith('/renew')).length, 1); h.api.dispose();
 });
 
+test('disconnect during renewal signs out the rotated token without admitting a ready session',async()=>{
+  const h=harness(),held=deferred();await h.api.connect();
+  h.overrides.set('renew',()=>held.promise);
+  h.overrides.set('logout',init=>{assert.equal(init.headers.Authorization,'Bearer '+ROTATED);return reply(200,{version:1,state:'signed_out'});});
+  const states=[];h.api.subscribe(s=>states.push(s.state));
+  const renewing=h.api.renew();await h.api.logout();
+  held.resolve(reply(200,ready(ROTATED)));await renewing;await flush();
+  assert.equal(h.api.snapshot().state,'signed_out');assert.ok(!states.includes('ready'));
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
+  h.api.activity({visible:true,userInput:true});await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);h.api.dispose();
+});
+
+test('recent visible input renews once at the warning boundary and installs the rotated lifetime', async () => {
+  const h = harness(); await h.api.connect();
+  h.time = 600000; h.api.activity({visible:true,userInput:true});
+  h.time = 780000; h.runTimer(180000); await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
+  assert.equal(h.api.snapshot().state,'ready');
+  assert.equal(h.api.continuity().remainingSeconds,900);
+  assert.equal(h.api.continuity().warning,false);
+  h.time = 900001;
+  assert.ok(await h.api.readHandle.jget('/api/tasks'));
+  assert.equal(h.calls.at(-1).init.headers.Authorization,'Bearer '+ROTATED);
+  h.api.dispose();
+});
+
+test('polls never count as activity; hidden and idle sessions wait for visible input within the window', async () => {
+  for (const hidden of [false,true]) {
+    const h=harness();await h.api.connect();
+    h.api.activity({visible:true,userInput:true});
+    h.time=700000;await h.api.readHandle.jget('/api/tasks');await h.api.check();
+    if(hidden)h.api.activity({visible:false,userInput:true});
+    h.time=780000;h.runTimer(80000);await flush();
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+    assert.equal(h.api.continuity().warning,true);
+    h.api.activity({visible:true});await flush();
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+    h.api.activity({visible:true,userInput:true});h.runTimer(0);await flush();
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
+    h.api.dispose();
+  }
+});
+
+test('unknown automatic renewal never retries on input, polling or timer callbacks; explicit check can recover',async()=>{
+  const h=harness();await h.api.connect();h.time=780000;
+  h.overrides.set('renew',()=>{throw new Error('lost renewal');});
+  h.api.activity({visible:true,userInput:true});h.runTimer(0);await flush();
+  assert.equal(h.api.snapshot().state,'unavailable');assert.equal(h.api.continuity().renewalUnknown,true);
+  h.api.activity({visible:true,userInput:true});await flush();
+  assert.equal(h.timers.filter(t=>t.active&&t.ms===0).length,0);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
+  h.overrides.delete('renew');await h.api.check();h.runTimer(0);await flush();
+  assert.equal(h.api.snapshot().state,'ready');assert.equal(h.api.continuity().renewalUnknown,false);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,2);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,1);
+  h.api.dispose();
+});
+
+test('expired and explicitly disconnected sessions cannot renew or reconnect on later input',async()=>{
+  for(const logout of [false,true]){
+    const h=harness();await h.api.connect();h.api.activity({visible:true,userInput:true});
+    if(logout)await h.api.logout();else{h.time=900000;h.runTimer(900000);}
+    h.api.activity({visible:true,userInput:true});await flush();
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,1);
+    assert.equal(h.api.snapshot().state,logout?'signed_out':'unavailable');
+    if(!logout)assert.match(h.api.snapshot().remediation,/Choose Connect again/);
+    h.api.dispose();assert.equal(h.timers.filter(t=>t.active).length,0);
+  }
+});
+
+test('automatic renewal waits for one in-flight action and never replays its send',async()=>{
+  const h=harness(),held=deferred(),recipient='actor_'+'c'.repeat(32);
+  const scope={workspace:'connected-test',host:HOST,fleet:'team',viewer:'message-grant1'};
+  h.overrides.set('actions/context',()=>reply(200,{version:1,room:'team',scope,simulation:false,actions:['message'],recipients:[{id:recipient,label:'Lead'}]}));
+  h.overrides.set('actions/send',()=>held.promise);
+  const actions=h.api.createActions({key:'computer-1'});await h.api.connect();
+  const context=await actions.interactionContext('team');
+  const request={kind:'message',scope:context.scope,target:{recipient:context.recipients[0].id,task_id:null},request_id:uuid(99),submitted_at:'2026-10-20T00:00:00Z',body:'One explicit send'};
+  const sending=actions.sendAction(request);await flush();
+  h.time=780000;h.api.activity({visible:true,userInput:true});await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+  held.resolve(reply(200,{version:1,status:'delivered',...request,scope,target:{recipient,task_id:null},body:undefined}));
+  await sending;h.runTimer(0);await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/send')).length,1);
+  h.api.dispose();
+});
+
 test('lost renew and failed logout stay unknown, never replay, and status alone can recover retained token', async () => {
   const h = harness(); await h.api.connect();
   h.overrides.set('renew', () => { throw new Error('do not expose credentials'); });
@@ -152,8 +242,8 @@ test('lost renew and failed logout stay unknown, never replay, and status alone 
   assert.equal(h.calls.filter(c => c.url.endsWith('/renew')).length, 1);
   await h.api.check(); assert.equal(h.api.snapshot().state, 'ready');
   h.overrides.set('logout', () => reply(403, { state: 'denied' }));
-  await h.api.logout(); assert.equal(h.api.snapshot().state, 'ready');
-  assert.match(h.api.snapshot().remediation, /Sign-out did not complete/);
+  await h.api.logout(); assert.equal(h.api.snapshot().state, 'unavailable');
+  assert.match(h.api.snapshot().remediation, /Disconnected/);
   assert.equal(h.calls.filter(c => c.url.endsWith('/logout')).length, 1); h.api.dispose();
 });
 

@@ -903,12 +903,19 @@ function renderDebugRail() {
 // ---------------------------------------------------------------------------
 let refreshTimer = null;
 let safetyTimer = null;
+let refreshInFlight = false;
+let refreshPending = false;
 let generation = 0;
 let sessionPaused = false;
 let sessionEpoch = 0;
 
 async function refreshBoards() {
   if (sessionPaused) return;
+  if (refreshInFlight) { refreshPending = true; return; }
+  refreshInFlight = true;
+  refreshPending = false;
+  clearTimeout(refreshTimer); refreshTimer = null;
+  try {
   const gen = ++generation;   // stale responses never paint over newer ones
   if (!fleetsSeen) {
     // The FIRST paint learns the fleet dimension before it fetches a board:
@@ -936,10 +943,16 @@ async function refreshBoards() {
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick
   restartSafety();
+  } finally {
+    refreshInFlight = false;
+    if (refreshPending) scheduleRefresh();
+  }
 }
 
-function scheduleRefresh() { // coalesce bursts into one refetch
-  if (sessionPaused || refreshTimer) return;
+function scheduleRefresh() { // one active read, then one refetch for intervening changes
+  if (sessionPaused) return;
+  if (refreshInFlight) { refreshPending = true; return; }
+  if (refreshTimer) return;
   refreshTimer = setTimeout(() => { refreshTimer = null; refreshBoards(); },
                             400);
 }
@@ -1103,7 +1116,7 @@ function renderFleetTabs() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
-  if (currentFleet !== f) closeEquipment();
+  if (currentFleet !== f) { ++generation; closeEquipment(); }
   currentFleet = f;
   syncWorkRoom();
   savePick(currentFleet);
