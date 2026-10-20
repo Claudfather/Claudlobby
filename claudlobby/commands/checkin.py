@@ -16,6 +16,8 @@ import stat
 from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
+from ..reference_hints import (PREFIX_HINT_LIMIT, PREFIX_MIN_HEX, PREFIX_SCAN_LIMIT, PrefixCandidate,
+                               PrefixHint, id_shape, note_prefix)
 
 
 def _text_file(name: str, *, cap: int) -> str:
@@ -129,6 +131,7 @@ def _read(args) -> CommandOutput:
     from datetime import datetime, timezone
 
     destination, _origin, selected, bindings = _scope(args)
+    prefix = None
     if args.public_command == "checkin.list":
         if args.bot is not None and args.bot not in destination.fleet.bots:
             raise CommandFailure("not_found", "bot is not in the active fleet")
@@ -141,8 +144,14 @@ def _read(args) -> CommandOutput:
         except ValueError as exc:
             raise CommandFailure("invalid_argument", str(exc)) from exc
     else:
-        if not isinstance(args.checkin_id, str) or not re.fullmatch(r"ck_[0-9a-f]{32}", args.checkin_id):
-            raise CommandFailure("invalid_argument", "check-in ID must have canonical ck_<32hex> form")
+        shape = id_shape(args.checkin_id, "ck_")
+        if shape == "short":
+            raise CommandFailure("invalid_argument",
+                                 f"a check-in ID prefix needs at least {PREFIX_MIN_HEX} hex digits after ck_")
+        if shape is None:
+            raise CommandFailure("invalid_argument", "check-in ID must have canonical ck_<32hex> form "
+                                 f"or be a prefix of one (ck_ and at least {PREFIX_MIN_HEX} of its hex digits)")
+        prefix = args.checkin_id if shape == "prefix" else None
     with closing(connect_ro(db_file(destination.paths.root))) as conn:
         conn.execute("BEGIN")
         require_current_schema(conn)
@@ -154,8 +163,12 @@ def _read(args) -> CommandOutput:
             rows = collect_checkins(conn, destination.fleet.name, since=since, bot=args.bot,
                                     last=args.last, raised=args.raised, limit=args.limit)
         else:
+            # A prefix (#2380) reads the same fleet-scoped rows as the full ID,
+            # by a range on the check-in's ref, and at most PREFIX_SCAN_LIMIT + 1.
             rows = collect_checkins(conn, destination.fleet.name, since=None, bot=None,
-                                    last=False, checkin_id=args.checkin_id, limit=1)
+                                    last=False, checkin_id=None if prefix else args.checkin_id,
+                                    checkin_prefix=prefix,
+                                    limit=PREFIX_SCAN_LIMIT + 1 if prefix else 1)
         readers = load_lib_module(destination.paths.lib, "plane-readers.py")
         if readers is None or not hasattr(readers, "workstream_registry"):
             raise CommandFailure("unavailable", "Plane workstream reader is unavailable")
@@ -166,13 +179,26 @@ def _read(args) -> CommandOutput:
     if read_selection(destination.paths.root) != selected:
         raise selection_read_conflict('active check-in selection changed during read')
     if args.public_command == "checkin.show":
+        ids = sorted({(row["checkin_ref"] or "").split("checkin:", 1)[-1] for row in rows})
+        if prefix and len(rows) > PREFIX_SCAN_LIMIT:
+            raise CommandFailure("ambiguous_reference", f"more than {PREFIX_SCAN_LIMIT} check-in decisions "
+                                 f"start with {prefix}; give more of the ID")
+        if prefix and len(ids) > 1:
+            raise CommandFailure(
+                "ambiguous_reference",
+                f"{len(ids)} check-in decisions start with {prefix}; select a canonical check-in ID",
+                hint=PrefixHint(prefix, tuple(PrefixCandidate(checkin_id, ("checkin", "show", checkin_id))
+                                              for checkin_id in ids[:PREFIX_HINT_LIMIT]), len(ids), None))
+        if not rows and prefix:
+            raise CommandFailure("not_found", f"no check-in decision in the selected fleet starts with {prefix}",
+                                 hint=PrefixHint(prefix, (), 0, None))
         if not rows:
             raise CommandFailure("not_found", "check-in decision is not in the selected fleet")
         row = rows[0]
-        return CommandOutput({"fleet": destination.fleet.name, "decision": row,
-                              "current_workstream_waits": waits},
-                             release_id=selected["release_id"],
-                             lines=(f"{row['checkin_id']}\t{row['actor']}\t{row['action']}",))
+        data = {"fleet": destination.fleet.name, "decision": row, "current_workstream_waits": waits}
+        lines = note_prefix(data, (f"{row['checkin_id']}\t{row['actor']}\t{row['action']}",),
+                            args.checkin_id, ids[0])
+        return CommandOutput(data, release_id=selected["release_id"], lines=lines)
     data = {"fleet": destination.fleet.name, "bot": args.bot,
             "since": None if args.last else since.isoformat(), "limit": args.limit,
             "items": rows, "current_workstream_waits": waits,

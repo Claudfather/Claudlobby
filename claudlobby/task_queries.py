@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Literal, NoReturn
 
 from .plane.queries import ESCALATION_IGNORED
-from .reference_hints import ReferenceCandidate, ReferenceHint
+from .reference_hints import PREFIX_MIN_HEX, ReferenceCandidate, ReferenceHint, id_shape
 from .task_state import Assignment, Task, TaskIssue, TaskSnapshot, legacy_display_id, read_tasks
 
 ListState = Literal["open", "queued", "assigned", "active", "blocked", "completed", "failed", "cancelled", "all"]
@@ -28,6 +28,8 @@ _HINT_LIMIT = 20
 class TaskQueryError(ValueError):
     code = "invalid_argument"
     retryable = False
+    # The public result shows this error's own text; others get a fixed one.
+    public_message = False
 
     def __init__(self, message: str, *, hint: ReferenceHint | None = None):
         self.hint = hint
@@ -44,6 +46,16 @@ class WrongTaskReferenceError(TaskQueryError):
 
 class AmbiguousTaskReferenceError(TaskQueryError):
     code = "ambiguous_reference"
+
+
+class TaskPrefixNotFoundError(TaskNotFoundError):
+    """A search by prefix found nothing in the fleet (#2380)."""
+    public_message = True
+
+
+class ShortTaskPrefixError(TaskQueryError):
+    """An ID prefix too short to search (#2380); never reported as not found."""
+    public_message = True
 
 
 class InvalidTaskCursorError(TaskQueryError):
@@ -213,31 +225,61 @@ def task_escalations_from_snapshot(snapshot: TaskSnapshot) -> TaskEscalations:
     return TaskEscalations(snapshot.schema_version, snapshot.fleet_uid, items, snapshot.issues)
 
 
-def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str):
+def _prefix_tag(reference: str) -> str | None:
+    """`wi_` or `asg_` when `reference` is a searchable prefix of such an ID (#2380)."""
+    return next((tag for tag in ("wi_", "asg_") if id_shape(reference, tag) == "prefix"), None)
+
+
+def _hit(reference: str, value: str | None, prefix: bool) -> bool:
+    return value == reference or (prefix and value is not None and value.startswith(reference))
+
+
+def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str, prefix: bool = False):
     """A0-style historical mapping within this snapshot, never a global scan.
 
     Keep closed assignments and task-plus-assignment display metadata. A
     returned task has its own unassigned intake candidate as well as history;
     ambiguity is never resolved by preferring a current or latest assignment.
-    Foreign/unscoped assignment identities are not recovery destinations.
+    Foreign/unscoped assignment identities are not recovery destinations. With
+    `prefix`, a searchable prefix matches task and assignment IDs, never
+    display IDs.
     """
+    prefix = prefix and _prefix_tag(reference) is not None
     candidates = []
     for task in snapshot.tasks:
-        task_display = legacy_display_id(task.source_ref)
+        task_hit = _hit(reference, task.task_id, prefix) or reference == legacy_display_id(task.source_ref)
         scoped_assignments = tuple(a for a in task.assignments if a.fleet_uid == snapshot.fleet_uid)
         for assignment in scoped_assignments:
-            if reference in (task.task_id, assignment.assignment_id,
-                             task_display, legacy_display_id(assignment.source_ref)):
+            if (task_hit or _hit(reference, assignment.assignment_id, prefix)
+                    or reference == legacy_display_id(assignment.source_ref)):
                 command = (("task", "show", task.task_id) if kind == "task"
                            else ("assignment", "show", assignment.assignment_id))
                 candidates.append(ReferenceCandidate(task.task_id, assignment.assignment_id, command))
-        if (not scoped_assignments or task.state == "queued") and reference in (task.task_id, task_display):
+        if (not scoped_assignments or task.state == "queued") and task_hit:
             candidates.append(ReferenceCandidate(task.task_id, None, ("task", "show", task.task_id)))
     return sorted(set(candidates), key=lambda row: (row.task_id, row.assignment_id or ""))
 
 
-def _not_canonical(snapshot: TaskSnapshot, reference: str, kind: str) -> NoReturn:
-    candidates = _reference_candidates(snapshot, reference, kind)
+def _prefix_miss(reference: str, kind: str, candidates: list[ReferenceCandidate]) -> NoReturn:
+    """Several records of the door's own kind start with `reference`, or none does."""
+    candidates = sorted(candidates, key=lambda row: (row.task_id, row.assignment_id or ""))
+    if candidates:
+        raise AmbiguousTaskReferenceError(
+            f"ambiguous prefix: {len(candidates)} {kind}s start with {reference}; select a canonical {kind} ID",
+            hint=ReferenceHint(tuple(candidates[:_HINT_LIMIT]), len(candidates), None))
+    raise TaskPrefixNotFoundError(f"no {kind} in this fleet starts with {reference}",
+                                  hint=ReferenceHint((), 0, ("task", "list", "--state", "all")))
+
+
+def _not_canonical(snapshot: TaskSnapshot, reference: str, kind: str, prefix: bool = False) -> NoReturn:
+    candidates = _reference_candidates(snapshot, reference, kind, prefix)
+    if not candidates and prefix:
+        if any(id_shape(reference, tag) == "short" for tag in ("wi_", "asg_")):
+            raise ShortTaskPrefixError(
+                f"an ID prefix needs at least {PREFIX_MIN_HEX} hex digits after its tag: {reference}")
+        if _prefix_tag(reference):
+            raise TaskPrefixNotFoundError(f"no task or assignment in this fleet starts with {reference}",
+                                          hint=ReferenceHint((), 0, ("task", "list", "--state", "all")))
     if not candidates:
         raise TaskNotFoundError(f"{kind} not found: {reference}", hint=ReferenceHint(
             (), 0, ("task", "list", "--state", "all")))
@@ -256,20 +298,47 @@ def _lookup_snapshot(conn: sqlite3.Connection, fleet_uid: str, reference: str) -
     return read_tasks(conn, fleet_uid=fleet_uid)
 
 
-def show_task(conn: sqlite3.Connection, task_id: str, *, fleet_uid: str) -> Task:
-    """Canonical task IDs only; unresolved history remains explicitly visible."""
+def show_task(conn: sqlite3.Connection, task_id: str, *, fleet_uid: str, prefix: bool = False) -> Task:
+    """Canonical task IDs only; unresolved history remains explicitly visible.
+
+    With `prefix` (the public read door, #2380), a prefix that only one of the
+    fleet's tasks starts with also resolves. Mutations never pass it.
+    """
     snapshot = _lookup_snapshot(conn, fleet_uid, task_id)
     task = snapshot.get(task_id)
+    if task is None and prefix and _prefix_tag(task_id) == "wi_":
+        matches = [task for task in snapshot.tasks if task.task_id.startswith(task_id)]
+        if len(matches) != 1:
+            _prefix_miss(task_id, "task", [ReferenceCandidate(
+                task.task_id, None, ("task", "show", task.task_id)) for task in matches])
+        task = matches[0]
     if task is None:
-        _not_canonical(snapshot, task_id, "task")
+        _not_canonical(snapshot, task_id, "task", prefix)
     return task
 
 
-def show_assignment(conn: sqlite3.Connection, assignment_id: str, *, fleet_uid: str) -> AssignmentView:
-    """Read a canonical assignment and its parent, including closed history."""
+def show_assignment(conn: sqlite3.Connection, assignment_id: str, *, fleet_uid: str,
+                    prefix: bool = False) -> AssignmentView:
+    """Read a canonical assignment and its parent, including closed history.
+
+    With `prefix` (the public read door, #2380), the one assignment of the
+    fleet that a prefix names also resolves. Mutations never pass it.
+    """
     snapshot = _lookup_snapshot(conn, fleet_uid, assignment_id)
+    own = prefix and _prefix_tag(assignment_id) == "asg_"
+    matches = []
     for task in snapshot.tasks:
         for assignment in task.assignments:
-            if assignment.assignment_id == assignment_id and assignment.fleet_uid == fleet_uid:
+            if assignment.fleet_uid != fleet_uid:
+                continue
+            if assignment.assignment_id == assignment_id:
                 return AssignmentView(assignment, task)
-    _not_canonical(snapshot, assignment_id, "assignment")
+            if own and assignment.assignment_id.startswith(assignment_id):
+                matches.append(AssignmentView(assignment, task))
+    if own:
+        if len(matches) == 1:
+            return matches[0]
+        _prefix_miss(assignment_id, "assignment", [ReferenceCandidate(
+            view.task.task_id, view.assignment.assignment_id,
+            ("assignment", "show", view.assignment.assignment_id)) for view in matches])
+    _not_canonical(snapshot, assignment_id, "assignment", prefix)

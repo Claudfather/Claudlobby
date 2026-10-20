@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the read doors resolve an ID prefix that names one record, list the candidates when it names several, and say "not found" only after searching by prefix (#2380)
+
+Handoffs, briefs and notes carry 8-digit ID prefixes, and the read doors refused them: `assignment show asg_da1585e0` answered `not_found` with `candidates: []` about an assignment that exists, and `message show`, `request show` and `checkin show` refused any short ID.
+
+- **The doors:** `task show`, `assignment show`, `message show`, `message receipt`, `message wait`, `request show` and `checkin show`.
+- **A prefix:** the ID's tag and at least 8 of its 32 lowercase hex digits (`wi_`, `asg_`, `msg_`, `ck_`), or a request UUID's first 8 or more characters, dashes in place. A shorter one is `invalid_argument` (exit 2), never "not found".
+- **One match:** the door reads that record and says so. `data.resolved_from_prefix` names the prefix and the full ID, and the text output ends `resolved from prefix PREFIX: FULL_ID`. Only a record the caller could read by its full ID counts: the fleet's tasks, assignments, retained requests and check-ins, and the messages the caller sent or received (for an operator, the selected fleet's).
+- **Several:** `ambiguous_reference` (exit 4), and none is read. The hint lists up to 20 candidates, each with the command that reads it; `total_matches` counts them all.
+- **None:** `not_found` (exit 3), and the message says no record starts with the prefix. A hint's `total_matches: 0` now always follows a search by prefix.
+- **What a prefix costs:**
+  - task and assignment: one pass over the fleet's tasks, which the door already reads;
+  - message: one range seek on the message key, at most 65 rows; past 64 the door refuses rather than choose;
+  - check-in: the rows the full-ID read already makes, filtered by a range on the check-in's reference, at most 65 rows;
+  - request: one listing of the fleet's request directory, which grows with the fleet's request history.
+- **Mutations stay canonical:** the query owners resolve a prefix only when a read door asks. Every write (`task assign`, `assignment accept`, `assignment deliver` and the rest) and `message reply`'s parent still take the full ID.
+- **Tests:** `tests/test_id_prefix_reads.py` drives each door's query owner against real SQL and request files: a unique, an ambiguous, a missing and a too-short prefix, a wrong-kind prefix, the message read's query plan and its bound, and the writers' canonical reads. `tests/test_id_prefix_cli.py` checks the same four answers for each door through the public CLI, and that the reads leave the plane unchanged.
+- **Not in this change:** the skills that write handoffs and briefs should write full IDs. That is a library change for later.
+
 ### Added — the heavy slot's render profile: a headless render runs inside the host's lines, in a scope its runner kills (#2221)
 
 `claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND` runs a headless browser render. The start line, the heavy slot, the scope and the watchdog are all in the one process that starts it. Plain `run` refuses a render, because a render is a script (#2039).
