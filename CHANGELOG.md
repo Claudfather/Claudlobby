@@ -24,6 +24,83 @@ and a legacy `report-back:` report searches the sender's own events. Building
 every report of that fleet took 54 s and now takes under 1 s, with every field
 of every row unchanged.
 
+### Fixed — activity_stuck times a stall from the last tick keepalive saw no turn running (#2391)
+
+A bot that waited past the activity_stuck threshold, at its prompt, behind a held input box or under a usage limit, and was then started on a turn read as hung until that turn made a tool call. keepalive's BUSY tick removes `data/.idle`, `.held` and `.limit` as the turn begins, and fleet-pulse then timed the stall from the previous turn's last tool call, so the whole wait counted against a turn begun seconds earlier, whatever began it.
+
+- **keepalive stamps `data/.last-no-turn` on every tick that sees no turn running: IDLE, HELD and LIMIT.** No verdict removes it, so once a turn begins it still says when keepalive last saw no turn running. A HELD tick whose screen shows a running turn above the box stamps nothing: text typed into a busy bot's box reads HELD on the last ten lines, and a message reaching a running turn must not move its clock.
+- **fleet-pulse times a stall from the later of `.last-tool-call` and `.last-no-turn`.** A turn that goes past the threshold with no tool call still pages, however many messages reach it. A bot with no `.last-no-turn` (never seen without a turn, or a keepalive older than the marker) is timed from its last tool call, as before.
+- **After a usage-limit hold, the stall runs from the last LIMIT tick.** A hold that ends into a turn, or into screens keepalive does not recognize, pages once the threshold has passed since that tick with no tool call, not at once on the tool-call clock. A bot still held after its reset gets `usage_limit_held` (#996), as before.
+- **The page carries `last_no_turn_epoch`** beside `last_tool_call_epoch` and `elapsed_seconds`; it is null with no marker.
+- **Tests:** `tests/test_activity_stuck_no_turn.py` drives the real keepalive tick and the real sweep: a turn begun a minute after an IDLE, a HELD or a LIMIT tick and swept 5,731 s after the last tool call does not page, and a bot without the marker does; a turn past the threshold pages with three messages typed into its box and queued behind it; a usage-limit hold followed by UNKNOWN ticks does not page 63 s after its last LIMIT tick, and does 30 min later.
+
+### Fixed — the read doors resolve an ID prefix that names one record, list the candidates when it names several, and say "not found" only after searching by prefix (#2380)
+
+Handoffs, briefs and notes carry 8-digit ID prefixes, and the read doors refused them: `assignment show asg_da1585e0` answered `not_found` with `candidates: []` about an assignment that exists, and `message show`, `request show` and `checkin show` refused any short ID.
+
+- **The doors:** `task show`, `assignment show`, `message show`, `message receipt`, `message wait`, `request show` and `checkin show`.
+- **A prefix:** the ID's tag and at least 8 of its 32 lowercase hex digits (`wi_`, `asg_`, `msg_`, `ck_`), or a request UUID's first 8 or more characters, dashes in place. A shorter one is `invalid_argument` (exit 2), never "not found".
+- **One match:** the door reads that record and says so. `data.resolved_from_prefix` names the prefix and the full ID, and the text output ends `resolved from prefix PREFIX: FULL_ID`. Only a record the caller could read by its full ID counts: the fleet's tasks, assignments, retained requests and check-ins, and the messages the caller sent or received (for an operator, the selected fleet's).
+- **Several:** `ambiguous_reference` (exit 4), and none is read. The hint lists up to 20 candidates, each with the command that reads it; `total_matches` counts them all.
+- **None:** `not_found` (exit 3), and the message says no record starts with the prefix. A hint's `total_matches: 0` now always follows a search by prefix.
+- **What a prefix costs:**
+  - task and assignment: one pass over the fleet's tasks, which the door already reads;
+  - message: one range seek on the message key, at most 65 rows; past 64 the door refuses rather than choose;
+  - check-in: the full-ID read's own query, with a range on the check-in's reference in place of equality (the same query plan), returning at most 65 rows;
+  - request: one listing of the fleet's request directory, which grows with the fleet's request history.
+- **Mutations stay canonical:** the query owners resolve a prefix only when a read door asks. Every write (`task assign`, `assignment accept`, `assignment deliver` and the rest) and `message reply`'s parent still take the full ID.
+- **Tests:** `tests/test_id_prefix_reads.py` drives each door's query owner against real SQL and request files: a unique, an ambiguous, a missing and a too-short prefix, a wrong-kind prefix, the message read's query plan and its bound, and the writers' canonical reads. `tests/test_id_prefix_cli.py` checks the same four answers for each door through the public CLI, and that the reads leave the plane unchanged.
+- **Not in this change:** the skills that write handoffs and briefs should write full IDs. That is a library change for later.
+
+### Fixed — `assignment show` names the delivery: its message, attempts and receipt (#2379)
+
+`assignment deliver` records its message as a communication linked to the
+task and the assignment, and each send as a transmission of that message.
+`assignment show` reported only the assignment row's `dispatch_message_id`,
+which only the retired dispatch path wrote, so it read `null` for every
+assignment the task commands made, and the delivery could be found only
+through the deliver request's UUID. A new `delivery` field reads it from
+those rows: the message ID, the request that delivered it, when it was
+recorded, how many send attempts were recorded and the newest one, and the
+receiver's newest receipt with its integrity verdict, judged as `message
+receipt` judges it. A receipt still queued for ingest reads `not_recorded`,
+since this read does not open the queues. It is the same message the plane's
+board names. After a re-delivery under a new request, the newest delivery is
+the one described, and `message_ids` lists every delivery in order. Nothing
+new is recorded, so assignments delivered before this change read the same
+way. Each added statement seeks one assignment's or one message's rows by
+index.
+
+### Added — each bot's live context in `fleet status`, and each compaction as a plane event (#2206)
+
+Nothing reported a bot's current context or recorded a compaction, so a manager read each worker's newest transcript by hand before compacting it. Both now come from the transcript reader that `fleet usage` already uses (`transcript_usage.py`), with one reader for its usage rows.
+
+- **`fleet status` and `bot status` carry each bot's `context`:** the input, cache-read and cache-write tokens of its newest main-chain call, and that call's time. The table gains a CONTEXT column. When no such row can be read, `tokens` is null with a `reason`, never 0: no transcript directory, no session, no usage row yet, a read past the cap, or an unreadable file. Sidechain rows are skipped, and so are the rows Claude Code writes itself for an error or an interrupt (model `<synthetic>`, every usage field 0). `compacted_after` names a compaction written after that call. The call is from the bot's own newest session: a hook's headless `claude -p` session, whose transcript lands beside the bot's and whose rows name `entrypoint` `sdk-cli`, is skipped, and a session naming none counts as the bot's own. A newer session that cannot be told apart (its head runs past 2 MiB before naming one, or is still being written) reads null with its reason, never the older session's figure. So do 16 headless sessions newer than the bot's own: the walk examines at most the 16 newest. Each read lists the bot's transcript directory once, reads the head of its own newest session and of each newer one up to the first `entrypoint` (never past 2 MiB; at most 16 heads), then reads its own newest session backwards in 64 KiB blocks, stopping at the row and never past 2 MiB.
+- **`brief --usage-since` adds the viewed bot's `context`,** from the same reader. Ordinary and boot briefs still read no transcript.
+- **Each compaction becomes one `compaction` event** (notice), recorded from its `compact_boundary` row. It carries `trigger`, `pre_tokens`, `post_tokens` (null until the compaction ends) and `session`, at the compaction's own time, on the bot, with the `fleet-events:` provenance that `event list` reads.
+  - The pulse records them each tick through the new `claudlobby fleet compactions record`, which a manager can also run after `bot compact`.
+  - It reads only what each transcript appended since a cursor kept in the fleet's state, and the event id is derived from the row, so a row read twice is stored once. Before a bot's first pass it reads only the bot's own newest session, never a hook's headless one, from its last 8 MiB; it finds that session through the same walk, with the same limit.
+  - An unreadable transcript records nothing, is named with its reason and keeps its cursor, so its rows wait for a pass that reads. Bytes appended past 8 MiB in one pass are skipped and counted.
+- **No bound yet.** A threshold that acts on the context is the operator's cost decision (#2206's proposal 3).
+
+### Fixed — a bot session no longer opens a browser window on the host's desktop (#2332)
+
+On a host with a desktop, the user manager hands every unit the desktop's `DISPLAY` and `WAYLAND_DISPLAY`, and bot sessions inherited them. A browser that a bot session opened (a login CLI's `xdg-open`, Claude Code's Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command: one ran 4.7 h holding 867 MiB, another 29 minutes holding 428 MiB, each found and closed by hand.
+
+- **The launch line cuts the desktop.** `start-bot.sh` sets three variables in the session's shell, before the env tiers and `bot.conf`: `DISPLAY` unset, `WAYLAND_DISPLAY` set empty and `BROWSER=true`. Unsetting `WAYLAND_DISPLAY` is no cut: libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0`, and a Wayland client still reaches the desktop (measured). A login CLI then prints its URL and opens nothing; `claude auth login` prints it either way.
+- **Every session gets it, whichever door starts it:** the unit, keepalive's restart (through the unit, or `start-bot.sh` itself when that fails), `bot start` or a hand run. A tmux server keeps the environment it was started with, and the cut runs in the pane's own shell.
+- **A bot that needs a display gets it explicitly:** for one command, or for its session by declaring the variables in its own `fleet.yaml` env, which is read after the cut.
+- **`account-relog` runs its login with the same cut,** so its relog opens no browser from any shell.
+- **The fleet pulse reports a browser outside a render scope:** one older than 15 minutes that is not in a heavy-slot render scope, recorded as `browser_outside_render` (notice) and pushed to the manager once, with the bot whose session started it. Each browser is reported once per host: a fleet reports its own bots' browsers, and the host's first fleet by name reports those no bot started. The pulse never stops a browser. It reads `/proc` through the new `browser-scan.py`, which signals nothing. The browser names it matches move to lib-common's `BROWSER_EXE_PATTERN`, which `orphan-browser-reaper.sh` now reads too.
+- **Limits:**
+  - The session bus still reaches the desktop, so a program that asks the desktop's portal to open a URL can still put a window there. xdg-open does that only inside a sandbox, and the pulse reports any browser it opens.
+  - On macOS, `BROWSER=true` applies; there is no `/proc`, so the pulse's check finds nothing there.
+  - The pulse recognises a render by its scope's name, `heavy-render-*.scope`, from the heavy slot's render profile.
+- **Tests:**
+  - `tests/test_boot_policy_conformance.py` runs the launch line in the environment a desktop host's user manager gives a unit, with every opener a stand-in: a CLI that hands its URL to xdg-open, Claude Code's own opener, and a tool that starts a GUI browser itself. The window count is three before the change and none after. A display declared in the bot's own config still reaches it. The stand-in's Wayland rule is checked against libwayland itself where it is installed.
+  - `tests/test_browser_scan.py` scans a `/proc` of its own: render scopes (the browser's own or an ancestor's), owners through the parent chain, crash handlers, names the kernel cuts at 15 characters, and the real `/proc`, where a stand-in browser is still running after the scan.
+  - `tests/test_fleet_pulse_browsers.py` drives the real sweep: one report per browser, a key dropped when the browser goes, render scopes and young browsers left alone, one report on a host of two fleets, and no key kept while the manager does not take the push.
+
 ### Changed — Printify: the integration is the direct API, and the MCP fragment is deprecated
 
 `library/integrations/printify.md` described the Printify MCP server and granted its ten read tools. It now describes the Printify v1 REST API, reached through the `printify` skill.

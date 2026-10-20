@@ -15,9 +15,11 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Literal, NoReturn
+from uuid import UUID
 
-from .plane.queries import ESCALATION_IGNORED
-from .reference_hints import ReferenceCandidate, ReferenceHint
+from .plane.queries import (ASSIGNMENT_DELIVERIES_SQL, DELIVERY_ATTEMPTS_SQL, DELIVERY_MESSAGE_SQL,
+                            DELIVERY_STATUS_SQL, ESCALATION_IGNORED, EVENT_OCCURRED_AT_SQL)
+from .reference_hints import PREFIX_MIN_HEX, ReferenceCandidate, ReferenceHint, id_shape
 from .task_state import Assignment, Task, TaskIssue, TaskSnapshot, legacy_display_id, read_tasks
 
 ListState = Literal["open", "queued", "assigned", "active", "blocked", "completed", "failed", "cancelled", "all"]
@@ -28,6 +30,8 @@ _HINT_LIMIT = 20
 class TaskQueryError(ValueError):
     code = "invalid_argument"
     retryable = False
+    # The public result shows this error's own text; others get a fixed one.
+    public_message = False
 
     def __init__(self, message: str, *, hint: ReferenceHint | None = None):
         self.hint = hint
@@ -44,6 +48,16 @@ class WrongTaskReferenceError(TaskQueryError):
 
 class AmbiguousTaskReferenceError(TaskQueryError):
     code = "ambiguous_reference"
+
+
+class TaskPrefixNotFoundError(TaskNotFoundError):
+    """A search by prefix found nothing in the fleet (#2380)."""
+    public_message = True
+
+
+class ShortTaskPrefixError(TaskQueryError):
+    """An ID prefix too short to search (#2380); never reported as not found."""
+    public_message = True
 
 
 class InvalidTaskCursorError(TaskQueryError):
@@ -65,6 +79,41 @@ class TaskPage:
 class AssignmentView:
     assignment: Assignment
     task: Task
+
+
+@dataclass(frozen=True)
+class DeliveryAttempt:
+    attempt_no: int | None  # the request's attempt number, as `assignment deliver` prints it
+    state: str              # the recorded transmission: pane_submitted, failed, unknown, ...
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class AssignmentDelivery:
+    """What delivered an assignment, read from the rows its delivery left (#2379).
+
+    Nothing is recorded for this read. `assignment deliver` commits a
+    communication linked to the task and the assignment before it sends, each
+    send records a transmission of that message, and the receiver's prompt
+    hook records a `received` row. `message_id` is the board's delivery message
+    (queries._DELIVERY_MSG): the legacy dispatch message where the assignment
+    row carries one, else the newest delivery. `message_ids` lists every
+    delivery message, oldest first, so a re-delivery shows beside the delivery
+    it followed. `attempts` counts the sender's recorded attempts at
+    `message_id`; `last_attempt` is the newest. The receipt is the receiver's
+    newest committed `received` row, judged by DELIVERY_STATUS_SQL as
+    `message receipt` judges it. A receipt still queued for ingest reads
+    `not_recorded`: this read does not open the queues, `message receipt` does.
+    """
+    message_id: str
+    message_ids: tuple[str, ...]
+    request_id: str | None   # the `assignment deliver` request, for `request show`
+    recorded_at: str | None  # when the delivery's communication was recorded
+    attempts: int
+    last_attempt: DeliveryAttempt | None
+    receipt_observation: Literal["received", "not_recorded"]
+    integrity_verdict: Literal["delivered", "truncated", "altered", "unconfirmed", "unknown"]
+    received_at: str | None
 
 
 @dataclass(frozen=True)
@@ -213,31 +262,61 @@ def task_escalations_from_snapshot(snapshot: TaskSnapshot) -> TaskEscalations:
     return TaskEscalations(snapshot.schema_version, snapshot.fleet_uid, items, snapshot.issues)
 
 
-def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str):
+def _prefix_tag(reference: str) -> str | None:
+    """`wi_` or `asg_` when `reference` is a searchable prefix of such an ID (#2380)."""
+    return next((tag for tag in ("wi_", "asg_") if id_shape(reference, tag) == "prefix"), None)
+
+
+def _hit(reference: str, value: str | None, prefix: bool) -> bool:
+    return value == reference or (prefix and value is not None and value.startswith(reference))
+
+
+def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str, prefix: bool = False):
     """A0-style historical mapping within this snapshot, never a global scan.
 
     Keep closed assignments and task-plus-assignment display metadata. A
     returned task has its own unassigned intake candidate as well as history;
     ambiguity is never resolved by preferring a current or latest assignment.
-    Foreign/unscoped assignment identities are not recovery destinations.
+    Foreign/unscoped assignment identities are not recovery destinations. With
+    `prefix`, a searchable prefix matches task and assignment IDs, never
+    display IDs.
     """
+    prefix = prefix and _prefix_tag(reference) is not None
     candidates = []
     for task in snapshot.tasks:
-        task_display = legacy_display_id(task.source_ref)
+        task_hit = _hit(reference, task.task_id, prefix) or reference == legacy_display_id(task.source_ref)
         scoped_assignments = tuple(a for a in task.assignments if a.fleet_uid == snapshot.fleet_uid)
         for assignment in scoped_assignments:
-            if reference in (task.task_id, assignment.assignment_id,
-                             task_display, legacy_display_id(assignment.source_ref)):
+            if (task_hit or _hit(reference, assignment.assignment_id, prefix)
+                    or reference == legacy_display_id(assignment.source_ref)):
                 command = (("task", "show", task.task_id) if kind == "task"
                            else ("assignment", "show", assignment.assignment_id))
                 candidates.append(ReferenceCandidate(task.task_id, assignment.assignment_id, command))
-        if (not scoped_assignments or task.state == "queued") and reference in (task.task_id, task_display):
+        if (not scoped_assignments or task.state == "queued") and task_hit:
             candidates.append(ReferenceCandidate(task.task_id, None, ("task", "show", task.task_id)))
     return sorted(set(candidates), key=lambda row: (row.task_id, row.assignment_id or ""))
 
 
-def _not_canonical(snapshot: TaskSnapshot, reference: str, kind: str) -> NoReturn:
-    candidates = _reference_candidates(snapshot, reference, kind)
+def _prefix_miss(reference: str, kind: str, candidates: list[ReferenceCandidate]) -> NoReturn:
+    """Several records of the door's own kind start with `reference`, or none does."""
+    candidates = sorted(candidates, key=lambda row: (row.task_id, row.assignment_id or ""))
+    if candidates:
+        raise AmbiguousTaskReferenceError(
+            f"ambiguous prefix: {len(candidates)} {kind}s start with {reference}; select a canonical {kind} ID",
+            hint=ReferenceHint(tuple(candidates[:_HINT_LIMIT]), len(candidates), None))
+    raise TaskPrefixNotFoundError(f"no {kind} in this fleet starts with {reference}",
+                                  hint=ReferenceHint((), 0, ("task", "list", "--state", "all")))
+
+
+def _not_canonical(snapshot: TaskSnapshot, reference: str, kind: str, prefix: bool = False) -> NoReturn:
+    candidates = _reference_candidates(snapshot, reference, kind, prefix)
+    if not candidates and prefix:
+        if any(id_shape(reference, tag) == "short" for tag in ("wi_", "asg_")):
+            raise ShortTaskPrefixError(
+                f"an ID prefix needs at least {PREFIX_MIN_HEX} hex digits after its tag: {reference}")
+        if _prefix_tag(reference):
+            raise TaskPrefixNotFoundError(f"no task or assignment in this fleet starts with {reference}",
+                                          hint=ReferenceHint((), 0, ("task", "list", "--state", "all")))
     if not candidates:
         raise TaskNotFoundError(f"{kind} not found: {reference}", hint=ReferenceHint(
             (), 0, ("task", "list", "--state", "all")))
@@ -256,20 +335,100 @@ def _lookup_snapshot(conn: sqlite3.Connection, fleet_uid: str, reference: str) -
     return read_tasks(conn, fleet_uid=fleet_uid)
 
 
-def show_task(conn: sqlite3.Connection, task_id: str, *, fleet_uid: str) -> Task:
-    """Canonical task IDs only; unresolved history remains explicitly visible."""
+def show_task(conn: sqlite3.Connection, task_id: str, *, fleet_uid: str, prefix: bool = False) -> Task:
+    """Canonical task IDs only; unresolved history remains explicitly visible.
+
+    With `prefix` (the public read door, #2380), a prefix that only one of the
+    fleet's tasks starts with also resolves. Mutations never pass it.
+    """
     snapshot = _lookup_snapshot(conn, fleet_uid, task_id)
     task = snapshot.get(task_id)
+    if task is None and prefix and _prefix_tag(task_id) == "wi_":
+        matches = [task for task in snapshot.tasks if task.task_id.startswith(task_id)]
+        if len(matches) != 1:
+            _prefix_miss(task_id, "task", [ReferenceCandidate(
+                task.task_id, None, ("task", "show", task.task_id)) for task in matches])
+        task = matches[0]
     if task is None:
-        _not_canonical(snapshot, task_id, "task")
+        _not_canonical(snapshot, task_id, "task", prefix)
     return task
 
 
-def show_assignment(conn: sqlite3.Connection, assignment_id: str, *, fleet_uid: str) -> AssignmentView:
-    """Read a canonical assignment and its parent, including closed history."""
+def show_assignment(conn: sqlite3.Connection, assignment_id: str, *, fleet_uid: str,
+                    prefix: bool = False) -> AssignmentView:
+    """Read a canonical assignment and its parent, including closed history.
+
+    With `prefix` (the public read door, #2380), the one assignment of the
+    fleet that a prefix names also resolves. Mutations never pass it.
+    """
     snapshot = _lookup_snapshot(conn, fleet_uid, assignment_id)
+    own = prefix and _prefix_tag(assignment_id) == "asg_"
+    matches = []
     for task in snapshot.tasks:
         for assignment in task.assignments:
-            if assignment.assignment_id == assignment_id and assignment.fleet_uid == fleet_uid:
+            if assignment.fleet_uid != fleet_uid:
+                continue
+            if assignment.assignment_id == assignment_id:
                 return AssignmentView(assignment, task)
-    _not_canonical(snapshot, assignment_id, "assignment")
+            if own and assignment.assignment_id.startswith(assignment_id):
+                matches.append(AssignmentView(assignment, task))
+    if own:
+        if len(matches) == 1:
+            return matches[0]
+        _prefix_miss(assignment_id, "assignment", [ReferenceCandidate(
+            view.task.task_id, view.assignment.assignment_id,
+            ("assignment", "show", view.assignment.assignment_id)) for view in matches])
+    _not_canonical(snapshot, assignment_id, "assignment", prefix)
+
+
+#: Every statement assignment_delivery runs, for the read-cost pin.
+ASSIGNMENT_DELIVERY_STATEMENTS = {
+    "deliveries": ASSIGNMENT_DELIVERIES_SQL, "message": DELIVERY_MESSAGE_SQL,
+    "attempts": DELIVERY_ATTEMPTS_SQL, "receipt": DELIVERY_STATUS_SQL.format(ph="?"),
+    "received_at": EVENT_OCCURRED_AT_SQL,
+}
+
+
+def _request_id(source_ref: str | None) -> str | None:
+    """The canonical request UUID a `request:<uuid>` source_ref names, else None."""
+    if isinstance(source_ref, str) and source_ref.startswith("request:"):
+        value = source_ref[len("request:"):]
+        try:
+            if str(UUID(value)) == value:
+                return value
+        except ValueError:
+            pass
+    return None
+
+
+def assignment_delivery(conn: sqlite3.Connection, assignment: Assignment) -> AssignmentDelivery | None:
+    """The assignment's delivery, or None when no delivery is recorded.
+
+    Each statement seeks one assignment's, message's or event's rows by index
+    (ASSIGNMENT_DELIVERY_STATEMENTS), so the read does not grow with the
+    fleet's history. The caller's read snapshot keeps them consistent.
+    """
+    rows = conn.execute(ASSIGNMENT_DELIVERIES_SQL, (assignment.assignment_id,)).fetchall()
+    recorded = {row[0]: (row[1], row[2]) for row in rows}
+    message_ids = [row[0] for row in rows]
+    legacy = assignment.dispatch_message_id  # the row's dispatch_msg_id, as the reducer read it
+    if legacy is not None and legacy not in recorded:
+        message_ids.insert(0, legacy)
+    if not message_ids:
+        return None
+    message_id = legacy or message_ids[-1]
+    row = recorded.get(message_id) or conn.execute(
+        DELIVERY_MESSAGE_SQL, (message_id, assignment.host_uid)).fetchone()
+    recorded_at, source_ref = row if row else (None, None)
+    attempts = conn.execute(DELIVERY_ATTEMPTS_SQL, (
+        message_id, assignment.host_uid, assignment.fleet_uid)).fetchall()
+    proof = conn.execute(DELIVERY_STATUS_SQL.format(ph="?"), (message_id,)).fetchone()
+    received = proof[4] if proof else None  # the receiver's newest `received` row
+    return AssignmentDelivery(
+        message_id, tuple(message_ids), _request_id(source_ref), recorded_at,
+        len({attempt[0] for attempt in attempts}),
+        DeliveryAttempt(*attempts[-1]) if attempts else None,
+        "received" if received is not None else "not_recorded",
+        # The verdict as message_queries.receipt reads the same row.
+        (proof[3] if proof else None) or ("unconfirmed" if received is not None else "unknown"),
+        conn.execute(EVENT_OCCURRED_AT_SQL, (received,)).fetchone()[0] if received is not None else None)

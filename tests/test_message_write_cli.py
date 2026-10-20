@@ -535,3 +535,71 @@ def test_assignment_deliver_refuses_stale_before_native(active, monkeypatch, cap
                             "--request-id", str(uuid4()), expected=4)
     assert result["error"]["code"] == "conflict"
     assert _facts(root) == (0, 0)
+
+
+def _show_call(capsys, root, assignment_id):
+    assert main(["--root", str(root), "--json", "assignment", "show", assignment_id]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "assignment.show" and output["ok"] is True
+    return output["data"]
+
+
+def test_assignment_show_names_its_delivery_attempts_and_receipt(active, monkeypatch, capsys, tmp_path):  # noqa: F811
+    """#2379: `assignment show` reads the delivery from what `assignment deliver`
+    committed: its message, request, attempts and the receiver's newest receipt.
+    A re-delivery under a new request becomes the delivery it names. Read by an
+    ID prefix (#2380), it answers the same, with the prefix note last."""
+    from claudlobby.commands import assignment_delivery as deliver_command
+    from claudlobby.plane.emit_api import emit_batch
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    _ctx, _task, assigned = _assigned(root)
+    assert _show_call(capsys, root, assigned.assignment_id)["delivery"] is None
+    real = assignment_delivery.deliver
+    def injected(*args, **kwargs):
+        return real(*args, transport=lambda *_, **__: TransportOutcome(
+            "submitted", "sha256:" + "a" * 64, 99, 0), **kwargs)
+    monkeypatch.setattr(assignment_delivery, "deliver", injected)
+    monkeypatch.setattr(deliver_command, "_RECEIPT_WAIT_S", 0)
+    body = tmp_path / "assignment.txt"
+    body.write_text("Private assignment delivery", encoding="utf-8")
+    request_id = str(uuid4())
+    first = _delivery_call(capsys, root, assigned.assignment_id, "--file", str(body),
+                           "--request-id", request_id, expected=5)["data"]
+    delivery = _show_call(capsys, root, assigned.assignment_id)["delivery"]
+    assert delivery["message_id"] == first["message_id"]
+    assert delivery["message_ids"] == [first["message_id"]]
+    assert delivery["request_id"] == request_id and delivery["recorded_at"]
+    assert delivery["attempts"] == 1
+    assert delivery["last_attempt"]["attempt_no"] == first["attempt_no"]
+    assert delivery["last_attempt"]["state"] == "pane_submitted"
+    assert (delivery["receipt_observation"], delivery["integrity_verdict"]) == ("not_recorded", "unconfirmed")
+    assert delivery["received_at"] is None
+    # The receiver's prompt hook records arrival with the hash of what arrived
+    # (claudlobby/_runtime_scripts/plane-dispatch-in.sh builds this event).
+    emit_batch(root, [{"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example",
+                       "payload": {"msg_id": first["message_id"], "attempt_no": 1, "carrier": "tmux",
+                                   "destination": "worker", "state": "received",
+                                   "received_bytes": 99, "received_sha256": "sha256:" + "a" * 64}}],
+               require_commit=True)
+    delivery = _show_call(capsys, root, assigned.assignment_id)["delivery"]
+    assert (delivery["receipt_observation"], delivery["integrity_verdict"]) == ("received", "delivered")
+    assert delivery["received_at"] >= delivery["recorded_at"]
+    second = _delivery_call(capsys, root, assigned.assignment_id, "--file", str(body),
+                            "--request-id", str(uuid4()), expected=5)["data"]
+    delivery = _show_call(capsys, root, assigned.assignment_id)["delivery"]
+    assert delivery["message_id"] == second["message_id"] != first["message_id"]
+    assert delivery["message_ids"] == [first["message_id"], second["message_id"]]
+    assert delivery["attempts"] == 1 and delivery["receipt_observation"] == "not_recorded"
+    assert main(["--root", str(root), "assignment", "show", assigned.assignment_id]) == 0
+    plain = capsys.readouterr().out.splitlines()
+    assert plain[1].split("\t")[:2] == ["delivery", second["message_id"]]
+    # By an ID prefix: the full ID's data and lines, and the prefix note last.
+    prefix = assigned.assignment_id[:12]
+    full = _show_call(capsys, root, assigned.assignment_id)
+    by_prefix = _show_call(capsys, root, prefix)
+    assert by_prefix.pop("resolved_from_prefix") == {"prefix": prefix, "id": assigned.assignment_id}
+    assert by_prefix == full and full["delivery"]["message_id"] == second["message_id"]
+    assert main(["--root", str(root), "assignment", "show", prefix]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        *plain, f"resolved from prefix {prefix}: {assigned.assignment_id}"]

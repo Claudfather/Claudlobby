@@ -7,6 +7,7 @@ from ..command_result import selection_read_conflict
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
+from ..reference_hints import note_prefix
 
 
 def _lines(view) -> tuple[str, ...]:
@@ -52,14 +53,15 @@ def dispatch(args) -> CommandOutput:
                 or set(bindings["bots"]) != set(destination.fleet.bots)):
             raise CommandFailure("conflict", "active request identity bindings differ from frozen fleet",
                                  release_id=release_id)
-        view = read_request(destination.paths.root, bindings["fleet_uid"], args.request_id)
+        view = read_request(destination.paths.root, bindings["fleet_uid"], args.request_id, prefix=True)
         if view.host_uid != bindings["host_uid"] or view.fleet_uid != bindings["fleet_uid"]:
             raise CommandFailure("conflict", "retained request belongs to another active host or fleet",
                                  release_id=release_id)
         if read_selection(destination.paths.root) != selected:
             raise selection_read_conflict('active request selection changed during read', release_id=release_id)
-        return CommandOutput({"fleet": destination.fleet.name, "request": asdict(view)},
-                             release_id=release_id, lines=_lines(view))
+        data = {"fleet": destination.fleet.name, "request": asdict(view)}
+        lines = note_prefix(data, _lines(view), args.request_id, view.request_id)
+        return CommandOutput(data, release_id=release_id, lines=lines)
     except CommandFailure:
         raise
     except RequestQueryError as exc:

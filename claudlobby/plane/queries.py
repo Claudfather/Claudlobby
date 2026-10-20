@@ -178,13 +178,15 @@ _TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 # (command_type='task') linked to this task AND this assignment, addressed to
 # this assignee in this fleet on this host. Canonical delivery never writes
 # dispatch_msg_id, so a join on that column alone hid every failed canonical
-# send from the board.
+# send from the board. _DELIVERY_MATCH is that link, which
+# ASSIGNMENT_DELIVERIES_SQL lists for `assignment show` (#2379).
+_DELIVERY_MATCH = (
+    " c.work_item_id = a.work_item_id AND c.assignment_id = a.assignment_id"
+    " AND c.command_type = 'task' AND c.recipient_uid = a.assignee_uid"
+    " AND c.fleet_uid = a.fleet_uid AND c.host_uid = a.host_uid")
 _DELIVERY_MSG = (
     "COALESCE(a.dispatch_msg_id, (SELECT c.msg_id FROM communications c"
-    " WHERE c.work_item_id = a.work_item_id AND c.assignment_id = a.assignment_id"
-    " AND c.command_type = 'task' AND c.recipient_uid = a.assignee_uid"
-    " AND c.fleet_uid = a.fleet_uid AND c.host_uid = a.host_uid"
-    " ORDER BY c.ingest_seq DESC LIMIT 1))")
+    " WHERE" + _DELIVERY_MATCH + " ORDER BY c.ingest_seq DESC LIMIT 1))")
 _TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
               f" AND e.msg_id = {_DELIVERY_MSG} AND e.event <> 'received')")
 _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
@@ -198,6 +200,29 @@ _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 ASSIGNMENT_DELIVERY_MSG_SQL = (
     f"SELECT a.assignment_id, {_DELIVERY_MSG} AS msg_id FROM assignments a"
     " WHERE a.assignment_id IN ({ph})")
+
+# One assignment's delivery messages for `assignment show` (#2379), oldest
+# first: each communication _DELIVERY_MATCH accepts. With the row's legacy
+# dispatch_msg_id they name _DELIVERY_MSG's message: the legacy one where the
+# row carries it, else the newest. INDEXED BY keeps the seek on the task's few
+# communications; without planner statistics SQLite answers the ORDER BY from
+# the fleet's index instead, a walk that grows with the fleet's history.
+ASSIGNMENT_DELIVERIES_SQL = (
+    "SELECT c.msg_id, c.occurred_at, c.source_ref FROM assignments a"
+    " JOIN communications c INDEXED BY idx_intents_work_item ON" + _DELIVERY_MATCH
+    + " WHERE a.assignment_id = ? ORDER BY c.ingest_seq")
+# A delivery message's own row, for a legacy message no communication links.
+DELIVERY_MESSAGE_SQL = (
+    "SELECT occurred_at, source_ref FROM communications WHERE msg_id = ? AND host_uid = ?")
+# The sender's recorded attempts at one delivery message, oldest first: its
+# transmissions on the assignment's host and fleet. The receiver's `received`
+# rows are the receipt, which DELIVERY_STATUS_SQL judges.
+DELIVERY_ATTEMPTS_SQL = (
+    "SELECT e.attempt_no, e.event, e.occurred_at FROM events e"
+    " WHERE e.kind = 'transmission' AND e.msg_id = ? AND e.event <> 'received'"
+    " AND e.host_uid = ? AND e.fleet_uid IS ? ORDER BY e.ingest_seq")
+# When one ingested event happened, by its sequence (a receipt's instant).
+EVENT_OCCURRED_AT_SQL = "SELECT occurred_at FROM events WHERE ingest_seq = ?"
 
 # --- the delivery JOIN (chunk P, #1501; fold F1/F3) ---------------------------
 # Delivery, derived ONCE here — the honest replacement for reading
@@ -998,7 +1023,7 @@ _CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq D
 
 
 def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False,
-                     checkin_id: bool = False) -> str:
+                     checkin_id: bool = False, checkin_prefix: bool = False) -> str:
     """The check-in decision rows query (PR 3 chunk 4): the window, the bot
     filter and --limit bound here rather than pulled whole into Python and
     filtered there (PR 1's shape) -- a wide --since still shrinks what
@@ -1012,9 +1037,9 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     base query admits human actors only under the recorded fleet UID;
     historical bot rows retain the alias fallback.
 
-    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, alias]
-    [, since] [, limit] -- current UID scope, legacy alias fallback and
-    a separate exact bot-alias guard, so
+    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, ref low,
+    ref high] [, alias] [, since] [, limit] -- current UID scope, legacy
+    alias fallback and a separate exact bot-alias guard, so
     every optional term is appended AFTER it. `collect_checkins`
     (commands/checkins.py) gates its params list on the SAME three booleans
     this function is called with, in the SAME order, so the SQL shape and
@@ -1028,6 +1053,9 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     sql = _CHECKIN_ROWS_HEAD
     if checkin_id:
         sql += " AND e.source_ref = ?"
+    if checkin_prefix:
+        # `checkin show` with an ID prefix (#2380): the refs in [prefix, prefix + 'g').
+        sql += " AND e.source_ref >= ? AND e.source_ref < ?"
     if bot:
         sql += " AND e.subject_alias = ?"
     if since:
