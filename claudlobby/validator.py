@@ -161,6 +161,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "skill-missing": "a declared skill or skill folder is not in any library/skills/",
     "integration-missing": "a declared integration is not in any library/integrations/",
     "mcp-missing": "a declared MCP fragment is not in any library/mcp/",
+    "mcp-deprecated": "a declared MCP fragment is marked deprecated; the warning names what replaces it",
     "guardrail-missing": "a declared guardrail is not in any library/guardrails/",
     "protocol-missing": "a declared protocol is not in any library/protocols/",
     "resource-missing": "a declared resource is not in any library/resources/",
@@ -694,7 +695,7 @@ def _validate_bots(
     # dataclass / MCP-fragment leaves via audit_bot_sources, and the grant paths
     # (which live in the composed settings.local.json allow-list, not on BotConfig)
     # via compose_settings_local — the same pure builder generate raises from (#704).
-    from .composer import _load_bot_fragments, compose_settings_local
+    from .composer import _load_bot_fragments, _mcp_deprecation, compose_settings_local
     from .path_audit import audit_bot_sources
 
     # Findings raised per bot whose cause is shared, emitted once after the
@@ -838,6 +839,16 @@ def _validate_bots(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
                 )
             else:
+                note = _mcp_deprecation(paths, mcp.name)
+                if note is not None:
+                    # One fragment, one line: every bot that lists it folds in. Its
+                    # grants are not meant to migrate, so the gap check is skipped.
+                    shared.add(
+                        "mcp-deprecated",
+                        f"mcp fragment '{mcp.name}.json' is deprecated: {note}",
+                        bot_name,
+                    )
+                    continue
                 # Migration-gap warning (remove with the P8 _permissions_contract cut):
                 # a fragment that still grants tools whose paired integration hasn't
                 # been given covering tool_grants would be dropped by the eventual

@@ -291,7 +291,10 @@ def test_late_source_never_starts_begin_and_retains_capacity(http, monkeypatch):
         responses = []
         try:
             await asyncio.wait_for(_raw_challenge(consumer, responses), 0.5)
-            assert entered.is_set() and responses[0]["status"] == 503
+            assert responses[0]["status"] == 503
+            # The 50 ms response deadline is under test; the real source's run time
+            # is not, so the source may finish after the 503 is sent (#2374).
+            assert await asyncio.to_thread(entered.wait, 10)
             assert len(consumer._workers) == 1
             release.set()
             await consumer.shutdown()

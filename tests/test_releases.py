@@ -22,14 +22,14 @@ _spec.loader.exec_module(r)
 _versions = runpy.run_path(str(_source.with_name("runtime_versions.py")))
 
 
-@pytest.fixture
-def installed(tmp_path):
-    root = tmp_path / "data"
+def release_tree(root, source_revision="a" * 40, artifact_id="artifact-source-a"):
+    """An unsealed release built from SOURCE_REVISION, installed under ROOT:
+    (inputs, paths, compatibility, directory)."""
     python = b"#!/bin/sh\nexit 0\n"
     wheel = b"release fixture wheel bytes"
     lock = b"example==1.0 --hash=sha256:fixture\n"
     inputs = r.ReleaseInputs.from_lock(
-        source_revision="a" * 40, artifact_id="artifact-source-a",
+        source_revision=source_revision, artifact_id=artifact_id,
         artifact_sha256="b" * 64, wheel_sha256=hashlib.sha256(wheel).hexdigest(),
         dependency_lock=lock,
         interpreter=r.InterpreterIdentity(
@@ -61,7 +61,13 @@ def installed(tmp_path):
         "raise RuntimeError('candidate version code must not execute during recovery')\n"
     )
     compatibility = r.Compatibility.from_dict(_versions["runtime_declaration"]())
-    return root, inputs, paths, compatibility, directory
+    return inputs, paths, compatibility, directory
+
+
+@pytest.fixture
+def installed(tmp_path):
+    root = tmp_path / "data"
+    return (root, *release_tree(root))
 
 
 def test_identity_is_stable_and_binds_assembly_inputs(installed):

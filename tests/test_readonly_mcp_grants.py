@@ -23,12 +23,13 @@ from pathlib import Path
 import pytest
 
 from claudlobby.composer import (
+    _mcp_deprecation,
     _resolve_integration_grants,
     _resolve_mcp_permissions,
     compose_settings_local,
 )
 from claudlobby.config import BotConfig, FleetConfig, McpEntry
-from claudlobby.loader import integration_tool_grants
+from claudlobby.loader import integration_tool_grants, parse_frontmatter
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
@@ -283,6 +284,15 @@ def _split_fragment_names() -> list[str]:
 
 SPLIT_FRAGMENTS = _split_fragment_names()
 
+# A deprecated fragment keeps its own contract and no integration mirrors it, so
+# the mirror pin covers the current fragments; Printify's is pinned at the end.
+MIRRORED_FRAGMENTS = [
+    name
+    for name in SPLIT_FRAGMENTS
+    if "_deprecated"
+    not in json.loads((REPO_DIR / "library" / "mcp" / f"{name}.json").read_text())
+]
+
 
 class TestShippedLibraryContent:
     """Pin every shipped split-contract fragment to the read-only guardrail."""
@@ -502,7 +512,7 @@ class TestShippedLibraryContent:
                 f"VERIFIED_NONSTANDARD_READS[{name!r}]"
             )
 
-    @pytest.mark.parametrize("name", SPLIT_FRAGMENTS)
+    @pytest.mark.parametrize("name", MIRRORED_FRAGMENTS)
     def test_integration_grants_mirror_read_only_exactly(self, name):
         contract = self._contract(name)
         expected = {f"mcp__{name}__{t}" for t in contract["read_only_tools"]}
@@ -609,3 +619,54 @@ class TestShippedHomeAssistantGrant:
         assert "mcp__homeassistant__*" not in composed
         assert composed == self._names(self.READS | self.DEVICE_CONTROL)
         assert not set(composed) & set(self._names(self.PROMPTING))
+
+
+class TestShippedPrintifyIsDeprecated:
+    """The shipped Printify MCP fragment is deprecated; the integration is the API.
+
+    The integration grants no ``mcp__printify__`` tool. A bot that still lists
+    the fragment composes exactly the fragment's read set from its own contract:
+    never the wildcard, never a write.
+    """
+
+    @staticmethod
+    def _paths(root: Path) -> Paths:
+        (root / "runtime" / "bots").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=root, package=source_package())
+
+    def test_the_fragment_is_marked_and_names_its_replacement(self, tmp_path):
+        note = _mcp_deprecation(self._paths(tmp_path), "printify")
+        assert note is not None
+        assert "skills: [printify]" in note and "integrations: [printify]" in note
+
+    def test_the_integration_is_cli_keeps_its_env_contract_and_grants_no_mcp_tool(self):
+        meta, _ = parse_frontmatter(
+            (REPO_DIR / "library" / "integrations" / "printify.md").read_text()
+        )
+        assert meta["type"] == "cli"
+        assert {k: v["secret"] for k, v in meta["env_contract"].items()} == {
+            "PRINTIFY_API_KEY": True,
+            "PRINTIFY_SHOP_ID": False,
+        }
+        paths = Paths(root=REPO_DIR, fleet_dir=REPO_DIR, package=source_package())
+        assert not [
+            g for g in integration_tool_grants(paths, "printify") if g.startswith("mcp__")
+        ]
+
+    def test_a_bot_that_still_lists_it_composes_exactly_its_reads(self, tmp_path):
+        paths = self._paths(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="printify", instances=["default"])],
+        )
+        settings = compose_settings_local(bot, _single_bot_fleet(bot), paths)
+        composed = sorted(
+            p for p in settings["permissions"]["allow"] if p.startswith("mcp__printify")
+        )
+        reads = json.loads(
+            (REPO_DIR / "library" / "mcp" / "printify.json").read_text()
+        )["_permissions_contract"]["read_only_tools"]
+        assert len(reads) == 10
+        assert composed == sorted(f"mcp__printify__{tool}" for tool in reads)

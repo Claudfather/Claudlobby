@@ -56,6 +56,18 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `WORKSTREAM_MAX_ACTIVE` | `fleet.workstreams.max_active` | Cap on concurrently active workstreams in the fleet registry (default: 12) |
 | `WORKSTREAM_LEASE_DAYS` | `fleet.workstreams.lease_days` | Workstream lease length in days before renewal is needed (default: 14) |
 
+## The Host's Desktop
+
+A bot session never reaches the host's desktop (#2332). On a host with a desktop, the user manager hands every unit the desktop session's display variables, so a browser opened from a bot session (a login CLI, an Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command. `start-bot.sh` sets these three in the session's shell before the env tiers and `bot.conf` are read:
+
+| Variable | Value | Why |
+|----------|-------|-----|
+| `DISPLAY` | unset | X clients need it to reach a display |
+| `WAYLAND_DISPLAY` | empty | Unset, libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0` and a Wayland client still reaches the desktop. Empty names no socket, and reads as no display to xdg-open and to Claude Code |
+| `BROWSER` | `true` | xdg-open and the CLIs that honour it run `true` instead of a browser. Without it, xdg-open with no display falls back to a console browser |
+
+Nothing composed into a bot needs a display: a headless render does not. A bot that does need one gets it explicitly, either for one command (`env DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 <command>`, with the desktop's values from `systemctl --user show-environment`) or for its whole session, by declaring `DISPLAY`, `WAYLAND_DISPLAY` or `BROWSER` in its `fleet.yaml` `env:`, which `bot.conf` carries and which is read after the cut. A browser that does reach the desktop and runs for more than 15 minutes outside a render scope is reported by the fleet pulse (`browser_outside_render`).
+
 ## Telegram
 
 | Variable | Source | Description |

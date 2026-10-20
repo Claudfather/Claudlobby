@@ -98,10 +98,12 @@ Get an explicit answer. Do not infer it from the fact that they asked.
 
 ```bash
 tmux -L relog new-session -d
-tmux -L relog send-keys 'claude auth login' Enter
+tmux -L relog send-keys 'env -u DISPLAY WAYLAND_DISPLAY= BROWSER=true claude auth login' Enter
 ```
 
 `-L relog` is a **separate tmux server**, not a session on an existing one.
+
+- **No browser on the host.** The `env` gives the login no display and a browser that does nothing, so it prints its URL and opens no window on the host's desktop. A window opened there outlives Step 10, which stops only the tmux server (#2332). A bot session already runs this way; the `env` keeps it so from any shell.
 
 - **Not a worker pane.** It interrupts that worker mid-task and bakes the whole auth flow into its transcript, where it stays.
 - **Not the manager pane.** Same problem, plus you lose the pane you are coordinating from.
@@ -156,6 +158,8 @@ tmux -L relog kill-server
 ```
 
 Do this even if the flow failed. A stranded server holds a pane containing the auth exchange.
+
+The login opened no browser (Step 4). A browser left running on the host anyway, from this or any other path, appears in the next fleet pulse as `browser_outside_render`, with the bot whose session started it; the pulse reports it and never stops it.
 
 ### 11. Notify peer fleet managers
 
