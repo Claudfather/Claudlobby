@@ -544,17 +544,29 @@ FLEET_REPORTS_SQL = (
     " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
     " ORDER BY c.occurred_at, c.ingest_seq"
 )
-_REPORT_STATUS_EVENT_SQL = (
+# A report door lands one companion fact right after each report, in the same
+# batch: a task event on the report's assignment when it names one, else one
+# report_status marker on the sender (a retry reuses the frozen event ids).
+# No index holds an event's ref, so each lookup seeks by what is indexed: the
+# assignment's task events, or the sender's system events after the report's
+# own ingest_seq. Unanchored, they walk every task event in the plane, or every
+# system event of the sender. A legacy report-back report naming no
+# assignment still searches its ref (some landed a linked task event), through
+# the sender's own events: `+e.kind` keeps it off idx_events_kind_seq.
+_REPORT_STATUS_EVENT_SELECT = (
     "SELECT e.event, e.detail, a.source_ref FROM events e"
     " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
-    " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid = ?"
+    " WHERE e.source_ref = ? AND e.actor_uid = ?"
     " AND e.event IN ('completed', 'failed', 'returned_blocked', 'blocked_waiting', 'progress')"
-    " ORDER BY e.ingest_seq DESC LIMIT 1"
 )
+_REPORT_STATUS_EVENT_SQL = (_REPORT_STATUS_EVENT_SELECT + " AND e.kind = 'task' AND e.assignment_id = ?"
+                            " ORDER BY e.ingest_seq DESC LIMIT 1")
+_LEGACY_REPORT_STATUS_EVENT_SQL = (_REPORT_STATUS_EVENT_SELECT + " AND +e.kind = 'task'"
+                                   " ORDER BY e.ingest_seq DESC LIMIT 1")
 _REPORT_MARKER_SQL = (
     "SELECT e.detail FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.source_ref = ? AND e.subject_uid = ?"
-    " ORDER BY e.ingest_seq DESC LIMIT 1"
+    " AND e.ingest_seq > ? ORDER BY e.ingest_seq LIMIT 1"
 )
 REPORT_FIELDS = ("ts", "bot", "task_id", "status", "summary", "pr_url", "issues", "skill",
                  "progress", "artifact", "task_anomaly", "plane_msg_id", "pr_role",
@@ -647,7 +659,12 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
                     "_body_stripped": not body,
                     # the plane's ordering authority (§4) — what an ack points at
                     "_seq": seq})
-        ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
+        if assignment_id:
+            ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid, assignment_id)).fetchone()
+        elif (ref or "").startswith("report:"):
+            ev = None                                  # an unlinked report's door landed a marker instead
+        else:
+            ev = conn.execute(_LEGACY_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
         if ev is not None:
             event, detail, dispatch_ref = ev
             row["status"] = "blocked" if event == "blocked_waiting" else LEGACY_STATUS.get(event, event)
@@ -661,7 +678,7 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
             row["task_event"] = event
             row["_source"] = "task_event"
         else:
-            marker = conn.execute(_REPORT_MARKER_SQL, (ref, sender_uid)).fetchone()
+            marker = conn.execute(_REPORT_MARKER_SQL, (ref, sender_uid, seq)).fetchone()
             data = _report_detail(marker[0]) if marker else {}
             if data.get("status"):
                 row["status"] = data["status"]

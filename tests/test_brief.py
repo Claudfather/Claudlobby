@@ -52,7 +52,7 @@ from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
 from tests.package_fixtures import source_package
 from tests.test_activation import cold, tmp_path  # noqa: F401 — selected activation and short paths
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
-from tests.test_task_write_cli import active  # noqa: F401 — real selected activation fixture
+from tests.test_task_write_cli import _call, active  # noqa: F401 — real selected activation fixture
 from claudlobby.paths import Paths
 
 from tests.conftest import (
@@ -1089,13 +1089,10 @@ def _write_fleet_yaml(fleet_dir: Path, name: str, bots: list[str], *, manager: s
     )
 
 
-def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, monkeypatch, capsys):  # noqa: F811
-    """One selected-activation flow: a later report stays unread, and replay
-    cannot advance the position or write a second ACK event."""
-    from uuid import uuid4
-
+def _report_viewer(active, monkeypatch, capsys):
+    """The selected activation's manager as the generated report viewer, reading
+    through the brief's real shared reader. Returns a CLI caller."""
     from claudlobby import brief
-    from claudlobby.__main__ import main
     from claudlobby.paths import load_lib_module
 
     root, release = active
@@ -1108,13 +1105,16 @@ def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, mon
                        "BOT_DIR": str(root / "runtime/bots/manager"),
                        "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
         monkeypatch.setenv(key, value)
+    return lambda *argv, expected=0: _call(capsys, root, *argv, expected=expected)
 
-    def call(*argv, expected=0):
-        assert main(["--root", str(root), "--json", *argv]) == expected
-        result = json.loads(capsys.readouterr().out)
-        assert result["ok"] is (expected == 0)
-        return result
 
+def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, monkeypatch, capsys):  # noqa: F811
+    """One selected-activation flow: a later report stays unread, and replay
+    cannot advance the position or write a second ACK event."""
+    from uuid import uuid4
+
+    root, _ = active
+    call = _report_viewer(active, monkeypatch, capsys)
     _land_report(Paths(root=root, fleet_dir=None, package=source_package()),
                  _report("worker", "2026-08-08T10:00:00Z"), fleet="example")
     shown = call("fleet", "reports", "list", "--unacknowledged", "--limit", "1")
@@ -1158,6 +1158,59 @@ def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, mon
                       "--request-id", str(uuid4()), expected=6)
     assert failed["error"]["code"] == "unavailable"
     assert len(_acked_events(Paths(root=root, fleet_dir=None, package=source_package()))) == 1
+
+
+def test_an_unacknowledged_read_builds_only_reports_past_the_read_position(active, monkeypatch, capsys):  # noqa: F811
+    """The read starts at the viewer's read position, as the ACK does: a report
+    at or below it is never built, so a read costs the reports the viewer has
+    not read, not every report the fleet has recorded. Its pages, its cursors
+    and the cursor's prefix check all read the reports past that position."""
+    from uuid import uuid4
+
+    from claudlobby.paths import load_lib_module
+
+    root, _ = active
+    call = _report_viewer(active, monkeypatch, capsys)
+    # Count every report the shared reader builds, through the readers module
+    # every session shares: each report built costs its decode and lookups.
+    readers = load_lib_module(source_package().native, "dispatch-overdue.py")._plane_readers()
+    report_rows, built = readers.report_rows, []
+
+    def counted(*args, **kwargs):
+        rows = report_rows(*args, **kwargs)
+        built.extend(row["_seq"] for row in rows)
+        return rows
+
+    monkeypatch.setattr(readers, "report_rows", counted)
+
+    def unread(*flags):
+        built.clear()
+        return call("fleet", "reports", "list", "--unacknowledged", *flags)["data"]
+
+    paths = Paths(root=root, fleet_dir=None, package=source_package())
+    for hour in (10, 11):
+        _land_report(paths, _report("worker", f"2026-08-08T{hour}:00:00Z"), fleet="example")
+    never_acked = unread()
+    assert len(never_acked["items"]) == len(built) == 2    # no read position: every report is unread
+    position = never_acked["items"][-1]["ingest_seq"]
+    assert call("fleet", "reports", "ack", "--through", never_acked["ack_cursor"],
+                "--request-id", str(uuid4()))["data"]["count"] == 2
+    for hour in (12, 13):
+        _land_report(paths, _report("worker", f"2026-08-08T{hour}:00:00Z"), fleet="example")
+
+    first = unread("--limit", "1")
+    below = [seq for seq in built if seq <= position]
+    assert not below, (f"the unacknowledged read built {len(built)} reports, {len(below)} of them"
+                       f" at or below the read position {position}")
+    second = unread("--limit", "1", "--cursor", first["next_cursor"])
+    assert built and min(built) > position                  # the prefix check reads the same bound
+    assert [item["occurred_at"] for item in first["items"] + second["items"]] == [
+        "2026-08-08T12:00:00Z", "2026-08-08T13:00:00Z"]
+    assert second["next_cursor"] is None
+    assert call("fleet", "reports", "ack", "--through", second["ack_cursor"],
+                "--request-id", str(uuid4()))["data"]["count"] == 2
+    caught_up = unread()
+    assert caught_up["items"] == [] and caught_up["ack_cursor"] is None and built == []
 
 
 # --- the omit suppresses true positives too, and must say how many ------------
