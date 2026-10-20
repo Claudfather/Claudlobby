@@ -2,6 +2,8 @@
 import asyncio
 import json
 import sqlite3
+import time
+import types
 
 import jwt
 import pytest
@@ -59,6 +61,28 @@ def login(client, fixture):
     result = post(client, "issue", {"nonce": c["nonce"], "assertion": assertion(fixture, c)})
     assert result.status_code == 200, result.text
     return result.json()
+
+
+async def bounded(awaitable, what, state, seconds=5):
+    """Wait at most `seconds`, so a wait that cannot end fails with its state (#2388)."""
+    try:
+        return await asyncio.wait_for(awaitable, seconds)
+    except asyncio.TimeoutError:
+        raise AssertionError(f"waited {seconds} s for {what}: {state()}") from None
+
+
+def move_clock(monkeypatch, module):
+    """Put the event loop's timers and the module's deadline reads on one clock,
+    real time plus an offset. The returned advance(seconds) adds to the offset,
+    so a deadline passes where the scenario says, not where a stall puts it (#2388)."""
+    offset = [0.0]
+    def now():
+        return time.monotonic() + offset[0]
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", now)
+    monkeypatch.setattr(module, "time", types.SimpleNamespace(monotonic=now))
+    def advance(seconds):
+        offset[0] += seconds
+    return advance
 
 
 def test_actual_crypto_read_profile_status_canonical_reads_and_cookie_separation(connected_http):
@@ -240,6 +264,7 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
     import claudlobby.plane.owner_workspace_http as module
     consumer = connected_http[0].connected_reads
     async def scenario():
+        advance = move_clock(monkeypatch, module)
         entered, release = asyncio.Event(), asyncio.Event()
         original = module.run_in_threadpool
         async def delayed(fn, *args, **kwargs):
@@ -249,7 +274,6 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
             await release.wait()
             return await original(fn, *args, **kwargs)
         monkeypatch.setattr(module, "run_in_threadpool", delayed)
-        monkeypatch.setattr(consumer, "response_seconds", lambda _: .03)
         scope = {"type": "http", "method": "POST", "path": PREFIX + "challenge", "query_string": b"",
             "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()),
                 (b"content-type", b"application/json"), (b"x-claudlobby-owner", b"1")]}
@@ -259,11 +283,18 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
         async def send(message):
             output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
-        await entered.wait()
-        await asyncio.wait_for(request, .5)
-        assert output[0]["status"] == 503
+        def state():
+            return (f"request done={request.done()}, sent={[m.get('status', m['type']) for m in output]}, "
+                    f"workers={len(consumer._workers)}, operations={len(consumer._operations)}")
+        await bounded(entered.wait(), "the first threadpool call", state)
+        # Its deadline passes now that the call is queued. A 30 ms wall-clock
+        # deadline could fire first on a stalled loop, and then nothing set
+        # `entered` and this wait never ended (#2388).
+        advance(consumer.response_seconds(scope))
+        await bounded(request, "the response", state)
+        assert output[0]["status"] == 503, state()
         release.set()
-        await consumer.shutdown()
+        await bounded(consumer.shutdown(), "shutdown", state)
         assert not consumer._workers and not consumer._operations
         with sqlite3.connect(connected_http[1].path) as conn:
             assert conn.execute("SELECT count(*) FROM connected_challenges").fetchone()[0] == 0
@@ -272,6 +303,7 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
 
 def test_started_work_retains_capacity_after_timeout_until_drained(connected_http, monkeypatch):
     import threading
+    import claudlobby.plane.owner_workspace_http as module
     consumer = connected_http[0].connected_reads
     entered, release = threading.Event(), threading.Event()
     original = consumer.connected.begin
@@ -280,8 +312,8 @@ def test_started_work_retains_capacity_after_timeout_until_drained(connected_htt
         assert release.wait(3)
         return original(principal)
     monkeypatch.setattr(consumer.connected, "begin", held)
-    monkeypatch.setattr(consumer, "response_seconds", lambda _: .1)
     async def scenario():
+        advance = move_clock(monkeypatch, module)
         scope = {"type": "http", "method": "POST", "path": PREFIX + "challenge", "query_string": b"",
             "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()),
                 (b"content-type", b"application/json"), (b"x-claudlobby-owner", b"1")]}
@@ -291,18 +323,18 @@ def test_started_work_retains_capacity_after_timeout_until_drained(connected_htt
         async def send(message):
             output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
-        for _ in range(100):
-            if entered.is_set():
-                break
-            await asyncio.sleep(.005)
-        assert entered.is_set()
-        await asyncio.wait_for(request, .5)
-        assert output[0]["status"] == 503 and len(consumer._workers) == 1
+        def state():
+            return (f"request done={request.done()}, sent={[m.get('status', m['type']) for m in output]}, "
+                    f"workers={len(consumer._workers)}, operations={len(consumer._operations)}")
+        assert await asyncio.to_thread(entered.wait, 5), "waited 5 s for begin to start: " + state()
+        advance(consumer.response_seconds(scope))  # its deadline passes while begin runs (#2388)
+        await bounded(request, "the response", state)
+        assert output[0]["status"] == 503 and len(consumer._workers) == 1, state()
         draining = asyncio.create_task(consumer.shutdown())
         await asyncio.sleep(.01)
         assert not draining.done()  # started transaction is still owned
         release.set()
-        await asyncio.wait_for(draining, 1)
+        await bounded(draining, "shutdown", state)
         assert not consumer._workers and not consumer._operations
         with sqlite3.connect(connected_http[1].path) as conn:
             assert conn.execute("SELECT count(*) FROM connected_challenges").fetchone()[0] == 1
@@ -434,9 +466,12 @@ def test_shutdown_cancelled_owned_stream_does_not_escape_request(connected_http,
         async def send(message):
             output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
-        await entered.wait()
-        await consumer.shutdown()
-        await request
+        def state():
+            return (f"request done={request.done()}, sent={[m.get('status', m['type']) for m in output]}, "
+                    f"readers={len(consumer._readers)}")
+        await bounded(entered.wait(), "the read app to start", state)
+        await bounded(consumer.shutdown(), "shutdown", state)
+        await bounded(request, "the request", state)
         assert not consumer._readers
         assert output[0]["status"] == (200 if headers_started else 503)
         if not headers_started:
@@ -475,7 +510,9 @@ def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_
         async def send(message):
             pass
         request = asyncio.create_task(consumer(scope, receive, send))
-        await entered.wait()
+        def state():
+            return f"request done={request.done()}, readers={len(consumer._readers)}, stopping={consumer._stopping}"
+        await bounded(entered.wait(), "the read app to start", state)
         release = asyncio.Event()
         if stopping:
             # Real shutdown is already draining a started lifecycle worker when
@@ -487,11 +524,11 @@ def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_
             assert consumer._stopping and not shutdown.done()
         request.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await request
+            await bounded(request, "the cancelled request", state)
         assert not consumer._readers
         if stopping:
             release.set()
-            await shutdown
+            await bounded(shutdown, "shutdown", state)
             consumer._workers.discard(worker)
     asyncio.run(run())
 
