@@ -15,8 +15,10 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Literal, NoReturn
+from uuid import UUID
 
-from .plane.queries import ESCALATION_IGNORED
+from .plane.queries import (ASSIGNMENT_DELIVERIES_SQL, DELIVERY_ATTEMPTS_SQL, DELIVERY_MESSAGE_SQL,
+                            DELIVERY_STATUS_SQL, ESCALATION_IGNORED, EVENT_OCCURRED_AT_SQL)
 from .reference_hints import PREFIX_MIN_HEX, ReferenceCandidate, ReferenceHint, id_shape
 from .task_state import Assignment, Task, TaskIssue, TaskSnapshot, legacy_display_id, read_tasks
 
@@ -77,6 +79,41 @@ class TaskPage:
 class AssignmentView:
     assignment: Assignment
     task: Task
+
+
+@dataclass(frozen=True)
+class DeliveryAttempt:
+    attempt_no: int | None  # the request's attempt number, as `assignment deliver` prints it
+    state: str              # the recorded transmission: pane_submitted, failed, unknown, ...
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class AssignmentDelivery:
+    """What delivered an assignment, read from the rows its delivery left (#2379).
+
+    Nothing is recorded for this read. `assignment deliver` commits a
+    communication linked to the task and the assignment before it sends, each
+    send records a transmission of that message, and the receiver's prompt
+    hook records a `received` row. `message_id` is the board's delivery message
+    (queries._DELIVERY_MSG): the legacy dispatch message where the assignment
+    row carries one, else the newest delivery. `message_ids` lists every
+    delivery message, oldest first, so a re-delivery shows beside the delivery
+    it followed. `attempts` counts the sender's recorded attempts at
+    `message_id`; `last_attempt` is the newest. The receipt is the receiver's
+    newest committed `received` row, judged by DELIVERY_STATUS_SQL as
+    `message receipt` judges it. A receipt still queued for ingest reads
+    `not_recorded`: this read does not open the queues, `message receipt` does.
+    """
+    message_id: str
+    message_ids: tuple[str, ...]
+    request_id: str | None   # the `assignment deliver` request, for `request show`
+    recorded_at: str | None  # when the delivery's communication was recorded
+    attempts: int
+    last_attempt: DeliveryAttempt | None
+    receipt_observation: Literal["received", "not_recorded"]
+    integrity_verdict: Literal["delivered", "truncated", "altered", "unconfirmed", "unknown"]
+    received_at: str | None
 
 
 @dataclass(frozen=True)
@@ -342,3 +379,56 @@ def show_assignment(conn: sqlite3.Connection, assignment_id: str, *, fleet_uid: 
             view.task.task_id, view.assignment.assignment_id,
             ("assignment", "show", view.assignment.assignment_id)) for view in matches])
     _not_canonical(snapshot, assignment_id, "assignment", prefix)
+
+
+#: Every statement assignment_delivery runs, for the read-cost pin.
+ASSIGNMENT_DELIVERY_STATEMENTS = {
+    "deliveries": ASSIGNMENT_DELIVERIES_SQL, "message": DELIVERY_MESSAGE_SQL,
+    "attempts": DELIVERY_ATTEMPTS_SQL, "receipt": DELIVERY_STATUS_SQL.format(ph="?"),
+    "received_at": EVENT_OCCURRED_AT_SQL,
+}
+
+
+def _request_id(source_ref: str | None) -> str | None:
+    """The canonical request UUID a `request:<uuid>` source_ref names, else None."""
+    if isinstance(source_ref, str) and source_ref.startswith("request:"):
+        value = source_ref[len("request:"):]
+        try:
+            if str(UUID(value)) == value:
+                return value
+        except ValueError:
+            pass
+    return None
+
+
+def assignment_delivery(conn: sqlite3.Connection, assignment: Assignment) -> AssignmentDelivery | None:
+    """The assignment's delivery, or None when no delivery is recorded.
+
+    Each statement seeks one assignment's, message's or event's rows by index
+    (ASSIGNMENT_DELIVERY_STATEMENTS), so the read does not grow with the
+    fleet's history. The caller's read snapshot keeps them consistent.
+    """
+    rows = conn.execute(ASSIGNMENT_DELIVERIES_SQL, (assignment.assignment_id,)).fetchall()
+    recorded = {row[0]: (row[1], row[2]) for row in rows}
+    message_ids = [row[0] for row in rows]
+    legacy = assignment.dispatch_message_id  # the row's dispatch_msg_id, as the reducer read it
+    if legacy is not None and legacy not in recorded:
+        message_ids.insert(0, legacy)
+    if not message_ids:
+        return None
+    message_id = legacy or message_ids[-1]
+    row = recorded.get(message_id) or conn.execute(
+        DELIVERY_MESSAGE_SQL, (message_id, assignment.host_uid)).fetchone()
+    recorded_at, source_ref = row if row else (None, None)
+    attempts = conn.execute(DELIVERY_ATTEMPTS_SQL, (
+        message_id, assignment.host_uid, assignment.fleet_uid)).fetchall()
+    proof = conn.execute(DELIVERY_STATUS_SQL.format(ph="?"), (message_id,)).fetchone()
+    received = proof[4] if proof else None  # the receiver's newest `received` row
+    return AssignmentDelivery(
+        message_id, tuple(message_ids), _request_id(source_ref), recorded_at,
+        len({attempt[0] for attempt in attempts}),
+        DeliveryAttempt(*attempts[-1]) if attempts else None,
+        "received" if received is not None else "not_recorded",
+        # The verdict as message_queries.receipt reads the same row.
+        (proof[3] if proof else None) or ("unconfirmed" if received is not None else "unknown"),
+        conn.execute(EVENT_OCCURRED_AT_SQL, (received,)).fetchone()[0] if received is not None else None)

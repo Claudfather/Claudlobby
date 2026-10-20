@@ -1341,6 +1341,7 @@ class TestBootCLI:
         assert envelope["data"]["brief"]["bot"] == "manager"
         assert envelope["data"]["brief"]["work"]["items"] == []
         assert "usage" not in envelope["data"]["brief"]
+        assert "context" not in envelope["data"]["brief"]  # an ordinary brief reads no transcript
 
         transcript_dir = (Path.home() / ".claude/projects" /
                           transcript_slug(root / "runtime/bots/manager"))
@@ -1353,14 +1354,19 @@ class TestBootCLI:
                 "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5}},
         }) + "\n")
         assert main(["--root", str(root), "--json", "brief", "--usage-since", "24h"]) == 0
-        with_usage = json.loads(capsys.readouterr().out)["data"]["brief"]["usage"]
+        read = json.loads(capsys.readouterr().out)["data"]["brief"]
+        with_usage = read["usage"]
         assert [with_usage["usage"][key] for key in (
             "input_tokens", "output_tokens", "cache_creation_input_tokens",
             "cache_read_input_tokens")] == [11, 7, 3, 5]
         assert with_usage["coverage"]["status"] == "observed"
         assert with_usage["quota"]["status"] == "unavailable"
+        # #2206: the same reader gives the viewer's live context beside it.
+        assert (read["context"]["tokens"], read["context"]["reason"]) == (19, None)  # 11 + 3 + 5
         assert main(["--root", str(root), "brief", "--usage-since", "24h"]) == 0
-        assert "USAGE — Claude transcript token counts" in capsys.readouterr().out
+        text = capsys.readouterr().out
+        assert "USAGE — Claude transcript token counts" in text
+        assert "context now: 19 tokens" in text
         assert main(["--root", str(root), "--json", "brief", "--usage-since", "8d"]) == 2
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
         assert main(["--root", str(root), "brief", "--boot", "--usage-since", "24h"]) == 2
