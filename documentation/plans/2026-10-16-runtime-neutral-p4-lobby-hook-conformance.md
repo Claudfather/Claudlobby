@@ -1,7 +1,7 @@
 ---
 title: "P4 Lobby hook conformance from measured Codex payloads"
 type: plan
-status: active
+status: completed
 owner: chrisrogers37
 created: 2026-10-16
 updated: 2026-10-16
@@ -53,7 +53,7 @@ The actual-hook/temporary-Plane replay is executable conformance evidence for th
 - [x] Actual Pre/Post vitals marker/event and missing-BOT_DIR control pass.
 - [x] Separate prepared before/after affected runs record counts, names and exits.
 - [x] Runtime blobs/modes remain equal to the base, or a justified runtime edit has fresh empirical evidence.
-- [ ] Independent simplify/code/spec review converges and exact-head CI is recorded.
+- [x] Independent simplify/code/spec review converges and exact-head CI is recorded.
 - [x] Ledger states reachability: conformance proven, Codex fleet composition/activation remains companion-owned.
 
 ## What NOT To Do
@@ -69,6 +69,6 @@ Area: runtime hook compatibility. Effort: S. Risk: low for tests/fixtures; runti
 
 Two separately exported/indexed/prepared legs used Python 3.11.5, identical pinned development dependencies, private HOME/TMPDIR and once-prepared resources. Command: `.venv/bin/python -m pytest --tb=no -ra tests/test_plane_dispatch_in.py tests/test_plane_cutover_keepalive.py`. Main `284e7f2d`: **60 passed, exit 0**; candidate: **83 passed, exit 0**; failed/error names empty on both, delta **+23**. All 1357 baseline/1363 candidate archived-plus-fixture source bytes/modes were unchanged through the runs. All **723 non-test/non-documentation paths** are identical across the legs, so this phase changes no runtime behavior. The initial export install was refused before tests because its Git index was missing; the corrected setup created the index before install and prepared resources once. That setup failure is retained separately from the successful test evidence.
 
-The capture-based envelopes broaden the existing real send-path/receiver/temporary-Plane and vitals rigs. Prompt substitution is deterministic test input; native Codex fleet dispatch, composition, service acceptance and mixed-runtime rollout remain companion-owned. Broader exact-head CI and independent convergence review are recorded when terminal.
+The capture-based envelopes broaden the existing real send-path/receiver/temporary-Plane and vitals rigs. Prompt substitution is deterministic test input; native Codex fleet dispatch, composition, service acceptance and mixed-runtime rollout remain companion-owned. All latest exact-head CI checks subsequently passed; see the integration proof below.
 
-Independent full-path evidence/spec/code/simplify review returned **NO FINDINGS** after the two P0 reporting corrections recorded in the canonical run log. Current test/fixture bytes match the verified export; exact-head CI remains pending.
+Independent full-path evidence/spec/code/simplify review returned **NO FINDINGS** after the two P0 reporting corrections recorded in the canonical run log. Current test/fixture bytes match the verified export. All latest exact-head CI checks passed before PR #2366 merged as `94088c2bdf61c9daa72561e3d34ef6a28383068a`, tree-identical to reviewed `f01b5fc1`. The canonical ledger records a fresh post-merge registry of 39/197/944 passes, all exit 0, using a newly prepared actual-merge export and actual released owner source. This closes P4 conformance; composition remains companion-owned.
