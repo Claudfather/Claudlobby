@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a bot session no longer opens a browser window on the host's desktop (#2332)
+
+On a host with a desktop, the user manager hands every unit the desktop's `DISPLAY` and `WAYLAND_DISPLAY`, and bot sessions inherited them. A browser that a bot session opened (a login CLI's `xdg-open`, Claude Code's Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command: one ran 4.7 h holding 867 MiB, another 29 minutes holding 428 MiB, each found and closed by hand.
+
+- **The launch line cuts the desktop.** `start-bot.sh` sets three variables in the session's shell, before the env tiers and `bot.conf`: `DISPLAY` unset, `WAYLAND_DISPLAY` set empty and `BROWSER=true`. Unsetting `WAYLAND_DISPLAY` is no cut: libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0`, and a Wayland client still reaches the desktop (measured). A login CLI then prints its URL and opens nothing; `claude auth login` prints it either way.
+- **Every session gets it, whichever door starts it:** the unit, keepalive's restart (through the unit, or `start-bot.sh` itself when that fails), `bot start` or a hand run. A tmux server keeps the environment it was started with, and the cut runs in the pane's own shell.
+- **A bot that needs a display gets it explicitly:** for one command, or for its session by declaring the variables in its own `fleet.yaml` env, which is read after the cut.
+- **`account-relog` runs its login with the same cut,** so its relog opens no browser from any shell.
+- **The fleet pulse reports a browser outside a render scope:** one older than 15 minutes that is not in a heavy-slot render scope, recorded as `browser_outside_render` (notice) and pushed to the manager once, with the bot whose session started it. Each browser is reported once per host: a fleet reports its own bots' browsers, and the host's first fleet by name reports those no bot started. The pulse never stops a browser. It reads `/proc` through the new `browser-scan.py`, which signals nothing. The browser names it matches move to lib-common's `BROWSER_EXE_PATTERN`, which `orphan-browser-reaper.sh` now reads too.
+- **Limits:**
+  - The session bus still reaches the desktop, so a program that asks the desktop's portal to open a URL can still put a window there. xdg-open does that only inside a sandbox, and the pulse reports any browser it opens.
+  - On macOS, `BROWSER=true` applies; there is no `/proc`, so the pulse's check finds nothing there.
+  - The pulse recognises a render by its scope's name, `heavy-render-*.scope`, from the heavy slot's render profile.
+- **Tests:**
+  - `tests/test_boot_policy_conformance.py` runs the launch line in the environment a desktop host's user manager gives a unit, with every opener a stand-in: a CLI that hands its URL to xdg-open, Claude Code's own opener, and a tool that starts a GUI browser itself. The window count is three before the change and none after. A display declared in the bot's own config still reaches it. The stand-in's Wayland rule is checked against libwayland itself where it is installed.
+  - `tests/test_browser_scan.py` scans a `/proc` of its own: render scopes (the browser's own or an ancestor's), owners through the parent chain, crash handlers, names the kernel cuts at 15 characters, and the real `/proc`, where a stand-in browser is still running after the scan.
+  - `tests/test_fleet_pulse_browsers.py` drives the real sweep: one report per browser, a key dropped when the browser goes, render scopes and young browsers left alone, one report on a host of two fleets, and no key kept while the manager does not take the push.
+
 ### Added — a blocking check on every pull request for use-case-specific data (#2042)
 
 `.github/actions/content-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
