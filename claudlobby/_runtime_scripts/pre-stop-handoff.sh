@@ -43,16 +43,49 @@ if [ "$MODE" = --explicit ]; then
     fi
 fi
 
-# Activation refreshes canonical task references without capturing the session.
-# Its newly written mtime must not suppress the actual session provider.
-if [ -f "$HANDOFF_FILE" ] && ! grep -Fq \
-    '<!-- claudlobby first-adoption reference refresh begin -->' "$HANDOFF_FILE"; then
+# A handoff written in the last 300 s is recent, with one exception. The
+# activation's reference refresh (#2094) keeps the times of a handoff it
+# rewrites, but one it creates has a new mtime and no capture, so a handoff
+# that names the refresh marker is judged by the capture below the envelope:
+# the self-restart check (#2123), not a parse here, reads its own last_updated
+# and its age is printed when it is fresh. No interpreter, a refusal or a
+# timeout (where lib-common has one) is not recent, and the handoff is sent.
+_capture_recent_age() {
+    local python=""
+    case "${CLAUDLOBBY_CLI:-}" in /*) python="${CLAUDLOBBY_CLI%/*}/python" ;; esac
+    if [ ! -x "$python" ]; then
+        echo "pre-stop-handoff.sh: no interpreter beside CLAUDLOBBY_CLI to read the capture; not recent" >&2
+        return 0
+    fi
+    with_timeout 5 "$python" -I -B - "$BOT_DIR" <<'PY'
+import sys
+from pathlib import Path
+
+from claudlobby.bot_operations import BotLifecycleError, _fresh_self_handoff
+
+try:
+    print(max(0, int(_fresh_self_handoff(Path(sys.argv[1])))))
+except BotLifecycleError:
+    pass
+PY
+}
+
+_recent_age=""
+if [ -f "$HANDOFF_FILE" ]; then
     AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
     if [ "$AGE" -lt 300 ]; then
-        if [ "$MODE" = --explicit ]; then echo "handoff-skipped:recent";
-        else echo "Recent handoff exists ($AGE seconds old), skipping"; fi
-        exit 0
+        if grep -Fq '<!-- claudlobby first-adoption reference refresh begin -->' "$HANDOFF_FILE"; then
+            _recent_age="$(_capture_recent_age || true)"
+            case "$_recent_age" in *[!0-9]*) _recent_age="" ;; esac
+        else
+            _recent_age="$AGE"
+        fi
     fi
+fi
+if [ -n "$_recent_age" ]; then
+    if [ "$MODE" = --explicit ]; then echo "handoff-skipped:recent";
+    else echo "Recent handoff exists ($_recent_age seconds old), skipping"; fi
+    exit 0
 fi
 
 # Try to trigger a handoff via the running session

@@ -182,8 +182,12 @@ def _handoff_capture(bot_dir: Path) -> tuple[float, datetime]:
     return info.st_mtime, stamp
 
 
-def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
-    """Require a fresh owned handoff; explicit capture already witnessed its write."""
+def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> float:
+    """Require a fresh owned handoff; explicit capture already witnessed its write.
+
+    Returns the capture's age in seconds. pre-stop-handoff.sh asks this check
+    whether a handoff below the refresh envelope is recent (#2119).
+    """
     mtime, stamp = _handoff_capture(bot_dir)
     age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
     mtime_age = datetime.now(timezone.utc).timestamp() - mtime
@@ -193,6 +197,7 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> Non
     if not (-30 <= mtime_age <= 300) or age > 300:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from ValueError(
             "handoff is stale")
+    return age
 
 
 _HANDOFF_REQUEST = ".handoff-request"

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `bot handoff` answers `recent` for a fresh capture below the activation's refresh envelope (#2119)
+
+Since #2110, each activation tops every bot's handoff with an envelope, and a session's fresh capture goes below it. `pre-stop-handoff.sh` skipped its 300 s recent-handoff check for any handoff that names the envelope's marker, so for such a bot `bot handoff` never answered `handoff-skipped:recent`, and `bot restart` sent one more handoff command into a bot that had just saved one.
+
+- **Below the envelope, the capture's own `last_updated` decides.** The script asks the self-restart check (#2123), which finds the envelope with the activation's own reader, so a handoff reads as recent when a self restart would accept it: the file written in the last 300 s, its capture's `last_updated` at most 300 s old. The stop path's line names the capture's age.
+- **Anything it cannot read is not recent, and the handoff is sent:** an envelope or capture that check refuses, a capture with no `last_updated`, no interpreter beside `CLAUDLOBBY_CLI`, or a read that runs past 5 s where a `timeout` command exists. A file the refresh created holds only the envelope, so it is never recent, however new its mtime.
+- **A handoff without the marker is unchanged:** its mtime decides, as before.
+- **What it costs:** only a handoff written in the last 300 s that names the marker starts the release's interpreter; every other handoff is judged as before, without one. On a Raspberry Pi the script took about 0.5 s with the interpreter at load 3, against 35 ms without it, and the import alone took 1.2 to 1.8 s at load 7.
+
 ### Fixed — an unacknowledged report read starts at the viewer's read position (#2378)
 
 `fleet reports list --unacknowledged` built every report its fleet had ever
