@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — each bot's live context in `fleet status`, and each compaction as a plane event (#2206)
+
+Nothing reported a bot's current context or recorded a compaction, so a manager read each worker's newest transcript by hand before compacting it. Both now come from the transcript reader that `fleet usage` already uses (`transcript_usage.py`), with one reader for its usage rows.
+
+- **`fleet status` and `bot status` carry each bot's `context`:** the input, cache-read and cache-write tokens of its newest main-chain call, and that call's time. The table gains a CONTEXT column. When no such row can be read, `tokens` is null with a `reason`, never 0: no transcript directory, no session, no usage row yet, a read past the cap, or an unreadable file. Sidechain rows are skipped, and so are the rows Claude Code writes itself for an error or an interrupt (model `<synthetic>`, every usage field 0). `compacted_after` names a compaction written after that call. The call is from the bot's own newest session: a hook's headless `claude -p` session, whose transcript lands beside the bot's and whose rows name `entrypoint` `sdk-cli`, is skipped, and a session naming none counts as the bot's own. A newer session that cannot be told apart (its head runs past 2 MiB before naming one, or is still being written) reads null with its reason, never the older session's figure. So do 16 headless sessions newer than the bot's own: the walk examines at most the 16 newest. Each read lists the bot's transcript directory once, reads the head of its own newest session and of each newer one up to the first `entrypoint` (never past 2 MiB; at most 16 heads), then reads its own newest session backwards in 64 KiB blocks, stopping at the row and never past 2 MiB.
+- **`brief --usage-since` adds the viewed bot's `context`,** from the same reader. Ordinary and boot briefs still read no transcript.
+- **Each compaction becomes one `compaction` event** (notice), recorded from its `compact_boundary` row. It carries `trigger`, `pre_tokens`, `post_tokens` (null until the compaction ends) and `session`, at the compaction's own time, on the bot, with the `fleet-events:` provenance that `event list` reads.
+  - The pulse records them each tick through the new `claudlobby fleet compactions record`, which a manager can also run after `bot compact`.
+  - It reads only what each transcript appended since a cursor kept in the fleet's state, and the event id is derived from the row, so a row read twice is stored once. Before a bot's first pass it reads only the bot's own newest session, never a hook's headless one, from its last 8 MiB; it finds that session through the same walk, with the same limit.
+  - An unreadable transcript records nothing, is named with its reason and keeps its cursor, so its rows wait for a pass that reads. Bytes appended past 8 MiB in one pass are skipped and counted.
+- **No bound yet.** A threshold that acts on the context is the operator's cost decision (#2206's proposal 3).
+
 ### Fixed — a bot session no longer opens a browser window on the host's desktop (#2332)
 
 On a host with a desktop, the user manager hands every unit the desktop's `DISPLAY` and `WAYLAND_DISPLAY`, and bot sessions inherited them. A browser that a bot session opened (a login CLI's `xdg-open`, Claude Code's Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command: one ran 4.7 h holding 867 MiB, another 29 minutes holding 428 MiB, each found and closed by hand.
