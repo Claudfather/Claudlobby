@@ -241,13 +241,18 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hold whose holder died without a release (across_reset: it was running
     # when the host reset, #1644's evidence), a heavy-looking command the
     # matcher would not parse, and (#2124) a queue ticket dropped because its
-    # holder stayed silent once a slot was free. The record, never a page.
+    # holder stayed silent once a slot was free, and (#2221) a render the
+    # render profile killed (at a stop line, its time limit, a signal, or by
+    # its keeper when the runner died) and a render hold lifted, with who
+    # lifted it. The record, never a page.
     "heavy_slot_acquired": "notice",
     "heavy_slot_released": "notice",
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
     "heavy_slot_ticket_dropped": "notice",
+    "heavy_slot_stopped": "notice",
+    "heavy_slot_hold_lifted": "notice",
     # The public-write guard: a refused GitHub-bound write (the record), and an
     # armed guard that found no host list. That one is critical because the
     # protection someone armed is off until the list is written: it shows in
@@ -295,6 +300,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # and update-siblings.
     "source_behind": "notice",
     "source_release_gap": "notice",
+    "source_unknown": "notice",
     "sibling_update_blocked": "notice",
     "sibling_update_failed": "notice",
     "sibling_updated": "notice",

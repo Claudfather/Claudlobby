@@ -169,7 +169,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `signal-guard.sh` — PreToolUse hook: refuses a signal to a process the caller did not start: pkill/killall, a pid not from `$!`, a job spec or a pid file (#1069)
 - `signal-decide.py` — the decision half of `signal-guard.sh`
 - `heavy-slot-guard.sh` — PreToolUse hook: queues heavy Bash commands (suites, installs, builds) on the host's heavy-job slot (opt-in)
-- `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot or queues a ticket, `status` names holders and the queue
+- `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot or queues a ticket, `run --profile render` gates and watches a render, `status` names holders and the queue
 - `public-write-guard.sh` — PreToolUse hook: refuses a GitHub-bound write that would put a term from the host's list into a public repository (opt-in)
 - `public-write-guard.py` — the decision half of `public-write-guard.sh`
 

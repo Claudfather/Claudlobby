@@ -17,6 +17,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Upgrade:** to move a bot to the API, replace `mcp: [printify]` with `skills: [printify]` and `integrations: [printify]`. A bot that equips the integration without the MCP loses ten `mcp__printify__` allows that matched no server. A fleet overlay `printify.json` replaces the shipped file, mark included: one that declares `read_only_tools` needs its own `_deprecated` note, or compose refuses it now that the integration no longer mirrors those reads; one with no `_permissions_contract` still composes, and its MCP tools now ask.
 - **Tests:** `tests/test_grant_superset.py` composes a deprecated fragment with no paired grants and still refuses a current one beside it. `tests/test_readonly_mcp_grants.py` pins the shipped mark, the integration, and a bot that lists the MCP composing exactly its ten reads. `tests/test_validator.py` pins the folded warning, and `tests/test_printify_skill.py` pins the grants against every call the skill documents.
 
+### Added — the heavy slot's render profile: a headless render runs inside the host's lines, in a scope its runner kills (#2221)
+
+`claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND` runs a headless browser render. The start line, the heavy slot, the scope and the watchdog are all in the one process that starts it. Plain `run` refuses a render, because a render is a script (#2039).
+
+- **The start line, read by the runner itself:** MemAvailable at or above 4820 MiB, the 1-minute load under 16, and no stop line already crossed. The runner reads them in the process that starts the render, before it asks for the slot. A closed line exits 75 with nothing started and no queue ticket taken, recorded as `heavy_slot_refused` with `where: gate` and the readings.
+- **The slot, through its queue:** the render then asks for the slot like any heavy job. While the slot is held, or a free one is another caller's turn, it takes a ticket and exits 75.
+- **Its own scope, with the session bus cut:** the render runs in a transient systemd user scope, with `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`. A browser that reaches the session bus moves itself into a scope of its own. Unsetting the variable is no cut: libdbus, GDBus and sd-bus all fall back to `$XDG_RUNTIME_DIR/bus` (measured).
+- **The stop lines, watched by the runner:** every 2 s the runner reads MemAvailable and the load. When MemAvailable falls under 3800 MiB, the 5-minute load passes 25, the 1-minute load passes 40, or the render passes 45 minutes, it kills the whole scope through its `cgroup.kill`, and every process that left the scope (found by parent link). It then exits 79 and records `heavy_slot_stopped`.
+- **A render never outlives its runner:** the scope's keeper, the process `systemd-run` starts in the scope, holds the kernel's parent-death signal. A runner killed outright (SIGKILL) still takes its render with it, and the keeper records the kill where the runner would have: in the slot's file, in the render record and on the plane (`heavy_slot_stopped` with line `runner`, then `heavy_slot_released`). The keeper waits for those two events to be sent, because the shell that sends them runs in the scope it then kills. A signal the runner can catch ends the render first. systemd's own time limit on the scope trails the runner's by 60 s.
+- **The retry rule, enforced by the runner:** after a render is killed (any ending `killed`: a stop line, the time limit, a signal, or the keeper), no render starts for 30 minutes. That refusal exits 75, is recorded as `heavy_slot_refused` with `where: retry`, and says when a render may start. After two kills in one local day, renders are on hold: every render is refused (exit 2, `where: hold`) until the fleet's manager, or the operator from a shell of their own, runs `heavy-slot.py lift-hold --by NAME [--reason TEXT]`. A worker's lift is refused. The lift is recorded with who lifted it, in the render record and as `heavy_slot_hold_lifted`. Time passing never lifts a hold. A lift starts the count of kills again, and does not shorten the 30 minutes. The kills and lifts have a record of their own, `state/heavy-slot/render-record`, because the slot's file keeps only its last run. The runner also counts a killed render that a slot's last record holds and the render record lacks, and reads the rule again once the slot is its own. A render record it cannot read refuses every render (exit 2). `status` shows a hold, or the time a render may start again.
+- **The end, recorded where the slot records its runs:** the slot's record and `heavy_slot_released` carry `profile`, the scope's `unit`, `ended` (done, killed or not-started), the stop line with its reading, and the measured `peak`: MemAvailable at the start and at its lowest, the highest loads, and the job's summed PSS. `heavy-slot.py status` shows them, and so does the runner's last line on stderr.
+- **Host knobs:** `state/heavy-slot/render-lines` sets `start_mib`, `start_load1`, `stop_mib`, `stop_load5`, `stop_load1`, `poll_s` and `max_minutes`, one `name = value` per line, read on every use. A file the runner cannot read refuses every render (exit 2).
+- **Limits:** Linux only; elsewhere the profile refuses (exit 2). The local day of the retry rule is the runner's (its `TZ`, else the host's zone). With no memory controller in the kernel, the stop is a watchdog's, not a cgroup memory limit. A process the job hands to the user manager as a service is no descendant of the job, so the walk for escaped processes cannot find it.
+- **Upgrade:** nothing to change. A caller that gates a render by hand replaces its gate check, scope and watchdog with this one command, once the activation that ships it is in.
+- **Tests:** `tests/test_heavy_slot_render.py` drives the real wrapper with injected readings (`HEAVY_SLOT_PROC`), so nothing loads the host:
+  - the shipped lines at their edges;
+  - refused before any scope: under the start line on each reading, a lines file it cannot read, an unknown profile, a scope that cannot be made, a held slot;
+  - a refusal through `| tail`: the pipeline exits 0, nothing starts, the refusal stays on stderr and on the plane, and `pipefail` gives 75;
+  - in a real scope, where a systemd user manager exists: the scope and the cut bus, killed at each stop line with a detached child, an escaped process killed with the scope, the time limit, a runner killed outright, and a runner sent SIGTERM;
+  - the keeper's events: on the plane after a runner killed outright, and sent through a stand-in door that takes half a second, before the keeper kills its scope;
+  - the retry rule, from records dated by the test: a render 29 and 31 minutes after a kill, a kill only a slot's last record holds, a hold still standing three days on, a worker's lift refused and the manager's and the operator's recorded, kills on two different days, a lift that starts the count again, and a render record it cannot read; and, after a real kill (stop line or keeper), the next render refused.
+
+### Fixed — notify-behind counts the data root from the release it runs (#2322)
+
+`notify-behind.sh` counted the data root's own checkout, which nothing runs
+from under sealed releases and nothing pulls, so its daily `source_behind`
+notice grew with every merge and no activation cleared it. The root now counts
+the commits on `origin/<branch>` missing from the source revision of the
+release the host has selected, read with the package's `read_selection` and
+`read_release`, the two reads runtime admission makes before a bot starts
+(`host status` hashes every installed release first). The tagged path counts
+from the same commit; sibling checkouts still count from their `HEAD`. When
+the release cannot be read, a new `source_unknown` notice says so and nothing
+is counted.
+
 ### Added — a blocking check on every pull request for use-case-specific data (#2042)
 
 `.github/actions/content-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
