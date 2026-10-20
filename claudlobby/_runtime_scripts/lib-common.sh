@@ -6326,6 +6326,52 @@ _harness_refused() {
     printf '  FAIL  %s\n' "$1"
 }
 
+# --- Test-harness input box ---------------------------------------------------
+
+# harness_box_up <socket> <session> <command> [<new-session option>...]
+# Start a pane whose program draws an input box (the stand-in every harness
+# sends into, tests/fixtures/input-box-stub.py) in a new detached session, and
+# return once the box is drawn. The stand-in enters raw mode before it draws,
+# which discards the keys typed before it, as a Claude Code session that has not
+# drawn its box loses them (#860); so a harness types nothing into the pane
+# before this returns (#2139). The wait is pane_await_input_box, for
+# HARNESS_BOX_TICKS polls of 0.2 s (default 100). Prints "drawn" and returns 0,
+# or prints why not and returns 1: "did not start: " and the tmux error, or the
+# wait's verdict. The caller stops at that setup step rather than scoring every
+# check that needed the pane (#2405). An empty <socket> is the default server.
+harness_box_up() {
+    local socket="$1" session="$2" command="$3" err verdict
+    shift 3
+    if ! err=$(bot_tmux "$socket" new-session -d "$@" -s "$session" "$command" 2>&1); then
+        printf 'did not start: %s\n' "$(printf '%s' "$err" | tr '\n' ' ')"
+        return 1
+    fi
+    verdict=$(PANE_READY_TICKS="${HARNESS_BOX_TICKS:-100}" PANE_READY_POLL_S=0.2 \
+        pane_await_input_box "$socket" "$session")
+    printf '%s\n' "$verdict"
+    [ "$verdict" = "$_PANE_BOX_DRAWN" ]
+}
+
+# harness_box_down <socket> <session>
+# End a session harness_box_up started. When it is the last session on its
+# server, the server exits too, and while it exits it still accepts a
+# connection: a start on that socket then reaches the exiting server, and tmux
+# fails it ("server exited unexpectedly") with no session (#2405; 6 of 800 such
+# restarts on a Pi 5). So when it is the last, this waits, up to 5 s, for that
+# server to be gone, and returns 1 if it is not. No such session: returns 0.
+harness_box_down() {
+    local socket="$1" session="$2" pid count i=0
+    pid=$(bot_tmux "$socket" display-message -p -t "$session" '#{pid}' 2>/dev/null) || return 0
+    count=$(bot_tmux "$socket" list-sessions 2>/dev/null | wc -l) || true
+    bot_tmux "$socket" kill-session -t "$session" 2>/dev/null || true
+    [ "$count" -le 1 ] || return 0
+    while kill -0 "$pid" 2>/dev/null; do
+        [ "$i" -lt 100 ] || return 1
+        sleep 0.05
+        i=$((i + 1))
+    done
+}
+
 # seed_claude_auth <config_dir> <host_creds>
 # Drop the host credential file into a throwaway CLAUDE_CONFIG_DIR (the #645
 # Fork F1 credential-file seed) — self-refreshing, and it preserves the native
