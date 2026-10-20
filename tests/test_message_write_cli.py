@@ -547,7 +547,8 @@ def _show_call(capsys, root, assignment_id):
 def test_assignment_show_names_its_delivery_attempts_and_receipt(active, monkeypatch, capsys, tmp_path):  # noqa: F811
     """#2379: `assignment show` reads the delivery from what `assignment deliver`
     committed: its message, request, attempts and the receiver's newest receipt.
-    A re-delivery under a new request becomes the delivery it names."""
+    A re-delivery under a new request becomes the delivery it names. Read by an
+    ID prefix (#2380), it answers the same, with the prefix note last."""
     from claudlobby.commands import assignment_delivery as deliver_command
     from claudlobby.plane.emit_api import emit_batch
     root, host = active
@@ -593,3 +594,12 @@ def test_assignment_show_names_its_delivery_attempts_and_receipt(active, monkeyp
     assert main(["--root", str(root), "assignment", "show", assigned.assignment_id]) == 0
     plain = capsys.readouterr().out.splitlines()
     assert plain[1].split("\t")[:2] == ["delivery", second["message_id"]]
+    # By an ID prefix: the full ID's data and lines, and the prefix note last.
+    prefix = assigned.assignment_id[:12]
+    full = _show_call(capsys, root, assigned.assignment_id)
+    by_prefix = _show_call(capsys, root, prefix)
+    assert by_prefix.pop("resolved_from_prefix") == {"prefix": prefix, "id": assigned.assignment_id}
+    assert by_prefix == full and full["delivery"]["message_id"] == second["message_id"]
+    assert main(["--root", str(root), "assignment", "show", prefix]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        *plain, f"resolved from prefix {prefix}: {assigned.assignment_id}"]

@@ -158,6 +158,17 @@ assignment, use an explicitly unlinked `fleet reports submit --status STATUS
 --summary "..." --request-id UUID`; that report does not transition a task.
 No report may borrow a historical display task ID as an assignment ID.
 
+The read doors (`task show`, `assignment show`, `message show`, `message
+receipt`, `message wait`, `request show` and `checkin show`) also take a
+prefix of an ID: its tag and at least 8 of its hex digits (`asg_da1585e0`), or
+a request UUID's first 8 or more characters. A prefix that names exactly one
+record the caller may read returns that record, and the result names the full
+ID in `data.resolved_from_prefix`. One that names several returns
+`ambiguous_reference` with the candidates and the command that reads each, and
+resolves none. One that names nothing is `not_found` only after that search; a
+shorter prefix is `invalid_argument`. Every mutation, and a reply's parent,
+still takes the full ID: copy it from the read's result before acting on it.
+
 Read reports with `claudlobby --json fleet reports list`, optionally filtering
 with `--bot`, `--status`, or `--since RFC3339_CUTOFF`. The cutoff must be a
 real RFC3339 instant with an offset, derived for the intended window. Inspect

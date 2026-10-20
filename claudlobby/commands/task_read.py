@@ -9,6 +9,7 @@ from dataclasses import asdict
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
+from ..reference_hints import note_prefix
 
 
 def _read(args) -> CommandOutput:
@@ -68,12 +69,13 @@ def _read(args) -> CommandOutput:
                 if page.next_cursor:
                     lines += (f"next_cursor: {page.next_cursor}",)
             elif args.public_command == "task.show":
-                task = show_task(conn, args.task_id, fleet_uid=bindings["fleet_uid"])
+                task = show_task(conn, args.task_id, fleet_uid=bindings["fleet_uid"], prefix=True)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
                         "task": asdict(task)}
-                lines = (f"{task.task_id}\t{task.state or 'unresolved'}\t{task.title}",)
+                lines = note_prefix(data, (f"{task.task_id}\t{task.state or 'unresolved'}\t{task.title}",),
+                                    args.task_id, task.task_id)
             else:
-                view = show_assignment(conn, args.assignment_id, fleet_uid=bindings["fleet_uid"])
+                view = show_assignment(conn, args.assignment_id, fleet_uid=bindings["fleet_uid"], prefix=True)
                 # The delivery, from the rows `assignment deliver` recorded (#2379).
                 delivery = assignment_delivery(conn, view.assignment)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
@@ -84,6 +86,7 @@ def _read(args) -> CommandOutput:
                 if delivery:
                     lines += (f"delivery\t{delivery.message_id}\t{delivery.receipt_observation}\t"
                               f"{delivery.integrity_verdict}",)
+                lines = note_prefix(data, lines, args.assignment_id, view.assignment.assignment_id)
         return CommandOutput(data, release_id=selected["release_id"], lines=lines)
     except CommandFailure:
         raise
@@ -117,6 +120,8 @@ def _read(args) -> CommandOutput:
                    "wrong_reference": "reference is not a canonical ID for this command",
                    "ambiguous_reference": "reference maps to multiple canonical records"}.get(
                        exc.code, "invalid task query")
+        if exc.public_message:
+            message = str(exc)
         raise CommandFailure(exc.code, message, hint=exc.hint) from exc
     except TaskStateError as exc:
         raise CommandFailure("unavailable", "recorded task state cannot be read safely") from exc

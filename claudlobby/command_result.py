@@ -11,7 +11,7 @@ import sys
 from typing import Callable
 from uuid import uuid4
 
-from .reference_hints import ReferenceHint
+from .reference_hints import PrefixHint, ReferenceHint
 
 
 _EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "not_found": 3,
@@ -82,7 +82,7 @@ class CommandError:
     code: str
     message: str
     retryable: bool = False
-    hint: str | ReferenceHint | None = None
+    hint: str | ReferenceHint | PrefixHint | None = None
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,8 @@ class CommandOutput:
 
 
 class CommandFailure(Exception):
-    def __init__(self, code: str, message: str, *, hint: str | ReferenceHint | None = None,
+    def __init__(self, code: str, message: str, *,
+                 hint: str | ReferenceHint | PrefixHint | None = None,
                  retryable: bool = False, data: dict | None = None,
                  release_id: str | None = None):
         if code not in _EXITS:
@@ -144,6 +145,15 @@ def emit(result: CommandResult, *, json_output: bool, lines: tuple[str, ...] = (
                     if hint.total_matches > len(hint.candidates):
                         print(f"{hint.total_matches - len(hint.candidates)} more candidates; "
                               "select a canonical ID", file=sys.stderr)
+            elif isinstance(hint, PrefixHint):
+                for candidate in hint.candidates:
+                    print(f"candidate {candidate.id}: claudlobby {shlex.join(candidate.command)}",
+                          file=sys.stderr)
+                if hint.total_matches > len(hint.candidates):
+                    print(f"{hint.total_matches - len(hint.candidates)} more candidates; "
+                          "give more of the ID", file=sys.stderr)
+                if hint.next_command:
+                    print(f"inspect claudlobby {shlex.join(hint.next_command)}", file=sys.stderr)
             else:
                 print(hint, file=sys.stderr)
     else:

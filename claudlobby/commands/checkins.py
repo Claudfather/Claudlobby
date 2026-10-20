@@ -136,7 +136,8 @@ def _row(r) -> dict:
 
 def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | None,
                      last: bool, raised: bool = False, limit: int | None = None,
-                     checkin_id: str | None = None, include_dispatches: bool = True) -> list[dict]:
+                     checkin_id: str | None = None, include_dispatches: bool = True,
+                     checkin_prefix: str | None = None) -> list[dict]:
     """Newest first by occurred_at. `since` None means no window (--last);
     `raised` keeps only rows whose raise.decided is true (the ask count).
 
@@ -155,10 +156,14 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
     try:
         push_limit = limit is not None and not raised
         sql = checkin_rows_sql(since=since is not None, bot=bool(bot), limit=push_limit,
-                               checkin_id=checkin_id is not None)
+                               checkin_id=checkin_id is not None,
+                               checkin_prefix=checkin_prefix is not None)
         params: list = [fleet, *fleet_range_params(fleet), *fleet_range_params(fleet)]
         if checkin_id is not None:
             params.append(f"checkin:{checkin_id}")
+        if checkin_prefix is not None:
+            # Hex digits sort below 'g', so this closes the prefix's range (#2380).
+            params.extend((f"checkin:{checkin_prefix}", f"checkin:{checkin_prefix}g"))
         if bot:
             # exact and case-sensitive -- fleet_alias_range's own rule.
             params.append(f"bot:{fleet}/{bot}")

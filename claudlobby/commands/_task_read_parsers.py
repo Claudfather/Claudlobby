@@ -32,7 +32,8 @@ def register_task_read_subparsers(sub, task_children):
     listing.add_argument("--limit", type=int, default=100, metavar="N", help="Page size, 1 to 1000")
     listing.add_argument("--cursor", metavar="TOKEN", help="Continue the same scope and filters")
     showing = _route(task_children, "show", "task.show", "Show one canonical task ID")
-    showing.add_argument("task_id", metavar="TASK_ID")
+    showing.add_argument("task_id", metavar="TASK_ID",
+                         help="A task ID, or wi_ and at least 8 of its hex digits")
 
     reviews = task_children.add_parser("reviews", help="Read current PR verdicts and host-wide review attribution")
     reviews.add_argument("repo", metavar="OWNER/REPO")
@@ -44,5 +45,6 @@ def register_task_read_subparsers(sub, task_children):
     assignment = sub.add_parser("assignment", help="Read canonical assignment records")
     children = assignment.add_subparsers(dest="assignment_command", required=True)
     showing = _route(children, "show", "assignment.show", "Show one canonical assignment ID")
-    showing.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
+    showing.add_argument("assignment_id", metavar="ASSIGNMENT_ID",
+                         help="An assignment ID, or asg_ and at least 8 of its hex digits")
     return children

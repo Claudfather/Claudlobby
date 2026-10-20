@@ -16,6 +16,24 @@ A bot that waited past the activity_stuck threshold, at its prompt, behind a hel
 - **The page carries `last_no_turn_epoch`** beside `last_tool_call_epoch` and `elapsed_seconds`; it is null with no marker.
 - **Tests:** `tests/test_activity_stuck_no_turn.py` drives the real keepalive tick and the real sweep: a turn begun a minute after an IDLE, a HELD or a LIMIT tick and swept 5,731 s after the last tool call does not page, and a bot without the marker does; a turn past the threshold pages with three messages typed into its box and queued behind it; a usage-limit hold followed by UNKNOWN ticks does not page 63 s after its last LIMIT tick, and does 30 min later.
 
+### Fixed — the read doors resolve an ID prefix that names one record, list the candidates when it names several, and say "not found" only after searching by prefix (#2380)
+
+Handoffs, briefs and notes carry 8-digit ID prefixes, and the read doors refused them: `assignment show asg_da1585e0` answered `not_found` with `candidates: []` about an assignment that exists, and `message show`, `request show` and `checkin show` refused any short ID.
+
+- **The doors:** `task show`, `assignment show`, `message show`, `message receipt`, `message wait`, `request show` and `checkin show`.
+- **A prefix:** the ID's tag and at least 8 of its 32 lowercase hex digits (`wi_`, `asg_`, `msg_`, `ck_`), or a request UUID's first 8 or more characters, dashes in place. A shorter one is `invalid_argument` (exit 2), never "not found".
+- **One match:** the door reads that record and says so. `data.resolved_from_prefix` names the prefix and the full ID, and the text output ends `resolved from prefix PREFIX: FULL_ID`. Only a record the caller could read by its full ID counts: the fleet's tasks, assignments, retained requests and check-ins, and the messages the caller sent or received (for an operator, the selected fleet's).
+- **Several:** `ambiguous_reference` (exit 4), and none is read. The hint lists up to 20 candidates, each with the command that reads it; `total_matches` counts them all.
+- **None:** `not_found` (exit 3), and the message says no record starts with the prefix. A hint's `total_matches: 0` now always follows a search by prefix.
+- **What a prefix costs:**
+  - task and assignment: one pass over the fleet's tasks, which the door already reads;
+  - message: one range seek on the message key, at most 65 rows; past 64 the door refuses rather than choose;
+  - check-in: the full-ID read's own query, with a range on the check-in's reference in place of equality (the same query plan), returning at most 65 rows;
+  - request: one listing of the fleet's request directory, which grows with the fleet's request history.
+- **Mutations stay canonical:** the query owners resolve a prefix only when a read door asks. Every write (`task assign`, `assignment accept`, `assignment deliver` and the rest) and `message reply`'s parent still take the full ID.
+- **Tests:** `tests/test_id_prefix_reads.py` drives each door's query owner against real SQL and request files: a unique, an ambiguous, a missing and a too-short prefix, a wrong-kind prefix, the message read's query plan and its bound, and the writers' canonical reads. `tests/test_id_prefix_cli.py` checks the same four answers for each door through the public CLI, and that the reads leave the plane unchanged.
+- **Not in this change:** the skills that write handoffs and briefs should write full IDs. That is a library change for later.
+
 ### Fixed — `assignment show` names the delivery: its message, attempts and receipt (#2379)
 
 `assignment deliver` records its message as a communication linked to the

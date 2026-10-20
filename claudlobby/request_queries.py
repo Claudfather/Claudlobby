@@ -19,6 +19,7 @@ from uuid import UUID
 from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.schema_state import require_current_schema
+from .reference_hints import PREFIX_HINT_LIMIT, PREFIX_MIN_HEX, PrefixCandidate, PrefixHint, uuid_shape
 from .request_facts import FactProof, reconcile_facts
 from .request_receipts import (ExpectedFact, MessageRouteBinding, ReceiptError,
                                TransportObservation, _regular, decode_receipt)
@@ -40,9 +41,25 @@ class RequestInvalidArgumentError(RequestQueryError):
 class RequestNotFoundError(RequestQueryError):
     code = "not_found"
 
-    def __init__(self):
-        self.hint = _MISSING_HINT
-        super().__init__("no retained request record for this fleet")
+    def __init__(self, prefix: str | None = None):
+        if prefix is None:
+            self.hint = _MISSING_HINT
+            super().__init__("no retained request record for this fleet")
+            return
+        # A search by prefix ran and found none (#2380).
+        self.hint = PrefixHint(prefix, (), 0, None)
+        super().__init__(f"no retained request record in this fleet starts with {prefix}; "
+                         "this cannot prove that no earlier best-effort message was sent")
+
+
+class RequestAmbiguousError(RequestQueryError):
+    """A prefix names several retained requests; none is chosen (#2380)."""
+    code = "ambiguous_reference"
+
+    def __init__(self, prefix: str, matches: list[str]):
+        self.hint = PrefixHint(prefix, tuple(PrefixCandidate(request_id, ("request", "show", request_id))
+                                             for request_id in matches[:PREFIX_HINT_LIMIT]), len(matches), None)
+        super().__init__(f"{len(matches)} retained requests start with {prefix}; select a canonical request ID")
 
 
 class RequestUnavailableError(RequestQueryError):
@@ -88,14 +105,19 @@ class RequestView:
     transmissions: tuple[RecordedTransmission, ...]
 
 
-def _scope(root: Path, fleet_uid: str, request_id: str) -> Path:
+def _scope(root: Path, fleet_uid: str, request_id: str, prefix: bool = False) -> Path:
     if not isinstance(fleet_uid, str) or not re.fullmatch(ID_PATTERNS["fleet"], fleet_uid):
         raise RequestInvalidArgumentError("selected fleet requires a canonical fleet identity")
     try:
         if not isinstance(request_id, str) or str(UUID(request_id)) != request_id:
             raise ValueError("noncanonical request ID")
     except (TypeError, ValueError, AttributeError) as exc:
-        raise RequestInvalidArgumentError("request ID must be a canonical UUID") from exc
+        shape = uuid_shape(request_id) if prefix else None
+        if shape == "short":
+            raise RequestInvalidArgumentError(
+                f"a request ID prefix needs at least its first {PREFIX_MIN_HEX} hex digits") from exc
+        if shape != "prefix":
+            raise RequestInvalidArgumentError("request ID must be a canonical UUID") from exc
     path = Path(root)
     if not path.is_absolute():
         raise RequestInvalidArgumentError("selected request root must be absolute")
@@ -107,16 +129,49 @@ def _scope(root: Path, fleet_uid: str, request_id: str) -> Path:
     return path
 
 
+def _requests_dir(stack: ExitStack, root: Path, fleet_uid: str) -> int:
+    """The fleet's request directory, no component followed through a symlink."""
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    stack.callback(os.close, directory)
+    for part in ("state", "requests", fleet_uid):
+        directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+        stack.callback(os.close, directory)
+    return directory
+
+
+def _resolve_prefix(root: Path, fleet_uid: str, prefix: str) -> str:
+    """The one retained request of this fleet whose ID starts with `prefix` (#2380).
+
+    One listing of the fleet's request directory, which grows with its request
+    history: nothing followed, created or read beyond the names.
+    """
+    matches = []
+    try:
+        with ExitStack() as stack, os.scandir(_requests_dir(stack, root, fleet_uid)) as entries:
+            for entry in entries:
+                name = entry.name
+                if (name.startswith(prefix) and name.endswith(".json")
+                        and uuid_shape(name[:-len(".json")]) == "canonical"):
+                    matches.append(name[:-len(".json")])
+    except FileNotFoundError as exc:
+        raise RequestNotFoundError(prefix) from exc
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise RequestQueryError("retained request path is redirected or not a directory") from exc
+        raise RequestUnavailableError("retained request records are unavailable") from exc
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise RequestAmbiguousError(prefix, sorted(matches))
+    raise RequestNotFoundError(prefix)
+
+
 def _read_receipt(root: Path, fleet_uid: str, request_id: str):
     """Follow no request-path symlinks, provision nothing, and bound the read."""
     try:
         with ExitStack() as stack:
-            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            stack.callback(os.close, directory)
-            for part in ("state", "requests", fleet_uid):
-                directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                    dir_fd=directory)
-                stack.callback(os.close, directory)
+            directory = _requests_dir(stack, root, fleet_uid)
             fd = os.open(f"{request_id}.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                          dir_fd=directory)
             with os.fdopen(fd, "rb") as stream:
@@ -152,9 +207,15 @@ def _proof(conn: sqlite3.Connection | None, facts: tuple[ExpectedFact, ...]) -> 
         return FactProof("unknown", "retained fact projection cannot prove recording")
 
 
-def read_request(root: Path, fleet_uid: str, request_id: str) -> RequestView:
-    """Inspect one selected-fleet receipt and exact facts without writing state."""
-    root = _scope(root, fleet_uid, request_id)
+def read_request(root: Path, fleet_uid: str, request_id: str, *, prefix: bool = False) -> RequestView:
+    """Inspect one selected-fleet receipt and exact facts without writing state.
+
+    With `prefix` (the public read door, #2380), the one retained request of
+    the fleet that a prefix names also resolves.
+    """
+    root = _scope(root, fleet_uid, request_id, prefix)
+    if uuid_shape(request_id) == "prefix":
+        request_id = _resolve_prefix(root, fleet_uid, request_id)
     receipt = _read_receipt(root, fleet_uid, request_id)
     conn = None
     try:
