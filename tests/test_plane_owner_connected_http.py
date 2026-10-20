@@ -1,7 +1,9 @@
 """Actual canonical reads/crypto over synthetic current native authority."""
 import asyncio
+import contextlib
 import json
 import sqlite3
+import threading
 import time
 import types
 
@@ -64,25 +66,57 @@ def login(client, fixture):
 
 
 async def bounded(awaitable, what, state, seconds=5):
-    """Wait at most `seconds`, so a wait that cannot end fails with its state (#2388)."""
+    """Wait at most `seconds` of real time, so a wait that cannot end fails with its
+    state, read before the wait is cancelled (#2388, #2406). Real time, because
+    move_clock's paused() stops the loop's own timers."""
+    task = asyncio.ensure_future(awaitable)
+    expired = threading.Event()
+    timer = asyncio.get_running_loop().run_in_executor(None, expired.wait, seconds)
     try:
-        return await asyncio.wait_for(awaitable, seconds)
-    except asyncio.TimeoutError:
-        raise AssertionError(f"waited {seconds} s for {what}: {state()}") from None
+        await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
+        if not task.done():
+            raise AssertionError(f"waited {seconds} s for {what}: {state()}")
+        return task.result()
+    finally:
+        # Not awaited: returning a thread hop later would give other tasks time to
+        # finish work that a check after this wait should still find pending (#2406).
+        expired.set()
+        timer.cancel()
+        task.cancel()
+
+
+def status(task):
+    """pending, done or cancelled: a cancelled task is done() as well (#2406)."""
+    return "cancelled" if task.cancelled() else "done" if task.done() else "pending"
 
 
 def move_clock(monkeypatch, module):
-    """Put the event loop's timers and the module's deadline reads on one clock,
-    real time plus an offset. The returned advance(seconds) adds to the offset,
-    so a deadline passes where the scenario says, not where a stall puts it (#2388)."""
-    offset = [0.0]
+    """Put the event loop's timers and `module`'s time.monotonic() on one clock, real
+    time plus an offset. Only that module's monotonic moves: its other `time`
+    attributes are the real ones, and owner_connected_http's own `time` (the read and
+    preflight deadlines) does not move. advance(seconds) adds to the offset, so a
+    deadline passes where the scenario says, not where a stall puts it (#2388).
+    Inside paused() the clock stands still. Past its deadline the answer needs no
+    clock time, nor the drain beyond the work it waits for, so one that needs some
+    (an answer 1.5 s late, a drain 2 s late) never ends and fails its bound; a stall
+    shorter than the bound cannot fail it (#2406)."""
+    offset, still = [0.0], [None]
     def now():
-        return time.monotonic() + offset[0]
+        return (time.monotonic() if still[0] is None else still[0]) + offset[0]
+    clock = types.SimpleNamespace(**vars(time))
+    clock.monotonic = now
     monkeypatch.setattr(asyncio.get_running_loop(), "time", now)
-    monkeypatch.setattr(module, "time", types.SimpleNamespace(monotonic=now))
+    monkeypatch.setattr(module, "time", clock)
     def advance(seconds):
         offset[0] += seconds
-    return advance
+    @contextlib.contextmanager
+    def paused():
+        still[0] = time.monotonic()
+        try:
+            yield
+        finally:
+            still[0] = None
+    return advance, paused
 
 
 def test_actual_crypto_read_profile_status_canonical_reads_and_cookie_separation(connected_http):
@@ -233,7 +267,9 @@ def test_real_canonical_sse_stops_after_revocation_without_next_chunk(connected_
             frames.append(message)
             if message["type"] == "http.response.body" and message.get("more_body"):
                 identity[0] = type(OWNER)(OWNER.namespace, "1002")
-        await asyncio.wait_for(app.connected_reads(scope, receive, send), 5)
+        def state():
+            return f"sent={[m.get('status', m['type']) for m in frames]}, readers={len(app.connected_reads._readers)}"
+        await bounded(app.connected_reads(scope, receive, send), "the stream to stop", state)
     asyncio.run(run())
     bodies = [m for m in frames if m["type"] == "http.response.body"]
     assert bodies[0]["body"] == b"retry: 3000\n\n"
@@ -264,7 +300,7 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
     import claudlobby.plane.owner_workspace_http as module
     consumer = connected_http[0].connected_reads
     async def scenario():
-        advance = move_clock(monkeypatch, module)
+        advance, paused = move_clock(monkeypatch, module)
         entered, release = asyncio.Event(), asyncio.Event()
         original = module.run_in_threadpool
         async def delayed(fn, *args, **kwargs):
@@ -284,17 +320,18 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
             output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
         def state():
-            return (f"request done={request.done()}, sent={[m.get('status', m['type']) for m in output]}, "
+            return (f"request={status(request)}, sent={[m.get('status', m['type']) for m in output]}, "
                     f"workers={len(consumer._workers)}, operations={len(consumer._operations)}")
         await bounded(entered.wait(), "the first threadpool call", state)
         # Its deadline passes now that the call is queued. A 30 ms wall-clock
         # deadline could fire first on a stalled loop, and then nothing set
         # `entered` and this wait never ended (#2388).
         advance(consumer.response_seconds(scope))
-        await bounded(request, "the response", state)
-        assert output[0]["status"] == 503, state()
-        release.set()
-        await bounded(consumer.shutdown(), "shutdown", state)
+        with paused():  # the answer is due now, and the drain once released (#2406)
+            await bounded(request, "the response", state)
+            assert output[0]["status"] == 503, state()
+            release.set()
+            await bounded(consumer.shutdown(), "shutdown", state)
         assert not consumer._workers and not consumer._operations
         with sqlite3.connect(connected_http[1].path) as conn:
             assert conn.execute("SELECT count(*) FROM connected_challenges").fetchone()[0] == 0
@@ -302,18 +339,17 @@ def test_queued_deadline_no_nonce_late_effect_and_shutdown_drains(connected_http
 
 
 def test_started_work_retains_capacity_after_timeout_until_drained(connected_http, monkeypatch):
-    import threading
     import claudlobby.plane.owner_workspace_http as module
     consumer = connected_http[0].connected_reads
     entered, release = threading.Event(), threading.Event()
     original = consumer.connected.begin
     def held(principal):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(3), "waited 3 s for the scenario to release begin"
         return original(principal)
     monkeypatch.setattr(consumer.connected, "begin", held)
     async def scenario():
-        advance = move_clock(monkeypatch, module)
+        advance, paused = move_clock(monkeypatch, module)
         scope = {"type": "http", "method": "POST", "path": PREFIX + "challenge", "query_string": b"",
             "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()),
                 (b"content-type", b"application/json"), (b"x-claudlobby-owner", b"1")]}
@@ -324,17 +360,19 @@ def test_started_work_retains_capacity_after_timeout_until_drained(connected_htt
             output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
         def state():
-            return (f"request done={request.done()}, sent={[m.get('status', m['type']) for m in output]}, "
+            return (f"request={status(request)}, sent={[m.get('status', m['type']) for m in output]}, "
                     f"workers={len(consumer._workers)}, operations={len(consumer._operations)}")
         assert await asyncio.to_thread(entered.wait, 5), "waited 5 s for begin to start: " + state()
         advance(consumer.response_seconds(scope))  # its deadline passes while begin runs (#2388)
-        await bounded(request, "the response", state)
+        with paused():  # the answer is due now (#2406)
+            await bounded(request, "the response", state)
         assert output[0]["status"] == 503 and len(consumer._workers) == 1, state()
         draining = asyncio.create_task(consumer.shutdown())
         await asyncio.sleep(.01)
         assert not draining.done()  # started transaction is still owned
         release.set()
-        await bounded(draining, "shutdown", state)
+        with paused():  # the drain ends with begin (#2406)
+            await bounded(draining, "shutdown", state)
         assert not consumer._workers and not consumer._operations
         with sqlite3.connect(connected_http[1].path) as conn:
             assert conn.execute("SELECT count(*) FROM connected_challenges").fetchone()[0] == 1
@@ -413,7 +451,9 @@ def test_head_stream_uses_actual_bounded_canonical_producer_and_zero_asgi_body(c
             await asyncio.Event().wait()
         async def send(message):
             frames.append(message)
-        await asyncio.wait_for(app.connected_reads(scope, receive, send), 2)
+        def state():
+            return f"sent={[m.get('status', m['type']) for m in frames]}, readers={len(app.connected_reads._readers)}"
+        await bounded(app.connected_reads(scope, receive, send), "the HEAD stream", state, seconds=2)
         assert not app.connected_reads._readers
     asyncio.run(run())
     assert frames[0]["status"] == 200
@@ -467,7 +507,7 @@ def test_shutdown_cancelled_owned_stream_does_not_escape_request(connected_http,
             output.append(message)
         request = asyncio.create_task(consumer(scope, receive, send))
         def state():
-            return (f"request done={request.done()}, sent={[m.get('status', m['type']) for m in output]}, "
+            return (f"request={status(request)}, sent={[m.get('status', m['type']) for m in output]}, "
                     f"readers={len(consumer._readers)}")
         await bounded(entered.wait(), "the read app to start", state)
         await bounded(consumer.shutdown(), "shutdown", state)
@@ -511,7 +551,7 @@ def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_
             pass
         request = asyncio.create_task(consumer(scope, receive, send))
         def state():
-            return f"request done={request.done()}, readers={len(consumer._readers)}, stopping={consumer._stopping}"
+            return f"request={status(request)}, readers={len(consumer._readers)}, stopping={consumer._stopping}"
         await bounded(entered.wait(), "the read app to start", state)
         release = asyncio.Event()
         if stopping:
