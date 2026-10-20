@@ -171,6 +171,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "worker_unassigned": "notice",
     "pane_stuck": "notice",
     "wip_uncommitted": "notice",
+    # #2332: a browser outside a render scope, pushed to the manager once; a report,
+    # never a fault the pulse can fix, and the pulse never stops it.
+    "browser_outside_render": "notice",
     "send_miss": "notice",
     "send_retry": "notice",
     "send_blind": "notice",
@@ -231,6 +234,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "session_summary": "notice",
     # Record only; the independent alert door pages and records fleet_alert.
     "export_stalled": "notice",
+    # One Claude Code compaction, from its compact_boundary transcript row,
+    # recorded once by the pulse (claudlobby.compactions, #2206).
+    "compaction": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.
@@ -241,13 +247,18 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hold whose holder died without a release (across_reset: it was running
     # when the host reset, #1644's evidence), a heavy-looking command the
     # matcher would not parse, and (#2124) a queue ticket dropped because its
-    # holder stayed silent once a slot was free. The record, never a page.
+    # holder stayed silent once a slot was free, and (#2221) a render the
+    # render profile killed (at a stop line, its time limit, a signal, or by
+    # its keeper when the runner died) and a render hold lifted, with who
+    # lifted it. The record, never a page.
     "heavy_slot_acquired": "notice",
     "heavy_slot_released": "notice",
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
     "heavy_slot_ticket_dropped": "notice",
+    "heavy_slot_stopped": "notice",
+    "heavy_slot_hold_lifted": "notice",
     # The public-write guard: a refused GitHub-bound write (the record), and an
     # armed guard that found no host list. That one is critical because the
     # protection someone armed is off until the list is written: it shows in

@@ -258,6 +258,23 @@ python3 "$LIB_DIR/dispatch-overdue.py" --all --fleet "$fleet" \
 python3 "$LIB_DIR/dispatch-overdue.py" --orphans --fleet "$fleet" \
     --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 
+# --- Pre-sweep: compactions (#2206), once, not per bot ---
+# Each bot's Claude Code compactions go onto the plane as `compaction` events,
+# once each, through the CLI door: it reads only what each transcript appended
+# since its cursor in the fleet's state. A refusal is reported here and retried
+# next pass (no cursor moved); it never stops the sweep. It runs in a subshell
+# with no ERR trap and no errexit: on macOS the escalation page went missing in
+# the harness only while this step ran unisolated, so whatever a shell does with
+# a failure in there (bash 3.2 included) costs this step and nothing after it.
+_compactions_err=$(safe_mktemp)
+_compactions_rc=0
+( trap - ERR; set +e
+  claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" --json fleet compactions record ) \
+    >/dev/null 2>"$_compactions_err" || _compactions_rc=$?
+if [ "$_compactions_rc" -ne 0 ]; then
+    echo "fleet-pulse: compactions not recorded (rc=${_compactions_rc}): $(tail -c 300 "$_compactions_err" 2>/dev/null | tr '\n' ' ' || true)" >&2
+fi
+
 
 # --- ONE send-and-disclose primitive for every debounced reader-outage page
 # (the fold's F7): `_overdue_page`, `_events_page` and `_esc_task_page` were
@@ -1196,6 +1213,88 @@ _task_escalations() {
 }
 _task_escalations || true
 
+# --- Browsers outside a render scope (#2332) ----------------------------------
+# A browser that a bot session opened on the host's desktop (a login CLI, an
+# Artifact preview, `claudlobby plane open`) ran on long after the command:
+# the worst for 4.7 h holding 867 MiB, each case found by hand. This leg
+# REPORTS such a browser and never stops one. browser-scan.py reads /proc
+# (Linux; elsewhere it finds nothing) and lists each browser older than
+# _BROWSER_AGE_S that is not in a heavy-slot render scope, with the bot whose
+# session started it, found by parent link even after the browser moved itself
+# out of that bot's unit.
+#
+# ONE REPORT PER BROWSER ON THE HOST, never one per fleet. The scan gets every
+# fleet's bot units (each fleet's bots, by BOT_SERVICE), so a fleet reports the
+# browsers its own bots started, a browser another fleet's bot started is that
+# fleet's, and a browser no bot started is reported by the host's first fleet
+# by name. Each is pushed to the manager once, keyed by its pid and start time
+# in this fleet's own seen-file (`<fleet>.browsers`, the escalation file's
+# shape), and recorded as `browser_outside_render`. A key is kept only once the
+# push went through, a scan that fails touches no key, and a browser that has
+# gone drops its key.
+_BROWSER_AGE_S=900
+_browser_seen="$state_dir/${fleet}.browsers"
+_BROWSER_SUMMARY=""
+_browsers_outside_render() {
+    local _units=() _first="" _f _fpath _bd _b _label _rows _seen _key _keep _m _rc
+    local _pid _start _age _procs _pss _owner _unit _name _obot _bot_dir _who _data _msg
+    while IFS="$(printf '\t')" read -r _f _fpath; do
+        [ -n "$_f" ] || continue
+        [ -n "$_first" ] || _first="$_f"
+        _bd=$(resolve_bots_dir "$_f" 2>/dev/null || true)
+        [ -d "$_bd" ] || continue
+        for _b in "$_bd"/*/; do
+            [ -f "$_b/bot.conf" ] || continue
+            _label=$(bot_conf_get "$_b" BOT_SERVICE "")
+            [ -n "$_label" ] && _units+=(--unit "$_label=$_f/$(basename "$_b")")
+        done
+    done < <(discover_fleet_manifests 2>/dev/null | LC_ALL=C sort)
+    [ -n "$_first" ] || _first="$fleet"
+    _rows=$(safe_mktemp)
+    if ! python3 "$LIB_DIR/browser-scan.py" --pattern "$BROWSER_EXE_PATTERN" --min-age "$_BROWSER_AGE_S" \
+            ${_units[@]+"${_units[@]}"} > "$_rows"; then
+        echo "fleet-pulse: browser-scan.py failed; browsers not judged this sweep and no key touched" >&2
+        return 0
+    fi
+    _seen=$(safe_mktemp)
+    while IFS="$(printf '\t')" read -r _pid _start _age _procs _pss _owner _unit _name; do
+        case "$_pid$_start$_age$_procs$_pss" in ''|*[!0-9]*) continue ;; esac
+        case "$_owner" in
+            "$fleet"/*) _obot="${_owner#*/}"; _bot_dir="$BOTS_DIR/$_obot"; _who="$_obot's session started it" ;;
+            -) [ "$fleet" = "$_first" ] || continue
+               _obot=""; _bot_dir="${_current_bot_dir:-}"; _who="no bot started it" ;;
+            *) continue ;;
+        esac
+        _key="$_pid-$_start"
+        printf '%s\n' "$_key" >> "$_seen"
+        _BROWSER_SUMMARY="$_BROWSER_SUMMARY $_name pid $_pid ($(( _age / 60 )) min, $_pss MiB, ${_obot:-no bot});"
+        grep -qxF "$_key" "$_browser_seen" 2>/dev/null && continue
+        _data=$(printf '{"pid":%s,"start":%s,"age_s":%s,"processes":%s,"pss_mib":%s,"owner":%s,"unit":"%s","name":"%s"}' \
+            "$_pid" "$_start" "$_age" "$_procs" "$_pss" \
+            "$( [ -n "$_obot" ] && printf '"%s"' "$(json_escape "$_obot")" || printf null )" \
+            "$(json_escape "$_unit")" "$(json_escape "$_name")")
+        if [ -n "$_obot" ]; then
+            emit_fleet_event "browser_outside_render" "pulse" "$_data" "$_bot_dir" "$_obot"
+        else
+            emit_fleet_event "browser_outside_render" "pulse" "$_data" "" fleet
+        fi
+        _msg="browser_outside_render — $_name pid $_pid has run $(( _age / 60 )) min outside a render scope ($_procs processes, $_pss MiB); $_who (cgroup $_unit). The pulse never stops it: find what opened it and close it there, never by name."
+        _rc=0
+        notify_manager "$_bot_dir" "$_msg" || _rc=$?
+        [ "$_rc" -eq 0 ] && printf '%s\n' "$_key" >> "$_browser_seen"
+    done < "$_rows"
+    if [ -s "$_browser_seen" ]; then
+        _keep=$(safe_mktemp)
+        while IFS= read -r _m; do
+            [ -n "$_m" ] || continue
+            grep -qxF "$_m" "$_seen" 2>/dev/null && printf '%s\n' "$_m" >> "$_keep"
+        done < "$_browser_seen"
+        mv "$_keep" "$_browser_seen"
+    fi
+    return 0
+}
+_browsers_outside_render || true
+
 if [ -n "$_ESCALATION_CHAT_ID" ]; then
     # Compute window start (portable: GNU date then BSD date fallback)
     _window_start=$(date -d "-${_ESCALATION_WINDOW} minutes" +%Y-%m-%dT%H:%M 2>/dev/null || \
@@ -1369,6 +1468,7 @@ _summary_tmp=$(safe_mktemp)
         _s_alerts="${_s_alerts:- none}"
         printf "%-12s %-8s %-18s %s\n" "$_s_bid" "$_s_session_status" "$_s_svc_status" "$_s_alerts"
     done
+    [ -z "$_BROWSER_SUMMARY" ] || printf "Browsers outside a render scope:%s\n" "$_BROWSER_SUMMARY"
 } > "$_summary_tmp" && mv "$_summary_tmp" "$_summary_file"
 _events_reader_guard || true
 

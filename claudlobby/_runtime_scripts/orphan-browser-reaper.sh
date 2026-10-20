@@ -55,11 +55,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
-# Anchored alternatives over the executable BASENAME, so `chrome-notes.sh` or a
-# checkout named `playwright-tests` is not a browser. `headless_shell` is what
-# recent Playwright actually execs; the crashpad handlers are the stragglers that
-# outlive a browser crash.
-DEFAULT_PATTERN='^(chromium|chromium-browser|chrome|google-chrome|google-chrome-stable|Google Chrome|Google Chrome Helper|chrome_crashpad_handler|crashpad_handler|headless_shell|playwright|playwright.sh|msedge|Microsoft Edge)$'
+# Anchored alternatives over the executable BASENAME: lib-common's
+# BROWSER_EXE_PATTERN, the one list of browser names, which fleet-pulse's
+# browser check reports by too (#2332).
+DEFAULT_PATTERN="$BROWSER_EXE_PATTERN"
 
 # Parents that mean "nothing owns this any more": init/launchd (pid 1) and the
 # subreapers that adopt in its place, a bot session's own among them (#2158).
