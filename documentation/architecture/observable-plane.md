@@ -1374,6 +1374,23 @@ identity triggers one coalesced refresh after publication so a channel response
 that arrived before later-admitted ownership cannot leave task links missing.
 Stable routing identities and endpoint errors never trigger that refresh.
 
+### Connected session continuity
+
+Host session expiry remains fixed at 15 minutes. The connected client renews an
+unexpired session through the existing endpoint in its final two minutes only
+while the view is visible and trusted user input occurred within five minutes.
+Keyboard, pointer, input and user wheel/touch movement count; polling, stream
+traffic and programmatic events do not. Returning to the view or providing input
+inside the warning window rechecks eligibility. Manual **Keep connected** remains
+available. An uncertain renewal requires an explicit connection check; it is not
+automatically replayed, and an expired/revoked session requires **Connect**.
+
+Renewal waits for an in-flight action to finish, fences replies using the old
+bearer and never resends an action. Explicit disconnect during rotation signs out
+the new token before it can publish a ready session. Existing unsent drafts stay
+in memory in the open view and return only with matching freshly admitted action
+context; neither this continuity policy nor draft retention creates authority.
+
 ### Connected action admission
 
 The opt-in connected factory exposes finite POST context/prepare/send/receipt at `/api/owner/connected/actions/`. It reuses the canonical OwnerActions engines and existing message, nudge and feedback adapters. Exact trusted Host/operational Origin, bearer-only credentials (no cookies), a fresh current native owner and admitted source are required. The current connected session/full workspace binding and the specific local fleet grant are admitted together in one owner-authority read snapshot; every context, effect, inspection and closing response rechecks them. Direct cookie authorizers remain direct-only. Connected context hashes include the full binding revision/generation and remain stable across session renewal; direct context bytes stay unchanged. Grants are principal/fleet-specific, not workspace-specific. A locally approved workspace alone grants no action; existing explicit allow-messages/allow-nudges/allow-feedback capabilities can be used by that owner's direct access or explicitly bound connected workspace. Browser requests never register actors or grant capabilities.

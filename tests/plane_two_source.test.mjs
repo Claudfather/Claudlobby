@@ -273,6 +273,50 @@ test('interleaved endpoint failures stay local while app paints healthy peer wit
   assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
   facade.close();api.dispose();
 });
+test('slow overview still paints under continuous stream traffic and queues only one trailing board read',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);
+  h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.openStream();
+  const held=deferred();
+  for(const source of [a,b])source.routes.set('/api/overview',held.promise);
+  const reading=h.c.refreshBoards();
+  await new Promise(r=>setImmediate(r));
+  let fired=0;
+  for(let i=0;i<4;i++) {
+    a.streams[0].onmessage({data:JSON.stringify({rows:[{family:'task',ingest_seq:i}]})});
+    const timers=h.callbacks.filter(x=>x.ms===400);
+    if(timers.length>fired)timers[fired++].cb();
+    await new Promise(r=>setImmediate(r));
+  }
+  assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,1);
+  held.resolve(roster('team'));
+  await reading;await new Promise(r=>setImmediate(r));
+  assert.equal(h.paints.length,2,'the completed board paints despite incoming ordinary events');
+  const trailing=h.callbacks.filter(x=>x.ms===400).at(-1);
+  trailing.cb();
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,2);
+  assert.equal(h.paints.length,4);
+  api.dispose();
+});
+test('fleet selection immediately retires the held board before the queued new-room refresh',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);
+  const {runInNewContext}=await import('node:vm');
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',$:()=>({hidden:true})});
+  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('const STATUS_DOT')),h.c);
+  h.c.fleetsSeen=true;h.c.currentFleet='all';
+  const held=deferred();for(const source of [a,b])source.routes.set('/api/overview',held.promise);
+  const reading=h.c.refreshBoards();await new Promise(r=>setImmediate(r));
+  h.c.pickFleet('a / team');
+  held.resolve(roster('team'));await reading;await new Promise(r=>setImmediate(r));
+  assert.equal(h.paints.length,0,'the old room cannot paint after the selected room changed');
+  assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,1,'new room waits for the active batch');
+  const trailing=h.callbacks.filter(x=>x.ms===400).at(-1);assert.ok(trailing);
+  trailing.cb();await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.ok(a.calls.some(c=>c.url==='/api/channel?limit=120&fleet=team'));
+  assert.equal(h.paints.length,2);
+  api.dispose();
+});
 test('board assignment history and last event use the same qualified references as current assignment',async()=>{
   const {api,a}=await pair(),asg='asg_'+'5'.repeat(32),ev='evt_'+'6'.repeat(32);
   a.routes.set('/api/tasks',ok({tasks:[{task_id:wi,fleet:'team',fleet_uid:fleet,current_assignment:{assignment_id:asg},assignment_history:[{assignment_id:asg,assignee_uid:actor,dispatch_message_id:'msg_'+'7'.repeat(32),terminal_event:{event_id:ev,assignment_id:asg,actor_uid:actor}}],last_event:{event_id:ev,assignment_id:asg,actor_uid:actor}}],issues:[],issue_count:0,attention_count:0}));

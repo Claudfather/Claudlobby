@@ -523,6 +523,7 @@ test('reused local pending UUID cannot start a send or clear its earlier row', a
 test('paused action context preserves selected team and does not fetch grants', async () => {
   const rooms=[]; const h=harness({interactionContext(room){rooms.push(room);return context;}});
   h.loop.setRoom('web'); await settle();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
   h.get('work-body').value='Kept';h.get('work-body').emit('input');
   h.loop.pause(); await settle();
   assert.deepEqual(rooms,['web']);
@@ -531,6 +532,9 @@ test('paused action context preserves selected team and does not fetch grants', 
   assert.equal(h.get('work-send').disabled,true);
   h.loop.setRoom('web');await settle();
   assert.equal(h.get('work-body').value,'Kept');
+  assert.equal(h.get('work-recipient').value,'worker');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  assert.doesNotMatch(h.storage.getItem('plane.pending-actions.v1') || '',/Kept/);
 });
 
 

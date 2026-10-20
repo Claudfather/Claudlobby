@@ -53,7 +53,7 @@ function dom() {
 }
 function harness(options={}) {
   const count=options.count??2,doc={...documentContext,references:options.references??refs.slice(0,count)},calls=[],timers=[],streams=[],overrides=new Map();
-  let metadata=context(doc.references),metadataStatus=200;
+  let metadata=context(doc.references),metadataStatus=200,time=0;
   const tokens=new Map(),receipts=new Map(), grants=new Set(['message','nudge','feedback']);
   const fetch=async(url,init)=>{
     calls.push({url,init});const u=new URL(url),path=u.pathname;
@@ -106,13 +106,31 @@ function harness(options={}) {
     throw new Error('Unexpected host route');
   };
   const ui=dom();const dependencies={documentContext:doc,documentOrigin:doc.operational_origin,fetch,
-    now:()=>1800000000,setTimeout(fn,ms){const t={fn,ms,active:true};timers.push(t);return t;},clearTimeout(t){if(t)t.active=false;},MutationObserver:ui.MutationObserver,...options.dependencies};
+    now:()=>1800000000,monotonicNow:()=>time,setTimeout(fn,ms){const t={fn,ms,active:true};timers.push(t);return t;},clearTimeout(t){if(t)t.active=false;},MutationObserver:ui.MutationObserver,...options.dependencies};
   const api=createConnectedWorkspace(dependencies);
   return {api,doc,ui,calls,timers,streams,overrides,dependencies,grants,receipts,
     get metadata(){return metadata;},set metadata(v){metadata=v;},set metadataStatus(v){metadataStatus=v;},
+    get time(){return time;},set time(v){time=v;},
     mount(callbacks={}){return api.mountSessionControls({document:ui.document,element:ui.get('owner-session'),...callbacks});},
     timer(ms){const t=timers.find(t=>t.active&&t.ms===ms);assert.ok(t);t.active=false;t.fn();}};
 }
+
+test('idle warning requires trusted visible input to renew and removes activity listeners on close',async()=>{
+  const h=harness({count:1});h.mount();await flush();await h.api.act(0,'connect');
+  h.time=780000;h.timer(780000);await flush();
+  const card=h.ui.get('owner-session').children.find(e=>e.className==='connection-card');
+  const detail=card.children.find(e=>e.className==='connection-detail');
+  assert.match(detail.textContent,/expires soon.*Keep connected/);
+  h.ui.listeners.get('input')({isTrusted:false});await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+  h.ui.document.visibilityState='hidden';h.ui.listeners.get('pointerdown')({isTrusted:true});await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);
+  h.ui.document.visibilityState='visible';h.ui.listeners.get('keydown')({isTrusted:true});h.timer(0);await flush();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
+  assert.doesNotMatch(detail.textContent,/expires soon/);
+  h.api.dispose();
+  for(const name of ['visibilitychange','pointerdown','keydown','input','wheel','touchmove'])assert.equal(h.ui.listeners.has(name),false);
+});
 
 test('fresh account admission precedes explicit host handshake; aggregate and outside-board detail use genuine core handles',async()=>{
   const h=harness();assert.equal(await h.api.checkAccount(),true);await flush();

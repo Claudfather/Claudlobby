@@ -26,7 +26,8 @@ const failure = (state = 'unavailable', remediation = 'Open this workspace again
 export function createConnectedWorkspace({ documentContext, documentOrigin = globalThis.location?.origin,
   fetch = globalThis.fetch.bind(globalThis), createClient = createConnectedReadClient,
   createTransport = createWorkspaceReadTransport, createEnrollment = createWorkspaceEnrollment, setTimeout = globalThis.setTimeout,
-  clearTimeout = globalThis.clearTimeout, now = () => Date.now() / 1000, MutationObserver = globalThis.MutationObserver } = {}) {
+  clearTimeout = globalThis.clearTimeout, now = () => Date.now() / 1000,
+  monotonicNow = () => globalThis.performance.now(), MutationObserver = globalThis.MutationObserver } = {}) {
   const validDocument = keys(documentContext, ['version', 'user_id', 'workspace_id', 'context_generation', 'shell_origin', 'operational_origin', 'references', 'expires_at'])
     && documentContext.version === 1 && [documentContext.user_id, documentContext.workspace_id, documentContext.context_generation].every(uuid)
     && origin(documentContext.shell_origin) && origin(documentContext.operational_origin)
@@ -134,8 +135,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         const row = {reference,key:'c-' + BigInt('0x' + reference.reference_id.replaceAll('-','')).toString(36), client:createClient({reference,
         documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
-        currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})};
+        currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options),
+        onContinuityChange:changed, monotonicNow, documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
+        row.client.activity?.({visible:mount?.document.visibilityState === 'visible'});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -307,7 +310,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       : phase === 'unavailable' ? 'Account check unavailable. No computer has been connected.'
       : phase === 'disposed' ? 'Workspace closed.'
       : accountUnavailable ? 'Account check unavailable. Existing computer sessions remain independent.'
-      : 'Connect each computer to view its teams.';
+      : 'Connect each computer to view its teams. Active use keeps connections alive. Unsent drafts stay in this open view.';
     controls.check.hidden = ['denied','disposed'].includes(phase);
     controls.check.disabled = controls.check.hidden;
     controls.check.setAttribute('aria-disabled', String(!!loading || controls.check.hidden));
@@ -342,10 +345,15 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,buttons,help,access} = controls;
       row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
+      const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
       const labels = {ready:'Connected',denied:'Not connected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
       label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${labels[status.state] || status.state}`;
-      detail.textContent = status.remediation || (status.state === 'denied'
+      detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
+        ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
+        : continuity?.warning && status.state === 'ready'
+        ? 'This connection expires soon. Use Keep connected to continue; active use renews it automatically.'
+        : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
         : '');
       access.hidden = status.state === 'ready';
@@ -379,10 +387,28 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const channel = document.getElementById('channel'); if (channel) observer?.observe(channel, {childList:true,subtree:true});
     const active = () => {
       clearTimeout(refreshTimer); refreshTimer = null;
+      for (const {client} of clients) client.activity?.({visible:document.visibilityState === 'visible'});
       if (document.visibilityState !== 'hidden') void checkAccount();
     };
+    let lastReadingInput = null;
+    const activity = event => {
+      if (!event.isTrusted) return;
+      if (['wheel','touchmove'].includes(event.type)) {
+        const time = monotonicNow();
+        if (lastReadingInput !== null && time - lastReadingInput < 1000) return;
+        lastReadingInput = time;
+      }
+      for (const {client} of clients)
+        client.activity?.({visible:document.visibilityState === 'visible',userInput:true});
+    };
     document.addEventListener('visibilitychange',active);
-    mount.cleanup = () => { document.removeEventListener('visibilitychange',active); observer?.disconnect(); }; void checkAccount();
+    const inputs = ['pointerdown','keydown','input','wheel','touchmove'];
+    for (const name of inputs) document.addEventListener(name,activity,true);
+    mount.cleanup = () => {
+      document.removeEventListener('visibilitychange',active);
+      for (const name of inputs) document.removeEventListener(name,activity,true);
+      observer?.disconnect();
+    }; void checkAccount();
     return {dispose};
   }
   function dispose() {

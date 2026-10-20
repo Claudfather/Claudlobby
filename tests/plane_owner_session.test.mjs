@@ -896,7 +896,7 @@ function inspectionHarness() {
       scrollIntoView() { this.scrolls++; } };
   }
   box = detail();
-  const state = { sessionPaused: false, sessionEpoch: 1, currentFleet: botIdentity.fleet, currentView: 'fleet',
+  const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: 'fleet',
     inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity, equipmentFocus: null,
     fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
     inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
@@ -995,6 +995,7 @@ test('initial fleet discovery cannot change a newer room or resumed session', as
   for (const reason of ['room', 'session']) {
     const reply = deferred(), adopted = [];
     const state = { sessionPaused: false, generation: 0, fleetsSeen: false,
+      refreshInFlight: false, refreshPending: false, refreshTimer: null, clearTimeout() {},
       jget: () => reply.promise, adoptFleets(value) { adopted.push(value); } };
     const pending = runInNewContext(`${refresh}\nrefreshBoards()`, state);
     state.generation++; if (reason === 'session') state.sessionPaused = true;
