@@ -19,9 +19,11 @@ from claudlobby.activation_enrollment import selected_bot_entry
 from claudlobby.activation_runtime import RuntimeEvidenceError
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units
+from tests.conftest import constructed_env
 from tests.package_fixtures import source_package
 from tests.test_activation import cold, tmp_path  # noqa: F401 — real short-root activation fixtures
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
+from tests.test_self_restart_handoff import _checkpointed, _stamp
 
 
 def test_private_control_uses_one_exact_native_send(tmp_path):
@@ -264,34 +266,89 @@ def test_a_late_handoff_is_read_against_the_request_the_door_recorded(tmp_path):
     assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "request_unreadable")
 
 
-def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path):
+def _worker_bot_dir(tmp_path):
     bot_dir = tmp_path / "runtime/bots/worker"
     (bot_dir / ".claude").mkdir(parents=True)
     (bot_dir / "bot.conf").write_text("BOT_ID=worker\nBOT_NAME=worker\nFLEET_NAME=example\n"
                                        "BOT_SERVICE=com.example.worker\nTMUX_SOCKET=com.example.worker\n")
+    return bot_dir
+
+
+def _pre_stop_handoff(tmp_path, bot_dir, *mode, cli=None):
+    script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/pre-stop-handoff.sh"
+    env = constructed_env(PATH="/usr/bin:/bin", HOME=tmp_path, TMPDIR=tmp_path, CLAUDLOBBY_ROOT=tmp_path)
+    if cli:
+        env["CLAUDLOBBY_CLI"] = str(cli)
+    return subprocess.run(["/bin/bash", str(script), str(bot_dir), *mode],
+                          env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path):
+    bot_dir = _worker_bot_dir(tmp_path)
     (bot_dir / ".claude/session.md").write_text("recent checkpoint\n")
     secret_env = bot_dir / ".tmux-env"
     secret_env.write_text("private launch values\n")
-    script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/pre-stop-handoff.sh"
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
-           "CLAUDLOBBY_ROOT": str(tmp_path), "PLANE_EMIT_DISABLED": "1"}
-    explicit = subprocess.run(["/bin/bash", str(script), str(bot_dir), "--explicit"],
-                              env=env, capture_output=True, text=True, timeout=10)
+    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit")
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() == "handoff-skipped:recent"
     assert secret_env.read_text() == "private launch values\n"
-    (bot_dir / ".claude/session.md").write_text(
-        "<!-- claudlobby first-adoption reference refresh begin -->\n"
-        "Canonical task references, not a session capture.\n")
-    reference_only = subprocess.run(["/bin/bash", str(script), str(bot_dir), "--explicit"],
-                                   env=env, capture_output=True, text=True, timeout=10)
-    assert reference_only.returncode == 0, reference_only.stderr
-    assert reference_only.stdout.strip() == "handoff-skipped:no-session"
-    assert secret_env.exists()
-    stopping = subprocess.run(["/bin/bash", str(script), str(bot_dir)],
-                              env=env, capture_output=True, text=True, timeout=10)
+    stopping = _pre_stop_handoff(tmp_path, bot_dir)
     assert stopping.returncode == 0, stopping.stderr
     assert not secret_env.exists()
+
+
+def _handoff_below_envelope(tmp_path, envelope, capture_age, written_age):
+    """A worker whose handoff, written `written_age` seconds ago, holds
+    activation's reference refresh envelope (#2094; `envelope` names its time
+    field, None writes none) above a capture `capture_age` seconds old, or above
+    text with no frontmatter when `capture_age` is None."""
+    bot_dir = _worker_bot_dir(tmp_path)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    if capture_age is None:
+        handoff = bot_dir / ".claude/session.md"
+        handoff.write_bytes(activation_handoffs._refresh_envelope(bot_dir, _stamp(now), field=envelope)
+                            + b"older context, no frontmatter\n")
+    else:
+        handoff, _ = _checkpointed(bot_dir, refreshed=now, captured=now - timedelta(seconds=capture_age),
+                                   field=envelope)
+    written = now.timestamp() - written_age
+    os.utime(handoff, (written, written))
+    return bot_dir
+
+
+@pytest.mark.parametrize("envelope, capture_age, written_age, with_cli, recent", [
+    pytest.param("references_refreshed", 10, 0, True, True, id="envelope-capture-10s"),
+    pytest.param("references_refreshed", 400, 0, True, False, id="envelope-capture-400s"),
+    pytest.param("references_refreshed", 10, 400, True, False, id="envelope-capture-10s-written-400s-ago"),
+    pytest.param("references_refreshed", None, 0, True, False, id="envelope-only"),
+    pytest.param("last_updated", None, 0, True, False, id="pre-2094-envelope-only"),
+    pytest.param("references_refreshed", 10, 0, False, False, id="no-reader"),
+    pytest.param(None, 400, 0, True, True, id="unmarked-written-now"),
+    pytest.param(None, 10, 400, True, False, id="unmarked-written-400s-ago"),
+])
+def test_explicit_handoff_is_recent_by_the_capture_below_the_refresh_envelope(
+        tmp_path, test_cli, envelope, capture_age, written_age, with_cli, recent):
+    """#2119 item 9(a): below activation's reference refresh, the capture's own
+    last_updated decides, read by the self-restart check (#2123), so a handoff
+    is recent when a self restart would accept it. An unmarked handoff is still
+    judged by the file's mtime. A capture that does not parse, or no reader, is
+    not recent."""
+    bot_dir = _handoff_below_envelope(tmp_path, envelope, capture_age, written_age)
+    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=test_cli if with_cli else None)
+    assert explicit.returncode == 0, explicit.stderr
+    # No session runs here: a handoff not read as recent would be sent to one.
+    assert explicit.stdout.strip() == ("handoff-skipped:recent" if recent
+                                       else "handoff-skipped:no-session"), explicit.stderr
+
+
+def test_stop_skips_by_the_age_of_the_capture_below_the_refresh_envelope(tmp_path, test_cli):
+    """The stop path names the capture's age, not the file's: written now, 30 s old."""
+    bot_dir = _handoff_below_envelope(tmp_path, "references_refreshed", 30, 0)
+    stopping = _pre_stop_handoff(tmp_path, bot_dir, cli=test_cli)
+    assert stopping.returncode == 0, stopping.stderr
+    said = stopping.stdout.strip()
+    assert said.startswith("Recent handoff exists (") and said.endswith(" seconds old), skipping"), said
+    assert 30 <= int(said.split("(", 1)[1].split()[0]) < 300, said
 
 
 @pytest.mark.parametrize("stalled, late_witness", [
