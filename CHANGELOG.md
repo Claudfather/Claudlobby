@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — no harness types into an input-box stand-in before its box is drawn, and a restarted stand-in comes up (#2139, #2405)
+
+The stand-in (`tests/fixtures/input-box-stub.py`) enters raw mode before it
+draws its box, and entering raw mode discards the keys typed before it, as a
+Claude Code session that has not drawn its box loses them. Two scenarios of
+`harness/validate-bot-change.sh` (the keepalive reload and the briefing
+trigger) and both arms of `harness/rehearse-vault-sync.sh` typed into a
+stand-in as soon as tmux returned, so a stand-in that started late failed
+them, or let the tty's echo of keys it never read count as an alert it was
+sent.
+
+A restart ended a stand-in's session and started the next one on the same
+socket at once. When the old session was its server's last, the start could
+reach that server while it exited, and tmux failed it ("server exited
+unexpectedly") with no session: on two macOS CI runs the held-push
+rehearsal's deaf manager never came up, and 13 checks failed after it.
+
+- **lib-common's `harness_box_up` and `harness_box_down`.** The first starts
+  a stand-in and returns once its box is drawn, or says why not; the second
+  ends a session and, when it was its server's last, waits for that server
+  to exit. Every stand-in the harnesses start or restart goes through them.
+- **A manager that does not come up ends a rehearsal at that step, as one
+  failure**, and the wrapper's tests for the steps after it skip, naming it.
+  In `validate-bot-change.sh` it refuses the checks after it in its scenario.
+- **`INPUT_BOX_START_DELAY` starts the stand-in late**: the test seam, which
+  the debounce rehearsal's slow arm uses.
+- **`harness/rehearse-vault-sync.sh` counts the alerts each manager was
+  submitted from the stand-in's log**, not from its pane.
+
 ### Fixed — an unacknowledged report read starts at the viewer's read position (#2378)
 
 `fleet reports list --unacknowledged` built every report its fleet had ever
