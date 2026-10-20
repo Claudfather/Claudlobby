@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Printify: the integration is the direct API, and the MCP fragment is deprecated
+
+`library/integrations/printify.md` described the Printify MCP server and granted its ten read tools. It now describes the Printify v1 REST API, reached through the `printify` skill.
+
+- **`library/integrations/printify.md` is `type: cli`.** Its tool is the `printify` skill (`printify_api.sh`): reads, and draft-first writes that never auto-publish. Its `env_contract` is unchanged (`PRINTIFY_API_KEY`, `PRINTIFY_SHOP_ID`), it grants no `mcp__printify__` tool, and the forked-MCP section is gone. `library/skills/printify/mcp-vs-api.md` says to use the API.
+- **The skill grants its reads.** `status`, `products`, `product`, `orders`, `order`, `raw` and `help` run without a prompt when called as `.claude/skills/printify/printify_api.sh <command>` from the bot directory; `create`, `migrate` and `publish` ask. A call written with `"$BOT_DIR/…"` asks every time: measured on Claude Code 2.1.281, a command that contains a `$VARIABLE` is allowed only by an exact-text rule.
+- **`library/mcp/printify.json` is deprecated, not removed.** A bot that lists `mcp: [printify]` composes as before: the server runs, the fragment's `_permissions_contract` still allows its ten reads, and its writes ask.
+- **A fragment marks itself deprecated with a `_deprecated` note.** The composer's grant-superset gate skips such a fragment, since no integration is meant to mirror its reads. `config validate` warns `mcp-deprecated` once, with the note and the bots that list it, in place of the `grant-migration` hint.
+- **Upgrade:** to move a bot to the API, replace `mcp: [printify]` with `skills: [printify]` and `integrations: [printify]`. A bot that equips the integration without the MCP loses ten `mcp__printify__` allows that matched no server. A fleet overlay `printify.json` replaces the shipped file, mark included: one that declares `read_only_tools` needs its own `_deprecated` note, or compose refuses it now that the integration no longer mirrors those reads; one with no `_permissions_contract` still composes, and its MCP tools now ask.
+- **Tests:** `tests/test_grant_superset.py` composes a deprecated fragment with no paired grants and still refuses a current one beside it. `tests/test_readonly_mcp_grants.py` pins the shipped mark, the integration, and a bot that lists the MCP composing exactly its ten reads. `tests/test_validator.py` pins the folded warning, and `tests/test_printify_skill.py` pins the grants against every call the skill documents.
+
 ### Added — the heavy slot's render profile: a headless render runs inside the host's lines, in a scope its runner kills (#2221)
 
 `claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND` runs a headless browser render. The start line, the heavy slot, the scope and the watchdog are all in the one process that starts it. Plain `run` refuses a render, because a render is a script (#2039).
