@@ -6,6 +6,122 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `assignment show` names the delivery: its message, attempts and receipt (#2379)
+
+`assignment deliver` records its message as a communication linked to the
+task and the assignment, and each send as a transmission of that message.
+`assignment show` reported only the assignment row's `dispatch_message_id`,
+which only the retired dispatch path wrote, so it read `null` for every
+assignment the task commands made, and the delivery could be found only
+through the deliver request's UUID. A new `delivery` field reads it from
+those rows: the message ID, the request that delivered it, when it was
+recorded, how many send attempts were recorded and the newest one, and the
+receiver's newest receipt with its integrity verdict, judged as `message
+receipt` judges it. A receipt still queued for ingest reads `not_recorded`,
+since this read does not open the queues. It is the same message the plane's
+board names. After a re-delivery under a new request, the newest delivery is
+the one described, and `message_ids` lists every delivery in order. Nothing
+new is recorded, so assignments delivered before this change read the same
+way. Each added statement seeks one assignment's or one message's rows by
+index.
+
+### Added — each bot's live context in `fleet status`, and each compaction as a plane event (#2206)
+
+Nothing reported a bot's current context or recorded a compaction, so a manager read each worker's newest transcript by hand before compacting it. Both now come from the transcript reader that `fleet usage` already uses (`transcript_usage.py`), with one reader for its usage rows.
+
+- **`fleet status` and `bot status` carry each bot's `context`:** the input, cache-read and cache-write tokens of its newest main-chain call, and that call's time. The table gains a CONTEXT column. When no such row can be read, `tokens` is null with a `reason`, never 0: no transcript directory, no session, no usage row yet, a read past the cap, or an unreadable file. Sidechain rows are skipped, and so are the rows Claude Code writes itself for an error or an interrupt (model `<synthetic>`, every usage field 0). `compacted_after` names a compaction written after that call. The call is from the bot's own newest session: a hook's headless `claude -p` session, whose transcript lands beside the bot's and whose rows name `entrypoint` `sdk-cli`, is skipped, and a session naming none counts as the bot's own. A newer session that cannot be told apart (its head runs past 2 MiB before naming one, or is still being written) reads null with its reason, never the older session's figure. So do 16 headless sessions newer than the bot's own: the walk examines at most the 16 newest. Each read lists the bot's transcript directory once, reads the head of its own newest session and of each newer one up to the first `entrypoint` (never past 2 MiB; at most 16 heads), then reads its own newest session backwards in 64 KiB blocks, stopping at the row and never past 2 MiB.
+- **`brief --usage-since` adds the viewed bot's `context`,** from the same reader. Ordinary and boot briefs still read no transcript.
+- **Each compaction becomes one `compaction` event** (notice), recorded from its `compact_boundary` row. It carries `trigger`, `pre_tokens`, `post_tokens` (null until the compaction ends) and `session`, at the compaction's own time, on the bot, with the `fleet-events:` provenance that `event list` reads.
+  - The pulse records them each tick through the new `claudlobby fleet compactions record`, which a manager can also run after `bot compact`.
+  - It reads only what each transcript appended since a cursor kept in the fleet's state, and the event id is derived from the row, so a row read twice is stored once. Before a bot's first pass it reads only the bot's own newest session, never a hook's headless one, from its last 8 MiB; it finds that session through the same walk, with the same limit.
+  - An unreadable transcript records nothing, is named with its reason and keeps its cursor, so its rows wait for a pass that reads. Bytes appended past 8 MiB in one pass are skipped and counted.
+- **No bound yet.** A threshold that acts on the context is the operator's cost decision (#2206's proposal 3).
+
+### Fixed — a bot session no longer opens a browser window on the host's desktop (#2332)
+
+On a host with a desktop, the user manager hands every unit the desktop's `DISPLAY` and `WAYLAND_DISPLAY`, and bot sessions inherited them. A browser that a bot session opened (a login CLI's `xdg-open`, Claude Code's Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command: one ran 4.7 h holding 867 MiB, another 29 minutes holding 428 MiB, each found and closed by hand.
+
+- **The launch line cuts the desktop.** `start-bot.sh` sets three variables in the session's shell, before the env tiers and `bot.conf`: `DISPLAY` unset, `WAYLAND_DISPLAY` set empty and `BROWSER=true`. Unsetting `WAYLAND_DISPLAY` is no cut: libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0`, and a Wayland client still reaches the desktop (measured). A login CLI then prints its URL and opens nothing; `claude auth login` prints it either way.
+- **Every session gets it, whichever door starts it:** the unit, keepalive's restart (through the unit, or `start-bot.sh` itself when that fails), `bot start` or a hand run. A tmux server keeps the environment it was started with, and the cut runs in the pane's own shell.
+- **A bot that needs a display gets it explicitly:** for one command, or for its session by declaring the variables in its own `fleet.yaml` env, which is read after the cut.
+- **`account-relog` runs its login with the same cut,** so its relog opens no browser from any shell.
+- **The fleet pulse reports a browser outside a render scope:** one older than 15 minutes that is not in a heavy-slot render scope, recorded as `browser_outside_render` (notice) and pushed to the manager once, with the bot whose session started it. Each browser is reported once per host: a fleet reports its own bots' browsers, and the host's first fleet by name reports those no bot started. The pulse never stops a browser. It reads `/proc` through the new `browser-scan.py`, which signals nothing. The browser names it matches move to lib-common's `BROWSER_EXE_PATTERN`, which `orphan-browser-reaper.sh` now reads too.
+- **Limits:**
+  - The session bus still reaches the desktop, so a program that asks the desktop's portal to open a URL can still put a window there. xdg-open does that only inside a sandbox, and the pulse reports any browser it opens.
+  - On macOS, `BROWSER=true` applies; there is no `/proc`, so the pulse's check finds nothing there.
+  - The pulse recognises a render by its scope's name, `heavy-render-*.scope`, from the heavy slot's render profile.
+- **Tests:**
+  - `tests/test_boot_policy_conformance.py` runs the launch line in the environment a desktop host's user manager gives a unit, with every opener a stand-in: a CLI that hands its URL to xdg-open, Claude Code's own opener, and a tool that starts a GUI browser itself. The window count is three before the change and none after. A display declared in the bot's own config still reaches it. The stand-in's Wayland rule is checked against libwayland itself where it is installed.
+  - `tests/test_browser_scan.py` scans a `/proc` of its own: render scopes (the browser's own or an ancestor's), owners through the parent chain, crash handlers, names the kernel cuts at 15 characters, and the real `/proc`, where a stand-in browser is still running after the scan.
+  - `tests/test_fleet_pulse_browsers.py` drives the real sweep: one report per browser, a key dropped when the browser goes, render scopes and young browsers left alone, one report on a host of two fleets, and no key kept while the manager does not take the push.
+
+### Changed — Printify: the integration is the direct API, and the MCP fragment is deprecated
+
+`library/integrations/printify.md` described the Printify MCP server and granted its ten read tools. It now describes the Printify v1 REST API, reached through the `printify` skill.
+
+- **`library/integrations/printify.md` is `type: cli`.** Its tool is the `printify` skill (`printify_api.sh`): reads, and draft-first writes that never auto-publish. Its `env_contract` is unchanged (`PRINTIFY_API_KEY`, `PRINTIFY_SHOP_ID`), it grants no `mcp__printify__` tool, and the forked-MCP section is gone. `library/skills/printify/mcp-vs-api.md` says to use the API.
+- **The skill grants its reads.** `status`, `products`, `product`, `orders`, `order`, `raw` and `help` run without a prompt when called as `.claude/skills/printify/printify_api.sh <command>` from the bot directory; `create`, `migrate` and `publish` ask. A call written with `"$BOT_DIR/…"` asks every time: measured on Claude Code 2.1.281, a command that contains a `$VARIABLE` is allowed only by an exact-text rule.
+- **`library/mcp/printify.json` is deprecated, not removed.** A bot that lists `mcp: [printify]` composes as before: the server runs, the fragment's `_permissions_contract` still allows its ten reads, and its writes ask.
+- **A fragment marks itself deprecated with a `_deprecated` note.** The composer's grant-superset gate skips such a fragment, since no integration is meant to mirror its reads. `config validate` warns `mcp-deprecated` once, with the note and the bots that list it, in place of the `grant-migration` hint.
+- **Upgrade:** to move a bot to the API, replace `mcp: [printify]` with `skills: [printify]` and `integrations: [printify]`. A bot that equips the integration without the MCP loses ten `mcp__printify__` allows that matched no server. A fleet overlay `printify.json` replaces the shipped file, mark included: one that declares `read_only_tools` needs its own `_deprecated` note, or compose refuses it now that the integration no longer mirrors those reads; one with no `_permissions_contract` still composes, and its MCP tools now ask.
+- **Tests:** `tests/test_grant_superset.py` composes a deprecated fragment with no paired grants and still refuses a current one beside it. `tests/test_readonly_mcp_grants.py` pins the shipped mark, the integration, and a bot that lists the MCP composing exactly its ten reads. `tests/test_validator.py` pins the folded warning, and `tests/test_printify_skill.py` pins the grants against every call the skill documents.
+
+### Added — the heavy slot's render profile: a headless render runs inside the host's lines, in a scope its runner kills (#2221)
+
+`claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND` runs a headless browser render. The start line, the heavy slot, the scope and the watchdog are all in the one process that starts it. Plain `run` refuses a render, because a render is a script (#2039).
+
+- **The start line, read by the runner itself:** MemAvailable at or above 4820 MiB, the 1-minute load under 16, and no stop line already crossed. The runner reads them in the process that starts the render, before it asks for the slot. A closed line exits 75 with nothing started and no queue ticket taken, recorded as `heavy_slot_refused` with `where: gate` and the readings.
+- **The slot, through its queue:** the render then asks for the slot like any heavy job. While the slot is held, or a free one is another caller's turn, it takes a ticket and exits 75.
+- **Its own scope, with the session bus cut:** the render runs in a transient systemd user scope, with `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`. A browser that reaches the session bus moves itself into a scope of its own. Unsetting the variable is no cut: libdbus, GDBus and sd-bus all fall back to `$XDG_RUNTIME_DIR/bus` (measured).
+- **The stop lines, watched by the runner:** every 2 s the runner reads MemAvailable and the load. When MemAvailable falls under 3800 MiB, the 5-minute load passes 25, the 1-minute load passes 40, or the render passes 45 minutes, it kills the whole scope through its `cgroup.kill`, and every process that left the scope (found by parent link). It then exits 79 and records `heavy_slot_stopped`.
+- **A render never outlives its runner:** the scope's keeper, the process `systemd-run` starts in the scope, holds the kernel's parent-death signal. A runner killed outright (SIGKILL) still takes its render with it, and the keeper records the kill where the runner would have: in the slot's file, in the render record and on the plane (`heavy_slot_stopped` with line `runner`, then `heavy_slot_released`). The keeper waits for those two events to be sent, because the shell that sends them runs in the scope it then kills. A signal the runner can catch ends the render first. systemd's own time limit on the scope trails the runner's by 60 s.
+- **The retry rule, enforced by the runner:** after a render is killed (any ending `killed`: a stop line, the time limit, a signal, or the keeper), no render starts for 30 minutes. That refusal exits 75, is recorded as `heavy_slot_refused` with `where: retry`, and says when a render may start. After two kills in one local day, renders are on hold: every render is refused (exit 2, `where: hold`) until the fleet's manager, or the operator from a shell of their own, runs `heavy-slot.py lift-hold --by NAME [--reason TEXT]`. A worker's lift is refused. The lift is recorded with who lifted it, in the render record and as `heavy_slot_hold_lifted`. Time passing never lifts a hold. A lift starts the count of kills again, and does not shorten the 30 minutes. The kills and lifts have a record of their own, `state/heavy-slot/render-record`, because the slot's file keeps only its last run. The runner also counts a killed render that a slot's last record holds and the render record lacks, and reads the rule again once the slot is its own. A render record it cannot read refuses every render (exit 2). `status` shows a hold, or the time a render may start again.
+- **The end, recorded where the slot records its runs:** the slot's record and `heavy_slot_released` carry `profile`, the scope's `unit`, `ended` (done, killed or not-started), the stop line with its reading, and the measured `peak`: MemAvailable at the start and at its lowest, the highest loads, and the job's summed PSS. `heavy-slot.py status` shows them, and so does the runner's last line on stderr.
+- **Host knobs:** `state/heavy-slot/render-lines` sets `start_mib`, `start_load1`, `stop_mib`, `stop_load5`, `stop_load1`, `poll_s` and `max_minutes`, one `name = value` per line, read on every use. A file the runner cannot read refuses every render (exit 2).
+- **Limits:** Linux only; elsewhere the profile refuses (exit 2). The local day of the retry rule is the runner's (its `TZ`, else the host's zone). With no memory controller in the kernel, the stop is a watchdog's, not a cgroup memory limit. A process the job hands to the user manager as a service is no descendant of the job, so the walk for escaped processes cannot find it.
+- **Upgrade:** nothing to change. A caller that gates a render by hand replaces its gate check, scope and watchdog with this one command, once the activation that ships it is in.
+- **Tests:** `tests/test_heavy_slot_render.py` drives the real wrapper with injected readings (`HEAVY_SLOT_PROC`), so nothing loads the host:
+  - the shipped lines at their edges;
+  - refused before any scope: under the start line on each reading, a lines file it cannot read, an unknown profile, a scope that cannot be made, a held slot;
+  - a refusal through `| tail`: the pipeline exits 0, nothing starts, the refusal stays on stderr and on the plane, and `pipefail` gives 75;
+  - in a real scope, where a systemd user manager exists: the scope and the cut bus, killed at each stop line with a detached child, an escaped process killed with the scope, the time limit, a runner killed outright, and a runner sent SIGTERM;
+  - the keeper's events: on the plane after a runner killed outright, and sent through a stand-in door that takes half a second, before the keeper kills its scope;
+  - the retry rule, from records dated by the test: a render 29 and 31 minutes after a kill, a kill only a slot's last record holds, a hold still standing three days on, a worker's lift refused and the manager's and the operator's recorded, kills on two different days, a lift that starts the count again, and a render record it cannot read; and, after a real kill (stop line or keeper), the next render refused.
+
+### Fixed — notify-behind counts the data root from the release it runs (#2322)
+
+`notify-behind.sh` counted the data root's own checkout, which nothing runs
+from under sealed releases and nothing pulls, so its daily `source_behind`
+notice grew with every merge and no activation cleared it. The root now counts
+the commits on `origin/<branch>` missing from the source revision of the
+release the host has selected, read with the package's `read_selection` and
+`read_release`, the two reads runtime admission makes before a bot starts
+(`host status` hashes every installed release first). The tagged path counts
+from the same commit; sibling checkouts still count from their `HEAD`. When
+the release cannot be read, a new `source_unknown` notice says so and nothing
+is counted.
+
+### Added — a blocking check on every pull request for use-case-specific data (#2042)
+
+`.github/actions/content-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
+
+- **Layer 1, generic patterns kept in the repository:** Telegram chat ids and bot tokens, GitHub and vendor API tokens, email addresses outside the reserved example domains, home paths, IPv4 addresses outside localhost and the documentation ranges, and UUIDs. The placeholders CLAUDE.md prescribes pass, and so do other obvious stand-ins.
+- **Layer 2, an operator's private list, only for authors who can already read it:** one case-insensitive pattern per line, from the `PRIVATE` Actions secret. It runs for a pull request whose head branch is in the repository, which only an author with write access can push, and not for Dependabot's runs. There, an unset or empty secret fails the check closed after layer 1 has reported its hits, saying that a maintainer must set the secret and that nothing in the change caused it. Every other pull request gets layer 1 only: it never receives the secret, never fails for its absence, and says in one fixed line that layer 2 did not run.
+- **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value. No warning from compiling the list is printed, since a warning can quote a pattern.
+- **The escape is visible:** `.github/content-check-allow.txt` (`<path glob> <class> <reason>`), read from the base branch and never from the pull request, so an entry is reviewed and merged in a pull request of its own before it exempts anything. The private list has no escape.
+- **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit with `actions/checkout` pinned by commit, and reads the head as git objects, so no code from the pull request runs. One run at a time per pull request, for at most ten minutes. The other three repositories call the action pinned by sha.
+- **The diff is read by its own structure:** each hunk by its line counts, and in `--git` mode every path from git's own list, renames and binary files included. A binary file's bytes are checked against the private list only.
+- **Tests:** `tests/test_content_check.py` covers:
+  - a planted positive for each class, and an invented private term, each failing the check;
+  - the placeholders, passing;
+  - no matched text in any output;
+  - the fail-closed paths;
+  - the allowlist, read from the base, and a fork whose own allowlist tries to silence its hit;
+  - who gets layer 2: both author classes, a deleted fork and Dependabot, end to end through the workflow's and the action's own wiring;
+  - the exact shape of the workflow and the action;
+  - `--git` mode, renames and binary files, and a binary file whose name would run a command in a shell;
+  - a diff crafted to steer the reader (a line shaped like a file header, a carriage return, a hunk that does not match its counts).
+
 ### Changed — Claudron v0.9.0 and session-loop migration warnings (#2145 P3, 6a)
 
 - Pin the optional vault extra to Claudron v0.9.0, providing the capture/amend,

@@ -970,6 +970,11 @@ def format_brief(brief: dict) -> str:
                    f"skipped>={coverage['files_skipped_at_least']} "
                    f"issues={','.join(coverage['issues']) or '-'}")
         out.append("  quota=unavailable (no provider observation)")
+        context = brief.get("context")
+        if context is not None:
+            out.append(f"  context now: {context['tokens']:,} tokens (the newest main-chain call, "
+                       f"{context['at']})" if context["tokens"] is not None else
+                       f"  context now: unknown ({context['reason']})")
         out.append("")
     if deg:
         out.append("DEGRADED — fields this door will not serve as plain truth")
