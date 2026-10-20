@@ -163,8 +163,9 @@ def _read(args) -> CommandOutput:
             rows = collect_checkins(conn, destination.fleet.name, since=since, bot=args.bot,
                                     last=args.last, raised=args.raised, limit=args.limit)
         else:
-            # A prefix (#2380) reads the same fleet-scoped rows as the full ID,
-            # by a range on the check-in's ref, and at most PREFIX_SCAN_LIMIT + 1.
+            # A prefix (#2380) runs the full ID's query with a range on the
+            # check-in's ref in place of equality (the same plan), returning at
+            # most PREFIX_SCAN_LIMIT + 1 rows.
             rows = collect_checkins(conn, destination.fleet.name, since=None, bot=None,
                                     last=False, checkin_id=None if prefix else args.checkin_id,
                                     checkin_prefix=prefix,

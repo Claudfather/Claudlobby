@@ -18,7 +18,7 @@ Handoffs, briefs and notes carry 8-digit ID prefixes, and the read doors refused
 - **What a prefix costs:**
   - task and assignment: one pass over the fleet's tasks, which the door already reads;
   - message: one range seek on the message key, at most 65 rows; past 64 the door refuses rather than choose;
-  - check-in: the rows the full-ID read already makes, filtered by a range on the check-in's reference, at most 65 rows;
+  - check-in: the full-ID read's own query, with a range on the check-in's reference in place of equality (the same query plan), returning at most 65 rows;
   - request: one listing of the fleet's request directory, which grows with the fleet's request history.
 - **Mutations stay canonical:** the query owners resolve a prefix only when a read door asks. Every write (`task assign`, `assignment accept`, `assignment deliver` and the rest) and `message reply`'s parent still take the full ID.
 - **Tests:** `tests/test_id_prefix_reads.py` drives each door's query owner against real SQL and request files: a unique, an ambiguous, a missing and a too-short prefix, a wrong-kind prefix, the message read's query plan and its bound, and the writers' canonical reads. `tests/test_id_prefix_cli.py` checks the same four answers for each door through the public CLI, and that the reads leave the plane unchanged.
