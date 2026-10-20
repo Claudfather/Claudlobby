@@ -231,9 +231,14 @@ def _delivery_message(conn, msg_id, tid, aid, **fields):
     _insert(conn, "communications", **row)
 
 
-def _transmission(conn, msg_id, event, attempt_no, **fields):
-    _insert(conn, "events", kind="transmission", event=event, msg_id=msg_id, carrier="tmux",
-            attempt_no=attempt_no, **fields)
+def _transmission(conn, msg_id, event, attempt_no, *, occurred_at=None, host_uid=None):
+    event_id = _insert(conn, "events", kind="transmission", event=event, msg_id=msg_id,
+                       carrier="tmux", attempt_no=attempt_no)
+    # _insert fixes the instant and the host itself, so set them afterwards.
+    if occurred_at is not None:
+        conn.execute("UPDATE events SET occurred_at = ? WHERE event_id = ?", (occurred_at, event_id))
+    if host_uid is not None:
+        conn.execute("UPDATE events SET host_uid = ? WHERE event_id = ?", (host_uid, event_id))
 
 
 def _board_message(conn, assignment_id):
