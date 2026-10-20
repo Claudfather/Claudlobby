@@ -232,3 +232,72 @@ class TestGrantSupersetGateHasTeeth:
         )
         with pytest.raises(ValueError, match="mcp__github__"):
             compose_settings_local(bot, fleet, paths)
+
+
+class TestDeprecatedFragmentSkipsTheGate:
+    """A fragment marked ``_deprecated`` keeps its own reads with no paired grant.
+
+    No integration is meant to mirror a deprecated fragment's reads, so the gate
+    skips it while it stays in the library; its contract still grants the reads
+    and keeps the writes prompting. A current fragment beside it is still held
+    to the gate.
+    """
+
+    @staticmethod
+    def _paths(tmp_path: Path, frags: dict[str, dict]) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        mcp = root / "library" / "mcp"
+        mcp.mkdir(parents=True)
+        for name, frag in frags.items():
+            (mcp / f"{name}.json").write_text(json.dumps(frag))
+        return Paths(root=root, fleet_dir=root,
+                     package=replace(source_package(), library=root / "library"))
+
+    @staticmethod
+    def _frag(name: str, *, deprecated: bool) -> dict:
+        frag: dict = {
+            "_permissions_contract": {
+                "tools": ["get_item", "set_item"],
+                "read_only_tools": ["get_item"],
+            },
+            name: {"command": "npx", "args": ["-y", f"{name}-mcp@1.0.0"]},
+        }
+        if deprecated:
+            frag["_deprecated"] = "Use the shop skill."
+        return frag
+
+    @staticmethod
+    def _compose(bot: BotConfig, paths: Paths) -> list[str]:
+        fleet = FleetConfig(
+            name="t", service_prefix="p", manager="lead",
+            bots={
+                "lead": BotConfig(bot_id="lead", name="lead", expertise=["orchestration"]),
+                bot.bot_id: bot,
+            },
+        )
+        return compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+
+    def test_deprecated_fragment_composes_its_reads_on_every_instance(self, tmp_path):
+        paths = self._paths(tmp_path, {"shop": self._frag("shop", deprecated=True)})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"],
+            mcp=[McpEntry(name="shop", instances=["default", "work"])],
+        )
+        composed = sorted(p for p in self._compose(bot, paths) if p.startswith("mcp__shop"))
+        assert composed == ["mcp__shop-work__get_item", "mcp__shop__get_item"]
+
+    def test_a_current_fragment_beside_it_still_trips_the_gate(self, tmp_path):
+        import pytest
+
+        paths = self._paths(tmp_path, {
+            "shop": self._frag("shop", deprecated=True),
+            "stock": self._frag("stock", deprecated=False),
+        })
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"],
+            mcp=[McpEntry(name="shop"), McpEntry(name="stock")],
+        )
+        with pytest.raises(ValueError, match="mcp__stock__get_item") as raised:
+            self._compose(bot, paths)
+        assert "mcp__shop__" not in str(raised.value)

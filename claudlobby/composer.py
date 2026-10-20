@@ -355,6 +355,28 @@ def _load_mcp_contract(paths: Paths, name: str) -> dict | None:
     return contract
 
 
+def _mcp_deprecation(paths: Paths, name: str) -> str | None:
+    """The ``_deprecated`` note of MCP fragment *name*, or ``None`` when it is current.
+
+    A deprecated fragment still composes for a bot that lists it: its server is
+    wired, and its ``_permissions_contract`` still grants its reads and keeps its
+    writes prompting. The note names what to use instead, and ``config validate``
+    repeats it for the bots that list the fragment. A ``_deprecated`` key with no
+    note still marks the fragment. Malformed JSON reads as current, as it does for
+    :func:`_load_mcp_contract`; :func:`compose_mcp_json` refuses that fragment.
+    """
+    try:
+        frag = _load_mcp_fragment(name, paths)
+    except ValueError:
+        return None
+    if not isinstance(frag, dict) or "_deprecated" not in frag:
+        return None
+    note = frag["_deprecated"]
+    if isinstance(note, str) and note.strip():
+        return note.strip()
+    return "no replacement is named"
+
+
 def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
     """Resolve MCP permission patterns from fragment _permissions_contract fields.
 
@@ -2980,7 +3002,19 @@ def compose_settings_local(
     # alone already covers legacy, the precondition for cutting _permissions_contract.
     legacy_grants = _resolve_mcp_permissions(bot, paths)
     integration_grants = _resolve_integration_grants(bot, paths)
-    _assert_grant_superset(bot.bot_id, legacy_grants, integration_grants)
+    # A deprecated fragment keeps granting its reads from its own contract until it
+    # is removed, and no integration is meant to cover them, so the gate skips it.
+    deprecated = tuple(
+        f"mcp__{entry.output_name(instance)}__"
+        for entry in bot.mcp
+        if _mcp_deprecation(paths, entry.name) is not None
+        for instance in entry.instances
+    )
+    _assert_grant_superset(
+        bot.bot_id,
+        [g for g in legacy_grants if not g.startswith(deprecated)],
+        integration_grants,
+    )
     _append_unique(allow_patterns, (*legacy_grants, *integration_grants))
 
     # Layer 4: Channel/plugin tools (auto-derived from config)

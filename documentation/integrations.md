@@ -143,20 +143,20 @@ Orders, products, customers, inventory. Essential for any e-commerce bot.
 
 ### Printify
 
-Print-on-demand fulfillment, product management, order tracking.
+Print-on-demand fulfillment, product management, order tracking. Reached through the Printify REST API with the `printify` skill, not an MCP server:
 
-```json
-{
-  "printify": {
-    "command": "npx",
-    "args": ["-y", "@tsavo/printify-mcp@0.1.1"],
-    "env": {
-      "PRINTIFY_API_KEY": "your_printify_token",
-      "PRINTIFY_SHOP_ID": "your_shop_id"
-    }
-  }
-}
+```yaml
+skills: [printify]          # library/skills/printify: reads, and draft-first writes
+integrations: [printify]    # library/integrations/printify.md: the guide and the env contract
 ```
+
+```bash
+# fleet-tier .env
+PRINTIFY_API_KEY=your_printify_token
+PRINTIFY_SHOP_ID=your_shop_id
+```
+
+The Printify MCP fragment (`library/mcp/printify.json`, `@tsavo/printify-mcp`) is deprecated. A bot that still lists `mcp: [printify]` composes as before, and `config validate` warns `mcp-deprecated`.
 
 **Setup:** Printify → Settings → Connections → Generate Personal Access Token. Get shop ID via `curl -s 'https://api.printify.com/v1/shops.json' -H 'Authorization: Bearer YOUR_TOKEN'`.
 
