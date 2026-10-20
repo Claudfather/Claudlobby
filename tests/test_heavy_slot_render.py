@@ -3,12 +3,15 @@
 A headless browser render starts only inside the host's render start line, with
 the heavy slot taken through its queue; it runs in a systemd user scope of its
 own with the session bus cut; and its runner kills the whole scope when a
-reading crosses a stop line, or when the runner itself dies. Each test drives
+reading crosses a stop line, or when the runner itself dies. After a kill no render starts for 30
+minutes, and two kills in one local day hold renders until the fleet's manager
+or the operator lifts the hold. Each test drives
 the real wrapper with injected readings: HEAVY_SLOT_PROC is a directory
 standing in for /proc's meminfo and loadavg, and a job moves a reading across a
-line by rewriting that directory, so nothing here loads the host. Tests that
-start a scope need a systemd user manager and skip without one; the refusals
-made before any scope exists run on every Linux host.
+line by rewriting that directory, so nothing here loads the host. The retry
+rule's tests date their kills by writing the render record the runner reads.
+Tests that start a scope need a systemd user manager and skip without one; the
+refusals made before any scope exists run on every Linux host.
 """
 
 from __future__ import annotations
@@ -156,6 +159,35 @@ def _wait_for(pred, timeout: float = 15.0):
             return got
         time.sleep(0.05)
     raise AssertionError("condition not met in time")
+
+
+def _kill(epoch: float, line: str = "stop_mib", by: str = "runner") -> dict:
+    """A kill as the render record holds one."""
+    return {"kind": "kill", "epoch": epoch, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)),
+            "unit": f"heavy-render-testfleet-alpha-{int(epoch)}-1", "line": line, "by": by}
+
+
+def _write_render_record(rs, *entries: dict) -> None:
+    (rs.state / "render-record").write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def _render_record(rs) -> list:
+    path = rs.state / "render-record"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _noon(days_ago: int) -> float:
+    """Noon UTC that many days ago: the fixture's TZ is UTC, so it is that local day."""
+    return float((int(time.time()) // 86400 - days_ago) * 86400 + 12 * 3600)
+
+
+def _lift(rs, *args: str, env: dict = None) -> subprocess.CompletedProcess:
+    return subprocess.run([str(WRAPPER), "lift-hold", *args], env=env or rs.env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def _refused_at(rs) -> list:
+    return [d["where"] for d in _of(rs, "heavy_slot_refused")]
 
 
 # --- the lines themselves ---------------------------------------------------------
@@ -383,6 +415,12 @@ def test_killed_when_a_reading_crosses_a_stop_line(rs, user_scope, cross, line, 
     _wait_for(lambda: not Path(f"/sys/fs/cgroup{rec['cgroup']}").exists(), timeout=10)
     status = subprocess.run([str(WRAPPER), "status"], env=rs.env, capture_output=True, text=True, timeout=60)
     assert "render killed" in status.stdout and says in status.stdout, status.stdout
+    # the kill is the retry rule's: with the readings back inside the lines, the next render is refused
+    _readings(rs.proc, 6000)
+    again = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert again.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), again.stderr
+    assert _refused_at(rs) == ["retry"], _events(rs)
+    assert [(e["kind"], e["line"], e["by"]) for e in _render_record(rs)] == [("kill", line, "runner")]
 
 
 @needs_linux
@@ -423,6 +461,43 @@ def test_the_scope_dies_with_its_runner(rs, user_scope):
         _wait_for(lambda: not _alive(detached), timeout=10)
         rec = _wait_for(lambda: _record(rs) if _record(rs).get("state") == "released" else None, timeout=10)
         assert rec["ended"] == "killed" and rec["stop"]["line"] == "runner", rec
+        # on the plane too, as a stop the runner makes is: a count of kills reads these rows
+        stopped = _wait_for(lambda: _of(rs, "heavy_slot_stopped"), timeout=10)
+        assert len(stopped) == 1 and stopped[0]["line"] == "runner" and stopped[0]["unit"] == rec["unit"], _events(rs)
+        assert [d["ended"] for d in _of(rs, "heavy_slot_released")] == ["killed"], _events(rs)
+        assert [e["by"] for e in _render_record(rs)] == ["keeper"]
+        again = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+        assert again.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), again.stderr
+        assert _refused_at(rs) == ["retry"], _events(rs)
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+@needs_linux
+def test_the_keepers_events_reach_the_door_before_its_scope_dies(rs, user_scope):
+    """The keeper's events go through the real door, emit_fleet_event in a shell
+    of its own, and that shell runs in the scope the keeper is about to kill. A
+    copy of the runner beside a stand-in lib-common, whose door takes half a
+    second and then writes what reached it, shows the keeper waits for them: an
+    event sent off without waiting dies with the scope."""
+    rt = rs.tmp / "rt"
+    rt.mkdir()
+    shutil.copy2(WRAPPER, rt / "heavy-slot.py")
+    (rt / "lib-common.sh").write_text(
+        'emit_fleet_event() { sleep 0.5; printf "%s\\n" "$1" >> "$STUB_DIR/door"; }\n')
+    env = {k: v for k, v in rs.env.items() if k not in ("HEAVY_SLOT_EVENTS_FILE", "PLANE_EMIT_DISABLED")}
+    p = subprocess.Popen([str(rt / "heavy-slot.py"), "run", "--profile", "render", "--", "sh", "-c",
+                          'touch "$STUB_DIR/started"; sleep 300'],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        _wait_for(lambda: (rs.tmp / "started").exists())
+        p.send_signal(signal.SIGKILL)
+        p.communicate(timeout=60)
+        door = rs.tmp / "door"
+        reached = _wait_for(lambda: door.exists() and "heavy_slot_released" in door.read_text()
+                            and door.read_text().split(), timeout=20)
+        assert "heavy_slot_stopped" in reached, reached
     finally:
         if p.poll() is None:
             p.kill()
@@ -445,3 +520,115 @@ def test_a_signal_to_the_runner_ends_the_render_first(rs, user_scope):
     finally:
         if p.poll() is None:
             p.kill()
+
+
+# --- the retry rule (the render rule, 2026-10-19) ---------------------------------------
+# Under the start line, a render the rule lets through is refused at the gate
+# instead (`where: gate`), so these need no scope.
+
+@needs_linux
+@pytest.mark.parametrize("minutes_ago, refused", [(29, True), (31, False)])
+def test_no_render_starts_for_30_minutes_after_a_kill(rs, minutes_ago, refused):
+    _readings(rs.proc, 4189)
+    killed = time.time() - minutes_ago * 60
+    _write_render_record(rs, _kill(killed))
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), r.stderr
+    if refused:
+        assert _refused_at(rs) == ["retry"], _events(rs)
+        assert f"may start again at {time.strftime('%H:%M', time.gmtime(killed + 30 * 60))}" in r.stderr, r.stderr
+        assert _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
+    else:
+        assert _refused_at(rs) == ["gate"], _events(rs)
+    assert not (rs.state / "slot-0.lock").exists()  # refused before the slot was asked for
+
+
+@needs_linux
+def test_the_rule_reads_the_last_runs_record_too(rs):
+    """A kill the render record lacks (its write failed) is still in the slot's
+    record until another job replaces it."""
+    _readings(rs.proc, 4189)
+    killed = time.time() - 5 * 60
+    (rs.state / "slot-0.lock").write_text(json.dumps({
+        "state": "released", "profile": "render", "ended": "killed", "unit": "heavy-render-x-1",
+        "fleet": "otherfleet", "bot": "beta", "shape": "node", "tool": "node",
+        "started_epoch": int(killed) - 60, "released_epoch": killed,
+        "stop": {"line": "stop_mib", "reading": "MemAvailable 3700 MiB, under 3800 MiB"}}))
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), r.stderr
+    assert _refused_at(rs) == ["retry"], _events(rs)
+
+
+@needs_linux
+def test_two_kills_in_one_local_day_hold_renders_until_the_manager_lifts_the_hold(rs):
+    """Three days on the hold stands: time passing never lifts it. A worker
+    cannot lift it; the manager can, and the lift records who lifted it."""
+    _readings(rs.proc, 4189)
+    day = _noon(3)
+    _write_render_record(rs, _kill(day), _kill(day + 600, "runner", "keeper"))
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == 2 and not (rs.tmp / "ran").exists(), r.stderr
+    assert "on hold" in r.stderr and "lift-hold" in r.stderr, r.stderr
+    assert time.strftime("%Y-%m-%d", time.gmtime(day)) in r.stderr, r.stderr
+    assert _refused_at(rs) == ["hold"], _events(rs)
+
+    manager = {**rs.env, "MANAGER_TMUX": "alpha"}
+    worker = _lift(rs, "--by", "alpha", "--reason", "my render", env={**rs.env, "MANAGER_TMUX": "boss"})
+    assert worker.returncode == 1 and "manager" in worker.stderr, worker.stderr
+    assert _lift(rs, env=manager).returncode == 2  # who lifts it must be named
+    assert len(_render_record(rs)) == 2  # neither recorded anything
+    lifted = _lift(rs, "--by", "alpha", "--reason", "host checked", env=manager)
+    assert lifted.returncode == 0, lifted.stderr
+    lift = _render_record(rs)[-1]
+    assert (lift["kind"], lift["by"], lift["reason"]) == ("lift", "alpha", "host checked"), lift
+    assert [d["by"] for d in _of(rs, "heavy_slot_hold_lifted")] == ["alpha"], _events(rs)
+
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), r.stderr
+    assert _refused_at(rs) == ["hold", "gate"], _events(rs)
+    assert _lift(rs, "--by", "alpha", env=manager).returncode == 1  # nothing left to lift
+
+
+@needs_linux
+def test_the_operator_lifts_a_hold_from_a_shell_of_their_own(rs):
+    day = _noon(1)
+    _write_render_record(rs, _kill(day), _kill(day + 60))
+    operator = {k: v for k, v in rs.env.items() if k not in ("BOT_ID", "FLEET_NAME")}
+    lifted = _lift(rs, "--by", "the operator", env=operator)
+    assert lifted.returncode == 0, lifted.stderr
+    assert _render_record(rs)[-1]["by"] == "the operator"
+
+
+@needs_linux
+def test_kills_on_different_local_days_do_not_hold(rs):
+    _readings(rs.proc, 4189)
+    _write_render_record(rs, _kill(_noon(3)), _kill(_noon(2)))
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), r.stderr
+    assert _refused_at(rs) == ["gate"], _events(rs)
+
+
+@needs_linux
+def test_a_lift_starts_the_count_again(rs):
+    """After a lift, one more kill that day does not hold renders; a second does."""
+    _readings(rs.proc, 4189)
+    day = _noon(2)
+    lift = {"kind": "lift", "epoch": day + 1200, "at": "", "by": "alpha", "reason": ""}
+    _write_render_record(rs, _kill(day), _kill(day + 600), lift, _kill(day + 1800))
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == EX_TEMPFAIL and _refused_at(rs) == ["gate"], (r.stderr, _events(rs))
+    with (rs.state / "render-record").open("a") as fh:
+        fh.write(json.dumps(_kill(day + 2400)) + "\n")
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == 2 and _refused_at(rs) == ["gate", "hold"], (r.stderr, _events(rs))
+    assert not (rs.tmp / "ran").exists()
+
+
+@needs_linux
+@pytest.mark.parametrize("text", ["not json\n", '{"kind": "kill"}\n', '{"kind": "nap", "epoch": 1}\n'])
+def test_a_render_record_it_cannot_read_refuses(rs, text):
+    _readings(rs.proc, 4189)
+    (rs.state / "render-record").write_text(text)
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == 2 and not (rs.tmp / "ran").exists(), r.stderr
+    assert "render-record" in r.stderr and _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
