@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — activity_stuck times a stall from the last tick keepalive saw no turn running (#2391)
+
+A bot that waited past the activity_stuck threshold, at its prompt, behind a held input box or under a usage limit, and was then started on a turn read as hung until that turn made a tool call. keepalive's BUSY tick removes `data/.idle`, `.held` and `.limit` as the turn begins, and fleet-pulse then timed the stall from the previous turn's last tool call, so the whole wait counted against a turn begun seconds earlier, whatever began it.
+
+- **keepalive stamps `data/.last-no-turn` on every tick that sees no turn running: IDLE, HELD and LIMIT.** No verdict removes it, so once a turn begins it still says when keepalive last saw no turn running. A HELD tick whose screen shows a running turn above the box stamps nothing: text typed into a busy bot's box reads HELD on the last ten lines, and a message reaching a running turn must not move its clock.
+- **fleet-pulse times a stall from the later of `.last-tool-call` and `.last-no-turn`.** A turn that goes past the threshold with no tool call still pages, however many messages reach it. A bot with no `.last-no-turn` (never seen without a turn, or a keepalive older than the marker) is timed from its last tool call, as before.
+- **After a usage-limit hold, the stall runs from the last LIMIT tick.** A hold that ends into a turn, or into screens keepalive does not recognize, pages once the threshold has passed since that tick with no tool call, not at once on the tool-call clock. A bot still held after its reset gets `usage_limit_held` (#996), as before.
+- **The page carries `last_no_turn_epoch`** beside `last_tool_call_epoch` and `elapsed_seconds`; it is null with no marker.
+- **Tests:** `tests/test_activity_stuck_no_turn.py` drives the real keepalive tick and the real sweep: a turn begun a minute after an IDLE, a HELD or a LIMIT tick and swept 5,731 s after the last tool call does not page, and a bot without the marker does; a turn past the threshold pages with three messages typed into its box and queued behind it; a usage-limit hold followed by UNKNOWN ticks does not page 63 s after its last LIMIT tick, and does 30 min later.
+
 ### Fixed — the read doors resolve an ID prefix that names one record, list the candidates when it names several, and say "not found" only after searching by prefix (#2380)
 
 Handoffs, briefs and notes carry 8-digit ID prefixes, and the read doors refused them: `assignment show asg_da1585e0` answered `not_found` with `candidates: []` about an assignment that exists, and `message show`, `request show` and `checkin show` refused any short ID.
