@@ -1,4 +1,4 @@
-import { createOwnerTransport } from "./owner-api-client.js";
+import { createOwnerTransport, ReadRequestUnavailable } from "./owner-api-client.js";
 import { createSourceActionInterface } from "./connected-actions.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -252,8 +252,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       } finally { actionRequests--; scheduleContinuity(); }
     }
     const route = readRoute(url);
-    const result = await http(route.url, { signal: options.signal, limit: 8 * 1024 * 1024 });
-    return { status: result.status, json: async () => result.data };
+    try {
+      const result = await http(route.url, { signal: options.signal, limit: 8 * 1024 * 1024 });
+      return { status: result.status, json: async () => result.data };
+    } catch { throw new ReadRequestUnavailable(); }
   }
 
   class FetchStream {
@@ -352,7 +354,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
 
   owner = createOwnerTransport({ fetch: carrier, EventSource: FetchStream,
-    monotonicNow, setTimeout, clearTimeout, requestTimeout: 15000, actionTimeout:15000, onAccessEnded: () => {},
+    monotonicNow, setTimeout, clearTimeout, requestTimeout: 15000, actionTimeout:15000,
+    verifyReadFailures: true, onAccessEnded: () => {},
     onActionPause:(scope,kind,recipient) => actions?.pause(scope,kind,recipient),
     onDispose() {
       disposed = true; epoch++; wipe(); actions?.invalidate(); cursors.clear(); binding = null; unsubscribe();

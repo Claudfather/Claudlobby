@@ -1,5 +1,7 @@
 const readHandles = new WeakSet();
 export const isOwnerReadHandle = handle => readHandles.has(handle);
+// Only trusted carriers mark a dispatched finite read as ambiguously unavailable.
+export class ReadRequestUnavailable extends Error {}
 
 // Selected only by the trusted owner browser server, inside its read gate.
 // Explicit renewal avoids assuming when a restored page's session began.
@@ -9,6 +11,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   monotonicNow = () => globalThis.performance.now(),
   requestTimeout = 8000,
   actionTimeout = 8000,
+  verifyReadFailures = false,
   onActionPause = () => {},
   onReadAdmitted = () => {},
   onDispose = () => {},
@@ -166,17 +169,24 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     try {
       const result = await request(url);
       if (disposed || gen !== generation || mode !== 'ready') return null;
-      if (result.status === 403) {
+      if (result.status === 403 || verifyReadFailures && result.status === 401) {
         if (recoveryUsed) leave('denied');
         else await checkSession(true);
         return null;
       }
-      if (result.status === 503) { unavailableRead(); return null; }
+      if (result.status === 503) {
+        if (verifyReadFailures) await checkActionSession(gen);
+        else unavailableRead();
+        return null;
+      }
       if (result.status !== 200) return null; // Only the affected panel degrades.
       recoveryUsed = false;
       return result.data ?? null;
-    } catch {
-      if (!disposed && gen === generation && mode === 'ready') unavailableRead();
+    } catch (error) {
+      if (!disposed && gen === generation && mode === 'ready') {
+        if (verifyReadFailures && error instanceof ReadRequestUnavailable) await checkActionSession(gen);
+        else unavailableRead();
+      }
       return null;
     }
   }
@@ -227,7 +237,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         const result = await request('/api/owner/status');
         if (disposed || gen !== generation || mode !== 'ready') return;
         if (result.status === 200 && result.data?.state === 'ready') { admitReady(result.data); return; }
-        if (result.status === 403 || (result.status === 200 &&
+        if (result.status === 403 || verifyReadFailures && result.status === 401 || (result.status === 200 &&
           ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
         else pause('unavailable');
       } catch {
