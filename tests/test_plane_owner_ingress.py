@@ -13,6 +13,7 @@ import shlex
 import signal
 from pathlib import Path
 import sys
+import time
 
 import pytest
 
@@ -20,6 +21,7 @@ from claudlobby.plane import owner_ingress
 from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable, PrincipalRef
 from claudlobby.plane.owner_ingress import ServePrincipalVerifier
 from tests.conftest import constructed_env
+from tests.deadline_clock import bounded, move_clock, status
 
 SOURCE = '100.64.0.42'
 PREFS = {'ControlURL': 'https://controlplane.tailscale.com'}
@@ -41,6 +43,15 @@ def verifier(monkeypatch, replies=None):
         return copy.deepcopy(replies.pop(0))
     monkeypatch.setattr(result, '_command', command)
     return result, calls
+
+
+async def until(condition):
+    # Reads every 10 ms of real time in a worker thread: paused() holds the
+    # loop clock, so asyncio.sleep would never return there. Bound it with
+    # bounded().
+    loop = asyncio.get_running_loop()
+    while not condition():
+        await loop.run_in_executor(None, time.sleep, .01)
 
 
 def test_verified_numeric_human_uses_fixed_namespace_and_checks_realm_each_admission(monkeypatch):
@@ -262,6 +273,7 @@ def test_queued_timeout_or_cancellation_releases_reservation_without_admitting(m
 def test_queue_wait_and_verification_share_one_deadline(monkeypatch):
     verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
     async def run():
+        advance, paused = move_clock(monkeypatch)
         entered = 0
         release, full, fifth = asyncio.Event(), asyncio.Event(), asyncio.Event()
         async def admit(_source):
@@ -275,16 +287,30 @@ def test_queue_wait_and_verification_share_one_deadline(monkeypatch):
             fifth.set()
             await asyncio.Event().wait()
         monkeypatch.setattr(verify, '_admit', admit)
-        active = [asyncio.create_task(verify(scope())) for _ in range(4)]
-        await asyncio.wait_for(full.wait(), 1)
-        monkeypatch.setattr(owner_ingress, '_TIMEOUT_SECONDS', .2)
-        queued = asyncio.create_task(verify(scope()))
-        await asyncio.sleep(.1)
-        release.set()
-        await asyncio.gather(*active)
-        await asyncio.wait_for(fifth.wait(), 1)
-        with pytest.raises(AccessUnavailable):
-            await asyncio.wait_for(asyncio.shield(queued), .15)
+        requests = []
+        def state():
+            return (f'requests={[status(task) for task in requests]}, entered={entered}, '
+                    f'pending={verify._pending}, free slots={verify._slots._value} (loop clock held)')
+        # The clock moves only where this says (#2404): the fifth request's
+        # deadline starts on arrival, four of its five seconds pass while it
+        # waits for a slot and the rest once it is verifying. A stall costs real
+        # time only, so the deadline cannot end the request while it is queued.
+        with paused():
+            requests.extend(asyncio.create_task(verify(scope())) for _ in range(4))
+            await bounded(full.wait(), 'four admissions to hold every slot', state)
+            queued = asyncio.create_task(verify(scope()))
+            requests.append(queued)
+            await bounded(until(lambda: verify._pending == 5), 'the fifth request to queue', state)
+            advance(owner_ingress._TIMEOUT_SECONDS - 1)
+            release.set()
+            await bounded(asyncio.gather(*requests[:4]), 'the four admissions to finish', state)
+            await bounded(fifth.wait(), 'the queued request to enter verification', state)
+            assert not queued.done(), state()
+            # Past the deadline that began on arrival. One begun when the slot
+            # was taken would have 3.5 s left.
+            advance(1.5)
+            with pytest.raises(AccessUnavailable, match='owner_identity_lookup_unavailable'):
+                await bounded(asyncio.shield(queued), 'the queued request to end at its deadline', state)
         assert verify._pending == 0 and verify._slots._value == 4
     asyncio.run(run())
 
@@ -351,12 +377,24 @@ def test_failed_or_overlarge_cli_is_unavailable_and_reaped(monkeypatch, tmp_path
 def test_stalled_cli_timeout_kills_and_reaps_subprocess(monkeypatch, tmp_path):
     verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
     _, processes = subprocess_helper(monkeypatch, tmp_path, 'import time; time.sleep(60)')
-    monkeypatch.setattr(owner_ingress, '_TIMEOUT_SECONDS', .1)
-    with pytest.raises(AccessUnavailable, match='owner_identity_lookup_unavailable'):
-        asyncio.run(verify(scope()))
-    assert processes[0].returncode is not None
-    assert verify._slots._value == owner_ingress._CONCURRENCY
-    assert verify._pending == 0
+    async def run():
+        advance, paused = move_clock(monkeypatch)
+        request = asyncio.create_task(verify(scope()))
+        def state():
+            return (f'request={status(request)}, spawned={len(processes)}, '
+                    f'returncode={processes[0].returncode if processes else None} (loop clock held)')
+        # The production deadline passes once the CLI is running and silent: a
+        # slow spawn costs real time only, so it cannot end the request first.
+        with paused():
+            await bounded(until(lambda: processes), 'the CLI to be spawned', state, seconds=10)
+            assert processes[0].returncode is None and not request.done(), state()
+            advance(owner_ingress._TIMEOUT_SECONDS + 1)
+            with pytest.raises(AccessUnavailable, match='owner_identity_lookup_unavailable'):
+                await bounded(asyncio.shield(request), 'the request to end at its deadline', state)
+        assert processes[0].returncode is not None
+        assert verify._slots._value == owner_ingress._CONCURRENCY
+        assert verify._pending == 0
+    asyncio.run(run())
 
 
 def test_request_cancellation_kills_and_reaps_subprocess(monkeypatch, tmp_path):
@@ -364,8 +402,8 @@ def test_request_cancellation_kills_and_reaps_subprocess(monkeypatch, tmp_path):
     _, processes = subprocess_helper(monkeypatch, tmp_path, 'import time; time.sleep(60)')
     async def run():
         task = asyncio.create_task(verify(scope()))
-        while not processes:
-            await asyncio.sleep(.005)
+        await bounded(until(lambda: processes), 'the CLI to be spawned',
+                      lambda: f'request={status(task)}, spawned={len(processes)}', seconds=10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -378,12 +416,18 @@ def test_request_cancellation_kills_and_reaps_subprocess(monkeypatch, tmp_path):
 def test_timeout_kills_cli_descendant_after_parent_exits(monkeypatch, tmp_path):
     verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
     child_file = tmp_path / 'synthetic-child.pid'
+    # The parent exits only once its descendant has written its pid, so the
+    # order is the program's, not the runner's.
     program = f"""import os,time
-pid = os.fork()
-if pid:
+read, write = os.pipe()
+if os.fork():
+    os.close(write)
+    os.read(read, 1)
     os._exit(0)
+os.close(read)
 with open({str(child_file)!r}, 'w') as stream:
     stream.write(str(os.getpid()))
+os.write(write, b'1')
 time.sleep(60)
 """
     _, processes = subprocess_helper(monkeypatch, tmp_path, program)
@@ -393,11 +437,29 @@ time.sleep(60)
         killed.append((pid, sig))
         original_killpg(pid, sig)
     monkeypatch.setattr(os, 'killpg', killpg)
-    monkeypatch.setattr(owner_ingress, '_TIMEOUT_SECONDS', .5)
+    async def run():
+        advance, paused = move_clock(monkeypatch)
+        request = asyncio.create_task(verify(scope()))
+        def state():
+            return (f'request={status(request)}, spawned={len(processes)}, '
+                    f'returncode={processes[0].returncode if processes else None}, '
+                    f'pid file={child_file.exists()}, killed={killed} (loop clock held)')
+        # The production deadline passes once the parent has exited and its
+        # descendant still holds the CLI's output open.
+        with paused():
+            await bounded(until(lambda: processes), 'the CLI to be spawned', state, seconds=10)
+            # Process.wait() also waits for the pipes the descendant holds, so
+            # read the exit itself.
+            await bounded(until(lambda: processes[0].returncode is not None), 'the CLI parent to exit',
+                          state, seconds=10)
+            assert processes[0].returncode == 0, state()
+            assert child_file.exists(), 'synthetic descendant did not start'
+            assert not request.done() and not killed, state()
+            advance(owner_ingress._TIMEOUT_SECONDS + 1)
+            with pytest.raises(AccessUnavailable):
+                await bounded(asyncio.shield(request), 'the request to end at its deadline', state)
     try:
-        with pytest.raises(AccessUnavailable):
-            asyncio.run(verify(scope()))
-        assert child_file.exists(), 'synthetic descendant did not start'
+        asyncio.run(run())
         assert processes[0].returncode == 0  # Parent already exited normally.
         assert killed == [(processes[0].pid, signal.SIGKILL)]
     finally:
