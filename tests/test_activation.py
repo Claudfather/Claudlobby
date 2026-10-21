@@ -549,7 +549,9 @@ def cold(installed, monkeypatch, tmp_path):
            "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
            "CLAUDLOBBY_LIBRARY_DIR": str(directory / "library"),
            "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
-    tmux_dir = tmp_path / "private-tmux"  # Never the host's shared /tmp sockets.
+    # Never the host's shared /tmp sockets. Short: a socket under it must fit
+    # macOS's 104-byte sun_path with pytest's directories in front.
+    tmux_dir = tmp_path / "tmux"
     for stem, phase, bot in (("claudlobby-plane-daemon", "ingest", None),
                              ("com.example.worker", "bots", "worker"),
                              ("com.example.manager", "bots", "manager"),
@@ -1013,7 +1015,7 @@ def test_start_repair_accepts_stale_refused_private_socket(cold):
     host.dead.add(_WORKER_UNIT)
     stale = host.tmux_dir / f"tmux-{os.getuid()}" / "com.example.worker"
     if len(str(stale)) > 100:
-        pytest.skip("AF_UNIX path limit; run with a short private TMPDIR")
+        pytest.skip("AF_UNIX path limit; point CLAUDLOBBY_TEST_TMPDIR at a shorter private directory")
     stale.parent.mkdir(parents=True)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(str(stale))  # Bound, never listening: an unclean tmux exit's leftover.

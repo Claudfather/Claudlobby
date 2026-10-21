@@ -84,15 +84,42 @@ the other two cannot** (#1035). Drop any one and a live hole reopens.
 Redirect, read `$?`, then grep the file. Same `${PIPESTATUS[0]}` trap as
 `gh api ... | head`.
 
-**CI's lanes: quarantine a flaky test, never deselect it.** Each test runs in exactly one CI
-lane, chosen by its markers (pinned by `tests/test_ci_lanes.py`). `test.yml`'s `pytest` job
-runs `-m "not quarantine and not harness"`; its `harness` job runs the validation harness
-(`@pytest.mark.harness`) in parallel; and `quarantine.yml` runs every test marked
-`@pytest.mark.quarantine(issue=<N>)`. Fix a flaky test when its cause is clear and small.
-Otherwise quarantine it: it leaves the required lanes (`pytest`, `harness`, conformance's
-`vault-tests`) but still runs on every PR and push to main, in a check nothing should require.
-Collection refuses a quarantine that names no tracking issue. Never `--deselect` or `-k` a test
-out of a workflow: a node id that stops matching deselects nothing and says so nowhere. The
-suite still runs everything locally, and `pytest -m "not quarantine and not harness"` mirrors
-the required `pytest` lane. A quarantined test that shows up in your before/after name diff is
-a known flake, so rerun it on both arms before attributing it.
+**CI's lanes: quarantine a flaky test, never deselect it.** On each platform, each test runs in
+exactly one CI lane, chosen by its markers (pinned by `tests/test_ci_lanes.py`). On a pull
+request, `test.yml` runs `-m "not quarantine and not harness"` on each supported platform, Linux
+with Python 3.10 and macOS with Python 3.11, in shards (below); a `harness` job runs the
+validation harness (`@pytest.mark.harness`) beside them, on Linux with Python 3.11 and on macOS;
+and `quarantine.yml` runs every test marked `@pytest.mark.quarantine(issue=<N>)`. The `pytest`
+job runs the shards' selection on Linux with Python 3.11, on push to main only. The `[vault]`
+tests skip in the shards and in `pytest`, and run in conformance's `vault-tests`. Fix a flaky
+test when its cause is clear and small. Otherwise quarantine it: it leaves the required lanes
+(the shards, both `harness` jobs, `pytest`, conformance's `vault-tests`) but still runs on every
+PR and push to main, in a check nothing should require. Collection refuses a quarantine that
+names no tracking issue. Never `--deselect` or `-k` a test out of a workflow: a node id that
+stops matching deselects nothing and says so nowhere. The suite still runs everything locally,
+and `pytest -m "not quarantine and not harness"` mirrors the required lanes. A quarantined test
+that shows up in your before/after name diff is a known flake, so rerun it on both arms before
+attributing it.
+
+**CI's shards.** Each supported platform's suite runs in `TEST_SPLITS` shard jobs (`test.yml`),
+`supported (ubuntu-latest, py3.10) shard 1` to `shard 4` and the same for macOS, and pytest-split
+hands each one a share by the recorded times in `.test_durations`. Each shard first lists the
+whole suite it collected, in the step and environment it runs it in. The platform's gate job
+carries its check name, `supported (ubuntu-latest, py3.10)` or `supported (macos-latest,
+py3.11)`, and passes only when every shard passed, every shard listed the same suite, the shards'
+JUnit reports hold each listed test exactly once, and the platform skipped no more tests,
+counted across all its shards, than its ceiling in `tests/ci_shards.py` (`SKIP_CEILINGS`). A
+change that adds a skip on a platform raises its ceiling in the same change and says why. A test
+id must not change between runs: a parametrize value that embeds something random (a fresh
+uuid, the time) needs explicit `ids=`, or the shards' listings disagree. To run what one shard
+ran, with the `dev` extra installed: `PYTHONHASHSEED=0 pytest -m "not quarantine and not
+harness" --splits 4 --group 3`.
+
+**Refreshing `.test_durations`.** A test missing from it gets the average time, so stale times
+make the shards uneven but never skip a test. Its times are macOS's: the slowest platform's
+shards decide how long a pull request waits. Judge drift over several green runs, not one:
+runner speed alone moves a shard a long way (with the same tests, one macOS shard took 10
+minutes in one run and 16 in the next). When the macOS shards stay more than about a quarter
+apart run after run, take the `test-durations` artifact of a green `tests` run (the newest on
+main, say) and commit it at the repository root: `rm .test_durations`, since `gh run download`
+will not overwrite it, then `gh run download <run-id> -n test-durations`.
