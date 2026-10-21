@@ -327,8 +327,8 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
 
     New identities use the explicitly selected, observed install directory.
     Matching identities retain the exact original installed path and owner.
-    One directory-only ConfigInstall journal ensures missing link parents before
-    phase journals reserve their own files/links. No unit is enabled or started.
+    One directory-only ConfigInstall journal ensures missing unit/link parents
+    before phase journals reserve their own files/links. No unit is enabled or started.
     """
     record = _record(store, activation_id)
     published = [store.root / "state/activations" / journal_id(activation_id, phase) / "config"
@@ -400,6 +400,7 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
         builder = ConfigPlanBuilder(store.root, candidate.release_id, candidate.release_seal,
                                     candidate.fleets, effects={**common, "phase": "directories"})
         for entry in entries:
+            builder.directory(Path(entry["installed"]).parent)
             link = entry["enablement"]
             if link and link["create"]:
                 builder.directory(Path(link["path"]).parent)
@@ -431,8 +432,10 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
 def _check_publication_changes(plan, entries, phase, retired=()):
     actual = {change.target: change.after for change in plan.changes}
     if phase == "directories":
-        expected = {str(Path(entry["enablement"]["path"]).parent): {"kind": "directory", "mode": 0o755}
-                    for entry in entries if entry["enablement"] and entry["enablement"]["create"]}
+        parents = {str(Path(entry["installed"]).parent) for entry in entries}
+        parents.update(str(Path(entry["enablement"]["path"]).parent)
+                       for entry in entries if entry["enablement"] and entry["enablement"]["create"])
+        expected = {parent: {"kind": "directory", "mode": 0o755} for parent in parents}
         valid = all(target in expected and node == expected[target] for target, node in actual.items())
     else:
         expected = {entry["installed"]: entry["after"] for entry in entries if entry["phase"] == phase}
