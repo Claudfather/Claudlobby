@@ -164,14 +164,17 @@ def test_the_cwd_key_is_the_one_transcript_slug_states(home, tmp_path):
     assert _log(home, odd) == (0, str(log))
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="XDG_CACHE_HOME moves the cache on Linux only")
-def test_xdg_cache_home_moves_the_cache_on_linux(home, bot, tmp_path):
+def test_xdg_cache_home_moves_the_cache_on_linux_only(home, bot, tmp_path):
+    """Linux reads Claude Code's cache from $XDG_CACHE_HOME; macOS keeps
+    ~/Library/Caches whatever it says. A log waits in each place."""
+    default = write_log(home, bot, capture("registered"))
     elsewhere = tmp_path / "xdg"
     d = elsewhere / "claude-cli-nodejs" / transcript_slug(os.path.realpath(bot)) / "mcp-logs-plugin-telegram-telegram"
     d.mkdir(parents=True)
-    log = d / f"{stamp(time.time())}.jsonl"
-    log.write_text(capture("refused"))
-    assert _log(home, bot, XDG_CACHE_HOME=str(elsewhere)) == (0, str(log))
+    moved = d / f"{stamp(time.time())}.jsonl"
+    moved.write_text(capture("refused"))
+    expected = default if sys.platform == "darwin" else moved
+    assert _log(home, bot, XDG_CACHE_HOME=str(elsewhere)) == (0, str(expected))
 
 
 # --- bring-up: bridge_bringup_verify with the poller up ---------------------------
