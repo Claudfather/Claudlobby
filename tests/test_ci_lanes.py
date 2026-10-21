@@ -475,19 +475,34 @@ def test_a_shard_step_lists_and_runs_its_suite_in_one_environment(
         ["bash", "-e", "-c", _shard_step(lane)["run"]],
         cwd=tmp_path, env=env, capture_output=True, text=True,
     )
-    assert proc.returncode == step_rc, proc.stdout + proc.stderr
-    assert (tmp_path / "pytest.rc").read_text() == f"{step_rc}\n"
     calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert len(calls) == (1 if run_rc is None else 2), [c["argv"] for c in calls]
-    if run_rc is not None:
-        listed, ran = calls
-        assert "--collect-only" in listed["argv"] and "--collect-only" not in ran["argv"]
-        assert ran["argv"][ran["argv"].index("--splits") + 1] == "4"
-        assert ran["argv"][ran["argv"].index("--group") + 1] == "2"
-        assert listed["env"] == ran["env"]
-        assert ran["env"]["HOME"].startswith(str(tmp_path))
-        assert ran["env"]["PLANE_EMIT_DISABLED"] == "1"
-        assert (tmp_path / "collected.txt").read_text() == listing.split("\n\n")[0] + "\n"
+    assert calls, proc.stdout + proc.stderr  # the listing always runs
+    # HOME, TMPDIR and the XDG dirs are one fresh scratch tree, wherever mktemp
+    # made it: macOS's ignores TMPDIR and uses its own temp dir, so the step's
+    # tree is removed below when it lies outside tmp_path.
+    scratch = Path(calls[0]["env"]["HOME"]).parent
+    try:
+        assert proc.returncode == step_rc, proc.stdout + proc.stderr
+        assert (tmp_path / "pytest.rc").read_text() == f"{step_rc}\n"
+        assert len(calls) == (1 if run_rc is None else 2), [c["argv"] for c in calls]
+        for key, sub in (("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CONFIG_HOME", "config"),
+                         ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state"),
+                         ("XDG_DATA_HOME", "data")):
+            assert calls[0]["env"][key] == str(scratch / sub), (key, calls[0]["env"][key])
+        assert calls[0]["env"]["PLANE_EMIT_DISABLED"] == "1"
+        if run_rc is not None:
+            listed, ran = calls
+            assert "--collect-only" in listed["argv"] and "--collect-only" not in ran["argv"]
+            assert ran["argv"][ran["argv"].index("--splits") + 1] == "4"
+            assert ran["argv"][ran["argv"].index("--group") + 1] == "2"
+            assert listed["env"] == ran["env"]
+            assert (tmp_path / "collected.txt").read_text() == listing.split("\n\n")[0] + "\n"
+    finally:
+        made = ["cache", "config", "data", "home", "state", "tmp"]
+        if (scratch.is_dir() and not scratch.is_relative_to(tmp_path)
+                and scratch.name.startswith("tmp.")
+                and sorted(child.name for child in scratch.iterdir()) == made):
+            shutil.rmtree(scratch)
 
 
 @pytest.mark.parametrize("lane", GATES, ids=lambda lane: lane[1])
