@@ -171,6 +171,17 @@ def _capture_policy():
     return capture_policy
 
 
+def _name_tag(events: list) -> str:
+    """The tag for a staged batch's name (claudlobby/plane/queue_names.py), from
+    the package `_capture_policy` put on the path. Without it the batch keeps
+    the untagged name, which every reader reads in full."""
+    try:
+        from claudlobby.plane.queue_names import name_tag
+    except ImportError:
+        return ""
+    return name_tag(events)
+
+
 def _staged_usage(path: str):
     """(batches, bytes) already pending. Temp names count: they age into
     replay. An unreadable queue raises OSError, which refuses the stage."""
@@ -202,13 +213,15 @@ def _record_loss(stage_dir: str, kind: str, detail: str) -> None:
         pass
 
 
-def _stage(stage_dir: str, payload: str, lead: str, bound=None) -> None:
+def _stage(stage_dir: str, payload: str, lead: str, bound=None, tag: str = "") -> None:
     """Durably stage events for daemon replay through emit_batch.
 
     The payload is already capture-policy-applied (S5a-04): the replay applies
     the policy again, but the file itself never holds a fuller body than the
     policy allows. `bound` = (max batches, max bytes); at or past it this
-    raises StagedFull and writes nothing.
+    raises StagedFull and writes nothing. `tag` names the message the batch's
+    transmissions name (claudlobby/plane/queue_names.py); the temp carries it
+    too, so a stage cut short says what it was.
     """
     path = os.path.abspath(stage_dir)
     for directory in (os.path.dirname(os.path.dirname(path)), os.path.dirname(path), path):
@@ -229,7 +242,7 @@ def _stage(stage_dir: str, payload: str, lead: str, bound=None) -> None:
         if count >= bound[0] or size + len(payload.encode()) > bound[1]:
             raise StagedFull(f"{count} batches, {size} bytes pending (bound "
                              f"{bound[0]} batches, {bound[1]} bytes)")
-    name = f"{time.time_ns()}-{lead}.batch"
+    name = f"{time.time_ns()}-{lead}{tag}.batch"
     tmp = os.path.join(path, f".{name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
                  getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -303,7 +316,7 @@ def _stage_pending(stage_dir: str, finalized: list, cause: str) -> int:
         return 2
     payload = json.dumps({"events": captured}, ensure_ascii=False)
     try:
-        _stage(stage_dir, payload, finalized[0]["event_id"], bound=bound)
+        _stage(stage_dir, payload, finalized[0]["event_id"], bound=bound, tag=_name_tag(captured))
     except StagedFull as exc:
         print(f"plane-socket-client: staged queue FULL ({exc}) — batch NOT recorded. "
               "The daemon is its only consumer: check `claudlobby plane doctor`",

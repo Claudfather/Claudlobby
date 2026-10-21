@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a deep queue of other work no longer makes message receipts read "unavailable" (#2430)
+
+Under load a hook misses its socket deadline, and every hook emit on the host
+then stages for the minute after it, so the staged queue held hundreds of
+batches, nearly all of them other bots' tool calls. A receipt check reads at
+most 256 queued entries. On 2026-10-21 one read "265 queued Plane entries that
+may hold this message's proof are more than the 256 a receipt check reads" for
+a proof that existed, and a send's own check read the same at 299. Replay took
+the queue oldest first, so a receiver's proof also waited behind every batch
+staged before it.
+
+- **Each queued batch is named for the message its transmissions name**
+  (`claudlobby/plane/queue_names.py`): `.np` for none, `.m<hex>` for one. The
+  socket client's stage and its temp file carry the tag, and so do the spool's
+  entries. A batch naming several messages carries none, and neither does any
+  older name.
+- **The receipt check reads only the entries whose names leave room for its
+  message's proof.** Other work is neither read nor counted, against the
+  256-entry bound, the byte budget or the listing cap, and another bot's stage
+  still being written is no torn entry. The retry gate reads the same way.
+  Untagged entries are read as before.
+- **Replay takes the batches that may hold a transmission first**, oldest first
+  among them, then the rest in their order.
+- **`plane spool inspect` and `plane spool quarantine`** accept the tagged names.
+
+Not covered: a proof spooled after a database error still waits for the
+10-minute drain, an orphaned stage still waits its hour, and the check's 0.5 s
+daemon probe, below the daemon's answer time under load, is #1693's.
+
 ### Fixed — the printify skill's suite no longer fails a check whose match it found (#1031)
 
 Four checks in `library/skills/printify/test.sh` piped captured output to `grep -q` under `pipefail`. `grep -q` exits at its first match, but bash's `printf` writes to a pipe one line at a time, so a later line could meet a closed pipe, and that SIGPIPE (status 141) became the pipeline's status: help without creds, the migrate id mapping and the cross-blueprint caveat failed with their text present, and the negated unbound-variable check could read its text as absent. Each check now matches the captured string with a bash pattern, as `supervisor.sh` already does for the same reason.

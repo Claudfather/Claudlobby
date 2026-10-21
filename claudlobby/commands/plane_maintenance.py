@@ -17,16 +17,19 @@ from ..plane.db import connect, connect_ro, db_file
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, preflight_schema, require_current_schema
+from ..plane.queue_names import TAG
 from ..plane.spool import drain, quarantine_dir, quarantine_entry, spool_dir, spool_entries
 from ..plane.queue_paths import scan_spool, spool_path
 from ..runtime_admission import RuntimeIdentity, mutation_admission
 
 
-_SPOOL_NAME = re.compile(r"ev_[0-9a-f]{32}\.json")
+# A spool entry's name may carry the tag naming the message its transmissions
+# name (`plane/queue_names.py`, #2430): `<lead event>[<tag>].json`.
+_SPOOL_NAME = re.compile(r"ev_[0-9a-f]{32}(?:" + TAG + r")?\.json")
 # What else the quarantine holds (#2165): a staged batch or orphan stage that
-# replay refused keeps its stage name, `<time_ns>-<lead event>[.batch.<pid>].json`.
+# replay refused keeps its stage name, `<time_ns>-<lead event>[<tag>][.batch.<pid>].json`.
 # `inspect` reads these too; `quarantine` (a move) still takes spool names only.
-_QUARANTINED_NAME = re.compile(r"(?:\d+-)?ev_[0-9a-f]{32}(?:\.batch\.\d+)?\.json")
+_QUARANTINED_NAME = re.compile(r"(?:\d+-)?ev_[0-9a-f]{32}(?:" + TAG + r")?(?:\.batch\.\d+)?\.json")
 
 QUARANTINE_LIST_LIMIT = 50
 QUARANTINE_LIST_MAX = 500
