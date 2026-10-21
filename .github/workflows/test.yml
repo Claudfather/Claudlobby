@@ -12,10 +12,25 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
-# Linux 3.11 splits the existing harness into its own lane. The other
-# supported-platform lanes retain it; every required lane excludes quarantine.
+env:
+  # How many shards run each supported platform's suite. Each shard job's matrix
+  # lists 1..TEST_SPLITS, and each shard refuses to run if the two disagree.
+  # Four, not five: the account runs at most five macOS jobs at once (GitHub's
+  # limit on its plan), and harness-macos is the fifth.
+  TEST_SPLITS: "4"
+
+# Every pull request runs the suite outside quarantine on each supported
+# platform, Linux with Python 3.10 (the floor version) and macOS with Python
+# 3.11, in TEST_SPLITS shards. Each platform's gate job carries the platform's
+# check name and passes only when every shard did and, between them, the shards
+# ran the suite they collected, each test once (tests/ci_shards.py). The harness
+# runs in a job of its own on each platform. Linux with Python 3.11 runs on push
+# to main only. Every lane excludes quarantine; tests/test_ci_lanes.py pins them.
 jobs:
   pytest:
+    # Push to main only: a pull request runs the Linux suite on 3.10 and runs
+    # 3.11 on macOS (#1945).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,19 +99,28 @@ jobs:
             ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/*.log
           if-no-files-found: error
 
-  supported-platforms:
-    name: supported (${{ matrix.os }}, py${{ matrix.python }})
+  # One share of the Linux 3.10 suite per shard. pytest-split hands out the
+  # shares by the times in .test_durations, and they add up to the suite only
+  # while every shard collects the same tests in the same order, so each shard
+  # first lists the suite it collected, in the step and environment it runs it
+  # in. A shard that lists or runs nothing fails, and the gate below fails with it.
+  supported-ubuntu-shard:
+    name: supported (ubuntu-latest, py3.10) shard ${{ matrix.group }}
+    runs-on: ubuntu-latest
+    # A shard runs about a quarter of the suite (around ten minutes): a hung
+    # one fails here instead of holding the gate below for an hour.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-latest, python: '3.10'}
-          - {os: macos-latest, python: '3.11'}
-    runs-on: ${{ matrix.os }}
-    # The first Mac run reached the real tmux harness at 91% before the
-    # 30-minute job cap. Allow that bounded harness to finish and retain traces.
-    timeout-minutes: 60
+        group: [1, 2, 3, 4]
+    env:
+      # One collection order in every shard (a set's order follows the hash seed).
+      PYTHONHASHSEED: "0"
+      TEST_GROUP: ${{ matrix.group }}
     steps:
+      - name: Check the matrix covers TEST_SPLITS
+        run: test "${{ strategy.job-total }}" = "$TEST_SPLITS"
       - uses: actions/checkout@v4
         with:
           # Full history: tests/test_env_cascade.py reads an older start-bot.sh
@@ -104,12 +128,157 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: '3.10'
       - name: Install Linux prerequisites
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install isolated package and report tool versions
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/python --version
+          command -v tmux jq node bash
+          tmux -V
+          jq --version
+          node --version
+          /bin/bash --version
+      - name: Rehearse real offline release assembly
+        # In one shard. On a pull request this is the rehearsal's only run:
+        # pytest, which runs it on Python 3.11, runs on push to main only.
+        if: matrix.group == 1
+        run: |
+          release_work="$RUNNER_TEMP/claudlobby-release-assembly"
+          mkdir -p "$release_work/dist" "$release_work/wheelhouse"
+          .venv/bin/python -m build --wheel --no-isolation --outdir "$release_work/dist"
+          .venv/bin/python -m pip download --only-binary=:all: \
+            --dest "$release_work/wheelhouse" "$release_work/dist/"*.whl
+          .venv/bin/python tests/release_assembly_smoke.py \
+            --wheel "$release_work/dist/"*.whl --wheelhouse "$release_work/wheelhouse" \
+            --disposable-root "$release_work/rehearsal"
+      - name: Prepare installed resources for editable test imports
+        # This runner checkout is disposable. Build from indexed source in a
+        # separate temporary tree, then stage only wheel resource/native assets.
+        # The Python package keeps its exact checkout origin for the P0 guard.
+        run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
+      - name: Run this shard of the supported-platform suite
+        env:
+          CLAUDLOBBY_CI_NATIVE_SMOKE: '0'
+        run: |
+          printf 'running\n' > pytest.status
+          test_scratch="$(mktemp -d)"
+          mkdir -p "$test_scratch"/{home,tmp,config,cache,state,data}
+          # Exported once, so that the listing and the run see one environment.
+          export HOME="$test_scratch/home" TMPDIR="$test_scratch/tmp" \
+            XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
+            XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
+            PLANE_EMIT_DISABLED=1
+          set +e
+          .venv/bin/python -m pytest --collect-only --verbosity=-1 \
+            -m "not quarantine and not harness" > collection.txt 2> collection-stderr.txt
+          result=$?
+          if [ "$result" -eq 0 ]; then
+            .venv/bin/python tests/ci_shards.py ids collection.txt collected.txt
+            result=$?
+          else
+            cat collection.txt collection-stderr.txt
+          fi
+          if [ "$result" -eq 0 ]; then
+            cp .test_durations durations.json
+            result=$?
+          fi
+          if [ "$result" -eq 0 ]; then
+            .venv/bin/python -m pytest -v --maxfail=20 --junitxml=pytest-results.xml \
+              -m "not quarantine and not harness" \
+              --splits "$TEST_SPLITS" --group "$TEST_GROUP" \
+              --durations-path durations.json --store-durations --clean-durations 2>&1 | tee pytest.log
+            result=${PIPESTATUS[0]}
+          fi
+          printf '%s\n' "$result" > pytest.rc
+          printf 'completed (exit %s)\n' "$result" > pytest.status
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-ubuntu-latest-py3.10-shard-${{ matrix.group }}
+          path: |
+            pytest.log
+            pytest.rc
+            pytest.status
+            pytest-results.xml
+            collection.txt
+            collection-stderr.txt
+            collected.txt
+            durations.json
+          if-no-files-found: error
+          # A re-run of a failed shard replaces its first attempt's files.
+          overwrite: true
+      # Apart from the shard's files: an upload that mixes the workspace with
+      # the runner's temp directory roots the artifact at their common parent,
+      # which would move the files above out of the place the gate reads.
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.group == 1
+        with:
+          name: release-assembly-ubuntu-latest-py3.10
+          path: |
+            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/result.json
+            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/dependency.lock
+            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/*.log
+          if-no-files-found: error
+          overwrite: true
+
+  # The check name the merge gate reads for Linux 3.10. It runs whatever its
+  # shards did (always(), not !cancelled(): a skipped job reports success) and
+  # passes only when every shard passed and the shards ran the suite they
+  # collected, each test once, skipping no more tests than SKIP_CEILINGS allows.
+  supported-ubuntu:
+    name: supported (ubuntu-latest, py3.10)
+    needs: [supported-ubuntu-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shard to have passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "supported-ubuntu-shard: $RESULTS"
+          [ -n "$RESULTS" ] || exit 1
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-ubuntu-latest-py3.10-shard-*
+          path: shards
+      - name: Require the shards to have run the collected suite, each test once
+        run: |
+          python3 tests/ci_shards.py check --lane 'supported (ubuntu-latest, py3.10)' \
+            --splits "$TEST_SPLITS" shards
+
+  # The macOS 3.11 suite, sharded as the Linux one is above.
+  supported-macos-shard:
+    name: supported (macos-latest, py3.11) shard ${{ matrix.group }}
+    runs-on: macos-latest
+    # A shard runs about a quarter of the suite (around thirteen minutes).
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    env:
+      PYTHONHASHSEED: "0"
+      TEST_GROUP: ${{ matrix.group }}
+    steps:
+      - name: Check the matrix covers TEST_SPLITS
+        run: test "${{ strategy.job-total }}" = "$TEST_SPLITS"
+      - uses: actions/checkout@v4
+        with:
+          # Full history: tests/test_env_cascade.py reads an older start-bot.sh
+          # from it, and skips on a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Install macOS prerequisites
-        if: runner.os == 'macOS'
         run: |
           for tool in tmux jq node; do
             command -v "$tool" >/dev/null || brew install "$tool"
@@ -132,55 +301,107 @@ jobs:
         # separate temporary tree, then stage only wheel resource/native assets.
         # The Python package keeps its exact checkout origin for the P0 guard.
         run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
-      - name: Run supported-platform suite
+      - name: Run this shard of the supported-platform suite
         env:
-          CLAUDLOBBY_CI_NATIVE_SMOKE: ${{ runner.os == 'macOS' && '1' || '0' }}
+          CLAUDLOBBY_CI_NATIVE_SMOKE: '1'
         run: |
           printf 'running\n' > pytest.status
           test_scratch="$(mktemp -d)"
           mkdir -p "$test_scratch"/{home,tmp,config,cache,state,data}
-          set +e
-          env HOME="$test_scratch/home" TMPDIR="$test_scratch/tmp" \
+          # Exported once, so that the listing and the run see one environment.
+          export HOME="$test_scratch/home" TMPDIR="$test_scratch/tmp" \
             XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
             XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
-            PLANE_EMIT_DISABLED=1 \
+            PLANE_EMIT_DISABLED=1
+          set +e
+          .venv/bin/python -m pytest --collect-only --verbosity=-1 \
+            -m "not quarantine and not harness" > collection.txt 2> collection-stderr.txt
+          result=$?
+          if [ "$result" -eq 0 ]; then
+            .venv/bin/python tests/ci_shards.py ids collection.txt collected.txt
+            result=$?
+          else
+            cat collection.txt collection-stderr.txt
+          fi
+          if [ "$result" -eq 0 ]; then
+            cp .test_durations durations.json
+            result=$?
+          fi
+          if [ "$result" -eq 0 ]; then
             .venv/bin/python -m pytest -v --maxfail=20 --junitxml=pytest-results.xml \
-            -m "not quarantine" 2>&1 | tee pytest.log
-          result=${PIPESTATUS[0]}
+              -m "not quarantine and not harness" \
+              --splits "$TEST_SPLITS" --group "$TEST_GROUP" \
+              --durations-path durations.json --store-durations --clean-durations 2>&1 | tee pytest.log
+            result=${PIPESTATUS[0]}
+          fi
           printf '%s\n' "$result" > pytest.rc
           printf 'completed (exit %s)\n' "$result" > pytest.status
           exit "$result"
-      - name: Verify native evidence executed
-        if: always() && runner.os == 'macOS'
-        run: |
-          .venv/bin/python - <<'PY'
-          import xml.etree.ElementTree as ET
-          cases = list(ET.parse('pytest-results.xml').iter('testcase'))
-          expected = {
-              'test_native_plutil_accepts_composed_plist',
-              'test_native_launchd_scratch_lifecycle[success]',
-              'test_native_launchd_scratch_lifecycle[assertion-failure]',
-              'test_native_host_long_exec_path_reads_up',
-              'test_native_bridge_startup_failure_reaps_tree[no-pidfile]',
-              'test_native_bridge_startup_failure_reaps_tree[early-exit]',
-              'test_native_bridge_startup_failure_reaps_tree[pre-yield]',
-          }
-          for name in sorted(expected):
-              found = [case for case in cases if case.attrib['name'] == name]
-              assert len(found) == 1, f'Native evidence missing or duplicated: {name}'
-              assert not any(found[0].find(tag) is not None for tag in ('skipped', 'failure', 'error')), name
-              print(f'Executed and passed: {name}')
-          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pytest-${{ matrix.os }}-py${{ matrix.python }}
+          name: pytest-macos-latest-py3.11-shard-${{ matrix.group }}
           path: |
             pytest.log
             pytest.rc
             pytest.status
             pytest-results.xml
+            collection.txt
+            collection-stderr.txt
+            collected.txt
+            durations.json
           if-no-files-found: error
+          overwrite: true
+
+  # The check name the merge gate reads for macOS, as supported-ubuntu is for
+  # Linux. It also requires the native macOS evidence: each case ran in exactly
+  # one shard and passed.
+  supported-macos:
+    name: supported (macos-latest, py3.11)
+    needs: [supported-macos-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shard to have passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "supported-macos-shard: $RESULTS"
+          [ -n "$RESULTS" ] || exit 1
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-macos-latest-py3.11-shard-*
+          path: shards
+      - name: Require the shards to have run the collected suite, each test once
+        run: |
+          python3 tests/ci_shards.py check --lane 'supported (macos-latest, py3.11)' \
+            --splits "$TEST_SPLITS" \
+            --require-passed 'test_native_plutil_accepts_composed_plist' \
+            --require-passed 'test_native_launchd_scratch_lifecycle[success]' \
+            --require-passed 'test_native_launchd_scratch_lifecycle[assertion-failure]' \
+            --require-passed 'test_native_host_long_exec_path_reads_up' \
+            --require-passed 'test_native_bridge_startup_failure_reaps_tree[no-pidfile]' \
+            --require-passed 'test_native_bridge_startup_failure_reaps_tree[early-exit]' \
+            --require-passed 'test_native_bridge_startup_failure_reaps_tree[pre-yield]' \
+            shards
+      # The times the macOS shards measured, merged, refresh .test_durations
+      # when the shards drift apart (documentation/test-suite.md). This gates
+      # nothing, so it runs only after a passing check and fails quietly.
+      - name: Merge the shards' measured times
+        continue-on-error: true
+        run: python3 tests/ci_shards.py durations shards merged/.test_durations
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-durations
+          path: merged/.test_durations
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
 
   harness:
     runs-on: ubuntu-latest
@@ -219,6 +440,58 @@ jobs:
         if: always()
         with:
           name: pytest-harness-ubuntu-latest-py3.11
+          path: |
+            pytest.log
+            pytest.rc
+            pytest.status
+            pytest-results.xml
+          if-no-files-found: error
+
+  # The harness on macOS, out of the macOS shards: it took about 3.5 minutes
+  # inside the one macOS job the suite ran in before the shards (#1945).
+  harness-macos:
+    name: harness (macos-latest, py3.11)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install macOS prerequisites
+        run: |
+          for tool in tmux jq node; do
+            command -v "$tool" >/dev/null || brew install "$tool"
+          done
+          command -v gtimeout >/dev/null || brew install coreutils
+          gtimeout --version
+      - name: Install isolated package
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Prepare installed resources in disposable checkout
+        run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
+      - name: Run the existing validation harness
+        run: |
+          printf 'running\n' > pytest.status
+          test_scratch="$(mktemp -d)"
+          mkdir -p "$test_scratch"/{home,tmp,config,cache,state,data}
+          set +e
+          env HOME="$test_scratch/home" TMPDIR="$test_scratch/tmp" \
+            XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
+            XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
+            PLANE_EMIT_DISABLED=1 \
+            .venv/bin/python -m pytest -v -m "harness and not quarantine" \
+            --junitxml=pytest-results.xml 2>&1 | tee pytest.log
+          result=${PIPESTATUS[0]}
+          printf '%s\n' "$result" > pytest.rc
+          printf 'completed (exit %s)\n' "$result" > pytest.status
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-harness-macos-latest-py3.11
           path: |
             pytest.log
             pytest.rc
