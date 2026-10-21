@@ -1,9 +1,12 @@
 # Supported-platform testing
 
-The default suite runs in three GitHub-hosted lanes: the existing `pytest`
-(Ubuntu/Python 3.11), `supported (ubuntu-latest, py3.10)` (the declared Python
-minimum), and `supported (macos-latest, py3.11)`. The matrix includes exactly
-these additional two combinations and does not expand our support promise.
+The default suite runs on three GitHub-hosted platforms: Ubuntu with Python
+3.10 (the declared Python minimum) and macOS with Python 3.11 on every pull
+request and push to main, as `supported (ubuntu-latest, py3.10)` and
+`supported (macos-latest, py3.11)`, and Ubuntu with Python 3.11 as `pytest`, on
+push to main only (#1945). Each supported platform's suite runs in four shards,
+behind a gate job that carries its check name ([test-suite.md](test-suite.md)).
+These platforms do not expand our support promise.
 The only default-suite deselection remains the existing hook-command case
 tracked by #229. Optional vault/model/auth tests retain their skip reasons.
 
@@ -22,9 +25,10 @@ with a unique `claudlobby-ci-<random>` prefix and a scratch launcher, observes
 its harmless process, and boots out only that job. Cleanup is asserted both
 for normal completion and an assertion raised after startup. No fleet
 installer, authenticated bot session, Telegram account, or live fleet is used.
-An unavailable launchd domain is a failure in this opted-in lane. A JUnit
-check also refuses missing, skipped, duplicate, or failed native observations,
-including each no-pidfile, early-exit and post-readiness startup-cleanup case.
+An unavailable launchd domain is a failure in this opted-in lane. The macOS
+gate's JUnit check also refuses missing, skipped, duplicate, or failed native
+observations across its shards, including each no-pidfile, early-exit and
+post-readiness startup-cleanup case.
 
 Bridge process startup owns cleanup from the moment it spawns: failure to
 write readiness, an early exit, and failures after yielding all reap the
@@ -39,16 +43,18 @@ failed on the injected assertion, and the [restored run](https://github.com/Clau
 passed all three lanes at `6ff6ddff4133e2d7dda01a69e3003f6e9dcf037d`.
 The historical mutation driver remains available in that commit; it is not
 part of recurring CI. Each current checkout still runs the complete suite,
-including native cleanup regressions and the seven-case JUnit gate, within
-the existing 30-minute supported-platform limit.
+including native cleanup regressions and the seven-case JUnit gate, across its
+shards, each within its job's limit (30 minutes on Linux, 40 on macOS).
 
 The checks must pass in the PR and then be selected as required checks in the
 repository's default-branch ruleset. Adding jobs alone does not enforce that
 merge policy. At implementation start, `Protect Main` required one approving
 review and no status checks; enforcement of these three names is pending
-operator approval. Preserve the original `pytest` name when updating rules.
-Removing a lane later requires updating its required-check rule together with
-the workflow so a nonexistent check does not block every merge.
+operator approval. On a pull request `pytest` is skipped (it runs on push to
+main), and each `supported` name is a gate job over its platform's shards: a
+rule that requires a check names the gate, never a shard. Removing a lane later
+requires updating its required-check rule together with the workflow so a
+nonexistent check does not block every merge.
 
 Runner labels and availability are documented in
 [GitHub-hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
