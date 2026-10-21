@@ -26,7 +26,8 @@ rehearsal's deaf manager never came up, and 13 checks failed after it.
 - **lib-common's `harness_box_up` and `harness_box_down`.** The first starts
   a stand-in and returns once its box is drawn, or says why not; the second
   ends a session and, when it was its server's last, waits for that server
-  to exit. Every stand-in the harnesses start or restart goes through them.
+  to exit, or names it on stderr when it outlives the wait. Every stand-in
+  the harnesses start or restart goes through them.
 - **A manager that does not come up ends a rehearsal at that step, as one
   failure**, and the wrapper's tests for the steps after it skip, naming it.
   In `validate-bot-change.sh` it refuses the checks after it in its scenario.

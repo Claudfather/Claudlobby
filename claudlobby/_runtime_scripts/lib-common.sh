@@ -6358,15 +6358,23 @@ harness_box_up() {
 # connection: a start on that socket then reaches the exiting server, and tmux
 # fails it ("server exited unexpectedly") with no session (#2405; 6 of 800 such
 # restarts on a Pi 5). So when it is the last, this waits, up to 5 s, for that
-# server to be gone, and returns 1 if it is not. No such session: returns 0.
+# server to be gone. If it is not, this names the server's pid and the seconds
+# it waited in one line on stderr, and returns 1: callers discard the status,
+# and a caller can run inside a command substitution, which captures stdout.
+# No such session: returns 0.
 harness_box_down() {
-    local socket="$1" session="$2" pid count i=0
+    local socket="$1" session="$2" pid count i=0 start
     pid=$(bot_tmux "$socket" display-message -p -t "$session" '#{pid}' 2>/dev/null) || return 0
     count=$(bot_tmux "$socket" list-sessions 2>/dev/null | wc -l) || true
     bot_tmux "$socket" kill-session -t "$session" 2>/dev/null || true
     [ "$count" -le 1 ] || return 0
+    start=$SECONDS
     while kill -0 "$pid" 2>/dev/null; do
-        [ "$i" -lt 100 ] || return 1
+        [ "$i" -lt 100 ] || {
+            printf 'harness_box_down: tmux server %s is still running %s s after its last session (%s) ended\n' \
+                "$pid" "$((SECONDS - start))" "$session" >&2
+            return 1
+        }
         sleep 0.05
         i=$((i + 1))
     done
