@@ -10,6 +10,8 @@ import runpy
 import shutil
 from types import SimpleNamespace
 import sqlite3
+import subprocess
+import sys
 import time
 
 import pytest
@@ -235,6 +237,43 @@ def stage(staged, name, events, written):
 #: An hour before the fixture's messages are recorded (2026-09-28T00:00:00Z).
 BEFORE_THE_MESSAGE = datetime(2026, 9, 27, 23, 0, tzinfo=timezone.utc).timestamp()
 
+CLIENT = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/plane-socket-client.py"
+
+
+def client_stager(staged):
+    """Stage events as the socket client does once it has missed the socket:
+    finalized, capture-policy-applied and named by the client's own writer."""
+    client = runpy.run_path(str(CLIENT))
+
+    def stage_events(*events):
+        assert client["_stage_pending"](str(staged), client["_finalize"](list(events)),
+                                        "socket transport: timeout") == 7
+    return stage_events
+
+
+def stage_cut_short(staged, *events):
+    """What a stager reaped before its first byte leaves: the temp file under the
+    client's own name, empty. Its fchmod ends the child, which like the bounded
+    emit's SIGKILL runs no cleanup. Returns that file."""
+    script = ("import json, os, runpy, sys\n"
+              "client = runpy.run_path(sys.argv[1])\n"
+              "os.fchmod = lambda *_: os._exit(137)\n"
+              "client['_stage_pending'](sys.argv[2], client['_finalize'](json.loads(sys.argv[3])), 'test')\n")
+    before = set(staged.iterdir())
+    run = subprocess.run([sys.executable, "-c", script, str(CLIENT), str(staged), json.dumps(list(events))],
+                         capture_output=True, text=True)
+    assert run.returncode == 137, (run.returncode, run.stderr)
+    [left] = set(staged.iterdir()) - before
+    assert left.stat().st_size == 0
+    return left
+
+
+def tool_call(number):
+    """A bot's tool-call event, the bulk of what the hooks stage under load."""
+    from claudlobby.plane.fleet_events import fleet_event_request
+    return fleet_event_request("tool_call", fleet="a", subject_kind="actor", subject="bot:a/worker",
+                               source="vitals", data={"event": "PreToolUse", "tool": "Bash", "n": number})
+
 
 def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_wins(estate, monkeypatch):
     from claudlobby.plane.spool import spool_write
@@ -341,6 +380,58 @@ def test_an_empty_orphan_written_before_the_message_is_no_torn_entry_for_it(esta
         torn = q.receipt(ctx, ident, wait=0)
     assert (torn.receipt_observation, torn.exit_code, torn.code) == ("unavailable", 6, "unavailable")
     assert torn.reason == (f"queued Plane entry {name} is not a whole batch (a write in progress,"
+                           " or one cut short); receipt absence is unproven")
+
+
+def test_a_live_backlog_of_other_work_neither_holds_the_proof_nor_fills_the_bound(estate, monkeypatch):
+    """#2430. Under load a hook misses its socket deadline, and every hook emit
+    on the host then stages for a minute, so the queue held hundreds of batches
+    written after a message, nearly all of them other bots' tool calls. While it
+    stayed past 256 entries, every receipt check whose proof was not yet
+    committed read "unavailable". The writers now name each batch for the
+    message its transmissions name, so other work is neither read nor counted.
+    The message's own proof, staged by the same writer, is still found."""
+    from claudlobby.plane.spool import spool_write
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "pane_submitted", fleet="a")
+    transmission(conn, "received", number=2)  # destination history exists
+    stage_events = client_stager(ctx.root / "state/plane/staged")
+    for n in range(300):
+        stage_events(tool_call(n))
+    stage_events(received_event(3))  # another message's proof
+    spool_write(ctx.root, [tool_call(300)], "database is locked")
+    with ingest_daemon(monkeypatch):
+        quiet = q.receipt(ctx, ident, wait=0)
+        assert (quiet.receipt_observation, quiet.exit_code, quiet.code) == ("missing", 8, "timeout"), \
+            quiet.reason
+        assert q.pending_transmission_proof(ctx.root, ident) == "absent"  # nor does it refuse a resend
+        stage_events(received_event())
+        pending = q.receipt(ctx, ident, wait=0)
+    assert pending.receipt_observation == "unavailable" and "staged (pending" in pending.reason, \
+        pending.reason
+
+
+def test_another_bots_stage_cut_short_is_no_torn_entry_for_this_message(estate, monkeypatch):
+    """#2430, at any queue depth. A stage still being written, or one whose
+    stager was reaped before its first byte, is not a whole batch. Written after
+    a message, it made that message's uncommitted receipt read "unavailable",
+    whatever it was a stage of. Its name now says which message its
+    transmissions name, so a cut-short stage of other work is set aside. One cut
+    short on this message's proof still leaves absence unproven."""
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "received", number=2)
+    staged = ctx.root / "state/plane/staged"
+    staged.mkdir(parents=True)
+    stage_cut_short(staged, tool_call(1))
+    with ingest_daemon(monkeypatch):
+        quiet = q.receipt(ctx, ident, wait=0)
+        assert (quiet.receipt_observation, quiet.exit_code) == ("missing", 8), quiet.reason
+        own = stage_cut_short(staged, received_event())
+        torn = q.receipt(ctx, ident, wait=0)
+    assert (torn.receipt_observation, torn.exit_code, torn.code) == ("unavailable", 6, "unavailable")
+    assert torn.reason == (f"queued Plane entry {own.name} is not a whole batch (a write in progress,"
                            " or one cut short); receipt absence is unproven")
 
 
