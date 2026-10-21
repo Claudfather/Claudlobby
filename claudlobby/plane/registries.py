@@ -135,6 +135,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "reload_failed": "critical",
     "restart_failed": "critical",
     "rc_timeout": "critical",
+    # #2423: Claude Code skipped the bot's Telegram channel at connect (the
+    # channel decision in the plugin's MCP log): the poller runs and replies go
+    # out, and no inbound message reaches the session. Raised through
+    # emit_failure_alert by bring-up and keepalive.
+    "channel_refused": "critical",
     # #1769: a unit failing its start over and over, which the per-phase boot
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.

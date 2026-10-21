@@ -97,7 +97,9 @@ def transcript_slug(path: object) -> str:
     """The name Claude Code gives a session's transcript dir: the session's cwd
     with every non-alphanumeric character replaced by ``-``.
 
-    The one copy; the shell fallback retired with the digest hook (#2145 P3)."""
+    Its shell twin is ``claude_cwd_slug`` in lib-common.sh, for doors that read
+    Claude Code's per-cwd dirs without starting Python on every tick;
+    tests/test_channel_refused.py holds the two to the same answer."""
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 

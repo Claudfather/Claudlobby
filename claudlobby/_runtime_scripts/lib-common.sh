@@ -1369,6 +1369,137 @@ bridge_down_state() {
     esac
 }
 
+# --- The channel decision (#2423) ---------------------------------------------
+# Each time Claude Code connects a channel plugin's MCP server it decides whether
+# to deliver that plugin's messages into the session, and it records the decision
+# in the plugin's MCP log and nowhere else (not the transcript, not the pane):
+# "Channel notifications registered", or "Channel notifications skipped: <reason>".
+# A skip leaves everything else working. The poller runs as the session's child,
+# so bridge_state reads `up`, and outbound replies go out, but no inbound message
+# reaches the session. Measured on Linux with Claude Code 2.1.304 and 2.1.306: a
+# login whose org has not allowed the plugin skips it at every connect, so a
+# restart on that login is refused again.
+#
+# The log's path, its file names and both lines are Claude Code internals, not an
+# interface it publishes. If any of them changes, these helpers find no log or no
+# decision and answer `unknown`, which no caller reads as ready.
+
+# claude_cwd_slug <dir>
+# The name Claude Code gives a cwd in its per-project dirs: the physical path with
+# every byte that is not an ASCII letter or digit replaced by "-". The shell twin
+# of claudlobby.isolation.transcript_slug, for doors that cannot start Python on
+# every tick; tests/test_channel_refused.py holds the two to the same answer. A
+# path with non-ASCII characters differs (bytes here, characters there). Prints
+# nothing for a dir it cannot enter.
+claude_cwd_slug() {
+    local cwd LC_ALL=C
+    cwd="$(cd "${1:?Usage: claude_cwd_slug <dir>}" 2>/dev/null && pwd -P || true)"
+    printf '%s' "${cwd//[!A-Za-z0-9]/-}"
+}
+
+# channel_mcp_log <bot_dir>
+# The Telegram channel plugin's MCP log for the bot's current session: prints its
+# path, or prints why there is none (a path starts with "/", a reason never does)
+# and returns 1. It lives under Claude Code's cache dir ($XDG_CACHE_HOME, else
+# ~/.cache, on Linux, measured; ~/Library/Caches on macOS, the same convention,
+# unmeasured), in a directory keyed by the session's cwd, the bot dir
+# (claude_cwd_slug). A session writes one file, named for its UTC start
+# (2026-10-21T16-05-25-798Z.jsonl), so the greatest name is the newest session; a
+# name of any other shape is not read, and neither is a session that started
+# before the bot's spawn marker (data/.spawn, stamped as start-bot.sh starts the
+# session), which is a previous session's.
+channel_mcp_log() {
+    local bot_dir="${1:?Usage: channel_mcp_log <bot_dir>}"
+    local slug dir newest spawn floor LC_ALL=C
+    local -a logs
+    slug="$(claude_cwd_slug "$bot_dir")"
+    if [ -z "$slug" ]; then printf 'no bot dir at %s' "$bot_dir"; return 1; fi
+    case "$_OS" in
+        Darwin) dir="$HOME/Library/Caches/claude-cli-nodejs" ;;
+        *) dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-cli-nodejs" ;;
+    esac
+    dir="$dir/$slug/mcp-logs-plugin-telegram-telegram"
+    # Pathname expansion sorts in the C locale, so the last name is the newest.
+    logs=("$dir"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z.jsonl)
+    newest="${logs[${#logs[@]}-1]}"
+    if [ ! -e "$newest" ]; then printf 'no channel MCP log in %s' "$dir"; return 1; fi
+    newest="${newest##*/}"
+    spawn="$(stat_mtime "$bot_dir/data/.spawn" 2>/dev/null || true)"
+    if [ -n "$spawn" ]; then
+        floor="$(epoch_to_iso_utc "$spawn" 2>/dev/null || true)"
+        if [ -z "$floor" ]; then printf 'cannot read the session start %s' "$spawn"; return 1; fi
+        floor="${floor//:/-}"
+        if [[ "${newest:0:19}" < "${floor:0:19}" ]]; then
+            printf 'no channel MCP log in %s from the session started at %s (newest %s)' \
+                "$dir" "${floor:0:19}" "$newest"
+            return 1
+        fi
+    fi
+    printf '%s/%s' "$dir" "$newest"
+}
+
+# channel_decision <log>
+# Claude Code's last decision in a channel plugin's MCP log, as one line:
+#   registered            it delivers the channel's messages
+#   refused<TAB>reason    it skipped them; the reason is its own words, cut at the
+#                         first quote (a JSON string ends there) and at 300 bytes
+#   pending               the log holds no decision yet: the server connects
+#                         first, and the decision followed 0.1 to 0.3 s later
+#   unknown<TAB>why       the log cannot be read
+# A session decides again at every reconnect (a /reload-plugins, a server
+# restart), so the last decision is the current one. A decision is matched as
+# Claude Code writes it, "debug":"Channel notifications ..." with bare quotes: the
+# plugin server's own stderr lands in the same log JSON-escaped, so nothing the
+# server prints can pass for one.
+channel_decision() {
+    local log="${1:?Usage: channel_decision <log>}" decision
+    if [ ! -r "$log" ]; then printf 'unknown\tcannot read %s\n' "$log"; return 0; fi
+    decision="$(awk '
+        {
+            i = index($0, "\"debug\":\"Channel notifications ")
+            if (i == 0) next
+            rest = substr($0, i + 31)
+            if (substr(rest, 1, 10) == "registered") v = "registered"
+            else if (substr(rest, 1, 7) == "skipped") {
+                r = substr(rest, 8); sub(/^:[ ]*/, "", r)
+                j = index(r, "\""); if (j > 0) r = substr(r, 1, j - 1)
+                sub(/\\$/, "", r)
+                v = "refused\t" substr(r, 1, 300)
+            }
+        }
+        END { printf "%s", v }
+    ' "$log" 2>/dev/null || true)"
+    printf '%s\n' "${decision:-pending}"
+}
+
+# channel_refused_report <bot_dir> <log> <reason> <where>
+# Raise a refused channel once per session: the critical channel_refused alert
+# (emit_failure_alert: a plane event, the manager pane, Telegram) and the marker
+# data/.channel-refused, which names the session log it was raised for. Returns 1,
+# raising nothing, when the marker already names <log>. The marker is written
+# whether or not the alert was delivered, so a host with no alert target is not
+# paged on every keepalive tick; debounce_notify is not used, because its re-arm
+# window would hold back the alert for another session refused within it.
+channel_refused_report() {
+    local bot_dir="${1:?Usage: channel_refused_report <bot_dir> <log> <reason> <where>}"
+    local key="${2##*/}" reason="$3" where="$4" marker="$1/data/.channel-refused" seen=""
+    if [ -f "$marker" ]; then IFS= read -r seen < "$marker" || true; fi
+    [ "$seen" != "$key" ] || return 1
+    mkdir -p "$bot_dir/data" 2>/dev/null || true
+    printf '%s\n' "$key" > "$marker" 2>/dev/null || true
+    emit_failure_alert "$(dirname "$bot_dir")" "channel_refused" \
+        "${bot_dir##*/} Telegram channel refused by Claude Code ($where): inbound messages never reach the session, while the poller and outbound replies keep working. Claude Code: \"${reason:-no reason given}\". The login refuses the plugin (its account or its org managed settings), so a restart on the same login comes up refused again; allow the plugin for that login." || true
+}
+
+# channel_refused_clear <bot_dir>
+# Remove the refusal marker once the channel is registered: returns 0 when there
+# was one to remove.
+channel_refused_clear() {
+    local marker="${1:?Usage: channel_refused_clear <bot_dir>}/data/.channel-refused"
+    [ -f "$marker" ] || return 1
+    rm -f "$marker"
+}
+
 # bridge_bringup_verify <bot_dir> <bots_dir> [timeout_seconds]
 # One-shot post-boot Telegram-bridge verification for start-bot.sh (Phase 3b/3c).
 # "remote-control is active" is a SEPARATE subsystem from the channel poller, so a
@@ -1388,6 +1519,13 @@ bridge_down_state() {
 #
 # Prints one status token for the caller to log:
 #   ready | missing:no_bridge | missing:no_token | unknown | no_handle
+# With the poller up, Claude Code's channel decision picks one of three (#2423):
+# `ready` only for a registered channel, `refused<TAB>reason` for one it skipped
+# (alerted once per session through channel_refused_report), and
+# `unknown:channel<TAB>why` when no decision can be read, which is not ready.
+# bridge_state cannot see a skip: the poller it proves is alive, ours and under a
+# live claude either way. A log with no decision yet is re-read for up to
+# CHANNEL_DECISION_WAIT_S seconds (default 10).
 bridge_bringup_verify() {
     local bot_dir="${1:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
     local bots_dir="${2:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
@@ -1431,7 +1569,29 @@ bridge_bringup_verify() {
     case "$state" in
         up)
             rm -f "$marker" 2>/dev/null || true
-            printf '%s' "ready" ;;
+            local log kind detail cwait="${CHANNEL_DECISION_WAIT_S:-10}" cwaited=0
+            case "$cwait" in ''|*[!0-9]*) cwait=10 ;; esac
+            kind=unknown
+            detail="$(channel_mcp_log "$bot_dir" || true)"
+            case "$detail" in /*) log="$detail" ;; *) log="" ;; esac
+            while [ -n "$log" ]; do
+                IFS=$'\t' read -r kind detail <<<"$(channel_decision "$log")"
+                if [ "$kind" != pending ] || [ "$cwaited" -ge "$cwait" ]; then break; fi
+                sleep 1
+                cwaited=$((cwaited + 1))
+            done
+            case "$kind" in
+                registered)
+                    channel_refused_clear "$bot_dir" || true
+                    printf '%s' "ready" ;;
+                refused)
+                    channel_refused_report "$bot_dir" "$log" "$detail" bring-up || true
+                    printf 'refused\t%s' "$detail" ;;
+                pending)
+                    printf 'unknown:channel\tno decision in %s after %ss' "$log" "$cwaited" ;;
+                *)
+                    printf 'unknown:channel\t%s' "$detail" ;;
+            esac ;;
         no_handle)
             printf '%s' "no_handle" ;;
         no_token)
@@ -1605,6 +1765,11 @@ wait_bridge_ready_state() {
 # serial rolling restart (#689); the caller serializes / halts rather than
 # proceed-anyway across the fleet (the #688/#689 mass-restart outage).
 #
+# A boot that logged its channel refused (BRIDGE_REFUSED) or its channel decision
+# unread (BRIDGE_UNVERIFIED) after the marker has answered (#2423): return 1 at
+# once, WAIT_BRIDGE_READY_OUTCOME refused or unknown, where a ceiling reached
+# returns 1 with the outcome empty.
+#
 # Why a marker, not a byte offset (#696 review, finding 1): log-rotate.sh keeps
 # only a line-count tail, so a rotation mid-restart-window invalidates a byte
 # offset AND can leave a prior boot's POLL_START…BRIDGE_READY as the "newest"
@@ -1645,6 +1810,10 @@ wait_bridge_ready() {
                     *'BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN)'*)
                         WAIT_BRIDGE_READY_OUTCOME=session; return 0 ;;
                 esac ;;
+        esac
+        case "$after" in
+            *BRIDGE_REFUSED*) WAIT_BRIDGE_READY_OUTCOME=refused; return 1 ;;
+            *BRIDGE_UNVERIFIED*) WAIT_BRIDGE_READY_OUTCOME=unknown; return 1 ;;
         esac
         [ "$waited" -ge "$ceiling" ] && return 1
         sleep "$step"

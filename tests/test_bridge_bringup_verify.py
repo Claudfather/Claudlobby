@@ -12,6 +12,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from tests.fixtures.channel_mcp_log import capture, write_log
+
 LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 
@@ -29,7 +31,11 @@ def _verify(bot_dir: Path, *, state: str, timeout: int = 1):
         'emit_failure_alert() { printf "%s\\n" "$3" >> "$STUB_ALERTS"; }\n'
         'bridge_bringup_verify "$2" "$3" "$4"\n'
     )
-    env = {**os.environ, "STUB_STATE": state, "STUB_ALERTS": str(alerts)}
+    # An up bridge is ready only once its channel decision reads registered
+    # (#2423): HOME is the test's own, where a test that wants `ready` writes one.
+    home = bot_dir.parent.parent / "home"
+    env = {**os.environ, "STUB_STATE": state, "STUB_ALERTS": str(alerts),
+           "HOME": str(home), "XDG_CACHE_HOME": str(home / ".cache")}
     proc = subprocess.run(
         [
             "bash",
@@ -59,6 +65,7 @@ def _mk_bot(tmp_path):
 
 def test_up_returns_ready_no_alert(tmp_path):
     bot = _mk_bot(tmp_path)
+    write_log(tmp_path / "home", bot, capture("registered"))
     verdict, marker, alerts = _verify(bot, state="up")
     assert verdict == "ready"
     assert not marker
@@ -71,6 +78,7 @@ def test_up_clears_stale_marker(tmp_path):
     bot = _mk_bot(tmp_path)
     (bot / "data").mkdir()
     (bot / "data" / ".bridge-down").write_text("")
+    write_log(tmp_path / "home", bot, capture("registered"))
     verdict, marker, alerts = _verify(bot, state="up")
     assert verdict == "ready"
     assert not marker  # cleared
