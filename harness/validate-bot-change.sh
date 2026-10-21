@@ -1767,7 +1767,7 @@ make_stand_ins(Path(sys.argv[3]), sys.argv[2])
 BINS
 cat > "$_SC_BIN/leaf.js" <<'LEAF'
 require('fs').writeFileSync(require('path').join(process.env.TELEGRAM_STATE_DIR, 'bot.pid'), String(process.pid));
-setTimeout(() => {}, 45000);
+setTimeout(() => {}, 90000);
 LEAF
 cat > "$_SC_BIN/wrapper.js" <<'WRAPPER'
 require('child_process').spawnSync(__dirname + '/bun', [__dirname + '/leaf.js', 'server.ts'], {stdio: 'inherit'});
@@ -1841,6 +1841,133 @@ if [ "$fail" -gt "$_scope_fail_before" ]; then
 fi
 kill -9 -"$_SC_ROOT_PID" 2>/dev/null || kill -9 "$_SC_ROOT_PID" 2>/dev/null || true
 rm -f "$RB_DIR/state/bot.pid"
+
+# === Scenario 2b-ter: a channel Claude Code refused is not ready (#2423) ===
+# The other shape that reads as success: the poller is up, ours, under our own
+# session's claude, so every process predicate says `up`, and Claude Code has
+# refused the channel, so no inbound message reaches the session. The only
+# record is the channel plugin's MCP log. Boot the real start-bot.sh with a
+# claude stand-in that does what Claude Code does on disk (the log, named for
+# the session's UTC start, holding the decision) and runs the production-shaped
+# poller tree under itself; then read startup.log, the restart gate, the plane
+# and real keepalive ticks. The log's place comes from claudlobby.isolation's
+# transcript_slug, not from the shell helper under test.
+val_scenario "validate-bot-change: a refused Telegram channel is not ready (#2423)"
+_ch_fail_before=$fail
+_CH_BIN="$RB_ROOT/chanbin"
+mkdir -p "$_CH_BIN"
+_CH_SLUG="$("$VAL_PY" -I -B -c 'import os, sys; sys.path.insert(0, sys.argv[1]); from claudlobby.isolation import transcript_slug; print(transcript_slug(os.path.realpath(sys.argv[2])))' "$VAL_REPO" "$RB_DIR")"
+case "$_OS" in Darwin) _CH_CACHE="$RB_HOME/Library/Caches" ;; *) _CH_CACHE="$RB_HOME/.cache" ;; esac
+_CH_LOGDIR="$_CH_CACHE/claude-cli-nodejs/$_CH_SLUG/mcp-logs-plugin-telegram-telegram"
+# One second in, as a real session names its log seconds after the spawn; the
+# decision file says which fixture this boot's log holds (none: no log at all).
+# Then 2b-bis's production-shaped poller tree, under this process.
+cat > "$_CH_BIN/claude" <<STUB
+#!/bin/bash
+sleep 1
+_d="\$(cat "$_CH_BIN/decision" 2>/dev/null || true)"
+if [ "\$_d" != none ]; then
+    mkdir -p "$_CH_LOGDIR"
+    cp "$VAL_REPO/tests/fixtures/channel-mcp-log/\$_d.jsonl" "$_CH_LOGDIR/\$(date -u +%Y-%m-%dT%H-%M-%S)-000Z.jsonl"
+fi
+exec "$_SC_BIN/claude" "$_SC_BIN/tree.js"
+STUB
+chmod +x "$_CH_BIN/claude"
+# No startup send: the pane is the poller tree, not an input box.
+cp "$RB_DIR/bot.conf" "$RB_ROOT/bot.conf.pre2423"
+printf 'STARTUP_PROMPT=""\n' >> "$RB_DIR/bot.conf"
+
+_ch_boot() {  # <refused|registered|none> -> boots valrb once; prints the boot's fence token
+    local tok
+    printf '%s\n' "$1" > "$_CH_BIN/decision"
+    rm -f "$RB_DIR/logs/startup.log" "$RB_DIR/state/bot.pid"
+    tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+    sleep 0.3
+    tok="$(bridge_fence_write "$RB_DIR")"
+    TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=20 \
+        CLAUDE_BIN="$_CH_BIN/claude" CLAUDE_CONFIG_DIR='' XDG_CACHE_HOME="$RB_HOME/.cache" \
+        HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
+        "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.channel-$1.out" 2>&1 || true
+    printf '%s' "$tok"
+}
+_ch_gate() {  # <fence token> -> "<rc> <outcome> <seconds>" from the real restart gate
+    local t0 rc=0
+    t0=$(date +%s)
+    wait_bridge_ready "$RB_DIR" 30 "$1" || rc=$?
+    printf '%s %s %s' "$rc" "${WAIT_BRIDGE_READY_OUTCOME:-none}" "$(( $(date +%s) - t0 ))"
+}
+_ch_tick() {  # one real keepalive tick, the bridge grace off so a young session is read
+    OBSERVABILITY_BRIDGE_DOWN_GRACE=0 XDG_CACHE_HOME="$RB_HOME/.cache" HOME="$RB_HOME" \
+        CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
+        "$LIB_DIR/keepalive.sh" "$RB_DIR" >>"$RB_ROOT/keepalive.channel.out" 2>&1 || true
+}
+_ch_alerts() {  # how many channel_refused alerts the plane holds for this fleet
+    { val_events "$RB_ROOT" "$FLEET" fleet channel_refused || true; } | grep -c 'Telegram channel refused by Claude Code' || true
+}
+
+# --- A refused channel: not BRIDGE_READY, an alert, and the gate answers at once ---
+_ch_tok="$(_ch_boot refused)"
+grep -q 'BRIDGE_REFUSED — Telegram poller up, but Claude Code refused the channel at connect' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "refused channel, poller up and ours -> BRIDGE_REFUSED in startup.log" "$r"
+grep -q 'BRIDGE_READY' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "  ...and never BRIDGE_READY (the #2423 false all-clear)" "$r"
+grep -q 'not on the approved channels allowlist' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...naming the reason Claude Code gave" "$r"
+read -r _ch_rc _ch_out _ch_s <<<"$(_ch_gate "$_ch_tok")"
+{ [ "$_ch_rc" = 1 ] && [ "$_ch_out" = refused ] && [ "$_ch_s" -lt 5 ]; } && r=yes || r=no
+harness_check "  ...and the restart gate reads that boot as refused at once ($_ch_rc $_ch_out ${_ch_s}s)" "$r"
+_ch_ev="$({ val_events "$RB_ROOT" "$FLEET" fleet channel_refused || true; } | grep 'valrb Telegram channel refused by Claude Code (bring-up)' | tail -n 1 || true)"
+[ -n "$_ch_ev" ] && r=yes || r=no
+harness_check "bring-up records a channel_refused alert on the plane naming the bot" "$r"
+printf '%s' "$_ch_ev" | grep -q 'a restart on the same login comes up refused again' && r=yes || r=no
+harness_check "  ...whose remedy says a restart on the same login is refused again" "$r"
+
+# --- keepalive: the same session raises nothing twice; a reconnect's decision is read ---
+_ch_n="$(_ch_alerts)"
+_ch_tick
+[ "$(_ch_alerts)" = "$_ch_n" ] && r=yes || r=no
+harness_check "keepalive on the refused session bring-up reported raises no second alert" "$r"
+_ch_log="$(ls "$_CH_LOGDIR" | tail -n 1 || true)"
+tail -n 1 "$VAL_REPO/tests/fixtures/channel-mcp-log/registered.jsonl" >> "$_CH_LOGDIR/$_ch_log"
+_ch_tick
+{ [ ! -e "$RB_DIR/data/.channel-refused" ] && grep -q 'registered the Telegram channel again' "$RB_DIR/keepalive.log"; } && r=yes || r=no
+harness_check "keepalive clears the refusal once a reconnect registers the channel" "$r"
+tail -n 1 "$VAL_REPO/tests/fixtures/channel-mcp-log/refused.jsonl" >> "$_CH_LOGDIR/$_ch_log"
+_ch_n="$(_ch_alerts)"
+_ch_tick
+grep -q 'CHANNEL_REFUSED' "$RB_DIR/keepalive.log" 2>/dev/null && r=yes || r=no
+harness_check "keepalive reads a refusal a reconnect brought into a running session" "$r"
+[ "$(_ch_alerts)" -gt "$_ch_n" ] && r=yes || r=no
+harness_check "  ...and records its own channel_refused alert" "$r"
+
+# --- A registered channel stays ready; no decision at all is never ready ---
+_ch_tok="$(_ch_boot registered)"
+grep -q 'BRIDGE_READY — Telegram poller up' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "registered channel -> BRIDGE_READY, as before" "$r"
+read -r _ch_rc _ch_out _ch_s <<<"$(_ch_gate "$_ch_tok")"
+{ [ "$_ch_rc" = 0 ] && [ "$_ch_out" = bridge ]; } && r=yes || r=no
+harness_check "  ...and the restart gate passes it ($_ch_rc $_ch_out)" "$r"
+_ch_tok="$(_ch_boot none)"
+grep -q 'BRIDGE_UNVERIFIED — Telegram poller up, but the channel decision could not be read' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "no log for this session (the last one is the previous boot's) -> BRIDGE_UNVERIFIED" "$r"
+grep -q 'BRIDGE_READY' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "  ...never BRIDGE_READY" "$r"
+read -r _ch_rc _ch_out _ch_s <<<"$(_ch_gate "$_ch_tok")"
+{ [ "$_ch_rc" = 1 ] && [ "$_ch_out" = unknown ] && [ "$_ch_s" -lt 5 ]; } && r=yes || r=no
+harness_check "  ...and the restart gate reads it as unknown at once ($_ch_rc $_ch_out ${_ch_s}s)" "$r"
+
+if [ "$fail" -gt "$_ch_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: #2423 channel checks failed ---"
+    echo "  [log dir $_CH_LOGDIR]"; ls -la "$_CH_LOGDIR" 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+    echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
+    echo "  [keepalive.log, last 8]"; tail -n 8 "$RB_DIR/keepalive.log" 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+    for _ch_f in refused registered none; do
+        echo "  [start-bot $_ch_f]"; sed 's/^/    /' "$RB_ROOT/startbot.channel-$_ch_f.out" 2>/dev/null || echo "    (none)"
+    done
+fi
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+cp "$RB_ROOT/bot.conf.pre2423" "$RB_DIR/bot.conf"
+rm -f "$RB_DIR/state/bot.pid" "$RB_DIR/data/.channel-refused"
 
 # === Scenario 2c: RC readiness ESCALATION — fleet-pulse pages on an rc_timeout burst (#533) ===
 # 2b proved start-bot EMITS rc_timeout. This proves the downstream half: fleet-pulse reads

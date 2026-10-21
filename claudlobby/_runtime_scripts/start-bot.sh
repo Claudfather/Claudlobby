@@ -601,12 +601,20 @@ fi
 # keepalive's heal ladder. Both are intentional. Done AFTER the bot is dispatch-
 # ready (resumed + prompted + marked idle) so it never delays the bridge-
 # INDEPENDENT tmux-dispatch path. start-bot does NOT bounce — keepalive owns the
-# heal ladder (Fork F1=b). No second wait-knob here: a slow host raises poll 1's
-# RC_READY_TIMEOUT_S (which owns the wait); this verify is a single check (0) by
-# construction, never a redundant re-wait past an already-declared timeout.
-_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0 "$_session_pid")"
+# heal ladder (Fork F1=b). No second wait for the poller here: a slow host raises
+# poll 1's RC_READY_TIMEOUT_S (which owns that wait), and this verify checks it
+# once (0). The one wait it can add is for Claude Code's channel decision
+# (CHANNEL_DECISION_WAIT_S, #2423), which follows the server's connect by a
+# fraction of a second and is normally on disk long before this runs.
+_bridge_out="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0 "$_session_pid")"
+# The channel verdicts carry their detail after a tab (#2423).
+IFS=$'\t' read -r _bridge_verdict _bridge_detail <<<"$_bridge_out"
 case "$_bridge_verdict" in
     ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
+    refused)   # bridge_bringup_verify has alerted
+        echo "$(ts_iso) BRIDGE_REFUSED — Telegram poller up, but Claude Code refused the channel at connect (\"$_bridge_detail\"); inbound is dark, and a restart on the same login comes up refused again" >> "$LOG" ;;
+    unknown:channel)
+        echo "$(ts_iso) BRIDGE_UNVERIFIED — Telegram poller up, but the channel decision could not be read ($_bridge_detail); not ready: Claude Code records it only in the plugin MCP log, and an unread decision is never taken as registered" >> "$LOG" ;;
     expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;
     missing:*)
         # "keepalive owns heal" is right for every cause of a missing bridge but
