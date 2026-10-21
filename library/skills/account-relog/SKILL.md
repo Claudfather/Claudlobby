@@ -184,7 +184,18 @@ tmux -L relog kill-server
 
 Do this even if the flow failed. A stranded server holds a pane containing the auth exchange.
 
-Then run Step 4's `browser-scan.py` line again. With Step 4's `env` the login starts no browser, so the list should hold nothing new. A row whose pid and start were not in Step 4's list is a browser this login started: stop it by its pid, typed as a number (`kill <pid>`), and list again to see it gone. Never stop a browser by name: `pkill chromium` stops every bot's browsers and renders, and the signal guard refuses it, as it refuses a pid read from `ps` or `pgrep` in the same command. Around any other login on the host (`gh auth login`, `vercel login`), do the same: list before, list after, stop only what the login started.
+Then list the browsers again, this time naming this bot's own unit as the fleet pulse does, so that the owner column (the sixth) reads `this-bot` for a browser this bot's session started, also after the browser moves itself into a scope of its own:
+
+```bash
+bash -c '. "$CLAUDLOBBY_NATIVE_DIR/lib-common.sh" >/dev/null 2>&1; python3 "$CLAUDLOBBY_NATIVE_DIR/browser-scan.py" --pattern "${BROWSER_EXE_PATTERN:?lib-common.sh did not load}" --min-age 0 --unit "${BOT_SERVICE:?no unit of this bot to name, so stop no browser}=this-bot"'
+```
+
+With Step 4's `env` the login starts no browser, so the list should hold nothing new. A row whose pid and start were not in Step 4's list shows only that a browser started meanwhile, not who started it, so its owner decides:
+
+- **Owner `this-bot`:** this bot's session started it while the login ran. Stop it by its pid, typed as a number (`kill <pid>`), and list again to see it gone.
+- **Owner `-`:** it did not start under this bot's unit; another bot, a job or the human's own desktop may have started it. Leave it running and tell the human its pid, name and unit; the fleet pulse tells its owner (below).
+
+The signal guard cannot tell whose typed pid it is, so the owner column is the only check. Never stop a browser by name: `pkill chromium` stops every bot's browsers and renders, and the signal guard refuses it, as it refuses a pid read from `ps` or `pgrep` in the same command. Around any other login on the host (`gh auth login`, `vercel login`), do the same: list before, list after naming this bot's unit, and stop only a new row whose owner is `this-bot`.
 
 A browser left running on the host anyway, from this or any other path, appears in the next fleet pulse as `browser_outside_render`, with the bot whose session started it; the pulse reports it and never stops it.
 
