@@ -79,7 +79,7 @@ def test_a_tag_says_which_message_a_batchs_transmissions_name(events, tag):
     (f"{LEAD}.json", True, True),
     (f".{LEAD}.tmp", True, True),
     ("1-ev_x.np.batch", True, True),
-    (f"1-{LEAD}{tag_for(2).upper()}.batch", True, True),
+    (f"1-{LEAD}.m{'0' * 29}ABC.batch", True, True),
     (f"1-{LEAD}.np.batch.tmp", True, True),
     (f"1-{LEAD}.np.json", True, True),
     (f"{LEAD}.np.batch", True, True),
