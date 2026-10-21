@@ -383,6 +383,111 @@ def test_started_work_retains_capacity_after_timeout_until_drained(connected_htt
         release.set()
 
 
+def _challenge_scope():
+    return {"type": "http", "method": "POST", "path": PREFIX + "challenge", "query_string": b"",
+        "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()),
+            (b"content-type", b"application/json"), (b"x-claudlobby-owner", b"1")]}
+
+
+def _recorded_source(consumer, monkeypatch):
+    """The first threadpool call a challenge makes is _source: record each run of it."""
+    ran, original = [], consumer._source
+    def source():
+        ran.append("source")
+        return original()
+    monkeypatch.setattr(consumer, "_source", source)
+    return ran
+
+
+def test_a_queued_call_reached_after_its_deadline_never_runs(connected_http, monkeypatch):
+    """The pool reaches the queued call once its deadline has passed but before
+    the loop has run the deadline's cancel: the guard's own deadline check is
+    what refuses it."""
+    import claudlobby.plane.owner_workspace_http as module
+    consumer = connected_http[0].connected_reads
+    ran = _recorded_source(consumer, monkeypatch)
+    async def scenario():
+        advance, paused = move_clock(monkeypatch, module)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def reached(fn, *args, **kwargs):
+            # Released, the call runs at once on this thread: the loop has not
+            # yet run the deadline's cancel when the guard decides.
+            entered.set()
+            await release.wait()
+            return fn(*args, **kwargs)
+        monkeypatch.setattr(module, "run_in_threadpool", reached)
+        scope = _challenge_scope()
+        async def receive():
+            return {"type": "http.request", "body": b"{}"}
+        output = []
+        async def send(message):
+            output.append(message)
+        request = asyncio.create_task(consumer(scope, receive, send))
+        def state():
+            return (f"request={status(request)}, sent={[m.get('status', m['type']) for m in output]}, "
+                    f"ran={ran}, workers={len(consumer._workers)}, operations={len(consumer._operations)}")
+        await bounded(entered.wait(), "the first threadpool call", state)
+        advance(consumer.response_seconds(scope))
+        release.set()  # in the same step, so the call starts before the cancel runs
+        with paused():
+            await bounded(request, "the response", state)
+            assert output[0]["status"] == 503, state()
+            await bounded(consumer.shutdown(), "shutdown", state)
+        assert ran == [], state()
+        assert not consumer._workers and not consumer._operations
+    asyncio.run(scenario())
+
+
+def test_a_call_its_caller_abandoned_never_runs_once_a_worker_reaches_it(connected_http, monkeypatch):
+    """The caller is cancelled while its call waits in a worker thread, with the
+    clock held short of the deadline: the cancel lets the response go without
+    the worker, and the abandon flag keeps the call from running once the worker
+    reaches it."""
+    import claudlobby.plane.owner_workspace_http as module
+    consumer = connected_http[0].connected_reads
+    ran = _recorded_source(consumer, monkeypatch)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = module.run_in_threadpool
+    async def dispatched(fn, *args, **kwargs):
+        def held():
+            # In a worker thread before the guard runs, where a cancel no longer reaches it.
+            entered.set()
+            try:
+                assert release.wait(5), "waited 5 s for the scenario to release the worker"
+                return fn(*args, **kwargs)
+            finally:
+                finished.set()
+        return await original(held)
+    monkeypatch.setattr(module, "run_in_threadpool", dispatched)
+    async def scenario():
+        _, paused = move_clock(monkeypatch, module)
+        scope = _challenge_scope()
+        async def receive():
+            return {"type": "http.request", "body": b"{}"}
+        output = []
+        async def send(message):
+            output.append(message)
+        def state():
+            return (f"request={status(request)}, sent={[m.get('status', m['type']) for m in output]}, "
+                    f"ran={ran}, workers={len(consumer._workers)}, operations={len(consumer._operations)}")
+        try:
+            with paused():  # neither the deadline nor its timer comes
+                request = asyncio.create_task(consumer(scope, receive, send))
+                assert await asyncio.to_thread(entered.wait, 5), "waited 5 s for a worker: " + state()
+                operation, = consumer._operations
+                consumer._cancel_operation(operation)  # what the deadline's timer calls
+                await bounded(request, "the response", state)
+                assert output[0]["status"] == 503, state()
+                release.set()
+                assert await asyncio.to_thread(finished.wait, 5), "waited 5 s for the worker: " + state()
+                assert ran == [], state()
+                await bounded(consumer.shutdown(), "shutdown", state)
+            assert not consumer._workers and not consumer._operations
+        finally:
+            release.set()
+    asyncio.run(scenario())
+
+
 def test_finite_read_deadline_no_private_body_and_shutdown_stream_ownership(connected_http, monkeypatch):
     import claudlobby.plane.owner_connected_http as module
     consumer = connected_http[0].connected_reads

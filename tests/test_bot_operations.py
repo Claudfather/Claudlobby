@@ -292,6 +292,15 @@ def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_pat
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() == "handoff-skipped:recent"
     assert secret_env.read_text() == "private launch values\n"
+    # A handoff older than 300 s and no session to send one to: that explicit
+    # exit keeps the file as well.
+    written = datetime.now(timezone.utc).timestamp() - 400
+    os.utime(bot_dir / ".claude/session.md", (written, written))
+    no_session = _pre_stop_handoff(tmp_path, bot_dir, "--explicit")
+    assert no_session.returncode == 0, no_session.stderr
+    assert no_session.stdout.strip() == "handoff-skipped:no-session"
+    assert secret_env.exists(), "the explicit no-session exit deleted the launch-time secret file"
+    assert secret_env.read_text() == "private launch values\n"
     stopping = _pre_stop_handoff(tmp_path, bot_dir)
     assert stopping.returncode == 0, stopping.stderr
     assert not secret_env.exists()

@@ -39,6 +39,9 @@ TASK_EF = "wi_" + _hex("ef56ab78", "3")
 TASK_FOREIGN = "wi_" + _hex("ef56ab78", "4")
 ASG_DA1, ASG_DA2 = "asg_" + _hex("da1585e0", "1"), "asg_" + _hex("da1585e0", "2")
 ASG_9F = "asg_" + _hex("9f8e7d6c", "3")
+# Another fleet's assignments, recorded under this fleet's TASK_EF.
+ASG_9F_ELSEWHERE = "asg_" + _hex("9f8e7d6c", "5")
+ASG_C0_ELSEWHERE = "asg_" + _hex("c0ffee12", "6")
 
 
 @pytest.fixture
@@ -112,6 +115,25 @@ def test_mutation_callers_still_read_canonical_ids_only(conn):
         with pytest.raises(tq.TaskNotFoundError) as raised:
             query(conn, reference, fleet_uid="fleet_a")
         assert type(raised.value) is tq.TaskNotFoundError
+
+
+@pytest.mark.parametrize("reference, prefix, outcome", [
+    pytest.param(ASG_9F_ELSEWHERE, False, "TaskNotFoundError", id="its-id-at-a-mutation-door"),
+    pytest.param(ASG_9F_ELSEWHERE, True, "TaskNotFoundError", id="its-id-at-the-read-door"),
+    pytest.param("asg_9f8e7d6c", True, ASG_9F, id="a-prefix-it-shares-with-this-fleet"),
+    pytest.param(ASG_C0_ELSEWHERE[:16], True, "TaskPrefixNotFoundError", id="a-prefix-only-it-has"),
+])
+def test_another_fleets_assignment_under_this_fleets_task_is_never_read(conn, reference, prefix, outcome):
+    """The task read takes every assignment row of a task, whatever fleet recorded
+    it, so show_assignment's own fleet guard keeps another fleet's row out: by ID
+    at a mutation door, and by ID or prefix at the read door."""
+    for assignment_id in (ASG_9F_ELSEWHERE, ASG_C0_ELSEWHERE):
+        _assignment(conn, assignment_id, TASK_EF, fleet_uid="fleet_b")
+    try:
+        found = tq.show_assignment(conn, reference, fleet_uid="fleet_a", prefix=prefix).assignment.assignment_id
+    except tq.TaskQueryError as refused:
+        found = type(refused).__name__
+    assert found == outcome
 
 
 MSG_42A, MSG_42B = "msg_" + _hex("42664fe3", "1"), "msg_" + _hex("42664fe3", "2")
