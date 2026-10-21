@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a Telegram channel Claude Code refused at connect reads as refused, never ready (#2423)
+
+Claude Code decides at each connect whether to deliver a channel plugin's
+messages into the session, and records the decision only in that plugin's MCP
+log. A refusal (for example, a login whose org has not allowed the plugin)
+leaves the poller running under the session and outbound replies working, so
+bring-up logged `BRIDGE_READY` and the restart gate passed a bot that received
+nothing. `channel_mcp_log` and `channel_decision` in `lib-common.sh` now read that
+decision, and both callers use them:
+
+- **Bring-up** (`start-bot.sh`): a registered channel logs `BRIDGE_READY` as
+  before. A refused one logs `BRIDGE_REFUSED` with Claude Code's reason and
+  raises the critical `channel_refused` alert, once per session. When no
+  decision can be read (no log for this session, an unreadable one, or none
+  within `CHANNEL_DECISION_WAIT_S`, default 10 s), it logs
+  `BRIDGE_UNVERIFIED`, which is not ready either.
+- **The restart gate** (`wait_bridge_ready`, used by `bot restart` and host
+  activation) reads either line as this boot's answer at once: not ready.
+- **keepalive** reads the decision on every tick of a running session, since a
+  reconnect (a `/reload-plugins`) decides again: a refusal raises the same alert
+  once per session, and a registered decision clears it.
+
+The log's path, its file names and both lines are Claude Code internals,
+measured on Linux with Claude Code 2.1.304 and 2.1.306; the macOS path follows
+the same convention unmeasured. If Claude Code changes any of them, bring-up
+logs `BRIDGE_UNVERIFIED`, and the restart gate refuses until the reader is updated.
+
 ### Fixed — a deep queue of other work no longer makes message receipts read "unavailable" (#2430)
 
 Under load a hook misses its socket deadline, and every hook emit on the host

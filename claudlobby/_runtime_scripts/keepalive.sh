@@ -310,6 +310,37 @@ _bridge_heal_bounce() {
     restart_bot_service "bridge poller dark (heal $attempt/$max)"
 }
 
+# _channel_check
+# Whether Claude Code still delivers this bot's Telegram channel (#2423): the
+# channel decision in the plugin's MCP log (lib-common.sh), which no process check
+# can see, since a refused channel leaves the poller up. Bring-up reads it once;
+# a session decides again at every reconnect (the /reload-plugins this script
+# sends among them), so this reads it on every live tick. It reads one file and
+# types nothing, so it runs whatever the pane shows. A session younger than the
+# bridge grace is bring-up's to judge, and no log or no decision changes nothing.
+_channel_check() {
+    [ -n "${TELEGRAM_BOT_HANDLE:-}" ] || return 0
+    local grace="${OBSERVABILITY_BRIDGE_DOWN_GRACE:-300}" log kind detail
+    if [ "$grace" -gt 0 ] 2>/dev/null && marker_age_within "$BOT_DIR/data/.spawn" "$grace"; then
+        return 0
+    fi
+    log="$(channel_mcp_log "$BOT_DIR" || true)"
+    case "$log" in /*) ;; *) return 0 ;; esac
+    IFS=$'\t' read -r kind detail <<<"$(channel_decision "$log")"
+    case "$kind" in
+        refused)
+            if channel_refused_report "$BOT_DIR" "$log" "$detail" keepalive; then
+                echo "$(ts_iso) CHANNEL_REFUSED — Claude Code refused the Telegram channel (\"$detail\"): inbound is dark while the poller is up; a restart on the same login comes up refused again" >> "$LOG"
+            fi
+            ;;
+        registered)
+            if channel_refused_clear "$BOT_DIR"; then
+                echo "$(ts_iso) CHANNEL — Claude Code registered the Telegram channel again; refusal cleared" >> "$LOG"
+            fi
+            ;;
+    esac
+}
+
 # Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
 # reach the user bus, otherwise it fails silently with "Failed to connect to
 # bus" while we still log a "RESTART" line — so the bot looks supervised
@@ -740,4 +771,5 @@ case "$state" in
         fi
         ;;
 esac
+_channel_check
 plane_presence_samples "$state"
