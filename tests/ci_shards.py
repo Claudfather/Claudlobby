@@ -268,13 +268,22 @@ def check(root: Path, lane: str, splits: int, require_passed: list[str]) -> list
 def merge_durations(root: Path) -> dict[str, float]:
     """Every shard's durations file, as one: each shard stored the times of
     exactly the tests it ran (pytest-split's --store-durations
-    --clean-durations), so the files hold disjoint tests."""
+    --clean-durations), so the files hold disjoint tests.
+
+    A node id holding an @ is left out: the content check, which a pull
+    request must pass, reads a user@host in an added line as an address (a
+    test's URL with user:password@ is one). A test left out still runs, at the
+    average time."""
     merged = {}
     for path in sorted(p for p in root.iterdir() if p.is_dir()):
         merged.update(json.loads(_read(path / "durations.json")))
     # Four decimals keep the file small, and the floor keeps every time above
     # zero, so that a test timed at under 50 microseconds still weighs something.
-    return {nodeid: max(round(secs, 4), 0.0001) for nodeid, secs in sorted(merged.items())}
+    return {
+        nodeid: max(round(secs, 4), 0.0001)
+        for nodeid, secs in sorted(merged.items())
+        if "@" not in nodeid
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

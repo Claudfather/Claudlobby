@@ -377,7 +377,11 @@ def test_junit_key_is_pytests_own_for_every_probe_id(shards):
 # --- the measured times -----------------------------------------------------------------------
 
 def test_the_merged_durations_are_every_shards_times(tmp_path):
-    for group, times in ((1, {"tests/t.py::b": 1.23456789}), (2, {"tests/t.py::a": 0.00001})):
+    shard_times = (
+        (1, {"tests/t.py::b": 1.23456789, "tests/t.py::c[https://u:p@host.test]": 0.5}),
+        (2, {"tests/t.py::a": 0.00001}),
+    )
+    for group, times in shard_times:
         (tmp_path / f"d-shard-{group}").mkdir()
         (tmp_path / f"d-shard-{group}" / "durations.json").write_text(json.dumps(times))
     out = tmp_path / ".test_durations"
@@ -393,6 +397,7 @@ def test_the_committed_durations_are_pytest_split_input():
     assert list(durations) == sorted(durations)
     bad = [
         nodeid for nodeid, seconds in durations.items()
-        if not ci_shards._NODE_ID.match(nodeid) or not isinstance(seconds, float) or seconds <= 0
+        if not ci_shards._NODE_ID.match(nodeid) or "@" in nodeid
+        or not isinstance(seconds, float) or seconds <= 0
     ]
     assert not bad, bad[:5]
