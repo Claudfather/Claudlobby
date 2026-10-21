@@ -451,9 +451,10 @@ def test_a_call_its_caller_abandoned_never_runs_once_a_worker_reaches_it(connect
     async def dispatched(fn, *args, **kwargs):
         def held():
             # In a worker thread before the guard runs, where a cancel no longer reaches it.
+            # It outwaits the 5 s bound on the response, so that bound decides.
             entered.set()
             try:
-                assert release.wait(5), "waited 5 s for the scenario to release the worker"
+                assert release.wait(30), "waited 30 s for the scenario to release the worker"
                 return fn(*args, **kwargs)
             finally:
                 finished.set()
