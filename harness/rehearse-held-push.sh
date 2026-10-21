@@ -68,24 +68,36 @@ export MANAGER_TMUX_SOCKET=$MGR_SOCK
 export TMUX_SOCKET=rhpv$$
 EOF
 
-start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$STUB $*"; }
+# The precondition every step rests on: a manager session that is up and shows
+# its box. Without it, a push finds no session, returns 0 and closes the window,
+# which reads as the very result a held push is tested for. So a manager starts
+# through lib-common's harness_box_up, which returns once its box is drawn, since
+# keys typed before that are lost (#2139), and stops through harness_box_down,
+# which waits for its server to be gone, since a start that reaches the exiting
+# server fails (#2405). Both run in a subshell: sourcing lib-common arms set -e
+# and its own EXIT trap. A manager that does not come up ends the run at that
+# step, as its one failure, rather than failing every check that needed it.
+start_manager () { # <check label> [stub option]...
+    local label="$1" got
+    shift
+    # shellcheck source=/dev/null
+    got=$(. "$LIB_DIR/lib-common.sh" && harness_box_up "$MGR_SOCK" "$MGR" "$STUB $*")
+    check "$label" drawn "$got"
+    [ "$got" = drawn ] || stop_run "$label"
+}
+# shellcheck source=/dev/null
+stop_manager ()  { (. "$LIB_DIR/lib-common.sh" && harness_box_down "$MGR_SOCK" "$MGR") || true; }
+stop_run ()      {
+    echo "STOPPED: the run ends at \"$1\": every check after it needs that manager"
+    echo
+    echo "=== $pass passed, $fail failed ==="
+    exit 1
+}
 mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
 # Whether the manager's pane is still blank. A function, never a case inside
 # $( ): bash 3.2 (the macOS /bin/bash) ends the substitution at the first
 # pattern's ")" and reads the rest of the line as text.
 mgr_blank ()     { case "$(mgr_pane)" in *[![:space:]]*) echo drawn ;; *) echo blank ;; esac; }
-# The precondition every step rests on: a manager session that is up and shows
-# its box. Without it, a push finds no session, returns 0 and closes the window,
-# which reads as the very result a held push is tested for.
-manager_box ()   {
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        # capture-pane trims trailing spaces, so the "> " prompt reads as ">".
-        case "$(mgr_pane)" in *">"*) echo shown; return ;; esac
-        sleep 0.5
-    done
-    echo missing
-}
 push_count ()    { printf '%s' "$(mgr_pane)" | grep -c "\\[FLEET-PULSE\\].*$1" || true; }
 # The debounce marker is the window: present, the alert stays quiet until the
 # re-notify age; absent, the next sweep fires it again.
@@ -130,8 +142,7 @@ run_pulse () {
 echo "=== #2120 rehearsal: no push types into a held box, and a box that takes no input is bounded ==="
 
 echo "--- 1. the manager's box already holds text; two alerts this sweep ---"
-start_manager
-check "the manager is up and shows its box" shown "$(manager_box)"
+start_manager "the manager is up and shows its box"
 tmux -L "$MGR_SOCK" send-keys -t "$MGR" -l "a reply being typed"
 sleep 0.5
 check "the box holds the manager's own text" "> a reply being typed" "$(box_line)"
@@ -144,9 +155,8 @@ check "a skipped push leaves session_missing's window open" open "$(window w2 se
 check "the alert is still recorded for the escalation" 1 "$(( $(recorded session_missing) - seen ))"
 
 echo "--- 2. the box takes no input: one wait, then the floor ---"
-tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
-start_manager --deaf
-check "the deaf manager is up and shows its box" shown "$(manager_box)"
+stop_manager
+start_manager "the deaf manager is up and shows its box" --deaf
 run_pulse
 check "one push waits on the box that takes no input" 1 "$(waits)"
 check "the other alert is held back by the floor, not typed" 1 "$(floor_skips)"
@@ -162,9 +172,8 @@ check "the alert is still recorded within the floor" 1 "$(( $(recorded session_m
 check "session_missing's window stays open within the floor" open "$(window w2 session_alerted)"
 
 echo "--- 4. the floor lapses and the box takes input: the push goes out ---"
-tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
-start_manager
-check "the restarted manager is up and shows its box" shown "$(manager_box)"
+stop_manager
+start_manager "the restarted manager is up and shows its box"
 sleep 2
 run_pulse FLEET_PULSE_HELD_PUSH_FLOOR_S=1
 check "session_missing is pushed and submitted"          1 "$(push_count session_missing)"
@@ -183,16 +192,14 @@ echo "--- 6. the floor belongs to the manager instance: a restarted manager is n
 # changes, so both alerts re-fire to it. A deaf one sets a floor; the next one,
 # which takes input, must not inherit that floor, though it reuses the deaf
 # one's session id: a floor keyed by the id would hold it back.
-tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
-start_manager --deaf
-check "a second deaf manager is up and shows its box" shown "$(manager_box)"
+stop_manager
+start_manager "a second deaf manager is up and shows its box" --deaf
 sid_before=$(session_id)
 run_pulse
 check "the alerts re-fire to it, and one push waits on its box" 1 "$(waits)"
 check "its other alert is held back by its floor" 1 "$(floor_skips)"
-tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
-start_manager
-check "a manager that takes input replaces it and shows its box" shown "$(manager_box)"
+stop_manager
+start_manager "a manager that takes input replaces it and shows its box"
 check "it reuses its predecessor's session id, so a floor keyed by the id would hold it back" "$sid_before" "$(session_id)"
 run_pulse
 check "the new manager is not held back by its predecessor's floor" 0 "$(floor_skips)"
@@ -221,8 +228,11 @@ echo "--- 8. a restarted manager whose box draws late gets the alert in the same
 # (9 to 19 s for a production-shaped bot, #860), and keys typed then are lost
 # (#2138). The push waits for the box, as a boot send does, so the alert lands
 # in that tick rather than costing the new instance a floor.
-tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
-tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "sleep 5; $STUB"
+stop_manager
+# Started without harness_box_up on purpose: the push must wait for this box.
+late=$(tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "sleep 5; $STUB" 2>&1 && echo started)
+check "the late manager's session starts" started "$late"
+[ "$late" = started ] || stop_run "the late manager's session starts"
 check "the new manager's pane is still blank when the sweep starts" blank "$(mgr_blank)"
 run_pulse FLEET_PULSE_REARM_WINDOW_S=0
 check "session_missing reaches the late manager in the same sweep" 1 "$(took_count session_missing)"

@@ -37,14 +37,27 @@ def run():
     )
 
 
+def _skip_unless_reached(run, label):
+    """A manager that does not come up ends the run at that step (#2405). The
+    checks after it did not run, and the start it stopped at is setup, not the
+    behaviour under test: test_every_check_passes fails once for the run, naming
+    the step."""
+    stopped = next((line for line in run.stdout.splitlines() if line.startswith("STOPPED:")), "")
+    reached = f"PASS: {label}" in run.stdout or f"FAIL: {label}" in run.stdout
+    if stopped and (not reached or f'"{label}"' in stopped):
+        pytest.skip(stopped)
+
+
 def test_harness_ran_rather_than_skipping(run):
     """rc 0 is not enough: the tmux-absent path also exits 0."""
     assert "SKIP:" not in run.stdout, run.stdout
+    _skip_unless_reached(run, "a submitted push closes session_missing's window")
     assert "a submitted push closes session_missing's window" in run.stdout, run.stdout
 
 
 def _passed(run, *labels):
     for label in labels:
+        _skip_unless_reached(run, label)
         assert f"PASS: {label}" in run.stdout, run.stdout
 
 
