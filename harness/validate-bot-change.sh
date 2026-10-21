@@ -135,6 +135,17 @@ VAL_REPO="$(cd "$LIB_DIR/../.." && pwd)"
 # Claude Code's border and footer below the prompt line. An absolute python3, so
 # a stub claude run by start-bot, which rebuilds PATH, still finds it.
 VAL_BOX="$(printf '%q %q' "$(type -P python3)" "$VAL_REPO/tests/fixtures/input-box-stub.py")"
+# val_box_up <session> "<stub option>..." [<new-session option>...]: start a
+# stand-in on its own server, through lib-common's harness_box_up, which returns
+# once its box is drawn: keys typed into the pane before that are lost (#2139).
+# One that does not come up is a setup read that could not run, so every check
+# after it in its scenario is refused, naming it (harness_refuse).
+val_box_up() {
+    local session="$1" opts="$2" got
+    shift 2
+    got=$(harness_box_up "$(vsock "$session")" "$session" "$VAL_BOX${opts:+ $opts}" "$@") \
+        || harness_refuse "the $session stand-in did not come up: $got"
+}
 # The pytest wrapper supplies its preflighted CLI. Hand callers must also select
 # one explicitly; neither PATH nor a nearby checkout chooses this harness's code.
 VAL_CLI="${PLANE_EMIT_CLI:-${CLAUDLOBBY_CLI:-}}"
@@ -556,7 +567,7 @@ CONF
 # canonical input queue fills, tmux reports successful sends that never appear
 # in capture-pane, while the stand-in reads everything (raw mode) and leaves each
 # submitted notice on its own line for the pane assertions below.
-tmux new-session -d -s "$MGR" "$VAL_BOX"
+val_box_up "$MGR" ""
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
@@ -962,8 +973,7 @@ CONF
 # pane that only echoes keeps the first command in its box, and the send then
 # rightly reports it unsubmitted. classify_pane captures the whole pane (not a
 # tail), so idle detection is unaffected by the extra lines.
-tmux new-session -d -s "$IBOT" "$VAL_BOX --chrome"
-sleep 1
+val_box_up "$IBOT" "--chrome"
 touch "$IBOT_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$IBOT_DIR" >/dev/null 2>&1 || true
 sleep 1
@@ -1979,8 +1989,7 @@ exit 0
 STUB
 chmod +x "$_st_lib/tg-post.sh" "$_st_bin/systemctl"
 val_plane_ready "$ROOT" "$_st_fleet"
-tmux new-session -d -x 250 -y 60 -s "$_st_mgr" "$VAL_BOX --log '$_st_pushes'"
-sleep 1  # let the box render
+val_box_up "$_st_mgr" "--log '$_st_pushes'" -x 250 -y 60
 
 st_bot() {  # <bot> <unit: none|active|failed> <stop record: none|seconds ago>
     local d="$_st_bots/$1" label="com.valstop.$1" at
@@ -2637,23 +2646,22 @@ done
 # in a box that shows it.
 # Idle briefing bot: a box, no esc-to-interrupt, no fresh .last-tool-call
 # -> bot_is_busy reads not-busy -> the trigger dispatches.
-tmux new-session -d -s "$BRIEF" "$VAL_BOX"
+val_box_up "$BRIEF" ""
 # Busy briefing bot: a fresh data/.last-tool-call -> bot_is_busy reads BUSY via
 # the rendering-immune marker branch (no pane-render race) -> the trigger defers.
-tmux new-session -d -s "$BRIEFBUSY" "$VAL_BOX"
+val_box_up "$BRIEFBUSY" ""
 touch "$BRIEFBUSY_DIR/data/.last-tool-call"
 # Retry bot: busy the same way, until its marker is removed mid-window below.
-tmux new-session -d -s "$BRIEFWAIT" "$VAL_BOX"
+val_box_up "$BRIEFWAIT" ""
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane. Reopen
 # the draining fixture if an earlier scenario stopped its private server.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "$VAL_BOX"
+tmux has-session -t "$MGR" 2>/dev/null || val_box_up "$MGR" ""
 # Idle briefing bot with no composed skill: the trigger must refuse it.
-tmux new-session -d -s "$BRIEFNOSKILL" "$VAL_BOX"
+val_box_up "$BRIEFNOSKILL" ""
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
 # computed PAYLOAD (bare vs set +H;) is observable verbatim in the captured pane.
-tmux new-session -d -s "$SINK" "$VAL_BOX"
-sleep 1  # let panes render
+val_box_up "$SINK" ""
 
 # --- Observe: the real trigger against the idle, busy + skill-less bots --------
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEF" morning >/dev/null 2>&1 || true
@@ -4787,16 +4795,12 @@ LK="vallock"
 LK_OUT="$ROOT/pane-lock.submits"
 # _lk_fresh: a new pane for each pair, so text one pair left in the box cannot
 # join the next pair's submits.
+# harness_box_down waits for the old pane's server to be gone: a start that
+# reaches the exiting server fails "server exited unexpectedly" (#2405).
 _lk_fresh() {
-    local t=0
-    command tmux -L "$(vsock "$LK")" kill-server 2>/dev/null || true
+    harness_box_down "$(vsock "$LK")" "$LK" || true
     : > "$LK_OUT"
-    tmux new-session -d -x 250 -y 60 -s "$LK" "$VAL_BOX --log '$LK_OUT'"
-    while [ "$t" -lt 50 ]; do
-        case "$(tmux capture-pane -p -t "$LK" 2>/dev/null || true)" in *">"*) return 0 ;; esac
-        sleep 0.1
-        t=$((t + 1))
-    done
+    val_box_up "$LK" "--log '$LK_OUT'" -x 250 -y 60
 }
 # Numbered tokens: no two chunks alike, and every byte names its sender.
 _lk_payload() {
