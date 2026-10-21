@@ -117,7 +117,9 @@ harness" --splits 4 --group 3`.
 
 **Refreshing `.test_durations`.** A test missing from it gets the average time, so stale times
 make the shards uneven but never skip a test. Its times are macOS's: the slowest platform's
-shards decide how long a pull request waits. When the macOS shards drift more than about a
-quarter apart, take the `test-durations` artifact of a green `tests` run (the newest on main,
-say) and commit it at the repository root: `rm .test_durations`, since `gh run download` will
-not overwrite it, then `gh run download <run-id> -n test-durations`.
+shards decide how long a pull request waits. Judge drift over several green runs, not one:
+runner speed alone moves a shard a long way (with the same tests, one macOS shard took 10
+minutes in one run and 16 in the next). When the macOS shards stay more than about a quarter
+apart run after run, take the `test-durations` artifact of a green `tests` run (the newest on
+main, say) and commit it at the repository root: `rm .test_durations`, since `gh run download`
+will not overwrite it, then `gh run download <run-id> -n test-durations`.

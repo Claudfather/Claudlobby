@@ -50,8 +50,8 @@ import xml.etree.ElementTree as ET
 # why in its pull request; when a change removes skips, the check prints a
 # notice until the ceiling comes down to the count.
 SKIP_CEILINGS = {
-    "supported (ubuntu-latest, py3.10)": 18,
-    "supported (macos-latest, py3.11)": 116,
+    "supported (ubuntu-latest, py3.10)": 17,
+    "supported (macos-latest, py3.11)": 114,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests
