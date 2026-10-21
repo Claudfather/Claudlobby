@@ -31,7 +31,11 @@ decision, and both callers use them:
 The log's path, its file names and both lines are Claude Code internals,
 measured on Linux with Claude Code 2.1.304 and 2.1.306; the macOS path follows
 the same convention unmeasured. If Claude Code changes any of them, bring-up
-reads `unknown`, and the restart gate refuses until the reader is updated.
+logs `BRIDGE_UNVERIFIED`, and the restart gate refuses until the reader is updated.
+
+### Fixed — the printify skill's suite no longer fails a check whose match it found (#1031)
+
+Four checks in `library/skills/printify/test.sh` piped captured output to `grep -q` under `pipefail`. `grep -q` exits at its first match, but bash's `printf` writes to a pipe one line at a time, so a later line could meet a closed pipe, and that SIGPIPE (status 141) became the pipeline's status: help without creds, the migrate id mapping and the cross-blueprint caveat failed with their text present, and the negated unbound-variable check could read its text as absent. Each check now matches the captured string with a bash pattern, as `supervisor.sh` already does for the same reason.
 
 ### Fixed — no harness types into an input-box stand-in before its box is drawn, and a restarted stand-in comes up (#2139, #2405)
 
