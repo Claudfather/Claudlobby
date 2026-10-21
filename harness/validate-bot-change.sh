@@ -1901,8 +1901,8 @@ _ch_tick() {  # one real keepalive tick, the bridge grace off so a young session
         CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
         "$LIB_DIR/keepalive.sh" "$RB_DIR" >>"$RB_ROOT/keepalive.channel.out" 2>&1 || true
 }
-_ch_alerts() {  # how many channel_refused alerts the plane holds for this fleet
-    { val_events "$RB_ROOT" "$FLEET" fleet channel_refused || true; } | grep -c 'Telegram channel refused by Claude Code' || true
+_ch_alerts() {  # <bring-up|keepalive>: the channel_refused alerts the plane holds from that caller
+    { val_events "$RB_ROOT" "$FLEET" fleet channel_refused || true; } | grep -c "Telegram channel refused by Claude Code ($1)" || true
 }
 
 # --- A refused channel: not BRIDGE_READY, an alert, and the gate answers at once ---
@@ -1916,16 +1916,19 @@ harness_check "  ...naming the reason Claude Code gave" "$r"
 read -r _ch_rc _ch_out _ch_s <<<"$(_ch_gate "$_ch_tok")"
 { [ "$_ch_rc" = 1 ] && [ "$_ch_out" = refused ] && [ "$_ch_s" -lt 5 ]; } && r=yes || r=no
 harness_check "  ...and the restart gate reads that boot as refused at once ($_ch_rc $_ch_out ${_ch_s}s)" "$r"
+_ch_n="$(val_poll 20 0.5 _ch_alerts bring-up)"
 _ch_ev="$({ val_events "$RB_ROOT" "$FLEET" fleet channel_refused || true; } | grep 'valrb Telegram channel refused by Claude Code (bring-up)' | tail -n 1 || true)"
-[ -n "$_ch_ev" ] && r=yes || r=no
+{ [ "${_ch_n:-0}" -ge 1 ] && [ -n "$_ch_ev" ]; } && r=yes || r=no
 harness_check "bring-up records a channel_refused alert on the plane naming the bot" "$r"
 printf '%s' "$_ch_ev" | grep -q 'a restart on the same login comes up refused again' && r=yes || r=no
 harness_check "  ...whose remedy says a restart on the same login is refused again" "$r"
 
 # --- keepalive: the same session raises nothing twice; a reconnect's decision is read ---
-_ch_n="$(_ch_alerts)"
+# keepalive records in the background, so each count is polled; the absence check
+# gives a would-be alert a few seconds to land before it scores none.
 _ch_tick
-[ "$(_ch_alerts)" = "$_ch_n" ] && r=yes || r=no
+_ch_n="$(val_poll 6 0.5 _ch_alerts keepalive)"
+[ "${_ch_n:-0}" = 0 ] && r=yes || r=no
 harness_check "keepalive on the refused session bring-up reported raises no second alert" "$r"
 _ch_log="$(ls "$_CH_LOGDIR" | tail -n 1 || true)"
 tail -n 1 "$VAL_REPO/tests/fixtures/channel-mcp-log/registered.jsonl" >> "$_CH_LOGDIR/$_ch_log"
@@ -1933,11 +1936,11 @@ _ch_tick
 { [ ! -e "$RB_DIR/data/.channel-refused" ] && grep -q 'registered the Telegram channel again' "$RB_DIR/keepalive.log"; } && r=yes || r=no
 harness_check "keepalive clears the refusal once a reconnect registers the channel" "$r"
 tail -n 1 "$VAL_REPO/tests/fixtures/channel-mcp-log/refused.jsonl" >> "$_CH_LOGDIR/$_ch_log"
-_ch_n="$(_ch_alerts)"
 _ch_tick
 grep -q 'CHANNEL_REFUSED' "$RB_DIR/keepalive.log" 2>/dev/null && r=yes || r=no
 harness_check "keepalive reads a refusal a reconnect brought into a running session" "$r"
-[ "$(_ch_alerts)" -gt "$_ch_n" ] && r=yes || r=no
+_ch_n="$(val_poll 20 0.5 _ch_alerts keepalive)"
+[ "${_ch_n:-0}" -ge 1 ] && r=yes || r=no
 harness_check "  ...and records its own channel_refused alert" "$r"
 
 # --- A registered channel stays ready; no decision at all is never ready ---
