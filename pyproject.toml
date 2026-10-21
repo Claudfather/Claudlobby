@@ -21,6 +21,9 @@ dependencies = [
 dev = ["pytest>=7.0", "tomli; python_version < '3.11'",
        # Installed-artifact smoke builds wheels directly and through an sdist.
        "build>=1,<2", "setuptools>=77", "wheel",
+       # CI's shards: each runs its share of a platform's suite, divided by the
+       # times in .test_durations (.github/workflows/test.yml, tests/ci_shards.py).
+       "pytest-split==0.11.0",
        # the plane-ui battery runs in CI; self-extra keeps ONE copy of the
        # pins (httpx = starlette TestClient engine)
        "claudlobby[plane-ui]"]
