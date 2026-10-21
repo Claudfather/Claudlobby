@@ -34,6 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: tests/test_env_cascade.py reads an older start-bot.sh
+          # from it, and skips on a shallow clone.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -118,6 +122,10 @@ jobs:
       - name: Check the matrix covers TEST_SPLITS
         run: test "${{ strategy.job-total }}" = "$TEST_SPLITS"
       - uses: actions/checkout@v4
+        with:
+          # Full history: tests/test_env_cascade.py reads an older start-bot.sh
+          # from it, and skips on a shallow clone.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -263,6 +271,10 @@ jobs:
       - name: Check the matrix covers TEST_SPLITS
         run: test "${{ strategy.job-total }}" = "$TEST_SPLITS"
       - uses: actions/checkout@v4
+        with:
+          # Full history: tests/test_env_cascade.py reads an older start-bot.sh
+          # from it, and skips on a shallow clone.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

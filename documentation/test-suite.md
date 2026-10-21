@@ -87,17 +87,19 @@ Redirect, read `$?`, then grep the file. Same `${PIPESTATUS[0]}` trap as
 **CI's lanes: quarantine a flaky test, never deselect it.** On each platform, each test runs in
 exactly one CI lane, chosen by its markers (pinned by `tests/test_ci_lanes.py`). On a pull
 request, `test.yml` runs `-m "not quarantine and not harness"` on each supported platform, Linux
-with Python 3.10 and macOS with Python 3.11, in shards (below); a `harness` job on each platform
-runs the validation harness (`@pytest.mark.harness`) beside them; and `quarantine.yml` runs every
-test marked `@pytest.mark.quarantine(issue=<N>)`. The `pytest` job runs the same selection on
-Linux with Python 3.11, on push to main only. Fix a flaky test when its cause is clear and small.
-Otherwise quarantine it: it leaves the required lanes (the shards, both `harness` jobs, `pytest`,
-conformance's `vault-tests`) but still runs on every PR and push to main, in a check nothing
-should require. Collection refuses a quarantine that names no tracking issue. Never `--deselect`
-or `-k` a test out of a workflow: a node id that stops matching deselects nothing and says so
-nowhere. The suite still runs everything locally, and `pytest -m "not quarantine and not
-harness"` mirrors the required lanes. A quarantined test that shows up in your before/after name
-diff is a known flake, so rerun it on both arms before attributing it.
+with Python 3.10 and macOS with Python 3.11, in shards (below); a `harness` job runs the
+validation harness (`@pytest.mark.harness`) beside them, on Linux with Python 3.11 and on macOS;
+and `quarantine.yml` runs every test marked `@pytest.mark.quarantine(issue=<N>)`. The `pytest`
+job runs the shards' selection on Linux with Python 3.11, on push to main only. The `[vault]`
+tests skip in the shards and in `pytest`, and run in conformance's `vault-tests`. Fix a flaky
+test when its cause is clear and small. Otherwise quarantine it: it leaves the required lanes
+(the shards, both `harness` jobs, `pytest`, conformance's `vault-tests`) but still runs on every
+PR and push to main, in a check nothing should require. Collection refuses a quarantine that
+names no tracking issue. Never `--deselect` or `-k` a test out of a workflow: a node id that
+stops matching deselects nothing and says so nowhere. The suite still runs everything locally,
+and `pytest -m "not quarantine and not harness"` mirrors the required lanes. A quarantined test
+that shows up in your before/after name diff is a known flake, so rerun it on both arms before
+attributing it.
 
 **CI's shards.** Each supported platform's suite runs in `TEST_SPLITS` shard jobs (`test.yml`),
 `supported (ubuntu-latest, py3.10) shard 1` to `shard 4` and the same for macOS, and pytest-split
