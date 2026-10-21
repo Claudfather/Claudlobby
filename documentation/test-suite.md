@@ -84,13 +84,18 @@ the other two cannot** (#1035). Drop any one and a live hole reopens.
 Redirect, read `$?`, then grep the file. Same `${PIPESTATUS[0]}` trap as
 `gh api ... | head`.
 
-**CI's lanes: quarantine a flaky test, never deselect it.** Each test runs in exactly one CI
-lane, chosen by its markers (pinned by `tests/test_ci_lanes.py`). `test.yml`'s `pytest` job
-runs `-m "not quarantine and not harness"`; its `harness` job runs the validation harness
-(`@pytest.mark.harness`) in parallel; and `quarantine.yml` runs every test marked
-`@pytest.mark.quarantine(issue=<N>)`. Fix a flaky test when its cause is clear and small.
-Otherwise quarantine it: it leaves the required lanes (`pytest`, `harness`, conformance's
-`vault-tests`) but still runs on every PR and push to main, in a check nothing should require.
+**CI's lanes: quarantine a flaky test, never deselect it.** Each test runs in exactly one of
+three lanes, chosen by its markers (pinned by `tests/test_ci_lanes.py`). `test.yml`'s `pytest`
+job runs `-m "not quarantine and not harness"` on Linux with Python 3.11; its `harness` job runs
+the validation harness (`@pytest.mark.harness`) in parallel; and `quarantine.yml` runs every
+test marked `@pytest.mark.quarantine(issue=<N>)`. Two more `test.yml` jobs run the suite again
+on the other supported platforms: `supported (ubuntu-latest, py3.10)` and `supported
+(macos-latest, py3.11)` run `-m "not quarantine"`, so every test outside quarantine, the harness
+included, also runs on Linux with Python 3.10 and on macOS (the `[vault]` tests skip there, as
+in `pytest`, and run in conformance's `vault-tests`). Fix a flaky test when its cause is clear
+and small. Otherwise quarantine it: it leaves the required lanes (`pytest`, `harness`,
+conformance's `vault-tests`) and both `supported` jobs, but still runs on every PR and push to
+main, in a check nothing should require.
 Collection refuses a quarantine that names no tracking issue. Never `--deselect` or `-k` a test
 out of a workflow: a node id that stops matching deselects nothing and says so nowhere. The
 suite still runs everything locally, and `pytest -m "not quarantine and not harness"` mirrors
