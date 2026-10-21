@@ -1391,6 +1391,14 @@ the new token before it can publish a ready session. Existing unsent drafts stay
 in memory in the open view and return only with matching freshly admitted action
 context; neither this continuity policy nor draft retention creates authority.
 
+A finite connected-read timeout or 503 is ambiguous. Only a fresh status check
+for the same token and workspace context, validating the same host read profile,
+allows just the failed panel to become unavailable while healthy results and the
+stream survive. Concurrent failures share an in-flight check; its result is not
+cached as an authority lease. Failed status, profile or identity checks still
+fence the entire source. No mutation is retried, and direct-owner read recovery
+is unchanged.
+
 ### Connected action admission
 
 The opt-in connected factory exposes finite POST context/prepare/send/receipt at `/api/owner/connected/actions/`. It reuses the canonical OwnerActions engines and existing message, nudge and feedback adapters. Exact trusted Host/operational Origin, bearer-only credentials (no cookies), a fresh current native owner and admitted source are required. The current connected session/full workspace binding and the specific local fleet grant are admitted together in one owner-authority read snapshot; every context, effect, inspection and closing response rechecks them. Direct cookie authorizers remain direct-only. Connected context hashes include the full binding revision/generation and remain stable across session renewal; direct context bytes stay unchanged. Grants are principal/fleet-specific, not workspace-specific. A locally approved workspace alone grants no action; existing explicit allow-messages/allow-nudges/allow-feedback capabilities can be used by that owner's direct access or explicitly bound connected workspace. Browser requests never register actors or grant capabilities.

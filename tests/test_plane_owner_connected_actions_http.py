@@ -16,6 +16,7 @@ from claudlobby.plane.owner_browser import create_owner_browser_app
 from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
 from claudlobby.plane.workspace_assertion import WorkspaceAttestation
 from claudlobby.plane.session_assertion import SessionAttestation
+from tests.deadline_clock import bounded, move_clock, status
 from tests.test_plane_owner_feedback import gateway  # noqa: F401
 from tests.test_activation import cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
@@ -175,27 +176,36 @@ def test_action_queue_cancellation_and_shutdown_retain_started_work(connected_ac
 def test_started_send_timeout_unknown_then_pure_receipt(connected_actions,monkeypatch):
     import threading
     import httpx
+    from claudlobby.plane import owner_connected_actions_http,owner_workspace_http
     f=connected_actions;allow(f,"feedback");calls=receiver(monkeypatch);r=row(f,"feedback");r=post(f,"prepare",{**r,"body":"comment"}).json()
     handler=f[0].connected_actions;entered=threading.Event();release=threading.Event();original=handler.actions.operation
     def held(*args):
-        result=original(*args);entered.set();assert release.wait(5);return result
-    monkeypatch.setattr(handler.actions,"operation",held);monkeypatch.setattr(handler,"response_seconds",lambda scope:.5)
+        result=original(*args);entered.set();assert release.wait(30);return result
+    monkeypatch.setattr(handler.actions,"operation",held)
     async def run():
+        advance,paused=move_clock(monkeypatch,owner_connected_actions_http,owner_workspace_http)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=f[0]),base_url=HOST) as client:
             headers={"Origin":ORIGIN,"Authorization":"Bearer "+f[8],"Content-Type":"application/json","X-Claudlobby-Owner":"1"}
-            response=await client.post(PREFIX+"send",json={**r,"body":"comment"},headers=headers)
-            assert entered.is_set() and len(calls)==1 and response.status_code==503 and response.json()=={"state":"unavailable"}
-            assert len(handler._workers)==1
-            release.set()
-            for _ in range(100):
-                if not handler._workers:break
-                await asyncio.sleep(.01)
-            assert not handler._workers
-            monkeypatch.setattr(handler.actions,"operation",original);monkeypatch.setattr(handler,"response_seconds",lambda scope:15)
-            receipt=await client.post(PREFIX+"receipt",json=r,headers=headers)
-            assert receipt.json()["status"]=="delivered" and len(calls)==1
-    try:asyncio.run(run())
-    finally:release.set()
+            request=asyncio.create_task(client.post(PREFIX+"send",json={**r,"body":"comment"},headers=headers))
+            def state():return f"request={status(request)}, entered={entered.is_set()}, calls={len(calls)}, workers={len(handler._workers)}"
+            try:
+                assert await asyncio.to_thread(entered.wait,10),"waited 10 s for the send to run: "+state()
+                # Its deadline passes once the send has run. A 0.5 s deadline could
+                # answer first on a slow runner, before the send was entered (#2412).
+                advance(handler.response_seconds({"path":PREFIX+"send"}))
+                with paused():response=await bounded(request,"the response (loop clock held)",state)  # the answer is due now (#2406)
+                assert len(calls)==1 and response.status_code==503 and response.json()=={"state":"unavailable"},state()
+                await asyncio.sleep(.01)  # a job that ended with its answer would be gone by now
+                assert len(handler._workers)==1,state()
+                job,=handler._workers
+                release.set()
+                with paused():await bounded(job,"the send's job (loop clock held)",state)  # it ends with the send
+                assert not handler._workers,state()
+                monkeypatch.setattr(handler.actions,"operation",original)
+                receipt=await client.post(PREFIX+"receipt",json=r,headers=headers)
+                assert receipt.status_code==200 and receipt.json()["status"]=="delivered" and len(calls)==1,receipt.text
+            finally:release.set()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("kind", ["message", "nudge", "feedback"])

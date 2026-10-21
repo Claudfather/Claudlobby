@@ -15,7 +15,7 @@ from claudlobby import activation_enrollment as publish, activation_state as sta
 from claudlobby import activation_units, config_install, runtime_admission
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units, unit_family
-from claudlobby.supervision_inventory import _catalog
+from claudlobby.supervision_inventory import _catalog, EnrollmentInventory, collect_enrollment
 from tests.test_activation_units import empty_enrollment, enrollment, RecordedAdapter, _complete, _pause_all
 from tests.test_releases import installed, r
 
@@ -37,19 +37,24 @@ class Manager(RecordedAdapter):
         super().__init__(inventory)
         self.directories = _catalog(inventory.catalog)[2]
         self.directory = self.directories[0]
-        self.declarations = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
+        self.declarations = {d.source.name: (d, item) for d, item in planned_units(plan, self.manager)}
         self.loaded_foreign = set()
 
     def call(self, function, *args, **kwargs):
         if function == "svc_inventory_catalog":
-            text = "manager\tLinux\n" + "".join(f"directory\t{path}\n" for path in self.directories)
-            text += ''.join(f"installed\t{p.name}\n" for p in sorted(self.directory.iterdir())
-                            if p.suffix in (".service", ".timer"))
-            text += ''.join(f"loaded\t{name}\n" for name in sorted(set(self.states) | self.loaded_foreign))
+            text = f"manager\t{self.manager}\n" + "".join(f"directory\t{path}\n" for path in self.directories)
+            if self.manager == "Darwin":
+                text += "domain\tgui/501\nPID\tStatus\tLabel\n"
+            else:
+                files = sorted(self.directory.iterdir()) if self.directory.exists() else []
+                text += ''.join(f"installed\t{p.name}\n" for p in files
+                                if p.suffix in (".service", ".timer"))
+                text += ''.join(f"loaded\t{name}\n" for name in sorted(set(self.states) | self.loaded_foreign))
         elif function == "svc_inventory_state":
             file, target = Path(args[0]), args[1]
-            text = self.states.get(target, "disabled loaded inactive" if file.exists() or target in self.loaded_foreign
-                                   else "not-found not-found inactive")
+            text = ("unchanged unloaded inactive" if self.manager == "Darwin" else
+                    self.states.get(target, "disabled loaded inactive" if file.exists() or target in self.loaded_foreign
+                                    else "not-found not-found inactive"))
         elif function == "svc_inventory_properties":
             text = unit_properties(self.directory, args[0], self.declarations[args[0]][0])
         else:
@@ -137,6 +142,167 @@ def prepared(case, store):
 
 def _complete_pending(store, step):
     store.complete("cutover", step, evidence_digest="b" * 64)
+
+
+@pytest.fixture(params=["Darwin", "Linux"])
+def new_native_case(installed, tmp_path, monkeypatch, request):
+    r.seal_release(installed[0], installed[1], installed[2])
+    plan, old, candidate = _candidate_plan(installed)
+    home = tmp_path / "private-home"
+    home.mkdir()
+    directory = home / ("Library/LaunchAgents" if request.param == "Darwin" else ".config/systemd/user")
+    catalog = f"manager\t{request.param}\ndirectory\t{directory}\n"
+    if request.param == "Darwin":
+        catalog += "domain\tgui/501\nPID\tStatus\tLabel\n"
+    inventory = EnrollmentInventory(plan.data_root, request.param, catalog, (), (), (), (), True)
+    adapter = Manager(inventory, plan)
+    inventory = collect_enrollment(plan.data_root, (), bootstrap_empty=True, adapter=adapter).require_complete()
+
+    def validate(release, declaration, item, content):
+        assert release.release_id == candidate.release_id
+        assert hashlib.sha256(content).hexdigest() == item["sha256"]
+    monkeypatch.setattr(runtime_admission, "validate_unit_admission", validate)
+    case = inventory, {phase: [] for phase in publish.PHASES}, plan, adapter, None, None, old, []
+    return case, home
+
+
+@pytest.mark.parametrize("existing_parent", [False, True])
+@pytest.mark.parametrize("mutable_child", [False, True])
+def test_native_phase_publication_has_one_shared_parent_owner(new_native_case, existing_parent, mutable_child):
+    case, home = new_native_case
+    inventory, _, plan, adapter, _, _, _, _ = case
+    directory = adapter.directory
+    if existing_parent:
+        directory.mkdir(parents=True)
+        (directory / "foreign-data").write_bytes(b"preserve existing data")
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        plans = publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=directory, adapter=adapter)
+        phase_rows = [json.loads((config_install.read_config_install(store.root,
+                      publish.journal_id("cutover", phase)).directory / "journal.json").read_text())["journal"]["rows"]
+                      for phase in publish.PHASES]
+        publication_order = ("ingest", "bots", "producers")
+        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started"), ("producers", "producers_resumed")):
+            if phase == "producers":
+                _complete(store, "verified")
+            store.begin("cutover", step)
+            publish.install_candidate_units(store, "cutover", phase, adapter=adapter)
+            for entry in plans[0].effects["entries"]:
+                installed_file = Path(entry["installed"])
+                if publication_order.index(entry["phase"]) <= publication_order.index(phase):
+                    assert installed_file.read_bytes() == plan.blob(entry["after"]["sha256"])
+                    assert installed_file.stat().st_mode & 0o777 == entry["after"]["mode"]
+                else:
+                    assert not installed_file.exists()
+            if phase != "producers":
+                _complete_pending(store, step)
+        assert not any(row["ensure"] for rows in phase_rows for row in rows)
+        if mutable_child:
+            (directory / "runtime-data").write_bytes(b"preserve new data")
+        store.begin_rollback("cutover")
+        for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("candidate_units_removed")]:
+            _complete(store, step)
+        store.begin("cutover", "candidate_units_removed")
+        publish.remove_candidate_units(store, "cutover", adapter=adapter)
+        assert not any(Path(entry["installed"]).exists() for entry in plans[0].effects["entries"])
+        directories = config_install.read_config_install(store.root, publish.journal_id("cutover", "directories"))
+        assert directories.status == "rolled_back"
+        if mutable_child:
+            assert (directory / "runtime-data").read_bytes() == b"preserve new data"
+            assert existing_parent or directory in directories.retained_directories
+        if existing_parent:
+            assert (directory / "foreign-data").read_bytes() == b"preserve existing data"
+        elif not mutable_child:
+            assert list(home.iterdir()) == []
+        assert not any(call[0] in ("svc_activation_start", "svc_enroll", "svc_activation_resume") for call in adapter.calls)
+
+
+def test_native_parent_publication_recovers_before_preparing_phase_journals(new_native_case, monkeypatch):
+    case, _ = new_native_case
+    inventory, _, _, adapter, _, _, _, _ = case
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        original_replace = config_install._replace
+
+        def interrupted(source, target):
+            original_replace(source, target)
+            if target == adapter.directory:
+                raise InterruptedError("after native parent publication")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(config_install, "_replace", interrupted)
+            with pytest.raises(InterruptedError, match="native parent publication"):
+                publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
+        directory_journal = config_install.read_config_install(store.root, publish.journal_id("cutover", "directories"))
+        assert directory_journal.status == "applying"
+        assert adapter.directory.is_dir() and not list(adapter.directory.iterdir())
+        assert not any((store.root / "state/activations" / publish.journal_id("cutover", phase)).exists()
+                       for phase in publish.PHASES)
+        publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                             install_directory=adapter.directory, adapter=adapter)
+        assert config_install.read_config_install(store.root, publish.journal_id("cutover", "directories")).status == "applied"
+        assert all(config_install.read_config_install(store.root, publish.journal_id("cutover", phase)).status == "prepared"
+                   for phase in publish.PHASES)
+
+
+@pytest.mark.parametrize("collision", ["symlink", "file"])
+def test_native_install_parent_cannot_redirect_or_replace_foreign_data(new_native_case, collision):
+    case, home = new_native_case
+    inventory, _, _, adapter, _, _, _, _ = case
+    foreign = home / "foreign"
+    foreign.mkdir()
+    (foreign / "data").write_bytes(b"foreign bytes")
+    adapter.directory.parent.mkdir(parents=True)
+    if collision == "symlink":
+        adapter.directory.symlink_to(foreign, target_is_directory=True)
+    else:
+        adapter.directory.write_bytes(b"foreign bytes")
+    with state.locked_activation(inventory.data_root) as store:
+        refusal = state.ActivationError if collision == "symlink" else NotADirectoryError
+        with pytest.raises(refusal):
+            prepared(case, store)
+            publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                 install_directory=adapter.directory, adapter=adapter)
+        assert not (store.root / "state/activations" / publish.journal_id("cutover", "directories")).exists()
+    assert (foreign / "data").read_bytes() == b"foreign bytes"
+    if collision == "symlink":
+        assert adapter.directory.readlink() == foreign
+    else:
+        assert adapter.directory.read_bytes() == b"foreign bytes"
+
+
+def test_directory_publication_refuses_an_unrelated_ensure(new_native_case):
+    case, home = new_native_case
+    inventory, _, plan, adapter, _, _, _, _ = case
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        plans = publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
+        foreign = home / "unrelated"
+        builder = ConfigPlanBuilder(store.root, plan.release_id, plan.release_seal, plan.fleets, effects={})
+        builder.directory(foreign)
+        with pytest.raises(state.ActivationError, match="unowned replacements"):
+            publish._check_publication_changes(builder.seal(), plans[0].effects["entries"], "directories")
+        assert not foreign.exists()
+
+
+def test_prepared_native_unit_collision_is_never_adopted(new_native_case):
+    case, _ = new_native_case
+    inventory, _, _, adapter, _, _, _, _ = case
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        plans = publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
+        entry = next(entry for entry in plans[0].effects["entries"] if entry["phase"] == "ingest")
+        foreign = Path(entry["installed"])
+        foreign.write_bytes(b"foreign bytes")
+        store.begin("cutover", "ingest_started")
+        with pytest.raises(state.ActivationError, match="foreign or changed candidate collision"):
+            publish.install_candidate_units(store, "cutover", "ingest", adapter=adapter)
+        assert foreign.read_bytes() == b"foreign bytes"
+        assert config_install.read_config_install(store.root, publish.journal_id("cutover", "ingest")).status == "prepared"
 
 
 def test_bootstrap_candidate_publishes_new_units_then_removes_only_its_files(empty_enrollment, installed, monkeypatch):

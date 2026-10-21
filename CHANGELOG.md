@@ -36,6 +36,14 @@ rehearsal's deaf manager never came up, and 13 checks failed after it.
 - **`harness/rehearse-vault-sync.sh` counts the alerts each manager was
   submitted from the stand-in's log**, not from its pane.
 
+### Changed — the account-relog skill leaves no browser behind a login, and restores Remote Control after an account change
+
+- **Step 4** lists the browsers running before the login (`browser-scan.py --min-age 0`, run under `bash -c`), says why a login on a desktop host starts a GUI Chromium that outlives it (a shell there inherits `DISPLAY` and `WAYLAND_DISPLAY` with `BROWSER` unset), and records a dated run of the login with the browser cut, which started none.
+- **Step 10** lists them again after the login, naming the unit of the bot that runs it (`browser-scan.py --unit "$BOT_SERVICE=this-bot"`, as the fleet pulse names bot units), and stops, by its typed pid, only a new browser whose owner is that bot; a new browser that did not start under that bot's unit is left running and reported to the human, and none is picked by name. The same holds around a `gh` or `vercel` login.
+- **Step 3** names the plan each account carries (Max or Team, for example), since usage limits differ by plan.
+- **Step 9** asks each peer manager for a one-line reply after its next turn on the new login, and restores Remote Control, which an account change disconnects in every running session, on the bots that run with `--remote-control`: typed only into an idle pane with an empty input box, with one Enter after the checks, and with the pitfalls measured the same day. The intro and the no-downtime rule say Remote Control is the one thing an account change drops.
+- **`/remote-control`** counts as a Claude Code built-in in the skill-reference check (`claudlobby/skill_refs.py`).
+
 ### Fixed — `bot handoff` answers `recent` for a fresh capture below the activation's refresh envelope (#2119)
 
 Since #2110, each activation tops every bot's handoff with an envelope, and a session's fresh capture goes below it. `pre-stop-handoff.sh` skipped its 300 s recent-handoff check for any handoff that names the envelope's marker, so for such a bot `bot handoff` never answered `handoff-skipped:recent`, and `bot restart` sent one more handoff command into a bot that had just saved one.
