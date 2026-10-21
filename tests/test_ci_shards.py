@@ -192,6 +192,11 @@ def _refused(out: Path, *require: str) -> str:
     return str(refusal.value)
 
 
+def _another_shard(nodeid: str) -> int:
+    """A shard the stand-in's round-robin did not give this test."""
+    return (COLLECTED.index(nodeid) % SPLITS + 1) % SPLITS + 1
+
+
 def _skips_in(report: Path) -> int:
     """The skips one shard's report holds: tests and modules, not xfails."""
     kinds = [case.find("skipped") for case in ET.parse(report).iter("testcase")]
@@ -282,10 +287,12 @@ def test_a_count_under_the_ceiling_passes_with_a_notice(shards, ceiling):
 
 def test_a_test_two_shards_ran_is_refused(shards, copy, ceiling):
     probe = _probe(shards / "rerun-twice")
-    shutil.rmtree(copy / "pytest-probe-shard-1")
-    _run_shard(probe, copy, 1, PROBE_ALSO="tests/test_a.py::TestK::test_m")
+    twice = "tests/test_a.py::TestK::test_m"
+    other = _another_shard(twice)
+    shutil.rmtree(copy / f"pytest-probe-shard-{other}")
+    _run_shard(probe, copy, other, PROBE_ALSO=twice)
     refusal = _refused(copy)
-    assert "ran in more than one shard" in refusal and "TestK::test_m (shards 1, " in refusal
+    assert "1 test(s) ran in more than one shard" in refusal and twice in refusal, refusal
 
 
 def test_a_collected_test_no_shard_ran_is_refused(shards, copy, ceiling):
@@ -355,8 +362,10 @@ def test_required_evidence_that_did_not_pass_is_refused(shards, ceiling, name):
 
 def test_required_evidence_that_ran_twice_is_refused(shards, copy, ceiling):
     probe = _probe(shards / "rerun-evidence")
-    shutil.rmtree(copy / "pytest-probe-shard-1")
-    _run_shard(probe, copy, 1, PROBE_ALSO="tests/sub/test_b.py::test_deep")
+    deep = "tests/sub/test_b.py::test_deep"
+    other = _another_shard(deep)
+    shutil.rmtree(copy / f"pytest-probe-shard-{other}")
+    _run_shard(probe, copy, other, PROBE_ALSO=deep)
     assert "test_deep must run once and pass" in _refused(copy, "test_deep")
 
 
