@@ -283,6 +283,12 @@ Bash(lsof *)
 
 These are the patterns from the current global settings.json. A "base" set that every bot gets.
 
+### Workers' privilege denies (role-keyed)
+
+`compose_settings_local()` adds `WORKER_SUDO_DENY` to every worker's deny list: `Bash(NAME *)`, `Bash(/usr/bin/NAME *)` and `Bash(/bin/NAME *)` for each of `sudo`, `sudoedit`, `su`, `pkexec`, `doas` and `run0`. The role test is `fleet.manager_bots()`, so the fleet manager gets none of them, even alone in its fleet. A trailing ` *` also matches the bare command, and `Bash(sudo *)` does not match `sudoedit`, hence one rule per name.
+
+The deny gates the session's own tool calls. Claude Code checks every subcommand, including one in a subshell or `$(…)`, and looks past a leading assignment and its built-in wrappers. It cannot see `bash -c '…'`, a script, an interpreter, an unresolvable expansion, another path to the program, or a session that edits its own settings file, while the OS user keeps its sudo rights (`library/guardrails/permissions-are-not-a-control.md`). It is a guard rail; a separate OS user without sudo is the wall.
+
 ---
 
 ## Path-Scoped Patterns

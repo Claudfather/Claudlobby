@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — a worker's settings deny sudo and its siblings; the fleet manager's do not
+
+Every worker's composed permissions now deny `sudo`, `sudoedit`, `su`,
+`pkexec`, `doas` and `run0`, each by bare name and as `/usr/bin/NAME` and
+`/bin/NAME`: 18 rules. The fleet manager's permissions get none of them, and
+neither does a manager alone in its fleet, so a step that needs root goes
+through the manager. No composed allow names any of these commands.
+
+The deny is a guard rail, not a wall. It refuses the command when a session
+runs it as a tool call: plainly, inside a compound command, a subshell or
+`$(…)`, after a variable assignment, behind the wrappers Claude Code looks
+past, and by those two paths. It cannot see `bash -c '…'`, a script, an
+interpreter, an expansion it cannot resolve, another path to the program, or a
+session that edits its own settings file, and the OS user keeps its sudo
+rights on every one of those routes. A separate OS user without sudo is the
+wall.
+
+Workers lose `sudo -u postgres psql`, root reads and package installs. The
+change reaches running bots at the next activation of a release that carries
+it.
+
 ### Fixed — a harness check reads a Plane row only once the daemon has replayed it (#2274)
 
 The validation harness read the Plane once, right after the code under test
