@@ -567,12 +567,19 @@ Each staged batch and each spool entry is named for the message its
 transmissions name (`plane/queue_names.py`, #2430). `<time_ns>-<lead event>.np.batch`
 holds no transmission, and `<time_ns>-<lead event>.m<hex>.batch` holds
 transmissions of `msg_<hex>` only; the spool's are `<lead event>.np.json` and
-`<lead event>.m<hex>.json`. A name with no tag says nothing: an older writer's, or
-a batch whose transmissions name several messages. Replay takes the batches whose
-names leave room for a transmission first, oldest first among them, so a receiver's
-proof does not wait behind the tool calls staged before it. A receipt check reads
-only the entries whose names leave room for its message's proof, so a queue full
-of other work no longer makes it read "unavailable" past its 256-entry bound.
+`<lead event>.m<hex>.json`. A name with no tag says nothing: an older writer's,
+a batch whose transmissions name several messages, or one nested deeper than the
+name walk reaches (about 340 levels, where json reads about 990; #2446). Replay takes
+the batches whose names leave room for a transmission first, oldest first among them,
+so a receiver's proof does not wait behind the tool calls staged before it. A receipt
+check reads only the entries whose names leave room for its message's proof, so a
+queue full of other work no longer makes it read "unavailable" past its 256-entry
+bound; an entry nested past the check's own walk reads "unavailable", never absent.
+A batch whose name leaves room for a transmission and that the daemon spools after a
+database error is tried again 30 seconds later, once, rather than left to the
+10-minute interval drain (#2446). Once, because a drain counts an attempt against
+each entry it cannot ingest and quarantines it at five. Other spooled work waits for
+the interval.
 
 Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's

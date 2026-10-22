@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — queued batches the name walk could not read are recorded, and a spooled proof is tried again within a minute (#2446)
+
+Follow-ups from the review of #2430's fix (`claudlobby/plane/queue_names.py`,
+`claudlobby/message_queries.py`, `claudlobby/plane/daemon.py`):
+
+- **A batch nested past the name walk's reach is recorded.** json reads about
+  990 levels of nesting, and `name_tag` gave out near 340 with a
+  `RecursionError` that neither writer caught, so the socket client's stage
+  and the daemon's spool write both failed and the batch was recorded nowhere.
+  Such a batch now gets no tag, the name every reader reads. The receipt
+  check's own walk gave out at the same depth with the same error; it now
+  reads such an entry as "unavailable" and names it. No door builds such an
+  event today.
+- **A transmission held in a tuple is named.** json writes a tuple as a list,
+  so the receipt check found such a proof, but the name walk passed tuples by
+  and named the batch for no transmission. The check then set the entry aside
+  and read "absent", which the retry gate takes as leave for another send. The
+  walk now reads a tuple as the list json writes. No writer builds one today.
+- **The replay order test stages two proofs**, so a replay that takes the
+  newer one first fails it.
+- **A proof the daemon spooled after a database error is tried again 30 s
+  later**, once, instead of waiting up to 10 minutes for the interval drain
+  while its message's receipt read "pending". Other spooled work still waits
+  for the interval. Once, because a drain counts an attempt against each entry
+  it cannot ingest and quarantines it at five.
+
 ### Fixed — a Telegram channel Claude Code refused at connect reads as refused, never ready (#2423)
 
 Claude Code decides at each connect whether to deliver a channel plugin's
