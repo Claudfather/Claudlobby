@@ -265,7 +265,7 @@ def test_example_system_yaml_ships_the_daemon_ARMED():
     assert "unit: service" in block
 
 
-@pytest.mark.parametrize("script,verb", [("plane-daemon.sh", "serve"), ("plane-view.sh", "view")])
+@pytest.mark.parametrize("script,verb", [("plane-daemon.sh", "serve"), ("plane-view.sh", "view"), ("plane-otel.sh", "otel-intake")])
 def test_launcher_execs_selected_cli_without_path_probes(tmp_path, script, verb):
     """The selected executable receives exact argv and the supervisor's PID."""
     root = tmp_path / "data root"
@@ -288,11 +288,13 @@ def test_launcher_execs_selected_cli_without_path_probes(tmp_path, script, verb)
         socket = str(tmp_path / "owned.sock")
         env.update(PLANE_SOCKET=socket, PLANE_DRAIN_INTERVAL="0.25")
         expected = ["--socket", socket, "--drain-interval", "0.25"]
+    elif verb == "otel-intake":
+        expected = ["--port", "4319", "--retention-days", "14"]
     else:
         env.update(PLANE_VIEW_HOST="127.0.0.1", PLANE_VIEW_PORT="4567")
         expected = ["--host", "127.0.0.1", "--port", "4567"]
     with subprocess.Popen(
-        ["/bin/bash", str(REPO / "claudlobby/_runtime_scripts" / script)],
+        ["/bin/bash", str(REPO / "claudlobby/_runtime_scripts" / script), *(expected if verb == "otel-intake" else [])],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -310,7 +312,7 @@ def test_launcher_execs_selected_cli_without_path_probes(tmp_path, script, verb)
         ]
 
 
-@pytest.mark.parametrize("script", ["plane-daemon.sh", "plane-view.sh"])
+@pytest.mark.parametrize("script", ["plane-daemon.sh", "plane-view.sh", "plane-otel.sh"])
 def test_launcher_refuses_unselected_cli_despite_stale_path(tmp_path, script):
     """Neither PATH nor an old data-root virtualenv may choose a release."""
     root = tmp_path / "root"
@@ -333,7 +335,7 @@ def test_launcher_refuses_unselected_cli_despite_stale_path(tmp_path, script):
 
 
 @pytest.mark.parametrize("root", [None, "relative/data"])
-@pytest.mark.parametrize("script", ["plane-daemon.sh", "plane-view.sh"])
+@pytest.mark.parametrize("script", ["plane-daemon.sh", "plane-view.sh", "plane-otel.sh"])
 def test_launcher_requires_explicit_absolute_data_root(tmp_path, root, script):
     selected = tmp_path / "selected"
     selected.write_text("#!/bin/bash\necho MUST-NOT-RUN; exit 99\n")
@@ -351,3 +353,21 @@ def test_launcher_requires_explicit_absolute_data_root(tmp_path, root, script):
     assert result.returncode == 127
     assert "CLAUDLOBBY_ROOT" in result.stderr
     assert result.stdout == ""
+
+
+def test_otel_service_is_dormant_and_port_is_the_composed_endpoint():
+    from claudlobby.config import _load_system_defaults
+    from claudlobby.known_values import OTEL_INTAKE_PORT
+    import shlex
+    cfg = _load_system_defaults()['host']['jobs']['plane-otel']
+    assert cfg['enroll'] is False and cfg['unit'] == 'service'
+    argv = shlex.split(cfg['script'])
+    assert int(argv[argv.index('--port')+1]) == OTEL_INTAKE_PORT
+
+
+def test_only_otel_service_has_private_unit_umask(tmp_path, monkeypatch):
+    import plistlib
+    jobs = {'plane-otel': {'enroll': True, 'unit': 'service', 'script': '$CLAUDLOBBY_NATIVE_DIR/plane-otel.sh'}}
+    out = _compose(tmp_path, monkeypatch, jobs)
+    assert 'UMask=0077' in (out/'claudlobby-plane-otel.service').read_text()
+    assert plistlib.loads((out/'claudlobby-plane-otel.plist').read_bytes())['Umask'] == 63

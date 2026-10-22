@@ -9,6 +9,7 @@ identifiers replaced) and assert what lands.
 from __future__ import annotations
 
 import importlib.util
+import gzip
 import json
 import os
 import shutil
@@ -199,3 +200,31 @@ def test_env_block_labels_the_bots_real_fleet():
     attrs = rnc.env_block(14319, "rajan", "crog-eng-team")["OTEL_RESOURCE_ATTRIBUTES"]
     assert "claudlobby.bot=rajan" in attrs and "claudlobby.fleet=crog-eng-team" in attrs
     assert "claudlobby.fleet=canary" in rnc.env_block(14319, "c")["OTEL_RESOURCE_ATTRIBUTES"]
+
+
+@pytest.mark.parametrize('body', [
+    b'not a gzip header',
+    b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\x07',
+    gzip.compress(b'['*1200 + b'0' + b']'*1200),
+])
+def test_receiver_records_malformed_gzip_after_immediate_ack(tmp_path, capsys, body):
+    import http.client
+    import threading
+
+    server = rnc.ThreadingHTTPServer(('127.0.0.1', 0), rnc.make_handler(tmp_path))
+    thread = threading.Thread(target=server.handle_request)
+    thread.start()
+    connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+    try:
+        connection.request('POST', '/v1/logs', body, {
+            'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
+        response = connection.getresponse()
+        assert response.status == 200 and response.read() == b'{}'
+    finally:
+        connection.close()
+        thread.join(5)
+        server.server_close()
+    (row,) = [json.loads(line) for line in (tmp_path/'requests.jsonl').read_text().splitlines()]
+    assert row['json'] is False and row['encoding'] == 'gzip' and row['bytes'] == len(body)
+    assert not (tmp_path/'logs.jsonl').exists()
+    assert 'Traceback' not in capsys.readouterr().err

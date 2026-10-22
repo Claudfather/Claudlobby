@@ -1907,3 +1907,26 @@ class TestTheDeliveryCoverageLine:
         assert bounds.startswith("0/1 repo(s) fully checked"), (
             "coverage must come before the per-repo detail — it is the part a "
             f"reader must not scroll past: {bounds}")
+
+
+def test_otel_intake_doctor_warns_and_checks_listener(tmp_path, monkeypatch):
+    import socket
+    from claudlobby import doctor
+    from claudlobby.config import BotConfig, FleetConfig, TelemetryConfig
+    bot = BotConfig(bot_id='canary', name='Canary', expertise=[])
+    fleet = FleetConfig(name='canary', service_prefix='canary', manager='canary', bots={'canary': bot})
+    report = doctor.DoctorReport()
+    doctor.check_otel_intake(fleet, None, report)
+    assert not report.checks
+    bot.telemetry = TelemetryConfig(True)
+    monkeypatch.setattr(doctor, 'load_host_jobs', lambda: {'plane-otel': {'enroll': False}})
+    doctor.check_otel_intake(fleet, None, report)
+    assert report.checks[-1].status == 'warn' and 'not enrolled' in report.checks[-1].detail
+    monkeypatch.setattr(doctor, 'load_host_jobs', lambda: {'plane-otel': {'enroll': True}})
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0)); listener.listen()
+        monkeypatch.setattr(doctor, 'OTEL_INTAKE_PORT', listener.getsockname()[1])
+        doctor.check_otel_intake(fleet, None, report)
+        assert report.checks[-1].status == 'pass' and 'listening' in report.checks[-1].detail
+    doctor.check_otel_intake(fleet, None, report)
+    assert report.checks[-1].status == 'warn' and 'nothing listens' in report.checks[-1].detail

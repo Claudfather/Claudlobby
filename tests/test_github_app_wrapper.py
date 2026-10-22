@@ -22,6 +22,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import _write_exec, booby_trap_git, constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -275,6 +277,7 @@ class TestRefreshLoop:
         finally:
             _stop(proc)
 
+    @pytest.mark.quarantine(issue=2362)
     def test_pat_bridge_upgrades_to_app_when_minting_heals(self, tmp_path):
         # Boot inside the Pi clock window with a PAT: serve the bridge NOW,
         # then rotate up to App identity at the short cadence — not 50min of

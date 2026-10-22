@@ -257,6 +257,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. Planning must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | composition | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
 | `public-write-guard` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one refuses GitHub writes, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.public_write_guard: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.public_write_guard once it has run clean |
 | `shared-config-isolation` | **off** — restricts access to shared host resources used by running bots; enable for one canary bot before widening the manifest default through activation | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.isolation.shared_config: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.isolation.shared_config once it has run clean |
+| `telemetry` | **off** — changes what an armed bot's claude process exports at its next restart — a resident stream to a host-local endpoint and, with content: full, prompt text on disk; activate an independent canary root with one armed RC bot before widening (#533) | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.telemetry.enabled: true in fleet.yaml on an independent canary root with ONE armed bot first, then set telemetry.enabled: true for one canary bot; config plan, config diff PLAN_ID, then host activate PLAN_ID --install-directory <native-user-unit-dir> (at the bot's next restart: the native exporter reads bot.conf at process start); widen to defaults.telemetry.enabled once it has run clean |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
@@ -551,6 +552,33 @@ mcp:
 This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
+
+### `bots.<name>.telemetry` / `fleet.defaults.telemetry`
+
+Opt-in, off by default (#2145 F4). The mapping inherits field by field; `null` inherits.
+
+```yaml
+telemetry:
+  enabled: false       # STRICT bool: quoted strings are refused
+  content: metadata    # metadata | full
+```
+
+An armed Claude bot receives seven exports: `CLAUDE_CODE_ENABLE_TELEMETRY=1`,
+`OTEL_METRICS_EXPORTER=otlp`, `OTEL_LOGS_EXPORTER=otlp`,
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/json`, `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319`,
+`OTEL_RESOURCE_ATTRIBUTES` (fleet, bot, content and agent CLI), and `OTEL_LOG_TOOL_DETAILS=1`.
+`content: full` adds `OTEL_LOG_USER_PROMPTS=1` (eight lines; the disclosed act of design v2 §11).
+Applied at the bot's next restart. Codex composition belongs to its execution-adapter phase.
+
+Enroll the host intake with `host.jobs.plane-otel.enroll: true` in the host override,
+then stage and activate a plan. Without enrollment, `config validate` and `config plan`
+warn `telemetry-intake`; this host fact never refuses a plan (A-F4b).
+The raw sink drops content and account identity for metadata logs and trims tool parameters
+ to MCP, skill and subagent names; full logs retain their content. Metrics are retained as sent.
+
+Before widening, run one RC/Telegram bot in an independent canary root for seven days:
+measure fleet RSS/CPU, time to HTTP 200, raw growth and refusal counts, and verify delivered
+replies on day 1 and day 7 (#533). See the [canary checklist](runbooks/telemetry-canary.md).
 
 ### `bots.<name>.heavy_slot` / `fleet.defaults.heavy_slot`
 

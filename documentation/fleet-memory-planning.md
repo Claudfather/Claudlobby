@@ -23,6 +23,7 @@ address space. Numbers are approximate and vary with context window fill.
 | Each additional MCP server         | +70 MB      | +100 MB     |
 | Python-based MCP server (uvx/uv)   | +80–120 MB  | +150 MB     |
 | Node-based MCP server              | +60–90 MB   | +100 MB     |
+| plane-otel intake, per host | ≤ 64 MiB proposal; C6a measured 20–21 MB on the Pi | C6b pending |
 
 ### Why RSS Varies So Much
 
@@ -155,3 +156,8 @@ the private check's policy, not flags to pass to `host job run`.
 
 The selected host configuration schedules these checks; inspect it with
 `claudlobby host job list` before requesting a one-shot `host job run`.
+
+The telemetry canary compares the fleet-level `FLEET_RSS_MB` and CPU series before
+and after arming one bot, alongside intake RSS and handler latency. C6a measured
+20–21 MB for the prototype receiver; it does not establish the production intake's
+seven-day budget. Capture the host baseline before activation; C6b remains pending.

@@ -2773,3 +2773,31 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         (fleet_dir / "lib" / "env-tiers.sh").mkdir()
         with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _validate_with_real_resolver(fleet_dir, monkeypatch)
+
+
+@pytest.mark.parametrize('enrolled,count', [(False, 1), (False, 2), (True, 0)])
+def test_telemetry_intake_is_one_folded_warning(fleet_dir, monkeypatch, enrolled, count):
+    from dataclasses import replace
+    from claudlobby.config import TelemetryConfig
+    fleet, _ = load_fleet(fleet_dir / 'fleet.yaml')
+    monkeypatch.setattr(validator_module, 'load_host_jobs', lambda: {'plane-otel': {'enroll': enrolled}})
+    for bot in list(fleet.bots.values())[:max(count, 1)]:
+        bot.telemetry = TelemetryConfig(enabled=True)
+    report = validate(fleet, _make_paths(fleet_dir))
+    findings = [w for w in report.warnings if 'telemetry.enabled is true' in w]
+    assert len(findings) == (0 if enrolled else 1)
+    if not enrolled:
+        assert f'affects {count} bot(s)' in findings[0]
+    assert not any('telemetry' in e for e in report.errors)
+
+
+def test_telemetry_override_error_warns_instead_of_refusing(fleet_dir, monkeypatch):
+    from claudlobby.config import TelemetryConfig
+    fleet, _ = load_fleet(fleet_dir / 'fleet.yaml')
+    next(iter(fleet.bots.values())).telemetry = TelemetryConfig(enabled=True)
+    def malformed():
+        raise RuntimeError('host.jobs must map job names to their fields')
+    monkeypatch.setattr(validator_module, 'load_host_jobs', malformed)
+    report = validate(fleet, _make_paths(fleet_dir))
+    assert any('host.jobs must map' in w for w in report.warnings)
+    assert not any('telemetry' in e for e in report.errors)

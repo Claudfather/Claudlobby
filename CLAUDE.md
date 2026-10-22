@@ -1,6 +1,6 @@
 # claudlobby
 
-Compositor for agent-CLI fleets — Claude Code today, Codex through the execution adapter (#2149). Transforms `fleet.yaml` + `library/` into runnable bot directories with isolated identities, MCP servers, skills, and systemd/launchd supervision.
+Composes `fleet.yaml` + `library/` into isolated bots with identities, MCP, skills and native supervision. Claude Code runs today; Codex follows through the execution adapter (#2149).
 
 **North star:** Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal (fleets know the mission they serve, pick work that advances it, and close it at each project's declared rigor).
 
@@ -8,7 +8,7 @@ Compositor for agent-CLI fleets — Claude Code today, Codex through the executi
 
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
-**This file is an index.** Detail lives beside what it describes: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (each runtime script in depth, the contracts of the public-CLI commands that replaced scripts, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
+**Index.** Detail lives beside its owner: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (each runtime script in depth, the contracts of the public-CLI commands that replaced scripts, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" before adding here.
 
 ## Ecosystem boundary
 
@@ -120,6 +120,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `plane-socket-client.py` — stdlib socket leg of `plane-emit.sh`
 - `plane-daemon.sh` — launcher for the ingest-only plane daemon
 - `plane-view.sh` — launcher for the read-only operator plane UI (localhost)
+- `plane-otel.sh` — launcher for the local OTLP/HTTP-JSON raw intake (opt-in)
 - `plane-prune.sh` — timer: deletes metric samples past 30 days (opt-in: also an allowlist of system events), never the ledger
 - `plane-expire.sh` — timer: expires assignments 7+ days past deadline
 - `plane-host-probe.sh` — per-minute host samples: load, RAM, disk, swap, iowait, thermal

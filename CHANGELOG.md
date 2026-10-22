@@ -329,6 +329,10 @@ is counted.
   An unavailable check warns
   `claudron-doctor`. Other engine findings remain in doctor's detailed rows.
 
+### Changed — issue-linked quarantine for a wrapper timing flake (#2362)
+
+- The PAT-to-App refresh test runs in CI's quarantine lane after an observed full-suite spawn timeout; its assertions and timeouts are unchanged. It still runs in the default local suite. The timing cause remains under investigation.
+
 ### Added — clauDNA summary export (#2145 P3)
 
 - A default-on 15-minute `session-export` fleet job reads clauDNA's recorded export
@@ -353,6 +357,13 @@ is counted.
 - Retire the transcript digest and SessionStart plane hooks with every live
   consumer. F15 waives the old-vs-new summary comparison; clauDNA owns summaries,
   and Python `derive_session_uid` is now the single session-id derivation.
+
+### Added — opt-in per-bot OpenTelemetry export to a local intake (#2145 P2-a1)
+
+- `telemetry: {enabled: true, content: metadata}` composes Claude's native OTLP/HTTP-JSON exports at its next restart; `content: full` separately enables prompt export.
+- The private raw sink rotates `state/otel/{logs,metrics}.jsonl` by count and age (14 days by default), within 1,920 MiB. Metadata logs omit content and account identity and retain only MCP, skill and subagent names from tool parameters. `plane doctor` reports sink privacy, size and retention.
+- `config validate` and `config plan` warn `telemetry-intake` when an armed bot's host has no enrolled intake; `host doctor` checks enrollment and the listening port.
+- The dormant `plane-otel` host service and `telemetry` switch are both opt-in. The listener binds only loopback, writes before acknowledging, and keeps private units/files. Nothing leaves the box and no plane rows are produced in this phase.
 
 ### Fixed — a handoff that lands after `bot handoff` returns reads `saved` on `bot handoff BOT --check` (#963, #990)
 

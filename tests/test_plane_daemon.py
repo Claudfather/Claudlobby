@@ -20,6 +20,7 @@ import tempfile
 import sqlite3
 import threading
 import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ from claudlobby.plane.daemon import (
     SocketOverrideInvalid,
     SocketPathTooLong,
     _check_sun_path,
+    _recv_line,
     send_batch,
 )
 from claudlobby.plane.db import connect, db_file, db_path
@@ -41,6 +43,32 @@ from claudlobby.plane.ids import ensure_host_uid, mint_event_id
 from claudlobby.plane.schema_state import PendingMigrationError
 from tests.plane_setup import initialize_plane
 from claudlobby.plane.spool import spool_dir, spool_write
+
+
+def test_recv_line_many_short_chunks_has_bounded_byte_storage():
+    class ShortChunks:
+        remaining = 100_000
+
+        def settimeout(self, timeout):
+            assert 0 < timeout <= 5.0
+
+        def recv(self, size):
+            assert size == 65536
+            if self.remaining:
+                self.remaining -= 1
+                # Distinct objects expose retained-object overhead, as real recv does.
+                return bytes(bytearray(b"x"))
+            return b"\n"
+
+    conn = ShortChunks()
+    tracemalloc.start()
+    try:
+        result = _recv_line(conn)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result == b"x" * 100_000 + b"\n"
+    assert peak < len(result) * 4 + 65536
 
 
 def _short_sock_dir() -> Path:

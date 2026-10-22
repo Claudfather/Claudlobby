@@ -345,3 +345,17 @@ def test_config_explain_claudna_mapping(world, capsys, monkeypatch):
     )
     assert main([*argv, "bot.nonesuch.x", "--bot", "solo"]) == 3
     assert "configuration key is not a declared model field" in capsys.readouterr().out
+
+def test_config_explain_strict_mapping_subfield(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr('claudlobby.context.resolve_paths', lambda **kwargs: paths)
+    path = fleet_dir/'fleet.yaml'
+    path.write_text(FLEET.replace('mcp: [github]', 'mcp: [github]\n    telemetry: {enabled: true}'))
+    argv = ['--root', str(paths.root), '--fleet', 'acme', '--json', 'config', 'explain']
+    assert main([*argv, 'bot.telemetry.enabled', '--bot', 'solo']) == 0
+    data = json.loads(capsys.readouterr().out)['data']
+    assert (data['source'], data['declaration']) == ('fleet.defaults', 'fleet.defaults.telemetry.enabled')
+    assert main([*argv, 'bot.telemetry', '--bot', 'solo']) == 2
+    assert 'telemetry is a mapping' in json.loads(capsys.readouterr().out)['error']['message']
+    assert main([*argv, 'bot.nonesuch.x', '--bot', 'solo']) == 3
+    assert 'not a declared model field' in json.loads(capsys.readouterr().out)['error']['message']

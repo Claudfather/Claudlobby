@@ -170,3 +170,13 @@ def test_a_daemon_listening_past_the_probe_deadline_reads_slow_not_stopped(tmp_p
                                                 " — slow or stuck, not stopped"), rungs["daemon"]
     assert "historically but not serving" not in rungs["daemon"]["detail"]
     assert rungs["staged depth"]["status"] == "ok", rungs["staged depth"]
+
+
+def test_plane_doctor_reports_private_raw_sink(tmp_path, monkeypatch, capsys):
+    from claudlobby.plane.otel_sink import RawSink
+    RawSink(tmp_path, days=14)
+    monkeypatch.setattr("claudlobby.context.get_resources", source_package)
+    rc = main(["--root", str(tmp_path), "plane", "doctor", "--json"])
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert any(r['name'] == 'otel sink' and r['status'] == 'ok' for r in result['data']['rungs'])
