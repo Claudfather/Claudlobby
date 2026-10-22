@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `config diff` tells paths a plan records again from changed ones, and says why every bot restarts (#2449)
+
+`config diff PLAN_ID` hashed each path's state before and after in two
+different shapes, so every path read as changed, including the many that a plan
+records again exactly as they are. A one-line edit read as a fleet-wide rollout.
+
+- **Each path carries `change`:** `content`, `mode` (only permission bits
+  differ) or `unchanged`. It is decided by the comparison activation itself
+  holds an applied path to, and the two digests are now equal exactly when a
+  path is unchanged.
+- **The text lists only content and mode changes.** It counts the rest
+  (`--json` lists every path), and names the bots the content changes reach
+  (`summary.content_bots`), from each bot's paths a plan now records.
+- **`restart_bots` still lists every declared bot,** because `host activate`
+  stops each enrolled bot and starts each declared one whatever the plan
+  changes. The plan now says so (`effects.restart_reason`).
+
+A plan staged by an older release records no bot paths, so its diff reads the
+bots it reaches as unknown.
+
 ### Fixed — a check-in beat held for a deep or unreadable Plane queue now says why (#2445)
 
 Before the check-in beat sends a manager `/checkin`, it scans the Plane's
