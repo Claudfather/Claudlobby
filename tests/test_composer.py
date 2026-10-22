@@ -385,6 +385,19 @@ def _expected_default_fleet_ops_allow() -> list[str]:
     ]
 
 
+# The sudo family, spelled out here rather than read from the compositor, so a
+# wrong constant there cannot also be the expectation.
+_SUDO_FAMILY = frozenset({"sudo", "sudoedit", "su", "pkexec", "doas", "run0"})
+
+
+def _sudo_rules(rules: list[str]) -> list[str]:
+    """The Bash rules with a sudo-family command among their words."""
+    return [
+        rule for rule in rules
+        if rule.startswith("Bash(") and _SUDO_FAMILY & set(re.findall(r"[\w.-]+", rule))
+    ]
+
+
 class TestComposeSettingsLocal:
     """compose_settings_local generates permissions from sibling isolation + tool rules."""
 
@@ -628,6 +641,56 @@ class TestComposeSettingsLocal:
         bash = [rule for rule in deny if rule.startswith("Bash(")]
         for own in ("task permission request t1", "task permission check p1", "task permission show p1"):
             assert not any(_bash_grant_matches(rule, f"claudlobby --json {own}") for rule in bash), own
+
+    def test_a_worker_denies_the_sudo_family_and_its_manager_does_not(self, tmp_path):
+        """Every worker's settings deny each sudo-family command, bare and by
+        absolute path; the fleet manager's deny none, so root goes through it."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        fleet = self._make_fleet_with_bots("lead", "worker", manager="lead")
+        worker = compose_settings_local(fleet.bots["worker"], fleet, paths)
+        lead = compose_settings_local(fleet.bots["lead"], fleet, paths)
+        expected = sorted(
+            f"Bash({prefix}{name} *)" for name in _SUDO_FAMILY for prefix in ("", "/usr/bin/", "/bin/")
+        )
+        assert sorted(_sudo_rules(worker["permissions"]["deny"])) == expected
+        assert _sudo_rules(lead["permissions"]["deny"]) == []
+
+    def test_a_manager_alone_in_its_fleet_keeps_sudo(self, tmp_path):
+        """The role test is the fleet's manager, not a manager with workers to
+        route: a fleet of one is its own manager and gets no sudo deny."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        fleet = self._make_fleet_with_bots("solo", manager="solo")
+        settings = compose_settings_local(fleet.bots["solo"], fleet, paths)
+        assert _sudo_rules(settings["permissions"]["deny"]) == []
+
+    def test_no_composed_allow_names_a_sudo_family_command(self, tmp_path):
+        """Nothing the library ships pre-approves a sudo-family command: a
+        worker's deny is the only rule that names one, and a manager's sudo
+        stays with its permission mode. The control expertise allows sudo, so
+        a scan that saw no allows fails here instead of passing."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        everything = {
+            kind: sorted(paths.expand_library_folder(kind, "")) for kind in ("expertise", "guardrails")
+        }
+        everything["skills"] = sorted(paths.expand_skill_folder(""))
+        control = paths.overlay_library / "expertise"
+        control.mkdir(parents=True)
+        (control / "root-steps.md").write_text(
+            "---\npermissions:\n  bash_allow: [sudo]\n---\n\n# Root steps\n"
+        )
+        bots = {
+            "lead": BotConfig(bot_id="lead", name="lead", **everything),
+            "worker": BotConfig(bot_id="worker", name="worker", **everything),
+            "control": BotConfig(bot_id="control", name="control", expertise=["root-steps"]),
+        }
+        fleet = FleetConfig(manager="lead", name="test-fleet", service_prefix="com.test", bots=bots)
+        allow = {
+            bot_id: compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+            for bot_id, bot in bots.items()
+        }
+        assert _sudo_rules(allow["control"]) == ["Bash(sudo *)"]
+        assert _sudo_rules(allow["lead"]) == []
+        assert _sudo_rules(allow["worker"]) == []
 
     def test_tool_allow_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
