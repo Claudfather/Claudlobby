@@ -1444,6 +1444,7 @@ def test_the_retry_of_a_spooled_proof_never_puts_the_interval_drain_off(tmp_path
     with _serving(tmp_path, drain_interval=dm.DEFAULT_DRAIN_INTERVAL) as sock:  # from the startup drain
         other = Path(send_batch(sock, [_tool_call(1)])["results"][0]["detail"])
         assert send_batch(sock, [_received(proof)])["results"][0]["status"] == "spooled"
+        assert dm.probe_daemon_info(sock) is not None  # the daemon notes a spooled proof after it replies
         advance(dm.SPOOLED_PROOF_RETRY_S)
         _one_turn(sock)
         assert _landed(tmp_path, proof) and other.exists(), "the retry did not run, or took the other work"
