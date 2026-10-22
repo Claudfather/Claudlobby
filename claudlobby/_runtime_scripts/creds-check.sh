@@ -16,10 +16,12 @@
 # failure to Telegram so the human sees it before the next bot trips it.
 #
 # Adding a new provider: drop in a `check_<name>` function that calls
-# `record_and_alert <provider> <status> <detail>`, then add it to the
-# CHECKS list. Status is "ok" / "fail" / "skip"
+# `record_and_alert <provider> <status> <detail>`, or `record_probe` for what
+# the provider answered, then add it to the CHECKS list. Status is "ok" /
+# "fail" / "skip" / "unknown"
 # (skip = required env var missing — no transition alert, but re-surfaces
-# once it has persisted past day 3; see next_alert_day).
+# once it has persisted past day 3; unknown = the provider gave no verdict,
+# see record_probe; see next_alert_day).
 #
 # Env vars consulted (selected mode reads host/root/fleet tiers; a direct
 # source-only call reads its chosen .env file):
@@ -195,22 +197,6 @@ _lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }  # bash 3.2 has no ${va
 # State + alert plumbing
 # ---------------------------------------------------------------------
 
-prev_status() {
-    "$JQ" -r --arg k "$1" '.[$k].status // ""' "$STATE"
-}
-
-# Epoch when the CURRENT run of this status began, and how many alerts it has
-# already produced. Both default to 0, so a state file written before #1095
-# upgrades cleanly: the first tick after the upgrade starts a fresh run rather
-# than crashing or back-dating one.
-prev_since() {
-    "$JQ" -r --arg k "$1" '.[$k].since_epoch // 0' "$STATE"
-}
-
-prev_alerts() {
-    "$JQ" -r --arg k "$1" '.[$k].alerts // 0' "$STATE"
-}
-
 # Day-mark the current run must reach before its NEXT alert (#1095).
 #
 # Transition-only alerting cannot express steady state: a credential that fails
@@ -227,10 +213,13 @@ prev_alerts() {
 #   never run -- a permanent hole wearing a skip's clothing -- and that is news
 #   exactly once, then weekly. This is why our own github_pat has been silent:
 #   it is a skip, not a fail, so a fail-only fix would not have surfaced it.
+# unknown: the fail ladder, and no transition alert (#2424). A provider that is
+#   down says nothing about a credential, but a day with no verdict is past
+#   "transient" for the same reason a fail is.
 next_alert_day() {
     local status="$1" sent="$2"
     case "$status" in
-        fail)
+        fail|unknown)
             # `sent` counts LADDER re-surfaces only. The ok->fail transition
             # alert is a separate event and deliberately does NOT consume a
             # rung, so both entry paths share one accounting.
@@ -262,24 +251,41 @@ next_alert_day() {
 # Atomically write one provider's entry to the shared state file. This is the
 # critical section run under with_lock, so it must be a command (function), not
 # an inline block — with_lock invokes "$@".
+#
+# An unknown also records its reason, and under .verdict the entry of the
+# verdict before it, whose run record_and_alert continues (#2424).
 _write_state() {
-    local provider="$1" status="$2" detail="$3" now="$4" since="${5:-0}" alerts="${6:-0}"
+    local provider="$1" status="$2" detail="$3" now="$4" since="${5:-0}" alerts="${6:-0}" reason="${7:-}"
     if "$JQ" --arg k "$provider" --arg s "$status" --arg d "$detail" --arg t "$now" \
-        --argjson since "$since" --argjson alerts "$alerts" \
-        '.[$k] = {status: $s, detail: $d, ts: $t, since_epoch: $since, alerts: $alerts}' "$STATE" > "$STATE.tmp"; then
+        --argjson since "$since" --argjson alerts "$alerts" --arg r "$reason" \
+        '.[$k] as $old
+         | .[$k] = {status: $s, detail: $d, ts: $t, since_epoch: $since, alerts: $alerts}
+         | if $s == "unknown" then .[$k] += {reason: $r,
+               verdict: (if $old.status == "unknown" then $old.verdict else $old end)}
+           else . end' "$STATE" > "$STATE.tmp"; then
         mv "$STATE.tmp" "$STATE"
     else
         # Silent state corruption is the worst failure mode here — the next tick
-        # would read a stale prev_status and miss the transition. Surface it loudly.
+        # would read a stale previous status and miss the transition. Surface it loudly.
         rm -f "$STATE.tmp"
         log "STATE WRITE FAILED for $provider — $status will not transition"
     fi
 }
 
 record_and_alert() {
-    local provider="$1" status="$2" detail="$3"
+    local provider="$1" status="$2" detail="$3" reason="${4:-}"
     local prev now now_epoch since sent days due alert_text=""
-    prev="$(prev_status "$provider")"
+    # The run this record continues: the epoch it began, the alerts it has
+    # produced and its status. An unknown continues the unknown before it, and a
+    # verdict (ok, fail, skip) continues the last VERDICT, which an unknown keeps
+    # under .verdict (#2424): a fail keeps its age through an outage, and a fail
+    # that recovers during one still reads RECOVERED. Epoch and count default to
+    # 0, so a state file written before #1095 upgrades cleanly: the first tick
+    # after the upgrade starts a fresh run rather than crashing or back-dating
+    # one. The status comes last, so an empty one cannot shift the others.
+    local run='.[$k] | if $s != "unknown" and .status == "unknown" then .verdict else . end
+        | "\(.since_epoch // 0) \(.alerts // 0) \(.status // "")"'
+    read -r since sent prev <<< "$("$JQ" -r --arg k "$provider" --arg s "$status" "$run" "$STATE")"
     now="$(ts)"
     # An epoch is stamped at WRITE time rather than parsed back out of `ts`
     # later: `date -Iseconds` emits an offset form (…-04:00) that iso_to_epoch
@@ -287,15 +293,12 @@ record_and_alert() {
     # on macOS, which is a first-class host here.
     now_epoch="$(date +%s)"
 
-    if [ "$status" = "$prev" ]; then
-        since="$(prev_since "$provider")"
-        sent="$(prev_alerts "$provider")"
-        [ "$since" -gt 0 ] 2>/dev/null || since="$now_epoch"
-    else
+    if [ "$status" != "$prev" ]; then
         # Status changed: a new run starts here.
         since="$now_epoch"
         sent=0
     fi
+    [ "$since" -gt 0 ] 2>/dev/null || since="$now_epoch"
 
     days=$(( (now_epoch - since) / 86400 ))
 
@@ -323,14 +326,20 @@ record_and_alert() {
             fi
             sent=0
             ;;
-        skip)
-            # No transition alert (unchanged): a skip on the first tick is
-            # usually a provider this fleet has not configured, which is not
-            # news. A skip that PERSISTS is a check that can never run.
-            if [ "$prev" = "skip" ]; then
-                due="$(next_alert_day skip "$sent")"
+        skip|unknown)
+            # No transition alert: a skip on the first tick is usually a
+            # provider this fleet has not configured, and an unknown is a
+            # provider that is down (#2424); neither is news about the
+            # credential. One that PERSISTS re-surfaces: a skip is a check that
+            # can never run, an unknown a credential with no verdict.
+            if [ "$prev" = "$status" ]; then
+                due="$(next_alert_day "$status" "$sent")"
                 if [ "$days" -ge "$due" ]; then
-                    alert_text="creds-check: $provider has been SKIPPED for ${days}d — $detail. A check that never runs is a permanent hole, not a skip: either configure it or remove the check."
+                    if [ "$status" = "skip" ]; then
+                        alert_text="creds-check: $provider has been SKIPPED for ${days}d — $detail. A check that never runs is a permanent hole, not a skip: either configure it or remove the check."
+                    else
+                        alert_text="creds-check: $provider UNVERIFIED for ${days}d — $detail. The provider has given no verdict on this credential since, which is no evidence it is dead."
+                    fi
                     sent=$(( sent + 1 ))
                 fi
             fi
@@ -341,13 +350,104 @@ record_and_alert() {
     # file. Portable mutex — flock where present, mkdir spinlock otherwise. A raw
     # flock is not portable: it's a Linux util-linux binary, absent on stock
     # macOS, where the bare call breaks the scheduled run (#709).
-    with_lock "$STATE.lock" _write_state "$provider" "$status" "$detail" "$now" "$since" "$sent"
+    with_lock "$STATE.lock" _write_state "$provider" "$status" "$detail" "$now" "$since" "$sent" "$reason"
 
-    log "$provider $status ($detail)${days:+ [${days}d in state]}"
+    log "$provider $status${reason:+ [$reason]} ($detail)${days:+ [${days}d in state]}"
 
     if [ -n "$alert_text" ]; then
         "$TG_POST" "$alert_text" >> "$LOG" 2>&1 || \
             log "tg-post failed for $provider $status"
+    fi
+}
+
+# ---------------------------------------------------------------------
+# What a probe learned: a rejection, or no verdict at all (#2424)
+# ---------------------------------------------------------------------
+# A probe that did not succeed either got a REJECTION from the provider or got
+# NO ANSWER: no HTTP answer, a timeout, a 429, a 5xx, a body that is not the
+# provider's own. No answer is recorded `unknown` (reason no_answer), never
+# `fail`: an outage, or a host off the network, is not a dead credential.
+#
+# A rejection is a verdict only while the provider is healthy. Inside Railway's
+# 2026-10-21 outage both tokens answered "Not Authorized" in a 200 body, the
+# answer a revoked token gets, so the answer alone cannot tell the two apart.
+# Before a rejection is recorded `fail`, the provider's status page is read
+# (provider_incident), and an open incident on the API the probe uses records
+# `unknown` (reason provider_degraded) instead. The next run probes again: a
+# token still refused once the incident is closed alerts as a failure then.
+#
+# The status page is evidence for `unknown` only, never for `ok`, and a page
+# that cannot be read is no evidence: the rejection stays `fail`, so a host
+# with no network to the page never loses a real rejection to it.
+
+# probe_outcome <code>: noanswer or reject, for a probe that did not succeed.
+# <code> is curl's HTTP status, the curl_err(...) put in its place, or a
+# Telegram answer's error_code, which is empty or "?" when the body was not
+# Telegram's JSON.
+probe_outcome() {
+    case "$1" in
+        ''|'?'|000|429|5[0-9][0-9]|curl_err*) printf 'noanswer' ;;
+        *) printf 'reject' ;;
+    esac
+}
+
+# provider_incident <provider>: print the title of an open incident on the API
+# the probes use, or nothing: when there is none, when the provider publishes
+# no status page, and whenever its page cannot be read. Always exits 0, and
+# reads each provider's page at most once a run.
+#
+# Measured live 2026-10-21: status.railway.com/api/status serves JSON whose
+# activeIncidents list the components each affects with an impact for each;
+# the probes' GraphQL endpoint is the component "API — backboard.railway.com".
+# githubstatus.com is a standard status page whose "API Requests" component
+# carries its live status; only a status word that means degraded counts, so a
+# missing or unfamiliar one is no evidence. Telegram publishes none
+# (status.telegram.org redirects to its API documentation), so a Telegram
+# rejection is a verdict.
+provider_incident() {
+    local cache="$_LC_TMPDIR/incident.$1" url rule code
+    if [ ! -e "$cache" ]; then
+        : > "$cache"
+        case "$1" in
+            railway)
+                url='https://status.railway.com/api/status'
+                rule='[.activeIncidents[] | select(.resolvedAt == null)
+                       | select(any(.components[]; (.name // "" | startswith("API") or contains("backboard"))
+                                                   and .impact != "OPERATIONAL"))
+                       | .title] | first' ;;
+            github)
+                url='https://www.githubstatus.com/api/v2/summary.json'
+                rule='if any(.components[]; .name == "API Requests"
+                                           and (.status | IN("degraded_performance", "partial_outage",
+                                                             "major_outage", "under_maintenance")))
+                      then ([.incidents[] | select(any(.components[]; .name == "API Requests")) | .name]
+                            | first) // "API Requests degraded"
+                      else null end' ;;
+            *) return 0 ;;
+        esac
+        code="$("$CURL" -s -o "$cache.page" -w '%{http_code}' --max-time 10 "$url")" || code=""
+        if [ "$code" = "200" ]; then
+            "$JQ" -r "($rule) // empty | .[0:120]" "$cache.page" > "$cache" 2>/dev/null || : > "$cache"
+        fi
+    fi
+    cat "$cache"
+}
+
+# record_probe <key> <provider> <noanswer|reject> <detail>: record a probe that
+# did not succeed, for the credential under state key <key>, as above.
+# <provider> names the status page to read: railway, github or telegram.
+record_probe() {
+    local key="$1" provider="$2" outcome="$3" detail="$4" incident
+    if [ "$outcome" = "noanswer" ]; then
+        record_and_alert "$key" "unknown" "$detail" "no_answer"
+        return
+    fi
+    incident="$(provider_incident "$provider")"
+    if [ -n "$incident" ]; then
+        record_and_alert "$key" "unknown" \
+            "$detail, during an open incident on the provider's API: $incident" "provider_degraded"
+    else
+        record_and_alert "$key" "fail" "$detail"
     fi
 }
 
@@ -364,9 +464,11 @@ _check_github_app() {
     # whose pathless context would serve whatever ambient config answers). A
     # mint failure has already emitted an auth_mint_failed event from the
     # helper, so this records the fleet-level verdict without re-alerting it.
+    # A failed mint cannot say whether GitHub refused it or never answered, so
+    # it reads as a rejection and GitHub's status page decides (record_probe).
     local token
     if ! token="$("$LIB_DIR/mint-github-token.sh" 2>/dev/null)" || [ -z "$token" ]; then
-        record_and_alert "github_pat" "fail" \
+        record_probe "github_pat" github reject \
             "GITHUB_APP_* configured but installation-token mint failed (see auth_mint_failed events)"
         return
     fi
@@ -388,9 +490,9 @@ _check_github_app() {
         || code="curl_err($(head -c 120 "$curl_err_file"))"
     case "$code" in
         200) record_and_alert "github_pat" "ok" "App installation token OK (HTTP 200 on /installation/repositories)" ;;
-        401) record_and_alert "github_pat" "fail" "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
-        403) record_and_alert "github_pat" "fail" "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
-        *)   record_and_alert "github_pat" "fail" "App token probe: HTTP $code on /installation/repositories" ;;
+        401) record_probe "github_pat" github reject "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
+        403) record_probe "github_pat" github reject "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
+        *)   record_probe "github_pat" github "$(probe_outcome "$code")" "App token probe: HTTP $code on /installation/repositories" ;;
     esac
 }
 
@@ -432,7 +534,7 @@ check_github_pat() {
     if [ "$code" = "200" ]; then
         record_and_alert "github_pat" "ok" "HTTP 200"
     else
-        record_and_alert "github_pat" "fail" "HTTP $code on /user"
+        record_probe "github_pat" github "$(probe_outcome "$code")" "HTTP $code on /user"
     fi
 }
 
@@ -486,7 +588,7 @@ _check_one_railway_token() {
         || code="curl_err($(head -c 120 "$curl_err_file"))"
 
     if [ "$code" != "200" ]; then
-        record_and_alert "$provider" "fail" "$varname: HTTP $code on /graphql/v2"
+        record_probe "$provider" railway "$(probe_outcome "$code")" "$varname: HTTP $code on /graphql/v2"
         return
     fi
     # A REJECTED Railway token still answers 200 — the refusal rides in the
@@ -495,7 +597,13 @@ _check_one_railway_token() {
     if "$JQ" -e '.errors' "$resp_body" >/dev/null 2>&1; then
         local err
         err="$("$JQ" -r '.errors[0].message // "unknown error"' "$resp_body" | head -c 120)"
-        record_and_alert "$provider" "fail" "$varname ($scope): $err on $query"
+        record_probe "$provider" railway reject "$varname ($scope): $err on $query"
+        return
+    fi
+    # Only an answer that carries data is ok (#2424). A 200 with neither data
+    # nor an error, such as an error page, is no answer, never a working token.
+    if ! "$JQ" -e '.data' "$resp_body" >/dev/null 2>&1; then
+        record_probe "$provider" railway noanswer "$varname ($scope): HTTP 200 with no data on $query"
         return
     fi
     record_and_alert "$provider" "ok" "$varname ($scope): $query answered"
@@ -576,14 +684,14 @@ check_telegram_tokens() {
 
         resp="$(_telegram_api "$token" getMe)"
         if [ -z "$resp" ]; then
-            record_and_alert "$key" "fail" "getMe no response (network or timeout)"
+            record_probe "$key" telegram noanswer "getMe no response (network or timeout)"
             continue
         fi
 
         okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag=false
         if [ "$okflag" != "true" ]; then
             errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "?"' 2>/dev/null)" || errcode="?"
-            record_and_alert "$key" "fail" "getMe error_code=$errcode"
+            record_probe "$key" telegram "$(probe_outcome "$errcode")" "getMe error_code=$errcode"
             continue
         fi
 
