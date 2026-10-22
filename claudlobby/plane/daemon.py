@@ -81,6 +81,7 @@ from typing import Optional
 
 from .contracts import ContractViolation
 from .db import connect, connect_ro, db_file, db_path
+from .queue_names import may_hold_any_transmission
 from .queue_paths import (STAGED_ORPHAN_AGE_S, scan_queue_dir, scan_spool, staged_dir,
                           staged_orphan, staged_payload)
 from .capture_policy import CaptureConfigInvalid
@@ -158,7 +159,8 @@ def _serving_identity(root: Path) -> dict:
 # STAGED_ORPHAN_AGE_S, kept in queue_paths so that `plane doctor` and the
 # receipt check age the queue by the same number (#2086).
 
-# The client names its temp `.<time_ns>-<lead event>.batch.<pid>.tmp`.
+# The client names its temp `.<time_ns>-<lead event>[<tag>].batch.<pid>.tmp`,
+# the tag saying which message its transmissions name (queue_names, #2430).
 _ORPHAN_WRITER = re.compile(r"\.\d+-[^/]+\.batch\.(\d+)\.tmp")
 
 
@@ -653,7 +655,12 @@ class PlaneDaemon:
             if not sd.is_dir():
                 _mkdir_fsynced(sd, 0o700)   # the handshake the client stages on
             entries = list(sd.iterdir())
-            batches = sorted(p for p in entries if p.name.endswith(".batch"))
+            # A batch that may hold a transmission goes first, oldest first among
+            # them (#2430). Under load nearly every hook emit stages, and a
+            # receiver's proof waited behind every tool call staged before it,
+            # while its receipt read "unavailable". The rest follow in order.
+            batches = sorted((p for p in entries if p.name.endswith(".batch")),
+                             key=lambda p: (not may_hold_any_transmission(p.name), p.name))
             batches += _orphaned_stages(entries)
         except OSError as exc:
             report.error = type(exc).__name__

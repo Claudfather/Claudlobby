@@ -24,6 +24,7 @@ from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.migrations import DowngradeError
 from .plane.queries import DELIVERY_STATUS_SQL, RECEIPT_HISTORY_SQL
+from .plane.queue_names import may_hold_transmission
 from .plane.queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
 from .plane.schema_state import PendingMigrationError, require_current_schema
 from .reference_hints import (PREFIX_HINT_LIMIT, PREFIX_MIN_HEX, PREFIX_SCAN_LIMIT, PrefixCandidate,
@@ -202,8 +203,9 @@ def _written_before(path: Path, instant: float) -> bool:
 
 def pending_transmission_proof(root: Path, message_id: str, *,
                                probe_timeout: float = 0.5) -> Literal["pending", "absent", "unavailable"]:
-    """`queued_transmission_proof` over every queued entry, for a caller that
-    has no recorded instant for the message, such as the retry gate."""
+    """`queued_transmission_proof` over every queued entry whose name leaves
+    room for the proof, for a caller that has no recorded instant for the
+    message, such as the retry gate."""
     return queued_transmission_proof(root, message_id, probe_timeout=probe_timeout).state
 
 
@@ -218,6 +220,13 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     never absent. A root using the staged handshake also needs a live ingest
     daemon: a dead one may hold unstaged proof, so absence is then unproven.
 
+    An entry whose name says it holds no transmission of this message (its
+    writer tagged it for none, or for another message: queue_names) cannot
+    hold the proof either, and is neither read nor counted. Under load nearly
+    every hook emit stages, and a queue past the bound with other bots' tool
+    calls held every uncommitted receipt "unavailable" (#2430). An untagged
+    name says nothing, and its entry is read.
+
     `written_after` is the message's recorded instant (epoch seconds). Its
     proof is emitted only after the message exists, so an entry last written
     before that, less _CLOCK_SLACK_S, cannot hold it and is neither read nor
@@ -231,13 +240,13 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
         return QueuedProof("unavailable", "a Plane queue cannot be listed")
     files = ([entry for entry in entries if staged_payload(entry)] if probe.state == SOURCE_OK else [])
     files += spool.pending + spool.inflight
-    scope = "queued Plane entries"
+    files = [path for path in files if may_hold_transmission(path.name, message_id)]
+    scope = "queued Plane entries that may hold this message's proof"
     if written_after is not None:
         if len(files) > _LISTED_FILES:
             return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
                                               f" {_LISTED_FILES} whose write times a receipt check reads")
         files = [path for path in files if not _written_before(path, written_after)]
-        scope = "queued Plane entries that may hold this message's proof"
     if len(files) > _PENDING_FILES:
         return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
                                           f" {_PENDING_FILES} a receipt check reads")

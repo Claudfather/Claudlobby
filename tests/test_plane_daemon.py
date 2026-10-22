@@ -1249,6 +1249,52 @@ def test_staged_replay_keeps_batches_under_a_broken_capture_config_and_bounds_a_
         daemon.writer.close()
 
 
+def _client_stage(staged: Path, *events: dict) -> None:
+    """Stage a batch the way the socket client does once it has missed the
+    socket: finalized, capture-policy-applied and named by its own writer."""
+    import runpy
+    client = runpy.run_path(str(Path(__file__).resolve().parent.parent
+                                / "claudlobby/_runtime_scripts/plane-socket-client.py"))
+    assert client["_stage_pending"](str(staged), client["_finalize"](list(events)),
+                                    "socket transport: timeout") == 7
+
+
+def test_replay_takes_a_staged_transmission_before_the_work_staged_ahead_of_it(tmp_path):
+    """#2430. Under load nearly every hook emit stages, and replay took the queue
+    oldest first, so a receiver's proof waited behind every tool call staged
+    before it, and its receipt read "unavailable" until replay got there.
+    Batches that hold a transmission now go first, oldest first among them, and
+    the rest follow in their order."""
+    from claudlobby.plane.fleet_events import fleet_event_request
+
+    initialize_plane(tmp_path)
+    staged = tmp_path / "state" / "plane" / "staged"
+    for n in range(5):
+        _client_stage(staged, fleet_event_request(
+            "tool_call", fleet="example-fleet", subject_kind="actor", subject="bot:example-fleet/alpha",
+            source="vitals", data={"event": "PreToolUse", "tool": "Bash", "n": n}))
+    others = sorted(p.name for p in staged.glob("*.batch"))
+    proof = "msg_" + "7" * 32
+    _client_stage(staged, {"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example-fleet",
+                           "payload": {"msg_id": proof, "attempt_no": 1, "carrier": "tmux",
+                                       "destination": "alpha", "state": "received", "received_bytes": 12,
+                                       "received_sha256": "sha256:" + "a" * 64}})
+    daemon = PlaneDaemon(tmp_path)
+    try:
+        tick = daemon._replay_staged(max_batches=1)
+    finally:
+        daemon.writer.close()
+    assert tick.limited and tick.committed == 1, tick
+    conn = connect(db_path(tmp_path))
+    try:
+        landed = conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'transmission' AND msg_id = ?",
+                              (proof,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert landed == 1, "the proof waited behind the work staged before it"
+    assert sorted(p.name for p in staged.glob("*.batch")) == others
+
+
 def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_evidence(tmp_path, monkeypatch):
     from claudlobby.plane import daemon as dm
     from claudlobby.plane.emit_api import _finalize
