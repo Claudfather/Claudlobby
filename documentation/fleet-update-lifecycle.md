@@ -37,15 +37,17 @@ of its paths are usually recorded again exactly as they are. Each path carries
 
 The text lists only `content` and `mode` paths, then the bots the content
 changes reach. `--json` lists every path, with digests that are equal exactly
-when a path is unchanged. Two lines always read alike, whatever the edit:
+when a path is unchanged. Two things read the same whatever the edit:
 
 - **Each fleet's `composed.json` reads `content` on every plan,** because it
   records when it was composed.
-- **The restart line names every declared bot,** because activation stops each
+- **The restart line covers every declared bot,** because activation stops each
   enrolled bot and starts each declared one, whatever the plan changes.
 
-A plan staged by an older release records no bot paths, so its diff says the
-bots it reaches are unknown (#2449).
+A `content` or `mode` line can also come from where the plan was staged rather
+than from its sources: composition reads the caller's PATH, umask and host
+override variable (#2194). A plan staged by an older release records no bot
+paths, so its diff says the bots it reaches are unknown (#2449).
 
 **While jobs run.** Every composed timer job, host operation and native bot start holds
 the host activation lock shared while it runs, and activation takes it exclusively.
