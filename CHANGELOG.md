@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a check-in beat held for a deep or unreadable Plane queue now says why (#2445)
+
+Before the check-in beat sends a manager `/checkin`, it scans the Plane's
+staged and spool queues for that manager's last trigger: a socket miss can
+leave the trigger there, uncommitted, where the rate limit's committed read
+cannot see it, and that read's silence must not license a second paid
+`/checkin`. The scan reads at most 256 entries. Past that, or when a queue or
+an entry in one cannot be read, it holds the beat, and it held it silently. On
+2026-10-21 receipt checks counted 265 and then 299 queued entries, nearly all
+of them other bots' tool calls (#2430); a beat that found a manager idle then
+would have been held with nothing to say why.
+
+The hold stays, since a pending trigger cannot be ruled out, and it is now a
+`checkin_skipped` row with reason `queue_deep` or `queue_unreadable`, beside
+`session_down`, `busy` and `send_failed`, with a log line that names the
+cause. A trigger the scan finds still queued keeps its log line and gets no
+row, like a rate-limited beat: once ingested, it is the row that holds the
+beat.
+
 ### Fixed — a Telegram channel Claude Code refused at connect reads as refused, never ready (#2423)
 
 Claude Code decides at each connect whether to deliver a channel plugin's
