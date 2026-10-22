@@ -27,6 +27,28 @@ release files or generated bot output. See [getting started](getting-started.md)
 for cold-host assembly and the [implementation record](plans/2026-09-28-unified-cli-run-log.md)
 for measured canary evidence and remaining platform limits.
 
+**Reading `config diff PLAN_ID`.** A plan records every path it renders, so most
+of its paths are usually recorded again exactly as they are. Each path carries
+`change`, decided by the comparison activation itself holds an applied path to:
+
+- `content`: the bytes, the kind, a link target or a tree's entries differ.
+- `mode`: only permission bits differ.
+- `unchanged`: activation would write what is already there.
+
+The text lists only `content` and `mode` paths, then the bots the content
+changes reach. `--json` lists every path, with digests that are equal exactly
+when a path is unchanged. Two things read the same whatever the edit:
+
+- **Each fleet's `composed.json` reads `content` on every plan,** because it
+  records when it was composed.
+- **The restart line covers every declared bot,** because activation stops each
+  enrolled bot and starts each declared one, whatever the plan changes.
+
+A `content` or `mode` line can also come from where the plan was staged rather
+than from its sources: composition reads the caller's PATH, umask and host
+override variable (#2194). A plan staged by an older release records no bot
+paths, so its diff says the bots it reaches are unknown (#2449).
+
 **While jobs run.** Every composed timer job, host operation and native bot start holds
 the host activation lock shared while it runs, and activation takes it exclusively.
 `host activate` first marks itself pending, so a job or operation that starts meanwhile

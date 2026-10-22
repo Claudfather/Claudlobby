@@ -202,21 +202,75 @@ def _host_releases(args, root: Path) -> CommandOutput:
 
 
 def _changes(plan) -> list[dict]:
+    from ..config_install import change_effect, review_nodes
+
     def digest(state):
         return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-    return [{"path": change.target,
-             "before": {"kind": change.before["node"]["kind"], "state_sha256": digest(change.before)},
-             "after": {"kind": change.after["kind"], "state_sha256": digest(change.after)}}
-            for change in plan.changes]
+    # Both digests cover the node shape apply compares, so they are equal
+    # exactly when the path is unchanged (#2449).
+    items = []
+    for change in plan.changes:
+        before, after = review_nodes(change)
+        items.append({"path": change.target, "change": change_effect(change),
+                      "before": {"kind": before["kind"], "state_sha256": digest(before)},
+                      "after": {"kind": change.after["kind"], "state_sha256": digest(after)}})
+    return items
+
+
+def _summary(plan, changes: list[dict]) -> dict:
+    """Counts by effect, and the bots a content change reaches. A plan that
+    records no bot paths (staged by an older release) cannot say: None, not []."""
+    summary = {"paths": len(changes), **{effect: sum(item["change"] == effect for item in changes)
+                                         for effect in ("content", "mode", "unchanged")},
+               "content_bots": None, "content_outside_bots": None}
+    owned = plan.effects.get("bot_paths")
+    if isinstance(owned, dict):
+        roots = {bot: [Path(os.path.abspath(path)) for path in paths] for bot, paths in owned.items()}
+        reached, outside = set(), 0
+        for item in changes:
+            if item["change"] == "content":
+                path = Path(os.path.abspath(item["path"]))
+                owners = {bot for bot, paths in roots.items()
+                          if any(path.is_relative_to(root) for root in paths)}
+                reached |= owners
+                outside += not owners
+        summary.update(content_bots=sorted(reached), content_outside_bots=outside)
+    return summary
 
 
 def _plan_data(plan) -> dict:
+    changes = _changes(plan)
     return {"plan_id": plan.plan_id, "release_id": plan.release_id, "release_seal": plan.release_seal,
-            "fleets": list(plan.fleets), "changes": _changes(plan),
+            "fleets": list(plan.fleets), "changes": changes, "summary": _summary(plan, changes),
             "effects": {"restart_bots": plan.effects.get("restart_bots", []),
+                        "restart_reason": plan.effects.get("restart_reason"),
                         "reload_supervision": plan.effects.get("reload_supervision", False),
                         "coverage": plan.effects.get("coverage")}}
+
+
+def _summary_line(data) -> str:
+    summary = data["summary"]
+    return (f"Configuration plan {data['plan_id']}: {summary['paths']} proposed paths "
+            f"(content {summary['content']}, mode only {summary['mode']}, unchanged {summary['unchanged']})")
+
+
+def _review_lines(data) -> tuple[str, ...]:
+    """Content and mode changes one per line; unchanged paths are counted, and --json lists them."""
+    summary, bots = data["summary"], data["effects"]["restart_bots"]
+    lines = [_summary_line(data) + "; --json lists every path."]
+    lines.extend(f"{item['change']} {item['path']}: {item['before']['kind']} -> {item['after']['kind']}"
+                 for item in data["changes"] if item["change"] != "unchanged")
+    if summary["content_bots"] is None:
+        lines.append("Bots reached: unknown, since this plan records no bot paths (an older release "
+                     "staged it); stage it again to see them.")
+    else:
+        lines.append(f"Content changes reach {len(summary['content_bots'])} of {len(bots)} bots: "
+                     f"{', '.join(summary['content_bots']) or 'none'}; paths outside bot directories: "
+                     f"{summary['content_outside_bots']}.")
+    reason = data["effects"]["restart_reason"]
+    lines.append(f"Restarts all {len(bots)} declared bots" + (f": {reason}." if reason else "."))
+    return tuple(lines)
 
 
 def _configuration_warning(category: str) -> None:
@@ -258,8 +312,9 @@ def _config_plan(args, root: Path) -> CommandOutput:
         # command exposes metadata only, including on failures.
         raise CommandFailure("conflict", "conflict: configuration could not be staged from these inputs",
                              hint=f"use the sealed candidate CLI {release.cli_path} and inspect fleet declarations") from exc
-    return CommandOutput(_plan_data(plan), _executing_release(root),
-                         (f"Configuration plan {plan.plan_id}: {len(plan.changes)} proposed paths.",))
+    data = _plan_data(plan)
+    return CommandOutput(data, _executing_release(root),
+                         (_summary_line(data) + f"; review it with config diff {plan.plan_id}.",))
 
 
 def _config_diff(args, root: Path) -> CommandOutput:
@@ -276,9 +331,7 @@ def _config_diff(args, root: Path) -> CommandOutput:
             raise CommandFailure("not_found", f"configuration plan not found: {args.plan_id}") from exc
         raise CommandFailure("conflict", "conflict: configuration plan is incomplete or changed") from exc
     data = _plan_data(plan)
-    return CommandOutput(data, _executing_release(root), tuple(
-        f"{item['path']}: {item['before']['kind']} -> {item['after']['kind']} "
-        f"{item['before']['state_sha256']} -> {item['after']['state_sha256']}" for item in data["changes"]))
+    return CommandOutput(data, _executing_release(root), _review_lines(data))
 
 
 def _config_current_drift(args) -> CommandOutput:
