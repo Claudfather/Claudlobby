@@ -57,10 +57,10 @@ def _inputs(builder: ConfigPlanBuilder, paths: Paths) -> None:
             builder.input(tier.path)
 
 
-def _access(builder, bot, fleet) -> None:
+def _access(builder, bot, fleet) -> Path | None:
     fresh = compose.compose_access_json(bot, fleet)
     if fresh is None:
-        return
+        return None
     target = Path.home() / compose.telegram_channel_rel(bot.telegram.handle) / "access.json"
     builder.input(target)  # the merge reads runtime-owned pending/access fields
     if target.exists():
@@ -69,6 +69,7 @@ def _access(builder, bot, fleet) -> None:
             raise PlanError(f"channel access is not an object: {target}")
         fresh = compose.reconcile_access_content(existing, fresh, bot, fleet)
     builder.file(target, (json.dumps(fresh, indent=2) + "\n").encode(), mode=0o600)
+    return target
 
 
 def _bot(builder, context, bot, delay, cascade, log) -> None:
@@ -113,7 +114,11 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
                 builder.remove(child)
     for name, target in compose.resolve_mount_sources(bot, directory, log).items():
         builder.symlink(mounts / name, target)
-    _access(builder, bot, fleet)
+    access = _access(builder, bot, fleet)
+    # Every path staged for this bot sits in its directory or is its channel
+    # access file; config diff names the bots a content change reaches (#2449).
+    builder.effects["bot_paths"][f"{fleet.name}/{bot.bot_id}"] = [
+        str(path) for path in (directory, access) if path is not None]
 
 
 def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
@@ -195,6 +200,11 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             "projects": {"path": str(c.paths.projects_yaml), "sha256": source_digests[c.fleet.name]["projects"]},
         } for c in contexts},
         "restart_bots": [f"{c.fleet.name}/{bot}" for c in contexts for bot in c.fleet.bots],
+        # Activation never reads restart_bots: it pauses every installed unit
+        # and starts every planned one, so the list is every bot (#2449).
+        "restart_reason": "host activate stops each enrolled bot and starts each declared one, "
+                          "whatever the plan changes",
+        "bot_paths": {},
         "reload_supervision": True,
         "coverage": "declared fleets; activation must reconcile enrolled consumers",
         "units": [],

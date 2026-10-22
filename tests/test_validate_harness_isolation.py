@@ -15,7 +15,11 @@ def _setup():
     end = source.index('# Every plane read below', start)
     daemon = source.index('val_start_fixture_daemon()')
     started = source.index('val_start_fixture_daemon "$ROOT" "$PLANE_SOCKET"', daemon)
-    return source[start:end] + '\n' + source[daemon:started + len('val_start_fixture_daemon "$ROOT" "$PLANE_SOCKET"')]
+    replayed = source.index('VAL_REPLAY_STALL_S=')
+    replayed_end = source.index('\n}\n', source.index('val_replayed() {')) + 3
+    return '\n'.join([source[start:end],
+                      source[daemon:started + len('val_start_fixture_daemon "$ROOT" "$PLANE_SOCKET"')],
+                      source[replayed:replayed_end]])
 
 
 def _run(root, socket_dir, env):
@@ -26,6 +30,9 @@ def _run(root, socket_dir, env):
         _setup(),
         '[ "$PLANE_SOCKET" = "$TMUX_TMPDIR/plane.sock" ]',
         'emit_fleet_event validate_started harness \'{}\' ""',
+        # The EXIT trap stops the daemon, which then can no longer replay a
+        # staged emit: wait for it first, as the harness does before a read.
+        'val_replayed "$ROOT"',
     ])
     return subprocess.run(
         ["/bin/bash", "-c", body, "_", str(REPO / "claudlobby/_runtime_scripts"), str(root), str(socket_dir)],

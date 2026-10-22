@@ -64,20 +64,39 @@ ck_skip() {   # <bot_dir> <bot_id> <reason> <log note>
 # still be waiting in the Plane's durable staged/spool queues (a daemon outage
 # stages the emission: durable, but invisible to the committed read), or
 # when those queues cannot be read in full. rc 1 only when every entry was read
-# and none names it. Pending is not recorded, and it is not absent either: the
-# committed read's silence cannot license another paid /checkin. Bounded like
-# the message receipt's queue read; over the bound is unknown, never clear.
+# and none names it. CK_HOLD says which: `trigger` (an entry names it),
+# `queue_deep` (more entries than the 256 it reads) or `queue_unreadable`.
+# Pending is not absent: the committed read's silence cannot license another
+# paid /checkin. Bounded like the message receipt's queue read; over the bound
+# is unknown, never clear.
 ck_trigger_pending() {
-    local q f n=0
-    for q in "$ROOT/state/plane/staged" "$ROOT/state/plane/spool"; do
+    local q f n=0 spool="$ROOT/state/plane/spool"
+    CK_HOLD=""
+    for q in "$ROOT/state/plane/staged" "$spool"; do
         [ -e "$q" ] || continue
-        { [ -d "$q" ] && [ -r "$q" ] && [ -x "$q" ]; } || return 0
-        for f in "$q"/*; do
+        if ! { [ -d "$q" ] && [ -r "$q" ] && [ -x "$q" ]; }; then
+            CK_HOLD=queue_unreadable; return 0
+        fi
+        # Dot names too, which * passes over, as the receipt check reads them
+        # (queue_paths.py). In the staged queue one is a stage the socket client
+        # did not finish, which the daemon replays once it is an hour old:
+        # pending, like any entry. One still being written is read the same way:
+        # it is never this manager's, as a beat waits for its own emit or kills
+        # it before it exits, and the timer runs one beat at a time. In the
+        # spool one is a temp its writer never renamed into an entry, which
+        # nothing replays: a trigger in it would hold the beat for good.
+        for f in "$q"/* "$q"/.[!.]* "$q"/..?*; do
             [ -f "$f" ] || continue
+            case "$f" in "$spool"/.*) continue ;; esac
             n=$((n + 1))
-            [ "$n" -le 256 ] && [ -r "$f" ] || return 0
+            if [ "$n" -gt 256 ]; then
+                CK_HOLD=queue_deep; return 0
+            fi
+            if [ ! -r "$f" ]; then
+                CK_HOLD=queue_unreadable; return 0
+            fi
             if grep -qF '"checkin_triggered"' "$f" && grep -qF "\"bot:$FLEET/$1\"" "$f"; then
-                return 0
+                CK_HOLD=trigger; return 0
             fi
         done
     done
@@ -116,9 +135,22 @@ while IFS="$(printf '\t')" read -r bot bot_fleet bot_dir; do
     # scan is already committed when the plane read below runs. The reverse
     # order let ingest land between the two reads and both miss it.
     if ck_trigger_pending "$bot_id"; then
-        pending_msg="$TS SKIP $FLEET/$bot_id -- a trigger may be pending Plane ingest (staged/spooled or queue unreadable), not firing"
-        echo "$pending_msg" >> "$LOG"
-        echo "$pending_msg" >&2
+        # A trigger found queued gets no row, as the rate limit below gets
+        # none: once ingested, that trigger is the row that holds the beat. A
+        # queue not read in full gets one: nothing else would say a check-in
+        # was held, or why (#2445).
+        case "$CK_HOLD" in
+            trigger)
+                held="a trigger may be pending Plane ingest (staged or spooled), not firing"
+                echo "$TS SKIP $FLEET/$bot_id -- $held" >> "$LOG" ;;
+            queue_deep)
+                held="the Plane's staged and spool queues hold more than 256 entries, more than this check reads, so a pending trigger cannot be ruled out; not firing"
+                ck_skip "$bot_dir" "$bot_id" queue_deep "$held" ;;
+            *)
+                held="a Plane staged or spool queue, or an entry in one, cannot be read, so a pending trigger cannot be ruled out; not firing"
+                ck_skip "$bot_dir" "$bot_id" queue_unreadable "$held" ;;
+        esac
+        echo "$TS SKIP $FLEET/$bot_id -- $held" >&2
         continue
     fi
     # THE RATE LIMIT IS A PLANE READ (task-recheck rule: no timer state file to

@@ -3,16 +3,20 @@
 import builtins
 import json
 from pathlib import Path
+import re
+from types import SimpleNamespace
 
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import activation_state, composer, config, context, freshbox, migration_apply, resources
+from claudlobby import (activation_state, composer, config, config_install, config_staging, context,
+                        freshbox, migration_apply, resources)
+from claudlobby import releases as release_store
 from claudlobby.commands import releases as commands
 from claudlobby.config_plan import ConfigPlanBuilder, read_plan
 from claudlobby.migration_plan import build_migration_manifest
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION
-from tests.test_config_staging import staging_case, _fleet, _tree
+from tests.test_config_staging import staging_case, _fleet, _tree, _write
 from tests.test_migration_plan import releases, _database, _snapshot
 from tests.test_releases import installed, r
 
@@ -146,7 +150,7 @@ def test_config_plan_covers_declared_and_explicit_fleets_and_diff_never_dumps_by
     diff, capture = _call(capsys, ["--root", str(case.root), "config", "diff", plan_id, "--json"])
     assert diff["request_id"] is None and diff["data"] == planned["data"]
     assert "SECRET-config-value" not in capture.out + capture.err
-    assert all(set(change) == {"path", "before", "after"} for change in diff["data"]["changes"])
+    assert all(set(change) == {"path", "change", "before", "after"} for change in diff["data"]["changes"])
     assert all(set(change["after"]) == {"kind", "state_sha256"} for change in diff["data"]["changes"])
     # Repeating the same source location is harmless; different sources may
     # never claim the same fleet name and redirect the planned runtime.
@@ -160,8 +164,101 @@ def test_config_plan_covers_declared_and_explicit_fleets_and_diff_never_dumps_by
     builder = ConfigPlanBuilder(case.root, plan.release_id, plan.release_seal, plan.fleets, effects={})
     builder.file(secret_target, b"ACTUAL_STAGED_SECRET=do-not-print\n")
     secret_plan = builder.seal()
-    _, capture = _call(capsys, ["--root", str(case.root), "config", "diff", secret_plan.plan_id, "--json"])
+    secret, capture = _call(capsys, ["--root", str(case.root), "config", "diff", secret_plan.plan_id, "--json"])
     assert "ACTUAL_STAGED_SECRET" not in capture.out + capture.err and not secret_target.exists()
+    # A plan that records no bot paths (staged by an older release) cannot say
+    # which bots its changes reach: unknown, never an empty list.
+    assert secret["data"]["summary"] == {"paths": 1, "content": 1, "mode": 0, "unchanged": 0,
+                                         "content_bots": None, "content_outside_bots": None}
+
+
+def _applied(case, release):
+    """Stage a plan and write it with activation's own writer."""
+    plan = config_staging.stage_configuration([case.paths], release)
+    activation = "applied-" + plan.plan_id[2:14]
+    config_install.prepare_config(plan, activation)
+    config_install.apply_config(case.root, activation)
+    return plan
+
+
+def test_config_diff_names_re_records_and_mode_changes_apart_from_content_changes(
+        staging_case, capsys, monkeypatch):
+    """#2449: a plan staged over what the last activation wrote said every path
+    changed, since each entry's two digests hashed different shapes, and it
+    named every bot to restart without saying why."""
+    case = staging_case
+    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
+    first = _applied(case, case.release)
+    instructions = case.paths.bot_runtime("primary-manager") / "CLAUDE.md"
+    mode = {Path(change.target): change for change in first.changes}[instructions].after["mode"]
+    instructions.chmod(0o600 if mode != 0o600 else 0o640)
+    # Outside the worker's directory, and a field every plan resets.
+    access = Path.home() / composer.telegram_channel_rel("primary_worker") / "access.json"
+    access.write_text(json.dumps({**json.loads(access.read_text()), "dmPolicy": "set-by-hand"}))
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    staged = {Path(change.target): change for change in plan.changes}
+    expected = dict.fromkeys(staged, "unchanged")
+    expected.update({instructions: "mode", access: "content"})
+    composed = case.paths.runtime / "composed.json"
+    if plan.content(staged[composed]) != composed.read_bytes():
+        expected[composed] = "content"  # it records the second it was composed in
+
+    diff, _ = _call(capsys, ["--root", str(case.root), "config", "diff", plan.plan_id, "--json"])
+    items = {Path(item["path"]): item for item in diff["data"]["changes"]}
+    assert set(items) == set(expected)
+    for path, item in items.items():
+        same = item["before"]["state_sha256"] == item["after"]["state_sha256"]
+        assert same is (expected[path] == "unchanged"), path
+    assert {path: item["change"] for path, item in items.items()} == expected
+    content = sum(want == "content" for want in expected.values())
+    assert diff["data"]["summary"] == {
+        "paths": len(expected), "content": content, "mode": 1,
+        "unchanged": len(expected) - content - 1,
+        "content_bots": ["primary/primary-worker"], "content_outside_bots": content - 1}
+    effects = diff["data"]["effects"]
+    assert effects["restart_bots"] == ["primary/primary-manager", "primary/primary-worker"]
+    assert effects["restart_reason"]
+
+    assert main(["--root", str(case.root), "config", "diff", plan.plan_id]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    # Every path line, whatever its label, so a listed unchanged path fails too.
+    named = {match[2]: match[1] for match in (re.fullmatch(r"(\S+) (/.+): \S+ -> \S+", line)
+                                              for line in lines) if match}
+    assert named == {str(path): want for path, want in expected.items() if want != "unchanged"}
+    assert f"unchanged {len(expected) - content - 1}" in lines[0]
+    assert any("primary/primary-worker" in line and "primary/primary-manager" not in line
+               for line in lines)
+
+
+def test_config_diff_names_every_bot_when_a_new_release_reaches_their_runtime(
+        staging_case, capsys, monkeypatch):
+    """#2449: a plan for a new release changes each bot's unit, environment and
+    CLI link, so every bot reads as a content change, and every bot restarts."""
+    case = staging_case
+    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
+    _applied(case, case.release)
+    cli = _write(case.root / "state/releases" / ("r-" + "c" * 64) / "venv/bin/claudlobby",
+                 "#!/bin/sh\nexit 97\n")
+    cli.chmod(0o755)
+    release = SimpleNamespace(release_id="r-" + "c" * 64, seal_sha256="d" * 64, cli_path=cli,
+                              native_path=case.package.native,
+                              inputs=SimpleNamespace(artifact_id=case.package.artifact_id))
+    monkeypatch.setattr(config_staging, "read_release", lambda *_: release)
+    monkeypatch.setattr(release_store, "read_release", lambda *_, **__: release)
+    for module in (config_staging, context, composer):
+        monkeypatch.setattr(module, "selected_cli", lambda: cli)
+    plan = config_staging.stage_configuration([case.paths], release)
+
+    diff, _ = _call(capsys, ["--root", str(case.root), "config", "diff", plan.plan_id, "--json"])
+    changes = {Path(item["path"]): item["change"] for item in diff["data"]["changes"]}
+    for bot in ("primary-manager", "primary-worker"):
+        directory = case.paths.bot_runtime(bot)
+        for name in ("bot.conf", f"com.primary.{bot}.service", f"com.primary.{bot}.plist",
+                     ".cli/bin/claudlobby"):
+            assert changes[directory / name] == "content", (bot, name)
+    bots = ["primary/primary-manager", "primary/primary-worker"]
+    assert diff["data"]["summary"]["content_bots"] == bots
+    assert diff["data"]["effects"]["restart_bots"] == bots
 
 
 

@@ -213,3 +213,63 @@ def test_replaces_leaf_symlink_into_old_release_but_refuses_redirected_parent(in
     unsafe.file(redirected / "unexpected", b"should never reach the release")
     with pytest.raises(install.ConfigInstallError, match="overlaps protected state"):
         install.prepare_config(unsafe.seal(), "redirected-parent")
+
+
+def _re_record(plan):
+    """Propose a plan's own recorded results again, as a later plan staged
+    from unchanged inputs would."""
+    builder = ConfigPlanBuilder(plan.data_root, plan.release_id, plan.release_seal,
+                                plan.fleets, effects={})
+    for change in plan.changes:
+        target, after = Path(change.target), change.after
+        if after["kind"] == "file":
+            builder.file(target, plan.content(change), mode=after["mode"])
+        elif after["kind"] == "symlink":
+            builder.symlink(target, Path(after["target"]))
+        elif after["kind"] == "tree":
+            builder.tree(target, {name: (plan.blob(entry["sha256"]), entry["mode"])
+                                  for name, entry in after["files"].items()})
+        elif after["kind"] == "absent":
+            builder.remove(target)
+        else:
+            builder.directory(target)  # records nothing once the directory exists
+    return builder.seal()
+
+
+def test_change_effect_reads_what_apply_wrote_as_unchanged_and_names_what_differs(proposal):
+    """#2449: a review names each path's effect from the plan alone. A path is
+    unchanged exactly where its frozen state is already the node apply would
+    produce, the comparison apply itself holds an applied row to."""
+    plan, runtime, external, _, settings = proposal
+
+    def effects(planned):
+        return {Path(change.target): install.change_effect(change) for change in planned.changes}
+
+    assert set(effects(plan).values()) == {"content"}
+    install.prepare_config(plan, "applied")
+    install.apply_config(plan.data_root, "applied")
+    again = effects(_re_record(plan))
+    assert again == dict.fromkeys(again, "unchanged")
+    assert set(again) == {Path(change.target) for change in plan.changes} - {runtime / "bot/data"}
+
+    access = runtime / "new/channel/access.json"
+    for path, key, changed in ((external / "new/run.sh", external, 0o700),
+                               (external / "new", external, 0o700),  # a directory's bits too
+                               (settings, settings, 0o600), (access, access, 0o644)):
+        restored = path.stat().st_mode & 0o777
+        path.chmod(changed)
+        assert effects(_re_record(plan))[key] == "mode", path
+        path.chmod(restored)
+    stale = _file(external / "new/stale.md", b"left by hand\n")
+    assert effects(_re_record(plan))[external] == "content"  # apply removes it
+    stale.unlink()
+    (external / "empty").mkdir()
+    assert effects(_re_record(plan))[external] == "content"
+    (external / "empty").rmdir()
+    settings.write_bytes(b"edited by hand\n")
+    link = runtime / "cli"
+    link.unlink()
+    link.symlink_to("previous-cli")
+    _file(runtime / "retired.sh", b"restored by hand\n")
+    again = effects(_re_record(plan))
+    assert [again[path] for path in (settings, link, runtime / "retired.sh")] == ["content"] * 3

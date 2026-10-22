@@ -152,6 +152,35 @@ def _desired(after: dict) -> dict:
     return node
 
 
+def review_nodes(change) -> tuple[dict, dict]:
+    """The node a plan froze at its target, and the node applying it produces.
+
+    Both are path_state's node shape, and an applied row is held to the second
+    (_check_rows), so equal nodes mean apply would rewrite what is already
+    there. Reads the plan's record only, never the live target: review
+    surfaces call this, no write path does (#2449).
+    """
+    return change.before["node"], _desired(change.after)
+
+
+def _modeless(node: dict) -> dict:
+    return {key: {name: _modeless(child) for name, child in value.items()} if key == "entries" else value
+            for key, value in node.items() if key != "mode"}
+
+
+def change_effect(change) -> str:
+    """What applying one planned change does to its target as the plan froze it.
+
+    "unchanged": apply would rewrite the same bytes, modes and link targets.
+    "mode": only permission bits differ. "content": anything else, such as
+    bytes, a kind, a link target, or a tree entry added or removed.
+    """
+    before, after = review_nodes(change)
+    if before == after:
+        return "unchanged"
+    return "mode" if _modeless(before) == _modeless(after) else "content"
+
+
 def _collect(node: dict, read, contents: dict) -> None:
     if node["kind"] == "file":
         data = read(node["sha256"])

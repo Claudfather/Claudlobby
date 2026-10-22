@@ -561,7 +561,27 @@ The queue accepts at most 2,000 batches or 32 MiB at each admission check;
 concurrent producers can overshoot by their simultaneous batches. A full or
 unwritable queue refuses and records a best-effort `.emit-losses` breadcrumb.
 Daemon replay uses the normal `emit_batch()` owner, at most 200 batches or
-0.5 seconds per serving tick. Invalid capture configuration or an existing identity-parent conflict leaves
+0.5 seconds per serving tick.
+
+Each staged batch and each spool entry is named for the message its
+transmissions name (`plane/queue_names.py`, #2430). `<time_ns>-<lead event>.np.batch`
+holds no transmission, and `<time_ns>-<lead event>.m<hex>.batch` holds
+transmissions of `msg_<hex>` only; the spool's are `<lead event>.np.json` and
+`<lead event>.m<hex>.json`. A name with no tag says nothing: an older writer's,
+a batch whose transmissions name several messages, or one nested deeper than the
+name walk reaches (about 340 levels, where json reads about 990; #2446). Replay takes
+the batches whose names leave room for a transmission first, oldest first among them,
+so a receiver's proof does not wait behind the tool calls staged before it. A receipt
+check reads only the entries whose names leave room for its message's proof, so a
+queue full of other work no longer makes it read "unavailable" past its 256-entry
+bound; an entry nested past the check's own walk reads "unavailable", never absent.
+A batch whose name leaves room for a transmission and that the daemon spools after a
+database error is tried again 30 seconds later, once, rather than left to the
+10-minute interval drain (#2446). Once, because a drain counts an attempt against
+each entry it cannot ingest and quarantines it at five. Other spooled work waits for
+the interval.
+
+Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's
 `.<event id>.tmp` becomes eligible for replay after an hour. One left empty, because the
 stage was reaped before writing its batch, never reached the disk: once its writer is
@@ -576,7 +596,7 @@ never satisfies a linked/task operation's committed-recording requirement.
 **The quarantine and the counted losses (#2165).**
 
 - **Listing the quarantine.** `plane spool list --quarantined` lists every quarantined entry, newest first. Each item shows when the entry was written and when it was quarantined, its size, whether it is empty, and its reason. The listing pages with `--limit` and `--cursor`, states its coverage, and reads only files, never the database.
-- **Reading one entry.** `plane spool inspect NAME` reads a single entry. That includes a refused stage, whose name has the form `<time_ns>-<lead event>[.batch.<pid>].json`.
+- **Reading one entry.** `plane spool inspect NAME` reads a single entry. That includes a refused stage, whose name has the form `<time_ns>-<lead event>[<tag>][.batch.<pid>].json`.
 - **The loss counter.** `emit_losses_summary` in `plane/health.py` reads `state/plane/.emit-losses` once, for three readers:
   - `plane doctor`'s emit-losses rung;
   - `plane status`, as `emit_losses`;

@@ -10,9 +10,13 @@ through the slash-aware dispatch.sh when the bot is a MANAGER, is EQUIPPED
 IDLE, and the plane shows no recent `checkin_triggered` row for it inside the
 min-gap window -- recording `checkin_triggered` on a real send and
 `checkin_skipped` (with a reason) on every gated skip except the two silent
-ones (not a manager, not equipped) and the two the plane cannot see (rate
-limited, unreachable). It fails CLOSED: an unreachable plane (rc 3) skips
-without firing and without a row.
+ones (not a manager, not equipped) and the three a row would only repeat or
+could not reach (rate limited, a trigger still queued for ingest,
+unreachable). A beat held because the staged and spool queues could not be
+read in full is recorded (`queue_deep`, `queue_unreadable`, #2445). The scan
+reads a stage the socket client did not finish (a dot name, which bash's `*`
+passes over) and never the spool's own temps (#2448). It fails CLOSED: an
+unreachable plane (rc 3) skips without firing and without a row.
 
 Like test_briefing_trigger.py, this copies the real script next to stub
 helpers so it exercises the real control flow without a live tmux server or a
@@ -32,6 +36,8 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -520,6 +526,164 @@ def test_ingest_between_the_two_reads_cannot_let_the_trigger_refire(tmp_path, *,
 def test_a_spooled_trigger_for_another_manager_does_not_block_this_one(tmp_path, *, scratch_plane_env):
     _pending_trigger(tmp_path, "spool", "b.json", "bot:f/someone-else")
     _pending_trigger(tmp_path, "spool", "c.json", "bot:g/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert [e["type"] for e in _events(tmp_path)] == ["checkin_triggered"]
+
+
+def _other_work(tmp_path: Path, count: int) -> None:
+    """COUNT staged batches of a worker's tool calls, under the name and in the
+    shape the socket client stages them while a socket miss has armed its
+    cooldown: #2430's deep queue (fields as captured live, values fake). None
+    holds a check-in trigger."""
+    d = tmp_path / "state" / "plane" / "staged"
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        event_id = f"ev_{i:032x}"
+        (d / f"{1792621600000000000 + i}-{event_id}.batch").write_text(json.dumps({"events": [{
+            "event_type": "system", "emitter": "vitals",
+            "source_ref": f"fleet-events:sha:{i:064x}", "fleet": "f",
+            "occurred_at": "2026-10-21T19:06:41Z",
+            "payload": {"event": "tool_call", "subject_kind": "actor", "subject": "bot:f/worker",
+                        "data": {"source": "vitals", "legacy_ts": "2026-10-21T15:06:41-04:00",
+                                 "data": {"event": "pre", "session": "s1", "tool": "Bash"}}},
+            "event_id": event_id}]}))
+
+
+def _held(tmp_path: Path) -> list[tuple[str, str | None, str]]:
+    return [(e["type"], e["data"].get("reason"), e["bot_id"]) for e in _events(tmp_path)]
+
+
+def test_a_queue_too_deep_to_read_holds_the_beat_and_records_why(tmp_path, *, scratch_plane_env):
+    # #2445: past the 256 entries the scan reads, a trigger in the rest cannot
+    # be ruled out, so the beat is held (pending never licenses a second paid
+    # /checkin), and the hold is a row a manager can read, not silence.
+    _other_work(tmp_path, 257)
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _plane_argv(tmp_path) == []      # held before the committed read
+    assert _held(tmp_path) == [("checkin_skipped", "queue_deep", "mgr")]
+    assert "more than 256" in _log(tmp_path)
+
+
+def test_the_same_work_within_the_bound_is_read_in_full_and_the_beat_fires(tmp_path, *, scratch_plane_env):
+    # The control for the test above: one entry fewer is read in full, holds
+    # no trigger, and the beat fires.
+    _other_work(tmp_path, 256)
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert [e["type"] for e in _events(tmp_path)] == ["checkin_triggered"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a mode-000 directory")
+def test_a_queue_that_cannot_be_listed_holds_the_beat_and_records_why(tmp_path, *, scratch_plane_env):
+    _other_work(tmp_path, 1)
+    staged = tmp_path / "state" / "plane" / "staged"
+    staged.chmod(0)
+    try:
+        rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                             scratch_plane_env=scratch_plane_env)
+    finally:
+        staged.chmod(0o700)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _plane_argv(tmp_path) == []
+    assert _held(tmp_path) == [("checkin_skipped", "queue_unreadable", "mgr")]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_an_entry_that_cannot_be_read_holds_the_beat_and_records_why(tmp_path, *, scratch_plane_env):
+    _other_work(tmp_path, 1)
+    entry = next((tmp_path / "state" / "plane" / "staged").iterdir())
+    entry.chmod(0)
+    try:
+        rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                             scratch_plane_env=scratch_plane_env)
+    finally:
+        entry.chmod(0o600)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _plane_argv(tmp_path) == []
+    assert _held(tmp_path) == [("checkin_skipped", "queue_unreadable", "mgr")]
+
+
+def _stage_name(writer: int) -> str:
+    """A stage's name before the rename that makes it a `.batch`, as the socket
+    client writes it: `.<time_ns>-<lead event><tag>.batch.<pid>.tmp`."""
+    return f".1792621600000000000-ev_{'b' * 32}.np.batch.{writer}.tmp"
+
+
+def test_a_trigger_in_a_stage_the_client_did_not_finish_holds_the_beat(tmp_path, *, scratch_plane_env):
+    # #2448: a stager reaped in its fsync leaves its batch under the temp's dot
+    # name, which bash's * passes over, until the daemon replays it at an hour
+    # old; a trigger in it is pending, not absent. The name is a running
+    # process's, as a reused pid leaves an orphan: nothing tells it from a stage
+    # still being written, so the scan never asks.
+    _pending_trigger(tmp_path, "staged", _stage_name(os.getpid()), "bot:f/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert _plane_argv(tmp_path) == []      # held before the committed read
+    assert "pending Plane ingest" in _log(tmp_path)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_a_stage_the_client_did_not_finish_that_cannot_be_read_holds_the_beat(tmp_path, *, scratch_plane_env):
+    name = _stage_name(os.getpid())
+    _pending_trigger(tmp_path, "staged", name, "bot:f/someone-else")
+    entry = tmp_path / "state" / "plane" / "staged" / name
+    entry.chmod(0)
+    try:
+        rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                             scratch_plane_env=scratch_plane_env)
+    finally:
+        entry.chmod(0o600)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _plane_argv(tmp_path) == []
+    assert _held(tmp_path) == [("checkin_skipped", "queue_unreadable", "mgr")]
+
+
+def test_a_stage_still_being_written_does_not_hold_the_beat(tmp_path, *, scratch_plane_env):
+    # The control for the two above: a stage its writer has created and not yet
+    # written is not held for being in flight (under load nearly every emit
+    # stages), and it names no trigger, so the beat fires.
+    d = tmp_path / "state" / "plane" / "staged"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / _stage_name(os.getpid())).write_text("")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert [e["type"] for e in _events(tmp_path)] == ["checkin_triggered"]
+
+
+def test_a_trigger_in_a_stage_named_with_two_leading_dots_holds_the_beat(tmp_path, *, scratch_plane_env):
+    # The daemon replays any dot-named temp as an orphan, not only the
+    # client's, and `.[!.]*` alone passes over a second leading dot.
+    _pending_trigger(tmp_path, "staged", "..1792621600000000000-a.batch.1.tmp", "bot:f/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert _plane_argv(tmp_path) == []      # held before the committed read
+    assert "pending Plane ingest" in _log(tmp_path)
+
+
+def test_a_trigger_left_in_a_spool_temp_does_not_hold_the_beat(tmp_path, *, scratch_plane_env):
+    # The spool's dot names are its writer's files before the rename that makes
+    # them entries. Nothing replays or removes one, so a trigger in one is not
+    # pending: read, it would hold this manager's beat for good, with no row.
+    _pending_trigger(tmp_path, "spool", f".ev_{'b' * 32}.np.json.4242.0123456789ab.tmp", "bot:f/mgr")
     rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
                          scratch_plane_env=scratch_plane_env)
     assert rc == 0, err

@@ -6,6 +6,119 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a harness check reads a Plane row only once the daemon has replayed it (#2274)
+
+The validation harness read the Plane once, right after the code under test
+had run. An emit is staged instead of committed when its send misses the
+socket's deadline, and for the 60 s cooldown after such a miss, and the root's
+daemon replays the staged queue about once a second. A read inside that window
+found no row: the check failed although the code under test had worked, and a
+check expecting absence passed on a row still to come. On slower hosts the
+failing checks changed from run to run, and on #2458's CI run six checks
+failed this way.
+
+Every read of a root's fleet events now first waits until its daemon has
+replayed each batch staged under that root before the read (`val_replayed`).
+So do a fleet's first receipt (`val_plane_ready`) and each fleet-pulse sweep of
+the escalation and stop scenarios, which read rows written before them. The
+wait ends when the last of those batches leaves the stage, usually within a
+second, and gives up once nothing has left the stage for 70 s, the longest the
+daemon's serial loop can go without replaying. A read is refused, naming the
+first entry, when a batch was given up on, when the daemon holds a row for
+later (a spooled batch until its next drain, a stage whose writer died before
+finishing it for an hour), or when a queue cannot be listed; later reads of
+that root refuse at once. The harness's dispatch and report seeds now require
+a committed write, and one that is not committed refuses its scenario. Reads
+through `val_sql` do not wait: the harness's own Plane checks read a stage held
+on purpose. The test that runs the harness's setup slice waits the same way
+before its daemon stops, since a batch staged then was never replayed.
+
+### Fixed — `config diff` tells paths a plan records again from changed ones, and says why every bot restarts (#2449)
+
+`config diff PLAN_ID` hashed each path's state before and after in two
+different shapes, so every path read as changed, including the many that a plan
+records again exactly as they are. A one-line edit read as a fleet-wide rollout.
+
+- **Each path carries `change`:** `content`, `mode` (only permission bits
+  differ) or `unchanged`. It is decided by the comparison activation itself
+  holds an applied path to, and the two digests are now equal exactly when a
+  path is unchanged.
+- **The text lists only content and mode changes.** It counts the rest
+  (`--json` lists every path), and names the bots the content changes reach
+  (`summary.content_bots`), from each bot's paths a plan now records.
+- **`restart_bots` still lists every declared bot,** because `host activate`
+  stops each enrolled bot and starts each declared one whatever the plan
+  changes. The plan now says so (`effects.restart_reason`).
+
+A plan staged by an older release records no bot paths, so its diff reads the
+bots it reaches as unknown.
+
+### Fixed — queued batches the name walk could not read are recorded, and a spooled proof is tried again within a minute (#2446)
+
+Follow-ups from the review of #2430's fix (`claudlobby/plane/queue_names.py`,
+`claudlobby/message_queries.py`, `claudlobby/plane/daemon.py`):
+
+- **A batch nested past the name walk's reach is recorded.** json reads about
+  990 levels of nesting, and `name_tag` gave out near 340 with a
+  `RecursionError` that neither writer caught, so the socket client's stage
+  and the daemon's spool write both failed and the batch was recorded nowhere.
+  Such a batch now gets no tag, the name every reader reads. The receipt
+  check's own walk gave out at the same depth with the same error; it now
+  reads such an entry as "unavailable" and names it. No door builds such an
+  event today.
+- **A transmission held in a tuple is named.** json writes a tuple as a list,
+  so the receipt check found such a proof, but the name walk passed tuples by
+  and named the batch for no transmission. The check then set the entry aside
+  and read "absent", which the retry gate takes as leave for another send. The
+  walk now reads a tuple as the list json writes. No writer builds one today.
+- **The replay order test stages two proofs**, so a replay that takes the
+  newer one first fails it.
+- **A proof the daemon spooled after a database error is tried again 30 s
+  later**, once, instead of waiting up to 10 minutes for the interval drain
+  while its message's receipt read "pending". Other spooled work still waits
+  for the interval. Once, because a drain counts an attempt against each entry
+  it cannot ingest and quarantines it at five.
+
+### Fixed — the check-in beat sees a trigger in a stage the socket client did not finish (#2448)
+
+Before the check-in beat sends a manager `/checkin`, it scans the Plane's
+staged and spool queues for that manager's last trigger, because the rate
+limit's committed read cannot see one still waiting for ingest. The scan
+listed each queue with `*`, which passes over a name that starts with a dot.
+A stager reaped in its fsync (the beat waits 10 s for its emit) leaves its
+batch under such a name, `.<time_ns>-<lead event><tag>.batch.<pid>.tmp`, and
+the daemon replays it only once it is an hour old. Until then a trigger in it
+was in neither place the beat read, so the next beat, 15 minutes later, could
+send a second paid `/checkin` inside the 45-minute gap.
+
+The scan now reads those stages like any other entry: one that names the
+trigger holds the beat, and one it cannot read holds it as
+`queue_unreadable`. A stage still being written is read the same way, since
+it is never this manager's: a beat waits for its own emit or kills it before
+it exits. The spool's own temps stay unread; nothing replays or removes one,
+so a trigger left in one would hold that manager's beat for good. A trigger
+held in a stage now delays that manager's next check-in until the daemon
+replays it, an hour or more after the last one instead of 45 minutes.
+
+### Fixed — a check-in beat held for a deep or unreadable Plane queue now says why (#2445)
+
+Before the check-in beat sends a manager `/checkin`, it scans the Plane's
+staged and spool queues for that manager's last trigger: a socket miss can
+leave the trigger there, uncommitted, where the rate limit's committed read
+cannot see it, and that read's silence must not license a second paid
+`/checkin`. The scan reads at most 256 entries. Past that, or when a queue or
+an entry in one cannot be read, it holds the beat, and it held it silently. On
+2026-10-21 receipt checks counted 265 and then 299 queued entries, nearly all
+of them other bots' tool calls (#2430); a beat that found a manager idle then
+would have been held with nothing to say why.
+
+The hold stays, since a pending trigger cannot be ruled out, and it is now a
+`checkin_skipped` row with reason `queue_deep` or `queue_unreadable`, beside
+`session_down`, `busy` and `send_failed`, with a log line that names the
+cause. A trigger the scan finds still queued keeps its log line and gets no
+row, like a rate-limited beat: once ingested, it is the row that holds the
+beat.
+
 ### Fixed — a Telegram channel Claude Code refused at connect reads as refused, never ready (#2423)
 
 Claude Code decides at each connect whether to deliver a channel plugin's
@@ -32,6 +145,35 @@ The log's path, its file names and both lines are Claude Code internals,
 measured on Linux with Claude Code 2.1.304 and 2.1.306; the macOS path follows
 the same convention unmeasured. If Claude Code changes any of them, bring-up
 logs `BRIDGE_UNVERIFIED`, and the restart gate refuses until the reader is updated.
+
+### Fixed — a deep queue of other work no longer makes message receipts read "unavailable" (#2430)
+
+Under load a hook misses its socket deadline, and every hook emit on the host
+then stages for the minute after it, so the staged queue held hundreds of
+batches, nearly all of them other bots' tool calls. A receipt check reads at
+most 256 queued entries. On 2026-10-21 one read "265 queued Plane entries that
+may hold this message's proof are more than the 256 a receipt check reads" for
+a proof that existed, and a send's own check read the same at 299. Replay took
+the queue oldest first, so a receiver's proof also waited behind every batch
+staged before it.
+
+- **Each queued batch is named for the message its transmissions name**
+  (`claudlobby/plane/queue_names.py`): `.np` for none, `.m<hex>` for one. The
+  socket client's stage and its temp file carry the tag, and so do the spool's
+  entries. A batch naming several messages carries none, and neither does any
+  older name.
+- **The receipt check reads only the entries whose names leave room for its
+  message's proof.** Other work is neither read nor counted, against the
+  256-entry bound, the byte budget or the listing cap, and another bot's stage
+  still being written is no torn entry. The retry gate reads the same way.
+  Untagged entries are read as before.
+- **Replay takes the batches that may hold a transmission first**, oldest first
+  among them, then the rest in their order.
+- **`plane spool inspect` and `plane spool quarantine`** accept the tagged names.
+
+Not covered: a proof spooled after a database error still waits for the
+10-minute drain, an orphaned stage still waits its hour, and the check's 0.5 s
+daemon probe, below the daemon's answer time under load, is #1693's.
 
 ### Fixed — the printify skill's suite no longer fails a check whose match it found (#1031)
 
