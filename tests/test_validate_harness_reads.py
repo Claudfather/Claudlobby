@@ -21,6 +21,7 @@ from pathlib import Path
 
 from claudlobby.plane.daemon import PlaneDaemon
 from claudlobby.plane.emit_api import emit_batch
+from claudlobby.plane.fleet_events import fleet_event_request
 from tests.plane_setup import initialize_plane
 
 REPO = Path(__file__).resolve().parent.parent
@@ -114,16 +115,14 @@ harness_check "  ...and no session_missing either" "$r"
 
 
 def _known_fleet(root: Path) -> None:
-    """A plane that already holds fleet F, as a harness root does once
-    val_plane_ready has run, so a read of F answers rather than refusing; and
-    its socket in the wedge cooldown, so every emit of the root is staged, as
-    in the minute after a send misses its deadline."""
+    """A plane that already holds fleet F, with the row val_plane_ready's emit
+    writes, so a read of F answers rather than refusing; and its socket in the
+    wedge cooldown, so every emit of the root is staged, as in the minute after
+    a send misses its deadline."""
     initialize_plane(root)
-    ts = "2026-01-01T00:00:00+00:00"
-    ev = {"event_type": "system", "emitter": "harness", "fleet": F, "occurred_at": ts,
-          "payload": {"event": "validate_started", "subject_kind": "fleet", "subject": F,
-                      "data": {"source": "harness", "legacy_ts": ts, "data": {}}}}
-    assert emit_batch(root, [ev])[0].status == "committed"
+    emit_batch(root, [fleet_event_request("validate_started", fleet=F, subject_kind="fleet",
+                                          subject=F, source="harness", data={})],
+               require_commit=True)
     (root / "state" / "plane" / ".socket-wedged").write_text(str(int(time.time())))
 
 
@@ -181,8 +180,8 @@ harness_check "the row its writer staged is read, once" "$v"
 def test_a_stage_nothing_replays_refuses_the_read_naming_it(tmp_path, scratch_plane_env):
     # No daemon at all. A read cannot be final while its root holds a batch
     # nothing replays, so it is refused rather than scored, and so is a later
-    # read of that root, at once rather than after a second wait: at 600 s
-    # this run would outlast its timeout.
+    # read of that root, at once, even with a newer batch staged: a second wait
+    # of 600 s would outlast this run's timeout.
     root = tmp_path / "root"
     _known_fleet(root)
     r = _run(root, _stage("held_probe") + f"""
@@ -190,13 +189,39 @@ n=$(VAL_REPLAY_STALL_S=1 val_events "$ROOT" {F} fleet held_probe | grep -c held_
 [ "${{n:-0}}" -eq 0 ] && v=yes || v=no
 harness_check "nothing is recorded yet" "$v"
 val_scenario "the next scenario"
-n=$(VAL_REPLAY_STALL_S=600 val_events "$ROOT" {F} fleet held_probe | grep -c held_probe || true)
+CLAUDLOBBY_FLEET={F} emit_fleet_event held_again harness '{{}}' "" 2>/dev/null
+VAL_REPLAY_STALL_S=600 val_events "$ROOT" {F} fleet held_probe >/dev/null
 harness_check "a later read of the same root" yes
 """, **scratch_plane_env(root))
     assert r.stdout.count("STAGED") == 1, r.stdout + r.stderr
     assert _counts(r.stdout) == (0, 2, 2), r.stdout + r.stderr
     for check in ("nothing is recorded yet", "a later read of the same root"):
-        assert re.search(rf"  FAIL  {check} — REFUSED, .*1 batch staged under .* not replayed", r.stdout), r.stdout
+        assert re.search(rf"  FAIL  {check} — REFUSED, .*1 entry under .* not replayed", r.stdout), r.stdout
+
+
+def test_a_row_held_for_a_later_replay_refuses_the_read_at_once(tmp_path, scratch_plane_env):
+    # The daemon replays a spooled batch at its next drain, and a stage whose
+    # writer died before renaming it an hour on. A read beside either cannot be
+    # final, and waiting for it would outlast this run's timeout.
+    root = tmp_path / "root"
+    _known_fleet(root)
+    (root / "state" / "plane" / "spool").mkdir(exist_ok=True)
+    (root / "state" / "plane" / "spool" / "held.json").write_text("{}")
+    r = _run(root, f"""
+VAL_REPLAY_STALL_S=600 val_events "$ROOT" {F} fleet >/dev/null
+harness_check "a read beside a spooled batch" yes
+val_scenario "the next scenario"
+rm "$ROOT/state/plane/spool/held.json"
+mkdir -p "$ROOT/state/plane/staged"
+: > "$ROOT/state/plane/staged/.1-held.batch.999999999.tmp"
+VAL_REPLAY_STALL_S=600 val_events "$ROOT" {F} fleet >/dev/null
+harness_check "a read beside a stage its writer never finished" yes
+""", **scratch_plane_env(root))
+    assert _counts(r.stdout) == (0, 2, 2), r.stdout + r.stderr
+    for check, first in (("a read beside a spooled batch", "held.json"),
+                         ("a read beside a stage its writer never finished", ".1-held.batch.999999999.tmp")):
+        assert re.search(rf"  FAIL  {re.escape(check)} — REFUSED, .*1 entry under .* not replayed, "
+                         rf"held for a later drain or replay \(first: {re.escape(first)}\)", r.stdout), r.stdout
 
 
 # --- ratchets on the harness's shape ----------------------------------------

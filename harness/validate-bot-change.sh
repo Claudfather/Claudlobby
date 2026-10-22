@@ -282,34 +282,35 @@ val_diag() {
 }
 
 # val_replayed <root>: hold a read until <root>'s daemon has replayed every
-# batch staged there before it. A writer's emit is staged, not committed, when
-# its send misses the socket's deadline and for the 60 s cooldown after a miss,
-# and the daemon replays the staged queue about once a second. A read that did
-# not wait found no row though its writer worked, and a check expecting absence
-# passed on a row still to come (#2274). It waits for the batches present at
-# the call, never for an empty queue, which a root with live writers may not
-# reach, and not for a temp stage (a dot name), which the daemon replays only
-# once it is an hour old. It gives up when no batch has left the stage for
-# VAL_REPLAY_STALL_S. The daemon's loop is serial: before a replay reaches a
-# batch it may finish one socket request, and each holds the loop for at most
-# its lock retries, six at the 5 s busy timeout (about 32 s), after which its
-# batch is committed or spooled; a replay that fails is tried again after 30 s.
-# So a stage where nothing moves for 70 s is not being replayed. Batches given
-# up on refuse this read and every later read of the root, which does not wait
-# for them again. VAL_READ_QUIET=1 drops the refusal.
+# batch staged there before it. An emit is staged, not committed, when its send
+# misses the socket's deadline and for the 60 s cooldown after a miss, and the
+# daemon replays the staged queue about once a second: a read that does not
+# wait misses a row its writer recorded, and an absence check passes on it
+# (#2274). It waits for the batches present at the call, never for an empty
+# queue, which a root with live writers may not reach. It gives up once no batch
+# has left the stage for VAL_REPLAY_STALL_S. The daemon's loop is serial: a
+# socket request or a replay holds it for at most six lock retries at the 5 s
+# busy timeout (about 32 s) before its batch is committed or spooled, and a
+# failed replay is tried again after 30 s, so a stage where nothing moves for
+# 70 s is not being replayed. It never waits for a row the daemon holds for
+# later: a spooled batch (replayed at its next drain) or a stage whose writer
+# died before renaming it (an hour on). Those, a batch given up on and a queue
+# it cannot list refuse this read and every later read of the root, at once.
+# VAL_READ_QUIET=1 drops the refusal.
 VAL_REPLAY_STALL_S="${VAL_REPLAY_STALL_S:-70}"
 VAL_UNREPLAYED="$ROOT/.harness-unreplayed"
 val_replayed() {
-    local f pending="" left n was=-1 since="$SECONDS" held=0 first="" why
-    for f in "$1"/state/plane/staged/*.batch; do
+    local q="$1/state/plane" f p pending="" left n was=-1 since held=0 first="" why=""
+    for f in "$q"/staged/*.batch; do
         [ -e "$f" ] || continue
-        if grep -qxF "$f" "$VAL_UNREPLAYED" 2>/dev/null; then
-            held=$((held + 1)); first="${first:-${f##*/}}"
+        if [ -s "$VAL_UNREPLAYED" ] && grep -qxF "$f" "$VAL_UNREPLAYED"; then
+            held=$((held + 1)); first="${first:-${f##*/}}"; why="given up on at an earlier read"
         else
             pending="$pending$f"$'\n'
         fi
     done
-    why="given up on at an earlier read"
+    # A batch given up on is still staged: nothing is replaying, so no newer one moves.
+    [ "$held" -eq 0 ] || pending=""
     while [ -n "$pending" ]; do
         left="" n=0
         while IFS= read -r f; do
@@ -322,15 +323,26 @@ val_replayed() {
         if [ -n "$pending" ] && [ $((SECONDS - since)) -ge "$VAL_REPLAY_STALL_S" ]; then
             printf '%s' "$pending" >> "$VAL_UNREPLAYED"
             IFS= read -r f <<< "$pending"
-            first="${f##*/}" held=$((held + n))
-            why="nothing left the stage in ${VAL_REPLAY_STALL_S}s"
+            held=$((held + n)) first="${f##*/}" why="nothing left the stage in ${VAL_REPLAY_STALL_S}s"
             break
         fi
         [ -z "$pending" ] || sleep 0.2
     done
+    for f in "$q/staged" "$q/spool" "$q"/spool/*.json "$q"/spool/*.json.inflight.* "$q"/staged/.*.tmp; do
+        [ -e "$f" ] || continue
+        if [ "$f" = "$q/staged" ] || [ "$f" = "$q/spool" ]; then
+            if [ -d "$f" ] && [ -r "$f" ] && [ -x "$f" ]; then continue; fi
+            p="its queue cannot be listed"
+        else
+            p="${f%.tmp}"   # a temp stage ends in its writer's pid: a live writer is still writing it
+            if [ "$p" != "$f" ] && kill -0 "${p##*.}" 2>/dev/null; then continue; fi
+            p="held for a later drain or replay"
+        fi
+        held=$((held + 1)); first="${first:-${f##*/}}"; why="${why:-$p}"
+    done
     if [ "$held" -gt 0 ] && [ -z "${VAL_READ_QUIET:-}" ]; then
-        [ "$held" -eq 1 ] && f=batch || f=batches
-        harness_refuse "$held $f staged under $1 not replayed, $why (first: $first)"
+        [ "$held" -eq 1 ] && f=entry || f=entries
+        harness_refuse "$held $f under $q not replayed, $why (first: $first)"
     fi
     return 0
 }
@@ -460,8 +472,8 @@ val_seed_dispatch() {
 {"event_type":"transmission","emitter":"dispatch-task","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","attempt_no":1,"carrier":"tmux","destination":"$bot","state":"pane_submitted"}}
 ]}
 JSON
-    "$VAL_CLI" --root "$root" plane emit-batch --file "$f" >/dev/null 2>&1 \
-        || echo "validate-bot-change: seeding dispatch $tid for $bot failed" >&2
+    "$VAL_CLI" --root "$root" plane emit-batch --require-commit --file "$f" >/dev/null 2>&1 \
+        || harness_refuse "seeding dispatch $tid for $bot was not committed"
     rm -f "$f"
 }
 # val_seed_report <root> <fleet> <bot> <task_id|""> <status> <epoch> [summary] [manager]:
@@ -498,8 +510,8 @@ val_seed_report() {
         fi
         printf ']}\n'
     } > "$f"
-    "$VAL_CLI" --root "$root" plane emit-batch --file "$f" >/dev/null 2>&1 \
-        || echo "validate-bot-change: seeding a $status report by $bot failed" >&2
+    "$VAL_CLI" --root "$root" plane emit-batch --require-commit --file "$f" >/dev/null 2>&1 \
+        || harness_refuse "seeding a $status report by $bot was not committed"
     rm -f "$f"
 }
 
@@ -2079,11 +2091,11 @@ esc_seed() {  # <fleet> <bot> <emit rc_timeout: yes|no> — seed a sandbox bot, 
     # bot, stamps the instant and the provenance the sweep then reads from the plane).
     if [ "$3" = yes ]; then
         CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$1" emit_fleet_event rc_timeout startup '{}' "$bots/$2" "$2"
-        val_replayed "$ROOT"   # the sweep reads it from the plane, so never while staged
     fi
     return 0
 }
 esc_run() {  # <fleet>
+    val_replayed "$ROOT"   # the sweep reads the rows written before it from the plane
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$1" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
         "$_esc_lib/fleet-pulse.sh" "$1" >/dev/null 2>&1 || true
@@ -2206,6 +2218,7 @@ st_bot() {  # <bot> <unit: none|active|failed> <stop record: none|seconds ago>
     return 0
 }
 st_run() {
+    val_replayed "$ROOT"   # the sweep reads the rows written before it from the plane
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_st_fleet" HOME="$_st_home" ST_UNITS="$_st_units" \
         PATH="$_st_bin:$PATH" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
