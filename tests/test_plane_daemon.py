@@ -1383,6 +1383,14 @@ def _move_the_daemon_clock(monkeypatch):
     return advance
 
 
+# How long a probe that orders a test's steps waits for the daemon's answer.
+# The probe waits out the round in progress, and a round's disk work can take
+# seconds on a busy host: one retry's drain took 3.1 s, past the probe's own
+# 2 s, which is for asking which daemon serves. So the probe gets the 30 s
+# send_batch gives a batch, and a daemon that never answers still fails (#2460).
+_ANSWER_S = 30.0
+
+
 def _one_turn(sock: Path) -> None:
     """Return once the serve loop has gone round since the call. It runs the
     drains, the retry and the replay at the top of each round, and it is
@@ -1390,7 +1398,7 @@ def _one_turn(sock: Path) -> None:
     follows the first."""
     from claudlobby.plane import daemon as dm
     for _ in range(2):
-        assert dm.probe_daemon_info(sock) is not None, "the daemon did not answer a probe"
+        assert dm.probe_daemon_info(sock, timeout=_ANSWER_S) is not None, "the daemon did not answer a probe"
 
 
 def test_a_proof_the_daemon_spooled_after_a_database_error_is_tried_again_soon(tmp_path, monkeypatch):
@@ -1444,7 +1452,8 @@ def test_the_retry_of_a_spooled_proof_never_puts_the_interval_drain_off(tmp_path
     with _serving(tmp_path, drain_interval=dm.DEFAULT_DRAIN_INTERVAL) as sock:  # from the startup drain
         other = Path(send_batch(sock, [_tool_call(1)])["results"][0]["detail"])
         assert send_batch(sock, [_received(proof)])["results"][0]["status"] == "spooled"
-        assert dm.probe_daemon_info(sock) is not None  # the daemon notes a spooled proof after it replies
+        # The daemon notes a spooled proof after it replies, and answers this probe only after that.
+        assert dm.probe_daemon_info(sock, timeout=_ANSWER_S) is not None
         advance(dm.SPOOLED_PROOF_RETRY_S)
         _one_turn(sock)
         assert _landed(tmp_path, proof) and other.exists(), "the retry did not run, or took the other work"
@@ -1471,7 +1480,8 @@ def test_a_spooled_proof_is_not_tried_again_once_a_controlled_drain_has_begun(tm
     proof = "msg_" + "7" * 32
     with _serving(tmp_path) as sock:
         entry = Path(send_batch(sock, [_received(proof)])["results"][0]["detail"])
-        report = dm.drain_daemon(sock, expected=dm.probe_daemon_info(sock), approved={"spool": {}, "staged": {}})
+        expected = dm.probe_daemon_info(sock, timeout=_ANSWER_S)
+        report = dm.drain_daemon(sock, expected=expected, approved={"spool": {}, "staged": {}})
         assert report["ok"] and report["retained"]["spool"] == [entry.name], report
         advance(dm.SPOOLED_PROOF_RETRY_S)
         _one_turn(sock)
