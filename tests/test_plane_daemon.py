@@ -20,6 +20,7 @@ import tempfile
 import sqlite3
 import threading
 import time
+import types
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -1338,11 +1339,12 @@ def _fill_the_disk_for_batches(monkeypatch):
 
 
 @contextmanager
-def _serving(root: Path):
-    """A live daemon on a short socket, with no interval drain in a test's time."""
+def _serving(root: Path, *, drain_interval: float = 9999):
+    """A live daemon on a short socket, with no interval drain in a test's time
+    unless the test moves the daemon's clock past `drain_interval`."""
     sdir = _short_sock_dir()
     sock = sdir / "s"
-    daemon = PlaneDaemon(root, socket_override=sock, drain_interval=9999)
+    daemon = PlaneDaemon(root, socket_override=sock, drain_interval=drain_interval)
     t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
     t.start()
     try:
@@ -1361,6 +1363,34 @@ def _attempts(entry: Path):
         return json.loads(entry.read_text())["attempts"]
     except FileNotFoundError:
         return None
+
+
+def _move_the_daemon_clock(monkeypatch):
+    """Put daemon.py's time.monotonic() on real time plus an offset, and return
+    advance(seconds), which adds to it. The daemon's deadlines stay the
+    production ones and pass at the step a test names, never where a slow
+    runner puts them (tests/deadline_clock.py does the same for the HTTP doors).
+    The module's other `time` attributes are the real ones. Its client calls
+    read this clock too, so advance only between requests."""
+    from claudlobby.plane import daemon as dm
+    offset = [0.0]
+    clock = types.SimpleNamespace(**vars(time))
+    clock.monotonic = lambda: time.monotonic() + offset[0]
+    monkeypatch.setattr(dm, "time", clock)
+
+    def advance(seconds):
+        offset[0] += seconds
+    return advance
+
+
+def _one_turn(sock: Path) -> None:
+    """Return once the serve loop has gone round since the call. It runs the
+    drains, the retry and the replay at the top of each round, and it is
+    serial, so it accepts the second of two requests only after the round that
+    follows the first."""
+    from claudlobby.plane import daemon as dm
+    for _ in range(2):
+        assert dm.probe_daemon_info(sock) is not None, "the daemon did not answer a probe"
 
 
 def test_a_proof_the_daemon_spooled_after_a_database_error_is_tried_again_soon(tmp_path, monkeypatch):
@@ -1399,6 +1429,52 @@ def test_a_spooled_proof_is_tried_again_once_and_other_work_waits_for_the_interv
         _until(lambda: _attempts(proof) == 1)
         time.sleep(3.0)  # three retry periods more
         assert (_attempts(proof), _attempts(other)) == (1, 0)
+
+
+def test_the_retry_of_a_spooled_proof_never_puts_the_interval_drain_off(tmp_path, monkeypatch):
+    """#2460. Only the interval drain takes other spooled work, one interval
+    after the last interval drain. A proof's retry is not that drain and must
+    not move its deadline: proofs spooling less than an interval apart would
+    then put the other work off for as long as they kept coming."""
+    from claudlobby.plane import daemon as dm
+    _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
+    advance = _move_the_daemon_clock(monkeypatch)
+    initialize_plane(tmp_path)
+    proof = "msg_" + "7" * 32
+    with _serving(tmp_path, drain_interval=dm.DEFAULT_DRAIN_INTERVAL) as sock:  # from the startup drain
+        other = Path(send_batch(sock, [_tool_call(1)])["results"][0]["detail"])
+        assert send_batch(sock, [_received(proof)])["results"][0]["status"] == "spooled"
+        advance(dm.SPOOLED_PROOF_RETRY_S)
+        _one_turn(sock)
+        assert _landed(tmp_path, proof) and other.exists(), "the retry did not run, or took the other work"
+        advance(dm.DEFAULT_DRAIN_INTERVAL - dm.SPOOLED_PROOF_RETRY_S)
+        _one_turn(sock)
+        assert not other.exists(), "the interval drain did not run one interval after the startup drain"
+
+
+def test_a_spooled_proof_is_not_tried_again_once_a_controlled_drain_has_begun(tmp_path, monkeypatch):
+    """#2460. A cutover's controlled drain (drain_pending) reports what each
+    queue still holds, and the cutover decides on that report, so from then on
+    the serve loop takes nothing by itself. That includes the retry of a proof
+    spooled before the drain began: run, it would ingest an entry the report
+    says remains."""
+    from claudlobby.plane import daemon as dm
+    _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
+    advance = _move_the_daemon_clock(monkeypatch)
+    initialize_plane(tmp_path)
+    # A controlled drain binds a sealed release. As in the test below, only the
+    # observation of the release is substituted; the drain and ingest are real.
+    identity = dm._serving_identity(tmp_path)
+    identity.update(release_id="r-" + "a" * 64, seal_sha256="b" * 64)
+    monkeypatch.setattr(dm, "_serving_identity", lambda _: identity)
+    proof = "msg_" + "7" * 32
+    with _serving(tmp_path) as sock:
+        entry = Path(send_batch(sock, [_received(proof)])["results"][0]["detail"])
+        report = dm.drain_daemon(sock, expected=dm.probe_daemon_info(sock), approved={"spool": {}, "staged": {}})
+        assert report["ok"] and report["retained"]["spool"] == [entry.name], report
+        advance(dm.SPOOLED_PROOF_RETRY_S)
+        _one_turn(sock)
+        assert (_attempts(entry), _landed(tmp_path, proof)) == (0, 0), "the retry ran after the controlled drain"
 
 
 def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_evidence(tmp_path, monkeypatch):
