@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a harness check reads a Plane row only once the daemon has replayed it (#2274)
+
+The validation harness read the Plane once, right after the code under test
+had run. An emit is staged instead of committed when its send misses the
+socket's deadline, and for the 60 s cooldown after such a miss, and the root's
+daemon replays the staged queue about once a second. A read inside that window
+found no row: the check failed although the code under test had worked, and a
+check expecting absence passed on a row still to come. On slower hosts the
+failing checks changed from run to run, and on #2458's CI run six checks
+failed this way.
+
+Every read of a root's fleet events now first waits until its daemon has
+replayed each batch staged under that root before the read (`val_replayed`).
+So do a fleet's first receipt (`val_plane_ready`) and each fleet-pulse sweep of
+the escalation and stop scenarios, which read rows written before them. The
+wait ends when the last of those batches leaves the stage, usually within a
+second, and gives up once nothing has left the stage for 70 s, the longest the
+daemon's serial loop can go without replaying. A read is refused, naming the
+first entry, when a batch was given up on, when the daemon holds a row for
+later (a spooled batch until its next drain, a stage whose writer died before
+finishing it for an hour), or when a queue cannot be listed; later reads of
+that root refuse at once. The harness's dispatch and report seeds now require
+a committed write, and one that is not committed refuses its scenario. Reads
+through `val_sql` do not wait: the harness's own Plane checks read a stage held
+on purpose. The test that runs the harness's setup slice waits the same way
+before its daemon stops, since a batch staged then was never replayed.
+
 ### Fixed — `config diff` tells paths a plan records again from changed ones, and says why every bot restarts (#2449)
 
 `config diff PLAN_ID` hashed each path's state before and after in two
