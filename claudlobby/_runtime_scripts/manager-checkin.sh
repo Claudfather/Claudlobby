@@ -70,15 +70,24 @@ ck_skip() {   # <bot_dir> <bot_id> <reason> <log note>
 # paid /checkin. Bounded like the message receipt's queue read; over the bound
 # is unknown, never clear.
 ck_trigger_pending() {
-    local q f n=0
+    local q f n=0 spool="$ROOT/state/plane/spool"
     CK_HOLD=""
-    for q in "$ROOT/state/plane/staged" "$ROOT/state/plane/spool"; do
+    for q in "$ROOT/state/plane/staged" "$spool"; do
         [ -e "$q" ] || continue
         if ! { [ -d "$q" ] && [ -r "$q" ] && [ -x "$q" ]; }; then
             CK_HOLD=queue_unreadable; return 0
         fi
-        for f in "$q"/*; do
+        # Dot names too, which * passes over, as the receipt check reads them
+        # (queue_paths.py). In the staged queue one is a stage the socket client
+        # did not finish, which the daemon replays once it is an hour old:
+        # pending, like any entry. One still being written is read the same way:
+        # it is never this manager's, as a beat waits for its own emit or kills
+        # it before it exits, and the timer runs one beat at a time. In the
+        # spool one is a temp its writer never renamed into an entry, which
+        # nothing replays: a trigger in it would hold the beat for good.
+        for f in "$q"/* "$q"/.[!.]* "$q"/..?*; do
             [ -f "$f" ] || continue
+            case "$f" in "$spool"/.*) continue ;; esac
             n=$((n + 1))
             if [ "$n" -gt 256 ]; then
                 CK_HOLD=queue_deep; return 0

@@ -32,6 +32,27 @@ Follow-ups from the review of #2430's fix (`claudlobby/plane/queue_names.py`,
   for the interval. Once, because a drain counts an attempt against each entry
   it cannot ingest and quarantines it at five.
 
+### Fixed — the check-in beat sees a trigger in a stage the socket client did not finish (#2448)
+
+Before the check-in beat sends a manager `/checkin`, it scans the Plane's
+staged and spool queues for that manager's last trigger, because the rate
+limit's committed read cannot see one still waiting for ingest. The scan
+listed each queue with `*`, which passes over a name that starts with a dot.
+A stager reaped in its fsync (the beat waits 10 s for its emit) leaves its
+batch under such a name, `.<time_ns>-<lead event><tag>.batch.<pid>.tmp`, and
+the daemon replays it only once it is an hour old. Until then a trigger in it
+was in neither place the beat read, so the next beat, 15 minutes later, could
+send a second paid `/checkin` inside the 45-minute gap.
+
+The scan now reads those stages like any other entry: one that names the
+trigger holds the beat, and one it cannot read holds it as
+`queue_unreadable`. A stage still being written is read the same way, since
+it is never this manager's: a beat waits for its own emit or kills it before
+it exits. The spool's own temps stay unread; nothing replays or removes one,
+so a trigger left in one would hold that manager's beat for good. A trigger
+held in a stage now delays that manager's next check-in until the daemon
+replays it, an hour or more after the last one instead of 45 minutes.
+
 ### Fixed — a check-in beat held for a deep or unreadable Plane queue now says why (#2445)
 
 Before the check-in beat sends a manager `/checkin`, it scans the Plane's
