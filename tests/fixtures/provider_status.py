@@ -1,18 +1,20 @@
 """Provider status pages for the creds-check tests (#2424).
 
-The pages in ``provider-status/`` were captured live on 2026-10-21, during
-Railway's outage: ``status.railway.com/api/status`` and GitHub's
-``githubstatus.com/api/v2/summary.json``. Each keeps the captured shape field
-for field; ids, slugs and codes are replaced, update text is neutral and long
-histories are cut to a few elements. Per page:
+``provider-status/`` holds pages in the shape of the two that creds-check
+reads, ``status.railway.com/api/status`` and GitHub's
+``githubstatus.com/api/v2/summary.json``, as captured live on 2026-10-21. Each
+holds one state of a provider's API, for testing how a rejected token reads in
+that state:
 
-- ``railway-api-incident``: the open incident as captured, the API among its
-  components (PARTIAL_OUTAGE).
-- ``railway-builds-incident``: an open incident on builds only.
-- ``railway-operational``: no open incident.
-- ``github-operational``: the captured summary, every component operational.
-- ``github-api-incident``: the same with "API Requests" in partial_outage and
-  an open incident on it, in the shape of the captured incident history.
+- ``railway-api-incident``: an open incident whose components include the API
+  (PARTIAL_OUTAGE), so a rejection reads ``unknown``.
+- ``railway-builds-incident``: an open incident on builds only, so a rejection
+  still reads ``fail``.
+- ``railway-operational``: no open incident, so a rejection reads ``fail``.
+- ``github-operational``: every component operational and no incident, so a
+  rejection reads ``fail``.
+- ``github-api-incident``: "API Requests" in partial_outage and an open
+  incident listing it, so a rejection reads ``unknown``.
 """
 
 import shutil

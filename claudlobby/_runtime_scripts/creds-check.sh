@@ -400,8 +400,10 @@ probe_outcome() {
 # activeIncidents list the components each affects with an impact for each;
 # the probes' GraphQL endpoint is the component "API — backboard.railway.com".
 # githubstatus.com is a standard status page whose "API Requests" component
-# carries its live status. Telegram publishes none (status.telegram.org
-# redirects to its API documentation), so a Telegram rejection is a verdict.
+# carries its live status; only a status word that means degraded counts, so a
+# missing or unfamiliar one is no evidence. Telegram publishes none
+# (status.telegram.org redirects to its API documentation), so a Telegram
+# rejection is a verdict.
 provider_incident() {
     local cache="$_LC_TMPDIR/incident.$1" url rule code
     if [ ! -e "$cache" ]; then
@@ -415,7 +417,9 @@ provider_incident() {
                        | .title] | first' ;;
             github)
                 url='https://www.githubstatus.com/api/v2/summary.json'
-                rule='if any(.components[]; .name == "API Requests" and .status != "operational")
+                rule='if any(.components[]; .name == "API Requests"
+                                           and (.status | IN("degraded_performance", "partial_outage",
+                                                             "major_outage", "under_maintenance")))
                       then ([.incidents[] | select(any(.components[]; .name == "API Requests")) | .name]
                             | first) // "API Requests degraded"
                       else null end' ;;

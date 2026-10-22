@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from tests.fixtures.provider_status import serve_status
+from tests.fixtures.provider_status import PAGES, serve_status
 from tests.test_creds_check_github_app import APP
 from tests.test_creds_check_github_app import _fleet as _app_fleet
 from tests.test_creds_check_github_app import _run as _app_run
@@ -63,10 +63,10 @@ def _posts_about(f: dict, key: str) -> list[str]:
     return [line for line in _posts(f).splitlines() if key in line]
 
 
-def _github_pat(tmp_path, token: str, page: str | None) -> dict:
+def _github_pat(tmp_path, token: str, page: str | None, *, body: str | None = None) -> dict:
     f = _controlled(tmp_path, railway_fails=False, roster=_one_bot())
     f["env"]["GITHUB_PAT"] = token
-    serve_status(f["bindir"], "github", page)
+    serve_status(f["bindir"], "github", page, body=body)
     return _run(f)["github_pat"]
 
 
@@ -125,6 +125,17 @@ class TestAGitHubRejection:
         row = _github_pat(tmp_path, "ghp-token-is-rejected", "github-operational")
         assert row["status"] == "fail"
         assert "HTTP 401 on /user" in row["detail"]
+
+    @pytest.mark.parametrize("word", ["normal", None])
+    def test_an_api_status_word_it_does_not_know_does_not_hide_it(self, tmp_path, word):
+        summary = json.loads((PAGES / "github-operational.json").read_text())
+        api = next(c for c in summary["components"] if c["name"] == "API Requests")
+        if word is None:
+            del api["status"]
+        else:
+            api["status"] = word
+        row = _github_pat(tmp_path, "ghp-token-is-rejected", None, body=json.dumps(summary))
+        assert row["status"] == "fail"
 
     def test_a_failed_app_mint_during_an_api_incident_reads_unknown(self, tmp_path):
         f = _app_fleet(tmp_path, app_env=APP, mint="fail")
