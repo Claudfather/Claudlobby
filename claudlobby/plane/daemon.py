@@ -605,7 +605,8 @@ class PlaneDaemon:
             try:
                 require_current_schema(conn)
                 host = ensure_host_uid(self.root / "state")
-                report = drain(self.root, conn, host, approved=approved)
+                report = drain(self.root, conn, host,
+                               **({"approved": approved} if approved is not None else {}))
             finally:
                 conn.close()
         except DowngradeError as exc:
