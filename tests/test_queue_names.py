@@ -42,9 +42,23 @@ def tool_call(number=0):
                                source="vitals", data={"event": "PreToolUse", "tool": "Bash", "n": number})
 
 
-def nested(*events):
-    """A system event whose data carries copies of others, as a door may record."""
-    return {**tool_call(), "payload": {"event": "copied", "data": {"events": list(events)}}}
+def nested(*events, kind=list):
+    """A system event whose data carries copies of others, as a door may record:
+    in a list, or in a tuple, which json writes as a list."""
+    return {**tool_call(), "payload": {"event": "copied", "data": {"events": kind(events)}}}
+
+
+#: Levels of object and array, 500 containers: past the depth the name walk
+#: reaches (about 340), within what json reads (about 990).
+PAST_THE_WALK = 250
+
+
+def deep(event, levels=PAST_THE_WALK):
+    """A system event carrying a copy of event nested `levels` objects and
+    arrays deep. No door builds one today (#2446)."""
+    for _ in range(levels):
+        event = {"data": [event]}
+    return {**tool_call(), "payload": {"event": "copied", "data": event}}
 
 
 @pytest.mark.parametrize("events, tag", [
@@ -58,8 +72,12 @@ def nested(*events):
     ([{"event_type": "transmission", "payload": "not an object"}], ""),
     ([nested(transmission(message(3)))], tag_for(3)),
     ([nested(transmission(message(3))), transmission(message(1))], ""),
+    ([nested(transmission(message(3)), kind=tuple)], tag_for(3)),
+    ([deep(transmission(message(3)))], ""),
+    ([deep(tool_call())], ""),
 ], ids=["empty", "no-transmission", "one-message", "one-message-twice", "two-messages",
-        "short-id", "no-id", "no-payload", "nested", "nested-and-another"])
+        "short-id", "no-id", "no-payload", "nested", "nested-and-another", "nested-in-a-tuple",
+        "past-the-walk", "other-work-past-the-walk"])
 def test_a_tag_says_which_message_a_batchs_transmissions_name(events, tag):
     assert names.name_tag(events) == tag
 
@@ -94,9 +112,10 @@ def test_only_a_whole_tagged_name_sets_an_entry_aside(name, for_message_1, for_a
 
 def test_no_name_sets_aside_an_entry_the_receipt_checks_own_match_finds():
     """The property both readers rely on, over 2000 seeded batches of tool
-    calls, transmissions of three messages and nested copies: wherever the
-    receipt check's own match (_queued_proof) finds a message's proof in a file
-    as each writer lays it out, that file's name leaves room for it."""
+    calls, transmissions of three messages and nested copies, in lists and in
+    tuples: wherever the receipt check's own match (_queued_proof) finds a
+    message's proof in a file as each writer lays it out, that file's name
+    leaves room for it."""
     rng = random.Random(0)
 
     def event():
@@ -104,7 +123,7 @@ def test_no_name_sets_aside_an_entry_the_receipt_checks_own_match_finds():
         if roll < 0.5:
             return tool_call(rng.randrange(9))
         proof = transmission(message(rng.randrange(1, 4)), rng.choice(["received", "pane_submitted"]))
-        return proof if roll < 0.9 else nested(proof)
+        return proof if roll < 0.9 else nested(proof, kind=rng.choice((list, tuple)))
 
     found = 0
     for _ in range(2000):
@@ -139,6 +158,22 @@ def test_both_writers_name_their_batches_by_the_messages_named(tmp_path):
     proof = spool_write(tmp_path, client["_finalize"]([transmission(message(2))]), "database is locked").name
     assert re.fullmatch(r"ev_[0-9a-f]{32}\.np\.json", other), other
     assert re.fullmatch(rf"ev_[0-9a-f]{{32}}{re.escape(tag_for(2))}\.json", proof), proof
+
+
+def test_a_batch_nested_past_the_walk_is_written_under_a_name_that_says_nothing(tmp_path):
+    """#2446. json reads about 990 levels of nesting, and the name walk gave out
+    near 340 with a RecursionError that neither writer caught: the socket
+    client's stage failed, and so did a spool write after a database error, so
+    the batch was recorded nowhere. A name that cannot say, says nothing: the
+    batch is written untagged, and every reader reads it."""
+    client = runpy.run_path(str(CLIENT))
+    staged = tmp_path / "state/plane/staged"
+    events = [deep(transmission(message(1)))]
+    assert client["_stage_pending"](str(staged), client["_finalize"](events), "test") == 7
+    [name] = [path.name for path in staged.iterdir()]
+    assert re.fullmatch(r"\d+-ev_[0-9a-f]{32}\.batch", name), name
+    spooled = spool_write(tmp_path, client["_finalize"](events), "database is locked").name
+    assert re.fullmatch(r"ev_[0-9a-f]{32}\.json", spooled), spooled
 
 
 def test_the_spool_door_reads_an_entry_under_its_tagged_name(tmp_path, monkeypatch):

@@ -435,6 +435,44 @@ def test_another_bots_stage_cut_short_is_no_torn_entry_for_this_message(estate, 
                            " or one cut short); receipt absence is unproven")
 
 
+def test_a_proof_nested_past_the_walk_leaves_absence_unproven(estate, monkeypatch):
+    """#2446. A batch nested past the depth the writers' name walk reaches is
+    written untagged, as an older writer's is, so the receipt check reads it.
+    Its own match walks the same way and gave out at the same depth, so the
+    check raised a RecursionError. An entry it cannot read leaves absence
+    unproven, and the check names the entry."""
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "received", number=2)  # destination history exists
+    copy = received_event()
+    for _ in range(250):  # 500 containers: within what json reads, about 990
+        copy = {"data": [copy]}
+    staged = ctx.root / "state/plane/staged"
+    staged.mkdir(parents=True)
+    name = f"{time.time_ns()}-ev_{'d' * 32}.batch"
+    stage(staged, name, [{**tool_call(1), "payload": {"event": "copied", "data": copy}}], time.time())
+    with ingest_daemon(monkeypatch):
+        deep = q.receipt(ctx, ident, wait=0)
+    assert (deep.receipt_observation, deep.exit_code, deep.code) == ("unavailable", 6, "unavailable")
+    assert deep.reason == (f"queued Plane entry {name} is nested deeper than a receipt check reads;"
+                           " receipt absence is unproven")
+
+
+def test_a_spooled_proof_a_door_held_in_a_tuple_is_found(estate):
+    """#2446. json writes a tuple as a list, so the receipt check's match finds
+    a proof a door held in a tuple, but the name walk passed tuples by: the
+    batch was named for no transmission and the check set its entry aside.
+    That is the fail-open side: an "absent" the retry gate reads as licence
+    for another send."""
+    from claudlobby.plane.spool import spool_write
+    ctx, conn = estate
+    ident = communication(conn)
+    copied = {**tool_call(1), "event_id": "ev_" + "c" * 32,
+              "payload": {"event": "copied", "data": {"events": (received_event(),)}}}
+    spool_write(ctx.root, [copied], "database is locked")
+    assert q.pending_transmission_proof(ctx.root, ident) == "pending"
+
+
 def test_a_listening_daemon_slower_than_the_probe_leaves_absence_unproven_not_ingest_down(
         estate, monkeypatch):
     """#2086, path 2, below the bound. Under #1693's load the daemon answered in
