@@ -15,8 +15,8 @@ message its transmissions name:
 A temp stage (`.<name>.<pid>.tmp`) and a spool entry a drain has claimed
 (`<name>.inflight.<pid>.<hex>`) carry the name they were written for. A name
 with no tag says nothing: an older writer's, a batch whose transmissions name
-several messages, or one that names a message in some other form. Readers read
-it, as they always have.
+several messages, one that names a message in some other form, or one nested
+deeper than the walk reaches (#2446). Readers read it, as they always have.
 
 Stdlib only: the socket client imports this inside its `python3 -S -E` process,
 beside capture_policy.
@@ -43,9 +43,15 @@ def name_tag(events) -> str:
     none is a transmission, ".m<hex>" when every transmission names msg_<hex>,
     and "" when the name cannot say. It walks every nested object, as the
     receipt check's own match does, so a tag never sets aside an entry that
-    match would find."""
+    match would find: a tuple as the list json writes it as, and a batch
+    nested past the walk's reach (json reads about 990 levels, the walk about
+    340) gets no tag (#2446)."""
     named: set = set()
-    if not _named(events, named) or len(named) > 1:
+    try:
+        whole = _named(events, named)
+    except RecursionError:
+        return ""
+    if not whole or len(named) > 1:
         return ""
     return ".m" + named.pop() if named else ".np"
 
@@ -53,7 +59,7 @@ def name_tag(events) -> str:
 def _named(value, named: set) -> bool:
     """Add the message every transmission in value names; False when one names
     none in canonical form."""
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return all(_named(item, named) for item in value)
     if not isinstance(value, dict):
         return True

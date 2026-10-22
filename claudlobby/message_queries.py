@@ -217,7 +217,8 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     claims, replays or deletes a file. Scan these before the committed read,
     because ingest moves proof from queue to database, never the reverse. An
     unreadable, non-regular, torn or over-bound queue entry is unavailable,
-    never absent. A root using the staged handshake also needs a live ingest
+    never absent, and so is one nested past what the match's walk reaches
+    (#2446). A root using the staged handshake also needs a live ingest
     daemon: a dead one may hold unstaged proof, so absence is then unproven.
 
     An entry whose name says it holds no transmission of this message (its
@@ -261,11 +262,16 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
                                               f" {_PENDING_BYTES} bytes a receipt check reads")
         try:
             value = json.loads(data)
+            found = needle in data and _queued_proof(value, message_id)
         except ValueError:
             # A torn entry cannot establish irrelevance.
             return QueuedProof("unavailable", f"queued Plane entry {path.name} is not a whole batch"
                                               " (a write in progress, or one cut short)")
-        if needle in data and _queued_proof(value, message_id):
+        except RecursionError:
+            # Nor can one nested past the walk's reach.
+            return QueuedProof("unavailable", f"queued Plane entry {path.name} is nested deeper"
+                                              " than a receipt check reads")
+        if found:
             return QueuedProof("pending")
     if probe.state != SOURCE_ABSENT:
         from .plane.daemon import probe_daemon_state, socket_path

@@ -20,6 +20,7 @@ import tempfile
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1259,40 +1260,145 @@ def _client_stage(staged: Path, *events: dict) -> None:
                                     "socket transport: timeout") == 7
 
 
+def _tool_call(n: int) -> dict:
+    """A bot's tool call, the bulk of what the hooks stage under load."""
+    from claudlobby.plane.fleet_events import fleet_event_request
+    return fleet_event_request(
+        "tool_call", fleet="example-fleet", subject_kind="actor", subject="bot:example-fleet/alpha",
+        source="vitals", data={"event": "PreToolUse", "tool": "Bash", "n": n})
+
+
+def _received(msg_id: str) -> dict:
+    """The receiver hook's proof of a message, as the socket client sends it."""
+    return {"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example-fleet",
+            "payload": {"msg_id": msg_id, "attempt_no": 1, "carrier": "tmux", "destination": "alpha",
+                        "state": "received", "received_bytes": 12, "received_sha256": "sha256:" + "a" * 64}}
+
+
+def _landed(root: Path, msg_id: str) -> int:
+    conn = connect(db_path(root))
+    try:
+        return conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'transmission' AND msg_id = ?",
+                            (msg_id,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
 def test_replay_takes_a_staged_transmission_before_the_work_staged_ahead_of_it(tmp_path):
     """#2430. Under load nearly every hook emit stages, and replay took the queue
     oldest first, so a receiver's proof waited behind every tool call staged
     before it, and its receipt read "unavailable" until replay got there.
     Batches that hold a transmission now go first, oldest first among them, and
-    the rest follow in their order."""
-    from claudlobby.plane.fleet_events import fleet_event_request
-
+    the rest follow in their order. Two proofs, so a replay that took the newer
+    one first fails here too (#2446)."""
     initialize_plane(tmp_path)
     staged = tmp_path / "state" / "plane" / "staged"
     for n in range(5):
-        _client_stage(staged, fleet_event_request(
-            "tool_call", fleet="example-fleet", subject_kind="actor", subject="bot:example-fleet/alpha",
-            source="vitals", data={"event": "PreToolUse", "tool": "Bash", "n": n}))
-    others = sorted(p.name for p in staged.glob("*.batch"))
-    proof = "msg_" + "7" * 32
-    _client_stage(staged, {"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example-fleet",
-                           "payload": {"msg_id": proof, "attempt_no": 1, "carrier": "tmux",
-                                       "destination": "alpha", "state": "received", "received_bytes": 12,
-                                       "received_sha256": "sha256:" + "a" * 64}})
+        _client_stage(staged, _tool_call(n))
+    older, newer = "msg_" + "7" * 32, "msg_" + "8" * 32
+    _client_stage(staged, _received(older))
+    for n in range(5, 8):
+        _client_stage(staged, _tool_call(n))
+    _client_stage(staged, _received(newer))
+    others = sorted(p.name for p in staged.glob("*.np.batch"))
     daemon = PlaneDaemon(tmp_path)
     try:
-        tick = daemon._replay_staged(max_batches=1)
+        ticks, landed = [], []
+        for _ in range(3):
+            ticks.append(daemon._replay_staged(max_batches=1))
+            landed.append((_landed(tmp_path, older), _landed(tmp_path, newer)))
     finally:
         daemon.writer.close()
-    assert tick.limited and tick.committed == 1, tick
-    conn = connect(db_path(tmp_path))
+    assert all(tick.limited and tick.committed == 1 for tick in ticks), ticks
+    assert landed == [(1, 0), (1, 1), (1, 1)], "a proof waited behind work staged before it, or the newer went first"
+    assert sorted(p.name for p in staged.glob("*.batch")) == others[1:], "the rest went out of order"
+
+
+# --- #2446: a proof the daemon spooled is tried again soon ----------------------
+
+class _Full(sqlite3.OperationalError):
+    sqlite_errorcode = 13                # SQLITE_FULL: retryable, so emit_batch spools
+
+
+def _full(conn, items, **kwargs):
+    raise _Full("synthetic full condition")
+
+
+def _fill_the_disk_for_batches(monkeypatch):
+    """Every batch the daemon ingests through emit_batch fails as on a full
+    disk, and spools, except the daemon's own lifecycle receipts."""
+    from claudlobby.plane import emit_api
+    real = emit_api.ingest_many
+
+    def ingest(conn, items, **kwargs):
+        if all(request.emitter == "plane-daemon" for request, _ in items):
+            return real(conn, items, **kwargs)
+        return _full(conn, items, **kwargs)
+    monkeypatch.setattr(emit_api, "ingest_many", ingest)
+
+
+@contextmanager
+def _serving(root: Path):
+    """A live daemon on a short socket, with no interval drain in a test's time."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    daemon = PlaneDaemon(root, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
+    t.start()
     try:
-        landed = conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'transmission' AND msg_id = ?",
-                              (proof,)).fetchone()[0]
+        _until(sock.exists)
+        yield sock
     finally:
-        conn.close()
-    assert landed == 1, "the proof waited behind the work staged before it"
-    assert sorted(p.name for p in staged.glob("*.batch")) == others
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+    assert not t.is_alive(), "daemon did not stop"
+
+
+def _attempts(entry: Path):
+    """A spool entry's attempt count; None while a drain has it claimed."""
+    try:
+        return json.loads(entry.read_text())["attempts"]
+    except FileNotFoundError:
+        return None
+
+
+def test_a_proof_the_daemon_spooled_after_a_database_error_is_tried_again_soon(tmp_path, monkeypatch):
+    """#2446. A batch spooled after a database error waited for the interval
+    drain, up to 10 minutes, and a receiver's proof in it held its message's
+    receipt "pending" all that time: its name is tagged, so the check finds it.
+    A batch that may hold a transmission is now tried again
+    SPOOLED_PROOF_RETRY_S after the daemon spooled it, whether it came in a
+    live request or from staged replay."""
+    from claudlobby.plane import daemon as dm
+    _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
+    monkeypatch.setattr(dm, "SPOOLED_PROOF_RETRY_S", 1.0, raising=False)
+    initialize_plane(tmp_path)
+    staged_proof, live_proof = "msg_" + "7" * 32, "msg_" + "8" * 32
+    _client_stage(tmp_path / "state" / "plane" / "staged", _received(staged_proof))
+    with _serving(tmp_path) as sock:
+        reply = send_batch(sock, [_received(live_proof)])["results"][0]
+        assert reply["status"] == "spooled", reply
+        _until(lambda: _landed(tmp_path, staged_proof) and _landed(tmp_path, live_proof))
+    assert not list(spool_dir(tmp_path).glob("*.json"))
+
+
+def test_a_spooled_proof_is_tried_again_once_and_other_work_waits_for_the_interval(tmp_path, monkeypatch):
+    """#2446. The retry must not spend the spool's attempts: a drain counts one
+    against each entry it cannot ingest, and at five it quarantines the entry,
+    where nothing replays it. So a batch that may hold a transmission is tried
+    again once, and other work waits for the interval drain, as before."""
+    from claudlobby.plane import daemon as dm, spool
+    _fill_the_disk_for_batches(monkeypatch)
+    monkeypatch.setattr(spool, "ingest_many", _full)  # and the disk stays full
+    monkeypatch.setattr(dm, "SPOOLED_PROOF_RETRY_S", 1.0, raising=False)
+    initialize_plane(tmp_path)
+    with _serving(tmp_path) as sock:
+        proof = Path(send_batch(sock, [_received("msg_" + "7" * 32)])["results"][0]["detail"])
+        other = Path(send_batch(sock, [_tool_call(1)])["results"][0]["detail"])
+        _until(lambda: _attempts(proof) == 1)
+        time.sleep(3.0)  # three retry periods more
+        assert (_attempts(proof), _attempts(other)) == (1, 0)
 
 
 def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_evidence(tmp_path, monkeypatch):

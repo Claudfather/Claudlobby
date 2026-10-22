@@ -8,10 +8,10 @@ daemon", that want is the tripwire firing.
 Transport can never change semantics: every request runs the SAME
 emit_batch() the CLI runs — capture policy, raw-then-transformed validation,
 spool-on-retryable, the full failure taxonomy. The daemon adds only (a) the
-socket, (b) periodic spool drains, (c) its own lifecycle as kind=system
-events. emit_batch opens/closes the db per batch (~1-2ms on WAL) — kept
-rather than optimized away, because reusing the one write path IS the
-correctness argument.
+socket, (b) spool drains, periodic and one retry of each proof it spooled,
+(c) its own lifecycle as kind=system events. emit_batch opens/closes the db
+per batch (~1-2ms on WAL) — kept rather than optimized away, because reusing
+the one write path IS the correctness argument.
 
 Protocol (one request per connection, newline-delimited JSON):
   client sends:  {"events": [<EmitRequest>, ...]}\n
@@ -106,6 +106,13 @@ DEFAULT_DRAIN_INTERVAL = 600.0
 # the next one at once, after at most one accept poll.
 STAGED_REPLAY_TICK_BATCHES = 200
 STAGED_REPLAY_TICK_S = 0.5
+# A batch that may hold a transmission is tried again this long after this
+# daemon spooled it on a database error, once (#2446). Only the interval drain
+# read the spool, every 10 minutes, and a receiver's proof in it held its
+# message's receipt "pending" all that while. 30 s is this loop's own pause
+# after a failed replay. Once, because a drain counts an attempt against each
+# entry it cannot ingest, and at MAX_ATTEMPTS quarantines it.
+SPOOLED_PROOF_RETRY_S = 30.0
 
 
 @dataclass
@@ -444,6 +451,9 @@ class PlaneDaemon:
         self._downgrading = False
         self._serving = _serving_identity(self.root)
         self._controlled_drain = False
+        # Spooled batches that may hold a transmission: name -> (the sha256 of
+        # the entry as written, when its one retry is due) (#2446).
+        self._spooled_proofs: dict[str, tuple[str, float]] = {}
 
     def serving_info(self) -> dict:
         result = {**json.loads(json.dumps(self._serving)), "sql_schema": None, "schema_state": "unavailable"}
@@ -582,18 +592,21 @@ class PlaneDaemon:
             # drain had disclosed the very same fault and carried on.
             print(f"plane-daemon: optimize skipped: {exc}", file=sys.stderr)
 
-    def _drain_spool(self, *, reason: str) -> None:
+    def _drain_spool(self, *, reason: str, approved: dict[str, str] | None = None) -> None:
         # Deadline advances at ATTEMPT, not success: stamping only on success
         # made a broken db retry once per accept-timeout tick (~1s) forever,
-        # ignoring the configured interval.
-        self._last_drain = time.monotonic()
+        # ignoring the configured interval. A drain of named entries
+        # (`approved`) is not the interval's, and leaves its deadline alone.
+        if approved is None:
+            self._last_drain = time.monotonic()
         try:
             preflight_schema(self.root)
             conn = connect(db_file(self.root))
             try:
                 require_current_schema(conn)
                 host = ensure_host_uid(self.root / "state")
-                report = drain(self.root, conn, host)
+                report = drain(self.root, conn, host,
+                               **({"approved": approved} if approved is not None else {}))
             finally:
                 conn.close()
         except DowngradeError as exc:
@@ -614,6 +627,31 @@ class PlaneDaemon:
                 "quarantined": report.quarantined,
                 "remaining": report.remaining,
             })
+
+    def _note_spooled(self, outcomes) -> None:
+        """Mark each batch emit_batch spooled that may hold a transmission for
+        one retry SPOOLED_PROOF_RETRY_S from now (#2446), by its name and the
+        sha256 of the entry as written. An attempt rewrites the entry, so the
+        retry passes over one an interval drain has tried since. Other work
+        waits for the interval drain."""
+        due = time.monotonic() + SPOOLED_PROOF_RETRY_S
+        for detail in {o.detail for o in outcomes if o.status == "spooled" and o.detail}:
+            entry = Path(detail)
+            if not may_hold_any_transmission(entry.name):
+                continue
+            try:
+                self._spooled_proofs[entry.name] = (hashlib.sha256(entry.read_bytes()).hexdigest(), due)
+            except OSError:
+                pass        # drained or claimed since: the interval drain reads what is left
+
+    def _retry_spooled_proofs(self) -> None:
+        """The one retry of each spooled batch noted above whose time is due."""
+        now = time.monotonic()
+        due = {name: digest for name, (digest, at) in self._spooled_proofs.items() if at <= now}
+        if due:
+            for name in due:
+                del self._spooled_proofs[name]
+            self._drain_spool(reason="spooled proof", approved=due)
 
     def _count_lost_stage(self, f: Path) -> bool:
         """Record an empty orphan stage as a lost emit, then remove it (#2164).
@@ -719,6 +757,7 @@ class PlaneDaemon:
                 return report
             if any(o.status == "spooled" for o in outcomes):
                 report.spooled += 1
+                self._note_spooled(outcomes)
             elif all(o.status == "duplicate" for o in outcomes):
                 report.duplicates += 1
             else:
@@ -813,6 +852,7 @@ class PlaneDaemon:
                 for o in outcomes
             ],
         })
+        self._note_spooled(outcomes)
         return True
 
     @staticmethod
@@ -958,6 +998,8 @@ class PlaneDaemon:
                 if not self._controlled_drain and time.monotonic() - self._last_drain >= self.drain_interval:
                     self._drain_spool(reason="interval")
                     self._optimize()
+                if not self._controlled_drain and self._spooled_proofs:
+                    self._retry_spooled_proofs()
                 if not self._controlled_drain and time.monotonic() >= self._next_replay:
                     tick = self._replay_staged(
                         max_batches=STAGED_REPLAY_TICK_BATCHES,
