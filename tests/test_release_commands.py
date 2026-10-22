@@ -3,6 +3,7 @@
 import builtins
 import json
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -220,8 +221,9 @@ def test_config_diff_names_re_records_and_mode_changes_apart_from_content_change
 
     assert main(["--root", str(case.root), "config", "diff", plan.plan_id]) == 0
     lines = capsys.readouterr().out.splitlines()
-    named = {line.split(" ", 1)[1].rsplit(": ", 1)[0]: line.split(" ", 1)[0]
-             for line in lines if line.split(" ", 1)[0] in ("content", "mode")}
+    # Every path line, whatever its label, so a listed unchanged path fails too.
+    named = {match[2]: match[1] for match in (re.fullmatch(r"(\S+) (/.+): \S+ -> \S+", line)
+                                              for line in lines) if match}
     assert named == {str(path): want for path, want in expected.items() if want != "unchanged"}
     assert f"unchanged {len(expected) - content - 1}" in lines[0]
     assert any("primary/primary-worker" in line and "primary/primary-manager" not in line
