@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a harness check reads a staged Plane row only after its daemon replays it (#2274)
+
+The validation harness read the Plane once, right after the code under test
+had run. An emit is staged instead of committed when its send misses the
+socket's deadline, and for the 60 s cooldown after such a miss, and the root's
+daemon replays the staged queue about once a second. A read inside that window
+found no row: the check failed although the code under test had worked, and a
+check expecting absence passed on a row still to come. On slower hosts the
+failing checks changed from run to run, and on #2458's CI run six checks
+failed this way.
+
+Every read of a root's fleet events now first waits until its daemon has
+replayed each batch staged under that root before the read (`val_replayed`).
+So do the two places where the harness seeds a row for the code under test to
+read: a fleet's first receipt (`val_plane_ready`) and the escalation scenario's
+`rc_timeout` rows. The wait ends when the last of those batches leaves the
+stage, usually within a second. It gives up once nothing has left the stage
+for 70 s, the longest the daemon's serial loop can go without replaying, and
+refuses the read, naming the first batch; a later read of that root refuses at
+once instead of waiting again. Reads through `val_sql` do not wait: the
+harness's own Plane checks read a stage held on purpose.
+
 ### Fixed — `config diff` tells paths a plan records again from changed ones, and says why every bot restarts (#2449)
 
 `config diff PLAN_ID` hashed each path's state before and after in two
