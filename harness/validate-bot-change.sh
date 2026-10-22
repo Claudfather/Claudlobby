@@ -1878,11 +1878,20 @@ cp "$RB_DIR/bot.conf" "$RB_ROOT/bot.conf.pre2423"
 printf 'STARTUP_PROMPT=""\n' >> "$RB_DIR/bot.conf"
 
 _ch_boot() {  # <refused|registered|none> -> boots valrb once; prints the boot's fence token
-    local tok
+    local tok newest
     printf '%s\n' "$1" > "$_CH_BIN/decision"
     rm -f "$RB_DIR/logs/startup.log" "$RB_DIR/state/bot.pid"
     tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
     sleep 0.3
+    # The reader tells a previous session's log from this one's by whole
+    # seconds, so a boot started in the second the boot before it named its log
+    # reads that log as its own (#2450). A boot's checks take any log already on
+    # disk as a previous session's, so each boot starts only once the clock is
+    # past the second the newest one is named for.
+    newest="$(ls "$_CH_LOGDIR" 2>/dev/null | tail -n 1 || true)"
+    newest="${newest:0:19}"
+    newest="${newest//[!0-9]/}"
+    until [ "$(date -u +%Y%m%d%H%M%S)" -gt "${newest:-0}" ]; do sleep 0.1; done
     tok="$(bridge_fence_write "$RB_DIR")"
     TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=20 \
         CLAUDE_BIN="$_CH_BIN/claude" CLAUDE_CONFIG_DIR='' XDG_CACHE_HOME="$RB_HOME/.cache" \
