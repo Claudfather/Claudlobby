@@ -2188,6 +2188,10 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
+    # A worker's settings deny it the sudo family on this same role test
+    # (compose_settings_local), and a refused call says only that permission
+    # was denied, so a worker is told the commands and what to do instead.
+    privilege_runners = () if is_manager else PRIVILEGE_RUNNERS
 
     # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
     # than named here. This used to be a literal `append("shared-documentation")`
@@ -2272,6 +2276,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         projects_derived=fleet.projects_derived,
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
+        privilege_runners=privilege_runners,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
@@ -2850,12 +2855,17 @@ def _resolve_guardrail_permissions(
 BASE_TOOLS = ["Read", "Grep", "Glob"]
 
 
+#: The sudo family, which a worker may not run and its fleet manager may: a
+#: worker's settings deny each command (``WORKER_SUDO_DENY``), and its
+#: CLAUDE.md names them with what to do when the deny refuses one.
+PRIVILEGE_RUNNERS = ("sudo", "sudoedit", "su", "pkexec", "doas", "run0")
+
 #: The sudo family a worker's settings deny, each command by bare name and by
 #: absolute path. A guard rail, not a wall: the routes it cannot see are in
 #: ``documentation/decisions/permissions-model.md`` (Workers' privilege denies).
 WORKER_SUDO_DENY = tuple(
     f"Bash({prefix}{name} *)"
-    for name in ("sudo", "sudoedit", "su", "pkexec", "doas", "run0")
+    for name in PRIVILEGE_RUNNERS
     for prefix in ("", "/usr/bin/", "/bin/")
 )
 
