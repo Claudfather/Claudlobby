@@ -388,6 +388,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
 # The sudo family, spelled out here rather than read from the compositor, so a
 # wrong constant there cannot also be the expectation.
 _SUDO_FAMILY = frozenset({"sudo", "sudoedit", "su", "pkexec", "doas", "run0"})
+_SUDO_RULES = sorted(f"Bash({prefix}{name} *)" for name in _SUDO_FAMILY for prefix in ("", "/usr/bin/", "/bin/"))
 
 
 def _sudo_rules(rules: list[str]) -> list[str]:
@@ -407,7 +408,7 @@ class TestComposeSettingsLocal:
         (root / "runtime" / "bots").mkdir(parents=True)
         return Paths(root=root, fleet_dir=root, package=source_package())
 
-    def _make_fleet_with_bots(self, *bot_ids, manager):
+    def _make_fleet_with_bots(self, *bot_ids, manager, meta=None):
         bots = {}
         for bid in bot_ids:
             bots[bid] = BotConfig(
@@ -415,6 +416,7 @@ class TestComposeSettingsLocal:
                 name=bid,
                 expertise=["eng"],
                 telegram=TelegramConfig(handle=f"{bid}_bot"),
+                **(meta or {}).get(bid, {}),
             )
         return FleetConfig(
             manager=manager,
@@ -649,10 +651,7 @@ class TestComposeSettingsLocal:
         fleet = self._make_fleet_with_bots("lead", "worker", manager="lead")
         worker = compose_settings_local(fleet.bots["worker"], fleet, paths)
         lead = compose_settings_local(fleet.bots["lead"], fleet, paths)
-        expected = sorted(
-            f"Bash({prefix}{name} *)" for name in _SUDO_FAMILY for prefix in ("", "/usr/bin/", "/bin/")
-        )
-        assert sorted(_sudo_rules(worker["permissions"]["deny"])) == expected
+        assert sorted(_sudo_rules(worker["permissions"]["deny"])) == _SUDO_RULES
         assert _sudo_rules(lead["permissions"]["deny"]) == []
 
     def test_a_manager_alone_in_its_fleet_keeps_sudo(self, tmp_path):
@@ -668,28 +667,16 @@ class TestComposeSettingsLocal:
         manager that reports to another fleet keeps sudo, and a worker that
         names bots it manages is still denied."""
         paths = self._make_paths_with_runtime(tmp_path)
-
-        def bot(bid, **meta):
-            return BotConfig(
-                bot_id=bid, name=bid, expertise=["eng"], telegram=TelegramConfig(handle=f"{bid}_bot"), **meta
-            )
-
-        bots = {
-            "sub": bot("sub", reports_to="top", manages=["w1", "w2"]),
-            "w1": bot("w1", reports_to="sub"),
-            "w2": bot("w2", reports_to="sub", manages=["w1"]),
-        }
-        fleet = FleetConfig(manager="sub", name="test-fleet", service_prefix="com.test", bots=bots)
+        fleet = self._make_fleet_with_bots("sub", "w1", "w2", manager="sub", meta={
+            "sub": {"reports_to": "top", "manages": ["w1", "w2"]},
+            "w1": {"reports_to": "sub"},
+            "w2": {"reports_to": "sub", "manages": ["w1"]},
+        })
         deny = {
-            bot_id: _sudo_rules(compose_settings_local(b, fleet, paths)["permissions"]["deny"])
-            for bot_id, b in bots.items()
+            bot_id: sorted(_sudo_rules(compose_settings_local(bot, fleet, paths)["permissions"]["deny"]))
+            for bot_id, bot in fleet.bots.items()
         }
-        expected = sorted(
-            f"Bash({prefix}{name} *)" for name in _SUDO_FAMILY for prefix in ("", "/usr/bin/", "/bin/")
-        )
-        assert deny["sub"] == []
-        assert sorted(deny["w1"]) == expected
-        assert sorted(deny["w2"]) == expected
+        assert deny == {"sub": [], "w1": _SUDO_RULES, "w2": _SUDO_RULES}
 
     def test_no_composed_allow_names_a_sudo_family_command(self, tmp_path):
         """Nothing the library ships pre-approves a sudo-family command: a
