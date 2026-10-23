@@ -15,10 +15,11 @@ neither does a manager alone in its fleet, so a step that needs root goes
 through the manager. No composed allow names any of these commands.
 
 Claude Code checks permission rules against the command a hook hands back,
-so the heavy-slot hook now leaves a heavy command behind one of these runners
-(`sudo npm install -g …`) as typed, and counts it (`heavy_slot_unparsed`).
-With its wrapper in front, no rule saw the runner. On a bot with
-`heavy_slot: true`, a manager's root install now runs without the slot.
+so the heavy-slot hook no longer looks past `sudo` or `doas`: a heavy job one
+of them runs (`sudo npm install -g …`) is left as typed, and the slot's
+wrapper refuses to run one. With the wrapper in front, no rule saw the runner.
+On a bot with `heavy_slot: true`, a manager's root install now runs without
+the slot.
 
 The deny is a guard rail, not a wall. It refuses the command when a session
 runs it as a tool call: plainly, inside a compound command, a subshell or
