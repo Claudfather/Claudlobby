@@ -55,7 +55,7 @@ def _dispatch(root, n, *, expected_by, fleet=F, emitter="t"):
         {"event_type": "assignment", "emitter": emitter, "fleet": fleet,
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": f"bot:{fleet}/w1", "assigned_by": f"bot:{fleet}/mgr",
-                     "expected_by": expected_by.isoformat(),
+                     **({"expected_by": expected_by.isoformat()} if expected_by else {}),
                      "dispatch_msg_id": f"msg_{n:0>32}"}}])
     return wi, aid
 
@@ -399,6 +399,51 @@ def test_a_changed_deadline_is_honored(tmp_path):
     finally:
         conn.close()
     assert plan.rows == []
+
+
+def _deadline_fact(root, wi, aid, deadline, *, ingested_days_ago=9):
+    """A deadline_changed on the assignment (None = open-ended), its ingest
+    backdated so the quiet-horizon clause is not what decides."""
+    emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
+                       "payload": {"work_item_id": wi, "assignment_id": aid,
+                                   "event": "deadline_changed",
+                                   "deadline": deadline.isoformat() if deadline else None}}])
+    db = connect(db_path(root))
+    try:
+        db.execute("UPDATE events SET ingested_at=? WHERE event='deadline_changed'",
+                   ((NOW - timedelta(days=ingested_days_ago)).isoformat(),))
+    finally:
+        db.close()
+
+
+def test_an_open_ended_deadline_fact_is_never_expired(tmp_path):
+    """#2469: a deadline_changed with no deadline makes the assignment
+    open-ended. The sweep keeps it, rather than skipping the fact for the
+    original deadline ten days back."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    _deadline_fact(root, wi, aid, None)
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert plan.rows == []
+
+
+def test_a_deadline_fact_gives_an_open_ended_assignment_a_deadline(tmp_path):
+    """#2469: an assignment dispatched with no deadline and given one by a
+    deadline_changed is swept like any other once that deadline is past the
+    horizon."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=None)
+    _deadline_fact(root, wi, aid, NOW - timedelta(days=10))
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert [r["assignment_id"] for r in plan.rows] == [aid]
 
 
 def test_concurrent_sweeps_collapse_to_one_expired_row(tmp_path):

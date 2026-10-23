@@ -289,6 +289,46 @@ def test_overdue_leads_over_stale_task_on_a_row_that_is_both(tmp_path):
     assert r["stale_tier"] is None
 
 
+# --- a deadline fact (#2469) ------------------------------------------------------
+
+def _task_event(root: Path, asg: str, event: str, *, age_h: float, **fields) -> None:
+    stem = asg.removeprefix("asg_")
+    emit_batch(root, [{
+        "event_type": "task", "emitter": "t", "fleet": "f", "occurred_at": _ago(hours=age_h),
+        "payload": {"event": event, "work_item_id": "wi_" + stem, "assignment_id": asg,
+                    "actor": MGR, "by": MGR, **fields}}])
+
+
+def _move_deadline(root: Path, asg: str, deadline: str | None) -> None:
+    """The manager's `assignment reschedule`: a deadline_changed on the assignment."""
+    _task_event(root, asg, "deadline_changed", age_h=0.25, deadline=deadline,
+                reason="waits on the operator")
+
+
+def test_a_moved_deadline_takes_the_overdue_arm_off_and_the_block_still_leads(tmp_path):
+    # overdue 2h ago and blocked 1h ago; the manager moves the deadline a day
+    # out. Not overdue any more, and the worker's block still leads the card:
+    # a deadline fact is not the worker's word, so it neither ends the block
+    # nor lets stale_task re-derive a silent stall from it
+    asg = _dispatch(tmp_path, "d1", dispatch_age_h=8, heartbeat="IDLE",
+                    expected_by=_ago(hours=2), blocked_age_h=1)
+    assert _row(tmp_path, asg)["attention_reason"] == ["overdue", "blocked_waiting"]
+    _move_deadline(tmp_path, asg, (NOW + timedelta(days=1)).isoformat())
+    assert _row(tmp_path, asg)["attention_reason"] == ["blocked_waiting"]
+
+
+def test_a_moved_deadline_leaves_an_open_escalation_standing(tmp_path):
+    # the manager escalated, then moved the deadline: moving a deadline does
+    # not answer the question it asked a human
+    asg = _dispatch(tmp_path, "d2", dispatch_age_h=3, heartbeat="IDLE",
+                    expected_by=_ago(hours=1))
+    _task_event(tmp_path, asg, "escalated", age_h=0.5, question="which disk?")
+    assert "escalated" in _row(tmp_path, asg)["attention_reason"]
+    _move_deadline(tmp_path, asg, None)
+    r = _row(tmp_path, asg)
+    assert r["attention_reason"] == ["escalated"]
+
+
 # --- delivery is required (a never-delivered task is not "held") ---------------
 
 def test_a_never_delivered_task_is_not_stale(tmp_path):

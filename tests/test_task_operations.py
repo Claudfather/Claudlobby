@@ -566,6 +566,62 @@ def test_escalate_queued_or_assigned_and_refuse_uncommitted_retarget(estate):
     assert _counts(conn) == after
 
 
+def test_reschedule_moves_the_deadline_on_the_same_assignment(estate):
+    """#2469: one deadline_changed on the assignment the page names, with the new
+    deadline, who moved it and why. The dispatch's expected_by stays on the row,
+    the reducer reads the newest fact, and no successor assignment is written."""
+    ctx, conn = estate
+    manager = replace(ctx, caller_fleet_uid=ctx.fleet_uid)        # a generated manager's own session
+    task = tasks.admit(manager, str(uuid4()), title="Waits on the operator")
+    routed = tasks.assign(manager, str(uuid4()), task.task_id, bot_id="worker",
+                          expected_by="2026-10-01T00:00:00Z")
+    rid = str(uuid4())
+    moved = tasks.reschedule(manager, rid, routed.assignment_id, expected_by="2026-10-04T00:00:00Z",
+                             reason="Waits on the operator's disk move")
+    assert moved.assignment_id == routed.assignment_id and moved.task.state == "assigned"
+    assert moved.task.current_assignment.expected_by == "2026-10-04T00:00:00+00:00"
+    fact = conn.execute("SELECT assignment_id, actor_uid, deadline, detail FROM events "
+                        "WHERE event='deadline_changed'").fetchone()
+    assert fact[:3] == (routed.assignment_id, manager.caller.uid, "2026-10-04T00:00:00+00:00")
+    assert json.loads(fact[3])["reason"] == "Waits on the operator's disk move"
+    assert json.loads(fact[3])["by"] == manager.caller.alias
+    assert conn.execute("SELECT expected_by FROM assignments").fetchone()[0] == "2026-10-01T00:00:00+00:00"
+    before = _counts(conn)
+    assert tasks.reschedule(manager, rid, routed.assignment_id, expected_by="2026-10-04T00:00:00Z",
+                            reason="Waits on the operator's disk move").replayed
+    assert _counts(conn) == before
+    person = replace(ctx, caller=tasks.TaskActor(resolve_party(
+        conn, "human:operator", now="2026-09-28T00:00:00Z", fleet_uid=ctx.fleet_uid), "human:operator"))
+    open_ended = tasks.reschedule(person, str(uuid4()), routed.assignment_id, expected_by="none",
+                                  reason="No date until the disk is in")
+    assert open_ended.task.current_assignment.expected_by is None
+    assert _counts(conn)[1] == 1
+
+
+def test_reschedule_is_the_managers_or_a_persons_and_never_a_closed_assignments(estate):
+    """The door, not only the grant: the worker the deadline binds, another bot
+    and the manager calling from another fleet are refused; so are an empty
+    reason and an assignment a reassign replaced."""
+    ctx, conn = estate
+    manager = replace(ctx, caller_fleet_uid=ctx.fleet_uid)
+    task = tasks.admit(manager, str(uuid4()), title="Route me")
+    first = tasks.assign(manager, str(uuid4()), task.task_id, bot_id="worker")
+    for caller in (replace(manager, caller=manager.bots["worker"]),
+                   replace(manager, caller=manager.bots["other"]),
+                   replace(manager, caller_fleet_uid="fleet_" + "f" * 32)):
+        with pytest.raises(tasks.TaskConflictError, match="manager or a local person"):
+            tasks.reschedule(caller, str(uuid4()), first.assignment_id, expected_by="none",
+                             reason="Mine to move")
+    with pytest.raises(tasks.TaskQueryError, match="reason"):
+        tasks.reschedule(manager, str(uuid4()), first.assignment_id, expected_by="none", reason=" ")
+    second = tasks.reassign(manager, str(uuid4()), task.task_id, bot_id="other", reason="Specialist")
+    with pytest.raises(tasks.TaskConflictError, match="stale or closed"):
+        tasks.reschedule(manager, str(uuid4()), first.assignment_id, expected_by="none",
+                         reason="Too late")
+    assert second.assignment_id != first.assignment_id
+    assert conn.execute("SELECT count(*) FROM events WHERE event='deadline_changed'").fetchone()[0] == 0
+
+
 def test_nudge_commits_queued_and_assigned_asks_without_retargeting_retry(estate):
     ctx, conn = estate
     task = tasks.admit(ctx, str(uuid4()), title="Need manager attention")

@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from claudlobby.plane.emit_api import emit_batch
 from tests.conftest import _write_exec, load_lib_module
 from tests.plane_fixtures import F, FLEET_YAML, REPO, _live_dispatch, _report, plane_root
 
@@ -130,6 +131,18 @@ class Fleet:
     def report(self, wi: str, asg: str, event: str, *, ago: int = 1):
         """w1's report on the assignment, *ago* seconds ago."""
         _report(self.root, wi, asg, _iso(time.time() - ago), bot="w1", event=event)
+
+    def move_deadline(self, wi: str, asg: str, *, due_in: int | None):
+        """The manager moves the assignment's deadline to *due_in* seconds from
+        now (None = open-ended): the deadline_changed `assignment reschedule`
+        records on the same assignment."""
+        now = time.time()
+        emit_batch(self.root, [{
+            "event_type": "task", "emitter": "claudlobby.tasks.v1", "fleet": F,
+            "source_ref": f"request:move-{asg}-{now}", "occurred_at": _iso(now),
+            "payload": {"work_item_id": wi, "assignment_id": asg, "event": "deadline_changed",
+                        "actor": f"bot:{F}/mgr", "by": f"bot:{F}/mgr", "reason": "waits on the operator",
+                        "deadline": None if due_in is None else _iso(now + due_in)}}])
 
     def overdue(self) -> dict:
         """bot -> overdue rows, as the matcher reads the plane now."""
@@ -275,6 +288,30 @@ def test_time_alone_does_not_page_the_assignment_again(fleet):
     time.sleep(2)
     fleet.sweep(FLEET_PULSE_RENOTIFY_AFTER_S="1")
     assert len(pages(log)) == 1, log.read_text()
+
+
+def test_a_moved_deadline_ends_the_episode_and_its_passing_pages_once(fleet):
+    """#2469: the manager moves a paged assignment's deadline a day out. The row
+    leaves the list, so the sweep lets its id go and pages nothing while it
+    waits. When the moved deadline has passed (here a second move puts it 30 s
+    back), the row is a new episode and pages once."""
+    log = fleet.start_manager()
+    latch = fleet.root / "state" / "pulse" / f"{F}.w1.dispatch_alerted"
+    wi, asg = fleet.assign("1", "w1", due_ago=600)
+    fleet.sweep()
+    assert len(pages(log)) == 1 and asg in latch.read_text(), log.read_text()
+    fleet.move_deadline(wi, asg, due_in=86400)
+    assert fleet.verdicts() == {}
+    fleet.sweep()
+    assert len(pages(log)) == 1, log.read_text()
+    assert asg not in (latch.read_text() if latch.exists() else "")
+    fleet.move_deadline(wi, asg, due_in=-30)
+    assert fleet.verdicts() == {asg: "overdue"}
+    fleet.sweep()
+    fleet.sweep()
+    got = pages(log)
+    assert len(got) == 2 and asg in got[1], log.read_text()
+    assert all("claudlobby --json assignment reschedule" in page for page in got), got
 
 
 def test_each_assignment_past_its_deadline_pages_once_naming_itself(fleet):
