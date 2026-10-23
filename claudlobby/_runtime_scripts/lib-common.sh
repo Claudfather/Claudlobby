@@ -3213,8 +3213,11 @@ pane_shows_payload() {
     # payload but not of its first N characters.
     local pane="$1" payload="$2" floor line stripped
     # Collapsed paste — the box shows a placeholder INSTEAD of any payload text,
-    # so no containment test of either direction can see it. Checked first.
-    printf '%s\n' "$pane" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER" && return 0
+    # so no containment test of either direction can see it. Checked first, as
+    # a bash pattern (#2428): piped into grep -q, which exits at the marker,
+    # the pane lines still to be written met a closed pipe, and pipefail read
+    # the marker as absent, so a held paste passed for submitted.
+    [[ $pane == *"$_PANE_PASTE_COLLAPSE_MARKER"* ]] && return 0
     [ -n "$payload" ] || return 1
     floor=$_PANE_MIN_VISIBLE_MATCH
     [ "${#payload}" -lt "$floor" ] && floor=${#payload}
@@ -3804,8 +3807,12 @@ pane_is_busy() {
     if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
         _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
     fi
-    printf '%s' "$text" | grep -qE "$_busy_pattern" && return 0
-    printf '%s\n' "$text" | LC_ALL=C grep -qE "$_BUSY_ACTIVITY_LINE_RE"
+    # Here-strings, never a pipe into grep (#2428). grep -q exits at its first
+    # match; the pane lines still to be written then met a closed pipe, and
+    # under pipefail that failure read the match as a miss: a running turn
+    # read as not busy.
+    grep -qE "$_busy_pattern" <<<"$text" && return 0
+    LC_ALL=C grep -qE "$_BUSY_ACTIVITY_LINE_RE" <<<"$text"
 }
 
 # pane_is_held <pane_text>
