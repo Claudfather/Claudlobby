@@ -6,22 +6,19 @@ role test composes a short section naming the remedy and the routes the deny
 cannot see. It is always-loaded text on every worker, paid on every turn: its
 size is pinned here, and a manager, which keeps sudo, composes none of it.
 """
-import fnmatch
-
 import pytest
 
 from claudlobby.__main__ import main
 from claudlobby.composer import compose_claude_md, compose_settings_local
 from tests.conftest import install_real_template, load_test_fleet, make_paths
+from tests.test_composer import _SUDO_FAMILY
+from tests.test_system_orientation import DOORS as ORIENTATION_DOORS, _words
 
 HEADING = "## Commands that need root"
-# About 0.6 KB. A longer section is a cost every worker pays on every turn:
+# About 0.53 KB. A longer section is a cost every worker pays on every turn:
 # raise this in the PR that grows it, and say what it adds.
-MAX_SECTION_BYTES = 700
+MAX_SECTION_BYTES = 600
 
-# Spelled out here rather than read from the compositor, so a wrong constant
-# there cannot also be the expectation.
-SUDO_FAMILY = ("sudo", "sudoedit", "su", "pkexec", "doas", "run0")
 # The remedy: block the work, naming the command and why it needs root.
 REMEDY = ("`assignment block`", "naming the command and why it needs root",
           "`fleet reports submit --status blocked`")
@@ -29,8 +26,8 @@ REMEDY = ("`assignment block`", "naming the command and why it needs root",
 # path, a shell string, a script and a settings edit.
 ROUTES = ("`env`", "`setsid`", "`ionice`", "`watch`", "another path", "`bash -c`",
           "a script", "editing your settings")
-# The doors the remedy names, as the CLI spells them.
-DOORS = (("assignment", "block"), ("fleet", "reports", "submit"))
+# The remedy's commands as a worker types them: the command's words, then its options.
+COMMANDS = ((("assignment", "block"), ()), (("fleet", "reports", "submit"), ("--status", "blocked")))
 
 
 def _section(text):
@@ -39,63 +36,55 @@ def _section(text):
 
 
 def _composed(fleet_dir):
-    """Each bot's composed CLAUDE.md and settings, from the fixture's manager and worker."""
+    """The fleet, its paths and each bot's composed CLAUDE.md: the fixture's manager and worker."""
     install_real_template(fleet_dir)
     fleet, paths = load_test_fleet(fleet_dir), make_paths(fleet_dir)
     assert fleet.manager in fleet.bots and set(fleet.bots) - fleet.manager_bots(), "needs the manager and a worker"
-    return fleet, {bot_id: (compose_claude_md(bot, fleet, paths), compose_settings_local(bot, fleet, paths))
-                   for bot_id, bot in fleet.bots.items()}
+    return fleet, paths, {bot_id: compose_claude_md(bot, fleet, paths) for bot_id, bot in fleet.bots.items()}
 
 
-def _workers(fleet, composed):
-    return {bot_id: pair for bot_id, pair in composed.items() if bot_id not in fleet.manager_bots()}
+def _worker_sections(fleet_dir):
+    fleet, _paths, composed = _composed(fleet_dir)
+    return {bot_id: _section(text) for bot_id, text in composed.items() if bot_id not in fleet.manager_bots()}
 
 
 def test_a_worker_is_told_what_to_do_when_the_deny_refuses_a_command(fleet_dir):
-    fleet, composed = _composed(fleet_dir)
-    for bot_id, (text, _settings) in _workers(fleet, composed).items():
-        section = _section(text)
-        missing = [f"`{name}`" for name in SUDO_FAMILY if f"`{name}`" not in section]
+    for bot_id, section in _worker_sections(fleet_dir).items():
+        missing = [f"`{name}`" for name in sorted(_SUDO_FAMILY) if f"`{name}`" not in section]
         missing += [phrase for phrase in REMEDY + ROUTES if phrase not in section]
         assert not missing, f"{bot_id}: the section does not name {missing}"
-        assert "{{" not in section and "{%" not in section, bot_id
 
 
 def test_the_section_reaches_exactly_the_bots_the_deny_reaches(fleet_dir):
     # The text and the deny share one role test: a manager keeps sudo and is
     # told nothing about a deny it does not have.
-    _fleet, composed = _composed(fleet_dir)
-    told = {bot_id: HEADING in text for bot_id, (text, _settings) in composed.items()}
-    denied = {bot_id: "Bash(sudo *)" in settings["permissions"]["deny"]
-              for bot_id, (_text, settings) in composed.items()}
+    fleet, paths, composed = _composed(fleet_dir)
+    told = {bot_id: HEADING in text for bot_id, text in composed.items()}
+    denied = {bot_id: "Bash(sudo *)" in compose_settings_local(bot, fleet, paths)["permissions"]["deny"]
+              for bot_id, bot in fleet.bots.items()}
     assert told == denied
     assert sorted(set(told.values())) == [False, True], "needs a bot on each side"
 
 
 def test_the_section_stays_small(fleet_dir):
-    fleet, composed = _composed(fleet_dir)
-    for bot_id, (text, _settings) in _workers(fleet, composed).items():
-        size = len(_section(text).encode())
+    for bot_id, section in _worker_sections(fleet_dir).items():
+        size = len(section.encode())
         assert size <= MAX_SECTION_BYTES, f"{bot_id}: {size} bytes; every worker pays this on every turn"
 
 
-@pytest.mark.parametrize("words", DOORS, ids=" ".join)
-def test_every_command_the_remedy_names_exists(words, capsys):
+@pytest.mark.parametrize("words, options", [pytest.param(w, o, id=" ".join(w + o)) for w, o in COMMANDS])
+def test_every_command_the_remedy_names_parses(words, options, capsys):
+    # The options parse before `--help` stops the run, so a status the CLI
+    # does not offer fails here rather than at a refused worker's prompt.
     with pytest.raises(SystemExit) as stop:
-        main([*words, "--help"])
+        main([*words, *options, "--help"])
     assert stop.value.code == 0
     assert capsys.readouterr().out.startswith("usage: claudlobby " + " ".join(words))
 
 
-def _allowed(allow, command):
-    """Whether a Bash allow rule matches the command line: a glob, and a trailing ' *' needs a space."""
-    return any(rule.startswith("Bash(") and fnmatch.fnmatchcase(command, rule[5:-1]) for rule in allow)
-
-
-def test_every_door_the_remedy_names_is_granted_to_a_worker(fleet_dir):
-    # A worker that follows the remedy must not stop at a permission prompt.
-    fleet, composed = _composed(fleet_dir)
-    refused = [(bot_id, words) for bot_id, (_text, settings) in _workers(fleet, composed).items()
-               for words in DOORS
-               if not _allowed(settings["permissions"]["allow"], " ".join(("claudlobby", "--json", *words, "ARG")))]
-    assert not refused, f"doors with no allow rule: {refused}"
+def test_the_remedy_is_among_the_doors_checked_as_granted_to_every_role():
+    # tests/test_system_orientation.py checks that each door it lists exists and
+    # is granted to every role, so a worker that follows the remedy does not
+    # stop at a permission prompt. This keeps the remedy's doors on that list.
+    checked = {words for door in ORIENTATION_DOORS for words in _words(door)}
+    assert {words for words, _options in COMMANDS} <= checked

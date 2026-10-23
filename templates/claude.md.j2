@@ -212,12 +212,12 @@ A dispatch's first line, like your startup prompt, can also start with `set +H; 
 {#- A worker only, on the role test its sudo deny keys on (#2464): a refused
     call says only that permission was denied, so this names the remedy and
     the routes the deny cannot see. Every worker pays it on every turn: its
-    size, remedy and grants are pinned in tests/test_worker_root_steps.py. #}
+    size, remedy and reach are pinned in tests/test_worker_root_steps.py. #}
 {%- if privilege_runners %}
 
 ## Commands that need root
 
-Your settings deny these commands: {{ privilege_runners | map('quote_backtick') | join(', ') }}. Your fleet manager keeps them. When the deny refuses a command, stop and record `assignment block`, naming the command and why it needs root, so your manager can run it or decide; with no assignment, use `fleet reports submit --status blocked`. Never retry it another way: behind a wrapper such as `env`, `setsid`, `ionice` or `watch`, by another path or name, in a shell string (`bash -c`), from a script or test, by editing your settings, or from a scheduled job or another session. The deny cannot see those routes, and each one still reaches root.
+Your settings deny {{ privilege_runners | map('quote_backtick') | join(', ') }}; your fleet manager can run them. When the deny refuses one, stop and record `assignment block`, naming the command and why it needs root (with no assignment, `fleet reports submit --status blocked`). Never retry it another way: behind a wrapper (`env`, `setsid`, `ionice`, `watch`), by another path or name, in a shell string (`bash -c`), from a script or test, by editing your settings, or from a scheduled job or another session.
 {%- endif %}
 {%- if teams %}
 

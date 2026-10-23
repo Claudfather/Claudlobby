@@ -2188,9 +2188,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
-    # A worker's settings deny it the sudo family on this same role test
-    # (compose_settings_local), and a refused call says only that permission
-    # was denied, so a worker is told the commands and what to do instead.
+    # The role test compose_settings_local denies the sudo family on.
     privilege_runners = () if is_manager else PRIVILEGE_RUNNERS
 
     # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
