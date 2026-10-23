@@ -6,16 +6,20 @@ the progress grace taking it off the overdue list and then lapsing, a manager
 restart and the passage of time are no new fact about it, so none of them
 pages it again (`task recheck` re-asks the manager about a task past its
 deadline once a day). Another assignment past its deadline is a new fact and
-pages, naming that assignment. A page no manager session took records nothing,
-so it goes out once a manager is there, and a reader that cannot answer
-changes nothing.
+pages, naming that assignment. A row the reader defers is past due and not
+overdue, and the sweep pages it only once it is overdue: one inside the
+progress grace pages when the grace lapses, and one past the expiry cap or
+orphaned by its worker's restart never pages. A page no manager session took
+records nothing, so it goes out once a manager is there, and a reader that
+cannot answer changes nothing.
 
 Each case drives the REAL sweep (the repo's claudlobby/_runtime_scripts/,
 linked file by file) and the REAL matcher over a throwaway plane. The manager
 is the stand-in input box in tmux, which logs each line it is submitted; the
 workers have live sessions, so the sweep raises nothing else about them.
 Stand-ins: tg-post.sh, plane-lookup.py (no escalation to read) and systemctl;
-the sweep records nothing (PLANE_EMIT_DISABLED=1).
+the sweep records nothing (PLANE_EMIT_DISABLED=1), so the events it records
+about a row are read in harness/validate-bot-change.sh.
 """
 
 from __future__ import annotations
@@ -71,8 +75,9 @@ class Fleet:
         self.proc.mkdir()
         self.lib = self.pulse_lib(tmp / "lib")
         self.managers = 0
+        self.bots = fleet_dir / "runtime" / "bots"
         for bot in ("w1", "w2"):
-            bot_dir = fleet_dir / "runtime" / "bots" / bot
+            bot_dir = self.bots / bot
             (bot_dir / "data").mkdir(parents=True)
             (bot_dir / "bot.conf").write_text(
                 f"BOT_NAME={bot}\nBOT_ID={bot}\nFLEET_NAME={F}\nTMUX_SOCKET=t2457-{bot}\n"
@@ -111,22 +116,38 @@ class Fleet:
     def stop_manager(self):
         self._box("harness_box_down t2457-mgr mgr")
 
-    def assign(self, n: str, bot: str, *, due_ago: int) -> tuple[str, str]:
-        """An assignment made with `task assign` (a request ref, no legacy task
-        id), dispatched an hour ago and due *due_ago* seconds ago."""
+    def assign(self, n: str, bot: str, *, due_ago: int, dispatched_ago: int = 3600,
+               task_id: str = "") -> tuple[str, str]:
+        """An assignment dispatched *dispatched_ago* seconds ago and due
+        *due_ago* seconds ago, made with `task assign` (a request ref, no legacy
+        task id), or by the legacy dispatch door when *task_id* is given."""
         now = time.time()
-        wi, asg, _msg = _live_dispatch(self.root, n, "", ts=_iso(now - 3600), bot=bot,
-                                       expected_by=_iso(now - due_ago), ref=f"request:{n:0>36}")
+        wi, asg, _msg = _live_dispatch(self.root, n, task_id, ts=_iso(now - dispatched_ago), bot=bot,
+                                       expected_by=_iso(now - due_ago),
+                                       ref=None if task_id else f"request:{n:0>36}")
         return wi, asg
 
-    def report(self, wi: str, asg: str, event: str):
-        """w1's report on the assignment, a second ago."""
-        _report(self.root, wi, asg, _iso(time.time() - 1), bot="w1", event=event)
+    def report(self, wi: str, asg: str, event: str, *, ago: int = 1):
+        """w1's report on the assignment, *ago* seconds ago."""
+        _report(self.root, wi, asg, _iso(time.time() - ago), bot="w1", event=event)
 
     def overdue(self) -> dict:
         """bot -> overdue rows, as the matcher reads the plane now."""
         doors = load_lib_module("dispatch-overdue")
         return doors.overdue_all(int(time.time()), fleet=F, root=str(self.root))
+
+    def verdicts(self, **env) -> dict:
+        """assignment id -> the verdict `--all` gives its row now, read as the
+        sweep reads it: with the bots dir (the orphan split needs it), and with
+        only the knobs given, since the sweep's env takes none from the caller."""
+        r = subprocess.run(
+            [sys.executable, str(LIB / "dispatch-overdue.py"), "--all", "--fleet", F,
+             "--root", str(self.root), "--bots-dir", str(self.bots)],
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", **env},
+            capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return {asg: verdict for _bot, _da, _exp, _elapsed, asg, verdict, _tid
+                in map(str.split, r.stdout.splitlines())}
 
     def sweep(self, lib: Path | None = None, **env):
         result = subprocess.run(
@@ -145,10 +166,10 @@ class Fleet:
         shutil.rmtree(self.tmux, ignore_errors=True)
 
 
-def pages(log: Path) -> list[str]:
-    """The overdue pages about w1 that the manager was submitted."""
+def pages(log: Path, bot: str = "w1") -> list[str]:
+    """The overdue pages about *bot* that the manager was submitted."""
     return [line for line in log.read_text().splitlines()
-            if line.startswith("[FLEET-PULSE] w1 overdue_dispatch")]
+            if line.startswith(f"[FLEET-PULSE] {bot} overdue_dispatch")]
 
 
 @pytest.fixture
@@ -179,6 +200,53 @@ def test_the_page_stands_while_the_progress_grace_defers_the_assignment(fleet, m
     assert "w1" in fleet.overdue()                     # the grace has lapsed
     fleet.sweep(DISPATCH_PROGRESS_GRACE_S="1")
     assert len(pages(log)) == 1, log.read_text()
+
+
+def test_a_row_inside_the_grace_at_its_deadline_pages_once_the_grace_lapses(fleet):
+    """w1 reported progress a minute ago, before its assignment fell due half
+    a minute ago, so the first sweep to see the row past due finds the grace
+    deferring it: no page. Once the grace lapses the row is overdue, and it
+    pages once."""
+    log = fleet.start_manager()
+    wi, asg = fleet.assign("1", "w1", due_ago=30)
+    fleet.report(wi, asg, "progress", ago=60)
+    assert fleet.verdicts() == {asg: "progress_grace"}
+    fleet.sweep()
+    assert pages(log) == [], log.read_text()
+    lapsed = {"DISPATCH_PROGRESS_GRACE_S": "30"}  # the progress is over a minute old
+    assert fleet.verdicts(**lapsed) == {asg: "overdue"}
+    fleet.sweep(**lapsed)
+    fleet.sweep(**lapsed)
+    got = pages(log)
+    assert len(got) == 1 and asg in got[0], log.read_text()
+
+
+def test_a_row_past_the_expiry_cap_never_pages(fleet):
+    """An assignment dispatched 25 hours ago is past the expiry cap (#460) the
+    first time the sweep sees it, as every such row is at rollout: past due,
+    never paged. w2's overdue row pages, so the sweep did read the rows."""
+    log = fleet.start_manager()
+    _wi, asg = fleet.assign("1", "w1", due_ago=89400, dispatched_ago=90000)
+    _wi, control = fleet.assign("2", "w2", due_ago=60)
+    assert fleet.verdicts() == {asg: "max_age_cap", control: "overdue"}
+    fleet.sweep()
+    fleet.sweep()
+    assert pages(log) == [] and len(pages(log, "w2")) == 1, log.read_text()
+
+
+def test_a_row_whose_worker_respawned_never_pages(fleet):
+    """w1 restarted after the dispatch (its data/.spawn is newer), so the
+    session that held the task is gone and the row is orphaned (#835): past
+    due, never paged. Only a dispatch with a legacy task id is orphan-split.
+    w2's overdue row pages, so the sweep did read the rows."""
+    log = fleet.start_manager()
+    _wi, asg = fleet.assign("1", "w1", due_ago=600, task_id="t-835-0001")
+    _wi, control = fleet.assign("2", "w2", due_ago=60)
+    (fleet.bots / "w1" / "data" / ".spawn").touch()
+    assert fleet.verdicts() == {asg: "orphaned", control: "overdue"}
+    fleet.sweep()
+    fleet.sweep()
+    assert pages(log) == [] and len(pages(log, "w2")) == 1, log.read_text()
 
 
 def test_a_manager_restart_does_not_page_the_assignment_again(fleet):

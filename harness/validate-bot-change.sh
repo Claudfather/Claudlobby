@@ -722,6 +722,8 @@ harness_check "#1728 an UNTRACKED-ONLY checkout is still reported (never filtere
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
 # fleet-pulse consumes) with a 25h-old, never-reported dispatch: it is still
 # listed as past due (#2457), with the expiry cap's verdict, never `overdue`.
+# The #835 scenario below gives its bot a bot dir, so the pulse sweeps the row
+# there and the check after that sweep reads what the pulse records for it.
 # The retired ledgers' paths survive only as the #1187 shape probe's junk
 # inputs below (a path in the bot slot); the matcher answers from the plane.
 VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
@@ -736,7 +738,8 @@ harness_check "overdue_dispatch expires past max age (#460 — a 25h-old dispatc
 # Task-id end-to-end (goal-aware plan P4) — the dispatch row seeded above
 # carries task_id t-1-aaaa; the REAL fleet-pulse run consumed it. Assert the
 # id made it through the pipeline: into the emitted overdue event, and into
-# the manager nudge, which names the assignment with its task id. (Join-matrix unit
+# the manager nudge, one page that says how far past its deadline the task is
+# and names the assignment with its task id. (Join-matrix unit
 # semantics live in tests/test_dispatch_overdue.py — not re-run here.)
 # A plain header, not val_scenario: these checks read the first scenario's
 # events_rows, so they belong to its refusal scope.
@@ -744,7 +747,7 @@ echo ""
 echo "=== validate task-id end-to-end (P4: event + nudge carry the id) ==="
 printf '%s' "$events_rows" | grep '"type":"overdue_dispatch"' | grep -q '"task_id":"t-1-aaaa"' && r=yes || r=no
 harness_check "overdue_dispatch event carries the dispatch task_id" "$r"
-printf '%s' "$mgr_pane" | grep -q 'no terminal linked report: asg_' && printf '%s' "$mgr_pane" | grep -q '(task t-1-aaaa)' && r=yes || r=no
+printf '%s' "$mgr_pane" | grep -qE 'a dispatched task is [0-9]+s past its deadline with no terminal linked report: asg_[0-9a-f]{32} \(task t-1-aaaa\)' && r=yes || r=no
 harness_check "manager nudge names the open id (for the manager to act on)" "$r"
 
 # ===========================================================================
@@ -752,22 +755,30 @@ harness_check "manager nudge names the open id (for the manager to act on)" "$r"
 # The historical dispatch remains a direct Plane fixture; the retired report
 # writer's implicit task-link behavior is covered by canonical report tests.
 # ===========================================================================
-val_scenario "validate #835: a respawn orphan goes quiet"
+val_scenario "validate #835 and #460: a respawn orphan and a capped row go quiet"
 
 # --- Half 2: a respawn orphan must stop reaching the pulse's overdue path. ---
 # Same bot dir, but .spawn is now NEWER than the dispatch: the session that
 # received the id is gone, so it can never be echoed.
 OR_BOT="valor835"
 OR_DIR="$ROOT/local/$FLEET/runtime/bots/$OR_BOT"
-mkdir -p "$OR_DIR/data/events"
-cat > "$OR_DIR/bot.conf" <<CONF
-BOT_NAME="$OR_BOT"
-BOT_ID="$OR_BOT"
+# valaged holds the 25h-old row seeded for #460 above; a bot dir puts it in
+# this sweep too.
+for b in "$OR_BOT" valaged; do
+    mkdir -p "$ROOT/local/$FLEET/runtime/bots/$b/data/events"
+    cat > "$ROOT/local/$FLEET/runtime/bots/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_ID="$b"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 CONF
+done
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$OR_BOT" t-835-0002 "$((now - 600))" "$((now - 10))" "do z"
 touch "$OR_DIR/data/.spawn"   # respawned just now, i.e. after the dispatch
+# valaged is up, so the sweep raises nothing else about it, and it has one
+# plainly overdue row: recorded, that row shows the sweep read valaged's rows.
+tmux new-session -d -s valaged 'sleep 600'
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0001 "$((now - 600))" "$((now - 10))" "y"
 
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
 
@@ -777,6 +788,14 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || tr
 or_overdue=$(val_events "$ROOT" "$FLEET" "$OR_BOT" overdue_dispatch | grep -c 't-835-0002' || true)
 [ "${or_overdue:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 respawn orphan emits NO overdue_dispatch from the real pulse" "$r"
+
+# #460: the reader lists a capped row past due (#2457), so the pulse is what
+# keeps its critical overdue_dispatch off the plane. Recorded every sweep until
+# the assignment expires, it would reach the worker's brief and every
+# --critical read. valaged's overdue row is the control: this sweep records it.
+aged_ev=$(val_events "$ROOT" "$FLEET" valaged overdue_dispatch)
+printf '%s' "$aged_ev" | grep -q '"task_id":"t-aged-0001"' && ! printf '%s' "$aged_ev" | grep -q 't-aged-0000' && r=yes || r=no
+harness_check "#460 a 25h-old row emits NO overdue_dispatch from the real pulse (its bot's overdue row does)" "$r"
 
 or_listed=$(val_read "overdue --orphans" python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$(date +%s)" \
     --bots-dir "$ROOT/local/$FLEET/runtime/bots" --fleet "$FLEET" --root "$ROOT" | grep -c 't-835-0002' || true)
