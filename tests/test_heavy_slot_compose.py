@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import load_test_fleet, make_paths
+from tests.conftest import load_lib_module, load_test_fleet, make_paths
 
 HOOK = "$CLAUDLOBBY_NATIVE_DIR/heavy-slot-guard.sh"
 
@@ -93,6 +93,47 @@ class TestComposition:
             g for g in after["hooks"]["PreToolUse"] if g["hooks"]
         ]
         assert json.dumps(after, sort_keys=True) == json.dumps(before, sort_keys=True)
+
+
+class TestTheRewriteHidesNoDeny:
+    """Claude Code checks a call's permission rules against the command a
+    PreToolUse hook hands back, and the slot's rewrite puts its wrapper first.
+    So the hook must leave as typed every command one of the bot's own deny
+    rules names, or that rule never sees it. A worker's sudo-family denies are
+    the rules this covers today (#2464)."""
+
+    # How a command still meets a rule: as typed, after an assignment or another
+    # command, and behind the wrappers Claude Code looks past.
+    FRONTS = ("", "FOO=1 ", "cd /x && ", "timeout 60 ", "nice ", "nohup ", "stdbuf -oL ",
+              "command ", "time ", "xargs ", "env ")
+    JOBS = ("npm ci", "pip install x", "pytest")
+
+    def test_a_worker_deny_still_sees_every_heavy_command_it_names(self, fleet_dir: Path):
+        hs = load_lib_module("heavy-slot")
+
+        def rewritten(command: str):
+            try:
+                return hs.gate(command, "W")
+            except hs.Unsure:
+                return None
+
+        _arm(fleet_dir, where="worker-1")
+        settings = _settings(fleet_dir, "worker-1")
+        assert _guard_groups(settings) == ["Bash"]
+        deny = [rule for rule in settings["permissions"]["deny"] if rule.startswith("Bash(")]
+        assert {"Bash(sudo *)", "Bash(/usr/bin/doas *)"} <= set(deny)
+        # The check can see a rewrite: each front gets the wrapper before a job alone.
+        assert all(rewritten(front + job) for front in self.FRONTS for job in self.JOBS)
+        hidden = []
+        for rule in deny:
+            pattern = rule[len("Bash("):-1]
+            head, star, _ = pattern.partition("*")
+            head = head.rstrip(": ")
+            if not head:
+                continue
+            named = [f"{head} {job}" for job in self.JOBS] if star else [pattern]
+            hidden += [front + c for front in self.FRONTS for c in named if rewritten(front + c)]
+        assert hidden == []
 
 
 class TestTheSwitch:
