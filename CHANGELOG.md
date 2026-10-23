@@ -14,6 +14,13 @@ Every worker's composed permissions now deny `sudo`, `sudoedit`, `su`,
 neither does a manager alone in its fleet, so a step that needs root goes
 through the manager. No composed allow names any of these commands.
 
+A refused call says only that permission was denied, so every worker's
+composed `CLAUDE.md` gains a short section, `## Commands that need root`. It
+names the six commands and the remedy: record `assignment block`, naming the
+command and why it needs root, so the manager can run it or decide (with no
+assignment, `fleet reports submit --status blocked`). It also forbids the
+routes the deny cannot see, listed below. A manager's `CLAUDE.md` is unchanged.
+
 Claude Code checks permission rules against the command a hook hands back,
 so the heavy-slot hook no longer looks past `sudo` or `doas`: a heavy job one
 of them runs (`sudo npm install -g …`) is left as typed, and the slot's
