@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a manager moves an open assignment's deadline without replacing it (#2469)
+
+`claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by
+RFC3339|none --reason TEXT --request-id UUID` records a `deadline_changed` on
+the same assignment: the new deadline, who moved it and why. It only records.
+Its door refuses any caller but the fleet's manager or a person at the host,
+and the composed grant sits beside `task reassign`. Until now the only way to
+stop an overdue page on a wait outside the worker was a same-worker `task
+reassign`, which closed the assignment, left a successor to deliver, and could
+not be used where the assignment's id must stay stable.
+
+Every reader takes the newest deadline fact as the deadline, and one with no
+deadline means open-ended: the overdue matcher behind fleet-pulse, the board's
+overdue and stale arms, the task reducer (so task recheck, the brief and the
+board), and the expiry sweep, which now keeps an open-ended assignment and
+sweeps one a fact gave a deadline. The dispatch's `expected_by` stays on the
+row. A moved deadline takes the row off the pulse's list, so its id is
+dropped, and its passing pages once. The expiry cap counts from the later of
+the move and the deadline it set, so a wait moved days out still pages when it
+passes. A deadline fact is neither an answer to a human nor the worker's word,
+so it does not end an open escalation, a block or a nudge.
+
+The overdue page, the board's overdue card and the `overdue_dispatch` row of
+the fleet-observability decision table name the verb.
+
 ### Fixed — four guards no longer read a match as a miss when grep stops reading early (#2428)
 
 Four checks piped text into `grep -q` under `pipefail`. `grep -q` exits at its
