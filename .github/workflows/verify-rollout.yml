@@ -44,6 +44,14 @@ on:
 jobs:
   check:
     name: Rollout check
+    # A draft is not checked (#2467). It cannot merge, and marking it ready for review
+    # is one of the caller's triggers, so the check judges a PR when it is offered: a
+    # body finished while the PR is a draft leaves no failed run. The skip is this
+    # job's own, so its skipped run keeps the rollup name, and the merge guardrails,
+    # which pass only a newest run reading SUCCESS, refuse it. A required check passes
+    # a skipped job, and the draft flag is the event's, so a re-run of a draft's run is
+    # skipped again: the guide's step 4 says what that leaves untested.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -324,6 +332,8 @@ jobs:
                         "line, `N/A: docs-only` or `N/A: tests-only` (library/guardrails/"
                         "verify-rollout.md in Claudfather/Claudlobby). Saving the edited body "
                         "re-runs this check.")
+                  print("A draft is not checked: keep a PR a draft until its body has this "
+                        "section, and marking it ready for review runs this check.")
                   return 1
               summary("Rollout check: the PR body names its rollout check.")
               print("Rollout check: the PR body names its rollout check.")
