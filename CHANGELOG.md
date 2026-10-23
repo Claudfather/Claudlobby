@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — four guards no longer read a match as a miss when grep stops reading early (#2428)
+
+Four checks piped text into `grep -q` under `pipefail`. `grep -q` exits at its
+first match; a writer with text still to write then met a closed pipe, and its
+SIGPIPE (status 141) became the pipeline's status, so the match read as a miss.
+It takes input longer than a pipe holds once grep has stopped reading, so it
+hid on short input:
+
+- the Shopify skill's read-only guard admitted a GraphQL document whose
+  mutation came early in a long document (`assert_query_only`);
+- `pane_send_verified` read a held collapsed paste in a long pane as submitted,
+  so its retry Enter never went out (`pane_shows_payload`);
+- keepalive read a running turn in a long pane as not busy (`pane_is_busy`,
+  both of its checks);
+- `bot_in_fleet` read a declared bot as undeclared when its name came early in
+  a long roster.
+
+Each now feeds grep a here-string, or tests with a bash pattern
+(`pane_shows_payload`), so grep's early exit closes nothing a writer still
+needs. Each has a case whose input outlasts any pipe (1 to 2 MiB), and
+`tests/test_quiet_grep_ratchet.py` fences the remaining pipes into a quiet grep
+in shell files under `claudlobby/_runtime_scripts`, `library`, `harness` and
+`tests` at their measured counts: a new one, or a file whose count grows, fails.
+
 ### Fixed — the rollout check skips a draft, so a body written before the PR is marked ready leaves no failed run (#2467)
 
 A PR opened before its body had the `## Rollout check` section failed its first
