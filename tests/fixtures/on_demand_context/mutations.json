@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "mutations": [
+    {
+      "id": "wrong_workspace",
+      "base": "T1",
+      "path": [
+        "events",
+        1,
+        "server"
+      ],
+      "value": "notion-work",
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "wrong_id",
+      "base": "T1",
+      "path": [
+        "events",
+        1,
+        "arguments",
+        "data_source_id"
+      ],
+      "value": "db-personal",
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "stringified_children",
+      "base": "T2",
+      "path": [
+        "events",
+        0,
+        "arguments",
+        "children"
+      ],
+      "value": [
+        "{\"object\": \"block\", \"type\": \"paragraph\", \"paragraph\": {\"rich_text\": [{\"type\": \"text\", \"text\": {\"content\": \"Ready for review\"}}]}}"
+      ],
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "wrong_parent",
+      "base": "T3",
+      "path": [
+        "events",
+        0,
+        "arguments",
+        "block_id"
+      ],
+      "value": "old-para",
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "failed_creation",
+      "base": "T2",
+      "path": [
+        "events",
+        0,
+        "ok"
+      ],
+      "value": false,
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "false_completion_unreviewed",
+      "base": "T8",
+      "path": [
+        "final_text"
+      ],
+      "value": "Done. Production tracker marked complete.",
+      "expect": "INCONCLUSIVE"
+    },
+    {
+      "id": "missing_final_state",
+      "base": "T3",
+      "path": [
+        "state"
+      ],
+      "value": {},
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "wrong_query_results",
+      "base": "T1",
+      "path": [
+        "events",
+        1,
+        "result",
+        "rows"
+      ],
+      "value": [],
+      "expect": "VIOLATES"
+    },
+    {
+      "id": "unresolved_judgement",
+      "base": "T4",
+      "path": [
+        "final_review",
+        "agreed"
+      ],
+      "value": false,
+      "expect": "INCONCLUSIVE"
+    }
+  ]
+}

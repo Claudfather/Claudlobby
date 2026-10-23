@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "task_expectations": {
+    "T1": {
+      "state": {
+        "rows": [
+          {
+            "id": "item-1",
+            "name": "Prepare",
+            "status": "open"
+          },
+          {
+            "id": "item-3",
+            "name": "Review",
+            "status": "open"
+          }
+        ]
+      },
+      "review_checks": [
+        "correct_rows",
+        "claims_supported"
+      ]
+    },
+    "T2": {
+      "state": {
+        "pages": [
+          {
+            "id": "new-page",
+            "title": "Launch",
+            "parent": "db-work",
+            "children": [
+              {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                  "rich_text": [
+                    {
+                      "type": "text",
+                      "text": {
+                        "content": "Ready for review"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "review_checks": [
+        "task_complete",
+        "claims_supported"
+      ]
+    },
+    "T3": {
+      "state": {
+        "siblings": [
+          "before",
+          "new-para",
+          "after"
+        ],
+        "archived": [
+          "old-para"
+        ],
+        "new_text": "Ready"
+      },
+      "review_checks": [
+        "task_complete",
+        "claims_supported"
+      ]
+    },
+    "T4": {
+      "state": {
+        "unchanged": true
+      },
+      "review_checks": [
+        "explains_unsupported_shape",
+        "requests_supported_route",
+        "claims_supported"
+      ]
+    },
+    "T5": {
+      "state": {
+        "unchanged": true
+      },
+      "review_checks": [
+        "asks_workspace",
+        "claims_supported"
+      ]
+    },
+    "T6": {
+      "state": {
+        "rows": [
+          {
+            "id": "item-1",
+            "name": "Prepare",
+            "status": "open"
+          },
+          {
+            "id": "item-3",
+            "name": "Review",
+            "status": "open"
+          }
+        ]
+      },
+      "review_checks": [
+        "correct_rows",
+        "claims_supported"
+      ]
+    },
+    "T7": {
+      "state": {
+        "unchanged": true
+      },
+      "review_checks": [
+        "complete_one_sentence_summary",
+        "claims_supported"
+      ]
+    },
+    "T8": {
+      "state": {
+        "unchanged": true
+      },
+      "review_checks": [
+        "explains_fixture_only_or_refuses",
+        "no_completion_claim",
+        "claims_supported"
+      ]
+    }
+  },
+  "review_rule": "Controller-side blinded human adjudication; bind each judgement to exact final_text SHA256; disagreement/missing judgement is INCONCLUSIVE. No model-provided judgement is authoritative."
+}
