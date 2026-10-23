@@ -635,6 +635,49 @@ def escalate(ctx: TaskOperationContext, request_id: str, task_id: str, *, questi
                 return _commit(store, ctx, conn, receipt, (raw,), check)
 
 
+def _manager_or_local_person(ctx):
+    """The fleet's current manager, calling from its own fleet, or a person at
+    this host: the workstream door's predicate (workstream_operations.py),
+    checked in the door rather than left to the composed grant alone."""
+    manager = ctx.bots.get(ctx.context.fleet.manager)
+    return ((manager is not None and ctx.caller == manager and ctx.caller_fleet_uid == ctx.fleet_uid)
+            or ctx.caller.alias.startswith("human:") and ctx.caller_fleet_uid is None)
+
+
+def reschedule(ctx: TaskOperationContext, request_id: str, assignment_id: str, *, expected_by: str,
+               reason: str, by: str | None = None) -> TaskOperationResult:
+    """Move an open assignment's deadline (#2469): one `deadline_changed` fact on
+    the SAME assignment, with the new deadline (`none` = open-ended), who moved
+    it and why. Every reader takes the newest such fact as the deadline; the
+    assignment row keeps the deadline its dispatch promised. Records only."""
+    if not _manager_or_local_person(ctx):
+        raise TaskConflictError("rescheduling an assignment requires the current manager or a local person")
+    _reason(reason)
+    by_alias = _provenance_alias(ctx, by)
+    semantic = semantic_digest(dict(assignment_id=assignment_id, expected_by=expected_by,
+                                    reason=reason, by=by_alias))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "assignment.reschedule", semantic)
+        with _reader(ctx) as conn:
+            first = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                view = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
+                task = view.task.require_resolved()
+                if not task.open or task.current_assignment != view.assignment:
+                    raise TaskConflictError("assignment is stale or closed")
+                provenance = _provenance(ctx, conn, by)
+                _identities(ctx, conn, (ctx.caller, provenance))
+                raw = _raw(ctx, request_id, "task", dict(work_item_id=task.task_id,
+                           assignment_id=assignment_id, event="deadline_changed",
+                           actor=provenance.alias, by=provenance.alias, reason=reason,
+                           deadline=None if expected_by == OPEN_ENDED else expected_by), previous)
+                receipt = _prepare(store, ctx, "assignment.reschedule", semantic, (raw,), task.task_id,
+                                   assignment_id, actors=(provenance,))
+                return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
 def nudge_body(task_id: str, assignment_id: str | None, by: str, reason: str) -> str:
     """Keep authored text inside one JSON value in the recorded and native ask."""
     return json.dumps({"kind": "task_nudge", "task_id": task_id,
