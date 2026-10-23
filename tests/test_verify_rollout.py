@@ -17,6 +17,8 @@ What it must hold:
   the job that checks it (the merge guardrails refuse it without a reviewer
   verdict that names the change);
 - the check's name in the rollup is the name the merge guardrails read.
+- a draft is not checked, and marking it ready for review runs the check, so a body
+  finished while the PR is a draft leaves no failed run (#2467); a failing run says so.
 """
 
 from __future__ import annotations
@@ -153,6 +155,15 @@ def test_a_body_with_no_section_fails(tmp_path):
     run = run_check(tmp_path, "## Summary\nA fix.\n")
     assert run.rc == 1
     assert any("no \"## Rollout check\" section" in e for e in run.errors), run.out
+
+
+def test_a_failing_run_says_to_keep_the_pr_a_draft_until_the_body_is_done(tmp_path):
+    """A body finished after opening failed its first run, and that run emailed the
+    operator (#2467). A draft is not checked, so the failure names the way round it."""
+    run = run_check(tmp_path, "## Summary\nA fix.\n")
+    assert run.rc == 1
+    told = [line for line in run.out.splitlines() if not line.startswith("::")]
+    assert any("draft" in line and "ready for review" in line for line in told), run.out
 
 
 @pytest.mark.parametrize("body", ["", None], ids=["empty", "null"])
@@ -432,6 +443,19 @@ def test_the_caller_reruns_on_a_body_edit_and_grants_read_only():
     assert caller["permissions"] == {"contents": "read", "pull-requests": "read"}
     check = _load(REUSABLE)["jobs"]["check"]
     assert check["permissions"] == {"contents": "read", "pull-requests": "read"}
+
+
+def test_a_draft_is_skipped_and_marking_it_ready_runs_the_check():
+    """A draft cannot merge, so its events are not checked (#2467). The skip is the
+    reusable job's own if:, so an adopter's pinned caller gets it and the skipped run
+    keeps the rollup name. Marking the PR ready for review must stay a trigger: without
+    it, a draft marked ready keeps only a skipped run, which a required check passes."""
+    caller = _load(CALLER)
+    on = caller.get("on", caller.get(True))
+    assert "ready_for_review" in on["pull_request"]["types"]
+    assert "if" not in caller["jobs"]["rollout-check"], "skip drafts in the reusable job"
+    check = _load(REUSABLE)["jobs"]["check"]
+    assert check.get("if") == "github.event.pull_request.draft != true"
 
 
 def test_the_checker_takes_every_value_from_the_environment():
