@@ -1243,13 +1243,13 @@ def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
 #
 # `NEWEST_TASK_IGNORED` is the package's constant (`queries.NEWEST_TASK_IGNORED`,
 # pinned equal): `supplied_id_not_open` is a JOIN anomaly, not a lifecycle
-# state, so it never counts as the row's newest word, and neither does a
-# manager's `deadline_changed` (#2469). The escalation's window
+# state, so it never counts as the row's newest word. The escalation's window
 # additionally skips `nudged` — a nudge is an ASK, not an ANSWER (the M-A fold's
 # F1), and reading the two arms through ONE window silently extinguishes an
-# escalation the moment anyone nudges the row.
-NEWEST_TASK_IGNORED = ("supplied_id_not_open", "deadline_changed")
-ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
+# escalation the moment anyone nudges the row — and a manager's
+# `deadline_changed` (#2469), which answers no human either.
+NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
+ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged", "deadline_changed")
 _ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
 
 def _newest_task_sql(ignore: tuple) -> str:
@@ -1301,7 +1301,7 @@ MENU_PROGRESS_SQL = (
 # (here, the fleet; in OPEN_SQL, the same assignee) — so it composes with
 # EITHER outer scope with no change of meaning.
 FLEET_OPEN_SQL = (
-    "SELECT " + _OPEN_ROW_COLS_SQL + ", a.source_ref, " + EFFECTIVE_DEADLINE_SQL + _OPEN_ROW_FROM
+    "SELECT " + _OPEN_ROW_COLS_SQL + ", a.source_ref, a.expected_by" + _OPEN_ROW_FROM
     + " WHERE a.fleet_uid = ?"
     + _SIBLING_CLOSURE
     + " ORDER BY a.occurred_at, a.ingest_seq")

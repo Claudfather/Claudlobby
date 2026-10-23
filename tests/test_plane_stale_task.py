@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
 from tests.package_fixtures import source_package
+from tests.plane_fixtures import _deadline_changed
 from claudlobby.plane.view import create_app  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
@@ -300,9 +301,7 @@ def _task_event(root: Path, asg: str, event: str, *, age_h: float, **fields) -> 
 
 
 def _move_deadline(root: Path, asg: str, deadline: str | None) -> None:
-    """The manager's `assignment reschedule`: a deadline_changed on the assignment."""
-    _task_event(root, asg, "deadline_changed", age_h=0.25, deadline=deadline,
-                reason="waits on the operator")
+    _deadline_changed(root, "wi_" + asg.removeprefix("asg_"), asg, deadline, ts=_ago(hours=0.25))
 
 
 def test_a_moved_deadline_takes_the_overdue_arm_off_and_the_block_still_leads(tmp_path):
@@ -315,6 +314,16 @@ def test_a_moved_deadline_takes_the_overdue_arm_off_and_the_block_still_leads(tm
     assert _row(tmp_path, asg)["attention_reason"] == ["overdue", "blocked_waiting"]
     _move_deadline(tmp_path, asg, (NOW + timedelta(days=1)).isoformat())
     assert _row(tmp_path, asg)["attention_reason"] == ["blocked_waiting"]
+
+
+def test_a_moved_deadline_answers_a_nudge(tmp_path):
+    # a nudge asks the manager to act on the row, and moving its deadline is an
+    # act: the nudge ends, as it does when the manager escalates
+    asg = _dispatch(tmp_path, "d3", dispatch_age_h=3, heartbeat="IDLE")
+    _task_event(tmp_path, asg, "nudged", age_h=1, reason="is this stuck?")
+    assert "nudged" in _row(tmp_path, asg)["attention_reason"]
+    _move_deadline(tmp_path, asg, (NOW + timedelta(days=1)).isoformat())
+    assert "nudged" not in _row(tmp_path, asg)["attention_reason"]
 
 
 def test_a_moved_deadline_leaves_an_open_escalation_standing(tmp_path):

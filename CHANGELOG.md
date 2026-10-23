@@ -20,13 +20,17 @@ not be used where the assignment's id must stay stable.
 Every reader takes the newest deadline fact as the deadline, and one with no
 deadline means open-ended: the overdue matcher behind fleet-pulse, the board's
 overdue and stale arms, the task reducer (so task recheck, the brief and the
-board), and the expiry sweep, which now keeps an open-ended assignment and
-sweeps one a fact gave a deadline. The dispatch's `expected_by` stays on the
-row. A moved deadline takes the row off the pulse's list, so its id is
-dropped, and its passing pages once. The expiry cap counts from the later of
-the move and the deadline it set, so a wait moved days out still pages when it
-passes. A deadline fact is neither an answer to a human nor the worker's word,
-so it does not end an open escalation, a block or a nudge.
+board), and the expiry sweep, which now keeps an open-ended assignment, sweeps
+one a fact gave a deadline, and compares the deadline as an instant rather than
+as text. The dispatch's `expected_by` stays on the row. A moved deadline takes
+the row off the pulse's list, so its id is dropped, and its passing pages once;
+as before, a row whose worker restarted since the dispatch reads orphaned and
+does not page. The expiry cap counts from the later of the move and the
+deadline it set, so a wait moved days out still pages when it passes, and task
+recheck's 48 h age clock restarts at the move, as a reassign's new assignment
+restarted it. Moving a deadline is an act on the row, so it ends a nudge like
+any manager act; it is neither an answer to a human nor the worker's word, so
+it ends neither an open escalation nor a block.
 
 The overdue page, the board's overdue card and the `overdue_dispatch` row of
 the fleet-observability decision table name the verb.

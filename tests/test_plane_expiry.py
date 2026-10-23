@@ -376,32 +376,7 @@ def test_an_alive_assignment_is_never_expired(tmp_path):
     assert [r["assignment_id"] for r in plan.rows] == [stale[1]]   # alive kept
 
 
-def test_a_changed_deadline_is_honored(tmp_path):
-    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
-    the future must keep the assignment — the sweep reads the EFFECTIVE
-    deadline, not the original row."""
-    root = _root(tmp_path)
-    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
-    emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
-                       "payload": {"work_item_id": wi, "assignment_id": aid,
-                                   "event": "deadline_changed",
-                                   "deadline": (NOW + timedelta(days=5)).isoformat()}}])
-    # backdate that event's ingest so the quiet-horizon clause is not what saves it
-    db = connect(db_path(root))
-    try:
-        db.execute("UPDATE events SET ingested_at=? WHERE event='deadline_changed'",
-                   ((NOW - timedelta(days=9)).isoformat(),))
-    finally:
-        db.close()
-    conn = connect(db_path(root))
-    try:
-        plan = expirable(conn, now=NOW, after_days=7)
-    finally:
-        conn.close()
-    assert plan.rows == []
-
-
-def _deadline_fact(root, wi, aid, deadline, *, ingested_days_ago=9):
+def _deadline_fact(root, wi, aid, deadline):
     """A deadline_changed on the assignment (None = open-ended), its ingest
     backdated so the quiet-horizon clause is not what decides."""
     emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
@@ -411,9 +386,24 @@ def _deadline_fact(root, wi, aid, deadline, *, ingested_days_ago=9):
     db = connect(db_path(root))
     try:
         db.execute("UPDATE events SET ingested_at=? WHERE event='deadline_changed'",
-                   ((NOW - timedelta(days=ingested_days_ago)).isoformat(),))
+                   ((NOW - timedelta(days=9)).isoformat(),))
     finally:
         db.close()
+
+
+def test_a_changed_deadline_is_honored(tmp_path):
+    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
+    the future must keep the assignment — the sweep reads the EFFECTIVE
+    deadline, not the original row."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    _deadline_fact(root, wi, aid, NOW + timedelta(days=5))
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert plan.rows == []
 
 
 def test_an_open_ended_deadline_fact_is_never_expired(tmp_path):

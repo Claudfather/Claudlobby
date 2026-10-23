@@ -36,9 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from claudlobby.plane.emit_api import emit_batch
 from tests.conftest import _write_exec, load_lib_module
-from tests.plane_fixtures import F, FLEET_YAML, REPO, _live_dispatch, _report, plane_root
+from tests.plane_fixtures import F, FLEET_YAML, REPO, _deadline_changed, _live_dispatch, _report, plane_root
 
 LIB = REPO / "claudlobby/_runtime_scripts"
 BOX = REPO / "tests/fixtures/input-box-stub.py"
@@ -137,12 +136,7 @@ class Fleet:
         now (None = open-ended): the deadline_changed `assignment reschedule`
         records on the same assignment."""
         now = time.time()
-        emit_batch(self.root, [{
-            "event_type": "task", "emitter": "claudlobby.tasks.v1", "fleet": F,
-            "source_ref": f"request:move-{asg}-{now}", "occurred_at": _iso(now),
-            "payload": {"work_item_id": wi, "assignment_id": asg, "event": "deadline_changed",
-                        "actor": f"bot:{F}/mgr", "by": f"bot:{F}/mgr", "reason": "waits on the operator",
-                        "deadline": None if due_in is None else _iso(now + due_in)}}])
+        _deadline_changed(self.root, wi, asg, None if due_in is None else _iso(now + due_in), ts=_iso(now))
 
     def overdue(self) -> dict:
         """bot -> overdue rows, as the matcher reads the plane now."""

@@ -484,10 +484,17 @@ def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> Ta
 
 
 def _current_assignee(ctx, view):
-    task = view.task.require_resolved()
+    view.task.require_resolved()
     if (view.assignment.assignee_uid != ctx.caller.uid
             or not any(_worker(ctx, bot) == ctx.caller for bot in ctx.bots if bot in ctx.context.fleet.bots)):
         raise TaskConflictError("only the declared current assignee can act")
+    return _current_assignment(view)
+
+
+def _current_assignment(view):
+    """The viewed assignment's task, refusing unless it is still the task's
+    open current assignment."""
+    task = view.task.require_resolved()
     if not task.open or task.current_assignment != view.assignment:
         raise TaskConflictError("assignment is stale or closed")
     return task
@@ -663,10 +670,7 @@ def reschedule(ctx: TaskOperationContext, request_id: str, assignment_id: str, *
             with _locked_task(store, first.task.task_id) as check:
                 if _replayed(store, previous, conn):
                     return _result(ctx, conn, previous, True)
-                view = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
-                task = view.task.require_resolved()
-                if not task.open or task.current_assignment != view.assignment:
-                    raise TaskConflictError("assignment is stale or closed")
+                task = _current_assignment(show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid))
                 provenance = _provenance(ctx, conn, by)
                 _identities(ctx, conn, (ctx.caller, provenance))
                 raw = _raw(ctx, request_id, "task", dict(work_item_id=task.task_id,
