@@ -80,10 +80,16 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // No context probe, task preparation, submission or receipt lookup lives here.
   function canSelectMessageRecipient(identity) {
     const message = contextsByKind.get("message");
+    const actor = typeof identity?.uid === "string" && identity.uid.match(/^(?:([a-z][a-z0-9-]{0,31})::)?actor_[0-9a-f]{32}$/);
+    const fleet = typeof identity?.fleet_uid === "string" && identity.fleet_uid.match(/^(?:([a-z][a-z0-9-]{0,31})::)?fleet_[0-9a-f]{32}$/);
+    // Connected roster and action identities keep the same source qualifier.
+    // Never strip it to compare a bot from another computer with this grant.
+    const source = actor?.[1];
     return !!message && message.version === 1 && message.actions.includes("message")
       && identity?.current === true && identity.provisional === false
-      && /^actor_[0-9a-f]{32}$/.test(identity.uid)
-      && /^fleet_[0-9a-f]{32}$/.test(identity.fleet_uid)
+      && !!actor && !!fleet && source === fleet[1]
+      && (!source || typeof identity.fleet === "string" && identity.fleet.startsWith(source + " / ")
+        && message.scope.host.startsWith(source + "::host_"))
       && typeof identity.alias === "string" && identity.alias.length > 0
       && identity.fleet === room && message.room === room && message.scope.fleet === room
       && message.recipients.some(recipient => recipient.id === identity.uid);

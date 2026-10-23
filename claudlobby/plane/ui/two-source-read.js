@@ -213,7 +213,7 @@ export function createWorkspaceReadTransport({ sources }) {
       ...(d.checkins === undefined ? {} : {checkins: d.checkins.map(x => fields(e, x,
         ['checkin_id', 'actor_uid'], ['actor_alias'], ['fleet']))}) } };
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
-    if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid'], ['alias'], ['fleet'])) } };
+    if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid', 'fleet_uid'], ['alias'], ['fleet'])) } };
     if (path === '/api/overview' && (!d.totals || !d.host)) throw new Error('Missing source facts.');
     if (path === '/api/overview') return { ...v, data: { ...d, fleets: d.fleets.map(x => ({...fields(e, x, ['uid'], ['acked_by'], ['alias']),display_label:`${e.label} / ${x.alias}`})) } };
     return v;

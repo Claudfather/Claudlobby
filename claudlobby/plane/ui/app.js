@@ -579,9 +579,27 @@ function railRow(a) {
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
     ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
+    ${a.kind === "actor" && a.fleet ? `<button class="pill ghost" type="button" data-bot-message="${esc(a.uid)}" aria-label="Message ${esc(a.short)} in ${esc(a.fleet)}" disabled>Message</button>` : ""}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
     <small>${esc(a.kind)} · ${esc(ago(a.last_seen))}</small></div>`;
+}
+
+// Selection uses only the current readable roster and an already admitted
+// message context. It never navigates rooms or probes for write authority.
+function rosterMessageRecipient(uid) {
+  if (sessionPaused || typeof workLoop === "undefined" || !workLoop) return null;
+  const identity = rosterIdentities.get(uid);
+  if (!identity || identity.fleet !== activeRoom()
+      || fleets.find(fleet => fleet.alias === identity.fleet)?.uid !== identity.fleet_uid) return null;
+  const current = { ...identity, current: true };
+  return workLoop.canSelectMessageRecipient(current) ? current : null;
+}
+function refreshRosterActions() {
+  $("fleet")?.querySelectorAll("[data-bot-message]").forEach(button => {
+    button.disabled = !rosterMessageRecipient(button.dataset.botMessage);
+    button.title = button.disabled ? "Choose this bot’s team. Messaging also needs access on that computer." : "Compose a message to this bot";
+  });
 }
 
 // The roster (item 6, #1479). In a fleet ROOM the read holds one fleet and
@@ -602,8 +620,10 @@ function railRow(a) {
 // `all` read ever does.
 function renderFleet(env) {
   const el = $("fleet");
-  const focused = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button === document.activeElement);
-  const focusedIdentity = focused && rosterIdentities.get(focused.dataset.botInspect);
+  const focused = [...el.querySelectorAll("[data-bot-inspect]"), ...el.querySelectorAll("[data-bot-message]")]
+    .find(button => button === document.activeElement);
+  const focusKind = focused?.dataset.botMessage ? "botMessage" : "botInspect";
+  const focusedIdentity = focused && rosterIdentities.get(focused.dataset[focusKind]);
   if (renderState(el, env,
                   { idleWhenEmpty: (d) => !d.identities.length })) {
     adoptRoster(new Map()); return;
@@ -633,10 +653,22 @@ function renderFleet(env) {
       inspectBot(identity);
     });
   });
+  el.querySelectorAll("[data-bot-message]").forEach(button => {
+    const version = rosterGeneration, epoch = sessionEpoch;
+    button.addEventListener("click", () => {
+      if (!button.isConnected || button.disabled || sessionPaused || epoch !== sessionEpoch || version !== rosterGeneration
+          || !el.contains(button)) return;
+      const identity = rosterMessageRecipient(button.dataset.botMessage);
+      if (identity && workLoop.selectMessageRecipient(identity)) $("work-loop").scrollIntoView({ block: "nearest" });
+      else refreshRosterActions();
+    });
+  });
+  refreshRosterActions();
   if (focusedIdentity) {
     const current = rosterIdentities.get(focusedIdentity.uid);
     if (current && Object.keys(focusedIdentity).every(key => focusedIdentity[key] === current[key])) {
-      const replacement = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button.dataset.botInspect === current.uid);
+      const selector = focusKind === "botMessage" ? "[data-bot-message]" : "[data-bot-inspect]";
+      const replacement = [...el.querySelectorAll(selector)].find(button => button.dataset[focusKind] === current.uid);
       if (replacement) {
         if (equipmentFocus?.origin === focused) equipmentFocus.origin = replacement;
         replacement.focus();
@@ -1559,7 +1591,7 @@ function showLoading() {
 }
 showLoading();
 let workLoop = null;
-workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange: refreshEquipmentAction });
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); } });
 let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
