@@ -409,6 +409,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const name of inputs) document.removeEventListener(name,activity,true);
       observer?.disconnect();
     }; void checkAccount();
+    // Acknowledge the rendered interface, independently of host connection or
+    // account availability. No account, host, draft or action metadata crosses
+    // this boundary; the shell checks the exact origin and frame source.
+    const view = document.defaultView;
+    if (doc && !disposed && view && view.parent !== view)
+      invoke(() => view.parent.postMessage({type:'claudfather.workspace.ready',version:1}, doc.shell_origin));
     return {dispose};
   }
   function dispose() {

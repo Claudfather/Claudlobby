@@ -115,6 +115,25 @@ function harness(options={}) {
     timer(ms){const t=timers.find(t=>t.active&&t.ms===ms);assert.ok(t);t.active=false;t.fn();}};
 }
 
+test('rendered connected controls acknowledge only their exact shell without waiting for host/account reads',async()=>{
+  const h=harness({count:0}),messages=[],held=deferred();
+  h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
+  h.ui.document.defaultView={parent:{postMessage:(...args)=>messages.push(args)}};
+  h.mount();
+  assert.equal(h.ui.get('owner-session').hidden,false);
+  assert.ok(h.ui.get('owner-session').children.length);
+  assert.deepEqual(messages,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin]]);
+  assert.equal(h.api.snapshot().phase,'checking','ready describes the rendered interface, not host authority');
+  h.api.dispose();held.resolve(reply(200,context([])));await flush();
+  assert.equal(messages.length,1,'late account completion never reopens a disposed view');
+  for(const invalid of [true,false]) {
+    const other=harness(invalid?{dependencies:{documentContext:null}}:{count:0});
+    const view={postMessage:()=>{throw new Error('must not announce');}};view.parent=view;
+    other.ui.document.defaultView=invalid?{parent:{postMessage:()=>assert.fail('invalid document must not announce')}}:view;
+    other.mount();other.api.dispose();
+  }
+});
+
 test('idle warning requires trusted visible input to renew and removes activity listeners on close',async()=>{
   const h=harness({count:1});h.mount();await flush();await h.api.act(0,'connect');
   h.time=780000;h.timer(780000);await flush();

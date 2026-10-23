@@ -36,6 +36,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const retainContext = value => Object.freeze({ ...value, scope: Object.freeze({ ...value.scope }),
     recipients: Object.freeze(value.recipients.map(recipient => Object.freeze({ ...recipient }))), actions: Object.freeze([...value.actions]) });
   const messageRecipients = new Map(); // Tab memory only, bound to the full authorized scope.
+  // Presentation only: retained scopes and text never authorize a transport call.
+  const retainedScopes = new Set();
+  let retainedComposition = null;
   let context = null, room = null, epoch = 0, board = null, channel = null;
   let detailEpoch = 0, pendingDetail = null, compositionEpoch = 0, detailSnapshot = null, targetTitle = null;
   let conversation = null;
@@ -53,6 +56,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <div class="work-controls"><span class="note">Drafts stay in this tab. Refreshing clears unsent text.</span>
         <button id="work-send" type="submit" class="pill">Send message</button></div>
     </form>
+    <div id="work-retained" hidden>
+      <p id="work-retained-label" class="note"></p>
+      <textarea id="work-retained-body" rows="3" readonly aria-label="Retained draft"></textarea>
+    </div>
     <p id="work-notice" role="status" aria-live="polite"></p>
     <div id="work-pending"></div>
     <div id="work-recoverable"></div>
@@ -65,7 +72,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       && scopeKey(value.scope) === scopeKey(request.scope) ? value : null;
   };
   const visibleRequest = request => requestContext(request) || (request.version === 2 && [...contextsByKind.values()].some(value =>
-    ["workspace", "host", "fleet"].every(field => value.scope[field] === request.scope[field])));
+    ["workspace", "host", "fleet"].every(field => value.scope[field] === request.scope[field])))
+    || retainedScopes.has(scopeKey(request.scope));
   const selectionKey = () => row() ? rowKey(row()) : "";
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
@@ -75,6 +83,14 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (!row()) return;
     try { state.draft(row(), $("work-body").value); }
     catch (error) { notice = error.message; }
+  }
+  function retainPresentation() {
+    for (const value of contextsByKind.values()) retainedScopes.add(scopeKey(value.scope));
+    const selection = row();
+    if (selection && $("work-body").value) retainedComposition = {
+      row: selection, text: $("work-body").value,
+      label: `${kind} to ${context.recipients.find(r => r.id === target.recipient)?.label || target.recipient}${target.task_id ? ` · task ${targetTitle || target.task_id}` : ""}`,
+    };
   }
   // Selection only: authority must already be admitted for this exact room.
   // No context probe, task preparation, submission or receipt lookup lives here.
@@ -108,7 +124,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const rows = state.pending.filter(visibleRequest);
     $("work-pending").innerHTML = rows.map(p => `<div class="pending-action">
       <div><b>Awaiting confirmation</b><p>${esc(p.kind)} · ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""}</p>
-      ${!requestContext(p) ? '<p class="note">Retained request from prior access. Its receipt cannot be checked under the current grant.</p>' : ""}<small>Submitted ${esc(ago(p.submitted_at))} · ${esc(p.request_id)}</small></div>
+      ${!requestContext(p) ? '<p class="note">Retained request from prior access. Outcome remains unknown; reconnect with matching access to check its receipt. Nothing was resent.</p>' : ""}<small>Submitted ${esc(ago(p.submitted_at))} · ${esc(p.request_id)}</small></div>
       <button class="pill ghost" type="button" data-request="${esc(p.request_id)}"${!requestContext(p) || p.request_id === inFlightRequest || checkingReceipts.has(p.request_id) ? " disabled" : ""}>Check receipt</button>
       <button class="pill ghost" type="button" data-discard="${esc(p.request_id)}"${p.request_id === inFlightRequest || checkingReceipts.has(p.request_id) ? " disabled" : ""}>Discard saved request</button></div>`).join("")
       + [...state.discarded.values()].filter(p => requestContext(p))
@@ -135,6 +151,13 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       $("work-send").disabled = sending || !context.actions.includes(kind) || !!state.unresolved(row()) || state.storageError;
       if (restoreDraft) $("work-body").value = readDraft();
     } else $("work-send").disabled = true;
+    if (retainedComposition && usable && rowKey(retainedComposition.row) === selectionKey()) retainedComposition = null;
+    const retained = retainedComposition;
+    const showingRetained = !!retained;
+    $("work-retained").hidden = !showingRetained;
+    $("work-retained-label").textContent = showingRetained
+      ? `Retained ${retained.label} draft. Reconnect and select its recipient or task again before any new submission. Check any pending request's receipt first.` : "";
+    $("work-retained-body").value = showingRetained ? retained.text : "";
     $("work-notice").textContent = usable && state.storageError
       ? "This tab cannot safely save or read pending receipts. Sending is disabled; existing requests were not resent."
       : notice;
@@ -159,6 +182,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       const affected = contextsByKind.get(affectedKind);
       if (!affected || (expectedScope && scopeKey(expectedScope) !== scopeKey(affected.scope))
         || (expectedRecipient && !affected.recipients.some(recipient => recipient.id === expectedRecipient))) return;
+      retainPresentation();
       if (kind === affectedKind) {
         saveDraft(); ++compositionEpoch;
         if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(affected.scope), target.recipient);
@@ -200,6 +224,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     }
     if (expectedScope && (!context || scopeKey(expectedScope) !== scopeKey(context.scope))) return;
     saveDraft();
+    retainPresentation();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     ++epoch;
@@ -216,6 +241,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function setRoom(fleet, {keepDetail = false} = {}) {
     saveDraft();
+    if (room === (fleet || "all")) retainPresentation();
+    else { retainedScopes.clear(); retainedComposition = null; }
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     const token = ++epoch, selectedRoom = fleet || "all";
@@ -233,6 +260,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         && (!taskKind || typeof api.prepareAction === "function");
       if (valid) {
         value = retainContext(value);
+        retainedScopes.add(scopeKey(value.scope));
         for (const action of value.actions) if (taskKind || value.simulation || action === "message") contextsByKind.set(action, value);
         if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
         if (kind === "message" && contextsByKind.has("message") && !target) {
@@ -605,6 +633,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       notice = "Sending…"; paint();
       const receipt = await api.sendAction(request);
       const status = state.accept(request, receipt);
+      if (status === "delivered" && retainedComposition && rowKey(request) === rowKey(retainedComposition.row)) retainedComposition = null;
       if (token === epoch) {
         notice = `${requestLabel(request)}: ${receiptNotice(status, originContext.simulation, request.kind)}`;
         restoreDraft = status === "delivered" && selection === selectionKey();
@@ -654,6 +683,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     checkingReceipts.add(request.request_id); button.disabled = true;
     try {
       const status = state.accept(request, await api.actionReceipt(request));
+      if (status === "delivered" && retainedComposition && rowKey(request) === rowKey(retainedComposition.row)) retainedComposition = null;
       if (token === epoch) notice = `${label}: ${receiptNotice(status, simulation, request.kind)}`;
       refresh();
     } catch {
