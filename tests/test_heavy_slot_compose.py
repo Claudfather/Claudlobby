@@ -100,10 +100,12 @@ class TestTheRewriteHidesNoDeny:
     PreToolUse hook hands back, and the slot's rewrite puts its wrapper first.
     So the hook must leave as typed every command one of the bot's own deny
     rules names, or that rule never sees it. A worker's sudo-family denies are
-    the rules this covers today (#2464)."""
+    the rules this covers today (#2464). It checks the denies the compositor
+    writes; one an operator adds for a heavy tool (`tool_permissions.deny`) is
+    not, and the rewrite would hide it."""
 
-    # How a command still meets a rule: as typed, after an assignment or another
-    # command, and behind the wrappers Claude Code looks past.
+    # Where a denied command can stand: as typed, after an assignment or another
+    # command, and behind each runner the hook looks past.
     FRONTS = ("", "FOO=1 ", "cd /x && ", "timeout 60 ", "nice ", "nohup ", "stdbuf -oL ",
               "command ", "time ", "xargs ", "env ")
     JOBS = ("npm ci", "pip install x", "pytest")
@@ -123,16 +125,13 @@ class TestTheRewriteHidesNoDeny:
         deny = [rule for rule in settings["permissions"]["deny"] if rule.startswith("Bash(")]
         assert {"Bash(sudo *)", "Bash(/usr/bin/doas *)"} <= set(deny)
         # The check can see a rewrite: each front gets the wrapper before a job alone.
-        assert all(rewritten(front + job) for front in self.FRONTS for job in self.JOBS)
+        assert [front + job for front in self.FRONTS for job in self.JOBS
+                if not rewritten(front + job)] == []
         hidden = []
         for rule in deny:
-            pattern = rule[len("Bash("):-1]
-            head, star, _ = pattern.partition("*")
-            head = head.rstrip(": ")
-            if not head:
-                continue
-            named = [f"{head} {job}" for job in self.JOBS] if star else [pattern]
-            hidden += [front + c for front in self.FRONTS for c in named if rewritten(front + c)]
+            head = rule[len("Bash("):-1].split("*", 1)[0].rstrip(": ")
+            hidden += [f"{front}{head} {job}" for front in self.FRONTS for job in self.JOBS
+                       if rewritten(f"{front}{head} {job}")]
         assert hidden == []
 
 

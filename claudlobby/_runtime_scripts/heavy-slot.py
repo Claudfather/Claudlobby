@@ -63,11 +63,11 @@ nor are dev servers, host timers or the Claudron doctor walk (a render script
 takes the slot when its caller runs it through the render profile). A matched command
 the matcher cannot parse with certainty is left untouched and counted
 (`heavy_slot_unparsed`), because rewriting a command at a guessed position
-would corrupt it, which is worse than missing the gate. So is a heavy command
-behind a privilege runner (`sudo`, `doas` and the rest of the family a
-worker's settings deny): Claude Code checks a call's permission rules against
-the command the hook hands back, and with the wrapper in front no rule that
-names the runner would see it (#2464).
+would corrupt it, which is worse than missing the gate. A heavy job run through
+a privilege runner (`sudo npm install -g …`) is not gated, and the wrapper
+refuses one: Claude Code checks a call's permission rules against the command
+the hook hands back, so a wrapper in front would hide the runner from a rule
+that names it (#2464).
 
 Knobs, all host-wide: ``state/heavy-slot/slots`` holds the slot count (default
 1, the measured start); ``state/heavy-slot/disabled`` makes the hook pass every
@@ -110,8 +110,7 @@ COMMAND_CAP = 200  # characters of a command kept in a record or event
 
 
 class Unsure(Exception):
-    """The matcher met a command it must not rewrite: a construct it does not
-    parse, or a heavy command behind a privilege runner."""
+    """The matcher met a construct it does not parse: never rewrite."""
 
 
 # --- reading a Bash command the way the shell does ---------------------------
@@ -605,7 +604,10 @@ def _skip_opts(args: List[Tok], i: int, value_opts: set) -> int:
 
 def _strip_runners(args: List[Tok]) -> List[Tok]:
     """What actually runs under env/timeout/nice/nohup/... (each is a program
-    that execs its argument)."""
+    that execs its argument). Never under a privilege runner such as sudo:
+    Claude Code checks permission rules against the command the hook hands
+    back, and a wrapper in front would hide the runner from a rule that names
+    it (#2464)."""
     i = 0
     while i < len(args):
         b = _base(args[i])
@@ -629,8 +631,6 @@ def _strip_runners(args: List[Tok]) -> List[Tok]:
             i = _skip_opts(args, i + 1, {"-s", "-n", "-e", "-f", "-w", "-p", "--server-args",
                                          "--server-num", "--error-file", "--auth-file",
                                          "--wait"})
-        elif b in ("sudo", "doas"):
-            i = _skip_opts(args, i + 1, {"-u", "-g", "-C", "-h", "-p", "-r", "-t"})
         elif (b in ("uv", "poetry", "pipenv", "pdm", "hatch") and i + 1 < len(args)
               and args[i + 1].value == "run"):
             i = _skip_opts(args, i + 2, {"--with", "--python", "-p", "--project",
@@ -654,19 +654,6 @@ def _strip_runners(args: List[Tok]) -> List[Tok]:
         else:
             break
     return args[i:]
-
-
-# Programs that run a command as another user, root by default. A worker's
-# settings deny each by name, and Claude Code checks those rules against the
-# command the hook hands back: with the wrapper in front, no rule would see the
-# runner. So a heavy command behind one is never rewritten.
-_PRIVILEGE = {"sudo", "sudoedit", "su", "pkexec", "doas", "run0"}
-
-
-def _behind_privilege(args: List[Tok]) -> bool:
-    """Whether a privilege runner is among the runners in front of the job."""
-    job = _strip_runners(args)
-    return any(_base(t) in _PRIVILEGE for t in args[:len(args) - len(job)])
 
 
 def _positionals(args: List[Tok], value_opts: set) -> List[Optional[str]]:
@@ -1037,11 +1024,8 @@ def _insertions(command: str, base: int = 0, ctx: Tuple[str, ...] = (),
                 elif _HEAVY_WORD.search(raw):
                     raise Unsure("a flock -c string the matcher cannot map")
                 continue
-        toks = [Tok(w.value, w.raw) for w in words]
-        label = _classify(toks, lenient=False)
+        label = _classify([Tok(w.value, w.raw) for w in words], lenient=False)
         if label:
-            if _behind_privilege(toks):
-                raise Unsure("a privilege runner in front of a heavy command")
             out.append((base + first.start, ctx))
             if labels is not None:
                 labels.append(label)
