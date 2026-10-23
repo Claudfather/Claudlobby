@@ -464,6 +464,14 @@ still repeats socket ownership and liveness checks.
 The composed systemd service uses `Restart=always`; launchd uses `KeepAlive`.
 Logs use the normal service journal or `state/plane-owner.log`. Disarm with
 `enroll: false` followed by plan/diff/activation; activation retires the owned unit.
+Messages, task nudges and feedback from the supervised owner require the exact
+selected sealed runtime, saved owner-unit definition, verified native enrollment
+and positive caller ancestry in that unit. Matching environment values alone
+never admit an action; bot, fleet and timer selectors still refuse. This process
+proof lasts for one action or inspection call under activation admission, while
+session, actor and exact grant checks repeat at their existing boundaries. It is
+not a cached authority lease and does not retry an uncertain submission.
+
 Supervision never configures Serve, pairs an owner, renews grants or grants
 website access. Public bootstrap remains a foreground operation; autonomous
 handover during first-team browser launch is not provided by this service.
