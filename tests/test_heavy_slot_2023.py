@@ -116,8 +116,8 @@ WRAPPER_GATED = [
     ("xargs --replace pytest {}", "W xargs --replace pytest {}"),
     ("xargs -l pytest", "W xargs -l pytest"),
     ("xargs -I {} pytest {}", "W xargs -I {} pytest {}"),
-    # sudo -u <user> is already a runner; confirm it still sees the suite
-    ("sudo -u ci pytest -q", "W sudo -u ci pytest -q"),
+    # (sudo -u ci pytest -q is left as typed, so a worker's sudo deny sees it:
+    # the UNSURE table in test_heavy_slot_match.py)
 ]
 
 
