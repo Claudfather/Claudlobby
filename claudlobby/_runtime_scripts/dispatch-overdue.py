@@ -27,13 +27,17 @@ session's), under --root or CLAUDLOBBY_ROOT; --bots-dir <dir> may trail any
 mode and enables the respawn (orphan) split:
 
   dispatch-overdue.py --all [<now_epoch>] [--fleet F] [--root R] [--bots-dir D]
-      "<bot_id> <dispatched_at> <expected_by> <elapsed_seconds> <task_id>" per
-      overdue row (task_id is "-" for an id-less dispatch).
+      "<bot_id> <dispatched_at> <expected_by> <elapsed_seconds> <assignment_id>
+      <verdict> <task_id>" per open row past its deadline (task_id is "-" for a
+      dispatch with no legacy id). The verdict is the watchdog's: `overdue`, or
+      deferred: `orphaned` (with --bots-dir: see --orphans), `progress_grace`
+      or `max_age_cap`. A deferred row is listed too, so a caller can tell it
+      from one that closed (#2457).
 
   dispatch-overdue.py --orphans [<now_epoch>] --bots-dir <dir> [--fleet F] [--root R]
       Past-deadline rows whose worker RESPAWNED after dispatch (#835): the
-      session that received the id is gone, so the row can never close — split
-      out of --all so it stops alarming, and listable so it is not deleted.
+      session that received the id is gone, so the row can never close —
+      `orphaned` in --all so it stops alarming, and listable so it is not deleted.
       --bots-dir is REQUIRED and refused when missing or unreadable, at rc 3
       (#1014): orphan-ness is a comparison against <bots_dir>/<bot>/data/.spawn,
       so without one the answer is UNKNOWN, and an empty set at rc 0 would be
@@ -282,37 +286,42 @@ def _classify_all(
     fleet: str | None = None,
     root: str | None = None,
     plane: _Plane | None = None,
-) -> tuple[
-    dict[str, list[tuple[int, int, int, str]]],
-    dict[str, list[tuple[int, int, int, str]]],
-]:
-    """Shared core: (overdue, orphaned) for EVERY bot the plane knows of the
-    fleet — one roster scan, the overdue rules as the plane reader applies
-    them (deadline passed, not terminal, the progress grace, the expiry cap),
-    then the SAME orphan split the watchdog has always applied: a dispatch
-    older than the bot's `.spawn` is the orphan list's, never paged as overdue
-    (#835). THE in-process door when a caller wants both sets; the contracts
-    live on overdue_all / orphaned_all.
+) -> dict[str, list[tuple[int, int, int, str, str, str]]]:
+    """Shared core: every open row past its deadline, for EVERY bot the plane
+    knows of the fleet — one roster scan, the overdue rules as the plane reader
+    applies them (deadline passed, not terminal, the progress grace, the expiry
+    cap), then the SAME orphan split the watchdog has always applied: an
+    overdue dispatch older than the bot's `.spawn` is `orphaned`, never paged as
+    overdue (#835). Each row is (dispatched_at, expected_by, elapsed,
+    assignment_id, verdict, task_id or "-"), the --all line's order. THE
+    in-process door; the contracts live on overdue_all / orphaned_all and on
+    the --all grammar.
     """
     grace = _resolve_progress_grace()
     spawn_cache: dict[str, int | None] = {}
     with _session(plane, fleet, root) as p:
-        out: dict[str, list[tuple[int, int, int, str]]] = {}
-        orphans: dict[str, list[tuple[int, int, int, str]]] = {}
+        out: dict[str, list[tuple[int, int, int, str, str, str]]] = {}
         for bot, entry in sorted(p.roster.items()):
-            for da, exp, elapsed, tid in p.pr.overdue_rows(
+            for da, exp, elapsed, tid, asg, verdict in p.pr.past_due_rows(
                     p.conn, p.fleet, bot, now=now, max_age=max_age, progress_grace=grace, entry=entry):
-                row = (da, exp, elapsed, tid if tid else "-")
                 # Orphan split (#835). Only id'd rows can orphan: an id-less
                 # dispatch closes on ANY later terminal report, so a respawned
                 # worker's next report still retires it.
-                if tid and bots_dir:
+                if verdict == "overdue" and tid and bots_dir:
                     spawn = _cached_spawn(bots_dir, bot, spawn_cache)
                     if spawn is not None and spawn > da:
-                        orphans.setdefault(bot, []).append(row)
-                        continue
-                out.setdefault(bot, []).append(row)
-        return out, orphans
+                        verdict = "orphaned"
+                out.setdefault(bot, []).append((da, exp, elapsed, asg, verdict, tid if tid else "-"))
+        return out
+
+
+def _with_verdict(rows: dict[str, list[tuple[int, int, int, str, str, str]]],
+                  verdict: str) -> dict[str, list[tuple[int, int, int, str]]]:
+    """The rows with one verdict, per bot, in the four-field shape overdue_all
+    and orphaned_all return."""
+    picked = {bot: [(da, exp, elapsed, tid) for da, exp, elapsed, _asg, v, tid in entries if v == verdict]
+              for bot, entries in rows.items()}
+    return {bot: entries for bot, entries in picked.items() if entries}
 
 
 def assignment_attention(plane: _Plane, tasks, *, now: int, max_age: int,
@@ -418,7 +427,8 @@ def overdue_all(
     With <bots_dir>, rows whose worker respawned after dispatch are NOT
     returned here — see orphaned_all.
     """
-    return _classify_all(now, max_age, bots_dir, fleet=fleet, root=root, plane=plane)[0]
+    return _with_verdict(_classify_all(now, max_age, bots_dir, fleet=fleet, root=root, plane=plane),
+                         "overdue")
 
 
 def orphaned_all(
@@ -446,7 +456,8 @@ def orphaned_all(
     and the safe default is to keep reporting a row overdue rather than silently
     retiring one that might still be live. (The CLI mode refuses instead: #1014.)
     """
-    return _classify_all(now, max_age, bots_dir, fleet=fleet, root=root, plane=plane)[1]
+    return _with_verdict(_classify_all(now, max_age, bots_dir, fleet=fleet, root=root, plane=plane),
+                         "orphaned")
 
 
 def unassigned_all(
@@ -670,10 +681,10 @@ def main() -> int:
                     unassigned_all(now, fleet=fleet_opt, root=root_opt).items()):
                 print(f"{bot_id} {rts} {idle} {tid} {status}")
         else:
-            over, orph = _classify_all(now, max_age, bots_dir, fleet=fleet_opt, root=root_opt)
-            for bot_id, entries in sorted((over if mode == "--all" else orph).items()):
-                for da, exp, elapsed, tid in entries:
-                    print(f"{bot_id} {da} {exp} {elapsed} {tid}")
+            door = _classify_all if mode == "--all" else orphaned_all
+            for bot_id, rows in sorted(door(now, max_age, bots_dir, fleet=fleet_opt, root=root_opt).items()):
+                for row in rows:
+                    print(bot_id, *row)
     except PlaneUnreachable as exc:
         print(f"dispatch-overdue: {mode}: the plane is UNREACHABLE — {exc}", file=sys.stderr)
         return 3

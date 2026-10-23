@@ -719,16 +719,17 @@ harness_check "#1728 an UNTRACKED-ONLY checkout is still reported (never filtere
 
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
-# fleet-pulse consumes) with a 25h-old, never-reported dispatch and assert nothing.
+# fleet-pulse consumes) with a 25h-old, never-reported dispatch: it is still
+# listed as past due (#2457), with the expiry cap's verdict, never `overdue`.
 # The retired ledgers' paths survive only as the #1187 shape probe's junk
 # inputs below (a path in the bot slot); the matcher answers from the plane.
 VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
 VAL_DISPATCH_LOG="$ROOT/state/dispatch-log.jsonl"
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0000 "$((now - 90000))" "$((now - 89400))" "x"
-aged_out=$(val_read "overdue --all" python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
-    --fleet "$FLEET" --root "$ROOT" | grep -c "^valaged " || true)
-[ "${aged_out:-1}" -eq 0 ] && r=yes || r=no
-harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
+aged=$(val_read "overdue --all" python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
+    --fleet "$FLEET" --root "$ROOT" | grep "^valaged " || true)
+[ "$(printf '%s\n' "$aged" | awk '{print $6}')" = max_age_cap ] && r=yes || r=no
+harness_check "overdue_dispatch expires past max age (#460 — a 25h-old dispatch is max_age_cap, never overdue)" "$r"
 
 # ===========================================================================
 # Task-id end-to-end (goal-aware plan P4) — the dispatch row seeded above
