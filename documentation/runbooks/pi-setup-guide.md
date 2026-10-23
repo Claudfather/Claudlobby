@@ -328,51 +328,14 @@ sudo systemctl enable --now fail2ban
 sudo systemctl disable --now cups cups-browsed ModemManager
 ```
 
-### Scope `sudo` before the fleet runs
+### The `sudo` defaults every bot inherits
 
 Every bot runs as your user and inherits its `sudo` rules (the README's [Safety model](../../README.md#safety-model)). Raspberry Pi OS ships two rules that matter here, both from its `raspberrypi-sys-mods` package:
 
 - `/etc/sudoers.d/010_pi-nopasswd` gives the first user `sudo` with no password, and first-boot setup writes the name of the user you create into it. On a stock install `sudo -n true` succeeds, so every bot has root.
 - `/etc/sudoers.d/010_global-tty` sets `Defaults timestamp_type=global`: once you type your password for `sudo` in any terminal, every process of your user, every bot included, can use `sudo` without one until that ticket times out.
 
-A drop-in that sorts after them puts the password back and keeps a short list that runs without one. sudoers reads `/etc/sudoers.d` in sorted order and applies the last rule that matches, so `020_bot-sessions` wins over `010_pi-nopasswd`, even if an OS update writes that file back. Replace each `OPERATOR` with your user name:
-
-```
-# /etc/sudoers.d/020_bot-sessions: what a process of OPERATOR, every bot
-# included, may run as root with no password. Everything else asks for it.
-# sudoers skips a file whose name contains a dot, so this name has none.
-
-# A password typed in one terminal counts for that terminal only.
-Defaults:OPERATOR timestamp_type=tty
-
-# Everything asks for the password unless a later rule says otherwise.
-OPERATOR ALL=(ALL:ALL) PASSWD: ALL
-
-# Read-only checks, each held to its exact arguments. ^ and $ anchor the
-# whole argument list (sudo 1.9.10 or later).
-Cmnd_Alias BOT_ROOT_READS = /usr/bin/cat ^/proc/[0-9]+/stack$, \
-    /usr/sbin/tune2fs ^-l /dev/mmcblk0p[0-9]+$
-OPERATOR ALL=(root) NOPASSWD: BOT_ROOT_READS
-```
-
-**Keep the list short, and leave out anything that is root by another name:** a package manager (`apt`, `npm install -g`: a package's own scripts run as root), an editor or a pager, `tee` or `cp` to any path, `systemctl` with any unit, `sysctl -w`, and anything that runs a script. Anchor each argument pattern at both ends, as above: sudoers' `*` wildcard matches spaces too, so `cat /proc/*/stack` would also match `cat /proc/1/stack /etc/shadow`.
-
-**Install it without locking yourself out:**
-
-1. **Make sure you know your password.** First-boot setup sets one, but with `sudo` asking for none and SSH keys for logins, nothing may have asked for it since. `su -c true "$USER"` asks for it, and no error means it works. If it does not, set one with `sudo passwd "$USER"` now, while `sudo` still needs none.
-2. **In one SSH session, open a root shell and leave it open:** `sudo -i`.
-3. **In a second session,** run `sudo visudo -s -f /etc/sudoers.d/020_bot-sessions`, paste the file, replace `OPERATOR`, and save. visudo does not save a file that fails to parse, and `-s` (strict) also refuses an `OPERATOR` left in place. If it asks "What now?", answer `e` to edit again or `x` to leave without saving, never `Q`.
-4. **Check, in the second session:**
-   - `sudo -k; sudo -n true` says a password is required;
-   - `sudo -k; sudo -n cat /proc/1/stack` prints a kernel stack with no password;
-   - `sudo -k; sudo true` asks for your password, then works.
-5. **Close the root shell.** If a check in step 4 is wrong, first remove the file from that root shell: `rm /etc/sudoers.d/020_bot-sessions`.
-
-To undo it later: `sudo rm /etc/sudoers.d/020_bot-sessions`.
-
-**What changes:** a bot's `sudo` outside the list now needs your password, which a bot does not have, so installs and system changes come to you as commands to run. So does any script of yours that ran `sudo` without a password.
-
-**This is a guard rail, not a wall.** It stops a bot from running a root command by mistake, or because an issue or a web page told it to. It does not stop a bot in the `docker` group, or one that edits your shell's startup files to catch the password you type next. Only a separate account does that ([Safety model](../../README.md#safety-model)).
+What bounds a bot against these defaults is in the [Safety model](../../README.md#safety-model). The guard rail is the worker `sudo` deny (#2464), from the release that adds it: a worker's composed permissions deny `sudo`, and a manager's do not. The wall is a separate OS user for the fleet, one with no `sudo` rules (#1606).
 
 ### Ask polkit what a bot may do
 
