@@ -663,6 +663,34 @@ class TestComposeSettingsLocal:
         settings = compose_settings_local(fleet.bots["solo"], fleet, paths)
         assert _sudo_rules(settings["permissions"]["deny"]) == []
 
+    def test_reporting_metadata_moves_no_role(self, tmp_path):
+        """`manages` and `reports_to` record reporting, not the role: a fleet
+        manager that reports to another fleet keeps sudo, and a worker that
+        names bots it manages is still denied."""
+        paths = self._make_paths_with_runtime(tmp_path)
+
+        def bot(bid, **meta):
+            return BotConfig(
+                bot_id=bid, name=bid, expertise=["eng"], telegram=TelegramConfig(handle=f"{bid}_bot"), **meta
+            )
+
+        bots = {
+            "sub": bot("sub", reports_to="top", manages=["w1", "w2"]),
+            "w1": bot("w1", reports_to="sub"),
+            "w2": bot("w2", reports_to="sub", manages=["w1"]),
+        }
+        fleet = FleetConfig(manager="sub", name="test-fleet", service_prefix="com.test", bots=bots)
+        deny = {
+            bot_id: _sudo_rules(compose_settings_local(b, fleet, paths)["permissions"]["deny"])
+            for bot_id, b in bots.items()
+        }
+        expected = sorted(
+            f"Bash({prefix}{name} *)" for name in _SUDO_FAMILY for prefix in ("", "/usr/bin/", "/bin/")
+        )
+        assert deny["sub"] == []
+        assert sorted(deny["w1"]) == expected
+        assert sorted(deny["w2"]) == expected
+
     def test_no_composed_allow_names_a_sudo_family_command(self, tmp_path):
         """Nothing the library ships pre-approves a sudo-family command: a
         worker's deny is the only rule that names one, and a manager's sudo
