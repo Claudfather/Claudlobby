@@ -681,7 +681,8 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || tr
 pass=0; fail=0; refused=0
 val_scenario "validate-bot-change: observe the trust-loop behaviors"
 events_rows="$(val_events "$ROOT" "$FLEET" "$BOT")"
-mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
+# -J joins the lines the pane wrapped, so a long page reads as one line
+mgr_pane=$(tmux capture-pane -J -t "$MGR" -p 2>/dev/null || true)
 
 printf '%s' "$events_rows" | grep -q '"type":"activity_stuck"' && r=yes || r=no
 harness_check "activity_stuck event emitted (animated-but-hung worker)" "$r"
@@ -735,7 +736,7 @@ harness_check "overdue_dispatch expires past max age (#460 — a 25h-old dispatc
 # Task-id end-to-end (goal-aware plan P4) — the dispatch row seeded above
 # carries task_id t-1-aaaa; the REAL fleet-pulse run consumed it. Assert the
 # id made it through the pipeline: into the emitted overdue event, and into
-# the manager nudge with the self-heal echo instruction. (Join-matrix unit
+# the manager nudge, which names the assignment with its task id. (Join-matrix unit
 # semantics live in tests/test_dispatch_overdue.py — not re-run here.)
 # A plain header, not val_scenario: these checks read the first scenario's
 # events_rows, so they belong to its refusal scope.
@@ -743,7 +744,7 @@ echo ""
 echo "=== validate task-id end-to-end (P4: event + nudge carry the id) ==="
 printf '%s' "$events_rows" | grep '"type":"overdue_dispatch"' | grep -q '"task_id":"t-1-aaaa"' && r=yes || r=no
 harness_check "overdue_dispatch event carries the dispatch task_id" "$r"
-printf '%s' "$mgr_pane" | grep -q 'no report has closed' && printf '%s' "$mgr_pane" | grep -q 't-1-aaaa' && r=yes || r=no
+printf '%s' "$mgr_pane" | grep -q 'no terminal linked report: asg_' && printf '%s' "$mgr_pane" | grep -q '(task t-1-aaaa)' && r=yes || r=no
 harness_check "manager nudge names the open id (for the manager to act on)" "$r"
 
 # ===========================================================================

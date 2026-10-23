@@ -183,6 +183,9 @@ def test_one_report_per_browser_on_a_host_of_two_fleets(host):
 def test_a_push_the_manager_did_not_take_keeps_no_key(host):
     host.fleet("F", "com.t", ["b1", "b2"], manager=("t2332-mgr", "mgr"))
     start = _browser(host, 1000, _left_by(host, "com.t.b1.service"), f"{APP}/app-org.chromium.Chromium-1000.scope")
+    # the manager has no session yet: nothing was typed, so no key (#2457)
+    host.sweep("F")
+    assert host.seen("F") == []
     assert host.tmux_cmd("-L", "t2332-mgr", "new-session", "-d", "-s", "mgr", "sleep 600").returncode == 0
     token = host.tmux_cmd("-L", "t2332-mgr", "display-message", "-p", "-t", "mgr",
                           "#{session_created}-#{pane_pid}").stdout.strip()
@@ -190,16 +193,6 @@ def test_a_push_the_manager_did_not_take_keeps_no_key(host):
     (host.root / "state" / "pulse" / "held-push.t2332-mgr_mgr").write_text(token)
     host.sweep("F")
     host.sweep("F")
-    assert [data["pid"] for _, _, data in host.reports()] == [1000, 1000]
+    assert [data["pid"] for _, _, data in host.reports()] == [1000, 1000, 1000]
     assert host.seen("F") == []
     assert f"1000-{start}" not in host.seen("F")
-
-
-def test_a_push_with_no_manager_session_keeps_no_key(host):
-    """A manager is declared and its session is not there: nothing was typed,
-    so the key waits for a push that goes through (#2457)."""
-    host.fleet("F", "com.t", ["b1", "b2"], manager=("t2332-mgr", "mgr"))
-    _browser(host, 1000, _left_by(host, "com.t.b1.service"), f"{APP}/app-org.chromium.Chromium-1000.scope")
-    host.sweep("F")
-    assert [data["pid"] for _, _, data in host.reports()] == [1000]
-    assert host.seen("F") == []
