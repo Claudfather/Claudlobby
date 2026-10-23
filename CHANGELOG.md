@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the rollout check skips a draft, so a body written before the PR is marked ready leaves no failed run (#2467)
+
+A PR opened before its body had the `## Rollout check` section failed its first
+run, and every failed run notifies whoever triggered it, though the next run
+passed once the body was done. Over 20 days, 30 of the check's 36 failed runs
+were a missing section, and 17 of those came while the PR was a draft.
+
+The check's job now skips a draft (`if: github.event.pull_request.draft != true`
+in `verify-rollout.yml`). A draft cannot merge, and marking it ready for review
+already runs the check, so a PR is judged when it is offered: on every event of
+a PR that is not a draft, a missing or incomplete section still fails at once.
+The skip is the reusable job's own, so an adopter gets it by moving its pinned
+`uses:` sha, and the skipped run keeps the name `rollout-check / Rollout check`.
+The merge guardrails pass only a newest run reading `SUCCESS`, so they refuse a
+skipped one. The guide and the check's failure message now tell openers to keep
+a PR a draft until its body has the section. The guide's step 4 tells a repo
+that makes the check required what that leaves open: a required check passes a
+skipped job, so it reads a draft just marked ready as passing until the new run
+appears, and which of several runs on one commit it counts is untested.
+
 ### Fixed — an overdue assignment pages its manager once (#2457)
 
 fleet-pulse paged a manager about one overdue assignment again and again. It
