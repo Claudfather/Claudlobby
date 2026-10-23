@@ -578,8 +578,13 @@ bound; an entry nested past the check's own walk reads "unavailable", never abse
 A batch whose name leaves room for a transmission and that the daemon spools after a
 database error is tried again 30 seconds later, once, rather than left to the
 10-minute interval drain (#2446). Once, because a drain counts an attempt against
-each entry it cannot ingest and quarantines it at five. Other spooled work waits for
-the interval.
+each entry it cannot ingest and quarantines it at five. The retry is one of the five:
+under a fault that outlasts it, such a batch is quarantined d + 1800 seconds after it
+spooled rather than d + 2400, where d, 30 to 600 seconds, is the wait for the next
+interval drain. (An interval drain within the 30 seconds tries the entry first, and the
+retry then passes over it.) A receipt check does not read the quarantine, so a spooled
+proof's receipt reads absent after a fault of about 30 to 40 minutes, where it took 40
+to 50 (#2460). Other spooled work waits for the interval.
 
 Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's

@@ -77,7 +77,9 @@ Follow-ups from the review of #2430's fix (`claudlobby/plane/queue_names.py`,
   later**, once, instead of waiting up to 10 minutes for the interval drain
   while its message's receipt read "pending". Other spooled work still waits
   for the interval. Once, because a drain counts an attempt against each entry
-  it cannot ingest and quarantines it at five.
+  it cannot ingest and quarantines it at five. The retry is one of the five, so
+  under a fault that outlasts it, a spooled proof's receipt reads absent after
+  about 30 to 40 minutes, where it took 40 to 50 (#2460).
 
 ### Fixed — the check-in beat sees a trigger in a stage the socket client did not finish (#2448)
 

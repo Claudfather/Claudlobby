@@ -111,7 +111,9 @@ STAGED_REPLAY_TICK_S = 0.5
 # read the spool, every 10 minutes, and a receiver's proof in it held its
 # message's receipt "pending" all that while. 30 s is this loop's own pause
 # after a failed replay. Once, because a drain counts an attempt against each
-# entry it cannot ingest, and at MAX_ATTEMPTS quarantines it.
+# entry it cannot ingest, and at MAX_ATTEMPTS quarantines it. The retry spends
+# one of those attempts, so under a fault that outlasts it a proof reaches the
+# quarantine, which no receipt check reads, one interval drain sooner (#2460).
 SPOOLED_PROOF_RETRY_S = 30.0
 
 
