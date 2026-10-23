@@ -14,16 +14,26 @@ Every worker's composed permissions now deny `sudo`, `sudoedit`, `su`,
 neither does a manager alone in its fleet, so a step that needs root goes
 through the manager. No composed allow names any of these commands.
 
+Claude Code checks permission rules against the command a hook hands back,
+so the heavy-slot hook now leaves a heavy command behind one of these runners
+(`sudo npm install -g …`) as typed, and counts it (`heavy_slot_unparsed`).
+With its wrapper in front, no rule saw the runner. On a bot with
+`heavy_slot: true`, a manager's root install now runs without the slot.
+
 The deny is a guard rail, not a wall. It refuses the command when a session
 runs it as a tool call: plainly, inside a compound command, a subshell or
-`$(…)`, after a variable assignment, behind the wrappers Claude Code looks
-past, and by those two paths. It cannot see `bash -c '…'`, a script, an
-interpreter, an expansion it cannot resolve, another path to the program, or a
-session that edits its own settings file, and the OS user keeps its sudo
-rights on every one of those routes. A separate OS user without sudo is the
+`$(…)`, after a variable assignment, behind `timeout`, `nice`, `nohup`,
+`stdbuf`, `command`, `time` or `xargs`, and by those two paths. It cannot see
+`bash -c '…'`, a script, an interpreter, an expansion it cannot resolve, a
+link to the program under another name, or a session that edits its own
+settings file. On Claude Code 2.1.309 it also misses `sudo`, `doas` or
+`pkexec` running a command behind `env`, `setsid`, `ionice` or `watch`
+(`env sudo ls`), and a relative path to one that runs a command. The OS user
+keeps its sudo rights on each of those routes, and in anything it runs
+outside the session's tool calls. A separate OS user without sudo is the
 wall.
 
-Workers lose `sudo -u postgres psql`, root reads and package installs. The
+Workers lose `sudo -u postgres psql`, root reads and root installs. The
 change reaches running bots at the next activation of a release that carries
 it.
 
