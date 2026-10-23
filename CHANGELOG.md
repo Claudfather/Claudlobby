@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Docs — the README says what every bot inherits from your account: its `sudo` rules, its groups and polkit (#2454)
+
+Every bot runs as the operator's own user, so it can do whatever that user can. The README's Safety model said a bot acts as your user, but named only `sudo` with no password as a way to root. The Docker integration told operators to join the `docker` group without saying that the group is root by another name, and the Pi setup guide did not say that Raspberry Pi OS gives its first user `sudo` with no password.
+
+- **`README.md`, Safety model:** a bot inherits your account's `sudo` rules, its groups (`docker`, `lxd` and `disk` each reach root without `sudo`) and what polkit grants your desktop session. A deny rule is a guard rail, not a wall (`library/guardrails/permissions-are-not-a-control.md`). That holds for the worker `sudo` deny too (#2464): the section says what workers carry from the release that adds it, and that until then no composed rule denies `sudo`. The wall is a separate OS user (#1606).
+- **`documentation/runbooks/pi-setup-guide.md`:** Raspberry Pi OS's two `sudo` defaults (no password for the first user, and one typed password for every terminal), what bounds a bot against them (the worker `sudo` deny as a guard rail, a separate OS user as the wall), and how to ask polkit what a bot may do.
+- **`documentation/integrations.md`:** the Docker step says what joining the group grants, with rootless Docker as the alternative.
+- **`documentation/getting-started.md` and `documentation/runbooks/mac-mini-setup-guide.md`:** a pointer to the Safety model where you choose the account the bots run as.
+
 ### Fixed — a harness check reads a Plane row only once the daemon has replayed it (#2274)
 
 The validation harness read the Plane once, right after the code under test

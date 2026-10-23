@@ -328,6 +328,26 @@ sudo systemctl enable --now fail2ban
 sudo systemctl disable --now cups cups-browsed ModemManager
 ```
 
+### The `sudo` defaults every bot inherits
+
+Every bot runs as your user and inherits its `sudo` rules (the README's [Safety model](../../README.md#safety-model)). Raspberry Pi OS ships two rules that matter here, both from its `raspberrypi-sys-mods` package:
+
+- `/etc/sudoers.d/010_pi-nopasswd` gives the first user `sudo` with no password, and first-boot setup writes the name of the user you create into it. On a stock install `sudo -n true` succeeds, so every bot has root.
+- `/etc/sudoers.d/010_global-tty` sets `Defaults timestamp_type=global`: once you type your password for `sudo` in any terminal, every process of your user, every bot included, can use `sudo` without one until that ticket times out.
+
+What bounds a bot against these defaults is in the [Safety model](../../README.md#safety-model). The guard rail is the worker `sudo` deny (#2464), from the release that adds it: a worker's composed permissions deny `sudo`, and a manager's do not. The wall is a separate OS user for the fleet, one with no `sudo` rules (#1606).
+
+### Ask polkit what a bot may do
+
+polkit is a second gate beside `sudo`. It decides who may reboot the host, change its network or manage its services, and on a host where you are logged in at the desktop it can answer for a bot as it does for that session. Ask it from a user service, which is where bots run:
+
+```bash
+systemd-run --user --wait --pipe --quiet sh -c \
+  'pkcheck --action-id org.freedesktop.login1.reboot --process $$$$ && echo allowed'
+```
+
+`allowed` means every bot can reboot the host with no password. `systemd-run` reads `$$` as one `$`, so the shell gets `$$`, its own process ID. Ask the same of `org.freedesktop.login1.power-off`, and of `org.freedesktop.NetworkManager.settings.modify.system` for the host's network connections; `pkaction` lists every action. On a Raspberry Pi OS desktop all three print `allowed`, while managing services and installing packages still ask for a password. Only a separate account keeps these rights from the bots and leaves them with you at the desktop.
+
 ## Swap (Recommended for 4+ Bots)
 
 **Set `CONF_MAXSWAP` as well as `CONF_SWAPSIZE`, or you silently get 2 GB.**

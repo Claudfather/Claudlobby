@@ -323,5 +323,6 @@ If all of those work, you're set.
 
 Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](../getting-started.md) to assemble a sealed host release and activate the first fleet with `fleet setup`. That activation composes the bots, enrolls declared jobs and starts supervised sessions. Run `host cache warm` through the sealed CLI when the fleet needs MCP package caches; later source changes go through `config plan`, `config diff PLAN_ID` and `host activate PLAN_ID`.
 
+- Every bot runs as the account you set up here, and inherits its `sudo` rules and groups. Read the README's [Safety model](../../README.md#safety-model) before the fleet starts.
 - For details on launchd vs systemd vs cron install patterns, see [install-patterns.md](../install-patterns.md).
 - For the Pi equivalent of this guide, see [pi-setup-guide.md](./pi-setup-guide.md).
