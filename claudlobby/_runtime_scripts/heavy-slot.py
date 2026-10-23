@@ -63,7 +63,11 @@ nor are dev servers, host timers or the Claudron doctor walk (a render script
 takes the slot when its caller runs it through the render profile). A matched command
 the matcher cannot parse with certainty is left untouched and counted
 (`heavy_slot_unparsed`), because rewriting a command at a guessed position
-would corrupt it, which is worse than missing the gate.
+would corrupt it, which is worse than missing the gate. So is a heavy command
+behind a privilege runner (`sudo`, `doas` and the rest of the family a
+worker's settings deny): Claude Code checks a call's permission rules against
+the command the hook hands back, and with the wrapper in front no rule that
+names the runner would see it (#2464).
 
 Knobs, all host-wide: ``state/heavy-slot/slots`` holds the slot count (default
 1, the measured start); ``state/heavy-slot/disabled`` makes the hook pass every
@@ -106,7 +110,8 @@ COMMAND_CAP = 200  # characters of a command kept in a record or event
 
 
 class Unsure(Exception):
-    """The matcher met a construct it does not parse: never rewrite."""
+    """The matcher met a command it must not rewrite: a construct it does not
+    parse, or a heavy command behind a privilege runner."""
 
 
 # --- reading a Bash command the way the shell does ---------------------------
@@ -651,6 +656,19 @@ def _strip_runners(args: List[Tok]) -> List[Tok]:
     return args[i:]
 
 
+# Programs that run a command as another user, root by default. A worker's
+# settings deny each by name, and Claude Code checks those rules against the
+# command the hook hands back: with the wrapper in front, no rule would see the
+# runner. So a heavy command behind one is never rewritten.
+_PRIVILEGE = {"sudo", "sudoedit", "su", "pkexec", "doas", "run0"}
+
+
+def _behind_privilege(args: List[Tok]) -> bool:
+    """Whether a privilege runner is among the runners in front of the job."""
+    job = _strip_runners(args)
+    return any(_base(t) in _PRIVILEGE for t in args[:len(args) - len(job)])
+
+
 def _positionals(args: List[Tok], value_opts: set) -> List[Optional[str]]:
     out: List[Optional[str]] = []
     i = 0
@@ -1019,8 +1037,11 @@ def _insertions(command: str, base: int = 0, ctx: Tuple[str, ...] = (),
                 elif _HEAVY_WORD.search(raw):
                     raise Unsure("a flock -c string the matcher cannot map")
                 continue
-        label = _classify([Tok(w.value, w.raw) for w in words], lenient=False)
+        toks = [Tok(w.value, w.raw) for w in words]
+        label = _classify(toks, lenient=False)
         if label:
+            if _behind_privilege(toks):
+                raise Unsure("a privilege runner in front of a heavy command")
             out.append((base + first.start, ctx))
             if labels is not None:
                 labels.append(label)
