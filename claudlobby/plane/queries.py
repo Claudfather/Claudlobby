@@ -118,8 +118,26 @@ NEWEST_ACK_SQL = (
     " ORDER BY e.ingest_seq DESC LIMIT 1"
 )
 
+# THE deadline of assignment `a` (#2469), one fragment for every reader: the
+# newest `deadline_changed` task event on it, by ingest order, whose NULL
+# deadline means open-ended; with no such event, the `expected_by` its dispatch
+# promised. A manager's move is a fact, so `assignments.expected_by` is never
+# rewritten. In the fragment, '' stands for "the newest fact names no
+# deadline", so the fallback applies only when there is no fact at all (a
+# stored deadline is never ''). Compare it through `_epoch` like any instant.
+_NEWEST_DEADLINE_FACT = ("(SELECT {col} FROM events d WHERE d.kind='task'"
+                         " AND d.event='deadline_changed' AND d.assignment_id = a.assignment_id"
+                         " ORDER BY d.ingest_seq DESC LIMIT 1)")
+EFFECTIVE_DEADLINE_SQL = ("NULLIF(COALESCE(" + _NEWEST_DEADLINE_FACT.format(col="IFNULL(d.deadline, '')")
+                          + ", a.expected_by), '')")
+# When the newest deadline fact was recorded, NULL while the dispatch's own
+# deadline stands: the watchdog's expiry cap counts from it (plane-readers.py,
+# `deadline_status`).
+DEADLINE_SET_AT_SQL = _NEWEST_DEADLINE_FACT.format(col="d.occurred_at")
+
 OPEN_ASSIGNMENTS_AT_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, " + EFFECTIVE_DEADLINE_SQL + ", "
+    + DEADLINE_SET_AT_SQL +
     " FROM assignments a"
     " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
@@ -355,7 +373,12 @@ DELIVERY_STATUS_SQL = (
 #
 # The nudge's OWN arm needs the opposite window (a nudge is exactly what it
 # looks for), so there are two, and they differ by that one token.
-NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
+#
+# Both windows skip `deadline_changed` (#2469). A manager moving a deadline is
+# neither an answer to the human it asked nor the worker's word, so it must
+# not end an escalation or a block, or let stale_task re-derive a stall from
+# a declared wait. A nudge stands through it too, until the work itself moves.
+NEWEST_TASK_IGNORED = ("supplied_id_not_open", "deadline_changed")
 ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
 
 
@@ -485,7 +508,7 @@ _ASSIGNEE_WORKING = (
 #   1) now             — not-overdue: no deadline, or the deadline has not passed
 #   2) amber cutoff     — aged: the LATER of dispatch/progress predates it
 #   3) hb-fresh cutoff  — working: the freshness gate inside _ASSIGNEE_WORKING
-# NULL expected_by is NOT overdue (the deadline-less case is the whole point);
+# A NULL deadline (EFFECTIVE_DEADLINE_SQL) is NOT overdue (the deadline-less case is the whole point);
 # without the guard `NOT (NULL < now)` is NULL and would drop every such row.
 #
 # HOLDING requires DELIVERY (_TX_ACTIVATED): a bot cannot be "sitting on" a task
@@ -498,7 +521,8 @@ _ASSIGNEE_WORKING = (
 # already hold).
 _STALE_TASK = (
     "(" + _TX_ACTIVATED
-    + " AND (a.expected_by IS NULL OR " + _epoch("a.expected_by") + " >= " + _epoch("?") + ")"
+    + " AND (" + EFFECTIVE_DEADLINE_SQL + " IS NULL OR " + _epoch(EFFECTIVE_DEADLINE_SQL)
+    + " >= " + _epoch("?") + ")"
     " AND MAX(" + _epoch("a.occurred_at") + ", COALESCE("
     + _epoch(_STALE_PROGRESS_AT) + ", " + _epoch("a.occurred_at") + ")) < "
     + _epoch("?")
@@ -544,8 +568,8 @@ ATTENTION_ARMS = (
     ("nudged",
      f"({_NEWEST_EVENT} = 'nudged' AND {_epoch(_NEWEST_AT)} < {_epoch('?')})",
      _NEWEST_AT, NEWEST_TASK_IGNORED),
-    ("overdue", f"({_epoch('a.expected_by')} < {_epoch('?')})",
-     "a.expected_by", None),
+    ("overdue", f"({_epoch(EFFECTIVE_DEADLINE_SQL)} < {_epoch('?')})",
+     EFFECTIVE_DEADLINE_SQL, None),
     # a bot that SAID it is blocked and waiting: its newest task event is
     # `blocked_waiting` — non-terminal (the task stays open while it waits, the
     # escalated/nudged family), so `_NON_TERMINAL_A` keeps it in the queue. An

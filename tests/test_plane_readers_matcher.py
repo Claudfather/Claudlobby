@@ -39,6 +39,7 @@ What remains is the plane-reader suite (the file is renamed to say so).
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -169,6 +170,24 @@ def test_an_open_ended_deadline_fact_wins_as_the_newest(tmp_path):
     _deadline_changed(root, "1", None, _at(-60))
     for later in (0, 86400 + 1, 30 * 86400):
         assert _verdicts(root, NOW_EPOCH + later) == [], later
+
+
+def test_the_deadline_fragment_seeks_the_assignments_own_events(tmp_path):
+    """Every open row runs the fragment's two subqueries, so each must seek
+    the assignment's events by its index, never walk the task history by
+    ingest order looking for a deadline fact the row may not have."""
+    from claudlobby.plane.db import connect, db_path
+    root = plane_root(tmp_path)
+    _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    conn = connect(db_path(root))
+    try:
+        plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + queries.OPEN_ASSIGNMENTS_AT_SQL,
+                                            ("actor_x",) + (None,) * 6)]
+    finally:
+        conn.close()
+    # "SEARCH d" on SQLite 3.36 and later, "SEARCH TABLE events AS d" before it
+    seeks = [d for d in plan if re.match(r"(SEARCH|SCAN) (TABLE events AS )?d\b", d)]
+    assert len(seeks) == 2 and all("idx_events_assignment" in d for d in seeks), plan
 
 
 @pytest.mark.parametrize("report_at,closed", [

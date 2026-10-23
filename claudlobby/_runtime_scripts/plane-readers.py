@@ -162,8 +162,19 @@ _SIBLING_CLOSURE = (
     "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
     "          AND t.ingest_seq>a.ingest_seq)))"
 )
+# THE deadline of assignment `a`, and when a manager last moved it (#2469):
+# byte-identical twins of `queries.EFFECTIVE_DEADLINE_SQL` and
+# `queries.DEADLINE_SET_AT_SQL`, where the rule is explained; OPEN_SQL's pin
+# keeps all three from forking.
+_NEWEST_DEADLINE_FACT = ("(SELECT {col} FROM events d WHERE d.kind='task'"
+                         " AND d.event='deadline_changed' AND d.assignment_id = a.assignment_id"
+                         " ORDER BY d.ingest_seq DESC LIMIT 1)")
+EFFECTIVE_DEADLINE_SQL = ("NULLIF(COALESCE(" + _NEWEST_DEADLINE_FACT.format(col="IFNULL(d.deadline, '')")
+                          + ", a.expected_by), '')")
+DEADLINE_SET_AT_SQL = _NEWEST_DEADLINE_FACT.format(col="d.occurred_at")
 OPEN_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a"
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, " + EFFECTIVE_DEADLINE_SQL + ", "
+    + DEADLINE_SET_AT_SQL + " FROM assignments a"
     " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     + _SIBLING_CLOSURE +
     " ORDER BY a.occurred_at, a.ingest_seq"
@@ -307,7 +318,8 @@ def bot_entry(conn: sqlite3.Connection, fleet: str, bot: str) -> Optional[dict]:
 def open_assignments(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
                      *, entry: Optional[dict] = None) -> list[tuple]:
     """The bot's OPEN assignments as of *at* (None = everything landed), oldest
-    first: (occurred_at, source_ref, assignment_id, expected_by)."""
+    first: (occurred_at, source_ref, assignment_id, expected_by, deadline_set_at),
+    the deadline being the newest deadline fact's, else the dispatch's (#2469)."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     out: list[tuple] = []
     for uid in (entry or {}).get("uids", []):
@@ -328,7 +340,7 @@ def open_rows(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] 
     task_id), oldest first — from the plane: the open LIST is id'd rows only
     (a row with no legacy task id, a ``sha:`` ref or none, is left out)."""
     out: list[tuple[int, Optional[int], str]] = []
-    for occurred_at, source_ref, _asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+    for occurred_at, source_ref, _asg, expected_by, _set in open_assignments(conn, fleet, bot, at, entry=entry):
         tid = _task_id(source_ref)
         if tid is None:
             continue
@@ -347,7 +359,7 @@ def open_idless_assignments(conn: sqlite3.Connection, fleet: str, bot: str,
     on the bot's next terminal report, as the legacy ledger closes id-less
     rows by any later terminal report."""
     out: list[tuple[str, str]] = []
-    for _at, source_ref, asg, _exp in open_assignments(conn, fleet, bot, at, entry=entry):
+    for _at, source_ref, asg, _exp, _set in open_assignments(conn, fleet, bot, at, entry=entry):
         if source_ref and source_ref.startswith(IDLESS):
             wi = conn.execute(WORK_ITEM_SQL, (asg,)).fetchone()
             out.append((wi[0] if wi else "", asg))
@@ -446,13 +458,20 @@ def last_progress_epoch(conn: sqlite3.Connection, uids: list[str], now: int) -> 
 
 
 def deadline_status(now: int, dispatched_at: int, expected_by: Optional[int],
-                    last_progress: Optional[int], max_age: int, progress_grace: int) -> str:
-    """Shared watchdog clock decision; caller owns lifecycle and orphan evidence."""
+                    last_progress: Optional[int], max_age: int, progress_grace: int,
+                    deadline_set_at: Optional[int] = None) -> str:
+    """Shared watchdog clock decision; caller owns lifecycle and orphan evidence.
+
+    The expiry cap counts from the dispatch, or, once a manager has moved the
+    deadline (*deadline_set_at*, #2469), from the later of that move and the
+    deadline it set: a wait moved days out pages once when it passes, and is
+    capped *max_age* after that."""
     if expected_by is None:
         return "no_deadline"
     if now <= expected_by:
         return "not_due"
-    if max_age > 0 and now - dispatched_at > max_age:
+    capped_from = dispatched_at if deadline_set_at is None else max(dispatched_at, deadline_set_at, expected_by)
+    if max_age > 0 and now - capped_from > max_age:
         return "max_age_cap"
     if (progress_grace > 0 and last_progress is not None and dispatched_at < last_progress <= now
             and now - last_progress <= progress_grace):
@@ -479,11 +498,11 @@ def past_due_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, m
     uids = (entry or {}).get("uids", [])
     last_progress = last_progress_epoch(conn, uids, now) if progress_grace > 0 else None
     out: list[tuple[int, int, int, Optional[str], str, str]] = []
-    for occurred_at, source_ref, asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+    for occurred_at, source_ref, asg, expected_by, set_at in open_assignments(conn, fleet, bot, at, entry=entry):
         da, exp = _epoch(occurred_at), _epoch(expected_by)
         if da is None:
             continue
-        verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace)
+        verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace, _epoch(set_at))
         if verdict in PAST_DUE:
             out.append((da, exp, now - exp, _task_id(source_ref), asg, verdict))
     return out
@@ -1224,11 +1243,12 @@ def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
 #
 # `NEWEST_TASK_IGNORED` is the package's constant (`queries.NEWEST_TASK_IGNORED`,
 # pinned equal): `supplied_id_not_open` is a JOIN anomaly, not a lifecycle
-# state, so it never counts as the row's newest word. The escalation's window
+# state, so it never counts as the row's newest word, and neither does a
+# manager's `deadline_changed` (#2469). The escalation's window
 # additionally skips `nudged` — a nudge is an ASK, not an ANSWER (the M-A fold's
 # F1), and reading the two arms through ONE window silently extinguishes an
 # escalation the moment anyone nudges the row.
-NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
+NEWEST_TASK_IGNORED = ("supplied_id_not_open", "deadline_changed")
 ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
 _ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
 
@@ -1281,7 +1301,7 @@ MENU_PROGRESS_SQL = (
 # (here, the fleet; in OPEN_SQL, the same assignee) — so it composes with
 # EITHER outer scope with no change of meaning.
 FLEET_OPEN_SQL = (
-    "SELECT " + _OPEN_ROW_COLS_SQL + ", a.source_ref, a.expected_by" + _OPEN_ROW_FROM
+    "SELECT " + _OPEN_ROW_COLS_SQL + ", a.source_ref, " + EFFECTIVE_DEADLINE_SQL + _OPEN_ROW_FROM
     + " WHERE a.fleet_uid = ?"
     + _SIBLING_CLOSURE
     + " ORDER BY a.occurred_at, a.ingest_seq")
@@ -1360,7 +1380,7 @@ def open_assignment_ids(conn: sqlite3.Connection, fleet: str, bot: str,
     definition of open and without guessing which assignment a repeated task id
     means (a re-dispatch under one id is legal; the pair separates them)."""
     out: dict = {}
-    for occurred_at, source_ref, asg, _exp in open_assignments(conn, fleet, bot, at, entry=entry):
+    for occurred_at, source_ref, asg, _exp, _set in open_assignments(conn, fleet, bot, at, entry=entry):
         da = _epoch(occurred_at)
         if da is None:
             continue
@@ -1385,7 +1405,7 @@ def open_rows_indexed(conn: sqlite3.Connection, fleet: str, bot: str, at: Option
     is dropped from both, as it already was from each alone."""
     rows: list[tuple[int, Optional[int], Optional[str]]] = []
     index: dict = {}
-    for occurred_at, source_ref, asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+    for occurred_at, source_ref, asg, expected_by, _set in open_assignments(conn, fleet, bot, at, entry=entry):
         da = _epoch(occurred_at)
         if da is None:
             continue

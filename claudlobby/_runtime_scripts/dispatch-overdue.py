@@ -9,13 +9,16 @@ report ledger this module was born reading no longer exist — no door writes
 them (R1) — and this module no longer knows how to read a file at all.
 
 A dispatch is OVERDUE when:
-  - now > expected_by, AND
+  - now > its deadline: the newest deadline_changed a manager recorded on it
+    (none = open-ended, never overdue; #2469), else its expected_by, AND
   - the assignment is not terminal (no completed | failed | blocked task
     event closed it, and no later dispatch retired it with --supersedes), AND
   - the worker has not reported progress inside the grace window
     (DISPATCH_PROGRESS_GRACE_S, default 45min — a reporting worker is alive,
     and a stuck one stops reporting), AND
-  - it has not aged out: now - dispatched_at <= max_age. A dispatch that never
+  - it has not aged out: now - dispatched_at <= max_age, or, once a manager
+    moved the deadline, now - (the later of the move and the deadline it
+    set) <= max_age. A dispatch that never
     receives a terminal report would otherwise stay overdue forever and make
     fleet-pulse re-emit an overdue_dispatch event every cycle without bound
     (issue #460). max_age defaults to 24h and is env-tunable via
@@ -380,7 +383,8 @@ def assignment_attention(plane: _Plane, tasks, *, now: int, max_age: int,
                                        if grace > 0 else None)
             progress = progress_cache[bot]
             item["last_progress_at"] = progress
-            clock = p.pr.deadline_status(now, dispatched, deadline, progress, max_age, grace)
+            clock = p.pr.deadline_status(now, dispatched, deadline, progress, max_age, grace,
+                                         p.pr._epoch(assignment.deadline_set_at))
             if clock in {"no_deadline", "not_due"}:
                 item.update(status="not_due", reason="no_deadline" if clock == "no_deadline" else "none")
             elif clock in {"max_age_cap", "progress_grace"}:
