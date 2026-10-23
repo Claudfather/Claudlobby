@@ -253,7 +253,11 @@ export function createWorkspaceReadTransport({ sources }) {
         try { const payload = JSON.parse(ev.data); facade.onmessage?.({ data: JSON.stringify({ ...payload, source: e.key, rows: payload.rows.map(r => ({ ...r, source: e.key })) }) }); } catch { /* next read refresh corrects malformed push */ }
       };
       child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };
-      child.onerror = ev => facade.onerror?.(ev);
+      child.onerror = () => {
+        // A stream interruption is scoped; canonical reads decide coverage.
+        facade.onerror?.({type:'error', source:e.key});
+        facade.refresh();
+      };
       child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; notify(); } } catch { /* do not infer recovery */ } });
     }
     streams.add(facade); return facade;

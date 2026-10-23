@@ -105,6 +105,10 @@ test('independent native streams preserve local cursors and source errors become
   assert.deepEqual(events.map(e => [e.source,e.cursor]), [['a',9],['b',2]]);
   a.streams[0].listeners.source({ data: JSON.stringify({ state: 'unreadable' }) });
   assert.equal(globalLoss, 0); assert.equal(events.at(-1).coverage_changed, true);
+  let error;stream.onerror=event=>{error=event;};
+  a.streams[0].onerror({type:'error'});
+  assert.equal(error.source,'a');assert.equal(events.at(-1).coverage_changed,true);
+  assert.equal((await api.jget('/api/overview')).data.sources[1].state,'ok');
   stream.close(); assert.ok(a.streams[0].closed && b.streams[0].closed);
 });
 
@@ -143,6 +147,12 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.match(nodes.get('overview').innerHTML, /&lt;Host A&gt;/);
   assert.match(nodes.get('overview').innerHTML, /Sign in to this source/);
   assert.doesNotMatch(nodes.get('overview').innerHTML, /recorder DOWN/);
+  env.data.sources[1].host.daemon_serving=null;context.renderOverview(env);
+  assert.match(nodes.get('overview').innerHTML,/recorder unknown/);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/recorder DOWN/);
+  env.data.sources[1].host.daemon_serving=false;context.renderOverview(env);
+  assert.match(nodes.get('overview').innerHTML,/recorder DOWN/);
+  env.data.sources[1].host.daemon_serving=true;
   assert.match(nodes.get('fleet-totals').innerHTML, /totals cover readable sources/);
   assert.match(nodes.get('beat-label').textContent, /1\/2 sources readable/);
   assert.match(nodes.get('host-facts').textContent, /<Host A>: denied/);
@@ -152,6 +162,18 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.doesNotMatch(nodes.get('fleet-tabs').innerHTML, /99/);
   env.state='unavailable'; env.data.fleets=[]; env.data.sources[1].state='unavailable'; env.data.sources[1].host=null;
   context.renderOverview(env); assert.match(nodes.get('overview').innerHTML, /Host B/);
+});
+
+test('scoped stream errors refresh coverage without replacing healthy peer status with global reconnect',async()=>{
+  const {runInNewContext}=await import('node:vm');
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const nodes=new Map([['beat',{className:'dot warn'}],['beat-label',{textContent:'1/2 sources readable · b: recording'}]]);
+  const stream={addEventListener(){}};let refreshes=0;
+  const context={createEventSource:()=>stream,$:id=>nodes.get(id),scheduleRefresh(){refreshes++;}};
+  runInNewContext(app.slice(app.indexOf('function openStream()'),app.indexOf('$("debug-toggle").addEventListener')),context);
+  context.openStream();stream.onerror({type:'error',source:'a'});
+  assert.equal(refreshes,1);assert.equal(nodes.get('beat-label').textContent,'1/2 sources readable · b: recording');
+  stream.onerror({type:'error'});assert.equal(nodes.get('beat-label').textContent,'reconnecting…');
 });
 
 test('initially unavailable source does not hide usable host; later admission recovers without invented profile', async () => {

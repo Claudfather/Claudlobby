@@ -841,7 +841,7 @@ function renderOverview(env) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.state)}</span></div>
       <div class="ov-line">${s.state === 'ok' && s.host
-        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving ? 'up' : 'DOWN'}`
+        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : esc(s.remediation || 'This source is not currently readable.')}</div>
       <div class="ov-line">Separate source snapshot; recent windows are per source.</div>
     </div>`).join('');
@@ -1026,7 +1026,8 @@ function openStream() {
       workLoop.updateChannel(env);
     } catch { /* next refresh corrects */ }
   });
-  es.onerror = () => {
+  es.onerror = (event) => {
+    if (event?.source) { scheduleRefresh(); return; }
     // The page cannot reach its own API — say so; never fake health.
     $("beat").className = "dot";
     $("beat-label").textContent = "reconnecting…";
