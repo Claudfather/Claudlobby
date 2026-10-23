@@ -4670,7 +4670,10 @@ bot_in_fleet() {
     # a caller that WRITES, RESTARTS or DELETES behind this predicate, read the
     # door note above declared_bots_strict and use the loud door instead.
     [ -z "$2" ] && return 0
-    printf '%s\n' "$2" | grep -qx "$1"
+    # A here-string, never a pipe into grep (#2428). grep -q exits at its first
+    # match; the roster lines still to be written then met a closed pipe, and
+    # under pipefail that failure read a declared bot as undeclared.
+    grep -qx "$1" <<<"$2"
 }
 
 # declared_bots_strict [--bad-out FILE]
