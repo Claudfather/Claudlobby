@@ -11,10 +11,10 @@ This module is the stdlib twin of the package definitions — keep them in step
 
 - ``open_rows``     ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
                       the plane's own open set (`queries.OPEN_ASSIGNMENTS_AT_SQL`)
-- ``overdue_rows``  ↔ the watchdog's overdue rules (deadline
+- ``past_due_rows`` ↔ the watchdog's overdue rules (deadline
                       passed, the expiry cap, the bot's own ``progress`` inside
-                      the grace — the watchdog's rules, mirrored; id-less rows
-                      are KEPT, as that reader keeps them)
+                      the grace — the watchdog's rules, mirrored, each row with
+                      its verdict; id-less rows are KEPT, as that reader keeps them)
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -323,16 +323,14 @@ def _task_id(source_ref: Optional[str]) -> Optional[str]:
 
 
 def open_rows(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
-              *, entry: Optional[dict] = None, idd_only: bool = True
-              ) -> list[tuple[int, Optional[int], Optional[str]]]:
+              *, entry: Optional[dict] = None) -> list[tuple[int, Optional[int], str]]:
     """The legacy ``open_dispatches`` tuple shape — (dispatched_at, expected_by,
-    task_id), oldest first — from the plane. ``idd_only`` drops rows with no
-    legacy task id (``sha:`` refs, or none): the open LIST is id'd rows only;
-    the overdue reader keeps them (task_id None → the legacy ``-``)."""
-    out: list[tuple[int, Optional[int], Optional[str]]] = []
+    task_id), oldest first — from the plane: the open LIST is id'd rows only
+    (a row with no legacy task id, a ``sha:`` ref or none, is left out)."""
+    out: list[tuple[int, Optional[int], str]] = []
     for occurred_at, source_ref, _asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
         tid = _task_id(source_ref)
-        if idd_only and tid is None:
+        if tid is None:
             continue
         da = _epoch(occurred_at)
         if da is None:
@@ -462,21 +460,32 @@ def deadline_status(now: int, dispatched_at: int, expected_by: Optional[int],
     return "overdue"
 
 
-def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
-                 progress_grace: int, entry: Optional[dict] = None
-                 ) -> list[tuple[int, int, int, Optional[str]]]:
-    """The legacy ``--all`` row shape — (dispatched_at, expected_by, elapsed,
-    task_id) — from the plane, the watchdog's rules mirrored; task_id None
-    for an id-less row (the caller prints ``-``)."""
+# The verdicts `deadline_status` gives an open row past its deadline: `overdue`
+# pages; the expiry cap and the progress grace leave a row past due, not paged.
+PAST_DUE = ("overdue", "max_age_cap", "progress_grace")
+
+
+def past_due_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
+                  progress_grace: int, entry: Optional[dict] = None
+                  ) -> list[tuple[int, int, int, Optional[str], str, str]]:
+    """The bot's OPEN rows past their deadline, oldest first — (dispatched_at,
+    expected_by, elapsed, task_id, assignment_id, verdict), the verdict one of
+    PAST_DUE — from the plane, the watchdog's rules mirrored; task_id None for
+    a row with no legacy id (the caller prints ``-``). A row the cap or the
+    grace defers is listed too, so a caller can tell it from a row that
+    closed (#2457)."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     at = datetime.fromtimestamp(now, timezone.utc).replace(microsecond=999999).isoformat()
-    rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=False)
     uids = (entry or {}).get("uids", [])
     last_progress = last_progress_epoch(conn, uids, now) if progress_grace > 0 else None
-    out: list[tuple[int, int, int, Optional[str]]] = []
-    for da, exp, tid in rows:
-        if deadline_status(now, da, exp, last_progress, max_age, progress_grace) == "overdue":
-            out.append((da, exp, now - exp, tid))
+    out: list[tuple[int, int, int, Optional[str], str, str]] = []
+    for occurred_at, source_ref, asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+        da, exp = _epoch(occurred_at), _epoch(expected_by)
+        if da is None:
+            continue
+        verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace)
+        if verdict in PAST_DUE:
+            out.append((da, exp, now - exp, _task_id(source_ref), asg, verdict))
     return out
 
 
@@ -1346,7 +1355,7 @@ def open_assignment_ids(conn: sqlite3.Connection, fleet: str, bot: str,
                         at: Optional[str] = None, *, entry: Optional[dict] = None
                         ) -> dict:
     """(dispatched_at epoch, task_id or None) → assignment_id for the bot's OPEN
-    rows — the key `open_rows` and `overdue_rows` return their tuples under, so
+    rows — the key `open_rows` returns its tuples under, so
     a caller can attach `menu_facts` to a row it already has WITHOUT a second
     definition of open and without guessing which assignment a repeated task id
     means (a re-dispatch under one id is legal; the pair separates them)."""
@@ -1360,7 +1369,7 @@ def open_assignment_ids(conn: sqlite3.Connection, fleet: str, bot: str,
 
 
 def open_rows_indexed(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
-                      *, entry: Optional[dict] = None, idd_only: bool = True
+                      *, entry: Optional[dict] = None
                       ) -> tuple[list[tuple[int, Optional[int], Optional[str]]], dict]:
     """`open_rows` and `open_assignment_ids`, from ONE `open_assignments` read
     (chunk M-B fold, F7). `brief._dispatch_section` used to call both
@@ -1368,11 +1377,11 @@ def open_rows_indexed(conn: sqlite3.Connection, fleet: str, bot: str, at: Option
     `open_dispatches` (itself `open_rows`) to get the row list, then
     `open_assignment_ids` again to key `menu_facts` — two round trips over
     the identical `OPEN_SQL` scan. This runs it once and derives both shapes
-    from the same rows, provably the same values `open_rows(idd_only=...)`
-    and `open_assignment_ids` would each return on their own: the index keeps
+    from the same rows, provably the same values `open_rows` and
+    `open_assignment_ids` would each return on their own: the index keeps
     EVERY row (id-less included, `_task_id` may be None), matching
-    `open_assignment_ids`'s own no-filter; the row list applies `idd_only`
-    exactly where `open_rows` does. A row whose `occurred_at` does not parse
+    `open_assignment_ids`'s own no-filter; the row list leaves out the id-less
+    rows `open_rows` leaves out. A row whose `occurred_at` does not parse
     is dropped from both, as it already was from each alone."""
     rows: list[tuple[int, Optional[int], Optional[str]]] = []
     index: dict = {}
@@ -1382,7 +1391,7 @@ def open_rows_indexed(conn: sqlite3.Connection, fleet: str, bot: str, at: Option
             continue
         tid = _task_id(source_ref)
         index[(da, tid)] = asg
-        if idd_only and tid is None:
+        if tid is None:
             continue
         rows.append((da, _epoch(expected_by), tid))
     return rows, index

@@ -464,6 +464,14 @@ still repeats socket ownership and liveness checks.
 The composed systemd service uses `Restart=always`; launchd uses `KeepAlive`.
 Logs use the normal service journal or `state/plane-owner.log`. Disarm with
 `enroll: false` followed by plan/diff/activation; activation retires the owned unit.
+Messages, task nudges and feedback from the supervised owner require the exact
+selected sealed runtime, saved owner-unit definition, verified native enrollment
+and positive caller ancestry in that unit. Matching environment values alone
+never admit an action; bot, fleet and timer selectors still refuse. This process
+proof lasts for one action or inspection call under activation admission, while
+session, actor and exact grant checks repeat at their existing boundaries. It is
+not a cached authority lease and does not retry an uncertain submission.
+
 Supervision never configures Serve, pairs an owner, renews grants or grants
 website access. Public bootstrap remains a foreground operation; autonomous
 handover during first-team browser launch is not provided by this service.
@@ -578,8 +586,13 @@ bound; an entry nested past the check's own walk reads "unavailable", never abse
 A batch whose name leaves room for a transmission and that the daemon spools after a
 database error is tried again 30 seconds later, once, rather than left to the
 10-minute interval drain (#2446). Once, because a drain counts an attempt against
-each entry it cannot ingest and quarantines it at five. Other spooled work waits for
-the interval.
+each entry it cannot ingest and quarantines it at five. The retry is one of the five:
+under a fault that outlasts it, such a batch is quarantined d + 1800 seconds after it
+spooled rather than d + 2400, where d, 30 to 600 seconds, is the wait for the next
+interval drain. (An interval drain within the 30 seconds tries the entry first, and the
+retry then passes over it.) A receipt check does not read the quarantine, so a spooled
+proof's receipt reads absent after a fault of about 30 to 40 minutes, where it took 40
+to 50 (#2460). Other spooled work waits for the interval.
 
 Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's
