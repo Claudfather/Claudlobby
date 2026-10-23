@@ -120,10 +120,13 @@ test('source window truncation and assignment/actor references remain source sco
   assert.equal(t.current_assignment.assignee_short, t.current_assignment.assignee_uid);
   assert.equal(t.current_assignment.terminal_event.assignment_id, 'a::'+asg);
   assert.equal(t.delivery.message_id, t.current_assignment.dispatch_message_id);
-  b.routes.set('/api/identities', ok({ identities: [{ uid: actor, alias: 'team/worker', short: actor, fleet: 'team' }] }));
+  b.routes.set('/api/identities', ok({ identities: [{ uid: actor, alias: 'team/worker', short: actor, fleet: 'team', fleet_uid: fleet }] }));
   a.routes.set('/api/identities', ok({ identities: [{ uid: actor, alias: 'human', short: 'Human', fleet: null }] }));
   const ids = (await api.jget('/api/identities')).data.identities;
   assert.equal(ids[0].fleet, null); assert.notEqual(ids[0].uid, ids[1].uid);
+  assert.equal(ids[1].fleet_uid, 'b::' + fleet);
+  const selectedFleet = (await api.jget('/api/fleets')).data.fleets.find(row => row.alias === ids[1].fleet);
+  assert.equal(ids[1].fleet_uid, selectedFleet.uid);
 });
 
 test('renderer shows per-host availability and partial totals without inventing recorder failure', async () => {
