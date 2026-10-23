@@ -26,6 +26,29 @@ that makes the check required what that leaves open: a required check passes a
 skipped job, so it reads a draft just marked ready as passing until the new run
 appears, and which of several runs on one commit it counts is untested.
 
+### Fixed — an overdue assignment pages its manager once (#2457)
+
+fleet-pulse paged a manager about one overdue assignment again and again. It
+read a row missing from the overdue list as the end of the episode, but the
+list leaves out a row the progress grace defers: once the worker reported
+progress on other work, its row dropped off for the 45-minute grace, the sweep
+cleared its marker (when another bot's row was on the list), and the row's
+return paged as a first sighting. The same page also came again after each
+manager restart and every 6 hours.
+
+`dispatch-overdue.py --all` now lists every open row past its deadline, with
+its assignment id and the watchdog's verdict: `overdue`, or past due and not
+paged (`orphaned`, `progress_grace`, `max_age_cap`). fleet-pulse pages each
+overdue assignment once, names it in the page, and keeps its id while the row
+stays on the list, whatever the verdict. The one new fact that pages is
+another assignment past its deadline; a manager restart, the grace lapsing and
+time do not. `task recheck` stays the reminder for a long-overdue task: it
+re-asks the manager once a day per assignment. A page no manager session took
+records nothing, so it goes out once a manager is there: the push now says when
+the manager has no session, and the browser report, whose key is kept only once
+its push went through, waits for a session too. The page says "no terminal
+linked report", since a progress or block report does not end the episode.
+
 ### Fixed — a harness check reads a Plane row only once the daemon has replayed it (#2274)
 
 The validation harness read the Plane once, right after the code under test
