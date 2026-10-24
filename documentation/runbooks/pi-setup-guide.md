@@ -335,7 +335,7 @@ Every bot runs as your user and inherits its `sudo` rules (the README's [Safety 
 - `/etc/sudoers.d/010_pi-nopasswd` gives the first user `sudo` with no password, and first-boot setup writes the name of the user you create into it. On a stock install `sudo -n true` succeeds, so every bot has root.
 - `/etc/sudoers.d/010_global-tty` sets `Defaults timestamp_type=global`: once you type your password for `sudo` in any terminal, every process of your user, every bot included, can use `sudo` without one until that ticket times out.
 
-What bounds a bot against these defaults is in the [Safety model](../../README.md#safety-model). The guard rail is the worker `sudo` deny (#2464), from the release that adds it: a worker's composed permissions deny `sudo`, and a manager's do not. The wall is a separate OS user for the fleet, one with no `sudo` rules (#1606).
+What bounds a bot against these defaults is in the [Safety model](../../README.md#safety-model). The guard rail is the worker `sudo` deny (#2464): a worker's composed permissions deny `sudo`, and the fleet manager's do not. The wall is a separate OS user for the fleet, one with no `sudo` rules (#1606).
 
 ### Ask polkit what a bot may do
 
