@@ -16,7 +16,9 @@ from claudlobby.paths import Paths
 from claudlobby.plane.contracts import ContractViolation
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.ids import derive_session_uid, derive_uid
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION, DowngradeError
 from claudlobby.plane.registry_emit import run_generate_scan
+from claudlobby.plane.schema_state import PendingMigrationError
 from tests.conftest import load_lib_module
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
@@ -302,6 +304,100 @@ def test_real_ledger_family_divergence_uses_separate_id(world, fallback_refused)
     assert ack["rows"] == rows and state(world)["pending"] == 0
     assert result.unexportable == 1 and result.acked == {sid: 1}
     assert ("last_unexportable" in state(world)) is fallback_refused
+
+
+@pytest.mark.parametrize("error", [PendingMigrationError, DowngradeError])
+@pytest.mark.parametrize("refused", ["summary", "fallback"])
+def test_plane_schema_refusal_fails_the_tick_and_keeps_the_cursor(
+    world, error, refused
+):
+    # The plane refuses every write until it is migrated or this release is
+    # upgraded (#2477): neither the summary nor its fallback is at fault.
+    fallbacks = []
+
+    def emit(root, rows, **kw):
+        fallbacks.append(
+            rows[0]["payload"]["data"]["data"]["skipped_reason"] == "unexportable"
+        )
+        if refused == "fallback" and len(fallbacks) == 1:
+            raise ContractViolation([{"loc": ("data",), "msg": "refused"}])
+        raise error("the plane is not at this release's schema")
+
+    door = Door()
+    result = export(world, door, emit=emit)
+    assert result.acked == {} and [step for step, _ in door.log] == ["export"]
+    assert result.failed == "emit_failed"
+    # A summary the plane could not take is never traded for its fallback row.
+    assert fallbacks == ([False] if refused == "summary" else [False, True])
+    doc = state(world)
+    assert doc["consecutive_failures"] == 1
+    assert doc["failure_counts"] == {"emit_failed": 1}
+    assert doc["pending"] == len(door.doc["items"]) and "last_unexportable" not in doc
+
+
+@pytest.mark.parametrize("plane", ["absent", "older", "newer"])
+def test_summary_waits_for_a_current_plane_then_lands_as_itself(world, plane):
+    root, paths, _, store = world
+    doc = envelope()
+    doc["items"] = doc["items"][:1]
+    sid = doc["items"][0]["sid"]
+    doc["next"] = {sid: 1}
+    db = root / "state/plane/plane.db"
+    aside = root / "aside"
+
+    def set_version(version):
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(f"PRAGMA user_version = {version}")
+        finally:
+            conn.close()
+
+    if plane == "absent":
+        aside.mkdir()
+        for path in db.parent.glob("plane.db*"):
+            path.rename(aside / path.name)
+    else:
+        set_version(SCHEMA_USER_VERSION + (1 if plane == "newer" else -1))
+    door, acks, pages = CursorDoor(doc, root), [], []
+
+    def run(argv, **kwargs):
+        if "--ack" in argv:
+            acks.append(argv[argv.index("--through") + 1])
+        return door(argv, **kwargs)
+
+    def tick(minutes):
+        return se.export_bot(
+            root,
+            "canary",
+            "lead",
+            store,
+            run=run,
+            now=NOW + timedelta(minutes=minutes),
+            fleet_state=paths.fleet_state,
+            notify=lambda **kw: pages.append(kw) or {"notification": "submitted"},
+        )
+
+    for n in range(se.STALL_AFTER):
+        result = tick(n)
+        assert acks == [] and result.acked == {} and door.cursor == 0
+        assert result.failed == "emit_failed"
+    assert state(world)["pending"] == 1
+    assert [(page["level"], page["event"]) for page in pages] == [
+        ("alert", "export_stalled")
+    ]
+    if plane == "absent":
+        for path in aside.iterdir():
+            path.rename(db.parent / path.name)
+    else:
+        set_version(SCHEMA_USER_VERSION)
+    result = tick(se.STALL_AFTER)
+    assert result.failed is None and result.acked == {sid: 1}
+    assert acks == ["1"] and door.cursor == 1
+    # The summary itself landed, not its unexportable fallback.
+    assert [(row["status"], row["skipped_reason"]) for row in door.rows()] == [
+        ("ok", None)
+    ]
+    assert "stall" not in state(world)
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — session export keeps its cursor while the plane cannot take a write (#2477)
+
+Session export read the plane's schema refusals as a refusal of the session.
+While the plane database was absent or awaiting migration
+(`PendingMigrationError`), or newer than the running release
+(`DowngradeError`), the summary and its `unexportable` fallback both failed,
+and the export acknowledged the session anyway, so its summaries were lost.
+Both refusals now fail the tick instead: the cursor stays, the failure counts
+toward the export's stall alert, and the summaries land on the first tick after
+the plane is migrated or the release upgraded.
+
 ### Fixed — four guards no longer read a match as a miss when grep stops reading early (#2428)
 
 Four checks piped text into `grep -q` under `pipefail`. `grep -q` exits at its

@@ -23,7 +23,9 @@ from .plane.contracts import ContractViolation
 from .plane.emit_api import emit_batch
 from .plane.fleet_events import fleet_event_request
 from .plane.ids import derive_session_uid, derive_uid
+from .plane.migrations import DowngradeError
 from .plane.registries import cap_for
+from .plane.schema_state import PendingMigrationError
 
 ENTRYPOINT_SCHEMA = "claudna.entrypoint/1"
 EXPORT_SCHEMA = "claudna.export/1"
@@ -44,6 +46,11 @@ CAPS = {
     "skipped_reason": 64,
 }
 LANDED = {"committed", "duplicate", "spooled"}
+# The plane refuses every write while its database is absent or its schema is
+# older or newer than this release's. That is never the item's fault: the tick
+# fails and keeps its cursor until the plane is migrated or this release
+# upgraded (#2477).
+PLANE_NOT_CURRENT = (PendingMigrationError, DowngradeError)
 
 
 @dataclass(frozen=True)
@@ -450,6 +457,8 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
                         data=record,
                     )
                     outcome = emit(root, [event], require_commit=False)[0]
+                except PLANE_NOT_CURRENT:
+                    raise
                 except (
                     ContractViolation,
                     RuntimeError,
@@ -476,6 +485,8 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
                             fallback=True,
                         )
                         outcome = emit(root, [fallback], require_commit=False)[0]
+                    except PLANE_NOT_CURRENT:
+                        raise
                     except (ContractViolation, RuntimeError) as refused:
                         state["last_unexportable"] = {
                             "sid": sid,
@@ -508,7 +519,14 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
             state["last_ack_at"] = now.isoformat()
     except subprocess.TimeoutExpired:
         failure = f"{phase}_timeout"
-    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+    except (
+        OSError,
+        sqlite3.Error,
+        ValueError,
+        KeyError,
+        TypeError,
+        *PLANE_NOT_CURRENT,
+    ) as exc:
         failure = f"{phase}_failed"
         state["failure_detail"] = str(exc)[:2000]
     if failure and not dry_run:
