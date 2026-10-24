@@ -1387,6 +1387,8 @@ def test_ui_reads_in_the_operators_language():
     assert 'dueLabel(r.expected_by).replace' not in js
     assert "attention_since" in js and "never delivered" in js
     assert "check the worker" in js and "send failed" in js
+    # an overdue card names the remedy that keeps the assignment (#2469)
+    assert "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by" in js
     # the clamp: ONE number, read by the stylesheet; the toggle finds its
     # body by structure and remembers what the operator opened
     assert "--clamp-lines" in js and "openBodies" in js

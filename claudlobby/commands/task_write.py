@@ -125,6 +125,11 @@ def _inputs(args) -> dict:
                 "reason": _text(args.reason, "--reason"),
                 "expected_by": _deadline(args.expected_by),
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "assignment.reschedule":
+        return {"assignment_id": _reference(args.assignment_id, "ASSIGNMENT_ID"),
+                "expected_by": _deadline(args.expected_by),
+                "reason": _text(args.reason, "--reason"),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command in _REPORTS:
         from ..report_payload import ReportPayload, ReportPayloadError
 
@@ -390,7 +395,7 @@ def dispatch(args) -> CommandOutput:
     from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
                                    complete, escalate, fail, progress, reassign,
-                                   return_assignment, withdraw)
+                                   reschedule, return_assignment, withdraw)
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
 
@@ -467,6 +472,8 @@ def dispatch(args) -> CommandOutput:
                 result = escalate(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.reassign":
                 result = reassign(ctx, args.request_id, values.pop("task_id"), **values)
+            elif args.public_command == "assignment.reschedule":
+                result = reschedule(ctx, args.request_id, values.pop("assignment_id"), **values)
             else:
                 result = accept(ctx, args.request_id, values["assignment_id"])
         return _task_output(result, fleet_name=fleet_name, release_id=release_id,

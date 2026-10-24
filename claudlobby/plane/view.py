@@ -1565,7 +1565,8 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         alias_of = {r["uid"]: r["alias"] for r in mine}
         rec, lv = _scope_presence(recorded, live, alias)
         verdicts = derive_presence(rec, lv, now=now_dt, stale_after_s=stale_after)
-        # open rows: (uid, occurred_at, source_ref, assignment_id, expected_by)
+        # open rows: (uid, occurred_at, source_ref, assignment_id, expected_by,
+        # deadline_set_at), the deadline in force (#2469)
         open_rows = [(uid, *r) for uid in uids for r in conn.execute(
             OPEN_ASSIGNMENTS_AT_SQL, (uid, None, None, None, None, None, None))]
         open_n = len(open_rows)
@@ -1584,7 +1585,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
                 "no bot directories for this fleet under the view's root —"
                 " orphan-ness compares a dispatch against the bot's .spawn")
         else:
-            for uid, occurred, ref, _asg, expected_by in open_rows:
+            for uid, occurred, ref, _asg, expected_by, _set in open_rows:
                 if not (expected_by and expected_by < now):
                     continue
                 # only an id'd dispatch can orphan (the matcher's rule: an

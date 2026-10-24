@@ -358,6 +358,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json assignment deliver *)",
         "Bash(claudlobby --json task withdraw *)",
         "Bash(claudlobby --json task reassign *)",
+        "Bash(claudlobby --json assignment reschedule *)",
         "Bash(claudlobby --json task escalate *)",
         "Bash(claudlobby --json task nudge *)",
         "Bash(claudlobby --json workstream open *)",

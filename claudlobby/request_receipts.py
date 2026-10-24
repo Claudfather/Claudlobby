@@ -180,7 +180,7 @@ class RequestReceipt:
 _OPERATIONS = frozenset(
     "task.permission.request task.permission.approve task.permission.decline task.permission.revoke "
     "task.admit task.assign task.withdraw task.reassign task.escalate task.nudge task.recheck task.feedback "
-    "assignment.deliver assignment.accept assignment.progress assignment.block assignment.return "
+    "assignment.deliver assignment.reschedule assignment.accept assignment.progress assignment.block assignment.return "
     "assignment.complete assignment.fail message.send message.reply fleet.reports.submit fleet.reports.ack "
     "checkin.record workstream.open workstream.progress workstream.renew workstream.block "
     "workstream.unblock workstream.close workstream.prune".split())

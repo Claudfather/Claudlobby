@@ -408,7 +408,7 @@ _check_overdue() {
     if [ -n "$_new" ]; then
         _what="a dispatched task is ${_oldest}s past its deadline"
         [ "$_n" -eq 1 ] || _what="$_n dispatched tasks are past their deadlines, the oldest by ${_oldest}s,"
-        if notify_manager "$_c_dir" "$_c_bot overdue_dispatch — $_what with no terminal linked report: $_named"; then
+        if notify_manager "$_c_dir" "$_c_bot overdue_dispatch — $_what with no terminal linked report: $_named. Waiting on something outside the worker? Move its deadline: claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"; then
             _keep="$_keep$_new"
         fi
     fi

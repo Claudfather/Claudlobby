@@ -449,8 +449,12 @@ const WHY = {
                   + ` ${r.attention_by || "the operator"}, no act yet`
                   + (r.attention_act_reason ? `: ${r.attention_act_reason}` : ""),
                   "the manager should inspect the task, then reassign, withdraw, or escalate"],
+  // the deadline in force: a manager's move (#2469) is read, not the dispatch's
   overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
-                   "check the worker; reassign with claudlobby --json task reassign TASK_ID"
+                   "check the worker; if it waits on something outside the worker, move its deadline"
+                   + " with claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by"
+                   + " RFC3339|none --reason TEXT --request-id UUID; to give it to another bot,"
+                   + " reassign with claudlobby --json task reassign TASK_ID"
                    + " --bot BOT --reason TEXT --request-id UUID"],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
