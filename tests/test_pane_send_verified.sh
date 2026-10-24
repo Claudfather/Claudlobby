@@ -296,6 +296,17 @@ assert_eq "collapsed-paste pane contains none of the payload text" "0" "$r"
 # One chunk, as this placeholder case was built: an explicit 900, whatever the default.
 r=$(PANE_SEND_CHUNK_BYTES=900 run_send_rc "$big" $(stuck_then_gone "$FIXTURES/input-stuck-collapsed-paste.txt"))
 assert_eq "collapsed paste stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
+# The same in a long pane (#2428). The marker check piped the pane into
+# grep -q, which exits at the marker; the rest of the pane then met a closed
+# pipe, and pipefail read the marker as absent, so the held paste read as
+# submitted and the retry Enter never went out ("2 0"). One 2 MiB line below
+# the box outlasts any pipe; one line, not many, because the fallback that runs
+# when the marker is missed forks once per line.
+long_frame="$TMPD/input-stuck-collapsed-paste-long.txt"
+{ cat "$FIXTURES/input-stuck-collapsed-paste.txt"
+  awk 'BEGIN { s = "x"; while (length(s) < 2097152) s = s s; print s }'; } > "$long_frame"
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send_rc "$big" $(stuck_then_gone "$long_frame"))
+assert_eq "collapsed paste stuck in a 2 MiB pane -> Enter resent, then submitted" "3 0" "$r"
 
 r=$(run_send 'PROBE763TRANSCRIPT reply ok' $(sent_frames 'PROBE763TRANSCRIPT reply ok'))
 assert_eq "clean submit (text visible in transcript) -> NO spurious Enter" "2" "$r"

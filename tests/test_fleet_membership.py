@@ -105,6 +105,29 @@ class TestBotInFleet:
         _, rc = _run('bot_in_fleet "$2" "$3"', "al", "alex\nari")
         assert rc == 1
 
+    # A long roster (#2428). bot_in_fleet piped the roster into grep -qx, which
+    # exits at its first match; the roster lines still to be written then met a
+    # closed pipe, and pipefail (set by lib-common) read a declared bot as
+    # undeclared (rc 141). A pipe holds 64 KiB to 256 KiB, and 100k lines of 13
+    # bytes outlast it on every host. The roster is built inside bash, since
+    # 1.3 MB cannot ride argv (E2BIG). $2 is the first line, $3 the last, $4
+    # the bot asked about.
+    _LONG_ROSTER = (
+        "roster=$(awk -v first=\"$2\" -v last=\"$3\" "
+        "'BEGIN { print first; for (i = 0; i < 100000; i++) printf \"filler%06d\\n\", i; print last }'); "
+        'bot_in_fleet "$4" "$roster"'
+    )
+
+    def test_member_first_in_a_long_roster(self):
+        _, rc = _run(self._LONG_ROSTER, "first-bot", "last-bot", "first-bot")
+        assert rc == 0
+
+    def test_member_last_in_a_long_roster(self):
+        # Control: grep reads the whole roster before its match, so the pipe
+        # never closes early; this passed before the fix too.
+        _, rc = _run(self._LONG_ROSTER, "first-bot", "last-bot", "last-bot")
+        assert rc == 0
+
 
 class TestGitPullAllFleetGuard:
     """A stale per-bot cron entry for a departed bot must not resurrect its dir."""
