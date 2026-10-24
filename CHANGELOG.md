@@ -31,6 +31,45 @@ needs. Each has a case whose input outlasts any pipe (1 to 2 MiB), and
 in shell files under `claudlobby/_runtime_scripts`, `library`, `harness` and
 `tests` at their measured counts: a new one, or a file whose count grows, fails.
 
+### Changed — a worker's settings deny sudo and its siblings; the fleet manager's do not
+
+Every worker's composed permissions now deny `sudo`, `sudoedit`, `su`,
+`pkexec`, `doas` and `run0`, each by bare name and as `/usr/bin/NAME` and
+`/bin/NAME`: 18 rules. The fleet manager's permissions get none of them, and
+neither does a manager alone in its fleet, so a step that needs root goes
+through the manager. No composed allow names any of these commands.
+
+A refused call says only that permission was denied, so every worker's
+composed `CLAUDE.md` gains a short section, `## Commands that need root`. It
+names the six commands and the remedy: record `assignment block`, naming the
+command and why it needs root, so the manager can run it or decide (with no
+assignment, `fleet reports submit --status blocked`). It also forbids the
+routes the deny cannot see, listed below. A manager's `CLAUDE.md` is unchanged.
+
+Claude Code checks permission rules against the command a hook hands back,
+so the heavy-slot hook no longer looks past `sudo` or `doas`: a heavy job one
+of them runs (`sudo npm install -g …`) is left as typed, and the slot's
+wrapper refuses to run one. With the wrapper in front, no rule saw the runner.
+On a bot with `heavy_slot: true`, a manager's root install now runs without
+the slot.
+
+The deny is a guard rail, not a wall. It refuses the command when a session
+runs it as a tool call: plainly, inside a compound command, a subshell or
+`$(…)`, after a variable assignment, behind `timeout`, `nice`, `nohup`,
+`stdbuf`, `command`, `time` or `xargs`, and by those two paths. It cannot see
+`bash -c '…'`, a script, an interpreter, an expansion it cannot resolve, a
+link to the program under another name, or a session that edits its own
+settings file. On Claude Code 2.1.309 it also misses `sudo`, `doas` or
+`pkexec` running a command behind `env`, `setsid`, `ionice` or `watch`
+(`env sudo ls`), and a relative path to one that runs a command. The OS user
+keeps its sudo rights on each of those routes, and in anything it runs
+outside the session's tool calls. A separate OS user without sudo is the
+wall.
+
+Workers lose `sudo -u postgres psql`, root reads and root installs. The
+change reaches running bots at the next activation of a release that carries
+it.
+
 ### Fixed — the rollout check skips a draft, so a body written before the PR is marked ready leaves no failed run (#2467)
 
 A PR opened before its body had the `## Rollout check` section failed its first

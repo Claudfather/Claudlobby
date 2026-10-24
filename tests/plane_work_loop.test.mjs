@@ -530,11 +530,36 @@ test('paused action context preserves selected team and does not fetch grants', 
   assert.equal(h.get('work-scope').textContent,'web');
   assert.match(h.get('work-notice').textContent,/Session access is paused/);
   assert.equal(h.get('work-send').disabled,true);
+  assert.equal(h.get('work-retained').hidden,false);
+  assert.equal(h.get('work-retained-body').value,'Kept');
+  assert.match(h.get('work-retained-label').textContent,/message to Worker/);
   h.loop.setRoom('web');await settle();
   assert.equal(h.get('work-body').value,'Kept');
   assert.equal(h.get('work-recipient').value,'worker');
+  assert.equal(h.get('work-retained').hidden,true);
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
   assert.doesNotMatch(h.storage.getItem('plane.pending-actions.v1') || '',/Kept/);
+});
+
+test('connection loss keeps the original pending ID visible without granting receipt access or replaying',async()=>{
+  const room='computer-1 / web',capability={...context,room,scope:{...context.scope,fleet:room}};
+  let available=true;
+  const h=harness({interactionContext:()=>available?capability:null,sendAction(){throw Error('lost response');}});
+  h.loop.setRoom(room);await settle();await h.submit();
+  const original=new ActionState(h.storage).pending[0],savedBytes=h.storage.getItem('plane.pending-actions.v1');
+  available=false;h.loop.refreshActions('computer-1');await settle();
+  assert.ok(h.get('work-pending').innerHTML.includes(original.request_id));
+  assert.match(h.get('work-pending').innerHTML,/Outcome remains unknown/);
+  assert.equal(h.get('work-pending').querySelectorAll('[data-request]')[0].disabled,true);
+  assert.equal(h.get('work-retained-body').value,'Hello');
+  await h.pendingClick(original.request_id);
+  assert.equal(h.sends.length,1);assert.equal(h.lookups.length,0);
+  assert.equal(h.storage.getItem('plane.pending-actions.v1'),savedBytes);
+  available=true;h.loop.refreshActions('computer-1');await settle();
+  assert.equal(h.get('work-body').value,'Hello');assert.equal(h.get('work-send').disabled,true);
+  assert.equal(h.sends.length,1);assert.equal(h.lookups.length,0);
+  h.loop.setRoom('other');await settle();
+  assert.equal(h.get('work-pending').innerHTML,'');assert.equal(h.get('work-retained').hidden,true);
 });
 
 
@@ -657,6 +682,43 @@ async function chooseNudge(h) {
   const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge');
   assert.equal(button.disabled,false);button.onclick();await settle();
 }
+test('connection recovery retains the exact task draft as display only until explicit task selection',async()=>{
+  let available=true;
+  const h=harness(nudgeOptions({nudgeContext:()=>available?ownerNudge:null}));
+  await chooseNudge(h);
+  h.get('work-body').value='Keep this nudge reason';h.get('work-body').emit('input');
+  h.loop.pause();available=false;h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-retained').hidden,false);
+  assert.equal(h.get('work-retained-body').value,'Keep this nudge reason');
+  assert.match(h.get('work-retained-label').textContent,/nudge to Manager.*Review the selected task/);
+  assert.equal(h.get('work-send').disabled,true);
+  available=true;h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-retained').hidden,false);
+  h.open(nudgeTaskId);await settle();
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+  assert.equal(h.get('work-body').value,'Keep this nudge reason');assert.equal(h.get('work-retained').hidden,true);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+for(const change of ['assignment','release'])
+test(`reconnecting to the same task with a new ${change} cannot hide its retained draft`,async()=>{
+  let capability=ownerNudge,assignment=null;
+  const h=harness(nudgeOptions({nudgeContext:()=>capability,jget:()=>ownerDetail(assignment)}));
+  await chooseNudge(h);
+  h.get('work-body').value='Reason for the original selection';h.get('work-body').emit('input');
+  h.loop.pause();
+  if(change==='release')capability={...ownerNudge,release_id:'r-'+'f'.repeat(64)};
+  else assignment={assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null};
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+  assert.equal(h.get('work-retained').hidden,false);
+  h.get('work-body').value='';h.get('work-body').emit('input');
+  // A fresh empty composition may share a logical draft key, never its full target.
+  h.open(nudgeTaskId);await settle();
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+  assert.equal(h.get('work-retained').hidden,false);
+  assert.equal(h.get('work-retained-body').value,'Reason for the original selection');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
 for(const assignment of [null,{assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null}])
 test(`real nudge-only access freezes canonical ${assignment===null?'queued-null':'assigned'} detail, prepares then saves metadata before send`,async()=>{
   const preparation=deferred(), sent=deferred();

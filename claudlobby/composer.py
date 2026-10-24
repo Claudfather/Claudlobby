@@ -2188,6 +2188,8 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
+    # The role test compose_settings_local denies the sudo family on.
+    privilege_runners = () if is_manager else PRIVILEGE_RUNNERS
 
     # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
     # than named here. This used to be a literal `append("shared-documentation")`
@@ -2272,6 +2274,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         projects_derived=fleet.projects_derived,
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
+        privilege_runners=privilege_runners,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
@@ -2850,6 +2853,21 @@ def _resolve_guardrail_permissions(
 BASE_TOOLS = ["Read", "Grep", "Glob"]
 
 
+#: The sudo family, which a worker may not run and its fleet manager may: a
+#: worker's settings deny each command (``WORKER_SUDO_DENY``), and its
+#: CLAUDE.md names them with what to do when the deny refuses one.
+PRIVILEGE_RUNNERS = ("sudo", "sudoedit", "su", "pkexec", "doas", "run0")
+
+#: The sudo family a worker's settings deny, each command by bare name and by
+#: absolute path. A guard rail, not a wall: the routes it cannot see are in
+#: ``documentation/decisions/permissions-model.md`` (Workers' privilege denies).
+WORKER_SUDO_DENY = tuple(
+    f"Bash({prefix}{name} *)"
+    for name in PRIVILEGE_RUNNERS
+    for prefix in ("", "/usr/bin/", "/bin/")
+)
+
+
 def _assert_grant_superset(bot_id: str, legacy: list[str], new: list[str]) -> None:
     """Fail generation unless the new integration ``tool_grants`` cover every legacy grant.
 
@@ -2919,6 +2937,11 @@ def compose_settings_local(
         "Bash(claudlobby task permission decline*)", "Bash(claudlobby * task permission decline*)",
         "Bash(claudlobby task permission revoke*)", "Bash(claudlobby * task permission revoke*)",
     ))
+
+    # Workers may not raise their own privileges; the fleet manager may.
+    is_manager = bot.bot_id in fleet.manager_bots()
+    if not is_manager:
+        deny_patterns.extend(WORKER_SUDO_DENY)
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
     # dir. Two rules, both DOUBLE-slash, and every part of that shape is a fix
@@ -3025,9 +3048,7 @@ def compose_settings_local(
     # protocols, spec §10 — computed once and shared with layer 5b so a
     # required skill is granted exactly like a declared one, never only
     # linked (cycle-1 B8)).
-    effective_skills = resolve_effective_skills(
-        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
-    )
+    effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
