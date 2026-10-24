@@ -175,6 +175,11 @@ transient native state refuses before stopping the estate. The activation record
 this disposition before quiescence; `--resume` reuses it even when the flag is
 omitted. The flag is rejected for bootstrap and first adoption. A later explicit
 `bot start` uses the retained frozen placement of a stopped bot.
+Preserve-state activation requires an explicit saved/recent handoff result and
+verification of the session capture's own fresh `last_updated` timestamp before
+stopping a live bot. A reference refresh or fresh file mtime alone is insufficient.
+A timeout or unknown handoff remains recorded as uncertain: inspect the live
+session and saved handoff before operator recovery; `--resume` never resends it.
 
 Do not run manual unit enrollment, live regeneration or per-bot restarts alongside
 activation. The coordinator pauses old producers, saves handoffs and quiesces

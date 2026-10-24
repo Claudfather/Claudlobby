@@ -621,6 +621,17 @@ def _startable_producers(entries):
                   if Path(entry["installed"]).name not in timer_services), timer_services)
 
 
+def _require_preserved_handoff(bot_dir):
+    """Use the public handoff owner's capture verifier, never the file's mtime alone."""
+    from .bot_operations import BotLifecycleError, _fresh_self_handoff
+    try:
+        _fresh_self_handoff(bot_dir)
+    except BotLifecycleError as exc:
+        raise ActivationRefusal("preserve-state activation requires a fresh verified session handoff; "
+                                "inspect the live session and saved handoff before explicit operator recovery; "
+                                "--resume never resends an unknown handoff") from exc
+
+
 def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
     """Run or resume the running-estate pause steps under one owner.
 
@@ -630,7 +641,9 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
     repeated and an intent without one refuses. A private server is stopped
     only while still observed and witnessed live at handoff.
     """
-    completed = read_activation(root, activation_id).body["completed"]
+    record = read_activation(root, activation_id)
+    completed = record.body["completed"]
+    preserve = record.body["intent"].get("preserve_bot_state") is True
     old_bots = {unit.target: unit for unit in old_units
                 if unit.installed and unit.declaration.scope == "bot"}
     if "producers_paused" not in completed:
@@ -660,22 +673,41 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
         store.begin(activation_id, "sessions_handed_off")
         effects = read_activation(root, activation_id).body.get("handoff_effects")
         if not isinstance(effects, dict) or None in effects.values():
+            if preserve:
+                raise ActivationRefusal("preserved bot handoff outcome is unknown; inspect its live session "
+                                        "and saved handoff before explicit operator recovery; "
+                                        "--resume never resends an unknown handoff")
             raise ActivationError("legacy bot handoff has an unknown effect; inspect its session before repair")
         for target, unit in old_bots.items():
             if target in effects:
                 continue  # Recorded before interruption; never inject twice.
             _, present = _legacy_bot_socket(unit)
+            restart = preserve and record.body["intent"]["bot_states"][target]["disposition"] == "restart"
             if not present:
+                if restart:
+                    _require_preserved_handoff(unit.declaration.working_directory)
                 store.record_handoff(activation_id, target=target, result="server_absent")
                 continue
+            if preserve and not restart:
+                raise ActivationRefusal("preserved stopped bot acquired a live private server before handoff")
             store.record_handoff(activation_id, target=target, result=None)
-            if adapter.call("svc_activation_handoff", unit.declaration.working_directory,
-                            unit.declaration.source.stem, _original_bot_tmpdir(unit),
-                            timeout=45).returncode:
+            result = adapter.call("svc_activation_handoff", unit.declaration.working_directory,
+                                  unit.declaration.source.stem, _original_bot_tmpdir(unit),
+                                  *(("explicit",) if preserve else ()), timeout=45)
+            if preserve:
+                marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+                if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
+                    raise ActivationRefusal("preserved bot handoff did not produce a verified save; "
+                                            "inspect its live session and saved handoff before explicit operator "
+                                            "recovery; --resume never resends an unknown handoff")
+                _require_preserved_handoff(unit.declaration.working_directory)
+            elif result.returncode:
                 raise ActivationError("legacy bot handoff did not complete")
             store.record_handoff(activation_id, target=target, result="handed_off")
         store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
-            {"old_bots": sorted(sockets), "handoff": "existing-door-attempted-or-private-server-absent"}))
+            {"old_bots": sorted(sockets), "handoff": (
+                "explicit-save-and-fresh-capture-verified-or-stopped" if preserve else
+                "existing-door-attempted-or-private-server-absent")}))
     if "sessions_quiesced" not in completed:
         store.begin(activation_id, "sessions_quiesced")
         # An older record has no witness; any server it left running refuses.
