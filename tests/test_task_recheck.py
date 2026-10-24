@@ -13,6 +13,8 @@ from claudlobby.plane.db import db_file
 from tests.test_activation import cold, tmp_path  # noqa: F401 — active fixture dependencies
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_write_cli import _call, active  # noqa: F401 — shared private activated fixture
+from tests.test_task_state import (_assignment, _deadline_fact, _read, _task,  # noqa: F401 — reducer rows
+                                   conn)
 
 
 def _admit(capsys, root, title):
@@ -204,3 +206,18 @@ def test_a_persons_deadline_less_assignment_is_a_standing_goal(active, monkeypat
         targets = conn.execute("SELECT DISTINCT recipient_alias FROM communications "
                                "WHERE source_ref LIKE 'task-recheck:%'").fetchall()
     assert targets == [("bot:example/manager",)]
+
+
+def test_a_moved_deadline_restarts_the_age_clock_as_a_reassign_did(conn):  # noqa: F811
+    """#2469: once a manager moves a bot's assignment to an open-ended deadline,
+    its age counts from the move, as a same-worker reassign's new assignment
+    counted from its own dispatch, and not from the original dispatch."""
+    from claudlobby.task_recheck import _due
+
+    _task(conn, "wi_wait")
+    _assignment(conn, "asg_wait", "wi_wait")            # dispatched 2026-09-01T00:00Z
+    _deadline_fact(conn, "wi_wait", "asg_wait", None, "2026-09-02T23:00:00Z")
+    task = _read(conn, "wi_wait")
+    noon = datetime(2026, 9, 3, 12, tzinfo=timezone.utc)   # 60 h after dispatch, 13 h after the move
+    assert not _due(task, noon, 48 * 3600)
+    assert _due(task, noon + timedelta(hours=36), 48 * 3600)

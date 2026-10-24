@@ -39,14 +39,15 @@ What remains is the plane-reader suite (the file is renamed to say so).
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 
 import pytest
 
 from claudlobby.plane import queries
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _dispatch, _matcher, _report, _scene,
-                                  _stdlib_readers, plane_root)
+from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _deadline_changed, _dispatch, _matcher, _report,
+                                  _scene, _stdlib_readers, plane_root, ro)
 from tests.plane_fixtures import _live_dispatch
 
 
@@ -120,6 +121,59 @@ def test_the_expiry_cap_and_the_progress_grace_hold_on_the_plane(tmp_path):
         [("t-2-bbbb", "progress_grace"), ("t-3-cccc", "overdue")]
     opened = _matcher(root, "--open", "w1", "--fleet", F)             # open is deadline-blind and grace-blind
     assert [l.split()[-1] for l in opened.stdout.splitlines()] == ["t-2-bbbb"]
+
+
+# --- a deadline fact moves the deadline the watchdog reads (#2469) -------------------
+
+def _at(seconds: int) -> str:
+    """The instant `seconds` from NOW_EPOCH, as a door stamps it."""
+    return datetime.fromtimestamp(NOW_EPOCH + seconds, timezone.utc).isoformat()
+
+
+def _verdicts(root, now):
+    r = _matcher(root, "--all", str(now), "--fleet", F)
+    assert r.returncode == 0, r.stderr
+    return [(t, v) for _, t, _, v in _past_due(r)]
+
+
+def test_a_deadline_fact_moves_the_deadline_the_watchdog_reads(tmp_path):
+    """Dispatched 2 h ago and due 1 h ago, then moved 3 days out: past due before
+    the move, not listed after it, overdue (not capped) once the moved deadline
+    passes, though that is days past dispatch + 24 h, and capped 24 h later."""
+    root = plane_root(tmp_path)
+    wi, asg, _msg = _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    assert _verdicts(root, NOW_EPOCH) == [("t-1-aaaa", "overdue")]
+    due = 3 * 86400
+    _deadline_changed(root, wi, asg, _at(due), ts=_at(-60))
+    assert _verdicts(root, NOW_EPOCH) == []
+    assert _verdicts(root, NOW_EPOCH + due + 1) == [("t-1-aaaa", "overdue")]
+    assert _verdicts(root, NOW_EPOCH + due + 86400 + 1) == [("t-1-aaaa", "max_age_cap")]
+
+
+def test_an_open_ended_deadline_fact_wins_as_the_newest(tmp_path):
+    """A fact with no deadline makes the assignment open-ended, and it wins as
+    the newest fact: read after both the dispatch's deadline and an older
+    fact's have passed, nothing is past due."""
+    root = plane_root(tmp_path)
+    wi, asg, _msg = _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    _deadline_changed(root, wi, asg, _at(86400), ts=_at(-120))
+    _deadline_changed(root, wi, asg, None, ts=_at(-60))
+    assert _verdicts(root, NOW_EPOCH + 86400 + 1) == []
+
+
+def test_the_deadline_fragment_seeks_the_assignments_own_events(tmp_path):
+    """Every open row runs the fragment's two subqueries, so each must seek
+    the assignment's own events, never scan them or walk the task history by
+    kind looking for a deadline fact the row may not have."""
+    root = plane_root(tmp_path)
+    _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    with ro(root) as conn:
+        plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + queries.OPEN_ASSIGNMENTS_AT_SQL,
+                                            ("actor_x",) + (None,) * 6)]
+    # "SEARCH d" on SQLite 3.36 and later, "SEARCH TABLE events AS d" before it
+    steps = [d for d in plan if re.match(r"(SEARCH|SCAN) (TABLE events AS )?d\b", d)]
+    walks = [d for d in steps if d.startswith("SCAN") or re.search(r"\(kind=\?\)", d)]
+    assert len(steps) == 2 and not walks, plan
 
 
 @pytest.mark.parametrize("report_at,closed", [

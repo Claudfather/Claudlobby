@@ -57,7 +57,7 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("context", ("show",)), ("bot", ("list", "show", "capabilities", "status", "session", "logs", "usage", "start", "stop", "restart", "handoff", "interrupt", "compact", "move", "create", "remove")),
     ("fleet", ("show", "status", "logs", "uptime", "utilization", "inbox", "usage", "start", "stop", "restart", "reconcile", "reload", "pulse", "notify", "move")), ("project", ("list", "show")),
     ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge", "feedback")),
-    ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
+    ("assignment", ("show", "deliver", "reschedule", "accept", "progress", "block", "return", "complete", "fail")),
     ("message", ("show", "receipt", "wait", "send", "reply")),
     ("request", ("show",)),
     ("workstream", ("list", "show", "open", "progress", "renew", "block", "unblock", "close", "prune")),

@@ -279,3 +279,27 @@ def test_snapshot_is_read_only_keeps_caller_transaction_and_batches_history_quer
     with pytest.raises(TaskStateError, match="unsupported task schema"):
         read_tasks(conn, fleet_uid="fleet_a")
     assert not conn.in_transaction
+
+
+def _deadline_fact(conn, tid, aid, deadline, occurred_at):
+    event_id = _event(conn, tid, aid, "deadline_changed", deadline=deadline)
+    conn.execute("UPDATE events SET occurred_at=? WHERE event_id=?", (occurred_at, event_id))
+
+
+def test_the_newest_deadline_fact_is_the_assignments_deadline(conn):
+    """#2469: a deadline_changed on the assignment moves its deadline, the
+    newest by ingest order wins, and one with no deadline makes it open-ended.
+    It is not a worker's word, so the lifecycle state stays where it was."""
+    _task(conn, "wi_wait")
+    _assignment(conn, "asg_wait", "wi_wait")
+    dispatched = _read(conn, "wi_wait").current_assignment
+    assert (dispatched.expected_by, dispatched.deadline_set_at) == ("2026-09-02T00:00:00Z", None)
+    _event(conn, "wi_wait", "asg_wait", "blocked_waiting")
+    _deadline_fact(conn, "wi_wait", "asg_wait", "2026-09-05T00:00:00+00:00", "2026-09-01T06:00:00Z")
+    task = _read(conn, "wi_wait")
+    moved = task.current_assignment
+    assert (moved.expected_by, moved.deadline_set_at) == ("2026-09-05T00:00:00+00:00", "2026-09-01T06:00:00Z")
+    assert task.state == "blocked" and not task.issues
+    _deadline_fact(conn, "wi_wait", "asg_wait", None, "2026-09-01T07:00:00Z")
+    open_ended = _read(conn, "wi_wait").current_assignment
+    assert (open_ended.expected_by, open_ended.deadline_set_at) == (None, "2026-09-01T07:00:00Z")
