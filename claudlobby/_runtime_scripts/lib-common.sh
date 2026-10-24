@@ -4162,8 +4162,11 @@ debounce_notify() {
 }
 
 # debounce_clear <state_dir> <bot_id> <marker_suffix>
-# Remove the debounce marker so the next occurrence fires again.
+# Remove the debounce marker so the next occurrence fires again. With no marker
+# it forks nothing: fleet-pulse clears every closed episode of every bot on
+# every sweep.
 debounce_clear() {
+    [ -e "$1/${2}.${3}" ] || return 0
     rm -f "$1/${2}.${3}"
 }
 

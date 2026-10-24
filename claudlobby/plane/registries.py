@@ -159,6 +159,13 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # of activity_stuck. Critical like input_held, and like it not one of
     # fleet-pulse's Telegram escalation types: the remedy is a prompt to the bot.
     "usage_limit_held": "critical",
+    # #997: a bot whose pane keepalive cannot read (its UNKNOWN verdict: no
+    # running turn, no prompt, no held box and no usage limit) past the
+    # threshold, with no tool call since. After an IDLE tick such a pane keeps
+    # data/.idle, so activity_stuck never fires for it. Critical like
+    # activity_stuck, and not one of fleet-pulse's Telegram escalation types:
+    # the remedy is a person looking at the pane.
+    "pane_unknown": "critical",
     # #996: the bot's own StopFailure hook recording a usage-limit stop (the
     # limit line in data.limit_line), and keepalive's one resume for a reset
     # (data.menu, data.outcome).

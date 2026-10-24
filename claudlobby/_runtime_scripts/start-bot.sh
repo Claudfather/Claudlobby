@@ -351,6 +351,13 @@ bot_session_spawn "$TMUX_SOCKET" "$TMUX_SESSION" "$CLAUDE_CMD"
 # — including a fleet-wide restart — doesn't trip a spurious bridge_down alert.
 mkdir -p "$BOT_DIR/data" 2>/dev/null || true
 touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
+# A new session's pane is not the last one's. keepalive's markers about the
+# pane, data/.held (its box holds text) and data/.unknown (keepalive cannot read
+# it), carry the epoch of the run they first saw, and a restart ends that run,
+# so they go here; fleet-pulse would otherwise read a fresh one from before the
+# restart as hours old (#997). data/.limit stays: a usage limit belongs to the
+# account, and it outlives a restart.
+rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.unknown" 2>/dev/null || true
 
 # Wait for initialization with observability. The readiness ceiling is
 # RC_READY_TIMEOUT_S: composed from host.boot into bot.conf since #1573

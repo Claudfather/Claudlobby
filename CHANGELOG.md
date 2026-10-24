@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — an alert about the fleet manager also pages its fleet's channel (#997, #2129)
+
+fleet-pulse pushes each per-bot alert into the pane of the bot's manager, so an
+alert about the fleet manager went into the manager's own pane: the one pane
+that cannot act on it. Such an alert now also posts to the fleet's alert
+channel, through the escalation's chat and sender, once an episode: the post's
+marker, `state/pulse/<bot>.<alert>.paged`, is written only once a post went
+out, and it is cleared with the alert's own, so the next episode posts again. A
+post that fails is tried again on each sweep while the alert holds. The
+reminder about a bot stopped on purpose is not an alert and posts nothing. A
+manager pane that shows a menu is now typed nothing and the push counts as not
+delivered (`notify_manager` returns 3, as for a held box), so the alert stays
+open and is sent once the pane takes input. Since #2457's fix such a push was
+recorded as delivered with nothing typed; 4 again means only that the manager
+has no session.
+
+### Added — `pane_unknown`: a pane keepalive cannot read is paged (#997)
+
+keepalive's `UNKNOWN` verdict (no running turn, no prompt, no held box and no
+usage limit on the pane) raised nothing, and after an idle tick it left
+`data/.idle` in place, which kept `activity_stuck` quiet however long the pane
+stayed that way. An `UNKNOWN` tick now writes `data/.unknown`, the epoch of the
+run's first `UNKNOWN` tick, re-stamped on each `UNKNOWN` tick; every other
+verdict removes it, and `start-bot.sh` removes it, with `data/.held`, when a
+session starts. fleet-pulse raises the critical `pane_unknown` once a run
+has lasted `OBSERVABILITY_PANE_UNKNOWN_THRESHOLD` seconds with no tool call
+since (default 1800, the `activity_stuck` default), and pushes it like the
+other per-bot alerts.
+
 ### Fixed — session export keeps its cursor while the plane cannot take a write (#2477)
 
 Session export read a write the plane could not take as a refusal of the
