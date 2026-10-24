@@ -375,7 +375,7 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
     """
     record = _record(store, activation_id)
     if (phase not in PHASES or record.body["pending"] != _PAUSE_STEPS[phase]
-            or "adoption_abort" in record.body):
+            or "adoption_abort" in record.body or "upgrade_abort" in record.body):
         raise ActivationError("unit pause phase is not the admitted activation step")
     pause = load_unit_pause(store, activation_id)
     adapter = adapter or Adapter()
@@ -413,6 +413,133 @@ def _producer_restored(saved: str, observed: str, *, scheduled: bool, allow_fail
     if scheduled and allow_failed and saved.split()[-1] == "failed":
         saved = " ".join(saved.split()[:2] + ["inactive"])
     return _same_enrollment(saved, observed, scheduled=scheduled)
+
+
+def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: str, release,
+                        sql_user_version: int, adapter=None) -> UnitPhaseEvidence:
+    """Restore only frozen producers of an upgrade stopped before any bot pause.
+
+    An unselected sealed repair CLI may own this operation. Handoff receipts
+    remain history, never permission to resend. ConfigInstall rollback and the
+    native resume owner reconcile interrupted restoration on an explicit retry.
+    """
+    store.assert_locked()
+    record = read_activation(store.root, activation_id)
+    terminal = record.status == "rolled_back"
+    store.check_upgrade_abort(activation_id, sql_user_version=sql_user_version, terminal=terminal)
+    for path in (store.root / "state/activations").glob("*/activation.json"):
+        if path.parent.name != activation_id and read_activation(store.root, path.parent.name).status not in {
+                "active", "rolled_back"}:
+            raise ActivationRefusal("another unfinished activation owns this host")
+    previous = record.body["previous_selection"]
+    selected = read_activation(store.root, previous["activation_id"])
+    source = read_release(store.root, previous["release_id"])
+    source_plan = read_plan(store.root, previous["plan_id"])
+    if (selected.status != "active" or selected.body["intent"]["release_id"] != source.release_id
+            or selected.body["intent"]["plan_id"] != source_plan.plan_id
+            or source_plan.release_id != source.release_id or source_plan.release_seal != source.seal_sha256):
+        raise ActivationRefusal("selected source activation, plan or release changed")
+    pause = load_unit_pause(store, activation_id, terminal=terminal)
+    if pause.enrollment.get("legacy_source") or pause.enrollment.get("bootstrap_empty"):
+        raise ActivationRefusal("early upgrade abort requires sealed original enrollment")
+    from . import activation_enrollment
+    from .migration_apply import read_migration
+    if read_migration(store.root, activation_id) is not None:
+        raise ActivationRefusal("activation has a migration journal")
+    for identifier in (activation_id, *(journal_id(activation_id, phase) for phase in ("bots", "ingest"))):
+        journal = read_config_install(store.root, identifier)
+        if journal.status != "prepared" or any(row != "pending" for row in journal.progress):
+            raise ActivationRefusal("configuration or later parking has begun")
+    for phase in (*PHASES, "directories"):
+        if (store.root / "state/activations" / activation_enrollment.journal_id(activation_id, phase)).exists():
+            raise ActivationRefusal("candidate publication has begun")
+    identifier = journal_id(activation_id, "producers")
+    journal = read_config_install(store.root, identifier)
+    allowed = {"rolled_back"} if terminal else {"applied", "rolling_back", "rolled_back"}
+    if journal.status not in allowed:
+        raise ActivationRefusal("producer parking is not a completed pause or its recorded restoration")
+    adapter = adapter or Adapter()
+    untouched = {unit["target"] for phase in ("bots", "ingest") for unit in pause.units(phase)}
+
+    def verify_untouched():
+        store.check_upgrade_abort(activation_id, sql_user_version=sql_user_version, terminal=terminal)
+        for unit in pause.enrollment["units"]:
+            _check_source(unit["generated"])
+        for unit in pause.units():
+            if unit["target"] in untouched:
+                _check_source(unit["installed"][0])
+                if _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]) != _saved(unit):
+                    raise ActivationRefusal("bot or ingest native state changed before early abort")
+        _darwin_check(adapter, pause.enrollment, untouched, original_load=True)
+        if record.body["intent"].get("preserve_bot_state") is True:
+            from types import SimpleNamespace
+            from .activation import _frozen_unit, _snapshot_bot_states
+            originals = tuple(_frozen_unit(row) for row in pause.enrollment["units"])
+            inventory = SimpleNamespace(units=originals, data_root=store.root,
+                                        manager=pause.enrollment["manager"])
+            candidates = tuple((unit.declaration, {"enroll": True}) for unit in originals
+                               if unit.declaration.scope == "bot")
+            if _snapshot_bot_states(inventory, candidates, adapter) != record.body["intent"]["bot_states"]:
+                raise ActivationRefusal("frozen bot disposition changed before early abort")
+        from .plane.db import connect_ro, db_file
+        conn = connect_ro(db_file(store.root))
+        try:
+            if conn.execute("PRAGMA user_version").fetchone()[0] != sql_user_version:
+                raise ActivationRefusal("SQL version differs from the early abort precondition")
+        finally:
+            conn.close()
+
+    verify_untouched()
+    _external(adapter, pause)
+    _darwin_check(adapter, pause.enrollment)
+    if not terminal:
+        for unit in pause.units("producers"):
+            before = dict(unit["properties"])
+            parked = ("unchanged unloaded inactive" if pause.enrollment["manager"] == "Darwin" else
+                      f"{before['UnitFileState'] if before['LoadState'] == 'masked' else 'masked-runtime'} masked inactive")
+            observed = _call(adapter, "svc_inventory_state", _file(unit), unit["target"])
+            allowed_states = {parked}
+            if "upgrade_abort" in record.body:
+                allowed_states.add(" ".join(_saved(unit).split()[:2] + ["inactive"]))
+                allowed_states.add(_saved(unit))
+            if observed not in allowed_states:
+                raise ActivationRefusal("producer native state differs from its parking/restoration journal")
+    if not terminal:
+        store.begin_upgrade_abort(activation_id, reason=reason, release_id=release.release_id,
+                                  artifact_id=release.inputs.artifact_id, sql_user_version=sql_user_version)
+        rollback_config(store.root, identifier)
+        if pause.enrollment["manager"] == "Linux":
+            _call(adapter, "svc_activation_reload")
+    scheduled = _scheduled_services(pause.enrollment, pause.phases)
+    resumed, cleared = [], []
+    for unit in _timers_last(pause.units("producers")):
+        _check_source(unit["installed"][0])
+        target, saved = unit["target"], _saved(unit)
+        native = _native_saved(unit, scheduled, allow_failed=pause.enrollment["manager"] == "Linux")
+        if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
+                                  scheduled=target in scheduled, allow_failed=pause.enrollment["manager"] == "Linux"):
+            if terminal:
+                raise ActivationRefusal("restored producer native state changed")
+            _call(adapter, "svc_activation_resume", _file(unit), target, native)
+            resumed.append(target)
+        if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
+                                  scheduled=target in scheduled, allow_failed=pause.enrollment["manager"] == "Linux"):
+            raise ActivationError(f"restored native state differs: {target}")
+        if pause.enrollment["manager"] == "Linux" and dict(unit["properties"])["LoadState"] == "loaded":
+            if terminal:
+                # A completed repeat observes only; it cannot clear new native state.
+                continue
+            if _call(adapter, "svc_activation_clear_runtime_mask", _file(unit), target, native) == "removed":
+                cleared.append(target)
+    verify_untouched()
+    _darwin_check(adapter, pause.enrollment, original_load=True)
+    evidence = UnitPhaseEvidence("producers", identifier, pause.plan("producers").plan_id,
+                                 tuple(unit["target"] for unit in pause.units("producers")),
+                                 "rechecked" if terminal else "aborted")
+    if not terminal:
+        store.finish_upgrade_abort(activation_id, sql_user_version=sql_user_version,
+                                   evidence_digest=evidence.digest, resumed=resumed, cleared=cleared)
+    return evidence
 
 
 def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: str, release,

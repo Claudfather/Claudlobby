@@ -61,7 +61,7 @@ def candidate(installed, monkeypatch, tmp_path):
 
 
 def test_host_help_and_parse_are_lazy_and_global_scope_order_is_explicit(tmp_path, monkeypatch, capsys):
-    for route in ("status", "activate", "abort-adoption"):
+    for route in ("status", "activate", "abort-adoption", "abort-upgrade"):
         result = _run(PARSE, "host", route, "--help", tmp_path=tmp_path)
         assert result.returncode == 0, result.stderr
     result = _run(PARSE, "--json", "host", "activate", "p-secret", tmp_path=tmp_path)
@@ -275,14 +275,26 @@ def test_activate_resume_reuses_recorded_id_and_reports_unsupported_start_stage(
     assert refusal["request_id"] == "interrupted"
 
 
-def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, monkeypatch, capsys):
+@pytest.mark.parametrize("route", ["abort-adoption", "abort-upgrade"])
+def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, monkeypatch, capsys, route):
     import sqlite3
     from claudlobby import activation_units
     root, release, plan, _ = candidate
     with state.locked_activation(root) as store:
+        if route == "abort-upgrade":
+            store.prepare("prior", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
+            for step in state.STEPS:
+                store.begin("prior", step)
+                if step == "selection_switched":
+                    store.select("prior")
+                else:
+                    store.complete("prior", step, evidence_digest="2" * 64)
         store.prepare("adopt", plan, recovery_release_id=release.release_id,
-                      enrollment_digest="1" * 64, legacy_source=True)
+                      enrollment_digest="1" * 64, legacy_source=route == "abort-adoption")
         store.begin("adopt", "producers_paused")
+        if route == "abort-upgrade":
+            store.complete("adopt", "producers_paused", evidence_digest="2" * 64)
+            store.begin("adopt", "sessions_handed_off")
     database = root / "state/plane/plane.db"
     database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     conn = sqlite3.connect(database)
@@ -294,14 +306,21 @@ def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, mo
         # Native/file restoration belongs to the separately tested owner; keep
         # its real durable record transitions for this CLI boundary.
         calls.append((activation_id, reason, release.release_id, sql_user_version))
-        store.begin_adoption_abort(activation_id, reason=reason, release_id=release.release_id,
-                                   artifact_id=release.inputs.artifact_id,
-                                   sql_user_version=sql_user_version)
-        store.finish_adoption_abort(activation_id, evidence_digest="3" * 64, resumed=[])
+        begin = store.begin_upgrade_abort if route == "abort-upgrade" else store.begin_adoption_abort
+        begin(activation_id, reason=reason, release_id=release.release_id,
+              artifact_id=release.inputs.artifact_id, sql_user_version=sql_user_version)
+        if route == "abort-upgrade":
+            store.finish_upgrade_abort(activation_id, sql_user_version=sql_user_version,
+                                       evidence_digest="3" * 64, resumed=[], cleared=[])
+        else:
+            store.finish_adoption_abort(activation_id, evidence_digest="3" * 64, resumed=[])
         return SimpleNamespace(targets=("clock.timer",), operation="aborted")
 
-    monkeypatch.setattr(activation_units, "abort_early_adoption", abort)
-    argv = ["--root", str(root), "--json", "host", "abort-adoption", "adopt",
+    monkeypatch.setattr(activation_units, "abort_early_upgrade" if route == "abort-upgrade" else "abort_early_adoption", abort)
+    from claudlobby.commands import host
+    runtimes = []
+    monkeypatch.setattr(host, "_abort_runtime", runtimes.append)
+    argv = ["--root", str(root), "--json", "host", route, "adopt",
             "--reason", "masked reader refused", "--expected-sql-version"]
     before = snapshot(root)
     wrong = call(capsys, argv + ["13"], 4)
@@ -315,7 +334,9 @@ def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, mo
     assert result["data"]["recording"] == "committed"
     assert result["data"]["recorded_activation"]["status"] == "rolled_back"
     assert result["data"]["restored_targets"] == ["clock.timer"]
-    assert state.read_activation(root, "adopt").body["adoption_abort"]["sql_user_version"] == 12
+    assert state.read_activation(root, "adopt").body[
+        "upgrade_abort" if route == "abort-upgrade" else "adoption_abort"]["sql_user_version"] == 12
+    assert [item.release_id for item in runtimes] == ([release.release_id] * 2 if route == "abort-upgrade" else [])
 
 
 def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(candidate, monkeypatch, capsys):

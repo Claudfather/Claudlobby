@@ -24,7 +24,7 @@ _ACTIVATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
             "use host activate PLAN_ID --resume ID --install-directory PATH for a supported recorded step, "
-            "or rerun host abort-adoption ID for a recorded abort in progress; "
+            "or rerun host abort-adoption/abort-upgrade ID for its recorded abort in progress; "
             "running-session handoff and starts without durable receipts need their missing witness repaired first")
 
 
@@ -61,7 +61,7 @@ def _status(args, root):
             try:
                 record = read_activation(root, item["activation_id"])
                 step = resumable_running_step(record)
-                aborting = "adoption_abort" in record.body
+                aborting = "adoption_abort" in record.body or "upgrade_abort" in record.body
             except Exception:
                 step, aborting = None, False
             # An abort in progress continues only through host abort-adoption.
@@ -277,6 +277,8 @@ def _abort(args, root):
     Restores only the original producer pause. It is not general rollback: it
     never starts bots or ingest, changes selection, or restores SQL.
     """
+    upgrade = args.public_command == "host.abort-upgrade"
+    marker = "upgrade_abort" if upgrade else "adoption_abort"
     activation_id = args.abort_activation_id  # its own dest: request_id stays null
     if not _ACTIVATION_ID.fullmatch(activation_id):
         raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
@@ -296,10 +298,12 @@ def _abort(args, root):
             data=data, hint=f"inspect claudlobby --root {shlex.quote(str(root))} host releases")
     try:
         from ..activation_state import locked_activation
-        from ..activation_units import abort_early_adoption
+        from ..activation_units import abort_early_adoption, abort_early_upgrade
         from ..plane.db import connect_ro, db_file
         from ..releases import read_release
         release = read_release(root, executing)
+        if upgrade:
+            _abort_runtime(release)
         with locked_activation(root) as store:
             conn = connect_ro(db_file(root))
             try:
@@ -310,8 +314,8 @@ def _abort(args, root):
                 raise CommandFailure("conflict", "conflict: database user_version differs from the "
                                      "operator's preflight expectation; no mutation performed",
                                      data=data, release_id=executing)
-            evidence = abort_early_adoption(store, activation_id, reason=reason, release=release,
-                                            sql_user_version=version)
+            owner = abort_early_upgrade if upgrade else abort_early_adoption
+            evidence = owner(store, activation_id, reason=reason, release=release, sql_user_version=version)
     except CommandFailure:
         raise
     except Exception as exc:
@@ -336,7 +340,7 @@ def _abort(args, root):
             code, message = "internal_error", f"internal error; see {diagnostic}"
         from ..activation_state import read_activation
         try:
-            marked = "adoption_abort" in read_activation(root, activation_id).body
+            marked = marker in read_activation(root, activation_id).body
         except ActivationError:
             marked = False
         hint = ("the recorded abort marker keeps forward activation refused; repair the named "
@@ -351,11 +355,24 @@ def _abort(args, root):
                              release_id=executing)
     data.update(recorded_activation=saved, recording="committed", restored_targets=list(evidence.targets),
                 operation=evidence.operation)
-    done = ("terminal early abort rechecked; hidden runtime masks cleared" if evidence.operation == "rechecked"
-            else "early adoption aborted")
+    done = (("terminal early upgrade abort rechecked" if upgrade else
+             "terminal early abort rechecked; hidden runtime masks cleared") if evidence.operation == "rechecked"
+            else "early upgrade aborted" if upgrade else "early adoption aborted")
     return CommandOutput(data, executing, (
         f"Activation {activation_id}: {done}; original producer files and states "
         "verified. Bots, ingest, selection and SQL were not touched.",))
+
+
+def _abort_runtime(release):
+    """The repair release may be unselected, but must be this executing sealed package."""
+    from ..activation_state import ActivationRefusal
+    from ..resources import get_resources
+    from ..runtime_admission import RuntimeIdentity
+    package = get_resources()
+    if (RuntimeIdentity.current() != RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)
+            or package.native != release.native_path or package.artifact_id != release.inputs.artifact_id
+            or Path(sys.executable).absolute() != release.directory / release.paths.interpreter):
+        raise ActivationRefusal("early upgrade abort requires its executing sealed interpreter and package")
 
 
 def _run_repair(what, run, *, data, root, unknown_hint):
@@ -438,10 +455,11 @@ def _repair_after_reset(args, root):
 
 def dispatch(args):
     activating = args.public_command == "host.activate"
-    aborting = args.public_command == "host.abort-adoption"
+    aborting = args.public_command in {"host.abort-adoption", "host.abort-upgrade"}
     # Operator verbs; each backend also checks recorded native ancestry.
     operator = {"host.activate": _activate, "host.repair-start": _repair_start,
-                "host.repair-after-reset": _repair_after_reset, "host.abort-adoption": _abort}
+                "host.repair-after-reset": _repair_after_reset, "host.abort-adoption": _abort,
+                "host.abort-upgrade": _abort}
     try:
         if args.public_command in operator:
             _operator_shell()  # refuses bot callers

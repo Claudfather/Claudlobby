@@ -15,7 +15,7 @@ from claudlobby import activation_units as units
 from claudlobby import config_install
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.supervision_inventory import Adapter, EnrollmentInventory, EnrolledUnit, FileSnapshot, UnitDeclaration, collect_enrollment
-from tests.test_releases import installed, r
+from tests.test_releases import installed, r, release_tree
 from tests.test_supervision_inventory import Observations, observed_print
 
 
@@ -158,6 +158,114 @@ def _prepare(store, inventory, phases, plan, adapter, *, install_directory=None)
                   enrollment_digest=inventory.digest, legacy_source=inventory.legacy_source,
                   install_directory=install_directory)
     return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
+
+
+def _prepare_upgrade_abort(store, inventory, phases, plan, adapter):
+    """Existing parking fixture with a real selected source and an early upgrade."""
+    import sqlite3
+    store.prepare("prior", plan, recovery_release_id=plan.release_id, enrollment_digest=inventory.digest)
+    for step in state.STEPS:
+        store.begin("prior", step)
+        if step == "selection_switched":
+            store.select("prior")
+        else:
+            store.complete("prior", step, evidence_digest="2" * 64)
+    _prepare(store, inventory, phases, plan, adapter)
+    config_install.prepare_config(plan, "cutover")
+    store.begin("cutover", "producers_paused")
+    paused = units.pause_phase(store, "cutover", "producers", adapter=adapter)
+    store.complete("cutover", "producers_paused", evidence_digest=paused.digest)
+    store.arm_handoff_evidence("cutover")
+    store.begin("cutover", "sessions_handed_off")
+    store.record_handoff("cutover", target="member.service", result=None)
+    database = inventory.data_root / "state/plane/plane.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as conn:
+        conn.execute("PRAGMA user_version=12")
+
+
+def test_early_upgrade_abort_restores_producers_retains_unknown_and_reconciles_retry(enrollment):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    inputs, paths, _, _ = release_tree(root, "b" * 40, "repair-artifact")
+    repair = r.seal_release(root, inputs, paths)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter)
+        before = state.read_activation(root, "cutover")
+        selected = state.read_selection(root)
+        adapter.resume_failure = "clock.timer"
+        with pytest.raises(state.ActivationError, match="svc_activation_resume refused"):
+            units.abort_early_upgrade(store, "cutover", reason="handoff unavailable", release=repair,
+                                      sql_user_version=12, adapter=adapter)
+        pending = state.read_activation(root, "cutover")
+        assert pending.body["upgrade_abort"]["result"] is None
+        assert state.resumable_running_step(pending) is None
+        with pytest.raises(state.ActivationError):
+            store.begin("cutover", "sessions_handed_off")
+        with pytest.raises(state.ActivationError):
+            store.begin_rollback("cutover")
+        with pytest.raises(state.ActivationError):
+            store.record_handoff("cutover", target="member.service", result="handed_off")
+        adapter.resume_failure = None
+        adapter.calls.clear()
+        evidence = units.abort_early_upgrade(store, "cutover", reason="retry exact producer restore", release=repair,
+                                             sql_user_version=12, adapter=adapter)
+        saved = state.read_activation(root, "cutover")
+        assert saved.status == "rolled_back" and saved.body["pending"] is None
+        assert saved.body["handoff_effects"] == {"member.service": None}
+        assert saved.body["completed"] == before.body["completed"]
+        assert saved.body["evidence"] == before.body["evidence"]
+        assert saved.body["forward"] == {key: before.body[key] for key in ("status", "completed", "pending", "evidence")}
+        assert saved.body["upgrade_abort"]["release_id"] == repair.release_id != selected["release_id"]
+        assert saved.body["upgrade_abort"]["result"]["evidence"] == evidence.digest
+        assert [target for function, target in adapter.calls if function == "svc_activation_resume"] == ["clock.timer"]
+        assert state.read_selection(root) == selected
+        assert all(FileSnapshot.read(Path(unit.installed[0].path)) == unit.installed[0] for unit in inventory.units)
+        adapter.calls.clear()
+        assert units.abort_early_upgrade(store, "cutover", reason="verify completed", release=repair,
+                                         sql_user_version=12, adapter=adapter).operation == "rechecked"
+        assert state.read_activation(root, "cutover") == saved
+        assert not any(function in {"svc_activation_resume", "svc_activation_handoff", "svc_activation_reload"}
+                       for function, _ in adapter.calls)
+
+
+@pytest.mark.parametrize("drift", ["bot-native", "ingest-native", "producer-native", "installed", "generated",
+                                  "selection", "sql", "later-step", "later-parking", "configuration", "publication"])
+def test_early_upgrade_abort_refuses_drift_or_later_effect_before_marker(enrollment, drift):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter)
+        if drift.endswith("-native"):
+            target = {"bot-native": "member.service", "ingest-native": "collector.service",
+                      "producer-native": "clock.timer"}[drift]
+            adapter.states[target] = "enabled loaded activating"
+        elif drift in {"installed", "generated"}:
+            unit = inventory.units[-1]
+            Path(unit.installed[0].path if drift == "installed" else unit.generated.path).write_text("changed")
+        elif drift == "selection":
+            state._write(root / "state/selected-release.json", None)
+        elif drift == "sql":
+            import sqlite3
+            with sqlite3.connect(root / "state/plane/plane.db") as conn:
+                conn.execute("PRAGMA user_version=13")
+        elif drift == "later-step":
+            store.complete("cutover", "sessions_handed_off", evidence_digest="3" * 64)
+            store.begin("cutover", "sessions_quiesced")
+        elif drift in {"later-parking", "configuration"}:
+            config_install.apply_config(root, units.journal_id("cutover", "bots") if drift == "later-parking" else "cutover")
+        elif drift == "publication":
+            from claudlobby.activation_enrollment import journal_id
+            (root / "state/activations" / journal_id("cutover", "bots")).mkdir()
+        before = state.read_activation(root, "cutover")
+        adapter.calls.clear()
+        with pytest.raises((state.ActivationError, state.ActivationRefusal)):
+            units.abort_early_upgrade(store, "cutover", reason="refuse changed source", release=release,
+                                      sql_user_version=12, adapter=adapter)
+        assert state.read_activation(root, "cutover") == before
+        assert not any(function in {"svc_activation_resume", "svc_activation_handoff", "svc_activation_reload"}
+                       for function, _ in adapter.calls)
 
 
 def test_prepared_snapshot_refusal_can_cancel_only_unstarted_journals(enrollment):

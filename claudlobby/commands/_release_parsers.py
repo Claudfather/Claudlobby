@@ -245,6 +245,17 @@ def register_release_subparsers(sub):
     abort.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
     abort.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
                        help="Plane user_version from the operator's retained pre-activation preflight")
+    abort_upgrade = _route(hosts, "abort-upgrade", "host.abort-upgrade",
+                           "Abort a selected-release upgrade before bot or ingest quiescence")
+    abort_upgrade.description = ("Operator-only, from a sealed release CLI, including an unselected repair "
+                                 "release. Restores only frozen producer files and native states after "
+                                 "producers_paused. Requires unchanged source selection, bots, ingest and "
+                                 "SQL; retains all handoff receipts. Not general rollback.")
+    abort_upgrade.set_defaults(func=_dispatch_host)
+    abort_upgrade.add_argument("abort_activation_id", metavar="ACTIVATION_ID")
+    abort_upgrade.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
+    abort_upgrade.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
+                               help="Plane user_version from the retained pre-activation preflight")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
