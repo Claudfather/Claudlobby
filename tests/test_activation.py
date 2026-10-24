@@ -1552,3 +1552,121 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     assert f"\nreferences_refreshed: {recorded}\n".encode() in repaired.split(b"\n---\n", 1)[0] + b"\n"
     assert task.encode() in repaired and assignment.encode() in repaired
     assert adapter.calls == calls  # no native pause, handoff or start replay
+
+
+@pytest.mark.parametrize("has_unit,live,native,session,expected", [
+    (True, True, "inactive", "ready", "restart"),
+    (True, False, "inactive", "unknown", "stopped"),
+    (False, False, "inactive", "unknown", "stopped"),
+    (False, True, "inactive", "ready", "uninstalled bot"),
+    (True, True, "inactive", "unknown", "ownership or readiness"),
+    (True, False, "active", "ready", "no live private server"),
+    (True, False, "activating", "ready", "transient or unreadable"),
+])
+def test_preserved_upgrade_disposition_requires_exact_live_or_absent_server(
+        cold, monkeypatch, has_unit, live, native, session, expected):
+    root, _, plan, host = cold
+    # Use the selected definition's explicit TMPDIR, independently of ambient
+    # environment and native wrapper activity. This fixture does not prove tmux.
+    declaration, item = next((d, i) for d, i in planned_units(plan, "Linux") if d.bot == "worker")
+    content = plan.blob(item["sha256"])
+    declaration.source.parent.mkdir(parents=True)
+    declaration.source.write_bytes(content)
+    generated = FileSnapshot.read(declaration.source)
+    environment = {**dict(declaration.environment), "TMUX_TMPDIR": str(host.tmux_dir)}
+    unit = SimpleNamespace(declaration=declaration, target=declaration.source.name,
+        generated=generated, installed=(generated,) if has_unit else (),
+        properties=(("Environment", shlex.join(f"{k}={v}" for k, v in environment.items())),
+                    ("ActiveState", native)))
+    inventory = SimpleNamespace(units=(unit,), data_root=root, manager="Linux")
+    monkeypatch.setattr(activation.enrollment, "selected_bot_entry", lambda *_: {
+        "target": unit.target, "source": str(declaration.source),
+        "installed": str(host.directory / declaration.source.name)})
+    adapter = SimpleNamespace(read=lambda function, *_:
+        f"disabled {'loaded' if has_unit else 'not-found'} {native}" if function == "svc_inventory_state" else session)
+    socket_path = host.tmux_dir / f"tmux-{os.getuid()}" / declaration.source.stem
+    socket_path.parent.mkdir(parents=True)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        if live:
+            server.bind(str(socket_path))
+            server.listen(8)
+        if expected in {"restart", "stopped"}:
+            snapshot = activation._snapshot_bot_states(inventory, ((declaration, item),), adapter)
+            assert snapshot[unit.target]["disposition"] == expected
+            assert snapshot[unit.target]["socket_path"] == str(socket_path)
+            assert snapshot == activation._snapshot_bot_states(inventory, ((declaration, item),), adapter)
+        else:
+            with pytest.raises(state.ActivationRefusal, match=expected):
+                activation._snapshot_bot_states(inventory, ((declaration, item),), adapter)
+    assert not (root / "state/activations").exists()
+
+
+def test_preserved_upgrade_requires_same_roster_and_explicit_frozen_tmpdir(tmp_path):
+    inventory = SimpleNamespace(units=())
+    declaration = SimpleNamespace(scope="bot", fleet="example", bot="worker")
+    with pytest.raises(state.ActivationRefusal, match="unchanged selected bot roster"):
+        activation._snapshot_bot_states(inventory, ((declaration, {"enroll": True}),), None)
+    unit = SimpleNamespace(installed=(), declaration=SimpleNamespace(source=tmp_path / "worker.service"),
+                           generated=SimpleNamespace(content=b"[Service]\n"))
+    with pytest.raises(state.ActivationRefusal, match="absolute private tmux"):
+        activation._original_bot_tmpdir(unit, allow_uninstalled=True)
+
+
+@pytest.mark.parametrize("pending", [None, "producers_paused"])
+def test_preserved_disposition_is_rechecked_before_first_pause_without_replacing_intent(monkeypatch, tmp_path, pending):
+    saved = {"example.worker": {"disposition": "restart"}}
+    record = SimpleNamespace(body={"completed": [], "pending": pending, "intent": {
+        "plan_id": "frozen", "install_directory": str(tmp_path), "bot_states": saved}})
+    pause = SimpleNamespace(enrollment={"catalog": "frozen catalog", "manager": "Darwin"})
+    calls = []
+    store = SimpleNamespace(begin=lambda *args: calls.append(args))
+    monkeypatch.setattr(activation, "read_activation", lambda *_: record)
+    monkeypatch.setattr(activation, "read_plan", lambda *_: object())
+    monkeypatch.setattr(activation, "planned_units", lambda *_: ())
+    def placement(*_):
+        assert pending is None, "a partial producer pause must use its owned journal proof"
+    monkeypatch.setattr(activation, "_preflight_candidate_placement", placement)
+    monkeypatch.setattr(activation, "_snapshot_bot_states", lambda *_: {
+        "example.worker": {"disposition": "stopped"}})
+    with pytest.raises(state.ActivationError, match="changed before the first activation pause"):
+        activation._quiesce_running(tmp_path, store, "upgrade", pause, (), object())
+    assert calls == [] and record.body["intent"]["bot_states"] is saved
+    assert saved["example.worker"]["disposition"] == "restart"
+
+
+def test_preserved_stopped_witness_exempts_only_stop_guard_and_keeps_runner_pause_guard(tmp_path):
+    root = tmp_path.resolve()
+    directory = root / "worker"
+    directory.mkdir()
+    runner = SimpleNamespace(autonomous_runner=None)
+    context = SimpleNamespace(paths=SimpleNamespace(bot_runtime=lambda _: directory),
+        fleet=SimpleNamespace(name="example", bots={"worker": runner}))
+    unit = SimpleNamespace(target="example.worker", installed=(), declaration=SimpleNamespace(
+        scope="bot", fleet="example", bot="worker", working_directory=directory))
+    with pytest.raises(state.ActivationRefusal, match="deliberately stopped"):
+        activation._refuse_unrecorded_run_intent(root, (unit,), (context,))
+    snapshot = {unit.target: {"disposition": "stopped", "session": "server_absent"}}
+    activation._refuse_unrecorded_run_intent(root, (unit,), (context,), bot_states=snapshot)
+    (directory / activation.LEGACY_RUNNER_PAUSE).write_text("paused\n")
+    runner.autonomous_runner = object()
+    with pytest.raises(state.ActivationRefusal, match="markers have no recorded automation pause"):
+        activation._refuse_unrecorded_run_intent(root, (unit,), (context,), bot_states=snapshot)
+
+
+@pytest.mark.parametrize("native", ["masked-runtime masked inactive", "disabled loaded inactive"])
+def test_preserved_stopped_bot_must_be_native_absent_before_producers(monkeypatch, tmp_path, native):
+    target = "example.worker.service"
+    entry = {"target": target, "installed": str(tmp_path / target), "publish": False}
+    record = SimpleNamespace(body={"completed": ["bots_started"], "intent": {
+        "bot_states": {target: {"disposition": "stopped"}}}})
+    monkeypatch.setattr(activation, "read_activation", lambda *_: record)
+    monkeypatch.setattr(activation, "_ingest_ready", lambda *_: {})
+    monkeypatch.setattr(activation.enrollment, "candidate_entries", lambda *_: (entry,))
+    monkeypatch.setattr(activation.enrollment, "_check_targets", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(activation.units, "load_unit_pause", lambda *_: SimpleNamespace(enrollment={}))
+    calls = []
+    adapter = SimpleNamespace(read=lambda *_: native)
+    store = SimpleNamespace(begin=lambda *_: calls.append("producer admission"))
+    with pytest.raises(state.ActivationError, match="remains natively enrolled or masked"):
+        activation._verify_candidate_startup(tmp_path, store, "upgrade", None, {}, {}, (), {}, adapter)
+    assert calls == []

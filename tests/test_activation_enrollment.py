@@ -575,3 +575,69 @@ def test_unsupported_install_semantics_refuse_before_publication(case):
                                                  install_directory=adapter.directory, adapter=adapter)
         assert not (adapter.directory / "collector.service").exists()
         assert not list((store.root / "state/activations").glob("enrollment-*/config"))
+
+
+def test_preserved_stopped_bot_retains_placement_without_publication_or_enablement(case, monkeypatch, tmp_path):
+    inventory, phases, plan, adapter, foreign, wants, old, checks = case
+    mask = None
+    if inventory.manager == "Linux":
+        masks = tmp_path / "private-runtime/systemd/user"
+        masks.mkdir(parents=True)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(masks.parent.parent))
+        config = _catalog(inventory.catalog)[2][0]
+        inventory = replace(inventory, catalog=inventory.catalog.replace(
+            f"directory\t{config}\n", f"directory\t{config}\ndirectory\t{masks}\n", 1))
+        adapter = Manager(inventory, plan)
+        case = (inventory, phases, plan, adapter, foreign, wants, old, checks)
+        mask = masks / "member.service"
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        if mask is not None:
+            mask.symlink_to("/dev/null")
+        # The coordinator's already witnessed immutable disposition; this test
+        # exercises the real publication journals and selected placement reader.
+        record = state.read_activation(store.root, "cutover")
+        bot = next(unit for unit in inventory.units if unit.declaration.scope == "bot")
+        record.body["intent"].update(preserve_bot_state=True,
+            bot_states={bot.target: {"disposition": "stopped"}})
+        store._save(record)
+        publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                             install_directory=adapter.directory, adapter=adapter)
+        entry = next(entry for entry in publish.candidate_entries(store, "cutover", "bots")
+                     if entry["target"] == bot.target)
+        assert entry["publish"] is False and entry["enablement"] is None
+        native = adapter.call
+        def reload_stopped_mask(function, *args, **kwargs):
+            if function == "svc_activation_reload" and mask is not None and not mask.is_symlink():
+                adapter.states.pop(bot.target, None)
+            if function == "svc_bot_unit_owned_by":
+                assert ("WorkingDirectory=" + str(args[1])).encode() in Path(args[0]).read_bytes()
+                return subprocess.CompletedProcess([function, *args], 0, "", "")
+            if (function == "svc_inventory_properties" and args[0] == bot.target
+                    and not Path(entry["installed"]).exists()):
+                text = unit_properties(adapter.directory, bot.target, bot.declaration)
+                text = text.replace("LoadState=loaded", "LoadState=not-found")
+                return subprocess.CompletedProcess([function, *args], 0, text, "")
+            return native(function, *args, **kwargs)
+        adapter.call = reload_stopped_mask
+        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started"),
+                            ("producers", "producers_resumed")):
+            if phase == "producers":
+                _complete(store, "verified")
+            store.begin("cutover", step)
+            publish.install_candidate_units(store, "cutover", phase, adapter=adapter)
+            _complete_pending(store, step)
+        assert not Path(entry["installed"]).exists()
+        assert publish.selected_bot_entry(store.root, "alpha", "member", inventory.manager) == entry
+        if inventory.manager == "Linux":
+            link = Path(entry["installed"]).parent / "default.target.wants" / Path(entry["installed"]).name
+            assert not link.exists() and not link.is_symlink()
+            assert not mask.exists() and not mask.is_symlink()
+            assert not any(function == "svc_activation_clear_runtime_mask" and args[1] == bot.target
+                           for function, args in adapter.calls)
+            # An explicit later start first uses this real inventory owner;
+            # no mask may make the stopped bot appear installed or foreign.
+            declarations = tuple(d for d, _ in planned_units(plan, "Linux"))
+            observed = collect_enrollment(store.root, declarations, adapter=adapter,
+                only_names=frozenset({Path(entry["installed"]).name})).require_complete()
+            assert len(observed.units) == 1 and observed.units[0].installed == ()

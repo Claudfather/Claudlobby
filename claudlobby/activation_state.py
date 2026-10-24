@@ -231,7 +231,8 @@ class ActivationStore:
                 recovery_release_id: str, enrollment_digest: str,
                 source_release_id: str | None = None,
                 legacy_source: bool = False,
-                install_directory: Path | None = None) -> ActivationRecord:
+                install_directory: Path | None = None,
+                bot_states: dict | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -253,6 +254,11 @@ class ActivationStore:
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if bot_states is not None:
+            if legacy_source or previous is None or not bot_states:
+                raise ActivationError("preserving bot state requires a selected release upgrade")
+            intent["preserve_bot_state"] = True
+            intent["bot_states"] = json.loads(json.dumps(bot_states))
         if install_directory is not None:
             directory = Path(install_directory)
             if not directory.is_absolute() or directory.resolve() != directory:

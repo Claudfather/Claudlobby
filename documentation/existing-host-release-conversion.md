@@ -168,6 +168,14 @@ After the host window is authorized and the plan/source/roster remain unchanged:
 
 Use `--adopt-existing` for the first unsealed, running estate only. For a host
 already selected into the sealed model, omit that flag and use the upgrade path.
+For an existing selected release, `--preserve-bot-state` keeps the same bot roster
+and native placements, restarts only positively witnessed live private sessions,
+and leaves bots with proven absent servers de-enrolled. Unknown ownership or
+transient native state refuses before stopping the estate. The activation records
+this disposition before quiescence; `--resume` reuses it even when the flag is
+omitted. The flag is rejected for bootstrap and first adoption. A later explicit
+`bot start` uses the retained frozen placement of a stopped bot.
+
 Do not run manual unit enrollment, live regeneration or per-bot restarts alongside
 activation. The coordinator pauses old producers, saves handoffs and quiesces
 sessions/ingest before installing the staged configuration and units; it records

@@ -154,3 +154,26 @@ def test_rollback_preserves_forward_evidence_and_refuses_foreign_pointer(proposa
         assert result.status == "rolled_back"
         assert result.body["forward"]["completed"] == forward["completed"]
         assert a.read_selection(builder.root) is None
+
+
+def test_preserved_bot_state_is_upgrade_only_and_part_of_immutable_intent(proposal):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    states = {"example.worker": {"disposition": "stopped", "session": "server_absent"}}
+    with a.locked_activation(builder.root) as store:
+        with pytest.raises(a.ActivationError, match="selected release upgrade"):
+            store.prepare("cold", plan, recovery_release_id=plan.release_id,
+                          enrollment_digest="1" * 64, bot_states=states)
+        _prepare(store, plan, "prior")
+        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
+        store.begin("prior", "selection_switched")
+        store.select("prior")
+        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
+        record = store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
+                               enrollment_digest="1" * 64, bot_states=states)
+        states["example.worker"]["disposition"] = "restart"
+        assert a.read_activation(builder.root, "upgrade").body["intent"]["bot_states"]["example.worker"]["disposition"] == "stopped"
+        with pytest.raises(a.ActivationError, match="different intent"):
+            store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
+                          enrollment_digest="1" * 64, bot_states=states)
+        assert record.body["intent"]["preserve_bot_state"] is True
