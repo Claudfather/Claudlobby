@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — session export keeps its cursor while the plane cannot take a write (#2477)
+
+Session export read a write the plane could not take as a refusal of the
+session. While the plane database was absent or awaiting migration
+(`PendingMigrationError`), or newer than the running release
+(`DowngradeError`), or when a write could be neither stored nor spooled, as on
+a full disk (`SpoolWriteError`), the summary and its `unexportable` fallback
+both failed, and the export acknowledged the session anyway, so its summaries
+were lost. All three now fail the tick instead: the cursor stays, and the
+summaries land on the first tick after the plane can take them. Each failure
+counts toward the export's stall alert while the export can still save its own
+state. On a disk too full for that as well, the tick reports
+`state_unavailable` and the count stays where it was last saved: no stall alert
+follows unless that count already stood one failure short of the alert or its
+page is still owed, and then the alert pages on every tick until the state can
+be saved again (#2484). A record the plane refuses for itself still gets its
+fallback and is acknowledged, so a bad record cannot stall the cursor.
+
 ### Added — a manager moves an open assignment's deadline without replacing it (#2469)
 
 `claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by
