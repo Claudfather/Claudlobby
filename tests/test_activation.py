@@ -1552,3 +1552,340 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     assert f"\nreferences_refreshed: {recorded}\n".encode() in repaired.split(b"\n---\n", 1)[0] + b"\n"
     assert task.encode() in repaired and assignment.encode() in repaired
     assert adapter.calls == calls  # no native pause, handoff or start replay
+
+
+@pytest.mark.parametrize("has_unit,live,native,session,expected", [
+    (True, True, "inactive", "ready", "restart"),
+    (True, False, "inactive", "unknown", "stopped"),
+    (False, False, "inactive", "unknown", "stopped"),
+    (False, True, "inactive", "ready", "uninstalled bot"),
+    (True, True, "inactive", "unknown", "ownership or readiness"),
+    (True, False, "active", "ready", "no live private server"),
+    (True, False, "activating", "ready", "transient or unreadable"),
+])
+def test_preserved_upgrade_disposition_requires_exact_live_or_absent_server(
+        cold, monkeypatch, has_unit, live, native, session, expected):
+    root, _, plan, host = cold
+    # Use the selected definition's explicit TMPDIR, independently of ambient
+    # environment and native wrapper activity. This fixture does not prove tmux.
+    declaration, item = next((d, i) for d, i in planned_units(plan, "Linux") if d.bot == "worker")
+    content = plan.blob(item["sha256"])
+    declaration.source.parent.mkdir(parents=True)
+    declaration.source.write_bytes(content)
+    generated = FileSnapshot.read(declaration.source)
+    environment = {**dict(declaration.environment), "TMUX_TMPDIR": str(host.tmux_dir)}
+    unit = SimpleNamespace(declaration=declaration, target=declaration.source.name,
+        generated=generated, installed=(generated,) if has_unit else (),
+        properties=(("Environment", shlex.join(f"{k}={v}" for k, v in environment.items())),
+                    ("ActiveState", native)))
+    inventory = SimpleNamespace(units=(unit,), data_root=root, manager="Linux")
+    monkeypatch.setattr(activation.enrollment, "selected_bot_entry", lambda *_: {
+        "target": unit.target, "source": str(declaration.source),
+        "installed": str(host.directory / declaration.source.name)})
+    adapter = SimpleNamespace(read=lambda function, *_:
+        f"disabled {'loaded' if has_unit else 'not-found'} {native}" if function == "svc_inventory_state" else session)
+    socket_path = host.tmux_dir / f"tmux-{os.getuid()}" / declaration.source.stem
+    socket_path.parent.mkdir(parents=True)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        if live:
+            server.bind(str(socket_path))
+            server.listen(8)
+        if expected in {"restart", "stopped"}:
+            snapshot = activation._snapshot_bot_states(inventory, ((declaration, item),), adapter)
+            assert snapshot[unit.target]["disposition"] == expected
+            assert snapshot[unit.target]["socket_path"] == str(socket_path)
+            assert snapshot == activation._snapshot_bot_states(inventory, ((declaration, item),), adapter)
+        else:
+            with pytest.raises(state.ActivationRefusal, match=expected):
+                activation._snapshot_bot_states(inventory, ((declaration, item),), adapter)
+    assert not (root / "state/activations").exists()
+
+
+def test_preserved_upgrade_requires_same_roster_and_explicit_frozen_tmpdir(tmp_path):
+    inventory = SimpleNamespace(units=())
+    declaration = SimpleNamespace(scope="bot", fleet="example", bot="worker")
+    with pytest.raises(state.ActivationRefusal, match="unchanged selected bot roster"):
+        activation._snapshot_bot_states(inventory, ((declaration, {"enroll": True}),), None)
+    unit = SimpleNamespace(installed=(), declaration=SimpleNamespace(source=tmp_path / "worker.service"),
+                           generated=SimpleNamespace(content=b"[Service]\n"))
+    with pytest.raises(state.ActivationRefusal, match="absolute private tmux"):
+        activation._original_bot_tmpdir(unit, allow_uninstalled=True)
+
+
+@pytest.mark.parametrize("pending", [None, "producers_paused"])
+def test_preserved_disposition_is_rechecked_before_first_pause_without_replacing_intent(monkeypatch, tmp_path, pending):
+    saved = {"example.worker": {"disposition": "restart"}}
+    record = SimpleNamespace(body={"completed": [], "pending": pending, "intent": {
+        "plan_id": "frozen", "install_directory": str(tmp_path), "bot_states": saved}})
+    pause = SimpleNamespace(enrollment={"catalog": "frozen catalog", "manager": "Darwin"})
+    calls = []
+    store = SimpleNamespace(begin=lambda *args: calls.append(args))
+    monkeypatch.setattr(activation, "read_activation", lambda *_: record)
+    monkeypatch.setattr(activation, "read_plan", lambda *_: object())
+    monkeypatch.setattr(activation, "planned_units", lambda *_: ())
+    def placement(*_):
+        assert pending is None, "a partial producer pause must use its owned journal proof"
+    monkeypatch.setattr(activation, "_preflight_candidate_placement", placement)
+    monkeypatch.setattr(activation, "_snapshot_bot_states", lambda *_: {
+        "example.worker": {"disposition": "stopped"}})
+    with pytest.raises(state.ActivationError, match="changed before the first activation pause"):
+        activation._quiesce_running(tmp_path, store, "upgrade", pause, (), object())
+    assert calls == [] and record.body["intent"]["bot_states"] is saved
+    assert saved["example.worker"]["disposition"] == "restart"
+
+
+def test_preserved_stopped_witness_exempts_only_stop_guard_and_keeps_runner_pause_guard(tmp_path):
+    root = tmp_path.resolve()
+    directory = root / "worker"
+    directory.mkdir()
+    runner = SimpleNamespace(autonomous_runner=None)
+    context = SimpleNamespace(paths=SimpleNamespace(bot_runtime=lambda _: directory),
+        fleet=SimpleNamespace(name="example", bots={"worker": runner}))
+    unit = SimpleNamespace(target="example.worker", installed=(), declaration=SimpleNamespace(
+        scope="bot", fleet="example", bot="worker", working_directory=directory))
+    with pytest.raises(state.ActivationRefusal, match="deliberately stopped"):
+        activation._refuse_unrecorded_run_intent(root, (unit,), (context,))
+    snapshot = {unit.target: {"disposition": "stopped", "session": "server_absent"}}
+    activation._refuse_unrecorded_run_intent(root, (unit,), (context,), bot_states=snapshot)
+    (directory / activation.LEGACY_RUNNER_PAUSE).write_text("paused\n")
+    runner.autonomous_runner = object()
+    with pytest.raises(state.ActivationRefusal, match="markers have no recorded automation pause"):
+        activation._refuse_unrecorded_run_intent(root, (unit,), (context,), bot_states=snapshot)
+
+
+@pytest.mark.parametrize("native", ["masked-runtime masked inactive", "disabled loaded inactive"])
+def test_preserved_stopped_bot_must_be_native_absent_before_producers(monkeypatch, tmp_path, native):
+    target = "example.worker.service"
+    entry = {"target": target, "installed": str(tmp_path / target), "publish": False}
+    record = SimpleNamespace(body={"completed": ["bots_started"], "intent": {
+        "bot_states": {target: {"disposition": "stopped"}}}})
+    monkeypatch.setattr(activation, "read_activation", lambda *_: record)
+    monkeypatch.setattr(activation, "_ingest_ready", lambda *_: {})
+    monkeypatch.setattr(activation.enrollment, "candidate_entries", lambda *_: (entry,))
+    monkeypatch.setattr(activation.enrollment, "_check_targets", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(activation.units, "load_unit_pause", lambda *_: SimpleNamespace(enrollment={}))
+    calls = []
+    adapter = SimpleNamespace(read=lambda *_: native)
+    store = SimpleNamespace(begin=lambda *_: calls.append("producer admission"))
+    with pytest.raises(state.ActivationError, match="remains natively enrolled or masked"):
+        activation._verify_candidate_startup(tmp_path, store, "upgrade", None, {}, {}, (), {}, adapter)
+    assert calls == []
+
+
+def _preserve_capture(bot_dir, *, kind="capture"):
+    from datetime import datetime, timezone
+    from claudlobby.activation_handoffs import _refresh_envelope
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    directory = bot_dir / ".claude"
+    directory.mkdir(parents=True, exist_ok=True)
+    capture = (f"---\ncwd: {bot_dir}\nlast_updated: {stamp}\n"
+               f"references_refreshed: {stamp}\nschema_version: 2\n---\n\n"
+               "## Decisions\n- Acceptance observation saved.\n").encode()
+    # Grounded in the canary's clauDNA write: real capture frontmatter/State
+    # precedes an older canonical reference shell, whose timestamp is separate.
+    shell = _refresh_envelope(bot_dir, stamp) + b"\ncanonical references\n"
+    if kind == "reference-only":
+        content = shell
+    elif kind == "stale-capture":
+        content = capture.replace(f"last_updated: {stamp}".encode(), b"last_updated: 2000-01-01T00:00:00Z")
+    elif kind == "shell-below":
+        content = capture + b"\n" + shell
+    elif kind == "envelope-above":
+        content = _refresh_envelope(bot_dir, stamp) + capture
+    else:
+        content = capture
+    (directory / "session.md").write_bytes(content)
+
+
+@pytest.mark.parametrize("kind", ["reference-only", "stale-capture", "capture", "shell-below", "envelope-above"])
+def test_preserved_handoff_uses_capture_timestamp_not_reference_refresh_or_mtime(tmp_path, kind):
+    _preserve_capture(tmp_path, kind=kind)
+    if kind in {"reference-only", "stale-capture"}:
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+            activation._require_preserved_handoff(tmp_path)
+    else:
+        activation._require_preserved_handoff(tmp_path)
+
+
+@pytest.fixture
+def preserved_handoff_case(tmp_path, monkeypatch):
+    target = "example.worker.plist"
+    bot_dir = tmp_path / "worker"
+    bot_dir.mkdir()
+    unit = SimpleNamespace(target=target, installed=(SimpleNamespace(path=tmp_path / target),), declaration=SimpleNamespace(
+        scope="bot", source=bot_dir / target, working_directory=bot_dir))
+    body = {"completed": ["producers_paused"], "pending": None, "handoff_effects": {},
+            "intent": {"preserve_bot_state": True, "install_directory": str(tmp_path),
+                       "bot_states": {target: {"disposition": "restart"}}},
+            "previous_selection": {"activation_id": "previous"}}
+    record = SimpleNamespace(body=body, status="activating")
+    calls, steps, on_call = [], [], [None]
+    class BotPauseReached(Exception):
+        pass
+    def begin(_activation, step):
+        steps.append(step)
+        if step == "sessions_quiesced":
+            raise BotPauseReached
+        body["pending"] = step
+    def complete(_activation, step, **_):
+        body["completed"].append(step)
+        body["pending"] = None
+    def handoff(_activation, *, target, result, request_started_ns=None):
+        if request_started_ns is not None:
+            body.setdefault("handoff_requests", {})[target] = {"started_at_ns": request_started_ns}
+        body["handoff_effects"][target] = result
+    store = SimpleNamespace(begin=begin, complete=complete, record_handoff=handoff,
+                            arm_handoff_evidence=lambda *_: None)
+    present = [True]
+    monkeypatch.setattr(activation, "read_activation", lambda *_: record)
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (tmp_path / "socket", present[0]))
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_: str(tmp_path))
+    outcome = [0, "handoff-saved"]
+    def call(function, *args, **kwargs):
+        assert body["handoff_effects"][target] is None  # Fence before the send.
+        calls.append((function, args, kwargs))
+        if on_call[0] is not None:
+            on_call[0]()
+        return subprocess.CompletedProcess([function], outcome[0], outcome[1] + "\n", "")
+    adapter = SimpleNamespace(call=call)
+    def run():
+        return activation._quiesce_running(tmp_path, store, "upgrade", None, (unit,), adapter)
+    return SimpleNamespace(run=run, body=body, record=record, calls=calls, steps=steps,
+                           outcome=outcome, bot_dir=bot_dir, target=target,
+                           present=present, on_call=on_call, BotPauseReached=BotPauseReached)
+
+
+@pytest.mark.parametrize("marker", ["handoff-saved", "handoff-skipped:recent"])
+def test_preserved_activation_requires_explicit_marker_and_verified_capture(preserved_handoff_case, marker):
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir, kind="shell-below")
+    case.outcome[1] = marker
+    if marker == "handoff-saved":
+        case.on_call[0] = lambda: _preserve_capture(case.bot_dir, kind="shell-below")
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert case.body["handoff_effects"][case.target] == "handed_off"
+    assert case.calls[0][1][-1] == "explicit"
+
+
+@pytest.mark.parametrize("marker,rc,kind", [
+    ("handoff-timeout", 0, "capture"),
+    ("handoff-skipped:capability", 0, "capture"),
+    ("handoff-skipped:no-session", 0, "capture"),
+    ("unrecognized", 0, "capture"),
+    ("handoff-saved", 3, "capture"),
+    ("handoff-skipped:recent", 0, "reference-only"),
+    ("handoff-saved", 0, "stale-capture"),
+])
+def test_preserved_activation_refuses_unverified_handoff_and_never_resends_unknown(
+        preserved_handoff_case, marker, rc, kind):
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir, kind=kind)
+    case.outcome[:] = [rc, marker]
+    with pytest.raises(state.ActivationRefusal, match="inspect.*session.*handoff"):
+        case.run()
+    assert case.body["handoff_effects"][case.target] is None
+    assert "sessions_quiesced" not in case.steps
+    assert activation.resumable_running_step(case.record) == "sessions_handed_off"
+    # A late UI-approved capture reconciles only the original request: no send.
+    _preserve_capture(case.bot_dir, kind="shell-below")
+    case.outcome[:] = [0, "handoff-saved"]
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert case.body["handoff_effects"][case.target] == "handed_off"
+    assert len(case.calls) == 1
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_witnessed_running_bot_now_absent_requires_saved_capture(preserved_handoff_case, fresh):
+    case = preserved_handoff_case
+    case.present[0] = False
+    if fresh:
+        _preserve_capture(case.bot_dir)
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+        assert case.body["handoff_effects"][case.target] == "server_absent"
+    else:
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+            case.run()
+        assert case.body["handoff_effects"] == {}
+    assert case.calls == []
+
+
+def test_default_activation_keeps_best_effort_handoff_semantics(preserved_handoff_case):
+    case = preserved_handoff_case
+    case.body["intent"].pop("preserve_bot_state")
+    case.outcome[:] = [0, "Handoff timed out after 30s"]
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert case.body["handoff_effects"][case.target] == "handed_off"
+    assert len(case.calls[0][1]) == 3
+
+
+@pytest.mark.parametrize("kind", ["reference-only", "stale-capture", "pre-attempt"])
+def test_preserved_unknown_handoff_stays_held_without_request_bound_capture(preserved_handoff_case, kind):
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir)
+    case.outcome[:] = [3, "handoff-timeout"]
+    with pytest.raises(state.ActivationRefusal):
+        case.run()
+    if kind != "pre-attempt":
+        _preserve_capture(case.bot_dir, kind=kind)
+    with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+        case.run()
+    assert case.body["handoff_effects"][case.target] is None and len(case.calls) == 1
+    assert "sessions_quiesced" not in case.steps
+
+
+@pytest.mark.parametrize("preserve,witness", [(False, True), (True, False)])
+def test_unbound_unknown_handoff_remains_nonresumable(preserved_handoff_case, preserve, witness):
+    case = preserved_handoff_case
+    case.body["handoff_effects"][case.target] = None
+    case.body["pending"] = "sessions_handed_off"
+    if not preserve:
+        case.body["intent"].pop("preserve_bot_state")
+    if witness:
+        case.body["handoff_requests"] = {case.target: {"started_at_ns": 1}}
+    _preserve_capture(case.bot_dir)
+    assert activation.resumable_running_step(case.record) is None
+    with pytest.raises(state.ActivationError, match="unknown effect|no bound capture witness"):
+        case.run()
+    assert case.calls == []
+
+
+def test_delayed_known_handoff_rechecks_fresh_capture_before_native_pause(preserved_handoff_case):
+    case = preserved_handoff_case
+    case.body["completed"].append("sessions_handed_off")
+    case.body["handoff_effects"][case.target] = "handed_off"
+    _preserve_capture(case.bot_dir, kind="stale-capture")
+    with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+        case.run()
+    assert case.steps == [] and case.calls == []
+
+
+@pytest.mark.parametrize("quiet,fresh", [(True, False), (False, False), (False, True)])
+def test_interrupted_bot_pause_reuses_capture_only_for_verified_quiet_target(
+        preserved_handoff_case, monkeypatch, quiet, fresh):
+    case = preserved_handoff_case
+    case.body["completed"].append("sessions_handed_off")
+    case.body["pending"] = "sessions_quiesced"
+    case.body["handoff_effects"][case.target] = "handed_off"
+    _preserve_capture(case.bot_dir, kind="capture" if fresh else "stale-capture")
+    observations = []
+    def observed(_adapter, **kwargs):
+        observations.append(kwargs)
+        if not quiet:
+            raise activation.RuntimeEvidenceError("quiescence", case.target, "still running")
+        return activation.RuntimeEvidence("quiescent", case.target, {})
+    monkeypatch.setattr(activation, "assert_quiescent", observed)
+    if quiet or fresh:
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+        assert case.steps == ["sessions_quiesced"]
+    else:
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+            case.run()
+        assert case.steps == []
+    assert observations == [{"installed_file": case.bot_dir.parent / case.target,
+                             "target": case.target, "socket_path": case.bot_dir.parent / "socket"}]
+    assert case.calls == []
