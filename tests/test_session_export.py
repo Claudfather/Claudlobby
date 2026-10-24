@@ -13,12 +13,15 @@ import pytest
 from claudlobby import session_export as se
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
+from claudlobby.plane import emit_api
 from claudlobby.plane.contracts import ContractViolation
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.ids import derive_session_uid, derive_uid
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, DowngradeError
 from claudlobby.plane.registry_emit import run_generate_scan
+from claudlobby.plane.queue_paths import spool_path
 from claudlobby.plane.schema_state import PendingMigrationError
+from claudlobby.plane.spool import SpoolWriteError
 from tests.conftest import load_lib_module
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
@@ -306,13 +309,16 @@ def test_real_ledger_family_divergence_uses_separate_id(world, fallback_refused)
     assert ("last_unexportable" in state(world)) is fallback_refused
 
 
-@pytest.mark.parametrize("error", [PendingMigrationError, DowngradeError])
+@pytest.mark.parametrize(
+    "error", [PendingMigrationError, DowngradeError, SpoolWriteError]
+)
 @pytest.mark.parametrize("refused", ["summary", "fallback"])
-def test_plane_schema_refusal_fails_the_tick_and_keeps_the_cursor(
+def test_a_summary_the_plane_cannot_take_fails_the_tick_and_keeps_the_cursor(
     world, error, refused
 ):
-    # The plane refuses every write until it is migrated or this release is
-    # upgraded (#2477): neither the summary nor its fallback is at fault.
+    # The plane takes no write until it is migrated or this release upgraded,
+    # nor one it can neither store nor spool (#2477): neither the summary nor
+    # its fallback is at fault.
     fallbacks = []
 
     def emit(root, rows, **kw):
@@ -321,7 +327,7 @@ def test_plane_schema_refusal_fails_the_tick_and_keeps_the_cursor(
         )
         if refused == "fallback" and len(fallbacks) == 1:
             raise ContractViolation([{"loc": ("data",), "msg": "refused"}])
-        raise error("the plane is not at this release's schema")
+        raise error("the plane cannot take this write")
 
     door = Door()
     result = export(world, door, emit=emit)
@@ -335,8 +341,10 @@ def test_plane_schema_refusal_fails_the_tick_and_keeps_the_cursor(
     assert doc["pending"] == len(door.doc["items"]) and "last_unexportable" not in doc
 
 
-@pytest.mark.parametrize("plane", ["absent", "older", "newer"])
-def test_summary_waits_for_a_current_plane_then_lands_as_itself(world, plane):
+@pytest.mark.parametrize("plane", ["absent", "older", "newer", "full"])
+def test_summary_waits_until_the_plane_can_take_it_then_lands_as_itself(
+    world, plane, monkeypatch
+):
     root, paths, _, store = world
     doc = envelope()
     doc["items"] = doc["items"][:1]
@@ -344,6 +352,13 @@ def test_summary_waits_for_a_current_plane_then_lands_as_itself(world, plane):
     doc["next"] = {sid: 1}
     db = root / "state/plane/plane.db"
     aside = root / "aside"
+    disk = {"full": plane == "full"}
+    ingest = emit_api.ingest_many
+
+    def ingest_many(*args, **kwargs):
+        if disk["full"]:
+            raise sqlite3.OperationalError("database or disk is full")
+        return ingest(*args, **kwargs)
 
     def set_version(version):
         conn = sqlite3.connect(db)
@@ -356,6 +371,12 @@ def test_summary_waits_for_a_current_plane_then_lands_as_itself(world, plane):
         aside.mkdir()
         for path in db.parent.glob("plane.db*"):
             path.rename(aside / path.name)
+    elif plane == "full":
+        # The write fails as on a full disk, and the real spool write fails
+        # too: a file sits where the spool directory goes.
+        monkeypatch.setattr(emit_api, "ingest_many", ingest_many)
+        assert not spool_path(root).exists()
+        spool_path(root).write_text("")
     else:
         set_version(SCHEMA_USER_VERSION + (1 if plane == "newer" else -1))
     door, acks, pages = CursorDoor(doc, root), [], []
@@ -388,6 +409,9 @@ def test_summary_waits_for_a_current_plane_then_lands_as_itself(world, plane):
     if plane == "absent":
         for path in aside.iterdir():
             path.rename(db.parent / path.name)
+    elif plane == "full":
+        disk["full"] = False
+        spool_path(root).unlink()
     else:
         set_version(SCHEMA_USER_VERSION)
     result = tick(se.STALL_AFTER)

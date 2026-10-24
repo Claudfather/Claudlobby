@@ -26,6 +26,7 @@ from .plane.ids import derive_session_uid, derive_uid
 from .plane.migrations import DowngradeError
 from .plane.registries import cap_for
 from .plane.schema_state import PendingMigrationError
+from .plane.spool import SpoolWriteError
 
 ENTRYPOINT_SCHEMA = "claudna.entrypoint/1"
 EXPORT_SCHEMA = "claudna.export/1"
@@ -46,11 +47,11 @@ CAPS = {
     "skipped_reason": 64,
 }
 LANDED = {"committed", "duplicate", "spooled"}
-# The plane refuses every write while its database is absent or its schema is
-# older or newer than this release's. That is never the item's fault: the tick
-# fails and keeps its cursor until the plane is migrated or this release
-# upgraded (#2477).
-PLANE_NOT_CURRENT = (PendingMigrationError, DowngradeError)
+# The plane takes no write while its database is absent or its schema is older
+# or newer than this release's, and a write it can neither store nor spool (a
+# full disk) is lost. Neither is the item's fault: the tick fails and keeps its
+# cursor until the plane can take the write (#2477).
+PLANE_CANNOT_WRITE = (PendingMigrationError, DowngradeError, SpoolWriteError)
 
 
 @dataclass(frozen=True)
@@ -457,7 +458,7 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
                         data=record,
                     )
                     outcome = emit(root, [event], require_commit=False)[0]
-                except PLANE_NOT_CURRENT:
+                except PLANE_CANNOT_WRITE:
                     raise
                 except (
                     ContractViolation,
@@ -485,7 +486,7 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
                             fallback=True,
                         )
                         outcome = emit(root, [fallback], require_commit=False)[0]
-                    except PLANE_NOT_CURRENT:
+                    except PLANE_CANNOT_WRITE:
                         raise
                     except (ContractViolation, RuntimeError) as refused:
                         state["last_unexportable"] = {
@@ -525,7 +526,7 @@ def _export(root, fleet, bot, state_dir, state, run, now, dry_run, emit, notify)
         ValueError,
         KeyError,
         TypeError,
-        *PLANE_NOT_CURRENT,
+        *PLANE_CANNOT_WRITE,
     ) as exc:
         failure = f"{phase}_failed"
         state["failure_detail"] = str(exc)[:2000]
