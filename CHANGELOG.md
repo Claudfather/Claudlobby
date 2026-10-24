@@ -11,8 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Four checks piped text into `grep -q` under `pipefail`. `grep -q` exits at its
 first match; a writer with text still to write then met a closed pipe, and its
 SIGPIPE (status 141) became the pipeline's status, so the match read as a miss.
-It takes input longer than a pipe holds once grep has stopped reading, so it
-hid on short input:
+It is certain once the text still to write outlasts the pipe, and on shorter
+input a rare race whenever another write follows the one that holds the match,
+so it hid in tests:
 
 - the Shopify skill's read-only guard admitted a GraphQL document whose
   mutation came early in a long document (`assert_query_only`);
