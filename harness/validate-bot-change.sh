@@ -1188,6 +1188,79 @@ printf '%s\n' "$mgr_pane" | grep -F "$HELDB input_held" | grep -q 'do not restar
 harness_check "#2070 ...and says not to restart" "$r"
 
 # ===========================================================================
+# #997 — a pane keepalive cannot read pages pane_unknown, and an alert about the
+#   fleet manager pages its fleet's channel once an episode. After an IDLE tick,
+#   keepalive's UNKNOWN verdict keeps data/.idle, which keeps activity_stuck
+#   quiet; the UNKNOWN tick writes data/.unknown with the run's first epoch, and
+#   the sweep raises pane_unknown past its threshold (0 here). The bot is its
+#   fleet's manager, so the push lands in its own pane, and the fleet's channel
+#   (a tg-post.sh that records the page) gets one page; a second sweep, with the
+#   alert still open, pages nothing more. Its own fleet, like #2070's.
+# ===========================================================================
+val_scenario "validate #997: an unreadable manager pane pages pane_unknown to its fleet's channel once"
+
+F997="valf997"
+F997_BOTS="$ROOT/local/$F997/runtime/bots"
+M997="valmgr997"
+mkdir -p "$F997_BOTS/$M997/data"
+cat > "$ROOT/local/$F997/fleet.yaml" <<YAML
+fleet:
+  name: $F997
+  manager: $M997
+  bots:
+    $M997:
+      expertise: [orchestration]
+YAML
+cat > "$F997_BOTS/$M997/bot.conf" <<CONF
+BOT_NAME="$M997"
+BOT_ID="$M997"
+BOT_SERVICE=""
+MANAGER_TMUX="$M997"
+OBSERVABILITY_PANE_UNKNOWN_THRESHOLD=0
+CONF
+# An idle prompt first, then a pane with neither a prompt nor a running turn.
+tmux new-session -d -s "$M997" "printf '\n  Done.\n\n> \n'; sleep 600"
+sleep 1
+touch -t 202001010000 "$F997_BOTS/$M997/data/.last-tool-call"
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$F997_BOTS/$M997" >/dev/null 2>&1 || true
+[ -f "$F997_BOTS/$M997/data/.idle" ] && r=yes || r=no
+harness_check "#997 keepalive reads the idle pane IDLE (data/.idle written)" "$r"
+tmux respawn-pane -k -t "$M997" "printf '\n  error: pathspec did not match any file\n'; sleep 600"
+sleep 1
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$F997_BOTS/$M997" >/dev/null 2>&1 || true
+[ -s "$F997_BOTS/$M997/data/.unknown" ] && [ -f "$F997_BOTS/$M997/data/.idle" ] && r=yes || r=no
+harness_check "#997 keepalive reads the unreadable pane UNKNOWN: data/.unknown written, data/.idle kept" "$r"
+
+_f997_lib="$ROOT/lib997"
+mkdir -p "$_f997_lib"
+for _f997_script in "$LIB_DIR"/*; do
+    [ "${_f997_script##*/}" = tg-post.sh ] || ln -s "$_f997_script" "$_f997_lib/${_f997_script##*/}"
+done
+_f997_pages="$ROOT/f997-pages.log"
+: > "$_f997_pages"
+cat > "$_f997_lib/tg-post.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$1" >> "$_f997_pages"
+STUB
+chmod +x "$_f997_lib/tg-post.sh"
+f997_sweep() {
+    CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F997" FLEET_PULSE_PUSH_BOX_TICKS=1 \
+        "$_f997_lib/fleet-pulse.sh" "$F997" >/dev/null 2>&1 || true
+}
+val_plane_ready "$ROOT" "$F997"
+f997_sweep
+f997_ev=$(val_events "$ROOT" "$F997" "$M997")
+printf '%s' "$f997_ev" | grep -q '"type":"pane_unknown"' && r=yes || r=no
+harness_check "#997 fleet-pulse emits pane_unknown for the unreadable pane" "$r"
+printf '%s' "$f997_ev" | grep -q '"type":"activity_stuck"' && r=no || r=yes
+harness_check "#997 ...and no activity_stuck (data/.idle keeps it quiet)" "$r"
+[ "$(grep -c "$M997 pane_unknown" "$_f997_pages")" = 1 ] && r=yes || r=no
+harness_check "#997 the manager's own alert pages its fleet's channel once" "$r"
+f997_sweep
+[ "$(grep -c "$M997 pane_unknown" "$_f997_pages")" = 1 ] && r=yes || r=no
+harness_check "#997 ...and a second sweep, the alert still open, pages nothing more" "$r"
+
+# ===========================================================================
 # #453 Phase 5 — Telegram bridge auto-heal (Tier-2, flag-gated F6b). Proves the
 # heal ladder in keepalive.sh end-to-end: a DARK poller (no bot.pid → no_bridge)
 # on an IDLE bot, with the heal flag on, triggers the restart ladder — the ONLY
@@ -1547,7 +1620,14 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
 
 val_scenario "validate-bot-change: lossless restart (resume on start, age-gated)"
 _lossless_fail_before=$fail
+# #997: a session's start removes keepalive's markers about the last session's
+# pane (data/.held, data/.unknown) and keeps data/.limit, which is the account's.
+mkdir -p "$RB_DIR/data"
+for _m997 in .held .unknown .limit; do printf '1700000000\n' > "$RB_DIR/data/$_m997"; done
 pane_fresh="$(_run_startbot fresh)"
+[ ! -e "$RB_DIR/data/.held" ] && [ ! -e "$RB_DIR/data/.unknown" ] && [ -e "$RB_DIR/data/.limit" ] && r=yes || r=no
+harness_check "#997 start-bot.sh starts a session without the last one's pane markers (.held, .unknown), keeping .limit" "$r"
+rm -f "$RB_DIR/data/.limit"
 printf '%s' "$pane_fresh" | grep -q '/claudna:session resume' && r=yes || r=no
 harness_check "fresh session.md -> /claudna:session resume injected on start" "$r"
 _rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session resume' | head -1 | cut -d: -f1 || true)"
