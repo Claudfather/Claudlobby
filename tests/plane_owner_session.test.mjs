@@ -917,7 +917,7 @@ test('bot roster names are native inspect buttons bound to full server fleet and
   const rail = { html: '', set innerHTML(value) { this.html = value; for (const node of nodes) node.isConnected = false; nodes.length = 0;
     for (const match of value.matchAll(/data-bot-inspect="([^"]+)"/g)) nodes.push({ dataset: { botInspect: match[1] }, isConnected: true, focus() { document.activeElement = this; },
       addEventListener(event, listener) { this[event] = listener; } }); },
-    get innerHTML() { return this.html; }, querySelectorAll() { return nodes; } };
+    get innerHTML() { return this.html; }, querySelectorAll(selector) { return selector === '[data-bot-inspect]' ? nodes : []; } };
   const twin = { ...botIdentity, uid: 'actor_' + '6'.repeat(32), alias: 'bot:other/worker', fleet: 'other', fleet_uid: 'fleet_' + '7'.repeat(32) };
   const state = { document, rosterIdentities: new Map(), rosterGeneration: 0, sessionEpoch: 2, sessionPaused: false,
     currentView: 'channel', equipmentAlias: null, equipmentFocus: null, fleets: [botIdentity, twin].map(b => ({ alias: b.fleet, uid: b.fleet_uid })),
@@ -1249,7 +1249,7 @@ test(`same-room roster replacement preserves pending inspection focus intent: ${
         focus() { h.document.activeElement = this; },
         addEventListener(event, listener) { this[event] = listener; },
       });
-    }, querySelectorAll() { return nodes; },
+    }, querySelectorAll(selector) { return selector === '[data-bot-inspect]' ? nodes : []; },
   };
   const get = h.state.$; h.state.$ = id => id === 'fleet' ? rail : get(id);
   h.state.renderState = node => { if (node === rail) return false; node.innerHTML = 'loading'; };

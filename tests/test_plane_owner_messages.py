@@ -466,3 +466,127 @@ def test_shared_delivery_refuses_conflicting_caller_before_any_effect(gateway, m
                               request_id=options["request_id"], caller_context=caller)
     assert calls == []
     assert not list((adapter.root / "state/requests").glob("*/*.json"))
+
+
+@pytest.fixture
+def native_owner_gateway(cold, monkeypatch):
+    """Existing activation owner and native observations, with one owner unit."""
+    from copy import deepcopy
+    import plistlib
+    from claudlobby import activation, runtime_admission, supervision_inventory
+    from claudlobby.config_plan import ConfigPlanBuilder
+    from claudlobby.config_units import unit_family
+    from tests.test_activation import NativeHost
+
+    root, release, plan, old_host = cold
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
+                                plan.fleets, effects=deepcopy(plan.effects))
+    builder.inputs = deepcopy(plan.inputs)
+    builder.changes = {change.target: change for change in plan.changes}
+    builder.contents = {path.name: plan.blob(path.name)
+                        for path in (plan.directory / 'files').iterdir()}
+    env = dict(next(iter(old_host.by_name.values()))[0].environment)
+    env.pop('FLEET_ROOT', None)
+    stem = 'example-private-owner'
+    socket_directory = root / 'private-owner'
+    socket_directory.mkdir(mode=0o700)
+    destination = root / 'runtime/_host/timers'
+    argv = runtime_admission.wrap_unit_argv(env, unit=stem, phase='producers', mode='exec',
+        argv=[str(release.cli_path), '--root', str(root), 'host', 'owner', 'serve',
+              '--origin', 'https://host.example.test', '--tailscale', '/example/tailscale',
+              '--socket', str(socket_directory / 'owner.sock')])
+    files = {stem + '.plist': (plistlib.dumps({'Label': stem, 'WorkingDirectory': str(root),
+        'EnvironmentVariables': env, 'ProgramArguments': list(argv)}), 0o644),
+        stem + '.service': ((f'[Service]\nWorkingDirectory={root}\n'
+            f'ExecStart={runtime_admission.unit_systemd_command(argv)}\n'
+            '[Install]\nWantedBy=default.target\n').encode(), 0o644)}
+    builder.effects['units'].extend(unit_family(files, destination=destination,
+        scope='host', phase='producers', release_id=release.release_id))
+    for name, (content, mode) in files.items():
+        builder.file(destination / name, content, mode=mode)
+    plan = builder.seal()
+    host = NativeHost(root, release, plan, old_host.directory, old_host.package)
+    monkeypatch.setattr(activation, '_probe', host.probe)
+    monkeypatch.setattr(activation, '_registry_scan', host.registry_scan)
+    activation.bootstrap_activation(root, 'cold', plan.plan_id, host.directory, adapter=host)
+    result = gateway.__wrapped__((root, host), monkeypatch)
+    # Extend the existing manager seam with its real shared ownership reader.
+    import importlib.util
+    import subprocess
+    spec = importlib.util.spec_from_file_location('owner_action_unit',
+                                                source_package().native / 'bot-unit-owner.py')
+    ownership = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ownership)
+    original_call = host.call
+    def call(function, *args, **kwargs):
+        if function == 'svc_bot_unit_owned_by':
+            host.calls.append((function, tuple(map(str, args))))
+            return subprocess.CompletedProcess([], ownership.main(*map(str, args)), '', '')
+        return original_call(function, *args, **kwargs)
+    monkeypatch.setattr(host, 'call', call)
+    monkeypatch.setattr(supervision_inventory, 'Adapter', lambda *a, **k: host)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    host.external_result = 1  # Existing ancestry door: proven member, not external.
+    host.calls.clear()
+    return result, host, stem
+
+
+def test_native_owner_service_can_send_once_with_exact_grant(native_owner_gateway, monkeypatch):
+    (adapter, reader, owner, ctx, options), host, stem = native_owner_gateway
+    calls = native_receiver(monkeypatch)
+    observation = adapter.send(reader, text='native owner message', **options)
+    assert observation.data['sender'] == {'uid': ctx.caller.uid, 'alias': ctx.caller.alias}
+    assert observation.data['delivery'] == 'received'
+    assert len(calls) == 1
+    ancestry = [args for name, args in host.calls if name == 'svc_activation_assert_external']
+    assert len(ancestry) == 1, 'process proof belongs to this invocation, not each grant recheck'
+    assert ancestry[0][1] == stem + '.service'
+    with pytest.raises(AccessDenied, match='generated_context_refused'):
+        adapter._authorize(reader, options['fleet_uid'], options['expected_grant'])
+    host.external_result = 0
+    with pytest.raises(AccessDenied, match='generated_context_refused'):
+        adapter.inspect(reader, **options)
+    assert len(calls) == 1
+    assert all(stem in args[0] for name, args in host.calls
+               if name in {'svc_inventory_properties', 'svc_bot_unit_owned_by'})
+
+
+@pytest.mark.parametrize('defect', ['root', 'release', 'external', 'unknown', 'missing',
+                                  'changed', 'drift', 'cli', 'native', 'artifact', 'BOT_ID', 'BOT_NAME', 'BOT_DIR',
+                                  'FLEET_ROOT', 'FLEET_NAME', 'CLAUDLOBBY_FLEET',
+                                  'BOT_SERVICE', 'CLAUDLOBBY_TIMER_CONTEXT'])
+def test_native_owner_process_proof_fails_closed(native_owner_gateway, monkeypatch, defect):
+    (adapter, reader, owner, ctx, options), host, stem = native_owner_gateway
+    calls = native_receiver(monkeypatch)
+    if defect in {'root', 'release'}:
+        monkeypatch.setenv('CLAUDLOBBY_ROOT' if defect == 'root' else 'CLAUDLOBBY_RELEASE_ID', 'wrong')
+    elif defect in {'cli', 'native', 'artifact'}:
+        key = {'cli': 'CLAUDLOBBY_CLI', 'native': 'CLAUDLOBBY_NATIVE_DIR',
+               'artifact': 'CLAUDLOBBY_ARTIFACT_ID'}[defect]
+        monkeypatch.setenv(key, 'wrong')
+    elif defect in {'external', 'unknown'}:
+        host.external_result = 0 if defect == 'external' else 3
+    elif defect == 'missing':
+        (host.directory / (stem + '.service')).unlink()
+    elif defect == 'drift':
+        original_call = host.call
+        catalogs = 0
+        def drift(function, *args, **kwargs):
+            nonlocal catalogs
+            if function == 'svc_inventory_catalog':
+                catalogs += 1
+                if catalogs == 2:
+                    declaration, item = host.by_name[stem + '.service']
+                    for path in (declaration.source, host.directory / (stem + '.service')):
+                        path.write_bytes(path.read_bytes() + b'# concurrent drift\n')
+            return original_call(function, *args, **kwargs)
+        monkeypatch.setattr(host, 'call', drift)
+    elif defect == 'changed':
+        declaration, item = host.by_name[stem + '.service']
+        declaration.source.write_text(declaration.source.read_text() + '# changed\n')
+    else:
+        monkeypatch.setenv(defect, '')
+    with pytest.raises(AccessDenied, match='generated_context_refused'):
+        adapter.send(reader, text='must not send', **options)
+    assert calls == []

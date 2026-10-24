@@ -768,3 +768,30 @@ def test_status_missing_and_empty_recorded_fields_have_same_shape(tmp_path, caps
     assert absent.keys() == present.keys()
     assert {k: v for k, v in absent.items() if k not in {"root", "preactivation"}} == {
         k: v for k, v in present.items() if k not in {"root", "preactivation"}}
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+def test_preserve_bot_state_rejects_bootstrap_and_first_adoption_before_record(candidate, capsys, adopt):
+    root, _, plan, directory = candidate
+    before = snapshot(root)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory), "--preserve-bot-state"]
+    if adopt:
+        argv.append("--adopt-existing")
+    result = call(capsys, argv, 4)
+    assert "requires a selected release upgrade" in result["error"]["message"]
+    assert snapshot(root) == before
+
+
+def test_preserve_bot_state_routes_only_explicit_upgrade_option(candidate, monkeypatch, capsys):
+    root, _, plan, directory = candidate
+    calls = []
+    monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
+    def upgrade(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise state.ActivationRefusal("witnessed option")
+    monkeypatch.setattr(activation, "upgrade_activation", upgrade)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory), "--preserve-bot-state"]
+    call(capsys, argv, 4)
+    assert len(calls) == 1 and calls[0][1] == {"preserve_bot_state": True}

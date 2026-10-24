@@ -421,3 +421,37 @@ test('permission attention opens the existing task and clears after a fresh deci
   assert.match(nodes.attention.innerHTML, /no tasks need attention/);
   assert.doesNotMatch(nodes.tasks.innerHTML, /permission requests need review/);
 });
+
+test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+  const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
+  const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
+  const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
+    ...panel, document: {
+      getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
+    },
+  });
+  // Other endpoints can remain healthy; this envelope alone defines task coverage.
+  const env = {state:'ok',data:{tasks:[],issue_count:0,truncated:false,
+    coverage:{total:2,reachable:1,partial:true}}};
+  board.renderTasks(env);
+  assert.match(nodes.attention.innerHTML,/1\/2 sources/);
+  assert.match(nodes.attention.innerHTML,/Attention status is incomplete/);
+  assert.match(nodes.attention.innerHTML,/no tasks need attention in readable sources/);
+  assert.match(nodes.tasks.innerHTML,/no other tasks in readable sources/);
+  assert.equal(nodes['attn-count'].hidden,false);
+  assert.equal(nodes['attn-count'].textContent,'!');
+  const row={task_id:'workshop::'+wi,fleet:'workshop / web',title:'Readable task history',state:'queued',resolved:true,attention:false};
+  env.data.tasks=[row];board.renderTasks(env);
+  assert.match(nodes.tasks.innerHTML,/Readable task history/);
+  assert.match(nodes.tasks.innerHTML,/data-task-open="workshop::wi_/);
+  env.data.tasks=[{...row,attention:true}];board.renderTasks(env);
+  assert.match(nodes.attention.innerHTML,/Readable task history/);
+  assert.match(nodes.attention.innerHTML,/1\/2 sources/);
+  assert.equal(nodes['attn-count'].textContent,1);
+  env.data.coverage={total:2,reachable:2,partial:false};board.renderTasks(env);
+  assert.doesNotMatch(nodes.attention.innerHTML,/Attention status is incomplete|1\/2 sources/);
+  assert.equal(nodes['attn-count'].title,'');
+  board.renderTasks({state:'unavailable',remediation:'Task records could not be read.'});
+  assert.equal(nodes['attn-count'].hidden,true);
+  assert.doesNotMatch(nodes.tasks.innerHTML,/st-idle|no other tasks/);
+});

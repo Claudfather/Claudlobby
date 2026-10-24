@@ -45,6 +45,7 @@ tool_grants:
   - "Bash(claudlobby assignment show --help)"
   - "Bash(claudlobby assignment accept --help)"
   - "Bash(claudlobby assignment deliver --help)"
+  - "Bash(claudlobby assignment reschedule --help)"
   - "Bash(claudlobby assignment progress --help)"
   - "Bash(claudlobby assignment block --help)"
   - "Bash(claudlobby assignment return --help)"
@@ -356,7 +357,11 @@ reports may carry `--pr URL --pr-role authored|reviewed`, repeatable
 `--artifact URL` and `--issue URL`, and `--skill NAME`; a reviewed report names
 its verdict's URL with `--artifact`. Check each verb's help.
 The manager can inspect `task withdraw --help` and `task reassign --help` for
-reasoned changes. To record a request for human guidance, including before
+reasoned changes. When open work waits on something outside its worker, the
+manager moves its deadline on the same assignment, recording only:
+`claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none
+--reason TEXT --request-id UUID`. Every overdue reader takes the newest deadline,
+so the page and the board follow it, and the worker keeps its assignment ID. To record a request for human guidance, including before
 assignment, use `task escalate TASK_ID --question "The decision needed" --request-id UUID`.
 Escalation leaves the task open; recording it does not prove a human was notified.
 To ask the fleet manager to revisit an open task, use `claudlobby --json task nudge

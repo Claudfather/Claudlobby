@@ -125,6 +125,16 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
     return msg
 
 
+def _deadline_changed(root, wi, asg, deadline, *, ts):
+    """What `assignment reschedule` records (#2469): a deadline_changed on the
+    SAME assignment, its new deadline (None = open-ended), by the manager."""
+    emit_batch(root, [{"event_type": "task", "emitter": "claudlobby.tasks.v1", "fleet": F,
+                       "source_ref": f"request:deadline-{asg}-{ts}", "occurred_at": ts,
+                       "payload": {"work_item_id": wi, "assignment_id": asg, "event": "deadline_changed",
+                                   "actor": f"bot:{F}/mgr", "by": f"bot:{F}/mgr",
+                                   "reason": "waits on the operator", "deadline": deadline}}])
+
+
 def _complete(root, wi, asg, ts, task_id, reports=None, *, bot="w1"):
     _report(root, wi, asg, ts, bot=bot)
     if reports is not None:

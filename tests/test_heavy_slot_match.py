@@ -5,11 +5,14 @@ tool call, and in front of nothing else. These tables are the spec:
 
 * GATED — the command as the hook must rewrite it, with the wrapper written
   here as ``W``. The rest of the command is byte-identical, so every other part
-  of it (and every rule a permission layer applies to it) is untouched.
+  of it is untouched.
 * NOT_GATED — heavy words in places that are not a heavy command: an argument,
   a quoted string, a heredoc body, a comment, a targeted test run, a dev
   server. Getting one of these wrong corrupts a command, which is worse than
   missing a gate, so the matcher reads the command the way the shell does.
+  Also a heavy job run through a privilege runner: Claude Code checks a
+  call's permission rules against the rewritten command, so the wrapper in
+  front would hide the runner from a rule that names it.
 * UNSURE — constructs the matcher does not parse. It must refuse to rewrite
   them (the hook then lets the call through untouched and counts it), never
   guess where a command starts.
@@ -85,7 +88,7 @@ GATED = [
     ("flock /tmp/x.lock pytest", "W flock /tmp/x.lock pytest"),
     ("flock /tmp/x.lock -c 'pytest -q'", "flock /tmp/x.lock -c 'W pytest -q'"),
     ("xargs pytest", "W xargs pytest"),
-    ("sudo -u ci pytest -q", "W sudo -u ci pytest -q"),
+    ("sudo npm ci && pytest -q", "sudo npm ci && W pytest -q"),
     ("nice -n 10 npm ci", "W nice -n 10 npm ci"),
     ("xvfb-run -a npx playwright test", "W xvfb-run -a npx playwright test"),
     # bash -c: rewritten INSIDE the string, so the wrapper never wraps a shell
@@ -216,6 +219,15 @@ NOT_GATED = [
     "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['pytest'])\nEOF",
     "cat <<< 'npm ci'",
     'x=`echo pipeline`; echo "$x"',
+    # a heavy job run through a privilege runner stays as typed, so a worker's
+    # sudo-family deny sees the runner (#2464)
+    "sudo -u ci pytest -q",
+    "sudo npm install -g foo",
+    "doas -u postgres npm ci",
+    "cd /x && sudo pip install foo",
+    "timeout 600 /usr/bin/sudo npm ci",
+    "exec sudo npm ci",
+    "bash -c 'sudo npm ci'",
 ]
 
 

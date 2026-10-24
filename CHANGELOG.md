@@ -15,6 +15,160 @@ Every bot runs as the operator's own user, so it can do whatever that user can. 
 - **`documentation/integrations.md`:** the Docker step says what joining the group grants, with rootless Docker as the alternative.
 - **`documentation/getting-started.md` and `documentation/runbooks/mac-mini-setup-guide.md`:** a pointer to the Safety model where you choose the account the bots run as.
 
+### Fixed — session export keeps its cursor while the plane cannot take a write (#2477)
+
+Session export read a write the plane could not take as a refusal of the
+session. While the plane database was absent or awaiting migration
+(`PendingMigrationError`), or newer than the running release
+(`DowngradeError`), or when a write could be neither stored nor spooled, as on
+a full disk (`SpoolWriteError`), the summary and its `unexportable` fallback
+both failed, and the export acknowledged the session anyway, so its summaries
+were lost. All three now fail the tick instead: the cursor stays, and the
+summaries land on the first tick after the plane can take them. Each failure
+counts toward the export's stall alert while the export can still save its own
+state. On a disk too full for that as well, the tick reports
+`state_unavailable` and the count stays where it was last saved: no stall alert
+follows unless that count already stood one failure short of the alert or its
+page is still owed, and then the alert pages on every tick until the state can
+be saved again (#2484). A record the plane refuses for itself still gets its
+fallback and is acknowledged, so a bad record cannot stall the cursor.
+
+### Added — a manager moves an open assignment's deadline without replacing it (#2469)
+
+`claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by
+RFC3339|none --reason TEXT --request-id UUID` records a `deadline_changed` on
+the same assignment: the new deadline, who moved it and why. It only records.
+Its door refuses any caller but the fleet's manager or a person at the host,
+and the composed grant sits beside `task reassign`. Until now the only way to
+stop an overdue page on a wait outside the worker was a same-worker `task
+reassign`, which closed the assignment, left a successor to deliver, and could
+not be used where the assignment's id must stay stable.
+
+Every reader takes the newest deadline fact as the deadline, and one with no
+deadline means open-ended: the overdue matcher behind fleet-pulse, the board's
+overdue and stale arms, the task reducer (so task recheck, the brief and the
+board), and the expiry sweep, which now keeps an open-ended assignment, sweeps
+one a fact gave a deadline, and compares the deadline as an instant rather than
+as text. The dispatch's `expected_by` stays on the row. A moved deadline takes
+the row off the pulse's list, so its id is dropped, and its passing pages once;
+as before, a row whose worker restarted since the dispatch reads orphaned and
+does not page. The expiry cap counts from the later of the move and the
+deadline it set, so a wait moved days out still pages when it passes, and task
+recheck's 48 h age clock restarts at the move, as a reassign's new assignment
+restarted it. Moving a deadline is an act on the row, so it ends a nudge like
+any manager act; it is neither an answer to a human nor the worker's word, so
+it ends neither an open escalation nor a block.
+
+The overdue page, the board's overdue card and the `overdue_dispatch` row of
+the fleet-observability decision table name the verb.
+
+### Fixed — four guards no longer read a match as a miss when grep stops reading early (#2428)
+
+Four checks piped text into `grep -q` under `pipefail`. `grep -q` exits at its
+first match; a writer with text still to write then met a closed pipe, and its
+SIGPIPE (status 141) became the pipeline's status, so the match read as a miss.
+It is certain once the text still to write outlasts the pipe, and on shorter
+input a rare race whenever another write follows the one that holds the match,
+so it hid in tests:
+
+- the Shopify skill's read-only guard admitted a GraphQL document whose
+  mutation came early in a long document (`assert_query_only`);
+- `pane_send_verified` read a held collapsed paste in a long pane as submitted,
+  so its retry Enter never went out (`pane_shows_payload`);
+- keepalive read a running turn in a long pane as not busy (`pane_is_busy`,
+  both of its checks);
+- `bot_in_fleet` read a declared bot as undeclared when its name came early in
+  a long roster.
+
+Each now feeds grep a here-string, or tests with a bash pattern
+(`pane_shows_payload`), so grep's early exit closes nothing a writer still
+needs. Each has a case whose input outlasts any pipe (1 to 2 MiB), and
+`tests/test_quiet_grep_ratchet.py` fences the remaining pipes into a quiet grep
+in shell files under `claudlobby/_runtime_scripts`, `library`, `harness` and
+`tests` at their measured counts: a new one, or a file whose count grows, fails.
+
+### Changed — a worker's settings deny sudo and its siblings; the fleet manager's do not
+
+Every worker's composed permissions now deny `sudo`, `sudoedit`, `su`,
+`pkexec`, `doas` and `run0`, each by bare name and as `/usr/bin/NAME` and
+`/bin/NAME`: 18 rules. The fleet manager's permissions get none of them, and
+neither does a manager alone in its fleet, so a step that needs root goes
+through the manager. No composed allow names any of these commands.
+
+A refused call says only that permission was denied, so every worker's
+composed `CLAUDE.md` gains a short section, `## Commands that need root`. It
+names the six commands and the remedy: record `assignment block`, naming the
+command and why it needs root, so the manager can run it or decide (with no
+assignment, `fleet reports submit --status blocked`). It also forbids the
+routes the deny cannot see, listed below. A manager's `CLAUDE.md` is unchanged.
+
+Claude Code checks permission rules against the command a hook hands back,
+so the heavy-slot hook no longer looks past `sudo` or `doas`: a heavy job one
+of them runs (`sudo npm install -g …`) is left as typed, and the slot's
+wrapper refuses to run one. With the wrapper in front, no rule saw the runner.
+On a bot with `heavy_slot: true`, a manager's root install now runs without
+the slot.
+
+The deny is a guard rail, not a wall. It refuses the command when a session
+runs it as a tool call: plainly, inside a compound command, a subshell or
+`$(…)`, after a variable assignment, behind `timeout`, `nice`, `nohup`,
+`stdbuf`, `command`, `time` or `xargs`, and by those two paths. It cannot see
+`bash -c '…'`, a script, an interpreter, an expansion it cannot resolve, a
+link to the program under another name, or a session that edits its own
+settings file. On Claude Code 2.1.309 it also misses `sudo`, `doas` or
+`pkexec` running a command behind `env`, `setsid`, `ionice` or `watch`
+(`env sudo ls`), and a relative path to one that runs a command. The OS user
+keeps its sudo rights on each of those routes, and in anything it runs
+outside the session's tool calls. A separate OS user without sudo is the
+wall.
+
+Workers lose `sudo -u postgres psql`, root reads and root installs. The
+change reaches running bots at the next activation of a release that carries
+it.
+
+### Fixed — the rollout check skips a draft, so a body written before the PR is marked ready leaves no failed run (#2467)
+
+A PR opened before its body had the `## Rollout check` section failed its first
+run, and every failed run notifies whoever triggered it, though the next run
+passed once the body was done. Over 20 days, 30 of the check's 36 failed runs
+were a missing section, and 17 of those came while the PR was a draft.
+
+The check's job now skips a draft (`if: github.event.pull_request.draft != true`
+in `verify-rollout.yml`). A draft cannot merge, and marking it ready for review
+already runs the check, so a PR is judged when it is offered: on every event of
+a PR that is not a draft, a missing or incomplete section still fails at once.
+The skip is the reusable job's own, so an adopter gets it by moving its pinned
+`uses:` sha, and the skipped run keeps the name `rollout-check / Rollout check`.
+The merge guardrails pass only a newest run reading `SUCCESS`, so they refuse a
+skipped one. The guide and the check's failure message now tell openers to keep
+a PR a draft until its body has the section. The guide's step 4 tells a repo
+that makes the check required what that leaves open: a required check passes a
+skipped job, so it reads a draft just marked ready as passing until the new run
+appears, and which of several runs on one commit it counts is untested.
+
+### Fixed — an overdue assignment pages its manager once (#2457)
+
+fleet-pulse paged a manager about one overdue assignment again and again. It
+read a row missing from the overdue list as the end of the episode, but the
+list leaves out a row the progress grace defers: once the worker reported
+progress on other work, its row dropped off for the 45-minute grace, the sweep
+cleared its marker (when another bot's row was on the list), and the row's
+return paged as a first sighting. The same page also came again after each
+manager restart and every 6 hours.
+
+`dispatch-overdue.py --all` now lists every open row past its deadline, with
+its assignment id and the watchdog's verdict: `overdue`, or past due and not
+paged (`orphaned`, `progress_grace`, `max_age_cap`). fleet-pulse pages each
+overdue assignment once, names it in the page, and keeps its id while the row
+stays on the list, whatever the verdict. The one new fact that pages is
+another assignment past its deadline; a manager restart, the grace lapsing and
+time do not. `task recheck` stays the reminder for a long-overdue task: it
+re-asks the manager once a day per assignment. A page no manager session took
+records nothing, so it goes out once a manager is there: the push now says when
+the manager has no session, and the browser report, whose key is kept only once
+its push went through, waits for a session too. The page says "no terminal
+linked report", since a progress or block report does not end the episode.
+
 ### Fixed — a harness check reads a Plane row only once the daemon has replayed it (#2274)
 
 The validation harness read the Plane once, right after the code under test
@@ -86,7 +240,9 @@ Follow-ups from the review of #2430's fix (`claudlobby/plane/queue_names.py`,
   later**, once, instead of waiting up to 10 minutes for the interval drain
   while its message's receipt read "pending". Other spooled work still waits
   for the interval. Once, because a drain counts an attempt against each entry
-  it cannot ingest and quarantines it at five.
+  it cannot ingest and quarantines it at five. The retry is one of the five, so
+  under a fault that outlasts it, a spooled proof's receipt reads absent after
+  about 30 to 40 minutes, where it took 40 to 50 (#2460).
 
 ### Fixed — the check-in beat sees a trigger in a stage the socket client did not finish (#2448)
 

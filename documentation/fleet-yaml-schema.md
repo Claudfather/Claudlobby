@@ -771,7 +771,7 @@ The composed env vars, and what each does:
 | `FLEET_PULSE_ESCALATION_STATE_DIR` | _(unset)_ | From `escalation_state_dir`: the escalation chat's declared sender — the channel state dir of a bot that is a **member** of that chat (`~` and `$HOME/` are expanded at generate time, because a unit does not expand them). An escalation chat is by design nobody's own group chat, so no bot can be matched to it; this is its only partner. `claudlobby config validate` warns when the chat is set without it. |
 | `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
-| `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |
+| `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). The overdue page does not use it: each overdue assignment pages once, and `task recheck` re-asks about it once a day (#2457), so a fleet that sets `TASK_RECHECK_ENABLED=0` gets the one page and no reminder after it. `0` disables the re-fire. |
 | `FLEET_PULSE_REARM_WINDOW_S` | _(lib-common default)_ | Bounds debounce re-arming during a known crashloop. `0` disables the bound. |
 | `FLEET_PULSE_STOPPED_REMIND_DAYS` | `3` | From `stopped_remind_days`: a bot stopped through `bot stop` raises no alert, and its manager gets one reminder push once it has been stopped this many days, then one every as many days again (#2243). `0` turns the reminder off. |
 
@@ -1051,15 +1051,16 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
 9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through (only doors every role is granted), and `bot show` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size and its grants are pinned by `tests/test_system_orientation.py`.
 10. **Dispatches framed as pasted text** — `## Dispatches framed as pasted text`, the verify-then-trust check for a framed dispatch, on every bot. Fixed in the template.
-11. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
-12. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
-13. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-14. **Principles** — `## Principles` section.
-15. **Permissions** — `## Permissions` section.
-16. **Protocols** — `## Protocols` section.
-17. **Guardrails** — `## Guardrails` section.
-18. **Lessons** — `## Lessons` section.
-19. **Post-actions** — `## Post-actions` section.
+11. **Commands that need root** — `## Commands that need root`, on a worker only (a bot its fleet does not name as manager): the commands its settings deny and what to do when the deny refuses one (#2464). Fixed in the template; its size, its remedy's commands and its reach are pinned by `tests/test_worker_root_steps.py`.
+12. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
+13. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
+14. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
+15. **Principles** — `## Principles` section.
+16. **Permissions** — `## Permissions` section.
+17. **Protocols** — `## Protocols` section.
+18. **Guardrails** — `## Guardrails` section.
+19. **Lessons** — `## Lessons` section.
+20. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 

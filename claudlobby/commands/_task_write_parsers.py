@@ -122,6 +122,14 @@ def register_task_write_subparsers(task_children, assignment_children):
     delivering.add_argument("--file", required=True, metavar="FILE")
     delivering.add_argument("--retry-uncertain", action="store_true")
 
+    rescheduling = _route(assignment_children, "reschedule", "assignment.reschedule",
+                          "Move an open assignment's deadline, recorded on the same assignment")
+    rescheduling.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
+    rescheduling.add_argument("--expected-by", required=True, metavar="RFC3339|none",
+                              help="The new RFC3339 deadline, or 'none' for open-ended")
+    rescheduling.add_argument("--reason", required=True, metavar="TEXT")
+    rescheduling.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
     for verb in ("progress", "block", "return", "complete", "fail"):
         reporting = _route(assignment_children, verb, "assignment." + verb,
                            "Record a linked report, then notify the fleet manager")

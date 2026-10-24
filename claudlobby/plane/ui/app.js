@@ -449,8 +449,12 @@ const WHY = {
                   + ` ${r.attention_by || "the operator"}, no act yet`
                   + (r.attention_act_reason ? `: ${r.attention_act_reason}` : ""),
                   "the manager should inspect the task, then reassign, withdraw, or escalate"],
+  // the deadline in force: a manager's move (#2469) is read, not the dispatch's
   overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
-                   "check the worker; reassign with claudlobby --json task reassign TASK_ID"
+                   "check the worker; if it waits on something outside the worker, move its deadline"
+                   + " with claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by"
+                   + " RFC3339|none --reason TEXT --request-id UUID; to give it to another bot,"
+                   + " reassign with claudlobby --json task reassign TASK_ID"
                    + " --bot BOT --reason TEXT --request-id UUID"],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
@@ -519,8 +523,10 @@ function taskIssueNote(r) {
 
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  const coverage = env?.state === "ok" ? env.data?.coverage : null;
+  const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
-                  { idleWhenEmpty: (d) => !d.tasks.length && !d.issue_count && !d.truncated })) {
+                  { idleWhenEmpty: (d) => !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
     return;
@@ -528,8 +534,9 @@ function renderTasks(env) {
   const rows = env.data.tasks;
   const attn = rows.filter((r) => r.attention);
   const issueCount = env.data.issue_count || 0;
-  badge.hidden = !attn.length && !issueCount && !env.data.truncated;
+  badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
   badge.textContent = attn.length || "!";
+  badge.title = partial ? "Task attention covers readable sources only." : "";
   const card = (r) => {
     const st = TASK_STATUS[r.state] || { label: "state unknown", cls: "s-bad" };
     const a = r.current_assignment;
@@ -567,11 +574,13 @@ function renderTasks(env) {
       + `${env.data.issue_scope === "displayed_tasks" ? " in displayed tasks" : ""};`
       + ` inspect Plane state before treating this board as clear.</div></div>`
     : "";
-  attEl.innerHTML = attn.length || issues || limited
+  const coverageNote = partial
+    ? `<div class="card attn"><div class="why">Task records are available from ${esc(coverage.reachable)}/${esc(coverage.total)} sources. Attention status is incomplete.</div></div>` : "";
+  attEl.innerHTML = coverageNote + (attn.length || issues || limited
     ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: "no tasks need attention" });
+    : stateBlock("idle", null, null, { label: partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
-    || stateBlock("idle", null, null, { label: "no other tasks" });
+    || stateBlock("idle", null, null, { label: partial ? "no other tasks in readable sources" : "no other tasks" });
 }
 
 function railRow(a) {
@@ -579,9 +588,27 @@ function railRow(a) {
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
     ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
+    ${a.kind === "actor" && a.fleet ? `<button class="pill ghost" type="button" data-bot-message="${esc(a.uid)}" aria-label="Message ${esc(a.short)} in ${esc(a.fleet)}" disabled>Message</button>` : ""}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
     <small>${esc(a.kind)} · ${esc(ago(a.last_seen))}</small></div>`;
+}
+
+// Selection uses only the current readable roster and an already admitted
+// message context. It never navigates rooms or probes for write authority.
+function rosterMessageRecipient(uid) {
+  if (sessionPaused || typeof workLoop === "undefined" || !workLoop) return null;
+  const identity = rosterIdentities.get(uid);
+  if (!identity || identity.fleet !== activeRoom()
+      || fleets.find(fleet => fleet.alias === identity.fleet)?.uid !== identity.fleet_uid) return null;
+  const current = { ...identity, current: true };
+  return workLoop.canSelectMessageRecipient(current) ? current : null;
+}
+function refreshRosterActions() {
+  $("fleet")?.querySelectorAll("[data-bot-message]").forEach(button => {
+    button.disabled = !rosterMessageRecipient(button.dataset.botMessage);
+    button.title = button.disabled ? "Choose this bot’s team. Messaging also needs access on that computer." : "Compose a message to this bot";
+  });
 }
 
 // The roster (item 6, #1479). In a fleet ROOM the read holds one fleet and
@@ -602,8 +629,10 @@ function railRow(a) {
 // `all` read ever does.
 function renderFleet(env) {
   const el = $("fleet");
-  const focused = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button === document.activeElement);
-  const focusedIdentity = focused && rosterIdentities.get(focused.dataset.botInspect);
+  const focused = [...el.querySelectorAll("[data-bot-inspect]"), ...el.querySelectorAll("[data-bot-message]")]
+    .find(button => button === document.activeElement);
+  const focusKind = focused?.dataset.botMessage ? "botMessage" : "botInspect";
+  const focusedIdentity = focused && rosterIdentities.get(focused.dataset[focusKind]);
   if (renderState(el, env,
                   { idleWhenEmpty: (d) => !d.identities.length })) {
     adoptRoster(new Map()); return;
@@ -633,10 +662,22 @@ function renderFleet(env) {
       inspectBot(identity);
     });
   });
+  el.querySelectorAll("[data-bot-message]").forEach(button => {
+    const version = rosterGeneration, epoch = sessionEpoch;
+    button.addEventListener("click", () => {
+      if (!button.isConnected || button.disabled || sessionPaused || epoch !== sessionEpoch || version !== rosterGeneration
+          || !el.contains(button)) return;
+      const identity = rosterMessageRecipient(button.dataset.botMessage);
+      if (identity && workLoop.selectMessageRecipient(identity)) $("work-loop").scrollIntoView({ block: "nearest" });
+      else refreshRosterActions();
+    });
+  });
+  refreshRosterActions();
   if (focusedIdentity) {
     const current = rosterIdentities.get(focusedIdentity.uid);
     if (current && Object.keys(focusedIdentity).every(key => focusedIdentity[key] === current[key])) {
-      const replacement = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button.dataset.botInspect === current.uid);
+      const selector = focusKind === "botMessage" ? "[data-bot-message]" : "[data-bot-inspect]";
+      const replacement = [...el.querySelectorAll(selector)].find(button => button.dataset[focusKind] === current.uid);
       if (replacement) {
         if (equipmentFocus?.origin === focused) equipmentFocus.origin = replacement;
         replacement.focus();
@@ -809,7 +850,7 @@ function renderOverview(env) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.state)}</span></div>
       <div class="ov-line">${s.state === 'ok' && s.host
-        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving ? 'up' : 'DOWN'}`
+        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : esc(s.remediation || 'This source is not currently readable.')}</div>
       <div class="ov-line">Separate source snapshot; recent windows are per source.</div>
     </div>`).join('');
@@ -994,7 +1035,8 @@ function openStream() {
       workLoop.updateChannel(env);
     } catch { /* next refresh corrects */ }
   });
-  es.onerror = () => {
+  es.onerror = (event) => {
+    if (event?.source) { scheduleRefresh(); return; }
     // The page cannot reach its own API — say so; never fake health.
     $("beat").className = "dot";
     $("beat-label").textContent = "reconnecting…";
@@ -1559,7 +1601,7 @@ function showLoading() {
 }
 showLoading();
 let workLoop = null;
-workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange: refreshEquipmentAction });
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); } });
 let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();

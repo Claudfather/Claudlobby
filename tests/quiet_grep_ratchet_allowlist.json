@@ -1,0 +1,23 @@
+{
+  "claudlobby/_runtime_scripts/boot-capture.sh": 1,
+  "claudlobby/_runtime_scripts/check-npx-cache.sh": 3,
+  "claudlobby/_runtime_scripts/code-audit-sweep.sh": 2,
+  "claudlobby/_runtime_scripts/lib-common.sh": 6,
+  "claudlobby/_runtime_scripts/reconcile-fleet.sh": 1,
+  "claudlobby/_runtime_scripts/selfstart-snapshot.sh": 2,
+  "claudlobby/_runtime_scripts/setup-github-app.sh": 1,
+  "harness/ab-comms-eval.sh": 2,
+  "harness/boot-strand-sampler.sh": 5,
+  "harness/freshbox-boot-gate.sh": 4,
+  "harness/rehearse-briefing-timer.sh": 2,
+  "harness/rehearse-env-cascade.sh": 2,
+  "harness/rehearse-permissions-ladder.sh": 5,
+  "harness/rehearse-staged-claude-update.sh": 7,
+  "harness/validate-bot-change.sh": 125,
+  "library/skills/shopify/test.sh": 2,
+  "tests/test_idle_markers.sh": 2,
+  "tests/test_pane_send_verified.sh": 3,
+  "tests/test_plane_emit.sh": 1,
+  "tests/test_script_consumers.sh": 2,
+  "tests/test_spin_down_receipt.sh": 5
+}

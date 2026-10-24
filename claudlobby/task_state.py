@@ -85,12 +85,20 @@ class TaskEvent(Fact):
     successor_id: str | None
 
 
+def _newest_deadline_fact(history) -> TaskEvent | None:
+    """The newest `deadline_changed` on an assignment, by ingest order (#2469)."""
+    return max((e for e in history if e.event == "deadline_changed"),
+               key=lambda e: e.ingest_seq, default=None)
+
+
 @dataclass(frozen=True)
 class Assignment(Fact):
     assignment_id: str
     task_id: str
     assignee_uid: str
     assigned_by_uid: str
+    #: The deadline in force: the newest deadline fact's (None = open-ended),
+    #: else the dispatch's. The stored assignment row keeps the dispatch's.
     expected_by: str | None
     dispatch_message_id: str | None
     state: AssignmentState
@@ -100,6 +108,13 @@ class Assignment(Fact):
     @property
     def current(self) -> bool:
         return self.terminal_event is None
+
+    @property
+    def deadline_set_at(self) -> str | None:
+        """When a manager last moved the deadline, None while the dispatch's
+        stands; the watchdog's expiry cap counts from it."""
+        fact = _newest_deadline_fact(self.history)
+        return fact.occurred_at if fact else None
 
 
 @dataclass(frozen=True)
@@ -417,9 +432,11 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
                           blocking=unresolved_link_is_active(event))
                 if known_task_producer(event.emitter) and event.event in _ACTIVITY:
                     state = _ACTIVITY[event.event]
+            moved = _newest_deadline_fact(ahistory)
             assignments.append(Assignment(**_fact(assignment), assignment_id=aid, task_id=tid,
                 assignee_uid=assignment["assignee_uid"], assigned_by_uid=assignment["assigned_by_uid"],
-                expected_by=assignment["expected_by"], dispatch_message_id=assignment["dispatch_msg_id"],
+                expected_by=moved.deadline if moved else assignment["expected_by"],
+                dispatch_message_id=assignment["dispatch_msg_id"],
                 state="closed" if closed else state, terminal_event=closed, history=ahistory))
         for event in {e.event_id: e for e in history + tuple(
                 e for a in assignments for e in a.history)}.values():

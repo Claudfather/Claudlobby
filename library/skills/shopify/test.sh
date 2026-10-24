@@ -69,6 +69,24 @@ refused "gql refuses a subscription" "gql 'subscription { x }'"
 refused "gql refuses a second operation smuggled after a query" \
         "gql 'query { a } mutation { b }'"
 
+# A mutation near the top of a long document (#2428). The guard piped the
+# document into grep -q, which exits at its first match; the writer, with most
+# of the document still to send, met a closed pipe, and under pipefail the
+# guard read the match as a miss. A pipe holds 64 KiB to 256 KiB, so 1 MiB
+# outlasts it on every host. The document rides a file, since 1 MiB cannot ride
+# argv (E2BIG), and its filler is fields, since the guard strips comments.
+long_doc=$(mktemp)
+awk 'BEGIN {
+  print "fragment F on Shop { id }"
+  print "mutation M { productUpdate(input: {}) { product { id } } }"
+  for (i = 0; i < 70000; i++) printf "  field%06d: id\n", i
+}' > "$long_doc"
+if [ "$(wc -c < "$long_doc")" -ge 1048576 ]; then ok "the long document is at least 1 MiB"
+else no "the long document is under 1 MiB ($(wc -c < "$long_doc") bytes): the case below proves nothing"; fi
+refused "gql refuses a mutation at the top of a 1 MiB document" \
+        "gql \"\$(cat '$long_doc')\""
+rm -f "$long_doc"
+
 # ...and it must NOT reject the reads this skill exists to perform. A valid
 # query passes the guard and dies on the absent credentials instead (2, not 7).
 # Without this, a guard that rejected everything would score full marks above.

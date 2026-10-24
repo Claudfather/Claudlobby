@@ -118,8 +118,26 @@ NEWEST_ACK_SQL = (
     " ORDER BY e.ingest_seq DESC LIMIT 1"
 )
 
+# THE deadline of assignment `a` (#2469), one fragment for every reader: the
+# newest `deadline_changed` task event on it, by ingest order, whose NULL
+# deadline means open-ended; with no such event, the `expected_by` its dispatch
+# promised. A manager's move is a fact, so `assignments.expected_by` is never
+# rewritten. In the fragment, '' stands for "the newest fact names no
+# deadline", so the fallback applies only when there is no fact at all (a
+# stored deadline is never ''). Compare it through `_epoch` like any instant.
+_NEWEST_DEADLINE_FACT = ("(SELECT {col} FROM events d WHERE d.kind='task'"
+                         " AND d.event='deadline_changed' AND d.assignment_id = a.assignment_id"
+                         " ORDER BY d.ingest_seq DESC LIMIT 1)")
+EFFECTIVE_DEADLINE_SQL = ("NULLIF(COALESCE(" + _NEWEST_DEADLINE_FACT.format(col="IFNULL(d.deadline, '')")
+                          + ", a.expected_by), '')")
+# When the newest deadline fact was recorded, NULL while the dispatch's own
+# deadline stands: the watchdog's expiry cap counts from it (plane-readers.py,
+# `deadline_status`).
+DEADLINE_SET_AT_SQL = _NEWEST_DEADLINE_FACT.format(col="d.occurred_at")
+
 OPEN_ASSIGNMENTS_AT_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, " + EFFECTIVE_DEADLINE_SQL + ", "
+    + DEADLINE_SET_AT_SQL +
     " FROM assignments a"
     " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
@@ -355,8 +373,15 @@ DELIVERY_STATUS_SQL = (
 #
 # The nudge's OWN arm needs the opposite window (a nudge is exactly what it
 # looks for), so there are two, and they differ by that one token.
+#
+# A manager moving a deadline (`deadline_changed`, #2469) is an act on the row,
+# so it ends a nudge like any other. It is neither an answer to the human the
+# manager asked nor the worker's word, so the escalation's window and the
+# worker's (the block arm, and stale_task's exclusion of a declared wait) skip
+# it: a move ends neither an escalation nor a block.
 NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
-ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
+ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged", "deadline_changed")
+WORKER_WORD_IGNORED = NEWEST_TASK_IGNORED + ("deadline_changed",)
 
 
 def _newest_task(col: str, ignore: tuple = NEWEST_TASK_IGNORED) -> str:
@@ -372,6 +397,8 @@ _NEWEST_AT = _newest_task("n.occurred_at")
 _NEWEST_BY = _newest_task("json_extract(n.detail, '$.by')")
 _NEWEST_ANSWER = _newest_task("n.event", ESCALATION_IGNORED)
 _NEWEST_ANSWER_AT = _newest_task("n.occurred_at", ESCALATION_IGNORED)
+_NEWEST_WORD = _newest_task("n.event", WORKER_WORD_IGNORED)
+_NEWEST_WORD_AT = _newest_task("n.occurred_at", WORKER_WORD_IGNORED)
 
 # A nudge is an ASK, and a manager is owed a moment to act on it, so a nudge
 # is not attention until it has gone unanswered past this. Named because the
@@ -397,6 +424,13 @@ def _epoch(expr: str) -> str:
     than firing on garbage — which ingest's AwareDatetime makes unreachable
     anyway."""
     return f"CAST(strftime('%s', {expr}) AS INTEGER)"
+
+
+# The deadline in force (EFFECTIVE_DEADLINE_SQL) passed before the bound
+# instant: the overdue arm, stale_task's not-overdue clause and the expiry
+# sweep's horizon all ask exactly this. A NULL deadline (open-ended) is never
+# past; it yields NULL, which a WHERE reads as false.
+DEADLINE_PASSED_SQL = f"({_epoch(EFFECTIVE_DEADLINE_SQL)} < {_epoch('?')})"
 
 
 # --- the stale in-flight task arm (chunk T) -----------------------------------
@@ -485,8 +519,9 @@ _ASSIGNEE_WORKING = (
 #   1) now             — not-overdue: no deadline, or the deadline has not passed
 #   2) amber cutoff     — aged: the LATER of dispatch/progress predates it
 #   3) hb-fresh cutoff  — working: the freshness gate inside _ASSIGNEE_WORKING
-# NULL expected_by is NOT overdue (the deadline-less case is the whole point);
-# without the guard `NOT (NULL < now)` is NULL and would drop every such row.
+# A NULL deadline is NOT overdue (the deadline-less case is the whole point):
+# DEADLINE_PASSED_SQL yields NULL for it, and without the IFNULL guard
+# `NOT NULL` is NULL and would drop every such row.
 #
 # HOLDING requires DELIVERY (_TX_ACTIVATED): a bot cannot be "sitting on" a task
 # a send never got to it. That gate also keeps stale_task mutually exclusive
@@ -498,7 +533,7 @@ _ASSIGNEE_WORKING = (
 # already hold).
 _STALE_TASK = (
     "(" + _TX_ACTIVATED
-    + " AND (a.expected_by IS NULL OR " + _epoch("a.expected_by") + " >= " + _epoch("?") + ")"
+    + " AND NOT IFNULL(" + DEADLINE_PASSED_SQL + ", 0)"
     " AND MAX(" + _epoch("a.occurred_at") + ", COALESCE("
     + _epoch(_STALE_PROGRESS_AT) + ", " + _epoch("a.occurred_at") + ")) < "
     + _epoch("?")
@@ -506,7 +541,7 @@ _STALE_TASK = (
     # re-derived as a silent stall here (the same lead-and-exclude the
     # not-overdue clause above does for `overdue`). No `?` -- attention_params
     # is unchanged.
-    + " AND (" + _NEWEST_EVENT + " IS NULL OR " + _NEWEST_EVENT
+    + " AND (" + _NEWEST_WORD + " IS NULL OR " + _NEWEST_WORD
     + " != 'blocked_waiting')"
     + " AND NOT " + _ASSIGNEE_WORKING + ")"
 )
@@ -544,16 +579,15 @@ ATTENTION_ARMS = (
     ("nudged",
      f"({_NEWEST_EVENT} = 'nudged' AND {_epoch(_NEWEST_AT)} < {_epoch('?')})",
      _NEWEST_AT, NEWEST_TASK_IGNORED),
-    ("overdue", f"({_epoch('a.expected_by')} < {_epoch('?')})",
-     "a.expected_by", None),
+    ("overdue", DEADLINE_PASSED_SQL, EFFECTIVE_DEADLINE_SQL, None),
     # a bot that SAID it is blocked and waiting: its newest task event is
     # `blocked_waiting` — non-terminal (the task stays open while it waits, the
     # escalated/nudged family), so `_NON_TERMINAL_A` keeps it in the queue. An
     # EXPLICIT block dated by the bot outranks an INFERRED stall, so it leads
     # stale_task and stale_task excludes it above — an aged block reads
     # `blocked_waiting`, never both. No `?`, so attention_params is unchanged.
-    ("blocked_waiting", f"({_NEWEST_EVENT} = 'blocked_waiting')",
-     _NEWEST_AT, None),
+    ("blocked_waiting", f"({_NEWEST_WORD} = 'blocked_waiting')",
+     _NEWEST_WORD_AT, None),
     # LAST in the order so `overdue`/`blocked_waiting` (and every louder arm)
     # LEAD a row that is both — and its predicate already excludes an overdue
     # or blocked row, so belt and suspenders: stale_task never rides in front,

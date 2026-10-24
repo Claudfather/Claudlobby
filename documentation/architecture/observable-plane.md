@@ -464,6 +464,14 @@ still repeats socket ownership and liveness checks.
 The composed systemd service uses `Restart=always`; launchd uses `KeepAlive`.
 Logs use the normal service journal or `state/plane-owner.log`. Disarm with
 `enroll: false` followed by plan/diff/activation; activation retires the owned unit.
+Messages, task nudges and feedback from the supervised owner require the exact
+selected sealed runtime, saved owner-unit definition, verified native enrollment
+and positive caller ancestry in that unit. Matching environment values alone
+never admit an action; bot, fleet and timer selectors still refuse. This process
+proof lasts for one action or inspection call under activation admission, while
+session, actor and exact grant checks repeat at their existing boundaries. It is
+not a cached authority lease and does not retry an uncertain submission.
+
 Supervision never configures Serve, pairs an owner, renews grants or grants
 website access. Public bootstrap remains a foreground operation; autonomous
 handover during first-team browser launch is not provided by this service.
@@ -578,8 +586,13 @@ bound; an entry nested past the check's own walk reads "unavailable", never abse
 A batch whose name leaves room for a transmission and that the daemon spools after a
 database error is tried again 30 seconds later, once, rather than left to the
 10-minute interval drain (#2446). Once, because a drain counts an attempt against
-each entry it cannot ingest and quarantines it at five. Other spooled work waits for
-the interval.
+each entry it cannot ingest and quarantines it at five. The retry is one of the five:
+under a fault that outlasts it, such a batch is quarantined d + 1800 seconds after it
+spooled rather than d + 2400, where d, 30 to 600 seconds, is the wait for the next
+interval drain. (An interval drain within the 30 seconds tries the entry first, and the
+retry then passes over it.) A receipt check does not read the quarantine, so a spooled
+proof's receipt reads absent after a fault of about 30 to 40 minutes, where it took 40
+to 50 (#2460). Other spooled work waits for the interval.
 
 Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's
@@ -670,6 +683,7 @@ program keeps refusing.
 |---|---|---|
 | `claudlobby task admit` / `task assign` | admission records a queued work item; assignment records its owner separately. Neither sends a message | committed recording required; an unavailable Plane refuses the mutation |
 | `claudlobby assignment deliver` | the generated fleet manager records a communication linked to the committed assignment, then attempts native delivery; transmission and receiver receipt remain separate evidence | committed recording required before delivery; an unknown outcome is not automatically resent |
+| `claudlobby assignment reschedule` | the fleet manager, or a person at the host, records a `deadline_changed` on the same open assignment: the new deadline (`none` = open-ended), who moved it and why. Every reader takes the newest such fact as the deadline; the assignment row keeps the dispatch's | the door refuses any other caller; committed recording required; it sends nothing |
 | `claudlobby assignment accept` / `progress` / `block` / `return` / `complete` / `fail` | the assigned bot accepts or transitions its current assignment; linked reports record the transition and communication, with manager notification reported separately | committed recording required; notification failure does not undo the recorded transition |
 | `claudlobby message send` / `fleet reports submit` | ordinary messages and explicitly unlinked reports record a communication without transitioning an assignment | recording outages allow delivery with an explicit degraded result and bounded fleet alert; delivery and recording outcomes remain separate |
 | `claudlobby/_runtime_scripts/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |

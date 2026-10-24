@@ -192,7 +192,13 @@ def _activate(args, root):
         activate = (resume_activation if getattr(args, "resume", None) else
                     adopt_existing_activation if args.adopt_existing else
                     upgrade_activation if read_selection(root) is not None else bootstrap_activation)
-        record = activate(root, args.activation_id, plan.plan_id, directory)
+        options = {}
+        if getattr(args, "preserve_bot_state", False):
+            if activate not in (upgrade_activation, resume_activation):
+                from ..activation_state import ActivationRefusal
+                raise ActivationRefusal("--preserve-bot-state requires a selected release upgrade")
+            options["preserve_bot_state"] = True
+        record = activate(root, args.activation_id, plan.plan_id, directory, **options)
     except Exception as exc:
         from subprocess import TimeoutExpired
         from ..activation_state import (ANOTHER_ACTIVATION, ActivationError, ActivationRefusal,

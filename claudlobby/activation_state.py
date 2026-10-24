@@ -164,6 +164,21 @@ _BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
 _RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 
 
+def handoff_request_started_ns(record: ActivationRecord, target: str) -> int | None:
+    """A preserve-only request witness can admit proof reconciliation, never a resend."""
+    intent = record.body["intent"]
+    states, requests = intent.get("bot_states"), record.body.get("handoff_requests")
+    if (intent.get("preserve_bot_state") is not True or not isinstance(states, dict)
+            or not isinstance(states.get(target), dict)
+            or states[target].get("disposition") != "restart" or not isinstance(requests, dict)):
+        return None
+    request = requests.get(target)
+    if (not isinstance(request, dict) or set(request) != {"started_at_ns"}
+            or type(request["started_at_ns"]) is not int or request["started_at_ns"] <= 0):
+        return None
+    return request["started_at_ns"]
+
+
 def resumable_running_step(record: ActivationRecord) -> str | None:
     """Return a supported same-ID stage; a missing start journal never implies no effect."""
     completed = record.body["completed"]
@@ -183,7 +198,9 @@ def resumable_running_step(record: ActivationRecord) -> str | None:
         # witness with no unknown intent, or it stays refused for inspection.
         effects = record.body.get("handoff_effects")
         supported = (step != "sessions_handed_off" or record.body["pending"] is None
-                     or isinstance(effects, dict) and None not in effects.values())
+                     or isinstance(effects, dict) and all(
+                         result is not None or handoff_request_started_ns(record, target) is not None
+                         for target, result in effects.items()))
     if step in START_STEPS:
         supported = (isinstance(record.body.get("start_effects"), dict)
                      and isinstance(record.body.get("start_phases"), dict))
@@ -231,7 +248,8 @@ class ActivationStore:
                 recovery_release_id: str, enrollment_digest: str,
                 source_release_id: str | None = None,
                 legacy_source: bool = False,
-                install_directory: Path | None = None) -> ActivationRecord:
+                install_directory: Path | None = None,
+                bot_states: dict | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -253,6 +271,11 @@ class ActivationStore:
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if bot_states is not None:
+            if legacy_source or previous is None or not bot_states:
+                raise ActivationError("preserving bot state requires a selected release upgrade")
+            intent["preserve_bot_state"] = True
+            intent["bot_states"] = json.loads(json.dumps(bot_states))
         if install_directory is not None:
             directory = Path(install_directory)
             if not directory.is_absolute() or directory.resolve() != directory:
@@ -394,8 +417,9 @@ class ActivationStore:
             raise ActivationError("session handoff evidence is inconsistent")
         return record
 
-    def record_handoff(self, activation_id: str, *, target: str, result: str | None) -> ActivationRecord:
-        """Fence one old bot's handoff; an intent without a result is unknown."""
+    def record_handoff(self, activation_id: str, *, target: str, result: str | None,
+                       request_started_ns: int | None = None) -> ActivationRecord:
+        """Fence one old bot's handoff; a preserve request also binds late capture proof."""
         self.assert_locked()
         record = read_activation(self.root, activation_id)
         effects = record.body.get("handoff_effects")
@@ -405,6 +429,16 @@ class ActivationStore:
         if (record.status != "activating" or record.body["pending"] != "sessions_handed_off"
                 or not target or not admitted):
             raise ActivationError("session handoff evidence is not the admitted effect")
+        if result is None and record.body["intent"].get("preserve_bot_state") is True:
+            requests = record.body.setdefault("handoff_requests", {})
+            if (not isinstance(requests, dict) or target in requests
+                    or type(request_started_ns) is not int or request_started_ns <= 0):
+                raise ActivationError("preserved handoff requires one immutable request witness")
+            requests[target] = {"started_at_ns": request_started_ns}
+            if handoff_request_started_ns(record, target) is None:
+                raise ActivationError("preserved handoff request differs from the restart intent")
+        elif request_started_ns is not None:
+            raise ActivationError("handoff request witness is admitted only with a preserved send intent")
         effects[target] = result
         return self._save(record)
 

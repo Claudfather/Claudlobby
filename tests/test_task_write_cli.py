@@ -273,6 +273,34 @@ def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, cap
     assert _counts(root) == after
 
 
+def test_reschedule_moves_the_deadline_the_pulse_reads_on_the_same_assignment(active, capsys):
+    """#2469: the public verb records one deadline_changed on the assignment the
+    page names, and the overdue read the pulse runs stops listing it, with no
+    new assignment and nothing delivered."""
+    root, release = active
+    due = datetime.now(timezone.utc) - timedelta(hours=1)
+    task_id = _call(capsys, root, "task", "admit", "--title", "Waits on the operator",
+                    "--request-id", str(uuid4()))["data"]["task_id"]
+    asg = _call(capsys, root, "task", "assign", task_id, "--bot", "worker", "--expected-by", due.isoformat(),
+                "--request-id", str(uuid4()))["data"]["assignment_id"]
+    doors = load_lib_module("dispatch-overdue")
+    now = int(datetime.now(timezone.utc).timestamp())
+    assert doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
+    later = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    argv = ("assignment", "reschedule", asg, "--expected-by", later,
+            "--reason", "Waits on the operator", "--request-id", str(uuid4()))
+    before = _counts(root)
+    moved = _call(capsys, root, *argv)
+    assert moved["command"] == "assignment.reschedule" and moved["release_id"] == release.release_id
+    assert moved["data"]["assignment_id"] == asg and moved["data"]["outcome"] == "committed"
+    assert moved["data"]["delivery"] == moved["data"]["notification"] == "not_requested"
+    assert _counts(root) == (*before[:4], before[4] + 1)
+    now = int(datetime.now(timezone.utc).timestamp())
+    assert not doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
+    replay = _call(capsys, root, *argv)
+    assert replay["data"]["replayed"] and _counts(root) == (*before[:4], before[4] + 1)
+
+
 def test_linked_reports_commit_before_notification_and_replay_never_resends(active, monkeypatch, capsys):
     root, release = active
     for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),

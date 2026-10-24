@@ -8,7 +8,8 @@ a user config directory can take precedence over a parked runtime mask.
 The coordinator owns zero-process proofs, native start/readiness and stopping
 candidates before rollback. Publication never starts a unit; on Linux it only
 removes the original pause's own runtime masks that its new bytes supersede.
-ConfigInstall owns all file writes,
+For preserved stopped bots, the publication journal removes their exact owned
+pause masks without publishing a unit. ConfigInstall owns all file writes,
 interruption recovery and exact removal; original restoration is UnitPause's.
 """
 
@@ -150,7 +151,7 @@ def _retired_enablement(enrollment, entries, pause, *, observe):
     """Bind only old persistent links whose exact owned targets retire."""
     if enrollment["manager"] != "Linux":
         return []
-    retained = {entry["target"] for entry in entries}
+    retained = {entry["target"] for entry in entries if entry.get("publish", True)}
     result = []
     for unit in enrollment["units"]:
         if not unit["installed"] or unit["target"] in retained:
@@ -173,6 +174,25 @@ def _retired_enablement(enrollment, entries, pause, *, observe):
                 raise ActivationError("retired native enablement link is missing or foreign")
             entry["before"] = before
         result.append(entry)
+    return result
+
+
+def _stopped_pause_masks(enrollment, entries, *, observe):
+    """Only masks created by this pause for stopped original bots may go."""
+    if enrollment["manager"] != "Linux":
+        return []
+    original = {unit["target"]: unit for unit in enrollment["units"]}
+    result = []
+    for entry in entries:
+        if entry.get("publish", True):
+            continue
+        path = _runtime_units() / Path(entry["installed"]).name
+        if not _owned_pause_mask(path, entry, original.get(entry["target"])):
+            continue
+        row = {"path": str(path), "target": entry["target"], "phase": entry["phase"]}
+        if observe:
+            row["before"] = path_state(path)
+        result.append(row)
     return result
 
 
@@ -274,6 +294,7 @@ def _check_targets(adapter, enrollment, entries, *, allow_candidate):
 
 def _check_target(adapter, catalog, original, entry, *, allow_candidate):
     manager, _, directories, _, loaded = catalog
+    allow_candidate = allow_candidate and entry.get("publish", True)
     _check_enablement(entry, allow_candidate=allow_candidate)
     destination = Path(entry["installed"])
     if destination.parent not in directories or destination.parent.resolve() != destination.parent:
@@ -380,16 +401,21 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
                         "service": declaration.service,
                         "after": {"kind": "file", "sha256": item["sha256"], "mode": item["mode"]}})
         wanted = _wanted_by(candidate.blob(item["sha256"]), declaration.source, paired_services)
-        entries[-1]["enablement"] = _enablement(entries[-1], wanted, prior)
+        disposition = record.body["intent"].get("bot_states", {}).get(target)
+        if disposition is not None:
+            entries[-1]["publish"] = disposition["disposition"] == "restart"
+        entries[-1]["enablement"] = (_enablement(entries[-1], wanted, prior)
+                                     if entries[-1].get("publish", True) else None)
     if not entries:
         raise ActivationError("empty enrolled candidate manifest is not removal authority")
     retired = _retired_enablement(enrollment, entries, pause, observe=True)
+    stopped_masks = _stopped_pause_masks(enrollment, entries, observe=True)
     _check_targets(adapter, enrollment, entries, allow_candidate=False)
     common = {"owner": _OWNER, "activation_id": activation_id,
               "configuration_journal": configuration_journal, "candidate_plan": candidate.plan_id,
               "install_directory": str(install_directory),
               "enrollment_digest": record.body["intent"]["enrollment_digest"],
-              "entries": entries, "retired_enablement": retired}
+              "entries": entries, "retired_enablement": retired, "stopped_masks": stopped_masks}
     directory_id = journal_id(activation_id, "directories")
     directory_path = store.root / "state/activations" / directory_id / "config"
     if directory_path.exists():
@@ -406,7 +432,7 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
                 builder.directory(Path(link["path"]).parent)
         directory_plan = builder.seal()
         prepare_config(directory_plan, directory_id)
-    _check_publication_changes(directory_plan, entries, "directories")
+    _check_publication_changes(directory_plan, entries, "directories", stopped_masks=stopped_masks)
     apply_config(store.root, directory_id)
     plans = []
     for phase in PHASES:
@@ -414,12 +440,12 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
                                     candidate.fleets, effects={**common, "phase": phase})
         for entry in entries:
             builder.input(Path(entry["source"]))
-            if entry["phase"] == phase:
+            if entry["phase"] == phase and entry.get("publish", True):
                 builder.file(Path(entry["installed"]), candidate.blob(entry["after"]["sha256"]), mode=entry["after"]["mode"])
                 link = entry["enablement"]
                 if link and link["create"]:
                     builder.symlink(Path(link["path"]), Path(link["target"]))
-        for link in retired:
+        for link in (*retired, *stopped_masks):
             if link["phase"] == phase:
                 builder.remove(Path(link["path"]))
         plans.append(builder.seal())
@@ -429,7 +455,7 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
     return tuple(plans)
 
 
-def _check_publication_changes(plan, entries, phase, retired=()):
+def _check_publication_changes(plan, entries, phase, retired=(), stopped_masks=()):
     actual = {change.target: change.after for change in plan.changes}
     if phase == "directories":
         parents = {str(Path(entry["installed"]).parent) for entry in entries}
@@ -438,14 +464,15 @@ def _check_publication_changes(plan, entries, phase, retired=()):
         expected = {parent: {"kind": "directory", "mode": 0o755} for parent in parents}
         valid = all(target in expected and node == expected[target] for target, node in actual.items())
     else:
-        expected = {entry["installed"]: entry["after"] for entry in entries if entry["phase"] == phase}
+        expected = {entry["installed"]: entry["after"] for entry in entries
+                    if entry["phase"] == phase and entry.get("publish", True)}
         expected.update({entry["enablement"]["path"]: {"kind": "symlink", "target": entry["enablement"]["target"]}
                          for entry in entries if entry["phase"] == phase
                          and entry["enablement"] and entry["enablement"]["create"]})
         expected.update({link["path"]: {"kind": "absent"}
-                         for link in retired if link["phase"] == phase})
+                         for link in (*retired, *stopped_masks) if link["phase"] == phase})
         valid = actual == expected
-    retired_before = {link["path"]: link["before"] for link in retired if link["phase"] == phase}
+    retired_before = {link["path"]: link["before"] for link in (*retired, *stopped_masks) if link["phase"] == phase}
     if not valid or any((change.before != retired_before[change.target]
                          if change.target in retired_before else change.before["node"] != {"kind": "absent"})
                         for change in plan.changes):
@@ -474,7 +501,10 @@ def _load(store, activation_id, record):
         shared = common
         for entry in effects["entries"]:
             link = entry["enablement"]
-            if entry["source"] not in wanted or (link["wanted_by"] if link else None) != wanted[entry["source"]]:
+            disposition = record.body["intent"].get("bot_states", {}).get(entry["target"])
+            publish = disposition is None or disposition["disposition"] == "restart"
+            if (entry.get("publish", True) is not publish or entry["source"] not in wanted
+                    or (link["wanted_by"] if link else None) != (wanted[entry["source"]] if publish else None)):
                 raise ActivationError("frozen enablement differs from candidate Install semantics")
         retired = effects.get("retired_enablement", [])
         expected_retired = _retired_enablement(pause.enrollment, effects["entries"], pause, observe=False)
@@ -482,7 +512,21 @@ def _load(store, activation_id, record):
                 != expected_retired or any(item.get("before", {}).get("node", {}).get("kind") != "symlink"
                                            or item["before"].get("resolved") != item["target"] for item in retired)):
             raise ActivationError("retired enablement differs from frozen enrollment")
-        _check_publication_changes(plan, effects["entries"], phase, retired)
+        stopped_masks = effects.get("stopped_masks", [])
+        stopped_entries = {entry["target"]: entry for entry in effects["entries"]
+                           if not entry.get("publish", True)}
+        originals = {unit["target"]: unit for unit in pause.enrollment["units"]}
+        for mask in stopped_masks:
+            entry = stopped_entries.get(mask.get("target"))
+            prior = originals.get(mask.get("target"))
+            if (entry is None or prior is None or not entry["original"]
+                    or dict(prior["properties"]).get("LoadState") != "loaded"
+                    or mask.get("path") != str(_runtime_units() / Path(entry["installed"]).name)
+                    or mask.get("phase") != "bots"
+                    or mask.get("before") != {"node": {"kind": "symlink", "target": "/dev/null"},
+                                              "resolved": "/dev/null"}):
+                raise ActivationError("stopped bot mask differs from its frozen pause owner")
+        _check_publication_changes(plan, effects["entries"], phase, retired, stopped_masks)
         if phase != "directories":
             plans.append(plan)
     configuration = read_config_install(store.root, plans[0].effects["configuration_journal"])
@@ -533,7 +577,13 @@ def _selected_phase(root: Path, phase: str) -> tuple[ConfigPlan, tuple[dict, ...
     entries = effects.get("entries")
     if not isinstance(entries, list):
         raise ActivationError("selected native publication has no entries")
-    _check_publication_changes(publication, entries, phase, effects.get("retired_enablement", []))
+    states = record.body["intent"].get("bot_states", {})
+    for entry in entries:
+        disposition = states.get(entry["target"])
+        if entry.get("publish", True) is not (disposition is None or disposition["disposition"] == "restart"):
+            raise ActivationError("selected native publication differs from preserved bot state")
+    _check_publication_changes(publication, entries, phase, effects.get("retired_enablement", []),
+                               effects.get("stopped_masks", []))
     return candidate, tuple(json.loads(json.dumps(entry)) for entry in entries if entry.get("phase") == phase)
 
 
@@ -615,9 +665,10 @@ def install_candidate_units(store: ActivationStore, activation_id: str, phase: s
         # owned masks. Nothing starts; a start-recovery never replays this.
         original = {unit["target"]: unit for unit in enrollment["units"]}
         masked = [entry for entry in entries
-                  if _owned_pause_mask(_runtime_units() / Path(entry["installed"]).name,
+                  if entry.get("publish", True) and _owned_pause_mask(_runtime_units() / Path(entry["installed"]).name,
                                        entry, original.get(entry["target"]))]
-        if masked:
+        stopped_masks = [mask for mask in plan.effects.get("stopped_masks", []) if mask["phase"] == phase]
+        if masked or stopped_masks:
             _native(adapter, "svc_activation_reload")
             _check_targets(adapter, enrollment, entries, allow_candidate=True)
             for entry in masked:

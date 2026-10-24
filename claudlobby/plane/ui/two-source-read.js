@@ -171,7 +171,7 @@ export function createWorkspaceReadTransport({ sources }) {
       if (v.state !== 'ok') return v;
       return project(owning.e, path, v);
     }
-    const good = entries.flatMap((e, i) => {
+    let good = entries.flatMap((e, i) => {
       if (values[i].state !== 'ok') return [];
       try {
         const projected = project(e, path, values[i]);
@@ -182,6 +182,26 @@ export function createWorkspaceReadTransport({ sources }) {
         return [];
       }
     });
+    if (path === '/api/overview') {
+      // Recover only failed overview legs. A healthy overview, including an
+      // empty registry, remains authoritative for its source. Keep overview
+      // health unchanged: this read restores routing, not host telemetry.
+      const fallback = await Promise.all(entries.map((e, i) =>
+        values[i].state !== 'ok' && epochs[i] === e.epoch && admitted(e)
+          ? read(e, '/api/fleets') : null));
+      entries.forEach((e, i) => {
+        // Any peer may lose admission while the registry fallback is held.
+        if (epochs[i] !== e.epoch || !admitted(e)) {
+          values[i] = failed(e.state);
+          return;
+        }
+        if (fallback[i]?.state === 'ok') {
+          try { publishFleets(e, fallback[i].data, '/api/fleets', tickets[i]); }
+          catch { /* malformed or superseded registry cannot grant a room */ }
+        }
+      });
+      good = good.filter(({ e }) => values[entries.indexOf(e)].state === 'ok');
+    }
     const data = { sources: sourceFacts(values, path), coverage: coverage(values),
       windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
     if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
@@ -213,7 +233,7 @@ export function createWorkspaceReadTransport({ sources }) {
       ...(d.checkins === undefined ? {} : {checkins: d.checkins.map(x => fields(e, x,
         ['checkin_id', 'actor_uid'], ['actor_alias'], ['fleet']))}) } };
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
-    if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid'], ['alias'], ['fleet'])) } };
+    if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid', 'fleet_uid'], ['alias'], ['fleet'])) } };
     if (path === '/api/overview' && (!d.totals || !d.host)) throw new Error('Missing source facts.');
     if (path === '/api/overview') return { ...v, data: { ...d, fleets: d.fleets.map(x => ({...fields(e, x, ['uid'], ['acked_by'], ['alias']),display_label:`${e.label} / ${x.alias}`})) } };
     return v;
@@ -233,7 +253,11 @@ export function createWorkspaceReadTransport({ sources }) {
         try { const payload = JSON.parse(ev.data); facade.onmessage?.({ data: JSON.stringify({ ...payload, source: e.key, rows: payload.rows.map(r => ({ ...r, source: e.key })) }) }); } catch { /* next read refresh corrects malformed push */ }
       };
       child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };
-      child.onerror = ev => facade.onerror?.(ev);
+      child.onerror = () => {
+        // A stream interruption is scoped; canonical reads decide coverage.
+        facade.onerror?.({type:'error', source:e.key});
+        facade.refresh();
+      };
       child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; notify(); } } catch { /* do not infer recovery */ } });
     }
     streams.add(facade); return facade;
