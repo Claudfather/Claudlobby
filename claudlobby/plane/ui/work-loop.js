@@ -138,7 +138,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     $("work-unavailable").textContent = usable ? "" : contextsByKind.has("feedback")
       ? "Open a task to give feedback to the lead. This does not approve or change the task."
       : contextsByKind.has("nudge") ? "Open a task to ask its team lead about it. This does not approve or complete work."
-      : "Browser actions are unavailable for this view. Its task and activity records remain readable.";
+      : "Browser actions are unavailable for this view. Check the task and activity panels for read status.";
     if (usable) {
       const options = context.recipients.map(r => `<option value="${esc(r.id)}">${esc(r.label)}${r.lead ? " · lead" : ""}</option>`).join("");
       if ($("work-recipient").innerHTML !== options) $("work-recipient").innerHTML = options;
@@ -176,7 +176,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (dialog.open) dialog.close();
     selected = null;
   }
-  function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.", expectedScope, affectedKind, expectedRecipient) {
+  function invalidate(message = "Message access is unavailable. Your draft is kept. Check the task and activity panels for read status.", expectedScope, affectedKind, expectedRecipient) {
     if (affectedKind === "permission") { permissions.pause(expectedScope); return; }
     if (affectedKind) {
       const affected = contextsByKind.get(affectedKind);
@@ -200,7 +200,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         }
       }
       contextsByKind.delete(affectedKind);
-      notice = affectedKind === "feedback" ? "Task feedback access is unavailable. Your comment is kept; task records remain readable." : affectedKind === "nudge" ? "Task nudge access is unavailable. Your reason is kept; task records remain readable." : message || "Message access is unavailable. Your draft is kept; task records remain readable.";
+      notice = affectedKind === "feedback" ? "Task feedback access is unavailable. Your comment is kept. Check the task panel for read status." : affectedKind === "nudge" ? "Task nudge access is unavailable. Your reason is kept. Check the task panel for read status." : message || "Message access is unavailable. Your draft is kept. Check the task panel for read status.";
       updateDetailActions(); paint();
       const readContext = taskContextReader(affectedKind);
       if (typeof readContext === "function") {
@@ -271,7 +271,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         }
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
       } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
-        : "Browser action access is unavailable for this team. Task and activity records remain readable.";
+        : "Browser action access is unavailable for this team. Check the task and activity panels for read status.";
       if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
       paint(); // An unrelated context result must not replace an authored draft.
     }

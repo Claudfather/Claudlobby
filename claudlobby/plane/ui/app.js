@@ -519,8 +519,10 @@ function taskIssueNote(r) {
 
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  const coverage = env?.state === "ok" ? env.data?.coverage : null;
+  const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
-                  { idleWhenEmpty: (d) => !d.tasks.length && !d.issue_count && !d.truncated })) {
+                  { idleWhenEmpty: (d) => !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
     return;
@@ -528,8 +530,9 @@ function renderTasks(env) {
   const rows = env.data.tasks;
   const attn = rows.filter((r) => r.attention);
   const issueCount = env.data.issue_count || 0;
-  badge.hidden = !attn.length && !issueCount && !env.data.truncated;
+  badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
   badge.textContent = attn.length || "!";
+  badge.title = partial ? "Task attention covers readable sources only." : "";
   const card = (r) => {
     const st = TASK_STATUS[r.state] || { label: "state unknown", cls: "s-bad" };
     const a = r.current_assignment;
@@ -567,11 +570,13 @@ function renderTasks(env) {
       + `${env.data.issue_scope === "displayed_tasks" ? " in displayed tasks" : ""};`
       + ` inspect Plane state before treating this board as clear.</div></div>`
     : "";
-  attEl.innerHTML = attn.length || issues || limited
+  const coverageNote = partial
+    ? `<div class="card attn"><div class="why">Task records are available from ${esc(coverage.reachable)}/${esc(coverage.total)} sources. Attention status is incomplete.</div></div>` : "";
+  attEl.innerHTML = coverageNote + (attn.length || issues || limited
     ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: "no tasks need attention" });
+    : stateBlock("idle", null, null, { label: partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
-    || stateBlock("idle", null, null, { label: "no other tasks" });
+    || stateBlock("idle", null, null, { label: partial ? "no other tasks in readable sources" : "no other tasks" });
 }
 
 function railRow(a) {
