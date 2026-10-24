@@ -119,13 +119,13 @@ class TestBotInFleet:
     )
 
     def test_member_first_in_a_long_roster(self):
-        _, rc = _run(self._LONG_ROSTER, "alex", "ari", "alex")
+        _, rc = _run(self._LONG_ROSTER, "first-bot", "last-bot", "first-bot")
         assert rc == 0
 
     def test_member_last_in_a_long_roster(self):
         # Control: grep reads the whole roster before its match, so the pipe
         # never closes early; this passed before the fix too.
-        _, rc = _run(self._LONG_ROSTER, "alex", "ari", "ari")
+        _, rc = _run(self._LONG_ROSTER, "first-bot", "last-bot", "last-bot")
         assert rc == 0
 
 
