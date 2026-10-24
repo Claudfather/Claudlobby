@@ -127,7 +127,7 @@ class BotControlResult:
     outcome: str
 
 
-def _handoff_capture(bot_dir: Path) -> tuple[float, datetime]:
+def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
     """The owned handoff file's mtime and its session capture's last_updated.
 
     The session capture's own frontmatter decides. Under the activation's
@@ -177,18 +177,26 @@ def _handoff_capture(bot_dir: Path) -> tuple[float, datetime]:
             raise ValueError("invalid handoff timestamp")
         if stamp.tzinfo is None or stamp.utcoffset() is None:
             raise ValueError("naive handoff timestamp")
+        if not_before is not None and (
+                type(not_before) is not int or not_before < 0
+                or info.st_mtime_ns < not_before
+                or stamp.timestamp() < not_before // 1_000_000_000):
+            raise ValueError("handoff predates its request")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
     return info.st_mtime, stamp
 
 
-def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> float:
+def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
+                        not_before: int | None = None) -> float:
     """Require a fresh owned handoff; explicit capture already witnessed its write.
 
     Returns the capture's age in seconds. pre-stop-handoff.sh asks this check
     whether a handoff below the refresh envelope is recent (#2119).
+    An optional request time in epoch nanoseconds also binds the verified
+    file write and the capture's second-resolution timestamp to that request.
     """
-    mtime, stamp = _handoff_capture(bot_dir)
+    mtime, stamp = _handoff_capture(bot_dir, not_before=not_before)
     age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
     mtime_age = datetime.now(timezone.utc).timestamp() - mtime
     # Explicit capture's changed checksum proves a fresh write, but resume

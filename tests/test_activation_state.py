@@ -177,3 +177,37 @@ def test_preserved_bot_state_is_upgrade_only_and_part_of_immutable_intent(propos
             store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
                           enrollment_digest="1" * 64, bot_states=states)
         assert record.body["intent"]["preserve_bot_state"] is True
+
+
+@pytest.mark.parametrize("request_ns", [None, True, -1, 0, "123", 1234567890])
+def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, request_ns):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    target = "example.worker"
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan, "prior")
+        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
+        store.begin("prior", "selection_switched")
+        store.select("prior")
+        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
+        store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
+            enrollment_digest="1" * 64, install_directory=builder.root,
+            bot_states={target: {"disposition": "restart"}})
+        _advance(store, "upgrade", ("producers_paused",))
+        store.begin("upgrade", "sessions_handed_off")
+        before = a.read_activation(builder.root, "upgrade")
+        if type(request_ns) is not int or request_ns <= 0:
+            with pytest.raises(a.ActivationError, match="immutable request witness"):
+                store.record_handoff("upgrade", target=target, result=None, request_started_ns=request_ns)
+            assert a.read_activation(builder.root, "upgrade") == before
+        else:
+            record = store.record_handoff("upgrade", target=target, result=None, request_started_ns=request_ns)
+            assert record.body["handoff_effects"] == {target: None}
+            assert record.body["handoff_requests"] == {target: {"started_at_ns": request_ns}}
+            assert a.handoff_request_started_ns(record, target) == request_ns
+            assert a.resumable_running_step(record) == "sessions_handed_off"
+            with pytest.raises(a.ActivationError):
+                store.record_handoff("upgrade", target=target, result=None, request_started_ns=request_ns + 1)
+            assert a.read_activation(builder.root, "upgrade") == record
+            saved = store.record_handoff("upgrade", target=target, result="handed_off")
+            assert saved.body["handoff_requests"] == record.body["handoff_requests"]

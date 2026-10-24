@@ -9,6 +9,7 @@ shapes from her review of #2110, item 3.
 """
 
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,43 @@ def test_a_character_cut_by_the_read_limit_does_not_refuse(tmp_path):
     assert content[8191:8194] == "→".encode()
     (handoff_dir / "session.md").write_bytes(content)
     bot_operations._fresh_self_handoff(tmp_path / "bot")
+
+
+@pytest.mark.parametrize("mtime_delta_ns,capture_delta_s,accepted", [
+    pytest.param(0, 0, True, id="exact-file-bound-and-floored-capture-second"),
+    pytest.param(1, 0, True, id="capture-in-request-second"),
+    pytest.param(-1, 1, False, id="file-one-nanosecond-before-request"),
+    pytest.param(1, -1, False, id="fresh-touch-with-pre-request-capture"),
+])
+def test_request_bound_requires_both_file_write_and_capture_timestamp(
+        tmp_path, mtime_delta_ns, capture_delta_s, accepted):
+    bot_dir = tmp_path / "bot"
+    second = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=2)
+    requested_ns = int(second.timestamp()) * 1_000_000_000 + 765_432_109
+    handoff, _ = _checkpointed(bot_dir, refreshed=second,
+        captured=second + timedelta(seconds=capture_delta_s))
+    written_ns = requested_ns + mtime_delta_ns
+    os.utime(handoff, ns=(written_ns, written_ns))
+    if accepted:
+        assert isinstance(bot_operations._fresh_self_handoff(bot_dir, not_before=requested_ns), float)
+    else:
+        with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned") as refused:
+            bot_operations._fresh_self_handoff(bot_dir, not_before=requested_ns)
+        assert str(refused.value.__cause__) == "handoff predates its request"
+    # The optional request bound does not change existing callers' contract.
+    bot_operations._fresh_self_handoff(bot_dir)
+
+
+@pytest.mark.parametrize("stale", ["capture", "file"])
+def test_request_bound_does_not_replace_existing_freshness_window(tmp_path, stale):
+    bot_dir = tmp_path / "bot"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    requested_ns = int((now - timedelta(seconds=600)).timestamp()) * 1_000_000_000
+    handoff, _ = _checkpointed(bot_dir, refreshed=now,
+        captured=now - timedelta(seconds=400) if stale == "capture" else now)
+    written = now - timedelta(seconds=400) if stale == "file" else now
+    written_ns = int(written.timestamp()) * 1_000_000_000
+    os.utime(handoff, ns=(written_ns, written_ns))
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned") as refused:
+        bot_operations._fresh_self_handoff(bot_dir, not_before=requested_ns)
+    assert str(refused.value.__cause__) == "handoff is stale"

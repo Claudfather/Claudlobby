@@ -178,8 +178,11 @@ omitted. The flag is rejected for bootstrap and first adoption. A later explicit
 Preserve-state activation requires an explicit saved/recent handoff result and
 verification of the session capture's own fresh `last_updated` timestamp before
 stopping a live bot. A reference refresh or fresh file mtime alone is insufficient.
-A timeout or unknown handoff remains recorded as uncertain: inspect the live
-session and saved handoff before operator recovery; `--resume` never resends it.
+A timed-out preserve handoff retains its recorded request time. After inspecting
+the live session and allowing its genuine capture to finish, retry the same
+activation with `--resume`: it can verify a fresh capture whose file write and
+capture timestamp follow that request, without sending another handoff. Unbound,
+stale or missing captures remain held; default activation behavior stays unchanged.
 
 Do not run manual unit enrollment, live regeneration or per-bot restarts alongside
 activation. The coordinator pauses old producers, saves handoffs and quiesces
