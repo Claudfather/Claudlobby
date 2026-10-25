@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec
+from tests.fixtures.provider_status import STATUS_PAGE_ARM
 from tests.test_maintenance_jobs import _native_fixture
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +36,12 @@ ALL_TOKENS = (VALID_TOKEN, WRONGBOT_TOKEN, REVOKED_TOKEN)
 #: the refusal in a GraphQL `errors` body. Every other Railway token the stub
 #: sees gets a real 401, so the two failure branches keep separate coverage.
 REJECTED_RAILWAY = "not-a-real-token-rejected-with-200-and-graphql-errors"
+
+#: A token ending in one of these gets that answer from every provider the stub
+#: plays (#2424): accepted, an HTTP 503, or a transfer that times out with no
+#: answer at all. Railway reads ``-answers-html-200`` and ``-answers-null-data``
+#: too, and Telegram ``-answers-429``, ``-answers-500`` and ``-answers-html-502``.
+IS_VALID, ANSWERS_503, TIMES_OUT = "-is-valid", "-answers-503", "-times-out"
 
 
 def _curl_stub(bindir: Path) -> None:
@@ -53,6 +60,16 @@ for a in "$@"; do
 done
 url=""
 [ -n "$cfg" ] && url=$(sed -n 's/^url *= *"\\(.*\\)"$/\\1/p' "$cfg")
+# The bearer token, for the arms that answer by token.
+bearer() {{
+  [ -n "$cfg" ] && sed -n 's/^header = "Authorization: Bearer \\(.*\\)"$/\\1/p' "$cfg"
+}}
+times_out() {{
+  echo "curl: (28) Operation timed out after 10000 milliseconds with 0 bytes received" >&2
+  printf '000'
+  exit 28
+}}
+{STATUS_PAGE_ARM}
 # Railway's URL rides ARGV, not the --config file, so the url-keyed cases
 # below never match it and it fell to the catch-all -- which ignores -o and
 # -w, leaving $code set to the JSON body. Answer it the way the real endpoint
@@ -65,21 +82,37 @@ case "$*" in
       [ "$prev" = "-o" ] && out="$a"
       prev="$a"
     done
-    tok=""
-    [ -n "$cfg" ] && tok=$(sed -n 's/^header = "Authorization: Bearer \\(.*\\)"$/\\1/p' "$cfg")
-    if [ "$tok" = "{REJECTED_RAILWAY}" ]; then
-      [ -n "$out" ] && printf '{{"errors":[{{"message":"Not Authorized"}}]}}' > "$out"
-      printf '200'
-    else
-      [ -n "$out" ] && : > "$out"
-      printf '401'
-    fi
+    [ -n "$out" ] || out=/dev/null
+    : > "$out"
+    case "$(bearer)" in
+      "{REJECTED_RAILWAY}")
+        printf '{{"errors":[{{"message":"Not Authorized"}}]}}' > "$out"
+        printf '200' ;;
+      *{IS_VALID}) printf '{{"data":{{"me":{{"email":"someone@example.com"}}}}}}' > "$out"; printf '200' ;;
+      *-answers-html-200) printf '<html><body>Service Unavailable</body></html>' > "$out"; printf '200' ;;
+      *-answers-null-data) printf '{{"data":null}}' > "$out"; printf '200' ;;
+      *{ANSWERS_503}) printf '503' ;;
+      *{TIMES_OUT}) times_out ;;
+      *) printf '401' ;;
+    esac
+    exit 0 ;;
+  *api.github.com/user*)
+    case "$(bearer)" in
+      *{IS_VALID}) printf '200' ;;
+      *{ANSWERS_503}) printf '503' ;;
+      *{TIMES_OUT}) times_out ;;
+      *) printf '401' ;;
+    esac
     exit 0 ;;
 esac
 case "$url" in
   *bot{VALID_TOKEN}/getMe*)    printf '{{"ok":true,"result":{{"username":"bot_one_bot"}}}}' ;;
   *bot{WRONGBOT_TOKEN}/getMe*) printf '{{"ok":true,"result":{{"username":"some_other_bot"}}}}' ;;
   *bot{REVOKED_TOKEN}/getMe*)  printf '{{"ok":false,"error_code":401,"description":"Unauthorized"}}' ;;
+  *{TIMES_OUT}/getMe*) times_out ;;
+  *-answers-429/getMe*) printf '{{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5","parameters":{{"retry_after":5}}}}' ;;
+  *-answers-500/getMe*) printf '{{"ok":false,"error_code":500,"description":"Internal Server Error"}}' ;;
+  *-answers-html-502/getMe*) printf '<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center></body></html>' ;;
   *bot{VALID_TOKEN}/getChat*)  printf '{{"ok":true,"result":{{"id":-1001234567890}}}}' ;;
   *sendMessage*) echo "$url" >> "$(dirname "$0")/send.log"; printf '{{"ok":true,"result":{{"message_id":1}}}}' ;;
   *) printf '{{"ok":false,"error_code":404,"description":"Not Found"}}' ;;

@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a provider outage reads `unknown`, never a failed credential (#2424)
+
+`creds-check.sh` recorded every probe that did not succeed as `fail`, so an
+outage at Railway, GitHub or Telegram alerted as a dead credential. A probe
+that gets no answer (a timeout, a refused connection, a 429, a 5xx, a body that
+is not the provider's own, or a Railway 200 that carries no data) now records
+`unknown`, reason `no_answer`. A rejection records `unknown`, reason
+`provider_degraded`, while the provider's status page shows its API degraded:
+Railway's lists an open incident on its API component, or GitHub's shows
+`API Requests` at a degraded status word. The page is read only after a
+rejection, at most once per provider a run and for at most 10 s. A page that
+cannot be read, or shows no such state, leaves the rejection `fail`, and so
+does every Telegram rejection, since Telegram publishes no status page. An
+`unknown` sends no alert when it starts and keeps the verdict before it, so a
+failure keeps its age and a recovery still reads `RECOVERED`; one that lasts a
+day sends an `UNVERIFIED` line, then again at 3 and 7 days and weekly. A
+Railway 200 counts as `ok` only when it carries `data`. The alert-pair check is
+unchanged: a Telegram that does not answer there still reads `fail`, since
+alerts are not being delivered.
+
 ### Docs — the README says what every bot inherits from your account: its `sudo` rules, its groups and polkit (#2454)
 
 Every bot runs as the operator's own user, so it can do whatever that user can. The README's Safety model said a bot acts as your user, but named only `sudo` with no password as a way to root, and still said no composed rule denies `sudo` after #2464 added the worker deny. The Docker integration told operators to join the `docker` group without saying that the group is root by another name, and the Pi setup guide did not say that Raspberry Pi OS gives its first user `sudo` with no password.
