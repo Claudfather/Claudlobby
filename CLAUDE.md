@@ -263,7 +263,7 @@ Read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUD
 
 ### Validating changes to how a bot behaves — MANDATORY
 
-Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_scripts/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge: unit tests prove composition, only running the code proves behavior. **Deliver** → **add config** to the canary's `fleet.yaml` → **stage it in an independent canary root** (its own labels, `unit_prefix`, Plane state and channels; `host setup`, `config plan --release RELEASE_ID`, `config diff PLAN_ID`; never a production root) → **observe** the real behavior (`bash harness/validate-bot-change.sh` for observability events; otherwise drive the path with the canary's CLI and watch `event list --bot BOT`). **Cite the observation in the PR body**: claimed evidence is not evidence. Ground a fixture for an externally produced shape in a **live capture**, never in the producer's source, committing its shape but never its identifiers. This gate proves the code, not the rollout: separately, the manager validates an independent canary root before coordinated production activation by default (skip for single-bot, product-repo or non-runtime work; the `canary-rollout` protocol). Full text: [`documentation/validating-bot-changes.md`](documentation/validating-bot-changes.md).
+Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_scripts/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge: unit tests prove composition, only running the code proves behavior. Run it in an independent canary root (its own labels, `unit_prefix`, Plane state and channels), never a production root, watch the real behavior happen, and **cite the observation in the PR body**: claimed evidence is not evidence. Full text: [`documentation/validating-bot-changes.md`](documentation/validating-bot-changes.md).
 
 ### Validating changes to the onboarding path — MANDATORY
 
@@ -276,6 +276,10 @@ Files in `runtime/bots/<name>/` are composed from a configuration plan. Hand-edi
 1. Edit `fleet.yaml` (fleet-level config) or `library/<category>/` (content)
 2. Stage `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`, then have the operator run `host activate PLAN_ID --install-directory PATH`
 3. If the bot drifted during a session (`claudlobby config diff --bot <name>` shows changed files), review the changes and edit their authored source in `library/`
+
+### Every PR body: a Rollout check
+
+CI's `rollout-check / Rollout check` fails a PR whose body has no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its four lines into the body and fill each in: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md` or `CHANGELOG.md` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
 
 ## Key Commands
 
