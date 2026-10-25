@@ -466,7 +466,7 @@ test(`app renewal restores worker selection and draft only with fresh matching a
     assert.equal(document.getElementById('work-send').disabled, false);
     const bindings = { workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
       sessionPaused: false, sessionEpoch: 1, generation: 1, trustGen: 1,
-      refreshTimer: null, safetyTimer: null, searchTimer: null,
+      refreshTimer: null, safetyTimer: null, searchTimer: null, invalidateOverview() {},
       clearTimeout() {}, $: id => document.getElementById(id), showLoading() {} };
     paused = true; runInNewContext(`(function() { ${pause} })()`, bindings);
     assert.equal(bindings.workRoom, undefined);
@@ -596,7 +596,7 @@ test('app resume restarts current fleet and search immediately', async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const helper = app.slice(app.indexOf('function resumeOwnerReads()'), app.indexOf('// Bootstrap LAST'));
   const calls = [], search = { value: ' active query ', dispatchEvent(event) { calls.push(['search', event.type]); } };
-  const state = { sessionPaused: true, currentView: 'fleet',
+  const state = { sessionPaused: true, currentView: 'fleet', invalidateOverview() {},
     refreshBoards() { calls.push(['boards']); }, pollFleet() { calls.push(['fleet']); },
     $: () => search, Event: class { constructor(type) { this.type = type; } } };
   runInNewContext(`${helper}\nresumeOwnerReads()`, state);
@@ -649,7 +649,7 @@ test('both resume callbacks preserve equipment through loading DOM replacement a
   for (const order of [[0, 1], [1, 0]]) {
     const requests = [deferred(), deferred()], rendered = [], opened = [], room = {};
     let detail = { hidden: false, alias: 'synthetic-worker' }, index = 0;
-    const state = { sessionPaused: true, sessionEpoch: 4, inventoryGeneration: 0, equipmentGeneration: 0, inventoryAliases: new Set(),
+    const state = { sessionPaused: true, sessionEpoch: 4, invalidateOverview() {}, inventoryGeneration: 0, equipmentGeneration: 0, inventoryAliases: new Set(),
       currentView: 'fleet', currentFleet: 'synthetic', equipmentAlias: 'synthetic-worker', equipmentSelection: null, rememberEquipmentFocus() {},
       fleetQuery: () => '?fleet=synthetic', refreshBoards() {},
       $: id => id === 'fleet-room' ? room : id === 'equip-detail' ? detail : { value: '' },
@@ -994,7 +994,7 @@ test('initial fleet discovery cannot change a newer room or resumed session', as
   const refresh = inspectionApp.slice(inspectionApp.indexOf('async function refreshBoards()'), inspectionApp.indexOf('function scheduleRefresh()'));
   for (const reason of ['room', 'session']) {
     const reply = deferred(), adopted = [];
-    const state = { sessionPaused: false, generation: 0, fleetsSeen: false,
+    const state = { sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
       refreshInFlight: false, refreshPending: false, refreshTimer: null, clearTimeout() {},
       jget: () => reply.promise, adoptFleets(value) { adopted.push(value); } };
     const pending = runInNewContext(`${refresh}\nrefreshBoards()`, state);

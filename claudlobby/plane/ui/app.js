@@ -956,6 +956,45 @@ let refreshPending = false;
 let generation = 0;
 let sessionPaused = false;
 let sessionEpoch = 0;
+let overviewTimer = null;
+let overviewInFlight = false;
+let overviewEpoch = 0;
+let overviewDueAt = 0;
+const OVERVIEW_INTERVAL = 60000;
+
+function invalidateOverview() {
+  ++overviewEpoch;
+  overviewDueAt = 0;
+  clearTimeout(overviewTimer); overviewTimer = null;
+  const env = {state: "unavailable", provenance: null, remediation: sessionPaused
+    ? "Team summary is paused until access resumes." : "Team summary is refreshing."};
+  renderHeader(env); renderHostFacts(env); renderOverview(env);
+}
+
+async function refreshOverview() {
+  if (sessionPaused || overviewInFlight || Date.now() < overviewDueAt) return;
+  overviewInFlight = true;
+  const epoch = overviewEpoch, session = sessionEpoch;
+  overviewDueAt = Date.now() + OVERVIEW_INTERVAL;
+  clearTimeout(overviewTimer); overviewTimer = null;
+  try {
+    const ov = await jget("/api/overview");
+    if (sessionPaused || session !== sessionEpoch || epoch !== overviewEpoch) return;
+    adoptFleets(ov);
+    if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
+    renderHeader(ov); renderHostFacts(ov); renderFleetTabs(); renderOverview(ov);
+    const note = ov?.state === "ok"
+      ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
+      : "Team summary unavailable. Retrying within a minute; activity and tasks refresh separately.";
+    const el = $("overview");
+    if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
+  } finally {
+    overviewInFlight = false;
+    if (!sessionPaused) overviewTimer = setTimeout(() => {
+      overviewTimer = null; void refreshOverview();
+    }, Math.max(0, overviewDueAt - Date.now()));
+  }
+}
 
 async function refreshBoards() {
   if (sessionPaused) return;
@@ -964,7 +1003,7 @@ async function refreshBoards() {
   refreshPending = false;
   clearTimeout(refreshTimer); refreshTimer = null;
   try {
-  const gen = ++generation;   // stale responses never paint over newer ones
+  const gen = ++generation, epoch = sessionEpoch; // every paint belongs to this session
   if (!fleetsSeen) {
     // The FIRST paint learns the fleet dimension before it fetches a board:
     // every per-fleet board below is fetched IN the room, so the room must
@@ -977,19 +1016,15 @@ async function refreshBoards() {
   }
   syncWorkRoom();
   const q = fleetQuery();
-  const [ch, tk, fl, sm, ov] = await Promise.all([
+  void refreshOverview(); // the expensive summary never holds conversation rendering
+  const [ch, tk, fl, sm] = await Promise.all([
     jget(channelUrl()), jget("/api/tasks" + q),
     jget("/api/identities" + q), jget("/api/summary"),
-    jget("/api/overview"),
   ]);
-  if (gen !== generation) return;
-  adoptFleets(ov);   // the overview carries the fleet list + default: one door
-  if (syncWorkRoom()) { refreshBoards(); return; }
-  renderHeader(ov); renderHostFacts(ov);
+  if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
   renderFleet(fl); renderChannel(ch); renderTasks(tk); renderSummary(sm);
   workLoop.update(tk, ch);
   renderFleetTabs();
-  renderOverview(ov);   // after the tabs: the strip highlights the pick
   restartSafety();
   } finally {
     refreshInFlight = false;
@@ -1017,12 +1052,13 @@ function openStream() {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
       if (payload.rows.length || payload.coverage_changed) {
-        if (payload.coverage_changed) ++generation;
+        if (payload.coverage_changed) { ++generation; invalidateOverview(); }
         scheduleRefresh();
       }
     } catch { /* malformed push — the next board refresh corrects */ }
   };
   es.addEventListener("source", (ev) => {
+    if (sessionPaused) return;
     // The RECORDER's source went absent/unreadable mid-stream — typed, not
     // silence (the first version pushed these frames to no listener). The
     // header and the host line are CLEARED, not left standing: the numbers
@@ -1034,10 +1070,9 @@ function openStream() {
       // read would have re-armed the safety timer, so the coalesced refetch
       // takes its place — the same door a pushed row uses, never a new one.
       ++generation;
+      invalidateOverview();
       scheduleRefresh();
       renderSummary(env);
-      renderHeader(null);
-      renderHostFacts(null);
       renderState($("channel"), env);
       workLoop.updateChannel(env);
     } catch { /* next refresh corrects */ }
@@ -1171,7 +1206,10 @@ function pickFleet(f) {
   currentFleet = f;
   syncWorkRoom();
   savePick(currentFleet);
-  renderFleetTabs();             // instant highlight (the strip re-renders with the boards)
+  renderFleetTabs();
+  for (const card of $("overview")?.querySelectorAll?.(".ov-card.pick") || []) {
+    card.classList.toggle("on", card.dataset.fleet === currentFleet);
+  }
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
   if (currentView === "grid") pollGrid();     // so does the grid
   refreshBoards();               // guarded path (generation stale-guard)
@@ -1595,6 +1633,7 @@ $("search").addEventListener("input", () => {
 
 function resumeOwnerReads() {
   sessionPaused = false;
+  invalidateOverview();
   refreshBoards();
   if (currentView === "fleet") void pollFleet();
   if ($("search").value.trim()) $("search").dispatchEvent(new Event("input"));
@@ -1629,6 +1668,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         sessionPaused = true;
         ++sessionEpoch;
         ++generation; ++trustGen;
+        invalidateOverview();
         // Invalidate the action context as well as reads. pause saves the
         // current draft in memory; resume must fetch fresh authority for this room.
         workLoop.pause();
