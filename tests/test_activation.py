@@ -808,6 +808,171 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
     assert not (root / "state/activations/upgrade").exists()
 
 
+@pytest.fixture
+def schema_upgrade(cold, monkeypatch):
+    """A sealed schema-13 source and schema-14 target; native effects stay fake."""
+    root, target, _, host = cold
+    inputs = replace(target.inputs, source_revision="d" * 40)
+    directory = release_path(root, inputs.release_id)
+    shutil.copytree(target.directory, directory)
+    (directory / MANIFEST).unlink()
+    (directory / target.paths.cli).write_text(f"#!{directory / target.paths.interpreter}\n")
+    artifact = directory / target.paths.artifact
+    metadata = json.loads(artifact.read_text())
+    metadata["source_revision"] = inputs.source_revision
+    metadata["compatibility"]["schema"] = {"read": [13], "write": 13}
+    artifact.write_text(json.dumps(metadata))
+    for path in (directory / "package/plane/migrations").glob("*.sql"):
+        if int(path.name[:4]) > 13:
+            path.unlink()
+    source = seal_release(root, inputs, target.paths)
+    source_plan = ConfigPlanBuilder(root, source.release_id, source.seal_sha256, (),
+                                   effects={"fleet_manifests": {}}).seal()
+    plan = ConfigPlanBuilder(root, target.release_id, target.seal_sha256, (),
+                            effects={"fleet_manifests": {}}).seal()
+    with state.locked_activation(root) as store:
+        store.prepare("prior", source_plan, recovery_release_id=source.release_id,
+                      enrollment_digest="1" * 64)
+        for step in state.STEPS:
+            store.begin("prior", step)
+            if step == "selection_switched":
+                store.select("prior")
+            else:
+                store.complete("prior", step, evidence_digest="2" * 64)
+    _database(root, version=13).close()
+    # This coordinator boundary fixture supplies no native estate. It does not
+    # model or authorize a zero-bot host setup; native rollout is separate.
+    monkeypatch.setattr(activation, "current_declarations", lambda *_args: ())
+    monkeypatch.setattr(activation, "planned_units", lambda *_args: ())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    monkeypatch.setattr(activation, "_probe", lambda _root: None)
+    return root, source, target, plan, host
+
+
+def test_source_recovery_schema_upgrade_refuses_before_record_or_native_pause(schema_upgrade):
+    root, source, target, plan, host = schema_upgrade
+    before = db_file(root).read_bytes()
+    with pytest.raises(state.ActivationRefusal, match="recovery release cannot read the post-migration.*14"):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    assert db_file(root).read_bytes() == before
+    assert not (root / "state/activations/upgrade").exists()
+    assert not any(name.startswith("svc_activation_") for name, _ in host.calls)
+    assert state.read_selection(root)["release_id"] == source.release_id
+
+
+def test_forward_recovery_checks_target_write_floor_before_record(schema_upgrade, monkeypatch):
+    root, _, _, plan, host = schema_upgrade
+    original = activation.build_migration_manifest
+    def preview(*args, **kwargs):
+        result = original(*args, **kwargs)
+        rollback = deepcopy(result.rollback)
+        rollback["after_target_write_versions"]["schema"] = 15
+        return replace(result, rollback=rollback)
+    monkeypatch.setattr(activation, "build_migration_manifest", preview)
+    with pytest.raises(state.ActivationRefusal, match="post-target-write.*15"):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory,
+                                      adapter=host, forward_recovery=True)
+    assert not (root / "state/activations/upgrade").exists()
+    assert not any(name.startswith("svc_activation_") for name, _ in host.calls)
+
+
+def test_source_recovery_checks_target_writes_even_when_sql_is_readable(schema_upgrade, monkeypatch):
+    root, _, _, plan, host = schema_upgrade
+    original = activation.build_migration_manifest
+    def preview(*args, **kwargs):
+        result = original(*args, **kwargs)
+        rollback = deepcopy(result.rollback)
+        rollback["after_sql_versions"]["schema"] = 13
+        return replace(result, rollback=rollback)
+    monkeypatch.setattr(activation, "build_migration_manifest", preview)
+    with pytest.raises(state.ActivationRefusal, match="post-target-write.*14"):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    assert not (root / "state/activations/upgrade").exists()
+    assert not any(name.startswith("svc_activation_") for name, _ in host.calls)
+
+
+def test_forward_recovery_migrates_on_same_id_resume_and_retains_backup(schema_upgrade, monkeypatch):
+    root, source, target, plan, host = schema_upgrade
+    manifest = activation.build_migration_manifest(root, source, target)
+    activation._check_recovery_readability(manifest, target)
+    with state.locked_activation(root) as store:
+        store.prepare("upgrade", plan, source_release_id=source.release_id,
+                      recovery_release_id=target.release_id, enrollment_digest="1" * 64,
+                      install_directory=host.directory, forward_recovery=True)
+        for step in state.STEPS[:state.STEPS.index("backup_saved")]:
+            store.begin("upgrade", step)
+            store.complete("upgrade", step, evidence_digest=(
+                manifest.manifest_id[2:] if step == "queues_classified" else "2" * 64))
+    class ResumeAdmitted(Exception):
+        pass
+    # Observe resume's immutable-choice gate before the native pause owner.
+    monkeypatch.setattr(activation.units, "load_unit_pause",
+                        lambda *_args: (_ for _ in ()).throw(ResumeAdmitted))
+    before = state.read_activation(root, "upgrade")
+    assert before.body["intent"]["forward_recovery"] is True
+    assert before.body["intent"]["recovery_release_id"] == target.release_id
+    assert before.body["intent"]["source_release_id"] == source.release_id
+    assert before.body["completed"][-1] == "queues_classified"
+    calls = list(host.calls)
+    with pytest.raises(state.ActivationRefusal, match="cannot change the recorded recovery mode"):
+        activation.resume_activation(root, "upgrade", plan.plan_id, host.directory,
+                                     adapter=host, forward_recovery=False)
+    assert state.read_activation(root, "upgrade") == before and host.calls == calls
+    with pytest.raises(ResumeAdmitted):
+        activation.resume_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    assert state.read_activation(root, "upgrade") == before and host.calls == calls
+    # Stop at the existing startup boundary: no native bot or resident starts.
+    monkeypatch.setattr(activation, "_candidate_startup",
+                        lambda _root, _store, identifier, *_args, **_kwargs:
+                            state.read_activation(_root, identifier))
+    with state.locked_activation(root) as store:
+        activation.config_install.prepare_config(plan, "upgrade")
+        resumed = activation._finish_running_activation(root, store, "upgrade", plan, target, source,
+            None, (), (), {}, {}, (), (), {}, host.directory, host, host.package, legacy_source=False)
+    assert resumed.body["intent"] == before.body["intent"]
+    assert resumed.body["completed"][-3:] == ["migration_applied", "selection_switched", "configuration_applied"]
+    journal = read_migration(root, "upgrade")
+    assert journal["backup"]["user_version"] == 13
+    assert Path(journal["backup"]["path"]).is_file()
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+    selected = state.read_selection(root)
+    assert selected["release_id"] == target.release_id
+    with state.locked_activation(root) as store:
+        with pytest.raises(state.ActivationError, match="old-source rollback is unsupported"):
+            store.begin_rollback("upgrade")
+        # The separate selection primitive still refuses the old configuration,
+        # even if a caller has already entered a rollback journal by other means.
+        refused = state.read_activation(root, "upgrade")
+        refused.body.update(status="rolling_back", pending="selection_restored")
+        store._save(refused)
+        with pytest.raises(state.ActivationError, match="matching configuration; use forward repair"):
+            store.restore_selection("upgrade")
+    assert state.read_selection(root) == selected
+
+
+@pytest.mark.parametrize("change", ["enable", "recovery-target"])
+def test_resume_refuses_changed_recovery_before_any_native_call(schema_upgrade, monkeypatch, change):
+    root, source, target, plan, host = schema_upgrade
+    with state.locked_activation(root) as store:
+        store.prepare("upgrade", plan, source_release_id=source.release_id,
+                      recovery_release_id=target.release_id, enrollment_digest="1" * 64,
+                      install_directory=host.directory, forward_recovery=True)
+        record = state.read_activation(root, "upgrade")
+        if change == "enable":
+            record.body["intent"].pop("forward_recovery")
+            record.body["intent"]["recovery_release_id"] = source.release_id
+        else:
+            record.body["intent"]["recovery_release_id"] = source.release_id
+        store._save(record)
+    before = state.read_activation(root, "upgrade")
+    calls = list(host.calls)
+    with pytest.raises(state.ActivationRefusal, match="recorded recovery"):
+        activation.resume_activation(root, "upgrade", plan.plan_id, host.directory,
+                                     adapter=host, forward_recovery=True)
+    assert state.read_activation(root, "upgrade") == before and host.calls == calls
+
+
 def test_upgrade_refuses_candidate_persistent_disabled_override_before_pause(cold, monkeypatch):
     root, release, source_plan, host = cold
     activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
@@ -1107,6 +1272,10 @@ def test_legacy_adoption_resume_after_start_repair_reproves_old_bot_quiet(enroll
     monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ((bot.declaration, item),))
     monkeypatch.setattr(activation, "validate_unit_admission", lambda *_args: object())
     monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    # This native-start witness fixture records migration as complete without
+    # creating a database; its readability proof belongs to migration tests.
+    monkeypatch.setattr(activation, "build_migration_manifest", lambda *_args:
+                        SimpleNamespace(readability_blockers=lambda *_args, **_kwargs: ()))
     fence = {"ceiling": 210, "fence": "RR_FENCE_member"}
     with state.locked_activation(root) as store:
         assert state.read_selection(root) is None
@@ -1576,7 +1745,8 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, contexts))
     monkeypatch.setattr(activation, "_source_handoff_roster",
                         lambda *_args: {"alpha": ("member", ("member",))})
-    manifest = SimpleNamespace(blockers=(), task_audit=task_audit, manifest_id="m-" + "c" * 64)
+    manifest = SimpleNamespace(blockers=(), task_audit=task_audit, manifest_id="m-" + "c" * 64,
+                               readability_blockers=lambda *_args, **_kwargs: ())
     monkeypatch.setattr(activation, "build_migration_manifest", lambda *_args, **_kwargs: manifest)
 
     class MigrationReached(Exception):

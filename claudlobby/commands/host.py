@@ -136,6 +136,8 @@ def _recorded(root, activation_id):
         return {"activation_id": activation_id, "status": record.status,
                 "pending_step": record.body["pending"], "completed_steps": record.body["completed"],
                 "plan_id": record.body["intent"]["plan_id"], "release_id": record.body["intent"]["release_id"],
+                "recovery_mode": ("target-forward-only" if record.body["intent"].get("forward_recovery") is True
+                                  else "target" if record.body["previous_selection"] is None else "source"),
                 "verification": "verified"}
     except (ActivationError, KeyError, TypeError):
         return {"activation_id": activation_id, "status": None, "pending_step": None,
@@ -193,6 +195,11 @@ def _activate(args, root):
                     adopt_existing_activation if args.adopt_existing else
                     upgrade_activation if read_selection(root) is not None else bootstrap_activation)
         options = {}
+        if getattr(args, "forward_recovery", None) is not None:
+            if activate not in (upgrade_activation, resume_activation):
+                from ..activation_state import ActivationRefusal
+                raise ActivationRefusal("--forward-recovery requires a selected release upgrade")
+            options["forward_recovery"] = args.forward_recovery
         if getattr(args, "preserve_bot_state", False):
             if activate not in (upgrade_activation, resume_activation):
                 from ..activation_state import ActivationRefusal
@@ -267,6 +274,7 @@ def _activate(args, root):
     data.update(recorded_activation=saved, recording="committed",
                 runtime_observation="readiness_checked_during_activation",
                 user_manager_startup="host_prerequisite", upgrade_supported=True, recovery_supported=False)
+    data["recovery_mode"] = saved["recovery_mode"]
     return CommandOutput(data, executing,
         (f"Activation {args.activation_id}: recorded active; release {executing}; plan {plan.plan_id}.",))
 

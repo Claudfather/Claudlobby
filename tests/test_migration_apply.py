@@ -197,6 +197,22 @@ def test_initial_cutover_binds_old_source_and_distinct_compatible_recovery(relea
         assert result["backup"]["user_version"] == 1 and _version(db_file(root)) == SCHEMA_USER_VERSION
 
 
+def test_apply_rechecks_post_target_write_recovery_before_backup(candidate):
+    root, _, plan = candidate
+    _database(root).close()
+    manifest = _preview(candidate)
+    rollback = {**manifest.rollback, "after_target_write_versions": {
+        **manifest.rollback["after_target_write_versions"], "schema": SCHEMA_USER_VERSION + 1}}
+    manifest = replace(manifest, rollback=rollback)
+    before = db_file(root).read_bytes()
+    with activation.locked_activation(root) as store:
+        _quiesce(store, plan, manifest)
+        with pytest.raises(apply.MigrationApplyError, match="post-target-write"):
+            apply.apply_migration(store, "upgrade", manifest)
+    assert db_file(root).read_bytes() == before
+    assert apply.read_migration(root, "upgrade") is None
+
+
 def test_preconditions_refuse_before_backup_or_database_writes(candidate):
     root, _, plan = candidate
     _database(root).close()

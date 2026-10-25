@@ -842,9 +842,34 @@ def _cancelled_before_effects(root: Path, record: ActivationRecord) -> bool:
                for journal in journals)
 
 
+def _check_recovery_readability(manifest, recovery) -> None:
+    for after_writes, label in ((False, "post-migration"), (True, "post-target-write")):
+        blockers = manifest.readability_blockers(recovery.compatibility,
+                                                after_target_writes=after_writes)
+        if blockers:
+            raise ActivationRefusal(f"recovery release cannot read the {label} state: " + "; ".join(blockers))
+
+
+def _recorded_recovery(root, record, release, *, forward_recovery=None):
+    intent = record.body["intent"]
+    mode = intent.get("forward_recovery", False)
+    if type(mode) is not bool or (forward_recovery is not None and type(forward_recovery) is not bool):
+        raise ActivationRefusal("invalid recorded recovery mode")
+    if forward_recovery is not None and forward_recovery != mode:
+        raise ActivationRefusal("resume cannot change the recorded recovery mode")
+    previous = record.body["previous_selection"]
+    expected = release.release_id if mode or previous is None else intent["source_release_id"]
+    if (intent["recovery_release_id"] != expected
+            or mode and (previous is None or intent.get("source_kind") == "legacy-unsealed"
+                         or intent["source_release_id"] != previous["release_id"])):
+        raise ActivationRefusal("recorded recovery release differs from its frozen recovery mode")
+    return read_release(root, expected)
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
-                        adapter: Adapter | None = None, preserve_bot_state=False) -> ActivationRecord:
+                        adapter: Adapter | None = None, preserve_bot_state=False,
+                        forward_recovery=False) -> ActivationRecord:
     """Quiesce an enrolled estate, then install one reviewed sealed candidate.
 
     First adoption has no sealed recovery floor. An upgrade binds the selected
@@ -853,6 +878,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
     """
     if preserve_bot_state and legacy_source:
         raise ActivationRefusal("preserving bot state is supported only for selected release upgrades")
+    if type(forward_recovery) is not bool or forward_recovery and legacy_source:
+        raise ActivationRefusal("forward recovery is supported only for selected release upgrades")
     root = Path(root).expanduser()
     if not root.is_absolute() or not root.is_dir():
         raise ActivationError("activation requires an explicit existing absolute data root")
@@ -910,6 +937,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                          if blocker not in _LIVE_PREVIEW_CHURN)
         if standing:
             raise ActivationRefusal("migration preview blocks activation before pause: " + "; ".join(standing))
+        recovery = release if forward_recovery or source is None else source
+        _check_recovery_readability(preview, recovery)
         if legacy_source:
             observed_manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
             declarations = (legacy_linux_declarations(plan) if observed_manager == "Linux" else
@@ -971,7 +1000,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                     unit.installed[0].path, unit.target, str(os.getpid())).returncode:
                 raise ActivationError("activation caller is hosted or native ownership is unknown")
         store.prepare(activation_id, plan,
-                      recovery_release_id=source.release_id if source else release.release_id,
+                      recovery_release_id=recovery.release_id, forward_recovery=forward_recovery,
                       source_release_id=source.release_id if source else None,
                       enrollment_digest=inventory.digest, legacy_source=legacy_source,
                       install_directory=install_directory, bot_states=bot_states)
@@ -1492,7 +1521,7 @@ def _frozen_unit(row: dict) -> EnrolledUnit:
 
 def resume_activation(root: Path, activation_id: str, plan_id: str,
                       install_directory: Path, *, adapter: Adapter | None = None,
-                      preserve_bot_state=False) -> ActivationRecord:
+                      preserve_bot_state=False, forward_recovery=None) -> ActivationRecord:
     """Fix forward one recorded activation, without replaying uncertain sends."""
     root = Path(root).expanduser()
     if not root.is_absolute() or not root.is_dir():
@@ -1516,6 +1545,7 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
             raise ActivationError("resume ID belongs to a different frozen plan or release")
         if preserve_bot_state and record.body["intent"].get("preserve_bot_state") is not True:
             raise ActivationRefusal("resume cannot change the recorded bot-state policy")
+        recovery = _recorded_recovery(root, record, release, forward_recovery=forward_recovery)
         step = resumable_running_step(record)
         if step is None:
             raise ActivationError("pending activation stage lacks a durable handoff or candidate-start witness; "
@@ -1561,6 +1591,16 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
         if source_plan is not None and (source_plan.release_id != source.release_id
                                         or source_plan.release_seal != source.seal_sha256):
             raise ActivationError("resume source plan differs from its selected release")
+        if not bootstrap:
+            journal = read_migration(root, activation_id)
+            if journal is not None:
+                payload = dict(journal["manifest"])
+                if payload.pop("schema", None) != 1:
+                    raise ActivationError("saved migration manifest has an unknown schema")
+                preview = MigrationManifest(**payload)
+            else:
+                preview = build_migration_manifest(root, source, release)
+            _check_recovery_readability(preview, recovery)
         candidates = planned_units(plan, manager)
         starts = {}
         candidate_targets = {}
@@ -1627,7 +1667,8 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
 
 def upgrade_activation(root: Path, activation_id: str, plan_id: str,
                        install_directory: Path, *, adapter: Adapter | None = None,
-                       preserve_bot_state=False) -> ActivationRecord:
+                       preserve_bot_state=False, forward_recovery=False) -> ActivationRecord:
     """Upgrade an active selected release with that seal as the recovery floor."""
     return _running_activation(root, activation_id, plan_id, install_directory,
-                               legacy_source=False, adapter=adapter, preserve_bot_state=preserve_bot_state)
+                               legacy_source=False, adapter=adapter, preserve_bot_state=preserve_bot_state,
+                               forward_recovery=forward_recovery)

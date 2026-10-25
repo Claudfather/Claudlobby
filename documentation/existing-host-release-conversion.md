@@ -289,6 +289,16 @@ support safe continuation, including a begun handoff without a recorded outcome
 or an older record without per-bot handoff evidence. Keep the host/source hold,
 inspect the exact native/session state and obtain an explicit recovery decision.
 There is no blanket rollback command for arbitrary unknown native effects.
+For a selected release upgrade whose source cannot read the post-migration or
+post-target-write formats, activation refuses before recording or pausing anything.
+The operator may explicitly choose `host activate PLAN_ID --forward-recovery
+--install-directory PATH` after reviewing that exact sealed target. This binds
+recovery to that candidate, not an arbitrary release: continue with the same
+candidate, plan and activation ID. Old-source rollback is unsupported. The backup
+is retained; this mode never automatically restores a database over accepted work.
+On `--resume`, omit the flag to keep the immutable recorded choice; an explicit
+opposite choice (`--no-forward-recovery`) refuses. JSON results report
+`recovery_mode: target-forward-only` for this opt-in.
 Do not invent a new activation ID, remove coordination files, restore old unit
 files over running candidate processes, or report an incomplete adoption as done.
 
