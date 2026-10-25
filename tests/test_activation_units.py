@@ -347,7 +347,18 @@ def _pause_all(store, adapter):
     _complete(store, "queues_classified")
 
 
-def test_resume_same_id_reloads_frozen_pause_before_forward_work(enrollment, monkeypatch):
+@pytest.fixture
+def native_resume_readability(monkeypatch):
+    """Native-only cases simulate SQL completion without creating a database.
+
+    Real recovery-floor refusals and migration/backup proofs stay in
+    test_activation.py and test_migration_apply.py; isolate only that boundary.
+    """
+    monkeypatch.setattr(activation, "_check_recovery_readability", lambda _manifest, _recovery: None)
+
+
+def test_resume_same_id_reloads_frozen_pause_before_forward_work(
+        enrollment, monkeypatch, native_resume_readability):
     inventory, phases, plan, adapter, _, _ = enrollment
     root = inventory.data_root
     directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
@@ -398,7 +409,8 @@ def test_resume_same_id_reloads_frozen_pause_before_forward_work(enrollment, mon
     assert adapter.calls == before
 
 
-def test_running_resume_reconciles_receipted_candidate_instead_of_old_bot(enrollment, monkeypatch):
+def test_running_resume_reconciles_receipted_candidate_instead_of_old_bot(
+        enrollment, monkeypatch, native_resume_readability):
     inventory, phases, plan, adapter, _, _ = enrollment
     root = inventory.data_root
     directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
@@ -457,7 +469,8 @@ def test_running_resume_reconciles_receipted_candidate_instead_of_old_bot(enroll
 
 
 @pytest.mark.parametrize("interrupt", ["producers", "handoff", "sessions", "ingest", "unknown"])
-def test_running_resume_before_selection_reparks_without_repeating_handoff(enrollment, monkeypatch, interrupt):
+def test_running_resume_before_selection_reparks_without_repeating_handoff(
+        enrollment, monkeypatch, interrupt, native_resume_readability):
     inventory, phases, plan, adapter, _, _ = enrollment
     root = inventory.data_root
     directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])

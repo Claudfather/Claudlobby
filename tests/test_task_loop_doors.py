@@ -107,13 +107,13 @@ def test_migration_0010_widens_the_task_check_without_losing_a_row(tmp_path):
     # migrate() applies the rest of the ladder — 0010's widen AND every later
     # rebuild (0011 added `received`, chunk P) — reaching SCHEMA_USER_VERSION.
     # The row/index preservation asserted below therefore holds ACROSS all of
-    # them: 0011 is the same 12-step rebuild and preserves both, so this pin
-    # only had to learn a later migration exists, not weaken what it checks.
+    # them. Migration 0014 additionally creates exactly two system-event
+    # indexes; every pre-existing index and row must still survive.
     assert migrate(conn) == SCHEMA_USER_VERSION
     assert [r[0] for r in conn.execute("SELECT event FROM events")] == ["progress"]
     after_idx = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'")}
-    assert after_idx == before_idx
+    assert after_idx == before_idx | {"idx_events_permission_requests", "idx_events_reports_acked"}
 
     # ...and the LIVE migrated schema accepts EVERY token the contract names
     # (fold F13): the two new ones are the point, but a vocabulary pinned only
