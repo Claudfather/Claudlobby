@@ -379,7 +379,7 @@ def test_the_session_id_class_is_the_documented_one():
   `\`, whitespace and a leading `.` stay out, so `_dir` (`:36-40`) still yields a safe path segment. Add the
   nearest unsafe neighbours of the new class to the parametrize at `:53` (e.g. `"a/b:c"`, `":lead"`).
   Never touch `runs.RUN_ID_RE` (`runs.py:25`): run ids are a CLI contract with exit 2 (`CLI_CONTRACT.md:695-697`).
-  **Step B3 — contract text, `documentation/specs/CLI_CONTRACT.md:686`:** "an id that isn't a safe directory name — the
+  **Step B3 — contract text, `docs/CLI_CONTRACT.md:686`:** "an id that isn't a safe directory name — the
   class below — isn't logged", followed by an indented marker + table (the in-bullet `DOCTOR_CODES` shape,
   `:458-469`; `doc_table` reads it, `code_values` extracts the backticked pattern):
 

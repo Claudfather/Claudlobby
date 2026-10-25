@@ -11,18 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Claudfather/Claudron#231 moved Claudron's docs onto the canonical
 `documentation/` layout, so every link here to a Claudron `docs/` file or to
 one of its old `documentation/plans/` files returned a 404. That included
-`CLAUDRON_INTEGRATION_URL`, which `config validate` (three warnings and an
-error) and `host doctor` (a warning) print about a bot's vault wiring: it now
-names `documentation/guides/INTEGRATION.md`.
-The boundary-spec pointer in the root, `claudlobby/`,
-`claudlobby/_runtime_scripts/` and `library/` instruction files, and in their
-`AGENTS.md` copies, names
-`documentation/decisions/005-claudfather-boundary-separation.md`. The docs,
-docstrings, plans, decision record and older changelog text that cite
-Claudron's contract or plan files follow the move too. A statement pinned to
-an older Claudron keeps the path it was made about: the evidence sections of
-two runtime-neutral observability plans (Claudron `6ca2b94` and v0.9.0) and a
-July line citation in an archived plan. Only paths changed.
+`CLAUDRON_INTEGRATION_URL`, which `config validate` and `host doctor` print
+about a bot's vault wiring: it now names `documentation/guides/INTEGRATION.md`.
+The instruction files' boundary-spec pointer now names
+`documentation/decisions/005-claudfather-boundary-separation.md`, and the docs,
+docstrings, plans and older changelog text that cite moved Claudron files
+follow too. A citation pinned to an older Claudron keeps the path it was made
+about: evidence recorded at a named commit, and line numbers that hold the
+cited text only there.
 
 ### Added — a rule for when a pull request gets a Vercel preview, and the gate that applies it (#2503, #2505)
 

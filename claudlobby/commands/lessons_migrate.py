@@ -11,7 +11,7 @@ below is that ledger's machine mirror (a test asserts the two never drift).
 
 Dry-run by default (prints the capture plan, needs no ``claudron``); ``--apply``
 shells the write door per note and branches on ``data.action`` per
-documentation/specs/CLI_CONTRACT.md §capture — ``created``/``updated`` land, ``suggest_*`` are
+Claudron documentation/specs/CLI_CONTRACT.md §capture — ``created``/``updated`` land, ``suggest_*`` are
 listed for a human (NEVER ``--force``), ``rejected`` is an error. Idempotent:
 re-running ``--apply`` dedup-routes every note to ``suggest_update``.
 """
@@ -95,7 +95,7 @@ class CaptureMapping:
         return not self.problems
 
     def stdin_payload(self) -> dict:
-        """The ``--stdin`` JSON envelope (documentation/specs/CLI_CONTRACT.md §capture fields)."""
+        """The ``--stdin`` JSON envelope (Claudron documentation/specs/CLI_CONTRACT.md §capture fields)."""
         return {
             "type": "knowledge",
             "title": self.title,
