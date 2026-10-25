@@ -133,7 +133,7 @@ def test_unsealed_first_adoption_binds_real_database_and_refuses_pending_queue(r
     assert plan.task_audit["counts"]["current_assignments"] == 1
     assert plan.rollback["source_after_sql_blockers"] == (
         "unsealed legacy runtime is not a rollback target",)
-    assert [row["version"] for row in plan.migrations if row["proposed"]] == [12, 13]
+    assert [row["version"] for row in plan.migrations if row["proposed"]] == list(range(12, SCHEMA_USER_VERSION + 1))
     assert _snapshot(root) == before
     verify_pending_queues(root, plan)
 

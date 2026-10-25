@@ -1567,8 +1567,9 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
     assert samples == {"host.load": {"value": None, "occurred_at": "2020-01-01"}}
 
 
-def test_task_permission_probe_does_not_scan_other_fleet_history(tmp_path):
-    """Unrelated fleet history must not exhaust a small board's read budget.
+@pytest.mark.parametrize("history", ["other-fleet-requests", "own-fleet-system"])
+def test_task_permission_probe_does_not_scan_other_fleet_history(tmp_path, history):
+    """Unrelated system history must not exhaust a small board's read budget.
 
     Count SQLite VM work instead of wall time: the old unscoped permission
     prefilter walked every system row before examining one selected task.
@@ -1581,17 +1582,18 @@ def test_task_permission_probe_does_not_scan_other_fleet_history(tmp_path):
               tx_state="pane_submitted")
     db = tmp_path / "state" / "plane" / "plane.db"
     conn = sqlite3.connect(db)
-    host, task_id = conn.execute(
-        "SELECT host_uid, work_item_id FROM work_items LIMIT 1").fetchone()
-    # Direct writers stay inside this pytest-owned database. These apparent
-    # requests name our task but belong to another fleet, so confer no authority.
+    host, fleet, task_id = conn.execute(
+        "SELECT host_uid, fleet_uid, work_item_id FROM work_items LIMIT 1").fetchone()
+    # Direct writers stay inside this pytest-owned database. Neither another
+    # fleet's requests nor unrelated own-fleet events confer task authority.
     conn.executemany(
         "INSERT INTO events (ingest_seq,event_id,schema_version,occurred_at,"
         "ingested_at,host_uid,fleet_uid,emitter,kind,event,detail) "
-        "VALUES (?,?,?,'2026-01-01','2026-01-01',?,?,?,'system',"
-        "'permission_requested',?)",
-        [(1_000_000 + n, f"ev_{n:032x}", "1", host, "fleet_" + "f" * 32,
-          EMITTER, json.dumps({"task_id": task_id})) for n in range(12_000)])
+        "VALUES (?,?,?,'2026-01-01','2026-01-01',?,?,?,'system',?,?)",
+        [(1_000_000 + n, f"ev_{n:032x}", "1", host,
+          fleet if history == "own-fleet-system" else "fleet_" + "f" * 32,
+          EMITTER, "heartbeat" if history == "own-fleet-system" else "permission_requested",
+          json.dumps({"task_id": task_id})) for n in range(12_000)])
     conn.commit()
     conn.close()
 
