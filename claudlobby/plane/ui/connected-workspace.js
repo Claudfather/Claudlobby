@@ -21,6 +21,10 @@ function references(value) {
     && new Set(value.map(ref => ref.endpoint_origin)).size === value.length;
 }
 const referenceKey = refs => JSON.stringify(refs.map(ref => [ref.reference_id, ref.endpoint_origin, ref.revision]).sort());
+const computerLabel = reference => {
+  const name = new URL(reference.endpoint_origin).hostname;
+  return name.length <= 80 ? name : name.slice(0, 77) + '…';
+};
 const failure = (state = 'unavailable', remediation = 'Open this workspace again to check its connection.') => ({state, provenance:null, remediation});
 
 export function createConnectedWorkspace({ documentContext, documentOrigin = globalThis.location?.origin,
@@ -146,8 +150,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           currentContext:() => current, obtainAssertion:(input,options) => accountAssertion('/api/plane/host-assertion',input,options),
           fetch,now,setTimeout,clearTimeout,onChange:changed});
       }
-      nextTransport = createTransport({sources:nextClients.map(({client,key}, index) => ({key,
-        label:`Computer ${index + 1}`, reader:client.readHandle}))});
+      nextTransport = createTransport({sources:nextClients.map(({client,key,reference}) => ({key,
+        label:computerLabel(reference), reader:client.readHandle,
+        connectionState:() => client.connectionState?.() || client.snapshot().state,
+        readFailure:url => client.readFailure?.(url)}))});
       for (const {client,actions,key} of nextClients) {
         let previous = client.snapshot();
         nextSubscriptions.push(client.subscribe(state => {
@@ -347,12 +353,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
       const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
-      const labels = {ready:'Connected',denied:'Not connected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
-      label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${labels[status.state] || status.state}`;
+      const connection = client.connectionState?.() || status.state;
+      const labels = {ready:'Connected',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
+      label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${labels[connection] || connection}`;
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
         ? 'This connection expires soon. Use Keep connected to continue; active use renews it automatically.'
+        : connection === 'not_connected' ? 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
         : '');

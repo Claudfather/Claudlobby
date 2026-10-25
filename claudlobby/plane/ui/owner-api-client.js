@@ -83,7 +83,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   async function request(url, action = false, body = {}, timeout = requestTimeout) {
     const controller = new AbortController();
     reads.add(controller);
-    const timer = setTimeout(() => controller.abort(), timeout);
+    const timer = setTimeout(() => controller.abort(new DOMException('Read request timed out.', 'TimeoutError')), timeout);
     try {
       const response = await fetch(url, { method: action ? 'POST' : 'GET',
         credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,

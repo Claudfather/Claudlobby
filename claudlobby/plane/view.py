@@ -995,13 +995,25 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
         # Only a candidate filter: raw events never establish permission state.
         # Batch once so tasks without requests do not repeat canonical reduction.
         permission_tasks = set()
-        if selected:
+        permission_fleets = sorted(reducer_fleets)
+        if selected and permission_fleets:
+            # 0009 supplies this partial index. Keep historical pre-0009
+            # read compatibility, but do not let the current planner choose
+            # the broad kind index merely because permission rows are rare.
+            permission_index = (" INDEXED BY idx_events_fleet_system"
+                                if conn.execute("PRAGMA user_version").fetchone()[0] >= 9 else "")
+            # The cards already name their owning fleet UIDs. Restrict this
+            # prefilter too, so each overview row can use the existing fleet
+            # system-event index instead of rescanning every host system event.
             permission_tasks = {tuple(row) for row in conn.execute(
                 "SELECT DISTINCT host_uid, fleet_uid, json_extract(detail, '$.task_id') "
-                "FROM events WHERE kind='system' AND emitter=? AND event='permission_requested' "
-                "AND detail_truncated=0 AND CASE WHEN json_valid(detail) "
+                "FROM events" + permission_index + " WHERE kind='system' AND emitter=? AND fleet_uid IN ("
+                + ",".join("?" * len(permission_fleets)) + ") "
+                "AND event='permission_requested' AND detail_truncated=0 "
+                "AND CASE WHEN json_valid(detail) "
                 "THEN json_extract(detail, '$.task_id') END IN ("
-                + ",".join("?" * len(selected)) + ")", (PERMISSION_EMITTER, *selected))}
+                + ",".join("?" * len(selected)) + ")",
+                (PERMISSION_EMITTER, *permission_fleets, *selected))}
         cards = []
         for task_id, _uid in candidates:
             task = by_id.get(task_id)
@@ -1430,19 +1442,16 @@ _REPORTS_SINCE_SQL = (
     " UNION"
     " SELECT msg_id FROM communications WHERE recipient_fleet = ?"
     "  AND message_class = 'report' AND occurred_at >= ?)")
+_HOST_METRICS = (
+    "host.load", "host.mem_available_mb", "host.disk_free_gb",
+    "host.thermal_flags", "host.undervoltage", "host.boot_time",
+    "host.plane_wal_bytes",
+)
 _HOST_SAMPLES_SQL = (
-    # the host probe's newest value per facet (subject_kind=host — the
-    # `_host` sentinel's samples, keyed by hostname): the ONE recorded place
-    # the Host card's hardware facts come from; a facet the probe never
-    # emitted is simply absent (a Pi-only facet off a Pi), never a 0
-    "WITH latest AS ("
-    " SELECT metric, value, occurred_at,"
-    "  ROW_NUMBER() OVER (PARTITION BY metric ORDER BY ingest_seq DESC) AS rn"
-    " FROM metric_samples WHERE subject_kind = 'host'"
-    "  AND metric IN ('host.load', 'host.mem_available_mb', 'host.disk_free_gb',"
-    "                 'host.thermal_flags', 'host.undervoltage', 'host.boot_time',"
-    "                 'host.plane_wal_bytes'))"
-    " SELECT metric, value, occurred_at FROM latest WHERE rn = 1")
+    "SELECT metric, value, occurred_at, ingest_seq FROM metric_samples"
+    " WHERE subject_uid=? AND metric=? AND subject_kind='host'"
+    " ORDER BY ingest_seq DESC LIMIT 1"
+)
 
 # The page's ingest-lag warning threshold, stamped by the API so a JSON
 # consumer gets the state and not only the number (structural lens)
@@ -1461,7 +1470,18 @@ def _host_samples(conn: sqlite3.Connection) -> dict | None:
     """metric -> {value, occurred_at} for the host probe's newest facets;
     None when the probe has never recorded (dormant, or armed on another
     host) — absent is not an empty dashboard."""
-    rows = conn.execute(_HOST_SAMPLES_SQL).fetchall()
+    # Discover subjects through the covering (subject_uid, metric, ingest_seq)
+    # index, including historical subjects absent from today's registry. Seek
+    # only their newest facet instead of sorting all retained host samples.
+    subjects = [row[0] for row in conn.execute(
+        "SELECT DISTINCT subject_uid FROM metric_samples")]
+    newest = {}
+    for subject in subjects:
+        for metric in _HOST_METRICS:
+            row = conn.execute(_HOST_SAMPLES_SQL, (subject, metric)).fetchone()
+            if row is not None and (metric not in newest or row[3] > newest[metric][3]):
+                newest[metric] = row
+    rows = list(newest.values())
     if not rows:
         return None
 

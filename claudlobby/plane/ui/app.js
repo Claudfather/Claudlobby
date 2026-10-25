@@ -708,7 +708,7 @@ function renderHeader(env) {
   const el = $("fleet-totals");
   if (!el) return;
   if (!env || env.state !== "ok" || !env.data || !env.data.totals) {
-    el.innerHTML = `<b>—</b> bots`;   // §16: never a zero for an absent source
+    el.innerHTML = `<b>—</b> bots${env?.data?.sources ? ' · <small class="warn">team summary unavailable</small>' : ''}`;
     return;
   }
   const t = env.data.totals;
@@ -749,7 +749,8 @@ function renderHostFacts(env) {
   if (env?.data?.sources) {
     el.textContent = env.data.sources.map(s => `${s.label}: ${s.state === 'ok' && s.host
       ? `ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
-      : s.state}`).join(' | ');
+      : s.connection_state === 'not_connected' ? 'not connected'
+      : s.connection_state === 'ready' ? 'team summary unavailable' : s.state}`).join(' | ');
     return;
   }
   const h = env && env.state === "ok" && env.data ? env.data.host : null;
@@ -764,7 +765,9 @@ function renderSummary(env) {
   if (env?.data?.sources) {
     const c = env.data.coverage;
     const health = s => {
-      if (s.state !== 'ok') return s.state;
+      if (s.state !== 'ok') return s.connection_state === 'not_connected' ? 'not connected'
+        : s.connection_state === 'disconnected' ? 'disconnected'
+        : s.connection_state === 'ready' ? 'recording summary unavailable' : s.state;
       if (s.summary?.daemon_serving === false) return 'recorder DOWN';
       if (s.summary?.daemon_serving !== true) return 'recorder unknown';
       const at = Date.parse(s.provenance?.last_ingest_at);
@@ -848,11 +851,15 @@ function renderOverview(env) {
     </div>`).join("");
   if (d.sources) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
-      <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.state)}</span></div>
+      <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.connection_state === 'ready' ? 'Connected'
+        : s.connection_state === 'not_connected' ? 'Not connected'
+        : s.connection_state === 'disconnected' ? 'Disconnected' : s.state)}</span></div>
       <div class="ov-line">${s.state === 'ok' && s.host
         ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
-        : esc(s.remediation || 'This source is not currently readable.')}</div>
-      <div class="ov-line">Separate source snapshot; recent windows are per source.</div>
+        : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
+        : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
+      <div class="ov-line">${s.connection_state === 'ready' && s.state !== 'ok'
+        ? 'Team summary unavailable; activity and task records remain independent.' : 'Separate source snapshot; recent windows are per source.'}</div>
     </div>`).join('');
     return;
   }
@@ -1146,7 +1153,9 @@ function renderFleetTabs() {
   // selected; the merged host view is the explicit last resort.
   el.innerHTML = [...fleets.map((f) => f.alias), "all"].map((f) => {
     const meta = fleets.find((x) => x.alias === f);
-    const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok" ? meta.source_state : meta.bots)}</small>`
+    const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok"
+      ? meta.connection_state === 'ready' ? 'summary unavailable'
+      : meta.connection_state === 'not_connected' ? 'not connected' : meta.source_state : meta.bots)}</small>`
       : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
     return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
       + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`;

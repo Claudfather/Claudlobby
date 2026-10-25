@@ -492,7 +492,7 @@ test('stable source routing uses readable computer/team display labels without c
   const h=harness({count:1});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
   const overview=await h.api.jget('/api/overview'),choice=overview.data.fleet_choices[0],fleet=overview.data.fleets[0];
   assert.equal(fleet.alias,sourceA+' / team');assert.equal(choice.alias,fleet.alias);
-  assert.equal(fleet.display_label,'Computer 1 / team');assert.equal(choice.display_label,fleet.display_label);
+  assert.equal(fleet.display_label,'a.example.test / team');assert.equal(choice.display_label,fleet.display_label);
   assert.equal(h.api.roomLabel(fleet.alias),fleet.display_label);
   const capability=await h.api.interactionContext(fleet.alias);assert.equal(capability.scope.fleet,fleet.alias);
   h.api.dispose();
@@ -548,4 +548,39 @@ test('connected permission decisions unwrap only their host and inspect the orig
  const result=await h.api.actionReceipt(state.pending[0]);state.accept(state.pending[0],result);
  assert.equal(result.permission.permission_id,p.permission_id);assert.equal(state.pending.length,0);
  assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,1);h.api.dispose();
+});
+
+
+test('never-connected computer stays distinct from an admitted source panel failure',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/read/overview',()=>reply(503,{state:'unavailable'}));
+  const overview=await h.api.jget('/api/overview');
+  assert.equal(overview.data.sources[0].connection_state,'ready');
+  assert.equal(overview.data.sources[0].state,'unavailable');
+  assert.equal(overview.data.sources[1].connection_state,'not_connected');
+  assert.equal(overview.data.sources[1].state,'not_connected');
+  assert.match(overview.data.sources[0].remediation,/This panel could not be read/);
+  assert.equal((await h.api.jget('/api/tasks')).state,'ok');
+  const cards=h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
+  assert.match(cards[1].children[0].textContent,/b.example.test.*Not connected/);
+  assert.doesNotMatch(cards[1].children[0].textContent,/denied/i);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,1);
+  h.api.dispose();
+});
+
+
+test('long saved hostname remains a valid reference with a bounded presentation label',async()=>{
+ const reference={...refs[0],endpoint_origin:'https://'+'a'.repeat(63)+'.'+'b'.repeat(63)+'.example.test'};
+ const h=harness({count:1,dependencies:{documentContext:{...documentContext,references:[reference]}}});
+ h.metadata=context([reference]);assert.equal(await h.api.checkAccount(),true);
+ assert.equal(h.api.snapshot().phase,'ready');h.api.dispose();
+});
+
+test('actual host rejection is distinct from a missing computer session',async()=>{
+ const h=harness({count:1});await h.api.checkAccount();await flush();
+ h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(403,{state:'denied'}));
+ assert.equal(await h.api.act(0,'connect'),false);
+ const view=await h.api.jget('/api/overview');
+ assert.equal(view.data.sources[0].connection_state,'denied');
+ assert.equal(view.data.sources[0].state,'denied');h.api.dispose();
 });

@@ -17,10 +17,10 @@ export function createWorkspaceReadTransport({ sources }) {
   if (!Array.isArray(sources) || ![1, 2].includes(sources.length)) throw new Error('One or two core read handles are required.');
   const rooms = new Map(), streams = new Set();
   let disposed = false;
-  const entries = sources.map(({ key, label, reader }) => {
+  const entries = sources.map(({ key, label, reader, connectionState, readFailure }) => {
     if (typeof key !== 'string' || !slug.test(key) || key.trim() !== key || typeof label !== 'string' || !label || label.length > 80 ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label, reader, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
+    return { key, label, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
@@ -31,7 +31,9 @@ export function createWorkspaceReadTransport({ sources }) {
   function adopt(e, snapshot) {
     const host = snapshot.read_profile?.host_uid;
     let state = snapshot.state === 'ready' ? 'ok' :
-      ['denied', 'signed_out'].includes(snapshot.state) ? 'denied' : 'unavailable';
+      e.connectionState?.() === 'not_connected' ? 'not_connected' :
+      e.connectionState?.() === 'denied' ? 'denied' :
+      snapshot.state === 'signed_out' ? 'disconnected' : snapshot.state === 'denied' ? 'denied' : 'unavailable';
     if (state === 'ok' && (e.host && host !== e.host || entries.some(other => other !== e && other.host === host)))
       state = 'unavailable';
     if (state === 'ok') e.host = host; // Issued by the one authenticated owner admission routine.
@@ -93,7 +95,12 @@ export function createWorkspaceReadTransport({ sources }) {
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
     if (epoch !== e.epoch || !admitted(e)) return failed(e.state);
-    if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object')) return failed();
+    if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object'))
+      return failed('unavailable', e.readFailure?.(url) === 'timed_out'
+        ? `${url === '/api/overview' ? 'Team summary' : 'This panel'} timed out. Other reads and the computer connection are independent.`
+        : 'This panel could not be read. Other reads and the computer connection are independent.');
+    if (value.state !== 'ok' && e.readFailure?.(url) === 'timed_out') return {...value,
+      remediation:`${url === '/api/overview' ? 'Team summary' : 'This panel'} timed out. Other reads and the computer connection are independent.`};
     // An endpoint refusal is local. Only authenticated lifecycle/stream facts
     // change source epochs or schedule a coverage refresh.
     return value;
@@ -117,7 +124,9 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
-      uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state })));
+      uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state,
+      connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
+      read_state: values[i].state })));
   }
   function coverage(values) {
     const reachable = values.filter(v => v.state === 'ok').length;
@@ -125,6 +134,7 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   function sourceFacts(values, path) {
     return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
+      connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       provenance: values[i].provenance, remediation: values[i].remediation,
       ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null } : {}),
       ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}) }));
@@ -174,6 +184,8 @@ export function createWorkspaceReadTransport({ sources }) {
     let good = entries.flatMap((e, i) => {
       if (values[i].state !== 'ok') return [];
       try {
+        const label = values[i].data.host?.display_name;
+        if (typeof label === 'string' && label.trim() && label.length <= 80) e.label = label;
         const projected = project(e, path, values[i]);
         if (rosterRead) publishFleets(e, values[i].data, path, tickets[i]);
         return [{ e, v: projected }];
