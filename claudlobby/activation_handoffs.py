@@ -89,8 +89,12 @@ def _strip_section(previous: bytes, path: Path) -> tuple[bytes, str | None]:
             "previous_handoff"]
     except (IndexError, KeyError, TypeError, ValueError, UnicodeError) as exc:
         raise ActivationRefusal(f"existing canonical handoff section is unreadable: {path}") from exc
-    if prior_status not in _STATUSES:
+    if not isinstance(prior_status, str):
         raise ActivationRefusal(f"existing canonical handoff status is invalid: {path}")
+    if prior_status not in _STATUSES:
+        # Sessions may rewrite this informal disclosure. It is not a capture
+        # witness; an unfamiliar label must never become a freshness claim.
+        prior_status = _STATUSES[0]
     prefix = previous[:start]
     if prefix.endswith(b"\n\n"):
         return prefix[:-2], prior_status
