@@ -40,6 +40,29 @@ def _snippet() -> dict:
 SNIPPET = _snippet()
 COMMAND = SNIPPET["ignoreCommand"]
 
+# One path for each entry of the gate's NEVER_RENDERED list, matched by that entry and
+# by no other entry or argument: a push of that path alone skips only while its entry
+# is on the list. A folder entry's path sits a folder deeper, so ** and * differ.
+ENTRY_PATHS = [
+    (".github/**", ".github/workflows/ci.yml"),
+    ("tests/**", "tests/fixtures/data.json"),
+    ("test/**", "test/fixtures/data.json"),
+    ("e2e/**", "e2e/specs/login.ts"),
+    ("cypress/**", "cypress/support/commands.ts"),
+    ("playwright/**", "playwright/fixtures/auth.ts"),
+    ("**/__tests__/**", "app/__tests__/unit/page.tsx"),
+    ("**/*.test.[jt]s", "lib/math.test.js"),
+    ("**/*.test.[jt]sx", "app/page.test.tsx"),
+    ("**/*.test.[cm][jt]s", "lib/math.test.mjs"),
+    ("**/*.spec.[jt]s", "lib/math.spec.ts"),
+    ("**/*.spec.[jt]sx", "app/page.spec.jsx"),
+    ("**/*.spec.[cm][jt]s", "lib/math.spec.cts"),
+    ("vitest.config.*", "vitest.config.ts"),
+    ("jest.config.*", "jest.config.js"),
+    ("playwright.config.*", "playwright.config.ts"),
+    ("cypress.config.*", "cypress.config.mjs"),
+]
+
 
 def _env(home: Path) -> dict:
     """A minimal env of our own: conftest's constructed_env needs conftest, which this
@@ -99,14 +122,19 @@ class Site:
     def branch(self, name: str) -> None:
         self.git("checkout", "-q", "-B", name, "main")
 
-    def deploy(self, ref: str = "feature", **vercel: str) -> tuple[int, str]:
+    def deploy(self, ref: str = "feature", *, depth: int = 10, fetch: str = "",
+               **vercel: str) -> tuple[int, str]:
         """Clone ``ref`` as Vercel does and run the snippet's command in the Root Directory.
 
-        With any Vercel variable set, Vercel also sets the branch, as it does."""
+        With any Vercel variable set, Vercel also sets the branch, as it does. Another
+        ``depth``, or a ``fetch`` (one more ref, fetched at depth 1), makes a clone that
+        Vercel does not."""
         self._clones += 1
         clone = self.root / f"clone{self._clones}"
-        self.git("clone", "-q", "--depth=10", "--branch", ref, self.origin.as_uri(), str(clone),
-                 cwd=self.root)
+        self.git("clone", "-q", f"--depth={depth}", "--branch", ref, self.origin.as_uri(),
+                 str(clone), cwd=self.root)
+        if fetch:
+            self.git("fetch", "-q", "--depth=1", "origin", fetch, cwd=clone)
         if vercel:
             vercel = {"VERCEL_GIT_COMMIT_REF": ref, **vercel}
         proc = subprocess.run(["sh", "-c", COMMAND], cwd=clone / self.project,
@@ -157,8 +185,8 @@ def test_a_docs_only_push_builds_when_the_gate_may_not_judge_it(site: Site, bran
 
 
 @pytest.mark.parametrize("changes, expected", [
-    pytest.param([("README.md", "# Site, reworded\n"), ("docs/guide.md", "# Guide, longer\n")],
-                 SKIP, id="docs"),
+    pytest.param([("README.md", "# Site, reworded\n"), ("docs/guide.md", "# Guide, longer\n"),
+                  ("docs/a/b.md", "# Nested docs\n")], SKIP, id="docs"),
     pytest.param([("tests/smoke.test.ts", "test('more', () => {})\n"),
                   ("app/page.test.tsx", "test('page', () => {})\n"),
                   ("vitest.config.ts", "export default {}\n")], SKIP, id="tests"),
@@ -183,6 +211,25 @@ def test_a_later_push_builds_only_when_it_can_change_what_renders(site: Site, bu
         assert f"nothing changed since {built[:12]} reaches the build" in out
     else:
         assert "can change what the site renders" in out
+
+
+def test_every_never_rendered_entry_has_a_case():
+    block = re.search(r"^NEVER_RENDERED=\((.*?)^\)", GATE.read_text(encoding="utf-8"),
+                      re.M | re.S)
+    assert block, "the gate should define NEVER_RENDERED"
+    entries = re.findall(r"'([^']+)'", block.group(1))
+    assert entries, "no quoted entries in NEVER_RENDERED"
+    missing = [entry for entry in entries if entry not in dict(ENTRY_PATHS)]
+    assert not missing, f"give each entry its own path in ENTRY_PATHS: {missing}"
+
+
+@pytest.mark.parametrize("entry, path", [pytest.param(entry, path, id=path)
+                                         for entry, path in ENTRY_PATHS])
+def test_a_push_of_one_never_rendered_path_skips(site: Site, built: str, entry, path):
+    site.commit(f"only {path}", (path, "// changed\n"))
+    rc, out = site.deploy(**preview(built))
+    assert rc == SKIP, f"{entry}: {out}"
+    assert f"nothing changed since {built[:12]} reaches the build" in out
 
 
 def test_a_dependabot_branch_without_the_key_is_judged_by_its_files(site: Site):
@@ -219,21 +266,44 @@ def test_an_empty_commit_asks_for_a_build(site: Site, built: str):
     assert "the head commit changes no file" in out
 
 
+def test_a_head_commit_whose_parent_cannot_be_read_builds(site: Site, built: str):
+    """A clone that holds the base but not the head's parent. Vercel's depth-10 clone is
+    never one (a base inside it is an ancestor, so the parent is there too), so the
+    branch is cloned at depth 1 and the base fetched beside it."""
+    site.git("branch", "previous", built)
+    site.commit("docs", ("README.md", "# Site, reworded\n"))
+    site.commit("more docs", ("docs/guide.md", "# Guide, longer\n"))
+    rc, out = site.deploy(depth=1, fetch="previous", **preview(built))
+    assert rc == BUILD, out
+    assert "cannot compare the head commit with its parent" in out
+
+
 def test_a_redeploy_of_the_built_commit_builds(site: Site, built: str):
     rc, out = site.deploy(**preview(built))
     assert rc == BUILD, out
     assert "redeploy" in out
 
 
-def test_in_a_root_directory_the_globs_still_count_from_the_repo_top(tmp_path: Path):
+@pytest.mark.parametrize("changes, expected, first", [
+    pytest.param([("README.md", "# Monorepo\n"), ("CHANGELOG.md", "# Changes\n")], SKIP, None,
+                 id="top-level-docs"),
+    pytest.param([("site/app/page.tsx", "export default 'v3'\n")], BUILD, "site/app/page.tsx",
+                 id="its-own-page"),
+    pytest.param([("packages/ui/button.tsx", "export const Button = 'v2'\n")], BUILD,
+                 "packages/ui/button.tsx", id="a-sibling-package"),
+    pytest.param([("site/docs/guide.md", "# Guide, longer\n")], BUILD, "site/docs/guide.md",
+                 id="its-own-docs-need-their-own-glob"),
+])
+def test_in_a_root_directory_the_globs_still_count_from_the_repo_top(tmp_path: Path, changes,
+                                                                     expected, first):
     site = Site(tmp_path, project="site")
     site.branch("feature")
     site.commit("a page change, built", ("site/app/page.tsx", "export default 'v2'\n"))
     built = site.head()
-    site.commit("top-level docs", ("README.md", "# Monorepo\n"), ("CHANGELOG.md", "# Changes\n"))
+    site.commit("the change", *changes)
     rc, out = site.deploy(**preview(built))
-    assert rc == SKIP, out
-    site.commit("a page", ("site/app/page.tsx", "export default 'v3'\n"))
-    rc, out = site.deploy(**preview(built))
-    assert rc == BUILD, out
-    assert "site/app/page.tsx can change" in out
+    assert rc == expected, out
+    if first:
+        assert f"{first} can change what the site renders" in out
+    else:
+        assert f"nothing changed since {built[:12]} reaches the build" in out

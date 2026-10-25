@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a rule for when a pull request gets a Vercel preview, and the gate that applies it (#2503, #2505)
+
+`library/integrations/vercel.md`, composed into every bot that equips the
+`vercel` integration, now says when a pull request gets a Vercel preview: only
+when it changes what the site renders, never for a Dependabot branch, and
+always when the gate cannot judge it. Production deployments build as before.
+`library/integrations/vercel_preview_gate.sh` is the Ignored Build Step a site
+repo copies to apply the rule: a preview push builds unless every path it
+changed since the branch's last built preview is on the gate's exclude lists,
+and a head commit whose parent the gate cannot read builds. The script's header
+holds the setup; a replay that counts what the gate would skip on a repo's own
+previews; the docs globs for a project in a subfolder; the Dependabot settings
+that rename its branches; and two checks, of the repo's required checks before
+the merge and of a docs-only push after it. A skipped build still counts toward
+Vercel's deployment quota and build slots, and what the gate saves on any site
+is not measured.
+
 ### Fixed — an alert about the fleet manager also pages its fleet's channel (#997, #2129)
 
 fleet-pulse pushes each per-bot alert into the pane of the bot's manager, so an
