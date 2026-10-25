@@ -213,14 +213,43 @@ def test_a_later_push_builds_only_when_it_can_change_what_renders(site: Site, bu
         assert "can change what the site renders" in out
 
 
-def test_every_never_rendered_entry_has_a_case():
-    block = re.search(r"^NEVER_RENDERED=\((.*?)^\)", GATE.read_text(encoding="utf-8"),
-                      re.M | re.S)
+# bash reads the list, as it does when the gate runs, so an entry counts whatever its
+# quoting. set -f reads an unquoted glob as written, not as the files it matches here.
+READ_LIST = ('set -f; eval "$1" || exit; '
+             r'for entry in "${NEVER_RENDERED[@]}"; do printf "%s\0" "$entry"; done')
+
+
+def _entries_without_a_case(gate: str) -> list[str]:
+    """The entries of the NEVER_RENDERED list in ``gate`` that have no row in ENTRY_PATHS."""
+    block = re.search(r"^NEVER_RENDERED=\(.*?^\)", gate, re.M | re.S)
     assert block, "the gate should define NEVER_RENDERED"
-    entries = re.findall(r"'([^']+)'", block.group(1))
-    assert entries, "no quoted entries in NEVER_RENDERED"
-    missing = [entry for entry in entries if entry not in dict(ENTRY_PATHS)]
+    read = subprocess.run(["bash", "-c", READ_LIST, "bash", block.group(0)],
+                          env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                          capture_output=True, text=True)
+    assert read.returncode == 0, read.stderr
+    entries = read.stdout.split("\0")[:-1]
+    assert entries, "no entries in NEVER_RENDERED"
+    return [entry for entry in entries if entry not in dict(ENTRY_PATHS)]
+
+
+def test_every_never_rendered_entry_has_a_case():
+    missing = _entries_without_a_case(GATE.read_text(encoding="utf-8"))
     assert not missing, f"give each entry its own path in ENTRY_PATHS: {missing}"
+
+
+@pytest.mark.parametrize("added", [
+    pytest.param("'storybook/**'", id="single-quotes"),
+    pytest.param('"storybook/**"', id="double-quotes"),
+    pytest.param("storybook/**", id="unquoted"),
+    pytest.param("$'storybook/**'", id="ansi-c-quotes"),
+    pytest.param("storybook/\\*\\*", id="backslashes"),
+    pytest.param("'story'\"book/**\"", id="mixed-quotes"),
+])
+def test_the_list_case_reads_an_added_entry_whatever_its_quoting(added):
+    gate = GATE.read_text(encoding="utf-8")
+    end = gate.index("\n)\n", gate.index("\nNEVER_RENDERED=(")) + 1
+    with_entry = gate[:end] + f"  {added}\n" + gate[end:]
+    assert _entries_without_a_case(with_entry) == [*_entries_without_a_case(gate), "storybook/**"]
 
 
 @pytest.mark.parametrize("entry, path", [pytest.param(entry, path, id=path)
