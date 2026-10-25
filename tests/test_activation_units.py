@@ -915,9 +915,11 @@ def _ticking_darwin(installed, tmp_path, frozen_active):
 
 
 @pytest.mark.parametrize("change", [None, "phase", "argv", "identity", "unmarked", "selection", "completed"])
-def test_abort_resident_scope_accepts_only_exact_marked_original_start(installed, tmp_path, change):
+def test_abort_resident_scope_accepts_only_exact_marked_original_start(tmp_path_factory, change):
     from claudlobby.config_units import unit_family
     from claudlobby import runtime_admission as admission
+    tmp_path = tmp_path_factory.mktemp("ur")  # Keep the real AF_UNIX endpoint below its platform limit.
+    installed = (tmp_path / "data", *release_tree(tmp_path / "data"))
     root, inventory, _, _, phases = _ticking_darwin(installed, tmp_path, "active")
     row = inventory.units[0]
     release = state.read_release(root, row.declaration.release_id)
