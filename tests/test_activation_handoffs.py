@@ -189,6 +189,50 @@ def test_live_preflight_writes_nothing_and_freezes_no_audit(tmp_path):
         conn.close()
 
 
+def test_session_rewritten_disclosure_is_neutral_without_changing_capture_or_audit(tmp_path):
+    """Sanitized live shape: a session called the old reference summary superseded."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        payload = {"schema": 1,
+            "previous_handoff": "superseded by this capture (2026-10-25T00:28:08Z)",
+            "manager_owned_work": [], "assigned_to_this_bot": []}
+        original = (STALE_HANDOFF + b"\n\n" + _BEGIN + b"\n```json\n"
+                    + json.dumps(payload).encode() + b"\n```\n" + _END + b"\n")
+        worker_handoff.write_bytes(original)
+        stamp = 1_600_000_000_123_456_789
+        os.utime(worker_handoff, ns=(stamp, stamp))
+        preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=set(dirs))
+        assert worker_handoff.read_bytes() == original
+        assert worker_handoff.stat().st_mtime_ns == stamp
+        with pytest.raises(ActivationError, match="quiesced task audit changed"):
+            persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit={})
+        assert worker_handoff.read_bytes() == original
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
+                                   expected_audit=expected, refreshed_at=REFRESHED)
+        assert b"\n\n" + STALE_HANDOFF + b"\n\n" in worker_handoff.read_bytes()
+        assert worker_handoff.stat().st_mtime_ns == stamp
+        section = _section(worker_handoff)
+        assert section["previous_handoff"] == "existing file present (fresh capture unverified)"
+        assert section["assigned_to_this_bot"][0]["assignment_id"] == ASSIGNMENT
+        assert _resume_gate(worker_handoff) == 1  # Neutral disclosure never freshens the old capture.
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("status", [None, False, 3, [], {}])
+def test_nonstring_canonical_disclosure_still_refuses_without_writes(tmp_path, status):
+    conn, roster, dirs, _, worker_handoff = _fixture(tmp_path)
+    try:
+        content = (STALE_HANDOFF + b"\n\n" + _BEGIN + b"\n```json\n"
+                   + json.dumps({"previous_handoff": status}).encode() + b"\n```\n" + _END + b"\n")
+        worker_handoff.write_bytes(content)
+        with pytest.raises(ActivationError, match="canonical handoff status is invalid"):
+            preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs)
+        assert worker_handoff.read_bytes() == content
+    finally:
+        conn.close()
+
+
 def _malformed(worker_handoff: Path) -> None:
     # A previous activation's section ends the file, where the refresh writes
     # it, but its JSON lost the status: ours and damaged, so it still refuses.

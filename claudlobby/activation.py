@@ -525,14 +525,31 @@ def _handoff_refresh_time(root: Path, activation_id: str, now: datetime) -> date
     return now.astimezone(timezone.utc).replace(microsecond=0)
 
 
-def _handoff_inputs(old_units, source_plan, contexts, package):
+def _handoff_inputs(old_units, source_plan, contexts, package, *, bot_states=None):
     """Old handoff roster, exact bot directories and retained candidate bots.
 
     Shared by the live pre-record preflight and the authoritative quiesced
     write, so both judge the same frozen old units and reviewed configuration.
+    A preserved, positively stopped selected bot retains its handoff ownership
+    after native de-enrollment; default and adoption mapping remain installed-only.
     """
-    bot_dirs = {(unit.declaration.fleet, unit.declaration.bot): unit.declaration.working_directory
-                for unit in old_units if unit.installed and unit.declaration.scope == "bot"}
+    bot_dirs = {}
+    for unit in old_units:
+        declaration = unit.declaration
+        if declaration.scope != "bot":
+            continue
+        if not unit.installed:
+            if source_plan is None or bot_states is None:
+                continue
+            witness = bot_states.get(unit.target, {})
+            if (witness.get("disposition") != "stopped"
+                    or witness.get("session") != "server_absent"
+                    or witness.get("source") != str(declaration.source)
+                    or witness.get("working_directory") != str(declaration.working_directory)
+                    or witness.get("installed") is not False
+                    or witness.get("native_active") != "inactive"):
+                raise ActivationRefusal("stopped bot handoff owner lacks its exact preserved witness")
+        bot_dirs[(declaration.fleet, declaration.bot)] = declaration.working_directory
     roster = (_source_handoff_roster(source_plan, bot_dirs, package) if source_plan is not None else
               {context.fleet.name: (context.fleet.manager,
                   tuple(bot for bot in context.fleet.bots
@@ -940,7 +957,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         # quiesced fleet. This live read proves only those conditions; the
         # quiesced write rereads its own audit and remains authoritative.
         from .activation_handoffs import preflight_canonical_handoffs
-        roster, bot_dirs, candidate_bots = _handoff_inputs(inventory.units, source_plan, contexts, package)
+        roster, bot_dirs, candidate_bots = _handoff_inputs(
+            inventory.units, source_plan, contexts, package, bot_states=bot_states)
         preflight_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
                                      candidate_bots=candidate_bots)
         _refuse_unrecorded_run_intent(root, inventory.units, contexts, bot_states=bot_states)
@@ -977,7 +995,9 @@ def _finish_running_activation(root, store, activation_id, plan, release, source
         if migration.blockers:
             raise ActivationRefusal("data or pending queues block activation: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
-        roster, bot_dirs, candidate_bots = _handoff_inputs(old_units, source_plan, contexts, package)
+        roster, bot_dirs, candidate_bots = _handoff_inputs(
+            old_units, source_plan, contexts, package,
+            bot_states=record.body["intent"].get("bot_states"))
         refreshed = _handoff_refresh_time(root, activation_id, datetime.now(timezone.utc))
         store.record_handoff_refresh(activation_id, refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"))
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,

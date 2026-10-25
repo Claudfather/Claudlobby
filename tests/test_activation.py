@@ -895,6 +895,66 @@ def test_upgrade_handoff_roster_uses_frozen_selected_bots_after_authoring_change
     }
 
 
+@pytest.mark.parametrize("installed_worker", [False, True])
+def test_preserved_stopped_handoff_owners_keep_canonical_work_mapping(tmp_path, monkeypatch, installed_worker):
+    from dataclasses import asdict
+    from claudlobby import active_config
+    from claudlobby.activation_handoffs import preflight_canonical_handoffs, persist_canonical_handoffs
+    from claudlobby.task_audit import audit_tasks
+    from tests.test_activation_handoffs import _fixture, _tree
+
+    conn, expected_roster, directories, _, worker_handoff = _fixture(tmp_path)
+    contexts = tuple(SimpleNamespace(fleet=SimpleNamespace(name=fleet, manager=manager,
+        bots=dict.fromkeys(bots))) for fleet, (manager, bots) in expected_roster.items())
+    source = SimpleNamespace(fleets=tuple(expected_roster))
+    monkeypatch.setattr(active_config, "context_from_plan", lambda _, fleet, **kw:
+                        next(context for context in contexts if context.fleet.name == fleet))
+    units, witnesses = [], {}
+    for (fleet, bot), directory in directories.items():
+        declaration = SimpleNamespace(scope="bot", fleet=fleet, bot=bot,
+            source=directory / f"{fleet}.{bot}.service", working_directory=directory)
+        target = declaration.source.name
+        installed = installed_worker and bot == "worker"
+        units.append(SimpleNamespace(declaration=declaration, target=target,
+                                     installed=(object(),) if installed else ()))
+        if not installed:
+            witnesses[target] = {"disposition": "stopped", "session": "server_absent",
+                "source": str(declaration.source), "working_directory": str(directory),
+                "installed": False, "native_active": "inactive"}
+    try:
+        roster, dirs, retained = activation._handoff_inputs(
+            units, source, contexts, None, bot_states=witnesses)
+        assert roster == expected_roster and dirs == directories
+        before = _tree(tmp_path)
+        preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=retained)
+        assert _tree(tmp_path) == before
+        result = persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
+            candidate_bots=retained, expected_audit=asdict(audit_tasks(conn)))
+        assert result["bots"] == len(directories) and result["active_assignments"] == 1
+        assert b"assigned_to_this_bot" in worker_handoff.read_bytes()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("disposition", "restart"), ("session", "unknown"), ("source", "/foreign.service"),
+    ("working_directory", "/foreign"), ("installed", True), ("native_active", "active"),
+])
+def test_preserved_stopped_handoff_owner_requires_exact_witness(tmp_path, field, value):
+    declaration = SimpleNamespace(scope="bot", fleet="example", bot="manager",
+        source=tmp_path / "manager.service", working_directory=tmp_path / "manager")
+    unit = SimpleNamespace(declaration=declaration, target="manager.service", installed=())
+    witness = {"disposition": "stopped", "session": "server_absent",
+        "source": str(declaration.source), "working_directory": str(declaration.working_directory),
+        "installed": False, "native_active": "inactive"}
+    witness[field] = value
+    with pytest.raises(state.ActivationRefusal, match="exact preserved witness"):
+        activation._handoff_inputs((unit,), object(), (), None,
+                                   bot_states={unit.target: witness})
+    # No preserve witness leaves the default stopped-owner refusal intact.
+    assert activation._handoff_inputs((unit,), None, (), None) == ({}, {}, set())
+
+
 def test_upgrade_parks_source_only_bot_by_selected_phase(cold):
     root, release, selected_plan, _ = cold
     retained = [item for item in selected_plan.effects["units"]
