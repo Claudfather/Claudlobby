@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import _write_exec, constructed_env
+from tests.fixtures.provider_status import STATUS_PAGE_ARM
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,10 +41,12 @@ def _fleet(tmp_path, *, app_env=None, mint="ok", probe_code="200", pat=None):
     bindir.mkdir()
     # curl stub: -o /dev/null -w %{http_code} → print the code. Answers the
     # installation probe with probe_code; the PAT /user path returns 200 so a
-    # PAT test can also run through here.
+    # PAT test can also run through here. GitHub's status page is served by
+    # STATUS_PAGE_ARM (#2424).
     _write_exec(
         bindir / "curl",
         f"""#!/bin/bash
+{STATUS_PAGE_ARM}
 out="" ; prev=""
 for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
@@ -81,7 +84,7 @@ esac
         CLAUDLOBBY_CREDS_LOG=str(root / "creds-check.log"),
         CLAUDLOBBY_CREDS_STATE=str(state),
     )
-    return {"lib": lib, "state": state, "env": env}
+    return {"lib": lib, "state": state, "env": env, "bindir": bindir}
 
 
 def _run(f):
