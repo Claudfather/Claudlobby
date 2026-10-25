@@ -364,19 +364,24 @@ def test_resident_start_waits_for_delayed_native_admission_before_accepting_pid(
         assert finished.is_set()
 
 
-def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, monkeypatch):
+def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, monkeypatch, request):
     """#2493: the outcome never rests on a clock. The timeout starts only once the
     grandchild runs, its late write waits for a gate that opens only at the drain
     after the kill, and that drain returns only after every process holding the
-    output pipes has exited, so a stalled parent or child cannot reorder them."""
+    output pipes has exited, so a stalled parent or child cannot reorder them.
+    #2507: a failing run stops at its own line and leaves no poller behind."""
     late, gate = tmp_path / "late", tmp_path / "gate"
+    request.addfinalizer(gate.touch)  # a survivor of a failed run writes late and exits
 
     class Gated(subprocess.Popen):
+        started = False
+
         def communicate(self, input=None, timeout=None):
             if timeout is None:
                 gate.touch()  # the drain: a survivor of the kill writes late before it exits
-            else:
+            elif not self.started:  # once: a bounded drain must not wait on a survivor's pipe
                 assert self.stdout.readline() == "ready\n"  # the grandchild is in the group
+                self.started = True
             return super().communicate(input, timeout)
 
     monkeypatch.setattr(subprocess, "Popen", Gated)
