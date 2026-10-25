@@ -497,7 +497,7 @@ _DARWIN_DIAGNOSTICS = {
 }
 
 
-def _darwin_print(text: str, target: str) -> dict[str, str]:
+def _darwin_print(text: str, target: str, *, restore_pending: bool = False) -> dict[str, str]:
     """Parse the observed tab-indented print projection without shell evaluation.
 
     Values/arguments containing controls or ambiguous surrounding whitespace are
@@ -544,6 +544,8 @@ def _darwin_print(text: str, target: str) -> dict[str, str]:
         active = "active"
     elif scalar["state"] == "not running" and "pid" not in scalar:
         active = "inactive"
+    elif restore_pending and scalar["state"] == "spawn scheduled" and "pid" not in scalar:
+        active = "activating"  # Binding only; never evidence of a restored running resident.
     else:
         raise InventoryError("unknown or transitional launchd state")
     for key in ("path", "program", "working directory"):
@@ -703,7 +705,7 @@ def _darwin_binding(name, content, installed_path, directory, environment, props
 
 def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path: str,
                         working_directory: str, environment: dict, original: dict,
-                        require_original_load: bool = False) -> dict:
+                        require_original_load: bool = False, restore_pending: bool = False) -> dict:
     """Recheck frozen binding/overrides during parking and exact restoration.
 
     The source may be parked, so read native state through the shared adapter;
@@ -713,10 +715,12 @@ def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path:
     if len(state) != 3 or state[0] != "unchanged" or state[1] not in ("loaded", "unloaded") or state[2] not in ("active", "inactive"):
         raise InventoryError("unknown launchd activation state")
     disabled = _darwin_disabled(adapter.read("svc_inventory_disabled", target.rsplit("/", 1)[0]))
-    props = _darwin_print(adapter.read("svc_inventory_properties", target), target) if state[1] == "loaded" else {}
+    props = _darwin_print(adapter.read("svc_inventory_properties", target), target,
+                          restore_pending=restore_pending) if state[1] == "loaded" else {}
     props = _darwin_binding(target.rsplit("/", 1)[1] + ".plist", source, installed_path,
                             working_directory, environment, props, state[1] == "loaded", disabled)
-    if (props["ActiveState"] != state[2]
+    pending_binding = restore_pending and props["ActiveState"] == "activating" and state[2] == "inactive"
+    if ((props["ActiveState"] != state[2] and not pending_binding)
             or any(props[key] != original.get(key) for key in ("DisabledOverride", "EnabledState"))
             or (require_original_load and props["LoadState"] != original.get("LoadState"))):
         raise InventoryError("launchd disabling, binding or load state changed")

@@ -184,7 +184,7 @@ def resumable_running_step(record: ActivationRecord) -> str | None:
     completed = record.body["completed"]
     # An early adoption abort in progress refuses forward steps; only its
     # explicit abort-adoption rerun can continue that record.
-    if (record.status != "activating" or "adoption_abort" in record.body
+    if (record.status != "activating" or "adoption_abort" in record.body or "upgrade_abort" in record.body
             or completed != list(STEPS[:len(completed)])
             or not isinstance(record.body["intent"].get("install_directory"), str)
             or len(completed) >= len(STEPS)):
@@ -354,7 +354,7 @@ class ActivationStore:
         record = read_activation(self.root, activation_id)
         body = record.body
         steps = ROLLBACK_STEPS if body["status"] == "rolling_back" else STEPS
-        if (body["status"] in {"active", "rolled_back"} or "adoption_abort" in body
+        if (body["status"] in {"active", "rolled_back"} or "adoption_abort" in body or "upgrade_abort" in body
                 or len(body["completed"]) >= len(steps)
                 or steps[len(body["completed"])] != step
                 or body["pending"] not in (None, step)):
@@ -426,7 +426,8 @@ class ActivationStore:
         prior = effects.get(target, "missing") if isinstance(effects, dict) else "invalid"
         admitted = (prior == "missing" if result in (None, "server_absent") else
                     prior is None if result == "handed_off" else False)
-        if (record.status != "activating" or record.body["pending"] != "sessions_handed_off"
+        if (record.status != "activating" or "upgrade_abort" in record.body
+                or record.body["pending"] != "sessions_handed_off"
                 or not target or not admitted):
             raise ActivationError("session handoff evidence is not the admitted effect")
         if result is None and record.body["intent"].get("preserve_bot_state") is True:
@@ -586,8 +587,8 @@ class ActivationStore:
         body = record.body
         if body["pending"] != step or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest):
             raise ActivationError("only a started step with verified evidence can complete")
-        if "adoption_abort" in body:
-            raise ActivationError("early adoption abort is in progress; forward steps are refused")
+        if "adoption_abort" in body or "upgrade_abort" in body:
+            raise ActivationError("early activation abort is in progress; forward steps are refused")
         body["completed"].append(step)
         body["evidence"][step] = evidence_digest
         body["pending"] = None
@@ -616,6 +617,8 @@ class ActivationStore:
     def begin_rollback(self, activation_id: str) -> ActivationRecord:
         self.assert_locked()
         record = read_activation(self.root, activation_id)
+        if "upgrade_abort" in record.body:
+            raise ActivationError("early upgrade abort owns recovery; rerun that abort command")
         if record.body["intent"].get("source_kind") == "legacy-unsealed":
             raise ActivationError("unsealed first adoption has no recorded rollback release; repair forward")
         if record.status == "rolling_back":
@@ -625,6 +628,72 @@ class ActivationStore:
         record.body["forward"] = {key: record.body[key] for key in
                                   ("status", "completed", "pending", "evidence")}
         record.body.update(status="rolling_back", completed=[], pending=None, evidence={})
+        return self._save(record)
+
+    def check_upgrade_abort(self, activation_id: str, *, sql_user_version: int,
+                            terminal: bool = False) -> ActivationRecord:
+        """Admit only the unchanged selected source, before bot/ingest quiescence."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body, previous = record.body, record.body["previous_selection"]
+        abort = body.get("upgrade_abort")
+        if (not isinstance(previous, dict) or read_selection(self.root) != previous
+                or body["intent"].get("source_kind") == "legacy-unsealed"
+                or body["intent"].get("source_release_id") != previous["release_id"]
+                or body["completed"] != ["producers_paused"]
+                or set(body["evidence"]) != {"producers_paused"}
+                or body.get("start_effects") or body.get("start_phases")
+                or "identity_bindings" in body or "adoption_abort" in body):
+            raise ActivationRefusal("early upgrade abort requires the unchanged source before bot/ingest quiescence")
+        if terminal:
+            if (record.status != "rolled_back" or body["pending"] is not None
+                    or not isinstance(abort, dict) or not isinstance(abort.get("result"), dict)
+                    or not re.fullmatch(r"[0-9a-f]{64}", abort["result"].get("evidence", ""))):
+                raise ActivationRefusal("terminal recheck requires a verified early upgrade abort")
+        elif record.status != "activating" or body["pending"] not in (None, "sessions_handed_off"):
+            raise ActivationRefusal("activation is past its early upgrade producer pause")
+        if abort is None:
+            if "forward" in body:
+                raise ActivationRefusal("activation already has recovery history")
+        elif (abort.get("sql_user_version") != sql_user_version
+                or (not terminal and abort.get("result") is not None)):
+            raise ActivationRefusal("early upgrade abort SQL precondition differs from its recorded intent")
+        return record
+
+    def begin_upgrade_abort(self, activation_id: str, *, reason: str, release_id: str,
+                            artifact_id: str, sql_user_version: int) -> ActivationRecord:
+        """Fence forward work durably; retain every handoff receipt, including unknowns."""
+        record = self.check_upgrade_abort(activation_id, sql_user_version=sql_user_version)
+        body = record.body
+        attempt = {"reason": reason, "release_id": release_id, "artifact_id": artifact_id}
+        if "upgrade_abort" not in body:
+            body["forward"] = {key: body[key] for key in ("status", "completed", "pending", "evidence")}
+            body["upgrade_abort"] = {**attempt, "sql_user_version": sql_user_version,
+                                     "attempts": [attempt], "result": None}
+        else:
+            body["upgrade_abort"]["attempts"].append(attempt)
+        return self._save(record)
+
+    def finish_upgrade_abort(self, activation_id: str, *, sql_user_version: int,
+                             evidence_digest: str, resumed: list[str], cleared: list[str]) -> ActivationRecord:
+        """End the attempt only after producer restoration and untouched-source proof."""
+        record = self.check_upgrade_abort(activation_id, sql_user_version=sql_user_version)
+        abort = record.body.get("upgrade_abort")
+        if abort is None or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest):
+            raise ActivationError("early upgrade abort is not in progress")
+        abort["result"] = {"evidence": evidence_digest, "resumed": list(resumed), "cleared": list(cleared)}
+        record.body.update(status="rolled_back", pending=None)
+        return self._save(record)
+
+    def record_upgrade_resident_grant(self, activation_id: str, *, unit: str, pid: int) -> ActivationRecord:
+        """Retain the exact old-client PID before replying to its bounded startup request."""
+        record = read_activation(self.root, activation_id)
+        marker = record.body.get("upgrade_abort")
+        if not isinstance(marker, dict) or type(pid) is not int or pid <= 1:
+            raise ActivationError("resident restoration has no admitted abort request")
+        record = self.check_upgrade_abort(activation_id, sql_user_version=marker["sql_user_version"])
+        grants = record.body["upgrade_abort"].setdefault("resident_grants", {})
+        grants.setdefault(unit, []).append(pid)
         return self._save(record)
 
     def begin_adoption_abort(self, activation_id: str, *, reason: str, release_id: str,

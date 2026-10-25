@@ -31,6 +31,17 @@ def _apple_xml(*, duplicate=False):
             + extra + b"<key>Program</key><string>/System/Library/foreign</string></dict></plist>")
 
 
+def test_spawn_scheduled_projection_is_binding_only_for_explicit_restore(tmp_path):
+    source = {"Label": "fixture", "ProgramArguments": ["/bin/sleep", "60"],
+              "WorkingDirectory": str(tmp_path), "EnvironmentVariables": {}}
+    # Grounded in the native failed resident restore: no PID, spawn scheduled.
+    observed = observed_print("gui/501/fixture", source, tmp_path / "fixture.plist", active=False)
+    observed = observed.replace("\tstate = not running", "\tstate = spawn scheduled", 1)
+    with pytest.raises(InventoryError, match="unknown or transitional"):
+        inventory._darwin_print(observed, "gui/501/fixture")
+    assert inventory._darwin_print(observed, "gui/501/fixture", restore_pending=True)["ActiveState"] == "activating"
+
+
 def test_nonstandard_apple_xml_remains_raw_and_classifies_foreign(tmp_path, monkeypatch):
     raw = _apple_xml()
     obs = Observations(tmp_path)
