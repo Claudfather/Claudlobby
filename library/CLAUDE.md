@@ -21,4 +21,4 @@ commands), `mcp/` (wire-config fragments, `${ENV_VAR}` placeholders only), `guar
 
 **Placement test** (one line): does it *wire or operate* the fleet? → stays. Is it *true about
 the world*? → vault. Is it *how to engineer*? → clauDNA. Full algorithm: Claudron repo,
-`documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+`documentation/decisions/005-claudfather-boundary-separation.md` §10.3.

@@ -6,7 +6,7 @@ owner: chris
 tags: [ecosystem, claudron, knowledge, vault, migration, boundary, play:ecosystem]
 created: 2026-07-23
 updated: 2026-08-28
-links: ["Claudfather/Claudron L3 plan 06-l3-corpus-return.md", "#509"]
+links: ["Claudfather/Claudron L3 plan 06_l3-corpus-return.md", "#509"]
 ---
 
 # L3 Lessons Triage Ledger

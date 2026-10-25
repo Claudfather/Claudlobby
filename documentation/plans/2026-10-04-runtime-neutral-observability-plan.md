@@ -738,7 +738,7 @@ Cross-references the companions should carry: Claudlobby#1997 (the `agent_cli:` 
 adapter-layer epic, deferred orchestration — #404 overlaps #300 items 1, 2 and 4), Claudron#178/#179.
 
 Prior art the P4 plans carry (ironclad cycle 1, precedent-check). Claudron: decision C trigger 2 — a Cursor/Codex
-fleet member un-parks MCP (`2026-07-18-decision-c-mcp-demand-gated.md:41-42`); the *structural* capture-prompt
+fleet member un-parks MCP (`001-decision-c-mcp-demand-gated.md:41-42`); the *structural* capture-prompt
 claim (`CLI_CONTRACT.md:285-289`); the single-reader invariant (#205); "host" already means machine/settings file
 in D009/D010, so `hooks install --host codex` overloads the term — the plan picks `--front-end codex` or
 `--agent codex`, or documents the overload; R6 on unshipped doors; a new flag takes a capability (#209). clauDNA:
@@ -879,7 +879,7 @@ clauDNA's phase-3 canary table (§5.1).
 ### P1 — Vocabulary, join key and the contracts behind them
 
 Claudron:
-- [ ] PR amending the boundary spec (`documentation/plans/2026-07-20-claudfather-boundary-separation.md`):
+- [ ] PR amending the boundary spec (`documentation/decisions/005-claudfather-boundary-separation.md`):
   - §10.2: the bought layer, owned by Claudlobby — worded mechanism-neutrally ("the normalization layer"), and
     naming no semconv attribute (A-F4 and A-F5, ratified): the normalized session attribute carries the plane's
     house key, and the vendor→house mapping is the intake's — plan 1 names the intake's mapping dict as the F5
@@ -1824,14 +1824,14 @@ Claudron:
   - `hooks install --host codex` (name settled in P4: `--host` clashes with Claudron's existing `host` term;
     `--front-end`/`--agent` are candidates);
   - doctor D009/D010 per host;
-  - a normative Codex snippet in `docs/CLI_CONTRACT.md` with a parity test;
+  - a normative Codex snippet in `documentation/specs/CLI_CONTRACT.md` with a parity test;
   - a capability (e.g. `codex-session-loop`) with its gate sentence.
 
   If C3 shows Codex cannot inject or block, R-capture-prompt is documented as not held on Codex; if C3's
   Claude leg shows a PreCompact block never reaches an unattended model (Claudron#179), the prompt moves to
   `SessionStart(compact)` stdout for both hosts — a contract change that PRs Claudron first (R4). The parity
   test reads the first fenced block of a `##` section (`tests/test_hooks.py:246-257`), so the Codex snippet
-  gets its own `##` section in `docs/CLI_CONTRACT.md`.
+  gets its own `##` section in `documentation/specs/CLI_CONTRACT.md`.
 - [ ] Release Claudron. The companion bumps Claudlobby's pin again to compose the Codex snippet (R6).
 
 Claudlobby (fixture-tested only; composition and canary in the companion):

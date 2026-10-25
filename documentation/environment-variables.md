@@ -198,7 +198,7 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 | `CLAUDNA_SESSION_SUMMARY` | composed, always: `0` unless `bots.<name>.claudna.session_summary` / `harvest` or `defaults.claudna.*` arms it | One summary per sealed segment; unarmed bots export `skipped: disabled` |
 | `CLAUDNA_HARVEST` | `bots.<name>.claudna.harvest` / `defaults.claudna.harvest` | Summaries plus draft vault capture; needs Claudron >= 0.8.0 on the host first (PR 6a) |
 | `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | Exports the version hint; does not pin plugin installation |
-| `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `docs/CLI_CONTRACT.md` §Environment) |
+| `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `documentation/specs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
 
 ## Opt-in Feature Flags
