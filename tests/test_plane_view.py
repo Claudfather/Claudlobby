@@ -1524,6 +1524,89 @@ def test_overview_attention_is_the_boards_owning_fleet_count(tmp_path):
     assert fleets["b"]["open_scope"] == "assigned_to_fleet_bots"
 
 
+def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path):
+    import sqlite3
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    _full_capture(tmp_path)
+    emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "probe",
+        "payload": {"subject_kind": "host", "subject": host,
+                    "metric": "host.load", "value": value}}
+        for host, value in (("first", 1), ("second", 2))])
+    db = tmp_path / "state" / "plane" / "plane.db"
+    conn = sqlite3.connect(db)
+    host, subject = conn.execute(
+        "SELECT host_uid, subject_uid FROM metric_samples ORDER BY ingest_seq LIMIT 1"
+    ).fetchone()
+    conn.executemany(
+        "INSERT INTO metric_samples (ingest_seq,event_id,schema_version,"
+        "occurred_at,ingested_at,host_uid,emitter,subject_kind,subject_uid,metric,value) "
+        "VALUES (?,?,'1','2020-01-01','2026-01-01',?,'probe','host',?,'host.load',?)",
+        [(1_000_000 + n, f"sample_{n}", host, subject,
+          "null" if n == 19_999 else "3") for n in range(20_000)])
+    conn.commit()
+    conn.close()
+    conn = view._ro_conn(db)
+    steps = 0
+    def bounded_work():
+        nonlocal steps
+        steps += 1
+        return int(steps > 200)
+    conn.set_progress_handler(bounded_work, 1000)
+    try:
+        samples = view._host_samples(conn)
+    finally:
+        conn.close()
+    # Newest ingest wins across hosts, even with an older producer timestamp;
+    # a recorded JSON null stays unknown, never replaced by an older value.
+    assert samples == {"host.load": {"value": None, "occurred_at": "2020-01-01"}}
+
+
+def test_task_permission_probe_does_not_scan_other_fleet_history(tmp_path):
+    """Unrelated fleet history must not exhaust a small board's read budget.
+
+    Count SQLite VM work instead of wall time: the old unscoped permission
+    prefilter walked every system row before examining one selected task.
+    """
+    import sqlite3
+    from claudlobby.plane import view
+    from claudlobby.task_permissions import EMITTER
+
+    _dispatch(tmp_path, "a1", fleet="owned", expected_by=FUTURE,
+              tx_state="pane_submitted")
+    db = tmp_path / "state" / "plane" / "plane.db"
+    conn = sqlite3.connect(db)
+    host, task_id = conn.execute(
+        "SELECT host_uid, work_item_id FROM work_items LIMIT 1").fetchone()
+    # Direct writers stay inside this pytest-owned database. These apparent
+    # requests name our task but belong to another fleet, so confer no authority.
+    conn.executemany(
+        "INSERT INTO events (ingest_seq,event_id,schema_version,occurred_at,"
+        "ingested_at,host_uid,fleet_uid,emitter,kind,event,detail) "
+        "VALUES (?,?,?,'2026-01-01','2026-01-01',?,?,?,'system',"
+        "'permission_requested',?)",
+        [(1_000_000 + n, f"ev_{n:032x}", "1", host, "fleet_" + "f" * 32,
+          EMITTER, json.dumps({"task_id": task_id})) for n in range(12_000)])
+    conn.commit()
+    conn.close()
+
+    conn = view._ro_conn(db)
+    steps = 0
+    def bounded_work():
+        nonlocal steps
+        steps += 1
+        return int(steps > 100)
+    conn.set_progress_handler(bounded_work, 1000)
+    try:
+        board = view._fetch_tasks(conn, "owned", root=tmp_path)
+    finally:
+        conn.close()
+    assert len(board["tasks"]) == 1
+    assert board["attention_count"] == 0
+    assert board["tasks"][0]["task_id"] == task_id
+
+
 def test_the_arms_query_selects_exactly_the_attention_query(tmp_path):
     """Both are built from `queries.ATTENTION_ARMS`, so the queue and the
     reasons cannot disagree about who is in it — a new arm reaches both or
