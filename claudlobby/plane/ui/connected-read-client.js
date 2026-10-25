@@ -51,6 +51,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   let continuityTimer = null, visible = false, lastActivity = null, autoAttempted = false;
   let renewalUnknown = false, continuityPaused = false, actionRequests = 0;
   let renewing = false, disconnectRequested = false;
+  let accessRejected = false;
+  const readFailures = new Map();
   const requests = new Set(), cursors = new Map();
   let owner, handle, actions = null, actionEpoch = 0, actionSourceChanged = () => {}, unsubscribe = () => {};
   function now() {
@@ -182,11 +184,11 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   async function http(path, { method = 'GET', body, signal, timeout = 15000, bearer = token,
     limit = 16384 } = {}) {
     const start = now();
-    const controller = new AbortController(), relay = () => controller.abort();
+    const controller = new AbortController(), relay = () => controller.abort(signal?.reason);
     if (signal?.aborted) controller.abort();
     signal?.addEventListener('abort', relay, { once: true });
     requests.add(controller);
-    const timer = setTimeout(relay, timeout), gen = epoch;
+    const timer = setTimeout(() => controller.abort(new DOMException('Read request timed out.', 'TimeoutError')), timeout), gen = epoch;
     try {
       const response = await fetch(path, { method, credentials: 'omit', cache: 'no-store', redirect: 'error',
         signal: controller.signal, headers: { ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}),
@@ -198,7 +200,13 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         catch { if (response.status === 403) data = { state: 'denied' }; else throw new Error(); }
       }
       if (controller.signal.aborted || disposed || gen !== epoch || (bearer && bearer !== token) || !valid()) throw new Error();
+      if ([401,403].includes(response.status) && /\/connected\/(challenge|issue|status|renew)$/.test(path)) accessRejected = true;
       return { status: response.status, data, start };
+    } catch (error) {
+      if (controller.signal.reason?.name === 'TimeoutError') {
+        const failure = new Error('Read request timed out.'); failure.readTimedOut = true; throw failure;
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', relay);
@@ -254,8 +262,12 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     const route = readRoute(url);
     try {
       const result = await http(route.url, { signal: options.signal, limit: 8 * 1024 * 1024 });
+      readFailures.delete(url);
       return { status: result.status, json: async () => result.data };
-    } catch { throw new ReadRequestUnavailable(); }
+    } catch (error) {
+      readFailures.set(url, error.readTimedOut === true ? 'timed_out' : 'unavailable');
+      throw new ReadRequestUnavailable();
+    }
   }
 
   class FetchStream {
@@ -378,6 +390,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   async function connect() {
     if (disposed || ended || busy || !valid()) return false;
     busy = true; disconnectRequested = false; continuityPaused = false; renewalUnknown = false; autoAttempted = false;
+    accessRejected = false;
     stop('Signing in to the selected computer…');
     const gen = epoch;
     try {
@@ -463,5 +476,14 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         stamp:() => `${epoch}:${actionEpoch}:${handle.snapshot().epoch}`,onPause});
       return actions;
     },
+    // Presentation only: the original read handle remains the admission owner.
+    connectionState() {
+      const state = handle.snapshot().state;
+      if (state === 'ready') return 'ready';
+      if (accessRejected) return 'denied';
+      if (state === 'signed_out') return 'disconnected';
+      return state === 'denied' && !binding ? 'not_connected' : state;
+    },
+    readFailure: url => readFailures.get(url),
     dispose, readHandle: handle, snapshot: handle.snapshot, subscribe: handle.subscribe });
 }

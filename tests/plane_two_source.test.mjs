@@ -162,6 +162,18 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.doesNotMatch(nodes.get('fleet-tabs').innerHTML, /99/);
   env.state='unavailable'; env.data.fleets=[]; env.data.sources[1].state='unavailable'; env.data.sources[1].host=null;
   context.renderOverview(env); assert.match(nodes.get('overview').innerHTML, /Host B/);
+  env.data.sources[0].connection_state='not_connected';env.data.sources[0].state='not_connected';
+  env.data.sources[1].connection_state='ready';env.data.sources[1].remediation='Team summary timed out. Other reads and the computer connection are independent.';
+  context.renderOverview(env);context.renderHeader(env);context.renderSummary(env);
+  assert.match(nodes.get('overview').innerHTML,/Not connected/);
+  assert.match(nodes.get('overview').innerHTML,/Connected/);
+  assert.match(nodes.get('overview').innerHTML,/Team summary timed out/);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/recorder DOWN/);
+  assert.match(nodes.get('fleet-totals').innerHTML,/team summary unavailable/);
+  assert.match(nodes.get('beat-label').textContent,/not connected/);
+  context.fleets=[{alias:'b / team',display_label:'Host B / team',source_state:'unavailable',connection_state:'ready'},{alias:'a / team',source_state:'not_connected',connection_state:'not_connected'}];
+  context.renderFleetTabs();assert.match(nodes.get('fleet-tabs').innerHTML,/summary unavailable/);
+
 });
 
 test('scoped stream errors refresh coverage without replacing healthy peer status with global reconnect',async()=>{

@@ -89,6 +89,7 @@ test('explicit real handshake yields one canonical minted handle, exact signer b
 test('start and explicit check never sign in, synthesize pairing or replay a mutation', async () => {
   const h = harness(); await h.api.start();
   assert.equal(h.api.snapshot().state, 'denied');
+  assert.equal(h.api.connectionState(), 'not_connected');
   assert.doesNotMatch(h.api.snapshot().remediation || '', /expired/i);
   await h.api.check();
   assert.equal(h.api.snapshot().state, 'denied');
@@ -451,6 +452,8 @@ test('read timeout covers a held response body after headers without publishing 
   });
   const read = h.api.readHandle.jget('/api/tasks'); await flush(); h.runTimer(15000);
   assert.equal(await read, null);
+  assert.equal(h.api.readFailure('/api/tasks'), 'timed_out');
+  assert.equal(h.api.connectionState(), 'ready');
   assert.equal(h.api.snapshot().state,'ready');assert.equal(h.api.snapshot().epoch,epoch);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length,1);
   assert.equal(h.streams.length,1);assert.equal(h.streams[0].init.signal.aborted,false);
@@ -568,4 +571,15 @@ test('an admitted source-loss frame fences a held action without replay or endin
   assert.equal(h.calls.filter(c=>new URL(c.url).pathname.endsWith('/actions/send')).length,1);
   assert.equal(h.calls.filter(c=>new URL(c.url).pathname.endsWith('/status')).length,0);
   stream.close();h.api.dispose();assert.throws(()=>h.api.createActions({key:'computer-2'}),/unavailable/);
+});
+
+
+test('late rejected status cannot relabel a disconnected newer epoch as access denied',async()=>{
+ const h=harness(),late=deferred();await h.api.connect();
+ h.overrides.set('status',()=>late.promise);
+ const checking=h.api.check();await flush();await h.api.logout();
+ const current=h.api.connectionState();assert.notEqual(current,'denied');
+ late.resolve(reply(403,{state:'denied'}));await checking;
+ assert.equal(h.api.connectionState(),current);
+ assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
 });
