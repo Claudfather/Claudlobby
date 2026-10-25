@@ -20,6 +20,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
+import time
 
 from .activation_state import ActivationError, ActivationRefusal, ActivationStore, read_activation, read_selection
 from .config_install import apply_config, prepare_config, read_config_install, rollback_config
@@ -194,7 +197,7 @@ def _external(adapter, pause: UnitPause) -> None:
         _call(adapter, "svc_activation_assert_external", _file(unit), unit["target"], str(os.getpid()))
 
 
-def _darwin_check(adapter, enrollment, targets=None, *, original_load=False):
+def _darwin_check(adapter, enrollment, targets=None, *, original_load=False, restore_pending=frozenset()):
     if enrollment["manager"] != "Darwin":
         return
     for unit in enrollment["units"]:
@@ -211,6 +214,7 @@ def _darwin_check(adapter, enrollment, targets=None, *, original_load=False):
                 installed_path=_file(unit), working_directory=declaration["working_directory"],
                 environment=dict(declaration["environment"]), original=dict(unit["properties"]),
                 require_original_load=original_load,
+                restore_pending=unit["target"] in restore_pending,
             )
         except InventoryError as exc:
             raise ActivationError(f"Darwin enrollment drift: {exc}") from exc
@@ -415,6 +419,73 @@ def _producer_restored(saved: str, observed: str, *, scheduled: bool, allow_fail
     return _same_enrollment(saved, observed, scheduled=scheduled)
 
 
+def _abort_residents(pause, source_plan, source):
+    """Only originally running Darwin KeepAlive residents need a startup grant."""
+    if pause.enrollment["manager"] != "Darwin":
+        return {}
+    from .config_units import planned_units
+    from .runtime_admission import validate_unit_admission
+    result = {}
+    candidates = None
+    for row in pause.units("producers"):
+        definition = plistlib.loads(base64.b64decode(row["generated"]["content"]["base64"], validate=True))
+        if (definition.get("KeepAlive") is not True or definition.get("RunAtLoad") is not True
+                or dict(row["properties"])["ActiveState"] != "active"):
+            continue
+        if candidates is None:
+            candidates = {str(declaration.source): (declaration, item)
+                          for declaration, item in planned_units(source_plan, "Darwin")}
+        declaration, item = candidates.get(row["declaration"]["source"], (None, None))
+        if (declaration is None or item["phase"] != "producers" or not item["enroll"]
+                or item["sha256"] != row["generated"]["sha256"]
+                or declaration.release_id != source.release_id):
+            raise ActivationRefusal("restored resident differs from the frozen source plan")
+        unit = validate_unit_admission(source, declaration, item, source_plan.blob(item["sha256"]))
+        if unit.mode != "exec" or unit.phase != "producers":
+            raise ActivationRefusal("abort restoration cannot replay one-shot work")
+        result[row["target"]] = (item["admission"], unit)
+    return result
+
+
+def abort_producer_request(store, activation_id, target, identity):
+    """Revalidate one old-client request while its marked abort retains EX."""
+    from .runtime_admission import RuntimeIdentity, _unit_request
+    record = read_activation(store.root, activation_id)
+    marker = record.body.get("upgrade_abort")
+    if not isinstance(marker, dict):
+        raise ActivationRefusal("producer restoration has no durable abort marker")
+    store.check_upgrade_abort(activation_id, sql_user_version=marker["sql_user_version"])
+    previous = record.body["previous_selection"]
+    source = read_release(store.root, previous["release_id"])
+    source_plan = read_plan(store.root, previous["plan_id"])
+    if (source_plan.release_id != source.release_id or source_plan.release_seal != source.seal_sha256
+            or identity != RuntimeIdentity(source.cli_path, source.native_path, source.inputs.artifact_id)):
+        raise ActivationRefusal("producer restoration identity differs from the selected source")
+    pause = load_unit_pause(store, activation_id)
+    residents = _abort_residents(pause, source_plan, source)
+    admitted = [row for row in pause.units("producers") if row["target"] in residents
+                and residents[row["target"]][1] == target]
+    if len(admitted) != 1 or target.root != store.root or target.release_id != source.release_id:
+        raise ActivationRefusal("abort scope is not one exact original resident producer")
+    _check_source(admitted[0]["generated"])
+    _check_source(admitted[0]["installed"][0])
+    return _unit_request(target, identity)
+
+
+def _resident_admitted(store, activation_id, adapter, target, original, installed_file):
+    """A native running PID must have received this abort's exact old-client grant."""
+    from .supervision_inventory import _darwin_print
+    if _call(adapter, "svc_activation_snapshot", installed_file, target) != "unchanged loaded active":
+        return False
+    text = adapter.read("svc_inventory_properties", target)
+    props = _darwin_print(text, target, restore_pending=True)
+    if props["ActiveState"] != "active":
+        return False
+    pids = re.findall(r"^\tpid = ([0-9]+)$", text, re.MULTILINE)
+    grants = read_activation(store.root, activation_id).body["upgrade_abort"].get("resident_grants", {})
+    return len(pids) == 1 and int(pids[0]) in grants.get(original.unit, [])
+
+
 def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: str, release,
                         sql_user_version: int, adapter=None) -> UnitPhaseEvidence:
     """Restore only frozen producers of an upgrade stopped before any bot pause.
@@ -459,6 +530,8 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
     if journal.status not in allowed:
         raise ActivationRefusal("producer parking is not a completed pause or its recorded restoration")
     adapter = adapter or Adapter()
+    residents = _abort_residents(pause, source_plan, source)
+    restoring = frozenset(residents) if not terminal and "upgrade_abort" in record.body else frozenset()
     untouched = {unit["target"] for phase in ("bots", "ingest") for unit in pause.units(phase)}
 
     def verify_untouched():
@@ -491,7 +564,7 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
 
     verify_untouched()
     _external(adapter, pause)
-    _darwin_check(adapter, pause.enrollment)
+    _darwin_check(adapter, pause.enrollment, restore_pending=restoring)
     if not terminal:
         for unit in pause.units("producers"):
             before = dict(unit["properties"])
@@ -515,6 +588,37 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
     for unit in _timers_last(pause.units("producers")):
         _check_source(unit["installed"][0])
         target, saved = unit["target"], _saved(unit)
+        if target in residents:
+            admission, original = residents[target]
+            if not _resident_admitted(store, activation_id, adapter, target, original, _file(unit)):
+                if terminal:
+                    raise ActivationRefusal("restored resident lacks its running admission receipt")
+                from .runtime_admission import RuntimeIdentity, activation_start
+                identity = RuntimeIdentity(source.cli_path, source.native_path, source.inputs.artifact_id)
+                with activation_start(store, activation_id, identity=identity, unit=admission,
+                                      abort_producer=True) as admitted:
+                    requested = False
+                    deadline = time.monotonic() + 30
+                    while True:
+                        observed = _call(adapter, "svc_activation_snapshot", _file(unit), target)
+                        if observed == "unchanged loaded active" and _resident_admitted(
+                                store, activation_id, adapter, target, original, _file(unit)):
+                            if not admitted.wait():
+                                raise ActivationError(f"resident handshake was not completed: {target}")
+                            _darwin_check(adapter, pause.enrollment, {target}, original_load=True)
+                            break
+                        # A loaded active PID can be an old wrapper about to
+                        # refuse admission. Never interrupt it: wait for its
+                        # exact request or its exit, then start only inactive.
+                        if observed.endswith(" inactive") and not requested:
+                            if _call(adapter, "svc_activation_start", _file(unit), target) != "start-requested":
+                                raise ActivationError(f"resident start was not acknowledged: {target}")
+                            requested = True
+                        if time.monotonic() >= deadline:
+                            raise ActivationError(f"restored resident admission was not observed: {target}")
+                        time.sleep(.05)
+                resumed.append(target)
+            continue
         native = _native_saved(unit, scheduled, allow_failed=pause.enrollment["manager"] == "Linux")
         if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
                                   scheduled=target in scheduled, allow_failed=pause.enrollment["manager"] == "Linux"):

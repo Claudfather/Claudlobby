@@ -685,6 +685,17 @@ class ActivationStore:
         record.body.update(status="rolled_back", pending=None)
         return self._save(record)
 
+    def record_upgrade_resident_grant(self, activation_id: str, *, unit: str, pid: int) -> ActivationRecord:
+        """Retain the exact old-client PID before replying to its bounded startup request."""
+        record = read_activation(self.root, activation_id)
+        marker = record.body.get("upgrade_abort")
+        if not isinstance(marker, dict) or type(pid) is not int or pid <= 1:
+            raise ActivationError("resident restoration has no admitted abort request")
+        record = self.check_upgrade_abort(activation_id, sql_user_version=marker["sql_user_version"])
+        grants = record.body["upgrade_abort"].setdefault("resident_grants", {})
+        grants.setdefault(unit, []).append(pid)
+        return self._save(record)
+
     def begin_adoption_abort(self, activation_id: str, *, reason: str, release_id: str,
                              artifact_id: str, sql_user_version: int) -> ActivationRecord:
         """Durably mark an operator's early first-adoption abort before any effect.

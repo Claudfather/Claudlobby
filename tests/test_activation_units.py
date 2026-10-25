@@ -914,6 +914,66 @@ def _ticking_darwin(installed, tmp_path, frozen_active):
     return root, inventory, plan, TickingAdapter(inventory), {"producers": [entry.target], "bots": [], "ingest": []}
 
 
+@pytest.mark.parametrize("change", [None, "phase", "argv", "identity", "unmarked", "selection", "completed"])
+def test_abort_resident_scope_accepts_only_exact_marked_original_start(installed, tmp_path, change):
+    from claudlobby.config_units import unit_family
+    from claudlobby import runtime_admission as admission
+    root, inventory, _, _, phases = _ticking_darwin(installed, tmp_path, "active")
+    row = inventory.units[0]
+    release = state.read_release(root, row.declaration.release_id)
+    environment = dict(row.declaration.environment, CLAUDLOBBY_RELEASE_ID=release.release_id)
+    argv = admission.wrap_unit_argv(environment, unit="fixture", phase="producers", mode="exec", argv=("/bin/sleep", "60"))
+    definition = plistlib.loads(row.generated.content)
+    definition.update(ProgramArguments=list(argv), KeepAlive=True, RunAtLoad=True, EnvironmentVariables=environment)
+    content = plistlib.dumps(definition)
+    row.declaration.source.write_bytes(content)
+    Path(row.installed[0].path).write_bytes(content)
+    row = replace(row, declaration=replace(row.declaration, environment=tuple(environment.items())),
+                  generated=FileSnapshot.read(row.declaration.source),
+                  installed=(FileSnapshot.read(Path(row.installed[0].path)),))
+    inventory = replace(inventory, units=(row,), observed_files=row.installed)
+    files = {"fixture.plist": (content, 0o644), "fixture.service": (b"unused Linux variant\n", 0o644)}
+    metadata = unit_family(files, destination=row.declaration.source.parent, scope="host", phase="producers",
+                           release_id=release.release_id)
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={"units": metadata})
+    for name, (blob, mode) in files.items():
+        builder.file(row.declaration.source.parent / name, blob, mode=mode)
+    plan = builder.seal()
+    adapter = TickingAdapter(inventory)
+    identity = admission.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)
+    target = admission.parse_unit_argv(argv)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter)
+        # The explicit abort marker and restored bytes are prerequisites for its scope.
+        if change != "unmarked":
+            store.begin_upgrade_abort("cutover", reason="restore original resident", release_id=release.release_id,
+                                       artifact_id=release.inputs.artifact_id, sql_user_version=12)
+        config_install.rollback_config(root, units.journal_id("cutover", "producers"))
+        if change == "phase":
+            target = replace(target, phase="bots")
+        elif change == "argv":
+            target = replace(target, command=("/bin/sleep", "61"))
+        elif change == "identity":
+            identity = replace(identity, artifact_id="foreign")
+        elif change == "selection":
+            state._write(root / "state/selected-release.json", None)
+        elif change == "completed":
+            store.finish_upgrade_abort("cutover", sql_user_version=12, evidence_digest="3" * 64,
+                                       resumed=[], cleared=[])
+        if change is not None:
+            with pytest.raises((state.ActivationError, state.ActivationRefusal)):
+                units.abort_producer_request(store, "cutover", target, identity)
+        else:
+            expected = admission._unit_request(target, identity)
+            assert units.abort_producer_request(store, "cutover", target, identity) == expected
+            with admission.activation_start(store, "cutover", identity=identity,
+                    unit={"kind": "unit-start-v1", "unit": target.unit, "argv": list(argv)}, abort_producer=True) as notice:
+                admission._request_start(root, {**expected, "pid": os.getpid()}, .5)
+                assert notice.wait()
+                with pytest.raises(state.ActivationError):
+                    admission._request_start(root, {**expected, "pid": os.getpid()}, .1)
+
+
 def test_darwin_producer_finished_between_inventory_and_prepare(installed, tmp_path):
     root, inventory, plan, adapter, phases = _ticking_darwin(installed, tmp_path, "active")
     adapter.states["gui/501/fixture"] = "unchanged loaded inactive"  # its tick exited

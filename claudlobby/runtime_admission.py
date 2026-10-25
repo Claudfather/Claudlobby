@@ -622,7 +622,8 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
 @contextmanager
 def activation_start(store: ActivationStore, activation_id: str, *, operation: str | None = None,
                      bot_dir: Path | None = None, identity: RuntimeIdentity | None = None,
-                     unit: dict | None = None, timeout: float = 30.0):
+                     unit: dict | None = None, timeout: float = 30.0,
+                     abort_producer: bool = False):
     """Arm one ephemeral supervisor start while the coordinator holds EX flock.
 
     Keep this context AND locked_activation open through start/readiness. A
@@ -635,6 +636,8 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
     the live responder. Recovery must quiesce any surviving admitted processes.
     """
     identity = identity or RuntimeIdentity.current()
+    if abort_producer and unit is None:
+        raise ActivationError("abort producer scope requires one exact frozen unit")
     target = None
     if unit is not None:
         if (operation is not None or bot_dir is not None or unit.get("kind") != "unit-start-v1"
@@ -643,7 +646,12 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
         target = parse_unit_argv(unit["argv"])
         if target.unit != unit["unit"]:
             raise ActivationError("unit admission identity changed")
-        request = _activation_unit_request(store, activation_id, target, identity)
+        if abort_producer:
+            from .activation_units import abort_producer_request
+            unit_request = abort_producer_request
+        else:
+            unit_request = _activation_unit_request
+        request = unit_request(store, activation_id, target, identity)
     else:
         request = _activation_request(store, activation_id, operation, bot_dir, identity)
     endpoint = store.root / "state/activation-start.sock"
@@ -691,7 +699,7 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
                                 or continuation_pid is not None and reported_pid != continuation_pid):
                             connection.sendall(b'{"refused":true}\n')
                             continue
-                        fresh = (_activation_unit_request(store, activation_id, target, identity) if target else
+                        fresh = (unit_request(store, activation_id, target, identity) if target else
                                  _activation_request(store, activation_id, operation, bot_dir, identity))
                         if fresh != request:
                             raise ActivationError("activation start scope changed")
@@ -699,6 +707,8 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
                         if target and continuation_pid is None and peer_pid is not None and peer_pid != reported_pid:
                             connection.sendall(b'{"refused":true}\n')
                             continue
+                        if abort_producer:
+                            store.record_upgrade_resident_grant(activation_id, unit=target.unit, pid=reported_pid)
                         connection.sendall(json.dumps({"admitted": received}).encode() + b"\n")
                         admitted.set()
                         if target and target.phase == "bots" and continuation_pid is None:
