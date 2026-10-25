@@ -385,6 +385,7 @@ def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, m
                             'echo late > "$1" ) & wait', "private-timeout", str(late), str(gate)],
                            timeout=0.05, env=dict(os.environ), capture_output=True, text=True)
     assert not late.exists()
+    assert gate.exists()  # the drain ran, else no survivor could have written late
 
 
 def test_quiet_settle_is_the_native_wait_and_widens_the_call_budget(tmp_path):
