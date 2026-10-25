@@ -66,9 +66,10 @@
 #   statuses: it built if one of them has the state "success".
 # - A preview's VERCEL_GIT_PREVIOUS_SHA is the sha of the latest earlier preview
 #   of its branch that built and that the replay did not skip, or empty.
-# - Fetch its commit as Vercel clones it (git init, git fetch --depth=10 URL SHA,
-#   git checkout FETCH_HEAD). In its Root Directory, run this script with the
-#   arguments the PR will use, VERCEL_ENV=preview and that previous SHA.
+# - Vercel clones with git clone --depth=10. For a past commit, fetch it the
+#   equivalent way: git init, git fetch --depth=10 URL SHA, git checkout
+#   FETCH_HEAD. In its Root Directory, run this script with the arguments the PR
+#   will use, VERCEL_ENV=preview and that previous SHA.
 # Count the builds (exit 1) and the skips (exit 0). Count apart the previews of
 # dependabot/ branches, which the key turns off, and any commit that is gone.
 #
