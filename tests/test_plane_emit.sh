@@ -2,7 +2,15 @@
 # Hermetic shim checks: committed socket ACK versus durable stage pending,
 # refusal, cooldown, and pre-minted replay IDs. The fake daemon uses a short
 # private socket; a recorder is a tripwire against cold full-CLI invocation.
-set -euo pipefail
+set -Eeuo pipefail
+# A step that fails outside the checks below ends the suite under set -e, and
+# its own output may be in a file the EXIT trap deletes: this trap names it,
+# inside the functions too (-E). It skips subshells: bash 3.2 runs it there
+# however the caller guards the command, and a subshell failure that ends the
+# suite also fails a command in the suite's own shell. Under bash 3.2 a step in
+# a function or loop gets the line that opens it.
+# shellcheck disable=SC2154  # _err is set at the start of the trap
+trap '_err=$?; [ "$BASH_SUBSHELL" -ne 0 ] || printf "FAIL(line %s%s): exit %s: %s\n" "$LINENO" "${FUNCNAME:+ in $FUNCNAME, called from line ${BASH_LINENO[0]}}" "$_err" "$BASH_COMMAND" >&2' ERR
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 SHIM="$LIB_DIR/plane-emit.sh"
@@ -79,19 +87,23 @@ start_daemon() {  # $1=response-json [$2=seconds before each reply]
 }
 stop_daemon() { kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; daemon_pid=""; }
 
-# Disabled isolation: no socket, subprocess, staged batch, or output.
-out=$(printf '%s' "$batch" | PLANE_EMIT_DISABLED=1 PLANE_EMIT_CLI="$recorder" \
-      PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>&1); rc=$?
+# Disabled isolation: no socket, subprocess, staged batch, or output. This shim
+# exits without reading its input, so the batch is a here-string: a writer
+# piping it in can find the pipe closed, and that failed write fails the step.
+rc=0
+out=$(PLANE_EMIT_DISABLED=1 PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" \
+      bash "$SHIM" <<<"$batch" 2>&1) || rc=$?
 [ "$rc" -eq 0 ] && [ -z "$out" ] && [ ! -e "$RECORDER_LOG" ] || {
     echo "FAIL(disabled): rc=$rc output=$out"; exit 1;
 }
 
 # A daemon acknowledgement alone is committed (rc 0).
 start_daemon '{"ok": true, "results": [{"event_id": "ev_11111111111111111111111111111111", "status": "committed"}]}'
-out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>"$tmpdir/committed.err"); rc=$?
+rc=0
+out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>"$tmpdir/committed.err") || rc=$?
 stop_daemon
 [ "$rc" -eq 0 ] && echo "$out" | grep -q '^ev_[0-9a-f]*$' || {
-    echo "FAIL(committed): rc=$rc output=$out"; exit 1;
+    echo "FAIL(committed): rc=$rc output=$out"; cat "$tmpdir/committed.err"; exit 1;
 }
 [ ! -e "$RECORDER_LOG" ] || { echo "FAIL(committed): cold CLI ran"; exit 1; }
 grep -q '"event_id"' "$tmpdir/seen.jsonl" || { echo "FAIL(committed): daemon saw no pre-minted id"; exit 1; }
