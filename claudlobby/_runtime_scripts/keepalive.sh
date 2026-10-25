@@ -432,7 +432,9 @@ fi
 #
 #   UNKNOWN — Neither signal matched.  Consecutive UNKNOWNs are tracked in
 #             a counter file; crossing a threshold logs a warning so fleet
-#             dashboards can surface stuck bots.
+#             dashboards can surface stuck bots. data/.unknown holds the
+#             epoch of the run's first UNKNOWN tick, which fleet-pulse
+#             pages pane_unknown from (#997).
 #
 # Operators can extend patterns without editing this script:
 #   KEEPALIVE_BUSY_PATTERNS  — extra ERE appended to the spinner check
@@ -702,14 +704,14 @@ case "$state" in
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
-        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
+        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
         ;;
     LIMIT)
         # #996: held by a usage limit. Named, never IDLE: no data/.idle (so
         # fleet-pulse pages usage_limit_held instead of staying quiet), no
         # reload and no bridge heal into the pane. The one key path is
         # usage_limit_tick's resume, once per reset, when armed.
-        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held"
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held" "$BOT_DIR/data/.unknown"
         usage_limit_tick "$_ul_verdict"
         ;;
     HELD)
@@ -719,7 +721,7 @@ case "$state" in
         # re-stamped every HELD tick so fleet-pulse can tell a live hold from a
         # stale marker.
         echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, then stop and look: a menu or modal may be taking the Enter; do not restart)" >> "$LOG"
-        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle"
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
         if [ -f "$BOT_DIR/data/.held" ]; then
             touch "$BOT_DIR/data/.held"
         else
@@ -731,7 +733,7 @@ case "$state" in
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
-        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
+        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then
         # clear the marker. This is the one place keepalive presses Enter on an
@@ -757,6 +759,17 @@ case "$state" in
     *)
         # Track consecutive UNKNOWN runs
         rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
+        # #997: data/.unknown holds the epoch of the run's first UNKNOWN tick
+        # and is re-stamped every UNKNOWN tick, as data/.held is, so fleet-pulse
+        # can page pane_unknown once a pane stays unreadable past its
+        # threshold. This arm keeps data/.idle, so activity_stuck cannot see
+        # such a pane after an IDLE tick; every other verdict removes the
+        # marker, and start-bot.sh removes it when a session starts.
+        if [ -f "$BOT_DIR/data/.unknown" ]; then
+            touch "$BOT_DIR/data/.unknown"
+        else
+            date +%s > "$BOT_DIR/data/.unknown"
+        fi
         prev=0
         [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
         count=$((prev + 1))

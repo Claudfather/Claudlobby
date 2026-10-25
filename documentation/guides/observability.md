@@ -37,6 +37,7 @@ Bot activity
   └─► fleet-pulse.sh (cron)     ──► emit_fleet_event ──► the plane (source: pulse)
                                 ──► state/pulse/<fleet>.pulse-summary.txt (human-readable)
                                 ──► [FLEET-PULSE] notification to manager tmux
+                                ──► the fleet's alert channel, once an episode, when the bot is the fleet manager
   └─► emit_failure_alert / emit_fleet_notice ──► emit_fleet_event ──► the plane (anchored on the fleet, or the host for a host job; source: alert/notice)
       (start-bot.sh, reload-fleet.sh, …)      ──► [FLEET-ALERT]/[FLEET-NOTICE] nudge to manager tmux
 Readers: claudlobby event list / fleet reports list / fleet uptime / fleet status / brief; the plane's samples age under `plane prune`.
@@ -54,6 +55,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `activity_stuck` | pulse | Bot is animating but hasn't made a tool call in >threshold seconds, counted from its last tool call or the last tick keepalive saw no turn running (IDLE, HELD or LIMIT), whichever is later. Data: `last_tool_call_epoch`, `last_no_turn_epoch` (null with no `.last-no-turn` marker), `elapsed_seconds` |
 | `input_held` | pulse | The bot's input box holds text that was never submitted and no turn is running, past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). It is not hung: an operator presses Enter in its pane, and a restart would discard the text |
 | `usage_limit_held` | pulse | A claude.ai usage limit stopped the bot and it is still held well after the limit's printed reset (keepalive's `LIMIT` verdict, past its resume window; #996). Data: `since_epoch`, `reset_epoch`, `limit`, `reset`, `screen`, `resume` (`off`, `armed`, or `tried` when keepalive already resumed it once for this reset). Paged in place of `activity_stuck`. The remedy is a prompt to the bot, never usage credits; no restart is needed |
+| `pane_unknown` | pulse | keepalive has read the bot's pane as none of the states it knows (no running turn, no prompt, no held box and no usage limit: its `UNKNOWN` verdict) for longer than `OBSERVABILITY_PANE_UNKNOWN_THRESHOLD` (default 1800 s), with no tool call since. Data: `unknown_since_epoch`, `unknown_seconds`. After an idle tick such a pane keeps `data/.idle`, so `activity_stuck` cannot see it (#997). Look at its pane: a menu or a dialog may be waiting for a key |
 | `overdue_dispatch` | pulse | A dispatched task passed its deadline with no terminal linked report. The manager is paged once per assignment (#2457) |
 | `script_error` | lib | A lifecycle script exited non-zero |
 | `bridge_down` | pulse / alert | Live tmux session, but the bot's Telegram bridge (channel poller) isn't delivering. Raised per-pulse by `fleet-pulse.sh` once down past `OBSERVABILITY_BRIDGE_DOWN_GRACE` seconds, and separately by `start-bot.sh` at bring-up on a verified-dark bridge or missing token |
@@ -131,6 +133,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `runtime/bots/<bot>/keepalive.log` | Plaintext keepalive state log | Rotated by log-rotate.sh (500 lines) |
 | `state/plane/plane.db` | The plane: every event, dispatch, report and heartbeat sample (F18 closure — the per-bot and fleet-root event files are gone); read with `claudlobby event list` / `fleet reports list` / `fleet uptime` / `brief` | Append-only; metric samples aged by `plane prune` (30d) |
 | `runtime/bots/<bot>/data/.idle` | Idle marker — touched by keepalive.sh on IDLE, cleared on BUSY. Fleet-pulse reads mtime. | Transient (current state only) |
+| `runtime/bots/<bot>/data/.unknown` | Unreadable-pane marker — keepalive.sh writes the epoch of the first UNKNOWN tick of a run and re-stamps it on each UNKNOWN tick; every other verdict removes it, and start-bot.sh removes it when a session starts. pane_unknown times the run from it. | Transient (current state only) |
 | `runtime/bots/<bot>/data/.last-no-turn` | No-turn marker — touched by keepalive.sh on every tick that sees no turn running (IDLE, HELD or LIMIT, but not a HELD tick whose screen shows a running turn above the box) and never cleared, so once a turn begins it still says when keepalive last saw no turn running. activity_stuck times a stall from the later of this and `.last-tool-call`. | Transient (current state only) |
 | `runtime/bots/<bot>/data/.last-tool-call` | Tool-call marker — touched by bot-vitals.sh on every hook. Stale mtime, a stale `.last-no-turn` and no `.idle` = activity_stuck candidate. | Transient (current state only) |
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |
