@@ -179,6 +179,59 @@ def test_preserved_bot_state_is_upgrade_only_and_part_of_immutable_intent(propos
         assert record.body["intent"]["preserve_bot_state"] is True
 
 
+def test_forward_recovery_is_target_bound_selected_and_immutable(proposal):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        with pytest.raises(a.ActivationError, match="selected upgrade and its exact target"):
+            store.prepare("cold", plan, recovery_release_id=plan.release_id,
+                          enrollment_digest="1" * 64, forward_recovery=True)
+        assert not (builder.root / "state/activations/cold").exists()
+        _prepare(store, plan, "prior")
+        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
+        store.begin("prior", "selection_switched")
+        store.select("prior")
+        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
+        with pytest.raises(a.ActivationError, match="selected upgrade and its exact target"):
+            store.prepare("wrong", plan, recovery_release_id="r-" + "a" * 64,
+                          enrollment_digest="1" * 64, forward_recovery=True)
+        record = store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
+                               enrollment_digest="1" * 64, forward_recovery=True)
+        assert record.body["intent"]["forward_recovery"] is True
+        assert store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
+                             enrollment_digest="1" * 64, forward_recovery=True) == record
+        with pytest.raises(a.ActivationError, match="different intent"):
+            store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
+                          enrollment_digest="1" * 64)
+        with pytest.raises(a.ActivationError, match="old-source rollback is unsupported"):
+            store.begin_rollback("upgrade")
+        assert a.read_activation(builder.root, "upgrade") == record
+
+
+def test_forward_recovery_keeps_no_effect_cancel_and_early_upgrade_abort(proposal):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan, "prior")
+        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
+        store.begin("prior", "selection_switched")
+        store.select("prior")
+        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
+        selected = a.read_selection(builder.root)
+        for name in ("cancelled", "early"):
+            store.prepare(name, plan, recovery_release_id=plan.release_id,
+                          enrollment_digest="1" * 64, forward_recovery=True)
+            if name == "cancelled":
+                assert store.cancel_prepared(name).status == "rolled_back"
+                continue
+            _advance(store, name, ("producers_paused",))
+            store.begin_upgrade_abort(name, reason="before bot quiescence", release_id=plan.release_id,
+                                      artifact_id="fixture", sql_user_version=13)
+            assert store.finish_upgrade_abort(name, sql_user_version=13, evidence_digest="3" * 64,
+                                              resumed=[], cleared=[]).status == "rolled_back"
+        assert a.read_selection(builder.root) == selected
+
+
 @pytest.mark.parametrize("request_ns", [None, True, -1, 0, "123", 1234567890])
 def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, request_ns):
     builder, _, _ = proposal

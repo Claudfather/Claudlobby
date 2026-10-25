@@ -249,7 +249,8 @@ class ActivationStore:
                 source_release_id: str | None = None,
                 legacy_source: bool = False,
                 install_directory: Path | None = None,
-                bot_states: dict | None = None) -> ActivationRecord:
+                bot_states: dict | None = None,
+                forward_recovery: bool = False) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -271,6 +272,13 @@ class ActivationStore:
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if type(forward_recovery) is not bool:
+            raise ActivationError("forward recovery must be an explicit boolean")
+        if forward_recovery:
+            if (legacy_source or previous is None
+                    or recovery_release_id != plan.release_id):
+                raise ActivationError("forward recovery requires a selected upgrade and its exact target release")
+            intent["forward_recovery"] = True
         if bot_states is not None:
             if legacy_source or previous is None or not bot_states:
                 raise ActivationError("preserving bot state requires a selected release upgrade")
@@ -617,6 +625,8 @@ class ActivationStore:
     def begin_rollback(self, activation_id: str) -> ActivationRecord:
         self.assert_locked()
         record = read_activation(self.root, activation_id)
+        if record.body["intent"].get("forward_recovery") is True:
+            raise ActivationError("forward recovery requires the same candidate; old-source rollback is unsupported")
         if "upgrade_abort" in record.body:
             raise ActivationError("early upgrade abort owns recovery; rerun that abort command")
         if record.body["intent"].get("source_kind") == "legacy-unsealed":

@@ -103,8 +103,14 @@ def _admit(store: ActivationStore, activation_id: str, manifest: MigrationManife
     if manifest.blockers:
         raise MigrationApplyError("migration remains blocked: " + "; ".join(manifest.blockers))
     recovery = read_release(store.root, body["intent"]["recovery_release_id"])
-    if manifest.readability_blockers(recovery.compatibility):
-        raise MigrationApplyError("recorded recovery release cannot read the post-migration state")
+    mode = body["intent"].get("forward_recovery", False)
+    if (type(mode) is not bool or mode and
+            (body["previous_selection"] is None or legacy
+             or recovery.release_id != manifest.target["release_id"])):
+        raise MigrationApplyError("recorded forward recovery differs from the exact selected upgrade target")
+    for after_writes, label in ((False, "post-migration"), (True, "post-target-write")):
+        if manifest.readability_blockers(recovery.compatibility, after_target_writes=after_writes):
+            raise MigrationApplyError(f"recorded recovery release cannot read the {label} state")
     return record
 
 

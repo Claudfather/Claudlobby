@@ -197,6 +197,7 @@ def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidat
     assert result["data"]["activation_id"] == result["request_id"]
     assert result["data"]["recorded_activation"]["status"] == "active"
     assert result["data"]["recording"] == "committed" and result["release_id"] == release.release_id
+    assert result["data"]["recovery_mode"] == result["data"]["recorded_activation"]["recovery_mode"] == "target"
     upgrades = []
 
     def upgrade(selected_root, activation_id, plan_id, install_directory):
@@ -214,6 +215,7 @@ def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidat
     second = call(capsys, argv)
     assert upgrades == [(root, second["request_id"], plan.plan_id, directory)]
     assert second["data"]["upgrade_supported"] is True
+    assert second["data"]["recovery_mode"] == second["data"]["recorded_activation"]["recovery_mode"] == "source"
 
 
 def test_explicit_first_adoption_routes_to_legacy_owner_without_changing_cold_default(
@@ -816,3 +818,34 @@ def test_preserve_bot_state_routes_only_explicit_upgrade_option(candidate, monke
             "--install-directory", str(directory), "--preserve-bot-state"]
     call(capsys, argv, 4)
     assert len(calls) == 1 and calls[0][1] == {"preserve_bot_state": True}
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+def test_forward_recovery_rejects_unselected_host_before_record(candidate, capsys, adopt):
+    root, _, plan, directory = candidate
+    before = snapshot(root)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory), "--forward-recovery"]
+    if adopt:
+        argv.append("--adopt-existing")
+    result = call(capsys, argv, 4)
+    assert "requires a selected release upgrade" in result["error"]["message"]
+    assert snapshot(root) == before
+
+
+@pytest.mark.parametrize("flag,options", [(None, {}), ("--forward-recovery", {"forward_recovery": True}),
+                                         ("--no-forward-recovery", {"forward_recovery": False})])
+def test_forward_recovery_routes_only_explicit_mode(candidate, monkeypatch, capsys, flag, options):
+    root, _, plan, directory = candidate
+    calls = []
+    monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
+    def upgrade(*args, **kwargs):
+        calls.append(kwargs)
+        raise state.ActivationRefusal("witnessed recovery choice")
+    monkeypatch.setattr(activation, "upgrade_activation", upgrade)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory)]
+    if flag:
+        argv.append(flag)
+    call(capsys, argv, 4)
+    assert calls == [options]

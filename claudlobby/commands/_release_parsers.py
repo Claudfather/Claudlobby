@@ -1,5 +1,6 @@
 """Dependency-light registration for release preparation and diagnosis."""
 
+from argparse import BooleanOptionalAction
 from importlib import import_module
 from uuid import uuid4
 
@@ -206,6 +207,10 @@ def register_release_subparsers(sub):
                           help="Absolute native user-unit directory; verified against the OS adapter's search paths")
     activate.add_argument("--preserve-bot-state", action="store_true",
                           help="Selected release upgrades only: restart witnessed live bots and keep absent servers stopped")
+    activate.add_argument("--forward-recovery", action=BooleanOptionalAction, default=None,
+                          help="Selected upgrades only: bind recovery to this exact sealed target; resume the same "
+                               "candidate, not old-source rollback. Backup is retained, never automatically restored. "
+                               "On --resume, omission keeps the recorded mode; an explicit change refuses")
     activate.add_argument("--adopt-existing", action="store_true",
                           help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
     activate.add_argument("--resume", metavar="ACTIVATION_ID",

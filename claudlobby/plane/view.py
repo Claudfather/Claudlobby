@@ -997,14 +997,12 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
         permission_tasks = set()
         permission_fleets = sorted(reducer_fleets)
         if selected and permission_fleets:
-            # 0009 supplies this partial index. Keep historical pre-0009
-            # read compatibility, but do not let the current planner choose
-            # the broad kind index merely because permission rows are rare.
-            permission_index = (" INDEXED BY idx_events_fleet_system"
-                                if conn.execute("PRAGMA user_version").fetchone()[0] >= 9 else "")
-            # The cards already name their owning fleet UIDs. Restrict this
-            # prefilter too, so each overview row can use the existing fleet
-            # system-event index instead of rescanning every host system event.
+            # 0014 seeks only permission requests, including when none exist.
+            # Historical helper reads retain their available index; raw events
+            # remain candidates, never authority for permission decisions.
+            schema = conn.execute("PRAGMA user_version").fetchone()[0]
+            permission_index = (" INDEXED BY idx_events_permission_requests" if schema >= 14
+                                else " INDEXED BY idx_events_fleet_system" if schema >= 9 else "")
             permission_tasks = {tuple(row) for row in conn.execute(
                 "SELECT DISTINCT host_uid, fleet_uid, json_extract(detail, '$.task_id') "
                 "FROM events" + permission_index + " WHERE kind='system' AND emitter=? AND fleet_uid IN ("
