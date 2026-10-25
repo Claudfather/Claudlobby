@@ -193,15 +193,15 @@ _held_push_floor_holds() {
 # Returns the push's delivery verdict, which debounce_notify reads (#900: a send
 # that reached nobody must not buy the window): 0 submitted; 3 typed and not
 # submitted (#1236), or not typed because the box held text or the floor is
-# fresh; 1 not sent. A non-zero leaves the alert's window open. No manager, or no
-# manager session, still returns 0: the recipient token re-fires the alert once a
-# manager appears (#831).
+# fresh; 1 not sent; 4 not typed because the manager has no session. A non-zero
+# leaves the alert's window open. No manager configured returns 0: there is
+# nobody to send to.
 notify_manager() {
     local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket="" rc=0 floor marker pane box_ticks
     target=$(_manager_target "$bot_dir") || return 0
     [ -n "$target" ] || return 0
     mgr_socket="${target%%|*}"; mgr="${target##*|}"
-    check_tmux_session "$mgr" "$mgr_socket" || return 0
+    check_tmux_session "$mgr" "$mgr_socket" || return 4
     floor="${FLEET_PULSE_HELD_PUSH_FLOOR_S:-$_HELD_PUSH_FLOOR_S_DEFAULT}"
     case "$floor" in ''|*[!0-9]*) floor="$_HELD_PUSH_FLOOR_S_DEFAULT" ;; esac
     marker="$state_dir/held-push.$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
@@ -229,18 +229,24 @@ notify_manager() {
 }
 
 # Wrapper: notify_manager needs bot_dir, but debounce_notify passes only
-# the message. We close over _current_bot_dir for each iteration.
+# the message. We close over _current_bot_dir for each iteration. A manager
+# with no session (4) counts as sent here: the debounce records the alert
+# against the empty recipient, and the recipient change re-fires it once a
+# manager appears (#831).
 _notify_current_bot() {
-    notify_manager "$_current_bot_dir" "$1"
+    local rc=0
+    notify_manager "$_current_bot_dir" "$1" || rc=$?
+    [ "$rc" -ne 4 ] || return 0
+    return "$rc"
 }
 
 # --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---
 # Runs dispatch-overdue.py --all against the plane exactly once.
 # Output is stored in a temp file for per-bot lookup inside the loop.
 # --bots-dir enables respawn detection (#835): a past-deadline row whose worker
-# restarted after it was dispatched is split into the orphan set instead of the
-# overdue set. The session holding that task id is gone, so it can never be
-# echoed and the row would alarm every cycle until it aged out.
+# restarted after it was dispatched is marked orphaned, never overdue. The
+# session holding that task id is gone, so it can never be echoed and the row
+# would alarm every cycle until it aged out.
 _overdue_cache=$(safe_mktemp)
 _orphan_cache=$(safe_mktemp)
 # The overdue reader's rc and stderr are KEPT (chunk 5): once the reader is
@@ -354,6 +360,65 @@ _emit_new_orphans() {
             '{"dispatched_at":'"$_oda"',"expected_by":'"$_oexp"',"task_id":"'"$_tid"'","reason":"worker respawned after dispatch"}' \
             "$_o_dir" "$_o_bot"
     done < <(grep "^${_o_bot} " "$_orphan_cache" || true)
+}
+
+# _check_overdue <bot_dir> <bot_id>
+# Check 6: one page per overdue assignment (#2457). Every overdue row is
+# recorded on the plane each sweep (overdue_dispatch), and an assignment pages
+# its manager once: the page names it, and its id goes into
+# <fleet>.<bot>.dispatch_alerted. The id stays while the reader lists the
+# assignment past due, whatever the verdict (overdue, or deferred: orphaned,
+# progress_grace, max_age_cap), and goes when the reader stops listing it:
+# closed, retired or no longer past due. So the one new fact that pages is
+# another assignment past its deadline. The grace taking a row off the overdue
+# list and then lapsing is none, and neither is a manager restart or time:
+# this check does not use debounce_notify, whose recipient change and
+# re-notify window would page the same assignment again. task recheck re-asks
+# the manager about a task past its deadline once a day.
+#
+# An id is recorded only once its page was submitted: a page no manager
+# session took records nothing, so it goes out once a manager is there (#831).
+# A reader that did not answer changes nothing, since no row of it can be
+# read as closed.
+_check_overdue() {
+    local _c_dir="$1" _c_bot="$2" _seen="$state_dir/${fleet}.${2}.dispatch_alerted"
+    local _nl=$'\n' _old="" _keep="" _new="" _named="" _oldest=0 _n=0 _what
+    local _cb _da _exp _elapsed _asg _verdict _tid
+    [ "${_overdue_reader_rc:-0}" -eq 0 ] || return 0
+    [ -s "$_overdue_cache" ] || [ -e "$_seen" ] || return 0
+    if [ -e "$_seen" ]; then IFS= read -r -d '' _old < "$_seen" || true; fi
+    while read -r _cb _da _exp _elapsed _asg _verdict _tid; do
+        [ -n "${_tid:-}" ] || continue
+        if [ "$_verdict" = overdue ]; then
+            emit_fleet_event "overdue_dispatch" "pulse" \
+                '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"',"task_id":"'"$_tid"'"}' "$_c_dir" "$_c_bot"
+        fi
+        case "$_nl$_old" in
+            *"$_nl$_asg$_nl"*) _keep="$_keep$_asg$_nl" ;;
+            *)
+                [ "$_verdict" = overdue ] || continue
+                _new="$_new$_asg$_nl"
+                _n=$((_n + 1))
+                [ "$_elapsed" -gt "$_oldest" ] && _oldest="$_elapsed"
+                _named="${_named:+$_named, }$_asg"
+                [ "$_tid" = - ] || _named="$_named (task $_tid)"
+                ;;
+        esac
+    done < <(grep "^${_c_bot} " "$_overdue_cache" || true)
+    if [ -n "$_new" ]; then
+        _what="a dispatched task is ${_oldest}s past its deadline"
+        [ "$_n" -eq 1 ] || _what="$_n dispatched tasks are past their deadlines, the oldest by ${_oldest}s,"
+        if notify_manager "$_c_dir" "$_c_bot overdue_dispatch — $_what with no terminal linked report: $_named. Waiting on something outside the worker? Move its deadline: claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"; then
+            _keep="$_keep$_new"
+        fi
+    fi
+    [ "$_keep" != "$_old" ] || return 0
+    if [ -z "$_keep" ]; then
+        rm -f "$_seen"
+    elif ! { printf '%s' "$_keep" > "$_seen.tmp" && mv -f "$_seen.tmp" "$_seen"; }; then
+        echo "fleet-pulse: the overdue pages sent for $_c_bot could not be recorded in $_seen" >&2
+    fi
+    return 0
 }
 
 # --- Check 7 input: the #1024 mirror — reported, never re-tasked ------------
@@ -915,31 +980,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     fi
 
     # --- Check 6: overdue dispatch (from pre-sweep cache) ---
-    if [ -s "$_overdue_cache" ]; then
-        overdue_lines=$(grep "^${bot_id} " "$_overdue_cache" || true)
-        if [ -n "$overdue_lines" ]; then
-            oldest_elapsed=0
-            overdue_ids=""
-            while read -r _bot _da _exp _elapsed _tid; do
-                [ -n "${_elapsed:-}" ] || continue
-                emit_fleet_event "overdue_dispatch" "pulse" \
-                    '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"',"task_id":"'"${_tid:--}"'"}' "$bot_dir" "$bot_id"
-                [ "$_elapsed" -gt "$oldest_elapsed" ] && oldest_elapsed="$_elapsed"
-                if [ "${_tid:--}" != "-" ]; then
-                    overdue_ids="${overdue_ids:+$overdue_ids }$_tid"
-                fi
-            done <<< "$overdue_lines"
-            # Name the open ids. The echo instruction is no longer the
-            # self-heal it was: report-back.sh resolves the open dispatch
-            # itself now (#835), so a row still overdue here means no report
-            # arrived at all, or the worker holds several open at once. Name
-            # the ids for the manager to act on, not for the worker to echo.
-            debounce_notify "$state_dir" "$bot_id" "dispatch_alerted" _notify_current_bot \
-                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report${overdue_ids:+ — no report has closed: $overdue_ids}" "$_mgr_token" "$_RENOTIFY_AFTER_S"
-        else
-            debounce_clear "$state_dir" "$bot_id" "dispatch_alerted"
-        fi
-    fi
+    _check_overdue "$bot_dir" "$bot_id"
     _emit_new_orphans "$bot_dir" "$bot_id"
 
     # --- Check 7: reported, then never re-tasked (#1024) — DEFAULT OFF -------

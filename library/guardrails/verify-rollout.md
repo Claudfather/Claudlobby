@@ -23,6 +23,8 @@ Every PR body has a `## Rollout check` section with four lines. `.github/pull_re
 
 The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. A change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
 
+**Open the PR as a draft until its body has the section.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before the section is written fails at once, and the failed run notifies whoever triggered it.
+
 ## Reviewer
 
 A missing or vacuous check is a request-changes item. CI fails these:
@@ -83,4 +85,6 @@ Rolling a framework release back is the operator's call, under `canary-rollout`.
 1. **Add the caller file.** Copy this repo's `.github/workflows/rollout-check.yml` and pin `uses:` to `Claudfather/Claudlobby/.github/workflows/verify-rollout.yml@<full commit sha>`. Keep the job id `rollout-check`: with the reusable job's name, it makes the check `rollout-check / Rollout check` in a PR's status rollup, which is the name the merge guardrails read.
 2. **Set the paths.** Set `docs-paths` and `tests-paths` to what an exempt PR may change. They are read from the default branch, so a PR cannot widen its own exemption. Anything composed into a running system is not documentation, whatever its file type.
 3. **Add the PR template.** Copy `.github/pull_request_template.md`.
-4. **Add a required check where you can.** Where the repo's merges do not go through a ruleset bypass, also list `rollout-check / Rollout check` in a ruleset's `required_status_checks`.
+4. **Add a required check where you can.** Where the repo's merges do not go through a ruleset bypass, also list `rollout-check / Rollout check` in a ruleset's `required_status_checks`. Know two things about a required check first:
+   - **It passes a skipped job, and the check's job is skipped on a draft**, and on a re-run of a draft's run, which replays the draft's event. When a draft is marked ready, the requirement reads as met for the seconds before the new run appears.
+   - **Which of several runs on one commit it counts is untested.** Each event starts a new run on the PR's head. The merge guardrails read only the newest, and pass it only at `SUCCESS`.

@@ -9,7 +9,6 @@ another action. Revocation stops subsequent admission, not an in-flight effect.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 import re
 
@@ -24,6 +23,7 @@ from ..operation_context import bind_task_context
 from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
 from ..runtime_admission import RuntimeIdentity, mutation_admission
+from .owner_service import admitted_action, check_action_process
 from .ids import ID_PATTERNS, read_host_uid
 from .owner_action_authorization import action_authorization
 from .owner_access import AccessDenied, OwnerNudgeGrant, VerifiedReader
@@ -51,8 +51,7 @@ class OwnerNudges:
     def _authorize(self, reader, fleet_uid, expected_grant):
         if type(reader) is not VerifiedReader:
             raise AccessDenied("verified_reader_required")
-        if any(key in os.environ for key in _GENERATED_ENV):
-            raise AccessDenied("generated_context_refused")
+        check_action_process(self.root, self.package)
         if read_host_uid(self.root / "state") != self.host_uid:
             raise AccessDenied("wrong_deployment")
         if type(expected_grant) is not OwnerNudgeGrant:
@@ -94,6 +93,7 @@ class OwnerNudges:
             raise AccessDenied("nudge_manager_changed")
         return manager
 
+    @admitted_action
     def nudge(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
               task_id: str, manager_uid: str, expected_assignment_id: str | None,
               expected_release_id: str, request_id: str, reason: str,
@@ -133,6 +133,7 @@ class OwnerNudges:
             self._authorize(reader, fleet_uid, grant)
             return result
 
+    @admitted_action
     def inspect(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
                 task_id: str, manager_uid: str, request_id: str,
                 expected_grant: OwnerNudgeGrant) -> OwnerNudgeObservation:

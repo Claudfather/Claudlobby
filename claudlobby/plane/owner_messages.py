@@ -9,7 +9,6 @@ to bots in one exact fleet are supported; no reply, task mutation or retry API.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 from uuid import UUID
 
@@ -24,6 +23,7 @@ from ..operation_context import bind_task_context
 from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
 from ..runtime_admission import RuntimeIdentity, mutation_admission
+from .owner_service import admitted_action, check_action_process
 from .ids import read_host_uid
 from .owner_action_authorization import action_authorization
 from .owner_access import AccessDenied, OwnerMessageGrant, VerifiedReader
@@ -69,8 +69,7 @@ class OwnerMessages:
                    expected_grant: OwnerMessageGrant) -> OwnerMessageGrant:
         if type(reader) is not VerifiedReader:
             raise AccessDenied("verified_reader_required")
-        if any(key in os.environ for key in _GENERATED_ENV):
-            raise AccessDenied("generated_context_refused")
+        check_action_process(self.root, self.package)
         if read_host_uid(self.root / "state") != self.host_uid:
             raise AccessDenied("wrong_deployment")
         if type(expected_grant) is not OwnerMessageGrant:
@@ -102,6 +101,7 @@ class OwnerMessages:
             raise AccessDenied("recipient_not_in_fleet")
         return matches[0]
 
+    @admitted_action
     def send(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
              recipient_uid: str, request_id: str, text: str,
              expected_grant: OwnerMessageGrant) -> CommandOutput:
@@ -144,6 +144,7 @@ class OwnerMessages:
             self._authorize(reader, fleet_uid, grant)
             return result
 
+    @admitted_action
     def inspect(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
                 recipient_uid: str, request_id: str,
                 expected_grant: OwnerMessageGrant) -> OwnerMessageObservation:
