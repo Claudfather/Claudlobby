@@ -191,6 +191,7 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .overview { display: flex; gap: 8px; padding: 6px 10px 8px; flex-wrap: wrap;
             border-bottom: 1px solid var(--edge); flex: none; }
 .overview:empty { display: none; }
+.overview > .ov-line { flex-basis: 100%; }
 .overview .panel-state { padding: 6px 10px; flex: 1; text-align: left; }
 .ov-card { background: var(--panel); border: 1px solid var(--edge);
            border-radius: 8px; padding: 6px 10px; font-size: 12px;
