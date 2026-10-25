@@ -1379,7 +1379,11 @@ def test_ui_reads_in_the_operators_language():
     # one door for both: the header's totals and the rail's host line come
     # from the overview envelope, and both clear on a source failure
     assert "renderHeader(ov)" in js and "renderHostFacts(ov)" in js
-    assert "renderHeader(null)" in js and "renderHostFacts(null)" in js
+    invalidation = js.split("function invalidateOverview() {", 1)[1].split("\n}", 1)[0]
+    assert 'state: "unavailable"' in invalidation and "provenance: null" in invalidation
+    assert all(f"render{panel}(env)" in invalidation for panel in ("Header", "HostFacts", "Overview"))
+    source_failure = js.split('es.addEventListener("source", (ev) => {', 1)[1].split("es.onerror", 1)[0]
+    assert "invalidateOverview();" in source_failure
     assert "hostFacts" not in js              # the dead module state is gone
     # no copied vocabulary, no client-side re-derivation (folds F4 + F7)
     assert "TERMINAL_STATUSES" not in js

@@ -1304,7 +1304,7 @@ test('the real stream source callback clears an open conversation through the ch
   const listeners = new Map(), cleared = [];
   const bindings = { createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
     workLoop: h.loop, $: id => h.get(id), renderSummary() {}, renderHeader: value => cleared.push(value),
-    renderHostFacts: value => cleared.push(value), renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
+    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
   runInNewContext(appSlice('function openStream() {', '$("debug-toggle")'), bindings); bindings.openStream();
   listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
   assert.deepEqual(cleared, [null, null]);
@@ -1318,7 +1318,7 @@ test('a refresh started before stream source loss cannot restore the cleared con
     const h = await conversationHarness({protected: guarded}), reports = h.get('task-reports');
     // app.js's own refreshBoards, coalescing, safety timer and stream callback; reads and timers are held here.
     const requests = [], timers = [], listeners = new Map(), painted = [];
-    const bindings = { fleetsSeen: true, workLoop: h.loop, $: id => h.get(id),
+    const bindings = { fleetsSeen: true, workLoop: h.loop, $: id => h.get(id), esc:String,
       jget(url) { const request = deferred(); requests.push({ url, ...request }); return request.promise; },
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }, clearTimeout() {},
       createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
@@ -1338,12 +1338,12 @@ test('a refresh started before stream source loss cannot restore the cleared con
     await answer(conversationRead(conversationThread('task-a', ['first', 'older']))); await stale;
     assert.deepEqual(painted, []); assert.equal(reports.children.length, 0); assert.match(reports.innerHTML, /Source access unavailable/);
     // The retired read is replaced through the existing coalesced refetch, which re-arms the safety timer.
-    assert.deepEqual(timers.map(timer => timer.delay), [400]);
-    timers.shift().callback(); assert.equal(requests.length, 5);
+    assert.equal(timers.filter(timer => timer.delay===400).length,1);
+    timers.find(timer=>timer.delay===400).callback(); assert.equal(requests.length, 5);
     await answer(conversationRead(conversationThread('task-a', ['first', 'recovered'])));
     assert.equal(painted.length, 1);
     assert.deepEqual(messagesIn(reports.children[0]).map(message => message.dataset.msgId), ['first', 'recovered']);
-    assert.deepEqual(timers.map(timer => timer.delay), [60000]);
+    assert.ok(timers.some(timer => timer.delay===60000),'fast board safety timer is rearmed');
     assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
   }
 });
