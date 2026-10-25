@@ -364,13 +364,26 @@ def test_resident_start_waits_for_delayed_native_admission_before_accepting_pid(
         assert finished.is_set()
 
 
-def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path):
-    late = tmp_path / "late"
+def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, monkeypatch):
+    """#2493: the outcome never rests on a clock. The timeout starts only once the
+    grandchild runs, its late write waits for a gate that opens only at the drain
+    after the kill, and that drain returns only after every process holding the
+    output pipes has exited, so a stalled parent or child cannot reorder them."""
+    late, gate = tmp_path / "late", tmp_path / "gate"
+
+    class Gated(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            if timeout is None:
+                gate.touch()  # the drain: a survivor of the kill writes late before it exits
+            else:
+                assert self.stdout.readline() == "ready\n"  # the grandchild is in the group
+            return super().communicate(input, timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", Gated)
     with pytest.raises(subprocess.TimeoutExpired):
-        NativeAdapter._run(["/bin/bash", "-c", '( /bin/sleep 0.2; echo late > "$1" ) & wait',
-                            "private-timeout", str(late)], timeout=0.05, env=dict(os.environ),
-                           capture_output=True, text=True)
-    time.sleep(0.3)
+        NativeAdapter._run(["/bin/bash", "-c", '( echo ready; until [ -e "$2" ]; do /bin/sleep 0.01; done; '
+                            'echo late > "$1" ) & wait', "private-timeout", str(late), str(gate)],
+                           timeout=0.05, env=dict(os.environ), capture_output=True, text=True)
     assert not late.exists()
 
 
