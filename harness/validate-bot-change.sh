@@ -1250,9 +1250,9 @@ f997_sweep() {
 val_plane_ready "$ROOT" "$F997"
 f997_sweep
 f997_ev=$(val_events "$ROOT" "$F997" "$M997")
-printf '%s' "$f997_ev" | grep -q '"type":"pane_unknown"' && r=yes || r=no
+grep -q '"type":"pane_unknown"' <<<"$f997_ev" && r=yes || r=no
 harness_check "#997 fleet-pulse emits pane_unknown for the unreadable pane" "$r"
-printf '%s' "$f997_ev" | grep -q '"type":"activity_stuck"' && r=no || r=yes
+grep -q '"type":"activity_stuck"' <<<"$f997_ev" && r=no || r=yes
 harness_check "#997 ...and no activity_stuck (data/.idle keeps it quiet)" "$r"
 [ "$(grep -c "$M997 pane_unknown" "$_f997_pages")" = 1 ] && r=yes || r=no
 harness_check "#997 the manager's own alert pages its fleet's channel once" "$r"
