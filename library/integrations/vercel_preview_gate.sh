@@ -56,8 +56,12 @@
 # To measure what the gate would skip on a repo before applying it, replay the
 # repo's recent previews through it:
 # - gh api --paginate "repos/OWNER/REPO/deployments?per_page=100" lists GitHub's
-#   record of each deployment: its id, sha, ref (the branch), environment and
-#   created_at. Keep the project's preview environment, oldest first.
+#   record of each deployment: its id, sha, environment and created_at. For
+#   Vercel's deployments ref is the commit sha, not the branch. Keep the
+#   project's preview environment, oldest first.
+# - A deployment's branch is the head of the pull request that holds its commit:
+#   gh api "repos/OWNER/REPO/commits/SHA/pulls" --jq '.[0].head.ref'. A preview
+#   with no pull request has no branch here: count those apart.
 # - gh api "repos/OWNER/REPO/deployments/ID/statuses" lists one deployment's
 #   statuses: it built if one of them has the state "success".
 # - A preview's VERCEL_GIT_PREVIOUS_SHA is the sha of the latest earlier preview
