@@ -310,7 +310,9 @@ Manage containers on the Pi — list, start, stop, logs, images.
 }
 ```
 
-**Setup:** User must be in `docker` group: `sudo usermod -aG docker $USER`. No token needed — uses local Docker socket.
+**Setup:** No token needed — uses local Docker socket, which the bots' user must be able to reach. The usual way is the `docker` group: `sudo usermod -aG docker $USER`.
+
+**The `docker` group is root by another name.** A member can start a container that mounts `/` and act as root inside it, so once your user joins, every bot on the host has root, whatever the `sudo` rules say. Docker's [post-install notes](https://docs.docker.com/engine/install/linux-postinstall/) give the same warning, and the README's [Safety model](../README.md#safety-model) lists the other rights a bot inherits from your account. The alternative is [rootless Docker](https://docs.docker.com/engine/security/rootless/), which runs the daemon as your user, so a container gets no more than your account has. Its socket is not at `/var/run/docker.sock`, so check that the server finds it before you rely on it.
 
 ## Productivity
 

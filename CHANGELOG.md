@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Docs — the README says what every bot inherits from your account: its `sudo` rules, its groups and polkit (#2454)
+
+Every bot runs as the operator's own user, so it can do whatever that user can. The README's Safety model said a bot acts as your user, but named only `sudo` with no password as a way to root, and still said no composed rule denies `sudo` after #2464 added the worker deny. The Docker integration told operators to join the `docker` group without saying that the group is root by another name, and the Pi setup guide did not say that Raspberry Pi OS gives its first user `sudo` with no password.
+
+- **`README.md`, Safety model:** a bot inherits your account's `sudo` rules, its groups (`docker`, `lxd` and `disk` each reach root without `sudo`) and what polkit grants your desktop session. A deny rule is a guard rail, not a wall (`library/guardrails/permissions-are-not-a-control.md`). That holds for the worker `sudo` deny too (#2464): the section says which commands it denies to which bots, what a refused worker is told to do, and which calls it cannot see. The wall is a separate OS user (#1606).
+- **`documentation/runbooks/pi-setup-guide.md`:** Raspberry Pi OS's two `sudo` defaults (no password for the first user, and one typed password for every terminal), what bounds a bot against them (the worker `sudo` deny as a guard rail, a separate OS user as the wall), and how to ask polkit what a bot may do.
+- **`documentation/integrations.md`:** the Docker step says what joining the group grants, with rootless Docker as the alternative.
+- **`documentation/getting-started.md` and `documentation/runbooks/mac-mini-setup-guide.md`:** a pointer to the Safety model where you choose the account the bots run as.
+
 ### Fixed — session export keeps its cursor while the plane cannot take a write (#2477)
 
 Session export read a write the plane could not take as a refusal of the
