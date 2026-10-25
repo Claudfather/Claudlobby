@@ -21,7 +21,7 @@ reporting, health checks, migrations, setup.
 
 **Placement test** (one line): operates the *host or fleet* → here; steers an *agent session* →
 a skill; touches *knowledge* → through the door. Full algorithm: Claudron repo,
-`documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+`documentation/decisions/005-claudfather-boundary-separation.md` §10.3.
 
 ## Authoring rules
 

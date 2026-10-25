@@ -19,7 +19,7 @@ The original receiving-side plan, `documentation/plans/2026-07-07-claudron-consu
 
 ## Fleet session loop (plan L2)
 
-A vault-wired bot (`claudron_vault_path` set) runs the Claudron **session loop** by default: the composer installs the engine's three lifecycle hooks into the bot's `settings.local.json` and grants the narrow CLI verbs the model may call itself. Claudron owns *what fires when* — this section is the consumer-side pointer; the normative contract is [CLI_CONTRACT.md §Session-loop protocol](https://github.com/Claudfather/Claudron/blob/main/docs/CLI_CONTRACT.md#session-loop-protocol).
+A vault-wired bot (`claudron_vault_path` set) runs the Claudron **session loop** by default: the composer installs the engine's three lifecycle hooks into the bot's `settings.local.json` and grants the narrow CLI verbs the model may call itself. Claudron owns *what fires when* — this section is the consumer-side pointer; the normative contract is [CLI_CONTRACT.md §Session-loop protocol](https://github.com/Claudfather/Claudron/blob/main/documentation/specs/CLI_CONTRACT.md#session-loop-protocol).
 
 **What fires when** (the three composed hooks; budgets are contract):
 
@@ -76,7 +76,7 @@ SSOT: `claudlobby/claudron_compat.py` — `claudlobby host doctor`'s `check_clau
 
 ## Decision C — amendment pointer (trigger 1 re-scoped)
 
-Decision C (`documentation/decisions/2026-07-18-claudron-consumption-door.md`) parks the MCP fragment as demand-gated. Boundary spec §10.5.2 (`Claudron:documentation/plans/2026-07-20-claudfather-boundary-separation.md`) **re-scopes its trigger 1** after #644, and this is the Claudlobby-side record of that amendment:
+Decision C (`documentation/decisions/2026-07-18-claudron-consumption-door.md`) parks the MCP fragment as demand-gated. Boundary spec §10.5.2 (`Claudron:documentation/decisions/005-claudfather-boundary-separation.md`) **re-scopes its trigger 1** after #644, and this is the Claudlobby-side record of that amendment:
 
 - **Was:** "a fleet policy that needs per-tool vault-access permission scoping" — premised on a CLI-skill door being one blanket grant.
 - **Is:** *adversarial-grade, non-circumventable per-verb enforcement.* #644's `tool_grants` + `tools.deny` already express the cooperative-grade split (`Bash(claudron lookup *)` allowed, `Bash(claudron capture *)` denied; deny wins) — that is **pattern**-grade, not structural, since an agent can spell an invocation many ways. Trigger 1 survives only where a fleet policy must hold against an agent trying to evade it.

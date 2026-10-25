@@ -41,7 +41,7 @@ How do Claudlobby fleet bots consume the Claudron knowledge hub for **query-befo
 
 The clauDNA CLI-skill door is the fleet-consumption path, on the record. The `library/mcp/claudron.json` fragment (option A) is **parked**, adopted only on a named trigger. The conformance wiring (#560–564) and the navigate-vs-query protocol (#561) are what C actually depends on and they stand.
 
-**Ratification:** fleet owner, 2026-07-18. Executed cross-repo the same day — **Claudfather/Claudron#60** marks `03-mcp-server.md` `status: deferred` (⛔ demand-gated), takes E3 off the critical path, and re-opens the post-gate "next epic" slot to E4 (indexer/search). This Claudlobby-side decision doc is the receiving-side counterpart.
+**Ratification:** fleet owner, 2026-07-18. Executed cross-repo the same day — **Claudfather/Claudron#60** marks `03_mcp-server.md` `status: deferred` (⛔ demand-gated), takes E3 off the critical path, and re-opens the post-gate "next epic" slot to E4 (indexer/search). This Claudlobby-side decision doc is the receiving-side counterpart.
 
 ## Tradeoffs (named)
 

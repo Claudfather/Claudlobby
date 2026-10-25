@@ -29,7 +29,7 @@ knowledge corpus is Claudron's. The local rules:
   CLI contract).
 - **Placement test** (one line): does it *wire, grant, or supervise*? → here. Behavior → clauDNA;
   knowledge → the vault. Full algorithm: Claudron repo,
-  `documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+  `documentation/decisions/005-claudfather-boundary-separation.md` §10.3.
 
 ## Architecture
 

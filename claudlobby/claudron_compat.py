@@ -32,7 +32,7 @@ from typing import Callable, Literal
 #: Canonical any-agent integration front door — Claudron owns this text; every
 #: claudlobby message that tells an operator how bots reach a vault cites it.
 CLAUDRON_INTEGRATION_URL = (
-    "https://github.com/Claudfather/Claudron/blob/main/docs/INTEGRATION.md"
+    "https://github.com/Claudfather/Claudron/blob/main/documentation/guides/INTEGRATION.md"
 )
 
 #: ``probe`` vocabulary.

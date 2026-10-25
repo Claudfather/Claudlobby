@@ -1349,7 +1349,7 @@ class TestClaudronDoor:
             for w in warnings
         ), warnings
         # The message names the door, and where the door is documented.
-        assert any("docs/INTEGRATION.md" in w for w in warnings), warnings
+        assert any("documentation/guides/INTEGRATION.md" in w for w in warnings), warnings
 
     def test_cli_present_and_vault_valid_is_silent(
         self, fleet_dir, tmp_path, monkeypatch
