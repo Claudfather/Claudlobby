@@ -4,6 +4,14 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+
+test('roster message entry names the exact bot and remains disabled until existing grant admission',()=>{
+  const c={Date,esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=> 'recently'};
+  runInNewContext(source.slice(source.indexOf('function railRow('),source.indexOf('// Selection uses only')),c);
+  const html=c.railRow({uid:'north::actor_'+'a'.repeat(32),alias:'north::bot:team/worker',short:'Worker <one>',fleet:'north / team',kind:'actor',provisional:false});
+  assert.match(html,/data-bot-message="north::actor_/);assert.match(html,/disabled>Message Worker &lt;one&gt;/);
+  assert.match(html,/aria-label="Message Worker &lt;one&gt; in north \/ team"/);
+});
 const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
 const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');

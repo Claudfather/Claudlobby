@@ -23,7 +23,8 @@ class RecordedAdapter:
     def __init__(self, inventory):
         self.manager = inventory.manager
         self.original = {unit.target: " ".join(dict(unit.properties)[key] for key in
-                         ("UnitFileState", "LoadState", "ActiveState")) for unit in inventory.units}
+                         ("UnitFileState", "LoadState", "ActiveState")) for unit in inventory.units
+                         if unit.properties}  # a unit template has no native state (#2522)
         scheduled = {unit.declaration.service for unit in inventory.units
                      if unit.target.endswith(".timer") and unit.declaration.service}
         if self.manager == "Darwin":  # fixtures enroll launchd jobs as their own-schedule producers
@@ -601,6 +602,49 @@ def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollmen
     assert adapter.states == {**adapter.original, "scheduled.service": "enabled loaded inactive"}
     assert foreign.read_bytes() == before_foreign
     assert os.readlink(wants / "collector.service") == "../collector.service"
+
+
+def test_a_unit_template_is_parked_and_restored_with_its_producers_and_never_named_natively(enrollment):
+    """The fleet's failure template (#2522) has no native state: activation
+    parks and restores its file with the producers, and calls no native
+    operation on its name (systemctl refuses a template name)."""
+    inventory, phases, plan, adapter, foreign, _ = enrollment
+    clock = next(unit for unit in inventory.units if unit.target == "clock.timer")
+    name = "com.alpha.job-failed@.service"
+    source = Path(clock.generated.path).parent / name
+    source.write_text("reviewed original failure template\n")
+    installed = Path(clock.installed[0].path).parent / name
+    installed.write_bytes(source.read_bytes())
+    template = EnrolledUnit(replace(clock.declaration, source=source, service=None), name,
+                            FileSnapshot.read(source), (FileSnapshot.read(installed),), ())
+    inventory = replace(inventory, catalog=inventory.catalog + f"installed\t{name}\n",
+                        units=(*inventory.units, template),
+                        observed_files=(*inventory.observed_files, template.installed[0]))
+    phases = {**phases, "producers": [*phases["producers"], name]}
+    adapter = RecordedAdapter(inventory)
+    original = installed.read_bytes()
+    with state.locked_activation(inventory.data_root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        _pause_all(store, adapter)
+        assert not installed.exists()
+        assert [target for function, target in adapter.calls if function == "svc_activation_pause"] == [
+            "clock.timer", "scheduled.service", "member.service", "collector.service"]
+        store.begin_rollback("cutover")
+        for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("selection_restored")]:
+            _complete(store, step)
+        store.begin("cutover", "selection_restored")
+        store.restore_selection("cutover")
+        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started"),
+                            ("producers", "producers_resumed")):
+            if phase == "producers":
+                _complete(store, "verified")
+            store.begin("cutover", step)
+            result = units.restore_phase(store, "cutover", phase, adapter=adapter)
+            store.complete("cutover", step, evidence_digest=result.digest)
+        assert state.read_activation(store.root, "cutover").status == "rolled_back"
+    assert installed.read_bytes() == original
+    assert not any(target == name for _, target in adapter.calls)
+    inventory.check_files()
 
 
 def test_proven_empty_bootstrap_parking_and_restore_are_frozen_noops(empty_enrollment):

@@ -1039,6 +1039,7 @@ test('inspect switching fleets from the Team view uses its one existing inventor
   const h = inspectionHarness(); let polls = 0;
   h.state.currentFleet = 'other'; h.state.currentView = 'fleet';
   h.state.syncWorkRoom = () => {}; h.state.savePick = () => {}; h.state.renderFleetTabs = () => {};
+  h.state.applyFleetVisibility = () => {}; // Overview DOM is outside this inventory-poll fixture.
   h.state.refreshBoards = () => {}; h.state.pollFleet = () => { polls++; };
   h.state.setView = view => { h.state.currentView = view; if (view === 'fleet') h.state.pollFleet(); };
   const get = h.state.$; h.state.$ = id => id === 'search-results' ? { hidden: true } : get(id);
@@ -1087,6 +1088,7 @@ for (const moveToComposer of [false, true]) test(`cross-fleet inspection preserv
   h.document.activeElement = origin;
   h.state.syncWorkRoom = () => { h.document.activeElement = null; };
   h.state.savePick = () => {}; h.state.renderFleetTabs = () => {}; h.state.refreshBoards = () => {};
+  h.state.applyFleetVisibility = () => {}; // This fixture owns inspection/composer focus, not overview visibility.
   h.state.fleetQuery = () => '?fleet=' + encodeURIComponent(h.state.currentFleet);
   h.state.renderInventory = () => {};
   h.state.setView = () => { throw Error('Team is already visible; a second poll is unnecessary'); };

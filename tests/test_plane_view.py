@@ -741,7 +741,7 @@ def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
 def test_index_served_from_package_data(tmp_path):
     r = TestClient(create_app(tmp_path, package=source_package())).get("/")
     assert r.status_code == 200
-    assert "observable plane" in r.text
+    assert "<title>Your teams · Claudfather</title>" in r.text
     assert r.headers.get("cache-control") == "no-store"
     # asset refs carry the cache-bust token (defeats a pinned ES module)
     assert "/app.js?v=" in r.text
