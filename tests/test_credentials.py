@@ -412,6 +412,22 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
     assert calls[1][1]["env"]["FLEET_ROOT"] == str(other_root)
     assert other_result.state_path != result.state_path
 
+    # A probe that may have run without completing names what to read next (#2515).
+    log = root / "state/logs/creds-check.log"
+
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 600)
+
+    for outcome, failed in (
+            ("unverified", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "")),
+            ("unknown", timed_out)):
+        monkeypatch.setattr(check.subprocess, "run", failed)
+        with pytest.raises(check.CredentialCheckError) as stopped:
+            check.check_credentials(root=root, fleet="f")
+        assert stopped.value.effect_attempted
+        assert str(stopped.value) == (f"credential probe outcome is {outcome}; "
+                                      f"inspect {result.state_path} and {log}")
+
 
 ACTIVATED_FLEET = dedent("""\
     fleet:
@@ -558,6 +574,28 @@ def test_public_credential_check_says_when_fleet_yaml_changed_since_activation(
         line = capsys.readouterr().out
         assert ("fleet.yaml has changed since activation" in line) is changed, line
         assert ("activated roster" in line) is changed, line
+
+
+def test_public_credential_check_names_why_it_stopped_before_probing(estate, monkeypatch, capsys):
+    """#2515: a run that stops before probing fails its unit, whose failure alert points
+    at the unit's journal. What the CLI writes there names the cause beside the refusal,
+    here an activation holding the host."""
+    from claudlobby import context
+    from claudlobby.__main__ import main
+    from claudlobby import credential_check
+    from claudlobby.activation_state import ActivationError
+
+    root, _fleet_dir, _fleet, paths = estate
+    monkeypatch.setattr(context, "get_resources", lambda: paths.package)
+
+    def held(**kwargs):
+        raise ActivationError("host activation is running; no mutation performed")
+
+    monkeypatch.setattr(credential_check, "check_credentials", held)
+    assert main(["--root", str(root), "--fleet", "t", "host", "credentials", "check"]) == 4
+    assert capsys.readouterr().err.splitlines() == [
+        "selected credential scope cannot be verified",
+        "host activation is running; no mutation performed"]
 
 
 class TestTierResolution:
