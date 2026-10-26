@@ -73,7 +73,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `undervoltage`, `storage_stall`, `host_health` | alert | `host-health-check.sh`: Pi under-voltage or throttling, an SD/MMC storage stall, or (`host_health`) a finding that is neither |
 | `binary_update_failed`, `binary_unrunnable` | alert | `update-claude-code.sh`: the staged `claude` binary failed to install, or the binary the fleet launches cannot run |
 | `vault_sync_failed` | alert | `vault-sync.sh`: a scheduled vault sync failed; the job never resolves a conflict |
-| `fleet_alert` | fleet-notify | `claudlobby fleet notify --level alert`: the caller's own event name and message ride in its data |
+| `fleet_alert` | fleet-notify | `claudlobby fleet notify --level alert`: the caller's own event name and message ride in its data. A failed fleet job's alert is one, with `job_failed` in its data ([system.yaml schema](../system-yaml-schema.md#a-failed-fleet-job-raises-an-alert), #2522) |
 | `public_write_guard_unarmed` | hook | The public-write guard is on, but the host has no term list (`~/.config/claudlobby/public-write-terms`), so it lets each GitHub write it checks through and records this. It does not page; `public-write-guard.py --check` says whether a host is armed |
 | `shadow_parity_diverged` | plane | Historical: the plane cutover's shadow recorded it. Nothing records it now; it stays registered so its rows still classify |
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
+import { hiddenTeams, setTeamHidden, fleetStatusCopy, fleetStatusCounts, aggregateFleetStatusCopy, aggregateFleetStatusCounts, connectionLabel } from '../claudlobby/plane/ui/workspace-display.js';
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
 const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
@@ -137,7 +138,7 @@ test('renderer shows per-host availability and partial totals without inventing 
   const { runInNewContext } = await import('node:vm');
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const nodes = new Map(['fleet-totals','host-facts','beat','beat-label','overview','fleet-tabs'].map(k => [k, {innerHTML:'',textContent:'',className:'',querySelectorAll:()=>[]}]));
-  const context = { $: id => nodes.get(id), fleets: [], currentFleet: null, interactionApi:{dispose(){}},
+  const context = { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel, showHiddenTeams:false, $: id => nodes.get(id), fleets: [], currentFleet: null, interactionApi:{dispose(){}},
     esc: v => String(v ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),
     ago: () => 'recently', stateBlock: () => 'unavailable' };
   runInNewContext(app.slice(app.indexOf('function renderHeader('), app.indexOf('function toggleMessageBody(')), context);
@@ -252,10 +253,11 @@ async function appHarness(api) {
   let now=Date.now();
   const c={Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
-    fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,
+    fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
     syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
     renderChannel:v=>paints.push(v),renderTasks:v=>paints.push(v),renderFleet(){},renderSummary:v=>summaries.push(v),renderHeader(){},renderHostFacts(){},renderFleetTabs(){},renderOverview:v=>overviewPaints.push(v)};
   runInNewContext(app.slice(app.indexOf('function adoptFleets('),app.indexOf('function renderFleetTabs()')),c);
+  runInNewContext(app.slice(app.indexOf('function applyFleetVisibility('),app.indexOf('// ONE pick path')),c);
   Object.assign(c,{createEventSource:api.createEventSource,pushDebugRow(){}});
   runInNewContext(app.slice(app.indexOf('let refreshTimer = null;'),app.indexOf('$("debug-toggle")')),c);
   const settle=async()=>{await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));};
@@ -716,7 +718,7 @@ test('held old one-source detail cannot paint private bytes after disposal or co
 // public demo's root adapter, or create a second owner-handle module instance.
 test('canonical module graph stays inside its release directory', async () => {
   const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js', 'permission-panel.js',
-    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js'];
+    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js', 'workspace-display.js'];
   for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
     for (const name of files) {
       const source = await readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
@@ -733,7 +735,7 @@ test('canonical module graph stays inside its release directory', async () => {
 test('overview and team tabs display escaped labels while clicks retain exact stable routing identity',async()=>{
   const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const key='c-abcdefghijklmnopqrstuvwxy / team',nodes=new Map(['overview','fleet-tabs'].map(k=>[k,{innerHTML:'',querySelectorAll:()=>[]}]));
-  const fleet={alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
+  const fleet={alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={hiddenTeams,setTeamHidden,fleetStatusCopy,connectionLabel,showHiddenTeams:false,$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
   runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function toggleMessageBody(')),context);
   context.renderOverview(ok({fleets:[fleet],sources:[]}));
   runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),context);context.renderFleetTabs();
@@ -741,4 +743,89 @@ test('overview and team tabs display escaped labels while clicks retain exact st
     assert.match(node.innerHTML,/Computer 1 \/ &lt;team&gt;/);assert.ok(node.innerHTML.includes(`data-fleet="${key}"`));
     assert.ok(!node.innerHTML.includes('>'+key));assert.doesNotMatch(node.innerHTML,/<team>/);
   }
+});
+
+test('recorded actors are separate from sampled running, stopped and unconfirmed states',()=>{
+  const fleet={bots:14,provisional:1,presence:{live_poll:'ok',counts:{working:3,idle:2,down:7,stale:1,unknown:1,sampling:0}}};
+  assert.deepEqual(fleetStatusCounts(fleet),{recorded:14,running:5,stopped:7,unconfirmed:2});
+  assert.equal(fleetStatusCopy(fleet),'5 running · 7 not running · 2 unconfirmed');
+  assert.deepEqual(fleetStatusCounts({...fleet,presence:{...fleet.presence,live_poll:'unavailable'}}),
+    {recorded:14,running:null,stopped:null,unconfirmed:14});
+  assert.equal(fleetStatusCounts({...fleet,bots:15}).running,null,'inconsistent samples never imply running');
+});
+
+test('aggregate retains confirmed fleet counts while malformed or unavailable peers remain unconfirmed',()=>{
+  const ready={bots:9,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  const unknown={bots:10,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  for(const peer of [unknown,{bots:10},{...unknown,presence:{...unknown.presence,live_poll:'unavailable'}},
+    {...unknown,presence:{live_poll:'ok',counts:{...unknown.presence.counts,down:-1}}}]) {
+    const rows=[ready,peer,{bots:3}],before=JSON.stringify(rows);
+    assert.deepEqual(aggregateFleetStatusCounts(rows,22),{recorded:22,running:9,stopped:0,unconfirmed:13});
+    assert.equal(aggregateFleetStatusCopy(rows,22),'9 confirmed running · 0 confirmed not running · 13 unconfirmed');
+    assert.equal(JSON.stringify(rows),before);
+  }
+  assert.deepEqual(aggregateFleetStatusCounts([ready],22),{recorded:22,running:9,stopped:0,unconfirmed:13},'missing rows remain in the recorded remainder');
+  assert.deepEqual(aggregateFleetStatusCounts([ready],8),{recorded:8,running:null,stopped:null,unconfirmed:8},'contradictory inventory never overstates confirmed counts');
+});
+
+test('header uses validated per-fleet evidence even when the aggregate poll is degraded, including hidden teams',async()=>{
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const node={innerHTML:''},c={$:()=>node,esc:String,aggregateFleetStatusCopy};
+  runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function renderHostFacts(')),c);
+  const ready={bots:9,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  const malformed={bots:10,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  const hidden={uid:'hidden-team',bots:3,presence:{live_poll:'ok',counts:{working:2,idle:0,down:1,stale:0,unknown:0,sampling:0}}};
+  c.hiddenTeams=()=>new Set([hidden.uid]);
+  c.renderHeader(ok({fleets:[ready,malformed,hidden],totals:{fleets:3,bots:22,working:11,attention:0,overdue:0,live_poll:'unavailable'}}));
+  assert.match(node.innerHTML,/<b>22<\/b> recorded bots/);
+  assert.match(node.innerHTML,/11 confirmed running · 1 confirmed not running · 10 unconfirmed/);
+  assert.equal(fleetStatusCopy(ready),'9 running · 0 not running · 0 unconfirmed');
+  c.renderHeader(ok({fleets:[ready,{bots:10},{bots:3}],totals:{fleets:3,bots:22,working:9,attention:0,overdue:0,live_poll:'unavailable'}}));
+  assert.match(node.innerHTML,/9 confirmed running · 0 confirmed not running · 13 unconfirmed/);
+});
+
+test('hidden teams are an explicit local preference, with reveal and a safe visible default',async()=>{
+  const {runInNewContext}=await import('node:vm');
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const values=new Map(),storage={getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v)};
+  const first={alias:'source / test',uid:'source::fleet_a',bots:2},second={alias:'source / team',uid:'source::fleet_b',bots:4};
+  assert.equal(hiddenTeams(storage).size,0,'no name-based automatic hiding');
+  setTeamHidden(first.uid,true,storage);
+  let focused=null,buttons=[];
+  const node={html:'',get innerHTML(){return this.html;},set innerHTML(value){
+    this.html=value;if(buttons.includes(focused))focused=null;
+    buttons=[...value.matchAll(/<button([^>]*)>/g)].map(([,attrs])=>{
+      const dataset={};for(const [attribute,key] of [['data-fleet','fleet'],['data-hide-team','hideTeam'],['data-message-team','messageTeam']]){
+        const match=attrs.match(new RegExp(attribute+'="([^"]*)"'));if(match)dataset[key]=match[1];
+      }
+      return {dataset,visibility:attrs.includes('fleet-visibility"'),handlers:{},
+        addEventListener(name,fn){this.handlers[name]=fn;},focus(){focused=this;}};
+    });
+  },querySelectorAll(selector){const key={'[data-fleet]':'fleet','[data-hide-team]':'hideTeam','[data-message-team]':'messageTeam'}[selector];return key?buttons.filter(b=>key in b.dataset):[];},
+  querySelector(selector){return selector==='.fleet-visibility'?buttons.find(b=>b.visibility):null;}},c={fleets:[],fleetsSeen:false,currentFleet:null,
+    hiddenTeams:()=>hiddenTeams(storage),setTeamHidden:(...args)=>setTeamHidden(...args,storage),showHiddenTeams:false,
+    loadPick:()=>null,$:()=>node,esc:String,interactionApi:{dispose(){}}};
+  runInNewContext(app.slice(app.indexOf('function adoptFleets('),app.indexOf('function fleetQuery(')),c);
+  const env=ok({fleets:[first,second],default:first.alias});c.adoptFleets(env);
+  assert.equal(c.currentFleet,second.alias,'automatic selection avoids hidden teams');
+  runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),c);c.renderFleetTabs();
+  assert.match(node.innerHTML,/Show hidden teams.*\(1\)/);assert.doesNotMatch(node.innerHTML,/data-fleet="source \/ test"/);
+  c.currentFleet=null;c.loadPick=()=>first.alias;c.adoptFleets(env);c.renderFleetTabs();
+  assert.equal(c.currentFleet,first.alias);assert.match(node.innerHTML,/data-fleet="source \/ test"/,'explicit remembered room remains reachable');
+  c.currentFleet=null;c.loadPick=()=>null;setTeamHidden(second.uid,true,storage);c.adoptFleets(env);
+  assert.equal(c.currentFleet,'all','all-hidden preferences never create a blank default');
+  c.showHiddenTeams=true;c.renderFleetTabs();assert.match(node.innerHTML,/data-fleet="source \/ test"/);
+  assert.match(node.innerHTML,/Message a bot/,'team shortcut opens existing roster messaging');
+  // Exercise the real explicit handlers; a background render must not steal focus.
+  values.clear();c.showHiddenTeams=false;c.currentFleet=second.alias;c.renderFleetTabs();
+  const hideFirst=buttons.find(b=>b.dataset.hideTeam===first.uid);hideFirst.focus();hideFirst.handlers.click();
+  assert.equal(focused.visibility,true,'hiding an unselected team focuses its visible reveal control');
+  focused.handlers.click();assert.equal(focused.visibility,true,'revealing keeps focus on the replacement toggle');
+  const unhideFirst=buttons.find(b=>b.dataset.hideTeam===first.uid);unhideFirst.focus();unhideFirst.handlers.click();
+  assert.equal(focused.dataset.hideTeam,first.uid,'unhiding retains a visible replacement control');
+  const untouched={};focused=untouched;c.renderFleetTabs();assert.equal(focused,untouched,'background refresh never redirects keyboard focus');
+  c.fleets=[{alias:'legacy',bots:1},{alias:'empty',uid:'',bots:0}];c.renderFleetTabs();
+  assert.equal(buttons.some(b=>'hideTeam' in b.dataset),false,'missing stable UIDs have no ineffective hide controls');
+  const before=values.size;setTeamHidden(undefined,true,storage);setTeamHidden('',true,storage);assert.equal(values.size,before);
+  assert.equal(hiddenTeams({getItem(){throw new Error('blocked storage');}}).size,0);
 });

@@ -643,6 +643,42 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .task-record-details .task-facts { margin:12px 0; }
 .task-history > li { margin:16px 0; }
 
+/* Keep the result and next interaction readable before the audit trail. */
+.task-result {
+  margin:20px 0;
+  padding:18px;
+  background:var(--bg);
+  border:1px solid var(--edge);
+  border-radius:10px;
+}
+#task-detail .task-result h3 { margin:0 0 10px; }
+.task-result .task-record-body,
+.task-record-body.task-result { font-size:14px; line-height:1.7; }
+.task-mode-note { color:var(--dim); font-size:12px; line-height:1.6; }
+#task-detail > .task-detail-toolbar {
+  position:sticky;
+  top:-24px;
+  z-index:1;
+  padding:12px 0;
+  background:var(--panel);
+  border-bottom:1px solid var(--edge);
+}
+.task-record-details > summary {
+  padding:12px 0;
+  color:var(--ink);
+  font-weight:600;
+}
+.fleet-tab-choice { display:inline-flex; align-items:center; gap:2px; }
+.fleet-hide { border:0; background:transparent; color:var(--dim); padding:6px; font-size:10px; }
+.fleet-hide:hover { color:var(--ink); text-decoration:underline; }
+.fleet-visibility { margin-left:4px; }
+.fleet-visibility-note { flex-basis:100%; margin:4px 0 0; color:var(--dim); font-size:11px; }
+.ov-status-counts { display:flex; flex-wrap:wrap; gap:4px 10px; margin:6px 0; font-size:11px; }
+@media(max-width:650px) {
+  #task-detail > .task-detail-toolbar { top:-18px; }
+  .task-result { padding:14px; }
+}
+
 /* Roster inspection uses native buttons, with the existing name treatment. */
 .bot-inspect { border:0; padding:0; background:transparent; color:var(--ink); text-align:left; overflow-wrap:anywhere }
 .bot-inspect:hover { text-decoration:underline }

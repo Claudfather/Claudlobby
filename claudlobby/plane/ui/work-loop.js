@@ -51,6 +51,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <div class="work-target"><label for="work-recipient">To</label>
         <select id="work-recipient"></select><span id="work-task"></span>
         <button id="work-reset" class="pill ghost" type="button" hidden>New message</button></div>
+      <p id="work-mode-note" class="note task-mode-note"></p>
       <label id="work-label" for="work-body">Message</label>
       <textarea id="work-body" maxlength="2000" rows="3" placeholder="What should the team focus on next?"></textarea>
       <div class="work-controls"><span class="note">Drafts stay in this tab. Refreshing clears unsent text.</span>
@@ -147,6 +148,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       $("work-task").textContent = target.task_id ? `Task: ${targetTitle || target.task_id}` : "";
       $("work-reset").hidden = !target.task_id || !contextsByKind.has("message");
       $("work-label").textContent = kind === "feedback" ? "Feedback on this task" : kind === "nudge" ? "Ask the team lead about this task (not approval)" : "Message";
+      const recipient = context.recipients.find(r => r.id === target.recipient)?.label || target.recipient;
+      $("work-mode-note").textContent = kind === "message" ? `Direct message to ${recipient}. This is not linked to a task.`
+        : kind === "feedback" ? `Feedback to ${recipient} about ${targetTitle || target.task_id}. This does not approve, reopen or change the task.`
+        : `Question to ${recipient} about ${targetTitle || target.task_id}. This does not approve or complete the task.`;
       $("work-send").textContent = sending ? "Sending…" : kind === "nudge" ? "Ask team lead" : kind === "feedback" ? "Send feedback" : "Send message";
       $("work-send").disabled = sending || !context.actions.includes(kind) || !!state.unresolved(row()) || state.storageError;
       if (restoreDraft) $("work-body").value = readDraft();
@@ -369,6 +374,31 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     return assignment.assignee_short && assignment.assignee_short !== assignment.assignee_uid
       ? assignment.assignee_short : assignment.assignee_alias || "Assignee not resolved";
   }
+  function recordedResult(task) {
+    const closed = ["completed", "failed", "cancelled"].includes(task.state);
+    const event = closed ? task.terminal_event : task.last_event || task.history?.at(-1);
+    const prose = row => {
+      let fields;
+      try { fields = JSON.parse(row?.detail); } catch {}
+      if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
+      return [fields.summary, fields.reason].find(text => typeof text === "string" && text.trim()) || null;
+    };
+    let text = prose(event);
+    if (!text && closed && typeof event?.event_id === "string" && event.event_id) {
+      // A terminal projection can omit detail. Only that exact frozen event's
+      // history row can supply it; later progress is never a terminal result.
+      const same = row => row.event_id === event.event_id
+        && ["event", "task_id", "assignment_id"].every(key => !Object.hasOwn(event, key)
+          || !Object.hasOwn(row, key) || row[key] === event[key])
+        && [event, row].every(value => !Object.hasOwn(value, "task_id") || value.task_id === task.task_id);
+      text = prose(task.history?.find(same));
+    }
+    if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
+    if (text.length <= 1000) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
+    return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
+      <pre class="task-record-body task-result">${esc(text.slice(0, 1000))}…</pre>
+      <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
+  }
   function renderDetail(task, boardOnly, unavailable = null) {
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
@@ -376,16 +406,27 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
-      ${recordIds([["Task", task.task_id], ["Team", task.fleet_uid], ["Created by", task.created_by_alias || task.created_by_uid]])}
       ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
       <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
       <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
-      <dt>Delivery evidence</dt><dd>${esc(task.delivery?.integrity || "No confirmed delivery evidence in this view")}</dd></dl>
+      <dt>Current assignment delivery</dt><dd>${esc(!assignment ? "No current assignment to check."
+        : task.delivery?.integrity || "Delivery of the current assignment is not confirmed in this view.")}</dd></dl>
       ${task.attention_question || task.attention_reason?.includes("escalated") ? `<div class="task-question"><b>Needs your input</b><pre class="task-record-body">${esc(task.attention_question || "The question was not recorded.")}</pre></div>` : ""}
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
       ${boardOnly ? '<p class="note">Showing a limited board snapshot. Full task detail is unavailable in this view.</p>' : `
-      <div id="task-permissions"></div>
-      <h3>Task description</h3>${task.body === null || task.body === undefined ? '<p class="detail-empty">No task body was recorded.</p>' : `<pre class="task-record-body">${esc(task.body)}</pre>`}
+      <h3>${["completed", "failed", "cancelled"].includes(task.state) ? "Recorded result" : "Latest recorded update"}</h3>${recordedResult(task)}
+      <p class="note">This is a task snapshot. Completion alone does not mean the result was reviewed.</p>`}
+      <h3>Feedback and conversation</h3><p class="note">Comments and replies appear first; recorded reports follow. This is the recent channel window, not a complete task history.</p>
+      <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
+      <p id="task-lineage-note" class="note" hidden></p>
+      <div id="task-reports"></div>
+      <div class="task-detail-actions"><button class="pill" type="button" data-kind="feedback">Give feedback</button>
+      <button class="pill ghost" type="button" data-kind="nudge">Nudge task</button></div>
+      <p class="note" id="task-action-note"></p>
+      ${boardOnly ? "" : `<div id="task-permissions"></div>
+      <details class="task-record-details"><summary>Task details and history</summary>
+      ${recordIds([["Task", task.task_id], ["Team", task.fleet_uid], ["Created by", task.created_by_alias || task.created_by_uid]])}
+      <h3>Task description</h3>${task.body === null || task.body === undefined ? '<p class="detail-empty">A separate task description is not available in this snapshot. Use the title, recorded result and conversation for context.</p>' : `<pre class="task-record-body">${esc(task.body)}</pre>`}
       <h3>Recorded task reports</h3>
       <p class="note">Reports recorded against this task, including those outside the recent activity window. Completion alone does not mean a result was reviewed.</p>
       ${task.reports_window?.truncated ? '<p class="note">Some recorded reports are outside this bounded view.</p>' : ""}
@@ -397,15 +438,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         ${historyWindow("Assignment history", a.history_window)}<ol class="task-history">${events(a.history)}</ol></details>`).join("") || '<p class="detail-empty">No assignment was recorded.</p>'}
       <h3>Task history</h3>${historyWindow("Task history", task.history_window)}<ol class="task-history">${events(task.history)}</ol>
       ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
-      ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}`}
-      <p class="note">Task state, history, recorded reports and action selection are a snapshot. Use Refresh to read them again.</p>
-      <h3>Recent conversation</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
-      <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
-      <p id="task-lineage-note" class="note" hidden></p>
-      <div id="task-reports"></div>
-      <div class="task-detail-actions"><button class="pill" type="button" data-kind="feedback">Give feedback</button>
-      <button class="pill ghost" type="button" data-kind="nudge">Nudge task</button></div>
-      <p class="note" id="task-action-note"></p>`;
+      ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}</details>`}
+      <p class="note">Task state, history, recorded reports and action selection are a snapshot. Use Refresh to read them again.</p>`;
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
     if (!boardOnly) void permissions.show($("task-permissions"),task);
@@ -430,7 +464,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     // The channel is the admitted current-room read. Task IDs are opaque,
     // shared across that room's cross-fleet threads; never infer from aliases.
     const ok = channel?.state === "ok";
-    const threads = ok ? channel.data.threads.filter(t => t.work_item_id === selected.id) : [];
+    const threads = ok ? channel.data.threads.filter(t => t.work_item_id === selected.id).map(thread => {
+      const followup = message => ["chat", "answer", "question"].includes(message.message_class);
+      return { ...thread, messages: [...thread.messages.filter(followup), ...thread.messages.filter(message => !followup(message))] };
+    }) : [];
     // These diagnostics describe the entire admitted room window. They do not
     // identify an affected task, and numeric detail/reasons do not change copy.
     const unresolved = ok && Number.isSafeInteger(channel.data.lineage?.unresolved_threads)
@@ -504,6 +541,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (!detailSnapshot) return;
     const { task, boardOnly } = detailSnapshot, content = $("task-detail-content");
     const capability = action => {
+      if (action === "nudge" && ["completed", "failed", "cancelled"].includes(task.state)) return null;
       const value = contextsByKind.get(action);
       if (!value || value.scope.fleet !== task.fleet) return null;
       if (value.version === 2 && !frozenTaskTarget(task, value, boardOnly, action)) return null;
@@ -525,7 +563,11 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       };
     }
     const feedback = capability("feedback"), nudge = capability("nudge");
-    const taskActions = feedback && nudge ? "Task feedback and nudges go to this team’s lead."
+    const closed = ["completed", "failed", "cancelled"].includes(task.state);
+    const taskActions = task.resolved === false ? "Task history is unresolved. Refresh and resolve its links before using task actions."
+      : boardOnly ? "Full task detail is unavailable. Task actions require a fresh canonical task selection."
+      : closed ? `This task is ${task.state === "completed" ? "complete" : "closed"}; it cannot be nudged. ${feedback ? "Use feedback to comment to the team lead without reopening it." : "Feedback access is unavailable in this view."}`
+      : feedback && nudge ? "Task feedback and nudges go to this team’s lead."
       : feedback ? "Task feedback goes to this team’s lead. Nudges are unavailable with this connection."
       : nudge ? "Task nudges go to this team’s lead. Feedback is unavailable with this connection."
       : "Task feedback and nudges are unavailable with this connection.";

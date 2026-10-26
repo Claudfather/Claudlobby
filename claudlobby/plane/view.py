@@ -2225,7 +2225,7 @@ def create_app(
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
                  "work-loop.js", "permission-panel.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-actions.js", "connected-workspace.js", "workspace-enrollment.js",
-                 "style.css", "workspace.css")
+                 "style.css", "workspace.css", "workspace-display.js")
 
     def asset_token() -> str:
         stamp = ":".join(
@@ -2270,7 +2270,7 @@ def create_app(
 
     @app.get("/app.js")
     def app_js():
-        return _busted_js("app.js", ("panel-state.js", "api-client.js", "work-loop.js"))
+        return _busted_js("app.js", ("panel-state.js", "api-client.js", "work-loop.js", "workspace-display.js"))
 
     @app.get("/work-loop.js")
     def work_loop_js():

@@ -22,6 +22,24 @@ change that moves the ref, not in every pull request; the `[vault]` tag cannot
 be the revision until a Claudron release carries the `documentation/` layout.
 This covers item 1 of #2520.
 
+### Fixed — a failed fleet job raises an alert (#2522)
+
+Every service the composer generates for a fleet job (the `defaults.jobs`
+entries, the code-audit sweep and each briefing slot) now names its fleet's
+failure template in `OnFailure=`. The template,
+`<service_prefix>.job-failed@.service`, is composed beside the job units and
+published by `host activate`, which never enables, starts or pauses it. When a
+job's service fails, systemd starts one instance for it, and the instance runs
+the selected release's `claudlobby fleet notify --level alert --event
+job_failed` with the failed unit's name: a `fleet_alert` on the fleet's plane,
+the manager's pane and the fleet's alert chat. Before this, a timer job could
+fail on every run and raise nothing. The activation inventory owns the
+template, and each instance systemd loads for it, including one an operator's
+own unit loads through a drop-in. It still refuses a template installed by
+hand that runs the CLI from under the data root. Bot services, host jobs and
+launchd get no `OnFailure=` (#2532). `documentation/system-yaml-schema.md` says
+what the alert records, whom it reaches and how to attach it to your own unit.
+
 ### Fixed — a preserve-state activation times its handoff request on the handoff file's own clock (#2528)
 
 A preserve-state activation could refuse a handoff written just after its
@@ -29,12 +47,12 @@ request, as one that predates it. The request was timed with
 `time.time_ns()`, and the kernel stamps a file from a coarser clock, which on
 a Raspberry Pi 5 with a 4 ms timer tick read up to 7.4 ms earlier. The request
 is now timed on the handoff file's own clock, read by files created in the
-bot's own `.claude/` directory, at that clock's next tick. So a handoff written
+bot's own `.claude/` directory, at that clock's next reading. So a handoff written
 after the request never reads as older, and one written before it, even in the
 same tick, still does, whatever the kernel's tick or the filesystem's
 granularity. A bot whose `.claude/` directory cannot take those files refuses
-before any handoff is sent. On a Pi, 8 of the 9 `test_preserved_activation_*`
-tests failed on main for this reason.
+before that bot's handoff is sent. On a Pi, up to 8 of the 9
+`test_preserved_activation_*` tests failed on main for this reason.
 
 ### Fixed — links to Claudron's docs follow the files Claudfather/Claudron#231 moved (#2512)
 
