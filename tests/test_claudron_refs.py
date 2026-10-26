@@ -217,7 +217,7 @@ class TestSpellings:
     @pytest.mark.parametrize(
         ("text", "line"),
         [
-            (f"Full algorithm: Claudron repo,\n  `{POINTER}` §10.3.", 2),
+            ("Full algorithm: Claudron repo,\n  `documentation/guides/NOT-THERE.md` §10.3.", 2),
             ("# Claudron\n# documentation/guides/NOT-THERE.md", 2),
             ('"""See Claudron\n    documentation/guides/NOT-THERE.md', 2),
             ("one\ntwo Claudron `documentation/guides/NOT-THERE.md`", 2),
