@@ -97,6 +97,11 @@ def _values(text: str, section: str, key: str) -> list[str]:
     return [value for name, value in _sections(text).get(section, []) if name == key]
 
 
+def _environment(text: str) -> dict[str, str]:
+    return dict(item.split("=", 1) for value in _values(text, "Service", "Environment")
+                for item in shlex.split(value))
+
+
 def _job_services(timers: Path) -> list[Path]:
     return sorted(path for path in timers.glob(f"{PREFIX}.*.service") if "@" not in path.name)
 
@@ -128,6 +133,14 @@ def test_the_failure_template_runs_the_selected_cli_fleet_notify_for_the_failed_
         "--message", "%i failed: journalctl --user -u %i"]
     assert _values(text, "Service", "Type") == ["oneshot"]
     assert _values(text, "Service", "WorkingDirectory") == [str(paths.root)]
+    # The fleet job carriers `fleet notify` binds from a timer, with no bot origin
+    # (test_operation_context::test_generated_fleet_timer_binds_scope_without_inventing_bot_origin):
+    # every assignment the template makes is the one a job service makes.
+    template_env = _environment(text)
+    job_env = _environment((timers / f"{PREFIX}.fleet-pulse.service").read_text())
+    assert {"CLAUDLOBBY_ROOT", "FLEET_ROOT", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_CLI", "PATH"} <= template_env.keys()
+    assert template_env["CLAUDLOBBY_FLEET"] == fleet.name
+    assert {key: job_env.get(key) for key in template_env} == template_env
 
 
 def test_the_failure_template_has_no_install_section_and_no_failure_hook_of_its_own(tmp_path):
