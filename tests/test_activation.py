@@ -13,6 +13,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -30,7 +31,7 @@ from claudlobby.plane.identity import resolve
 from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.plane.queue_paths import spool_path
 from claudlobby.releases import MANIFEST, release_path, seal_release
-from claudlobby.supervision_inventory import FileSnapshot
+from claudlobby.supervision_inventory import FileSnapshot, InventoryError
 from tests.test_releases import installed
 from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
@@ -105,6 +106,10 @@ class NativeHost:
                 output = "inactive\tno-cgroup-witness"
             else:
                 output = "active\tcgroup-populated"
+        elif function == "svc_bot_unit_owned_by":
+            reader = subprocess.run([sys.executable, str(self.package.native / "bot-unit-owner.py"), *args],
+                                    capture_output=True, text=True, timeout=30)
+            rc = reader.returncode
         elif function == "svc_activation_start":
             file, target = Path(args[0]), args[1]
             assert file.is_file()
@@ -789,6 +794,64 @@ def test_bootstrap_publishes_the_fleet_failure_template_and_never_starts_or_name
     assert "com.example.creds-check.service" not in host.starts
     assert not any(name in arg for _, args in host.calls for arg in args)
     assert not list(host.directory.glob(f"*.wants/{name}"))
+
+
+def test_upgrade_over_an_installed_template_passes_the_inventory_and_candidate_checks(
+        installed, monkeypatch, tmp_path):
+    """#2522: once an activation has installed the fleet's failure template, the
+    next activation's inventory owns it, and the candidate's admission, placement
+    and owner-service checks skip it without a native call. A template installed
+    by hand whose command runs from under the data root still refuses."""
+    root, release, source_plan, host = _cold_case(installed, monkeypatch, tmp_path, fleet_job=True)
+    activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    name = "com.example.job-failed@.service"
+    assert (host.directory / name).is_file()
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
+                                effects={"units": source_plan.effects["units"]})
+    for item in source_plan.effects["units"]:
+        builder.file(Path(item["source"]), source_plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+
+    class ReachedRoster(Exception):
+        pass
+
+    def roster(*_):
+        raise ReachedRoster  # past the inventory and every candidate check that sees units
+
+    monkeypatch.setattr(activation, "_roster", roster)
+    calls_before = len(host.calls)
+    with pytest.raises(ReachedRoster):
+        activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
+    assert not any(name in arg for _, args in host.calls[calls_before:] for arg in args)
+    assert not (root / "state/activations/upgrade").exists()
+    (host.directory / "fleet-unit-failed@.service").write_text(
+        "[Unit]\nDescription=raise a fleet alert that %i failed\n[Service]\nType=oneshot\n"
+        f"ExecStart={root}/runtime/bots/manager/.cli/bin/claudlobby --root {root} fleet notify\n")
+    with pytest.raises(InventoryError, match="fleet-unit-failed@.service: owned consumer is absent"):
+        activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
+    assert not (root / "state/activations/upgrade").exists()
+
+
+def test_a_template_needs_no_quiescence_proof_and_hosts_no_caller():
+    """#2522: no process runs as a template, so neither the quiescence proof nor
+    the external-caller check names one; systemd would refuse the name."""
+    calls = []
+
+    class Recording:
+        def call(self, function, *args, timeout=30):
+            calls.append((function, args))
+            return subprocess.CompletedProcess([function, *args], 0, "inactive\tno-cgroup-witness\n", "")
+
+    template = {"target": "com.example.job-failed@.service",
+                "installed": [{"path": "/user/com.example.job-failed@.service"}]}
+    timer = {"target": "com.example.creds-check.timer",
+             "installed": [{"path": "/user/com.example.creds-check.timer"}]}
+    activation._legacy_quiet(Recording(), SimpleNamespace(units=lambda phase: (template, timer)), "producers", {})
+    activation._assert_external_caller(Recording(), {"producers": (
+        {"target": template["target"], "installed": template["installed"][0]["path"]},
+        {"target": timer["target"], "installed": timer["installed"][0]["path"]})})
+    assert [function for function, _ in calls] == ["svc_activation_quiet", "svc_activation_assert_external"]
+    assert not any("job-failed@" in arg for _, args in calls for arg in map(str, args))
 
 
 @pytest.mark.parametrize("same_release", [False, True])
