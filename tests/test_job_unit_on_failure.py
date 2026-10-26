@@ -143,6 +143,27 @@ def test_the_failure_template_runs_the_selected_cli_fleet_notify_for_the_failed_
     assert {key: job_env.get(key) for key in template_env} == template_env
 
 
+@pytest.mark.parametrize("tier", [{"PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_DISABLED": "0"},
+                                  {"PLANE_EMIT_ENABLED": "0"}], ids=["armed", "unarmed"])
+def test_the_failure_template_carries_the_plane_switch_lines_of_the_job_units(tmp_path, monkeypatch, tier):
+    """A named fleet job unit carries the plane switches its tier resolves
+    (test_plane_readers_unassigned), and the template carries the same lines."""
+    import claudlobby.env_tiers as env_tiers_mod
+    resolved = {key: env_tiers_mod.Resolution(name=key, value=value, tier="fleet", path=None)
+                for key, value in tier.items()}
+    monkeypatch.setattr(env_tiers_mod, "read_tiers", lambda paths, fleet_name=None, bot_name=None: [])
+    monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: resolved)
+    _, _, timers = _compose(tmp_path / "f")
+
+    def plane(path: Path) -> dict[str, str]:
+        return {key: value for key, value in _environment(path.read_text()).items()
+                if key.startswith("PLANE_")}
+
+    expected = {"PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_DISABLED": "0"} if tier["PLANE_EMIT_ENABLED"] == "1" else {}
+    assert plane(timers / f"{PREFIX}.fleet-pulse.service") == expected
+    assert plane(timers / TEMPLATE) == expected
+
+
 def test_the_failure_template_has_no_install_section_and_no_failure_hook_of_its_own(tmp_path):
     _, _, timers = _compose(tmp_path / "f")
     sections = _sections((timers / TEMPLATE).read_text())

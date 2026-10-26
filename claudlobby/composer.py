@@ -4245,7 +4245,8 @@ def job_failed_template(prefix: str) -> str:
     return f"{prefix}.{JOB_FAILED_TEMPLATE}@.service"
 
 
-def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, paths: Paths) -> str:
+def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, paths: Paths,
+                               plane_env: dict[str, str] | None = None) -> str:
     """Write the fleet's failure template beside its job units; return its stem.
 
     The instance calls the selected CLI directly, not through the unit-start
@@ -4273,6 +4274,8 @@ def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, p
         *(unit_systemd_environment(key, value) for key, value in environment.items()),
         unit_systemd_environment("PATH", _scheduler_tool_path()),
         unit_systemd_environment("CLAUDLOBBY_FLEET", fleet_name),
+        # The plane switch lines every fleet job unit carries (job_baseline_env).
+        *(unit_systemd_environment(key, value) for key, value in (plane_env or {}).items()),
         f"TimeoutStartSec={_JOB_FAILED_TIMEOUT_S}",
         f"ExecStart={unit_systemd_command(argv)} \"--message\" {message}",
     ]
@@ -5293,7 +5296,8 @@ def compose_fleet_timers(
     # with the job units: its stem is one dotless segment after the prefix.
     expected_jobs.add(job_failed_template(prefix).removesuffix(".service"))
     n_expected_jobs = len(expected_jobs)
-    composed_jobs: set[str] = {_write_job_failed_template(timers_dir, prefix, fleet.name, paths)}
+    composed_jobs: set[str] = {
+        _write_job_failed_template(timers_dir, prefix, fleet.name, paths, job_baseline_env)}
     on_failure = f"{prefix}.{JOB_FAILED_TEMPLATE}@%n.service"
 
     if emit_defaults:
