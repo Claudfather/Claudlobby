@@ -260,6 +260,8 @@ class TestSpellings:
             "Claudron `documentation/specs/local-spec.md`"
         )
         assert found(text) == []
+        # ... from a file in another folder too: the path is read from the repo root.
+        assert found(text, file="claudlobby/CLAUDE.md") == []
 
     def test_a_path_relative_to_the_file_that_names_it_is_its_own(self):
         text = "Claudron `specs/local-spec.md`"
@@ -317,6 +319,7 @@ class TestResolve:
             "docs/INTEGRATION.md",
             "documentation/guides/integration.md",
             "documentation/guides/NOT-THERE.md",
+            "guides/INTEGRATION.md",
             "NOPE.md",
         ],
     )
