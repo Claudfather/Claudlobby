@@ -651,6 +651,17 @@ def _require_preserved_handoff(bot_dir, *, not_before=None):
                                 "with --resume; existing handoff attempts are never resent") from exc
 
 
+def _handoff_request_time(bot_dir):
+    """Time a preserved handoff request on the clock that stamps its handoff file (#2528)."""
+    from .bot_operations import BotLifecycleError, _handoff_clock_ns
+    try:
+        return _handoff_clock_ns(bot_dir)
+    except BotLifecycleError as exc:
+        raise ActivationRefusal("preserve-state activation cannot time its handoff request in the bot's "
+                                "handoff directory; inspect that directory, then retry the same activation "
+                                "with --resume; no handoff was requested") from exc
+
+
 def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
     """Run or resume the running-estate pause steps under one owner.
 
@@ -718,7 +729,7 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
                 continue
             if preserve and not restart:
                 raise ActivationRefusal("preserved stopped bot acquired a live private server before handoff")
-            requested = time.time_ns() if preserve else None
+            requested = _handoff_request_time(unit.declaration.working_directory) if preserve else None
             store.record_handoff(activation_id, target=target, result=None,
                                  **({"request_started_ns": requested} if preserve else {}))
             result = adapter.call("svc_activation_handoff", unit.declaration.working_directory,

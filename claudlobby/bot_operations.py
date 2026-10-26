@@ -127,14 +127,8 @@ class BotControlResult:
     outcome: str
 
 
-def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
-    """The owned handoff file's mtime and its session capture's last_updated.
-
-    The session capture's own frontmatter decides. Under the activation's
-    reference refresh envelope (#2094) that is the capture below it: the
-    activation's own reader finds the envelope, so the two agree on it, and
-    one that reader refuses is refused here by name (#2119).
-    """
+def _owned_handoff_dir(bot_dir: Path) -> Path:
+    """The bot's .claude directory, when it and the bot directory are this user's own directories."""
     handoff_dir = bot_dir / ".claude"
     try:
         bot_info = bot_dir.lstat()
@@ -144,7 +138,58 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[f
     if (not stat.S_ISDIR(bot_info.st_mode) or bot_info.st_uid != os.getuid()
             or not stat.S_ISDIR(dir_info.st_mode) or dir_info.st_uid != os.getuid()):
         raise BotLifecycleError("self restart requires an owned handoff directory")
-    path = handoff_dir / "session.md"
+    return handoff_dir
+
+
+# The coarsest file clock in common use, FAT's, keeps 2 s.
+_HANDOFF_CLOCK_WAIT_S = 5
+
+
+def _file_clock_ns(handoff_dir: Path) -> int:
+    """One reading of the clock that stamps files in handoff_dir: a new file's mtime.
+
+    The file has no name where the filesystem takes O_TMPFILE, and is unlinked
+    at once elsewhere.
+    """
+    with tempfile.TemporaryFile(dir=handoff_dir) as stream:
+        return os.fstat(stream.fileno()).st_mtime_ns
+
+
+def _handoff_clock_ns(bot_dir: Path) -> int:
+    """A handoff request's time, in epoch ns, on the clock that stamps the owned handoff file (#2528).
+
+    A file's mtime comes from the filesystem, not from time.time_ns(): the
+    kernel stamps files from a clock that advances once a timer tick (it
+    trailed time_ns() by up to 7.4 ms with a 4 ms tick), and a filesystem can
+    keep whole seconds. So a request timed with time_ns() can postdate the
+    handoff written for it. A file created in the handoff's own directory is
+    stamped by the same clock, at the same granularity. Its first reading can
+    equal a capture saved just before it, in the same tick, so the request
+    takes the clock's next reading: every file already written there reads
+    older than it, and no file written after it does.
+    """
+    handoff_dir = _owned_handoff_dir(bot_dir)
+    try:
+        first = _file_clock_ns(handoff_dir)
+        deadline = time.monotonic() + _HANDOFF_CLOCK_WAIT_S
+        while (stamp := _file_clock_ns(handoff_dir)) <= first:
+            if time.monotonic() > deadline:
+                raise OSError("the handoff directory's file clock did not move")
+            time.sleep(0.001)
+    except OSError as exc:
+        raise BotLifecycleError("self restart requires an owned handoff directory") from exc
+    return stamp
+
+
+def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
+    """The owned handoff file's mtime and its session capture's last_updated.
+
+    The session capture's own frontmatter decides. Under the activation's
+    reference refresh envelope (#2094) that is the capture below it: the
+    activation's own reader finds the envelope, so the two agree on it, and
+    one that reader refuses is refused here by name (#2119).
+    """
+    path = _owned_handoff_dir(bot_dir) / "session.md"
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
@@ -195,6 +240,7 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
     whether a handoff below the refresh envelope is recent (#2119).
     An optional request time in epoch nanoseconds also binds the verified
     file write and the capture's second-resolution timestamp to that request.
+    Take that time with `_handoff_clock_ns`, never time.time_ns() (#2528).
     """
     mtime, stamp = _handoff_capture(bot_dir, not_before=not_before)
     age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
