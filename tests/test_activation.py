@@ -822,7 +822,10 @@ def test_upgrade_over_an_installed_template_passes_the_inventory_and_candidate_c
     calls_before = len(host.calls)
     with pytest.raises(ReachedRoster):
         activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
-    assert not any(name in arg for _, args in host.calls[calls_before:] for arg in args)
+    # The inventory reads the template's file owner (a file read, never systemd);
+    # no native operation names it.
+    assert {function for function, args in host.calls[calls_before:]
+            if any(name in arg for arg in args)} == {"svc_bot_unit_owned_by"}
     assert not (root / "state/activations/upgrade").exists()
     (host.directory / "fleet-unit-failed@.service").write_text(
         "[Unit]\nDescription=raise a fleet alert that %i failed\n[Service]\nType=oneshot\n"
