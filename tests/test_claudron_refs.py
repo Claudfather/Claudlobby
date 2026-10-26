@@ -238,6 +238,7 @@ class TestSpellings:
             "Claudron #231 moved documentation/guides/NOT-THERE.md",
             "projects/Claudron/documentation/guides/NOT-THERE.md",
             "Claudron [x](../specs/NOT-THERE.md)",
+            "Claudron ../specs/NOT-THERE.md",
         ],
         ids=[
             "lower-case",
@@ -247,6 +248,7 @@ class TestSpellings:
             "issue-number",
             "inside-a-path",
             "relative-link",
+            "relative-plain",
         ],
     )
     def test_a_path_that_does_not_follow_the_name_is_not_read(self, text):
@@ -442,7 +444,9 @@ class TestCheck:
         after, sha_after = _claudron(tmp_path / "after", CLAUDRON_FILES)
         text = "Claudron `documentation/guides/INTEGRATION.md` is the front door\n"
         root = _repo(tmp_path / "repo", {"README.md": text})
-        assert cr.check(root, before, sha_before)[0] == 1
+        code, report = cr.check(root, before, sha_before)
+        assert code == 1 and report.startswith("STALE"), report
+        assert "README.md:1: documentation/guides/INTEGRATION.md (marker)" in report
         assert cr.check(root, after, sha_after)[0] == 0
 
     def test_a_gate_that_reads_nothing_fails(self, tmp_path):
@@ -518,14 +522,16 @@ class TestCheck:
         )
         assert cr.check(root, claudron, sha)[0] == 0
         _write(root, {"stale.md": "Claudron `docs/CLI_CONTRACT.md`\n"})
-        assert cr.check(root, claudron, sha)[0] == 1
+        code, report = cr.check(root, claudron, sha)
+        assert code == 1 and "stale.md:1: docs/CLI_CONTRACT.md" in report, report
 
     def test_a_folder_inside_another_repo_is_read_by_walking_not_by_the_outer_index(self, tmp_path):
         claudron, sha = _claudron(tmp_path / "claudron", CLAUDRON_FILES)
         outer = _repo(tmp_path / "outer", {"keep.txt": "x\n"})
         root = outer / "export"
         _write(root, {"stale.md": "Claudron `docs/CLI_CONTRACT.md`\n"})
-        assert cr.check(root, claudron, sha)[0] == 1
+        code, report = cr.check(root, claudron, sha)
+        assert code == 1 and "stale.md:1: docs/CLI_CONTRACT.md" in report, report
 
     def test_a_file_that_is_not_text_is_counted_not_fatal(self, tmp_path):
         claudron, sha = _claudron(tmp_path / "claudron", CLAUDRON_FILES)
