@@ -164,3 +164,29 @@ def test_request_bound_does_not_replace_existing_freshness_window(tmp_path, stal
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned") as refused:
         bot_operations._fresh_self_handoff(bot_dir, not_before=requested_ns)
     assert str(refused.value.__cause__) == "handoff is stale"
+
+
+def test_handoff_clock_reads_the_clock_that_stamps_the_handoff_and_leaves_no_file(tmp_path):
+    """#2528: the stamp is taken in the handoff's own directory, so it falls between the
+    mtimes of files written there before and after it, and it leaves nothing there."""
+    handoff_dir = tmp_path / "bot" / ".claude"
+    handoff_dir.mkdir(parents=True)
+    before, after = handoff_dir / "before", handoff_dir / "after"
+    before.write_bytes(b"x")
+    stamp = bot_operations._handoff_clock_ns(tmp_path / "bot")
+    after.write_bytes(b"x")
+    assert before.stat().st_mtime_ns <= stamp <= after.stat().st_mtime_ns
+    assert sorted(path.name for path in handoff_dir.iterdir()) == ["after", "before"]
+
+
+@pytest.mark.parametrize("shape", ["missing", "symlink"])
+def test_handoff_clock_is_read_only_in_an_owned_handoff_directory(tmp_path, shape):
+    """A symlinked handoff directory could put the stamp on another filesystem, with
+    another clock: the stamp is refused there, as a missing directory is."""
+    bot_dir = tmp_path / "bot"
+    bot_dir.mkdir()
+    if shape == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        (bot_dir / ".claude").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(bot_operations.BotLifecycleError, match="owned handoff directory"):
+        bot_operations._handoff_clock_ns(bot_dir)

@@ -14,6 +14,7 @@ import socket
 import sqlite3
 import subprocess
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -2147,6 +2148,78 @@ def test_preserved_activation_refuses_unverified_handoff_and_never_resends_unkno
         case.run()
     assert case.body["handoff_effects"][case.target] == "handed_off"
     assert len(case.calls) == 1
+
+
+# How far a file's mtime can trail time.time_ns() (#2528): 7.4 ms was the most measured on a
+# 250 Hz Pi, whose kernel stamps files from a clock that advances once a tick (4 ms), and a
+# filesystem that keeps whole seconds can trail it by up to one.
+FILE_CLOCK_LAGS = [pytest.param(7_500_000, id="7.5ms"), pytest.param(1_000_000_000, id="1s")]
+
+
+@pytest.mark.parametrize("flow", ["request", "resume"])
+@pytest.mark.parametrize("lag_ns", FILE_CLOCK_LAGS)
+def test_preserved_handoff_request_is_timed_on_the_handoff_files_clock(
+        preserved_handoff_case, monkeypatch, lag_ns, flow):
+    """#2528: the request is timed on the clock that stamps the handoff file, so a handoff
+    written after it never reads as older, however far that clock trails time.time_ns().
+    time.time_ns() runs lag_ns ahead here, which is how such a file clock looks from the
+    process, whatever this host's own clocks do. Both callers: the request verified at
+    once, and a resume verifying a late save against the recorded request."""
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir, kind="shell-below")
+    process_clock = time.time_ns
+    monkeypatch.setattr(time, "time_ns", lambda: process_clock() + lag_ns)
+    if flow == "request":
+        case.on_call[0] = lambda: _preserve_capture(case.bot_dir, kind="shell-below")
+    else:
+        case.outcome[1] = "handoff-timeout"
+        with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+            case.run()
+        _preserve_capture(case.bot_dir, kind="shell-below")
+        case.outcome[1] = "handoff-saved"
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert case.body["handoff_effects"][case.target] == "handed_off"
+    assert len(case.calls) == 1
+
+
+@pytest.mark.parametrize("offset_ns,accepted", [
+    pytest.param(0, True, id="at-the-request"),
+    pytest.param(-1, False, id="one-nanosecond-before"),
+    pytest.param(-1_000_000_000, False, id="one-second-before"),
+])
+def test_preserved_handoff_written_before_its_request_is_still_refused(
+        preserved_handoff_case, offset_ns, accepted):
+    """#2528 control: timing the request on the file's clock adds no slack. A handoff whose
+    file reads as written before the recorded request is refused for that, and one written
+    at it is accepted."""
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir, kind="shell-below")
+
+    def save():
+        _preserve_capture(case.bot_dir, kind="shell-below")
+        written = case.body["handoff_requests"][case.target]["started_at_ns"] + offset_ns
+        os.utime(case.bot_dir / ".claude/session.md", ns=(written, written))
+    case.on_call[0] = save
+    if accepted:
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+        assert case.body["handoff_effects"][case.target] == "handed_off"
+    else:
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff") as refused:
+            case.run()
+        assert str(refused.value.__cause__.__cause__) == "handoff predates its request"
+        assert case.body["handoff_effects"][case.target] is None
+
+
+def test_preserved_handoff_request_that_cannot_be_timed_refuses_before_it_is_sent(preserved_handoff_case):
+    """#2528: the request is timed in the bot's own handoff directory before the fence, so a
+    bot without one refuses with nothing recorded and nothing sent."""
+    case = preserved_handoff_case
+    with pytest.raises(state.ActivationRefusal, match="no handoff was requested"):
+        case.run()
+    assert case.body["handoff_effects"] == {}
+    assert case.calls == []
 
 
 @pytest.mark.parametrize("fresh", [False, True])
