@@ -74,8 +74,8 @@ def managed_listeners(source_plan, inventory):
     installed = {str(unit.declaration.source) for unit in inventory.units if unit.installed}
     result = set()
     for item in source_plan.effects.get("units", ()):
-        if item["source"] not in installed or not item["enroll"]:
-            continue
+        if item["source"] not in installed or not item["enroll"] or item["admission"] is None:
+            continue  # a unit template (#2522) has no admission and listens on nothing
         unit = parse_unit_argv(item["admission"]["argv"])
         path = unit_socket(unit)
         if path is not None:
@@ -143,6 +143,8 @@ def admitted_action(method):
                 manager = _catalog(adapter.read('svc_inventory_catalog'))[0]
                 owners = []
                 for declaration, item in planned_units(plan, manager):
+                    if item['admission'] is None:
+                        continue  # a unit template (#2522) has no admission and is never the owner
                     unit = parse_unit_argv(item['admission']['argv'])
                     if (item['enroll'] and declaration.scope == 'host'
                             and declaration.fleet is None and declaration.bot is None

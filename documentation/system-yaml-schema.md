@@ -450,6 +450,67 @@ for the opt-out shape, and its
 section for the per-job opt-in recipe — both documented from the fleet.yaml
 side already; this doc is the system.yaml side of the same merge.
 
+### A failed fleet job raises an alert
+
+Every service the composer generates for a fleet job (each `defaults.jobs`
+entry, the `fleet.sweep` unit and each briefing slot) names its fleet's failure
+template under `[Unit]` (#2522):
+
+```ini
+OnFailure=<service_prefix>.job-failed@%n.service
+```
+
+The template, `<service_prefix>.job-failed@.service`, is composed beside the job
+units. `host activate` publishes it with them, and parks and restores it like
+any other generated unit, but never enables, starts or pauses it. When a job's
+service fails (a non-zero exit, a crash or a timeout), systemd starts one
+instance of the template named for that service, and the instance runs the
+selected release's CLI:
+
+```bash
+claudlobby --root <data root> --fleet <fleet> fleet notify --level alert --event job_failed \
+  --message "<unit> failed: journalctl --user -u <unit>"
+```
+
+- **What it records:** one `fleet_alert` event on the fleet's plane for each
+  failure (source `fleet-notify`), with `job_failed` and the message in its
+  data. The type is `fleet_alert`, not `job_failed`: find these with
+  `claudlobby --json --fleet <fleet> event list --type fleet_alert`, or with
+  `--critical`. `--type job_failed` finds nothing.
+- **Whom it reaches:** the fleet manager's pane and the fleet's alert chat,
+  the target fleet-pulse escalates to (the `fleet_pulse` block in
+  [`fleet-yaml-schema.md`](fleet-yaml-schema.md)). Each channel pages once for
+  a unit, and again after `renotify_after_s` (6 h by default) while the unit
+  keeps failing; every failure is still recorded.
+- **What stays out:** bot services (fleet-pulse watches them), host jobs, which
+  have no fleet to notify, and launchd, which has no `OnFailure=`: the plists
+  carry nothing. #2532 tracks a sweep for those. The template has no
+  `OnFailure=` of its own, so an alert that fails leaves only its journal,
+  `journalctl --user -u '<service_prefix>.job-failed@*'`.
+
+To see one alert without failing a job, start an instance by hand:
+`systemctl --user start <service_prefix>.job-failed@test.service` raises one
+alert that names `test`.
+
+#### Attaching the template to your own unit
+
+A unit of your own can raise the same alert. Give it a drop-in:
+
+```ini
+# ~/.config/systemd/user/<your-unit>.service.d/20-on-failure.conf
+[Unit]
+OnFailure=<service_prefix>.job-failed@%n.service
+```
+
+Then run `systemctl --user daemon-reload`, and check it with
+`systemctl --user show -p OnFailure <your-unit>.service`. Its failures alert
+that fleet. The activation inventory owns the instance systemd loads for your
+unit, as an instance of a declared template, so it does not block
+`host activate`; your unit and its drop-in stay yours. Do not install a
+template of your own that runs the CLI from under the data root: the inventory
+reads such a file as a Claudlobby unit that no plan declares, and
+`host activate` refuses until it is gone.
+
 ## `fleet.system_defaults` — what it gates, from this side
 
 `fleet.yaml`'s `system_defaults:` field (full shape documented in

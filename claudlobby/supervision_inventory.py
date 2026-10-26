@@ -254,6 +254,26 @@ _SYSTEMD_NAME = re.compile(r"(?:[A-Za-z0-9_.@:-]|\\x[0-9a-fA-F]{2})+")
 _SUFFIXES = (".service", ".timer", ".socket", ".path", ".plist")
 # systemd template (prefix@.suffix): installable, never itself a loaded unit.
 _TEMPLATE = re.compile(r"(?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+@\.(?:service|timer|socket|path)")
+# One instance of such a template, such as ``prefix@instance.service``; the
+# instance is empty only in the template itself.
+_INSTANCE = re.compile(r"((?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+)@(?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+"
+                       r"\.(service|timer|socket|path)")
+
+
+def is_unit_template(name: str) -> bool:
+    """A systemd template unit name (``prefix@.service``), which no manager runs.
+
+    A declared template is published and parked like any generated unit, but it
+    has no native state: it is never snapshotted, paused, enabled or started.
+    systemd starts its instances, here only through OnFailure= (#2522).
+    """
+    return bool(_TEMPLATE.fullmatch(name))
+
+
+def template_of_instance(name: str) -> str | None:
+    """The template an instance name belongs to (``a@b.service`` -> ``a@.service``)."""
+    match = _INSTANCE.fullmatch(name)
+    return f"{match.group(1)}@.{match.group(2)}" if match else None
 
 
 def _directory_files(directory):
@@ -819,8 +839,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         for name in sorted(names | set(expected)):
             if not name.endswith(_SUFFIXES):
                 continue
-            if name not in expected and name not in loaded and _TEMPLATE.fullmatch(name):
-                # An uninstantiated template has no unit for systemctl show.
+            if name not in loaded and _TEMPLATE.fullmatch(name):
+                # A template has no unit for systemctl show, declared or not.
                 # Its installed bytes are still read, hashed and ownership-
                 # checked below; each loaded instance is its own catalog name.
                 continue
@@ -880,6 +900,20 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
 
     for name in sorted(names - set(expected)):
         props = properties.get(name, {})
+        template = template_of_instance(name)
+        if manager == "Linux" and template in expected:
+            # OnFailure= loads one instance of a declared template for each unit
+            # that names it (#2522), and an operator's unit can name it too.
+            # Each must be that template's exact installed definition, or
+            # nothing while the template file is absent; never a file or
+            # drop-in of its own.
+            definitions = {("loaded", saved.path) for saved in installed.get(template, ())}
+            definitions.add(("not-found", ""))
+            if (installed.get(name) or props.get("Id") != name or props.get("DropInPaths") != ""
+                    or (props.get("LoadState"), props.get("FragmentPath")) not in definitions
+                    or props.get("LoadState") == "loaded" and props.get("NeedDaemonReload") != "no"):
+                issues.append(f"{name}: instance of a declared template has a foreign or stale definition")
+            continue
         # A dependency can name a unit that exists nowhere: not-found, inactive,
         # no fragment and no installed file is an absent unit, not unknown.
         ghost = (props.get("LoadState") == "not-found" and props.get("ActiveState") == "inactive"
@@ -974,7 +1008,11 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     raise InventoryError("installed bytes differ from reviewed generated source")
                 if not declaration.service and adapter.call("svc_bot_unit_owned_by", saved.path, declaration.working_directory).returncode != 0:
                     raise InventoryError("installed ownership is foreign or unknown")
-            if manager == "Linux":
+            if manager == "Linux" and is_unit_template(name):
+                # Its exact bytes and owner were checked above; it has no native
+                # state, and its loaded instances were checked as instances.
+                pass
+            elif manager == "Linux":
                 if not props:
                     raise InventoryError("missing effective native properties")
                 if sources:

@@ -23,7 +23,7 @@ def require_operator_context(root: str | Path | None = None) -> None:
     from ..config_plan import read_plan
     from ..config_units import current_declarations
     from ..context import resolve_paths
-    from ..supervision_inventory import Adapter, _catalog, collect_enrollment
+    from ..supervision_inventory import Adapter, _catalog, collect_enrollment, is_unit_template
 
     try:
         root_path = Path(root).expanduser().resolve()
@@ -37,8 +37,8 @@ def require_operator_context(root: str | Path | None = None) -> None:
         inventory = collect_enrollment(root_path, declarations, adapter=adapter).require_complete()
         checked = 0
         for unit in inventory.units:
-            if not unit.installed:
-                continue
+            if not unit.installed or is_unit_template(unit.target):
+                continue  # a template runs nothing, so it can host no caller
             checked += 1
             verdict = adapter.call("svc_activation_assert_external", unit.installed[0].path,
                                    unit.target, str(os.getpid()))

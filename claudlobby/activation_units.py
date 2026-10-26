@@ -29,7 +29,8 @@ from .config_install import apply_config, prepare_config, read_config_install, r
 from .config_plan import ConfigPlan, ConfigPlanBuilder, read_plan
 from .releases import read_release
 from .supervision_inventory import (
-    Adapter, EnrollmentInventory, FileSnapshot, InventoryError, _catalog, collect_enrollment, validate_darwin_unit,
+    Adapter, EnrollmentInventory, FileSnapshot, InventoryError, _catalog, collect_enrollment, is_unit_template,
+    validate_darwin_unit,
 )
 
 
@@ -194,6 +195,8 @@ def _external(adapter, pause: UnitPause) -> None:
     # All units, including later phases, must be safe before the first parking
     # write. Explicit coordinator PID keeps subprocess ancestry unambiguous.
     for unit in pause.units():
+        if is_unit_template(unit["target"]):
+            continue  # a template runs nothing and has no native state (#2522)
         _call(adapter, "svc_activation_assert_external", _file(unit), unit["target"], str(os.getpid()))
 
 
@@ -295,12 +298,15 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     adapter = adapter or Adapter()
     _check_empty(enrollment, adapter)
     enrolled = tuple(unit for unit in enrollment["units"] if unit["installed"])
+    # A template's file is parked like any unit's, but it has no native state
+    # to snapshot or pause: systemd runs only its instances (#2522).
+    native = tuple(unit for unit in enrolled if not is_unit_template(unit["target"]))
     # Finish every external-caller check before preparing any parking write.
-    for unit in enrolled:
+    for unit in native:
         _call(adapter, "svc_activation_assert_external", _file(unit), unit["target"], str(os.getpid()))
     scheduled = _scheduled_services(enrollment, membership)
     observations = {}
-    for unit in enrolled:
+    for unit in native:
         observed = _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"])
         observations[unit["target"]] = observed
         if not _same_enrollment(_saved(unit), observed,
@@ -396,6 +402,8 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
         path = Path(_file(unit))
         if path.exists() or path.is_symlink():
             _check_source(unit["installed"][0])
+            if is_unit_template(unit["target"]):
+                continue
             if not _same_enrollment(_saved(unit),
                                     _call(adapter, "svc_activation_snapshot", path, unit["target"]),
                                     scheduled=unit["target"] in scheduled,
@@ -404,6 +412,8 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
     identifier = journal_id(activation_id, phase)
     apply_config(store.root, identifier)  # sole filesystem writer; resumes partial swaps
     for unit in pause.units(phase):
+        if is_unit_template(unit["target"]):
+            continue  # parked above; no instance can start without its file
         timer_service = pause.enrollment["manager"] == "Linux" and unit["target"] in scheduled
         _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
               _native_saved(unit, scheduled, allow_failed=timer_service), str(os.getpid()),
@@ -567,6 +577,8 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
     _darwin_check(adapter, pause.enrollment, restore_pending=restoring)
     if not terminal:
         for unit in pause.units("producers"):
+            if is_unit_template(unit["target"]):
+                continue
             before = dict(unit["properties"])
             parked = ("unchanged unloaded inactive" if pause.enrollment["manager"] == "Darwin" else
                       f"{before['UnitFileState'] if before['LoadState'] == 'masked' else 'masked-runtime'} masked inactive")
@@ -587,6 +599,8 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
     resumed, cleared = [], []
     for unit in _timers_last(pause.units("producers")):
         _check_source(unit["installed"][0])
+        if is_unit_template(unit["target"]):
+            continue  # its restored file is the whole restoration
         target, saved = unit["target"], _saved(unit)
         if target in residents:
             admission, original = residents[target]
@@ -713,6 +727,8 @@ def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: 
     resumed, cleared = [], []
     scheduled = _scheduled_services(pause.enrollment, pause.phases)
     for unit in _timers_last(pause.units("producers")):
+        if is_unit_template(unit["target"]):
+            continue  # its restored file is the whole restoration
         target, saved, native = unit["target"], _saved(unit), _native_saved(unit, scheduled, allow_failed=pause.enrollment["manager"] == "Linux")
         ticks = target in scheduled
         if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
@@ -765,6 +781,8 @@ def restore_phase(store: ActivationStore, activation_id: str, phase: str, *, ada
     scheduled = _scheduled_services(pause.enrollment, pause.phases)
     for unit in _timers_last(pause.units(phase)):
         _check_source(unit["installed"][0])
+        if is_unit_template(unit["target"]):
+            continue  # its restored file is the whole restoration
         _darwin_check(adapter, pause.enrollment, {unit["target"]})
         _call(adapter, "svc_activation_resume", _file(unit), unit["target"], _native_saved(unit, scheduled, allow_failed=pause.enrollment["manager"] == "Linux"))
         _darwin_check(adapter, pause.enrollment, {unit["target"]}, original_load=True)
