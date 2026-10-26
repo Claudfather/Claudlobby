@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the daily credential check probes the activated roster after an edit to `fleet.yaml` (#2515)
+
+Each fleet's daily credential check stopped before probing, with `fleet source
+changed since activation`, whenever its `fleet.yaml` differed from the copy
+frozen in the activated plan. That is the normal state between an edit and the
+next activation, so every run in that time probed nothing and failed its unit.
+The check now probes the roster, manager and chat frozen in the activated plan,
+which are what the fleet's running bots use. The alert pair's sender is chosen
+from that roster too, so an edit cannot choose it. When `fleet.yaml` has changed
+since activation, the result says so (`fleet_source_changed`), and its line says
+that the change is probed once it is activated. A run that still stops before
+probing writes its cause under the refusal, and a probe that may have run
+without completing names the state file and the log to read.
+
 ### Fixed — a preserve-state activation times its handoff request on the handoff file's own clock (#2528)
 
 A preserve-state activation could refuse a handoff written just after its

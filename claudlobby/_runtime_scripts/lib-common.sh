@@ -6305,7 +6305,7 @@ EOF
     printf '%s' "$hit"
 }
 
-# resolve_alert_target <bots_dir> [fleet|any]
+# resolve_alert_target <bots_dir> [fleet|any] [roster]
 # THE fleet-alert delivery-target resolver, shared by every env-less alert path
 # (fleet-pulse escalation, _emit_fleet_signal, creds-check). It resolves the chat
 # AND its sender -- the channel state dir tg-post reads the token from -- as ONE
@@ -6318,7 +6318,8 @@ EOF
 #   2. TELEGRAM_GROUP_CHAT_ID from the env (a fleet timer's composed chat):
 #      paired with TELEGRAM_STATE_DIR when that is set beside it, else with a bot
 #      in <bots_dir> -- the caller's own fleet, never a cross-fleet scan -- whose
-#      OWN chat it is. None: REFUSED.
+#      OWN chat it is, among the bots <roster> names (one per line; the
+#      fleet.yaml beside <bots_dir> when it is empty). None: REFUSED.
 #   3. No env chat: the first bot the scan finds supplies both. scan_scope "any"
 #      (default) is cross-fleet for host jobs, which run fleet-less; "fleet"
 #      restricts it to <bots_dir>.
@@ -6332,7 +6333,7 @@ EOF
 # undeliverable, so a refusal is never a send.
 # Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
 resolve_alert_target() {
-    local bots_dir="${1:-}" scan_scope="${2:-any}" _bot
+    local bots_dir="${1:-}" scan_scope="${2:-any}" roster="${3:-}" _bot
     _alert_chat_id=""
     _alert_state_dir=""
     _alert_target_src=""
@@ -6357,7 +6358,7 @@ resolve_alert_target() {
             _alert_token="${TELEGRAM_BOT_TOKEN:-}"
             return 0
         fi
-        _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" || true)
+        _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" "$roster" || true)
         if [ -n "$_bot" ]; then
             _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
             _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
@@ -6380,18 +6381,19 @@ resolve_alert_target() {
     fi
 }
 
-# _bot_with_own_chat <bots_dir> <chat_id>
-# The first bot dir in <bots_dir> (lexical) that its fleet.yaml declares (every
-# dir when the roster is empty), whose OWN TELEGRAM_GROUP_CHAT_ID is <chat_id>,
-# that is a channel bot (TELEGRAM_BOT_HANDLE: every bot.conf carries a state
-# dir, a channel-less one too) and that declares a channel state dir; prints it,
-# or returns 1. Both filters are creds-check's: move-bot leaves a moved bot's old
-# dir behind by default. The validator warns at generate time when no declared
-# bot qualifies (composer.fleet_alert_sender_state_dir).
+# _bot_with_own_chat <bots_dir> <chat_id> [roster]
+# The first bot dir in <bots_dir> (lexical) that <roster> names, or else its
+# fleet.yaml declares (every dir when both are empty), whose OWN
+# TELEGRAM_GROUP_CHAT_ID is <chat_id>, that is a channel bot
+# (TELEGRAM_BOT_HANDLE: every bot.conf carries a state dir, a channel-less one
+# too) and that declares a channel state dir; prints it, or returns 1. Both
+# filters are creds-check's: move-bot leaves a moved bot's old dir behind by
+# default. The validator warns at generate time when no declared bot qualifies
+# (composer.fleet_alert_sender_state_dir).
 _bot_with_own_chat() {
-    local bots_dir="$1" chat="$2" d declared
+    local bots_dir="$1" chat="$2" declared="${3:-}" d
     [ -d "$bots_dir" ] || return 1
-    declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
+    [ -n "$declared" ] || declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
         bot_in_fleet "$(basename "$d")" "$declared" || continue
