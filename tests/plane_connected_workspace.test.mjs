@@ -115,6 +115,25 @@ function harness(options={}) {
     timer(ms){const t=timers.find(t=>t.active&&t.ms===ms);assert.ok(t);t.active=false;t.fn();}};
 }
 
+test('trusted source labels name computers without conflating a read failure with disconnection',async()=>{
+  const h=harness({count:1});h.mount();await h.api.checkAccount();await flush();
+  assert.equal(await h.api.act(0,'connect'),true);
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/read/overview',()=>reply(200,ok({
+    fleets:[{alias:'team',uid:fleetUID,bots:1,provisional:0}],
+    host:{display_name:'Office computer',rows:1,daemon_serving:true},
+    totals:{fleets:1,bots:1,provisional:0,working:0,attention:0,overdue:0,live_poll:'ok',recorder_gaps:[]},
+  })));
+  await h.api.jget('/api/overview');
+  const label=h.ui.get('owner-session').children[1].children[0];
+  assert.equal(label.textContent,'Office computer · Connected');assert.equal(label.title,'a.example.test');
+  assert.equal(h.api.snapshot().computers[0].label,'Office computer');
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/read/overview',()=>reply(503,{}));
+  const failed=await h.api.jget('/api/overview');
+  assert.equal(failed.data.sources[0].connection_state,'ready');assert.equal(failed.data.sources[0].state,'unavailable');
+  assert.equal(label.textContent,'Office computer · Connected','only admitted connection facts can report disconnection');
+  h.api.dispose();
+});
+
 test('rendered connected controls acknowledge only their exact shell without waiting for host/account reads',async()=>{
   const h=harness({count:0}),messages=[],held=deferred();
   h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);

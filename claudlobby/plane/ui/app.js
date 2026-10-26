@@ -14,6 +14,7 @@ import { esc, ago, renderState, stateBlock } from "./panel-state.js";
 import { jget, createEventSource } from "./api-client.js";
 import * as interactionApi from "./api-client.js";
 import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
+import { hiddenTeams, setTeamHidden, fleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -588,7 +589,7 @@ function railRow(a) {
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
     ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
-    ${a.kind === "actor" && a.fleet ? `<button class="pill ghost" type="button" data-bot-message="${esc(a.uid)}" aria-label="Message ${esc(a.short)} in ${esc(a.fleet)}" disabled>Message</button>` : ""}
+    ${a.kind === "actor" && a.fleet ? `<button class="pill ghost" type="button" data-bot-message="${esc(a.uid)}" aria-label="Message ${esc(a.short)} in ${esc(a.fleet)}" disabled>Message ${esc(a.short)}</button>` : ""}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
     <small>${esc(a.kind)} · ${esc(ago(a.last_seen))}</small></div>`;
@@ -718,10 +719,13 @@ function renderHeader(env) {
     el.innerHTML = `<span class="dim">${coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
-  el.innerHTML = `<b>${t.bots}</b> bots`
+  const status = env.data.fleets?.length ? fleetStatusCopy({ bots: t.bots, presence: {
+    live_poll: t.live_poll, counts: Object.fromEntries(OV_PRESENCE_ORDER.map(key => [key,
+      env.data.fleets.reduce((n, f) => n + (f.presence?.counts?.[key] ?? NaN), 0)])) } }) : 'session counts unavailable';
+  el.innerHTML = `<b>${t.bots}</b> recorded bots · ${esc(status)}`
     + (t.provisional ? ` <small title="actors no registry scan has confirmed`
         + ` yet — a mistyped dispatch target mints one">(${t.provisional}`
-        + ` unconfirmed)</small>` : "")
+        + ` unconfirmed identities)</small>` : "")
     + ` · <b>${t.working}</b> working`
     + ` · <b class="${t.attention ? "warn" : ""}">${t.attention}</b> need you`
     + ` · <b class="${t.overdue ? "warn" : ""}">${t.overdue}</b> overdue`
@@ -825,15 +829,17 @@ function renderOverview(env) {
   }
   const d = env.data;
   const dimension = fleets.length >= 2;
+  const hidden = hiddenTeams();
   const cards = d.fleets.map((f) => `
     <div class="ov-card ${dimension ? "pick" : ""} ${
         dimension && f.alias === currentFleet ? "on" : ""}"
-         data-fleet="${esc(f.alias)}" ${dimension ? 'role="button" tabindex="0"' : ""}
+         data-fleet="${esc(f.alias)}" ${!showHiddenTeams && hidden.has(f.uid) && f.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null) ? 'hidden' : ''} ${dimension ? 'role="button" tabindex="0"' : ""}
          title="${esc(f.display_label || f.alias)}${dimension ? " — open this room" : ""}">
       <div class="ov-head"><b>${esc(f.display_label || f.alias)}</b>
-        <span>${f.bots} bot${f.bots === 1 ? "" : "s"}${
-          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed)</small>` : ""}</span>
+        <span>${f.bots} recorded bot${f.bots === 1 ? "" : "s"}${
+          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed identities)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
+      <div class="ov-line ov-status-counts">${esc(fleetStatusCopy(f))}</div>
       <div class="ov-line">${ovPresence(f.presence)}</div>
       <div class="ov-line">${ovNum(f.open, "open", false)} ·
         ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")} ·
@@ -851,9 +857,8 @@ function renderOverview(env) {
     </div>`).join("");
   if (d.sources) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
-      <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.connection_state === 'ready' ? 'Connected'
-        : s.connection_state === 'not_connected' ? 'Not connected'
-        : s.connection_state === 'disconnected' ? 'Disconnected' : s.state)}</span></div>
+      <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(connectionLabel(s.connection_state))}</span></div>
+      <div class="ov-line">Team summary: ${s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
       <div class="ov-line">${s.state === 'ok' && s.host
         ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
@@ -1148,6 +1153,7 @@ let focusTimer = null;
 let fleets = [];          // [{alias, bots, last_comm_at, ...}], alphabetical
 let fleetsSeen = false;   // the first /api/fleets answer has landed
 const PICK_KEY = "plane.fleet";
+let showHiddenTeams = false;
 
 function loadPick() {   // per-viewer convenience — may be absent or throw
   try { return localStorage.getItem(PICK_KEY); } catch { return null; }
@@ -1168,8 +1174,9 @@ function adoptFleets(env) {
   if (names.length < 2) { currentFleet = null; return; }
   if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
   const stored = loadPick();
+  const visible = fleets.filter(f => !hiddenTeams().has(f.uid)).map(f => f.alias);
   currentFleet = stored && (stored === "all" || names.includes(stored))
-    ? stored : (env.data.default || names[0]);
+    ? stored : (visible.includes(env.data.default) ? env.data.default : visible[0] || "all");
 }
 
 function fleetQuery(sep = "?") {   // the per-fleet routes' `fleet=` axis
@@ -1183,20 +1190,53 @@ function channelUrl() {
 
 function renderFleetTabs() {
   const el = $("fleet-tabs");
-  if (fleets.length < 2) { el.innerHTML = ""; return; }
+  if (!fleets.length) { el.innerHTML = ""; return; }
+  const hidden = hiddenTeams(), hiddenCount = fleets.filter(f => hidden.has(f.uid)).length;
   // Per-team rooms are the DEFAULT (operator ruling): a fleet tab is always
   // selected; the merged host view is the explicit last resort.
-  el.innerHTML = [...fleets.map((f) => f.alias), "all"].map((f) => {
+  el.innerHTML = [...fleets.filter(f => showHiddenTeams || !hidden.has(f.uid) || f.alias === currentFleet || fleets.length === 1 && currentFleet === null).map((f) => f.alias), "all"].map((f) => {
     const meta = fleets.find((x) => x.alias === f);
     const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok"
       ? meta.connection_state === 'ready' ? 'summary unavailable'
-      : meta.connection_state === 'not_connected' ? 'not connected' : meta.source_state : meta.bots)}</small>`
+      : meta.connection_state === 'not_connected' ? 'not connected' : meta.source_state : `${meta.bots} recorded`)}</small>`
       : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
-    return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
-      + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`;
-  }).join("");
-  el.querySelectorAll("button").forEach((b) =>
+    return `<span class="fleet-tab-choice"><button class="pill ghost ${f === currentFleet || currentFleet === null && fleets.length === 1 && meta ? "on" : ""}"`
+      + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`
+      + (meta ? `<button class="pill ghost fleet-message" data-message-team="${esc(f)}" type="button" title="Open this team’s bot list; sending still requires granted access" aria-label="Choose a bot to message in ${esc(meta.display_label || f)}">Message a bot</button>` : '')
+      + (meta && typeof meta.uid === 'string' && meta.uid.trim() ? `<button class="pill ghost fleet-hide" data-hide-team="${esc(meta.uid)}" type="button" aria-label="${hidden.has(meta.uid) ? 'Show' : 'Hide'} ${esc(meta.display_label || f)} in my view">${hidden.has(meta.uid) ? 'Unhide' : 'Hide'}</button>` : '') + '</span>';
+  }).join("") + (hiddenCount ? `<button class="pill ghost fleet-visibility" type="button" aria-pressed="${showHiddenTeams}">${showHiddenTeams ? 'Hide hidden teams' : 'Show hidden teams'} (${hiddenCount})</button><small class="fleet-visibility-note">Hidden only in this browser; the selected team stays visible. Combined activity and totals still include hidden teams.</small>` : '');
+  el.querySelectorAll("[data-fleet]").forEach((b) =>
     b.addEventListener("click", () => pickFleet(b.dataset.fleet)));
+  el.querySelectorAll("[data-hide-team]").forEach(b => b.addEventListener("click", () => {
+    setTeamHidden(b.dataset.hideTeam, !hidden.has(b.dataset.hideTeam));
+    renderFleetTabs(); applyFleetVisibility();
+    focusFleetControl(b.dataset.hideTeam);
+  }));
+  el.querySelectorAll("[data-message-team]").forEach(b => b.addEventListener("click", () => {
+    pickFleet(b.dataset.messageTeam);
+    $("fleet")?.scrollIntoView?.({ block: "nearest" });
+  }));
+  el.querySelector?.('.fleet-visibility')?.addEventListener('click', () => {
+    showHiddenTeams = !showHiddenTeams; renderFleetTabs(); applyFleetVisibility();
+    focusFleetControl();
+  });
+}
+
+// Only explicit visibility actions move focus; background reads never call it.
+function focusFleetControl(uid) {
+  const el = $("fleet-tabs");
+  const hide = uid && [...el.querySelectorAll("[data-hide-team]")].find(b => b.dataset.hideTeam === uid);
+  const selected = [...el.querySelectorAll("[data-fleet]")].find(b => b.dataset.fleet === currentFleet)
+    || el.querySelectorAll("[data-fleet]")[0];
+  (hide || el.querySelector?.('.fleet-visibility') || selected)?.focus?.();
+}
+
+function applyFleetVisibility() {
+  const hidden = hiddenTeams();
+  for (const card of $("overview")?.querySelectorAll?.(".ov-card[data-fleet]") || []) {
+    const team = fleets.find(f => f.alias === card.dataset.fleet);
+    card.hidden = !showHiddenTeams && hidden.has(team?.uid) && team?.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null);
+  }
 }
 
 // ONE pick path — the tab row and the overview strip's cards (U3) both
@@ -1207,6 +1247,7 @@ function pickFleet(f) {
   syncWorkRoom();
   savePick(currentFleet);
   renderFleetTabs();
+  applyFleetVisibility();
   for (const card of $("overview")?.querySelectorAll?.(".ov-card.pick") || []) {
     card.classList.toggle("on", card.dataset.fleet === currentFleet);
   }

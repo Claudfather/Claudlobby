@@ -441,6 +441,67 @@ test('selected canonical detail loads independently of capped board and escapes 
   assert.doesNotMatch(h.get('task-detail-content').innerHTML,/<body>/);
 });
 
+test('task result and feedback precede closed history without inventing description or delivery', async () => {
+  const response = canonicalDetail('task-a');
+  response.data.task.body = null;
+  response.data.task.terminal_event = {event:'completed',detail:JSON.stringify({summary:'Latest <result> from the recorded completion'})};
+  response.data.task.history.push({event:'progress',detail:JSON.stringify({summary:'Later stale progress must not replace completion'})});
+  const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+  const html = h.get('task-detail-content').innerHTML;
+  assert.ok(html.indexOf('<h3>Recorded result</h3>') < html.indexOf('<h3>Feedback and conversation</h3>'));
+  assert.ok(html.indexOf('id="task-reports"') < html.indexOf('<summary>Task details and history</summary>'));
+  assert.ok(html.indexOf('id="task-permissions"') < html.indexOf('<summary>Task details and history</summary>'));
+  assert.match(html,/Latest &lt;result&gt; from the recorded completion/);
+  assert.doesNotMatch(html,/<result>|No confirmed delivery evidence|No task body was recorded/);
+  assert.match(html,/No current assignment to check/);
+  assert.match(html,/A separate task description is not available in this snapshot/);
+  assert.doesNotMatch(html,/<details[^>]*\bopen\b/);
+  assert.match(h.get('task-action-note').textContent,/complete; it cannot be nudged.*Use feedback/);
+  assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').disabled,true);
+  assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').disabled,false);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+
+test('missing current assignment receipt stays unconfirmed rather than implying delivery', async () => {
+  const response = canonicalDetail('task-a');
+  response.data.task.state = 'active'; response.data.task.current_assignment = {assignee_alias:'Worker'};
+  const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+  assert.match(h.get('task-detail-content').innerHTML,/Delivery of the current assignment is not confirmed/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/No current assignment to check/);
+  assert.match(h.get('task-detail-content').innerHTML,/<h3>Latest recorded update<\/h3>/);
+});
+
+for (const mismatch of [null,'event_id','event','task_id','assignment_id'])
+test(`terminal result recovers nullable detail only from its exact frozen event: ${mismatch}`, async () => {
+  const response=canonicalDetail('task-a');
+  const terminal={event_id:'terminal-id',event:'completed',task_id:'task-a',assignment_id:'original-assignment',detail:null};
+  const history={...terminal,detail:JSON.stringify({summary:'Exact terminal <summary>'})};
+  if(mismatch) history[mismatch]='unrelated';
+  response.data.task.terminal_event=terminal;
+  response.data.task.history=[history,{event_id:'later',event:'progress',detail:JSON.stringify({summary:'Unrelated later progress'})}];
+  const h=harness({jget:()=>response});h.loop.setRoom('web');await settle();h.open();await settle();
+  const html=h.get('task-detail-content').innerHTML;
+  const primary=html.slice(html.indexOf('<h3>Recorded result</h3>'),html.indexOf('<h3>Feedback and conversation</h3>'));
+  if(mismatch) assert.match(primary,/Result text is not available/);
+  else assert.match(primary,/Exact terminal &lt;summary&gt;/);
+  assert.doesNotMatch(primary,/Unrelated later progress|<summary>/);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+
+test('long result is an escaped labelled excerpt with full text in a closed disclosure', async () => {
+  const response=canonicalDetail('task-a');
+  const summary='A'.repeat(1100)+'<full-result-tail>';
+  response.data.task.terminal_event={event:'completed',detail:JSON.stringify({summary})};
+  const h=harness({jget:()=>response});h.loop.setRoom('web');await settle();h.open();await settle();
+  const html=h.get('task-detail-content').innerHTML;
+  const excerpt=html.slice(html.indexOf('Result excerpt'),html.indexOf('<summary>Read full result</summary>'));
+  assert.match(excerpt,/first 1,000 characters/);assert.match(excerpt,new RegExp('A'.repeat(1000)+'…'));
+  assert.doesNotMatch(excerpt,/full-result-tail/);
+  assert.match(html, new RegExp('A'.repeat(1100)+'&lt;full-result-tail&gt;'));
+  assert.doesNotMatch(html,/<full-result-tail>|<details[^>]*\bopen\b/);
+  assert.ok(html.indexOf('Read full result')<html.indexOf('<h3>Feedback and conversation</h3>'));
+});
+
 test('late detail cannot replace another selected task or reopen a closed dialog', async () => {
   const first=deferred();
   const h=harness({jget(url){return url.includes('task-a')?first.promise:canonicalDetail('task-b');}});
@@ -657,7 +718,8 @@ test('unknown recorded team keeps only labelled readonly board snapshot, never p
 
 for (const actions of [[],['message'],['feedback'],['nudge'],['feedback','nudge'],['message','feedback','nudge']])
 test(`task action note describes actual capabilities only: ${actions.join(',') || 'none'}`, async () => {
-  const h = harness({interactionContext(){return {...context,actions};}}); h.loop.setRoom('web'); await settle(); h.update(); h.open(); await settle();
+  const response=canonicalDetail('task-a'); response.data.task.state='queued';
+  const h = harness({interactionContext(){return {...context,actions};},jget:()=>response}); h.loop.setRoom('web'); await settle(); h.update(); h.open(); await settle();
   const note = h.get('task-action-note').textContent;
   const buttons = h.get('task-detail-content').querySelectorAll('[data-kind]');
   for(const button of buttons) assert.equal(button.disabled,!actions.includes(button.dataset.kind));
@@ -1588,6 +1650,30 @@ test('recorded reports survive the recent window and remain a frozen task snapsh
   assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
   const olderHost = await conversationHarness();
   assert.match(olderHost.get('task-recorded-reports').innerHTML, /Recorded reports are unavailable/);
+});
+
+test('task comments and replies precede report duplicates without dropping or mutating messages', async () => {
+  const thread = conversationThread('task-a', ['long-report','feedback','reply','dispatch']);
+  thread.messages[0].message_class = 'report'; thread.messages[2].message_class = 'answer';
+  thread.messages[3].message_class = 'task_request';
+  const original = JSON.stringify(thread);
+  const h = await conversationHarness(); h.update(conversationRead(thread));
+  assert.deepEqual(messagesIn(h.get('task-reports').children[0]).map(m=>m.dataset.msgId), ['feedback','reply','long-report','dispatch']);
+  assert.equal(JSON.stringify(thread),original);
+  assert.match(h.get('task-detail-content').innerHTML,/Comments and replies appear first/);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+
+test('composer names the recipient and keeps direct message distinct from task feedback', async () => {
+  const h = harness(feedbackOptions({interactionContext:()=>context}));
+  h.loop.setRoom('web'); await settle();
+  h.get('work-recipient').value='worker'; h.get('work-recipient').onchange();
+  assert.match(h.get('work-mode-note').textContent,/Direct message to Worker.*not linked to a task/);
+  h.open(nudgeTaskId); await settle();
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').onclick();
+  assert.match(h.get('work-mode-note').textContent,/Feedback to Manager.*does not approve, reopen or change/);
+  assert.equal(h.get('work-recipient').disabled,true);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
 
 

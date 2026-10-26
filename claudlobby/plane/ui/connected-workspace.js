@@ -44,8 +44,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   let sequence = 0, loading = null, refreshTimer = null, paused = true;
   const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Set();
   const snapshot = () => Object.freeze({phase, accountUnavailable,
-    computers: clients.map(({reference, client}) => ({reference_id:reference.reference_id,
-      endpoint_origin:reference.endpoint_origin, ...client.snapshot()}))});
+    computers: clients.map(({reference, client, label}) => ({reference_id:reference.reference_id,
+      endpoint_origin:reference.endpoint_origin, label:label || computerLabel(reference), ...client.snapshot()}))});
   const invoke = (fn, ...args) => { try { fn?.(...args); } catch { /* consumer callbacks cannot change admission */ } };
   function changed() {
     render();
@@ -220,6 +220,15 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const ticket = sequence, active = transport, recovery = new Map(clients.map(row => [row.key,row.actionRecoveryPending]));
     const value = await active.jget(url);
     if (disposed || phase !== 'ready' || ticket !== sequence || active !== transport) return failure('denied');
+    let renamed = false;
+    for (const source of value?.data?.sources || []) {
+      const row = clients.find(row => row.key === source.key);
+      if (row && source.state === 'ok' && typeof source.label === 'string'
+          && source.label.trim() && source.label.length <= 80 && row.label !== source.label) {
+        row.label = source.label; renamed = true;
+      }
+    }
+    if (renamed) changed();
     // Quiet recorder recovery is observed by the existing board refresh, not
     // a source:ok event. Refresh only once after an admitted healthy overview.
     if (url === '/api/overview') for (const source of value?.data?.sources || []) {
@@ -354,8 +363,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
       const connection = client.connectionState?.() || status.state;
+      const name = clients[index].label || computerLabel(reference);
       const labels = {ready:'Connected',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
-      label.textContent = `${new URL(reference.endpoint_origin).hostname} · ${labels[connection] || connection}`;
+      label.textContent = `${name} · ${labels[connection] || 'Connection unconfirmed'}`;
+      label.title = new URL(reference.endpoint_origin).hostname;
+      row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
