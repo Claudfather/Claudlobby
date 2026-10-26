@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { hiddenTeams, setTeamHidden, fleetStatusCopy, fleetStatusCounts, connectionLabel } from '../claudlobby/plane/ui/workspace-display.js';
+import { hiddenTeams, setTeamHidden, fleetStatusCopy, fleetStatusCounts, aggregateFleetStatusCopy, aggregateFleetStatusCounts, connectionLabel } from '../claudlobby/plane/ui/workspace-display.js';
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
 const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
@@ -138,7 +138,7 @@ test('renderer shows per-host availability and partial totals without inventing 
   const { runInNewContext } = await import('node:vm');
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const nodes = new Map(['fleet-totals','host-facts','beat','beat-label','overview','fleet-tabs'].map(k => [k, {innerHTML:'',textContent:'',className:'',querySelectorAll:()=>[]}]));
-  const context = { hiddenTeams, setTeamHidden, fleetStatusCopy, connectionLabel, showHiddenTeams:false, $: id => nodes.get(id), fleets: [], currentFleet: null, interactionApi:{dispose(){}},
+  const context = { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel, showHiddenTeams:false, $: id => nodes.get(id), fleets: [], currentFleet: null, interactionApi:{dispose(){}},
     esc: v => String(v ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),
     ago: () => 'recently', stateBlock: () => 'unavailable' };
   runInNewContext(app.slice(app.indexOf('function renderHeader('), app.indexOf('function toggleMessageBody(')), context);
@@ -752,6 +752,36 @@ test('recorded actors are separate from sampled running, stopped and unconfirmed
   assert.deepEqual(fleetStatusCounts({...fleet,presence:{...fleet.presence,live_poll:'unavailable'}}),
     {recorded:14,running:null,stopped:null,unconfirmed:14});
   assert.equal(fleetStatusCounts({...fleet,bots:15}).running,null,'inconsistent samples never imply running');
+});
+
+test('aggregate retains confirmed fleet counts while malformed or unavailable peers remain unconfirmed',()=>{
+  const ready={bots:9,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  const unknown={bots:10,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  for(const peer of [unknown,{bots:10},{...unknown,presence:{...unknown.presence,live_poll:'unavailable'}},
+    {...unknown,presence:{live_poll:'ok',counts:{...unknown.presence.counts,down:-1}}}]) {
+    const rows=[ready,peer,{bots:3}],before=JSON.stringify(rows);
+    assert.deepEqual(aggregateFleetStatusCounts(rows,22),{recorded:22,running:9,stopped:0,unconfirmed:13});
+    assert.equal(aggregateFleetStatusCopy(rows,22),'9 confirmed running · 0 confirmed not running · 13 unconfirmed');
+    assert.equal(JSON.stringify(rows),before);
+  }
+  assert.deepEqual(aggregateFleetStatusCounts([ready],22),{recorded:22,running:9,stopped:0,unconfirmed:13},'missing rows remain in the recorded remainder');
+  assert.deepEqual(aggregateFleetStatusCounts([ready],8),{recorded:8,running:null,stopped:null,unconfirmed:8},'contradictory inventory never overstates confirmed counts');
+});
+
+test('header uses validated per-fleet evidence even when the aggregate poll is degraded, including hidden teams',async()=>{
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const node={innerHTML:''},c={$:()=>node,esc:String,aggregateFleetStatusCopy};
+  runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function renderHostFacts(')),c);
+  const ready={bots:9,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  const malformed={bots:10,presence:{live_poll:'ok',counts:{working:0,idle:9,down:0,stale:0,unknown:0,sampling:0}}};
+  const hidden={uid:'hidden-team',bots:3,presence:{live_poll:'ok',counts:{working:2,idle:0,down:1,stale:0,unknown:0,sampling:0}}};
+  c.hiddenTeams=()=>new Set([hidden.uid]);
+  c.renderHeader(ok({fleets:[ready,malformed,hidden],totals:{fleets:3,bots:22,working:11,attention:0,overdue:0,live_poll:'unavailable'}}));
+  assert.match(node.innerHTML,/<b>22<\/b> recorded bots/);
+  assert.match(node.innerHTML,/11 confirmed running · 1 confirmed not running · 10 unconfirmed/);
+  assert.equal(fleetStatusCopy(ready),'9 running · 0 not running · 0 unconfirmed');
+  c.renderHeader(ok({fleets:[ready,{bots:10},{bots:3}],totals:{fleets:3,bots:22,working:9,attention:0,overdue:0,live_poll:'unavailable'}}));
+  assert.match(node.innerHTML,/9 confirmed running · 0 confirmed not running · 13 unconfirmed/);
 });
 
 test('hidden teams are an explicit local preference, with reveal and a safe visible default',async()=>{

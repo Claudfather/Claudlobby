@@ -28,6 +28,25 @@ export function fleetStatusCopy(fleet) {
   const c = fleetStatusCounts(fleet);
   return `${c.running ?? "unknown"} running · ${c.stopped ?? "unknown"} not running · ${c.unconfirmed ?? "unknown"} unconfirmed`;
 }
+export function aggregateFleetStatusCounts(fleets, recorded) {
+  const unknown = {recorded, running:null, stopped:null, unconfirmed:recorded};
+  if (!Number.isSafeInteger(recorded) || recorded < 0)
+    return {recorded:null, running:null, stopped:null, unconfirmed:null};
+  const rows = fleets.map(fleetStatusCounts);
+  const represented = rows.reduce((n, row) => n + (row.recorded ?? 0), 0);
+  if (!Number.isSafeInteger(represented) || represented > recorded) return unknown;
+  const running = rows.reduce((n, row) => n + (row.running ?? 0), 0);
+  const stopped = rows.reduce((n, row) => n + (row.stopped ?? 0), 0);
+  if (!Number.isSafeInteger(running + stopped) || running + stopped > recorded) return unknown;
+  // Invalid/missing fleet samples contribute no confirmed state. The host's
+  // authoritative recorded total still accounts for every remaining identity.
+  return {recorded, running, stopped, unconfirmed:recorded - running - stopped};
+}
+export function aggregateFleetStatusCopy(fleets, recorded) {
+  const c = aggregateFleetStatusCounts(fleets, recorded);
+  const qualifier = c.unconfirmed > 0 ? "confirmed " : "";
+  return `${c.running ?? "unknown"} ${qualifier}running · ${c.stopped ?? "unknown"} ${qualifier}not running · ${c.unconfirmed ?? "unknown"} unconfirmed`;
+}
 export function connectionLabel(state) {
   return ({ready:"Connected", not_connected:"Not connected", denied:"Access denied", disconnected:"Disconnected",
     signed_out:"Disconnected", checking:"Checking connection", unavailable:"Connection unavailable",

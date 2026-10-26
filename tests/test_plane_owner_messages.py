@@ -552,6 +552,34 @@ def test_native_owner_service_can_send_once_with_exact_grant(native_owner_gatewa
                if name in {'svc_inventory_properties', 'svc_bot_unit_owned_by'})
 
 
+@pytest.fixture
+def native_owner_gateway_with_template(installed, monkeypatch, tmp_path):  # noqa: F811
+    """The same owner unit in a selected plan that also holds the fleet's failure
+    template, a unit with no admission (#2522)."""
+    from tests.test_activation import _cold_case
+
+    return native_owner_gateway.__wrapped__(
+        _cold_case(installed, monkeypatch, tmp_path, fleet_job=True), monkeypatch)
+
+
+def test_native_owner_service_acts_beside_a_failure_template_in_the_selected_plan(
+        native_owner_gateway_with_template, monkeypatch):
+    """#2522: the owner check walks every planned unit, and the failure template has
+    no admission to read, so it is passed over and the owner service still acts."""
+    from claudlobby.activation_state import read_selection
+    from claudlobby.config_plan import read_plan
+    from claudlobby.config_units import planned_units
+
+    (adapter, reader, owner, ctx, options), host, stem = native_owner_gateway_with_template
+    plan = read_plan(adapter.root, read_selection(adapter.root)['plan_id'])
+    assert [item['admission'] for declaration, item in planned_units(plan, 'Linux')
+            if declaration.source.name == 'com.example.job-failed@.service'] == [None]
+    calls = native_receiver(monkeypatch)
+    observation = adapter.send(reader, text='native owner message', **options)
+    assert observation.data['delivery'] == 'received'
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize('defect', ['root', 'release', 'external', 'unknown', 'missing',
                                   'changed', 'drift', 'cli', 'native', 'artifact', 'BOT_ID', 'BOT_NAME', 'BOT_DIR',
                                   'FLEET_ROOT', 'FLEET_NAME', 'CLAUDLOBBY_FLEET',

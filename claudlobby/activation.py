@@ -40,7 +40,7 @@ from .resources import get_resources
 from .runtime_admission import RuntimeIdentity, validate_unit_admission
 from .supervision_inventory import (Adapter, EnrolledUnit, FileSnapshot, InventoryError, UnitDeclaration,
                                     _catalog, _darwin_disabled, _darwin_source, _environment,
-                                    collect_enrollment, legacy_linux_declarations)
+                                    collect_enrollment, is_unit_template, legacy_linux_declarations)
 
 
 # A live preview can race normal writers; these facts need the authoritative
@@ -271,7 +271,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         declarations = planned_units(plan, inventory.manager)
         starts = {}
         for declaration, item in declarations:
-            if item["enroll"]:
+            if item["enroll"] and not is_unit_template(declaration.source.name):
                 start = validate_unit_admission(release, declaration, item, plan.blob(item["sha256"]))
                 starts[str(declaration.source)] = (declaration, item, start)
                 if item["phase"] == "bots" and os.path.lexists(declaration.working_directory):
@@ -285,9 +285,10 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         # upgrade parking owner. Check exact candidate targets before preparing
         # SQL/config changes; hosted or unknown ancestry is not permission.
         for declaration, item in declarations:
-            if item["enroll"] and adapter.call("svc_activation_assert_external",
+            if (item["enroll"] and not is_unit_template(declaration.source.name)
+                    and adapter.call("svc_activation_assert_external",
                     install_directory / declaration.source.name,
-                    enrollment._target(manager, domain, declaration.source), str(os.getpid())).returncode:
+                    enrollment._target(manager, domain, declaration.source), str(os.getpid())).returncode):
                 raise ActivationError("bootstrap caller is hosted or cannot be proved external; use an operator shell")
         store.prepare(activation_id, plan, recovery_release_id=release.release_id,
                       source_release_id=release.release_id, enrollment_digest=inventory.digest,
@@ -621,6 +622,8 @@ def _refuse_unrecorded_run_intent(root: Path, old_units, contexts, *, bot_states
 
 def _legacy_quiet(adapter, pause, phase, sockets, *, candidate_started=frozenset()):
     for unit in pause.units(phase):
+        if is_unit_template(unit["target"]):
+            continue  # no process runs as a template; its instances are its own units
         if unit["target"] in candidate_started:
             continue  # Exact saved candidate intent is reconciled by its readiness/native owner.
         assert_quiescent(adapter, installed_file=Path(unit["installed"][0]["path"]),
@@ -634,10 +637,14 @@ def _oneshot_producer(phase: str, installed) -> bool:
 
 
 def _startable_producers(entries):
-    """Publish paired services, but start only their declared timers."""
+    """Publish paired services, but start only their declared timers.
+
+    A unit template is published and never started: only OnFailure= starts
+    its instances (#2522)."""
     timer_services = {entry["service"] for entry in entries if entry["service"]}
     return (tuple(entry for entry in entries
-                  if Path(entry["installed"]).name not in timer_services), timer_services)
+                  if Path(entry["installed"]).name not in timer_services
+                  and not is_unit_template(Path(entry["installed"]).name)), timer_services)
 
 
 def _require_preserved_handoff(bot_dir, *, not_before=None):
@@ -970,7 +977,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         bot_states = _snapshot_bot_states(inventory, candidates, adapter) if preserve_bot_state else None
         starts = {}
         for declaration, item in candidates:
-            if item["enroll"]:
+            if item["enroll"] and not is_unit_template(declaration.source.name):
                 starts[str(declaration.source)] = (declaration, item,
                     validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
         candidate_targets = {enrollment._target(inventory.manager, _catalog(inventory.catalog)[1], declaration.source)
@@ -990,7 +997,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         from .plane.owner_service import preflight as owner_service_preflight, managed_listeners
         owner_service_preflight(starts, managed=managed_listeners(source_plan, inventory))
         retired_units = tuple(unit for unit in inventory.units
-                              if unit.installed and unit.target not in candidate_targets)
+                              if unit.installed and unit.target not in candidate_targets
+                              and not is_unit_template(unit.target))
         rank, contexts = _roster(plan, candidates, package)
         # Standing handoff refusals (manager coverage, stopped or uninstalled
         # assignees, retired owners, unparsable sections) must not wait for a
@@ -1007,8 +1015,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if unit.installed and unit.declaration.scope == "bot":
                 _original_bot_tmpdir(unit)  # Refuse an unknown private server before any record.
         for unit in inventory.units:
-            if unit.installed and adapter.call("svc_activation_assert_external",
-                    unit.installed[0].path, unit.target, str(os.getpid())).returncode:
+            if (unit.installed and not is_unit_template(unit.target)
+                    and adapter.call("svc_activation_assert_external",
+                                     unit.installed[0].path, unit.target, str(os.getpid())).returncode):
                 raise ActivationError("activation caller is hosted or native ownership is unknown")
         store.prepare(activation_id, plan,
                       recovery_release_id=recovery.release_id, forward_recovery=forward_recovery,
@@ -1356,6 +1365,8 @@ def _assert_external_caller(adapter, placements: dict) -> None:
     itself checks; ordinary inventory cannot classify a partial start."""
     for entries in placements.values():
         for placement in entries:
+            if is_unit_template(placement["target"]):
+                continue
             if adapter.call("svc_activation_assert_external", placement["installed"],
                             placement["target"], str(os.getpid())).returncode:
                 raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
@@ -1618,8 +1629,9 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
         for declaration, item in candidates:
             if item["enroll"]:
                 source_path = str(declaration.source)
-                starts[source_path] = (declaration, item,
-                    validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
+                if not is_unit_template(declaration.source.name):
+                    starts[source_path] = (declaration, item,
+                        validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
                 candidate_targets[source_path] = enrollment._target(manager, domain, declaration.source)
         candidate_started = set()
         if step in START_STEPS:
@@ -1659,7 +1671,8 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
             raise ActivationError("old ingest still answers; resume requires a quiesced writer")
         rank, contexts = _roster(plan, candidates, package)
         targets = set(candidate_targets.values())
-        retired = tuple(unit for unit in old_units if unit.installed and unit.target not in targets)
+        retired = tuple(unit for unit in old_units if unit.installed and unit.target not in targets
+                        and not is_unit_template(unit.target))
         if bootstrap:
             return _finish_bootstrap_activation(root, store, activation_id, plan, release,
                 candidates, starts, rank, install_directory, adapter, package)

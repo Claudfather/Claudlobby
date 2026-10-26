@@ -20,6 +20,24 @@ that the change is probed once it is activated. A run that still stops before
 probing writes its cause under the refusal, and a probe that may have run
 without completing names the state file and the log to read.
 
+### Fixed — a failed fleet job raises an alert (#2522)
+
+Every service the composer generates for a fleet job (the `defaults.jobs`
+entries, the code-audit sweep and each briefing slot) now names its fleet's
+failure template in `OnFailure=`. The template,
+`<service_prefix>.job-failed@.service`, is composed beside the job units and
+published by `host activate`, which never enables, starts or pauses it. When a
+job's service fails, systemd starts one instance for it, and the instance runs
+the selected release's `claudlobby fleet notify --level alert --event
+job_failed` with the failed unit's name: a `fleet_alert` on the fleet's plane,
+the manager's pane and the fleet's alert chat. Before this, a timer job could
+fail on every run and raise nothing. The activation inventory owns the
+template, and each instance systemd loads for it, including one an operator's
+own unit loads through a drop-in. It still refuses a template installed by
+hand that runs the CLI from under the data root. Bot services, host jobs and
+launchd get no `OnFailure=` (#2532). `documentation/system-yaml-schema.md` says
+what the alert records, whom it reaches and how to attach it to your own unit.
+
 ### Fixed — a preserve-state activation times its handoff request on the handoff file's own clock (#2528)
 
 A preserve-state activation could refuse a handoff written just after its
