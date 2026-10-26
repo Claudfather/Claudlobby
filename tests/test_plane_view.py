@@ -1599,10 +1599,13 @@ def test_task_permission_probe_does_not_scan_other_fleet_history(tmp_path, histo
 
     conn = view._ro_conn(db)
     steps = 0
+    # One tick per 1,000 VM steps. The board reads in under 1,000 on the
+    # permission index; the fleet-system index walks the 12,000 own-fleet
+    # rows in about 85,000, so 10,000 tells the two apart (#2525).
     def bounded_work():
         nonlocal steps
         steps += 1
-        return int(steps > 100)
+        return int(steps > 10)
     conn.set_progress_handler(bounded_work, 1000)
     try:
         board = view._fetch_tasks(conn, "owned", root=tmp_path)

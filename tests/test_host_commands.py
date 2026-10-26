@@ -849,3 +849,34 @@ def test_forward_recovery_routes_only_explicit_mode(candidate, monkeypatch, caps
         argv.append(flag)
     call(capsys, argv, 4)
     assert calls == [options]
+
+
+def test_forward_recovery_activation_reports_target_forward_only(candidate, monkeypatch, capsys):
+    root, release, plan, directory = candidate
+    with state.locked_activation(root) as store:
+        store.prepare("prior", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
+        for step in state.STEPS:
+            store.begin("prior", step)
+            if step == "selection_switched":
+                store.select("prior")
+            else:
+                store.complete("prior", step, evidence_digest="2" * 64)
+    calls = []
+
+    def upgrade(selected_root, activation_id, plan_id, install_directory, **options):
+        calls.append(options)
+        with state.locked_activation(root) as store:
+            store.prepare(activation_id, plan, recovery_release_id=release.release_id,
+                          source_release_id=release.release_id, enrollment_digest="1" * 64, **options)
+            for step in state.STEPS:
+                store.begin(activation_id, step)
+                record = (store.select(activation_id) if step == "selection_switched" else
+                          store.complete(activation_id, step, evidence_digest="2" * 64))
+        return record
+
+    monkeypatch.setattr(activation, "upgrade_activation", upgrade)
+    result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                           "--install-directory", str(directory), "--forward-recovery"])
+    assert calls == [{"forward_recovery": True}]
+    assert result["data"]["recovery_mode"] == result["data"]["recorded_activation"]["recovery_mode"] == (
+        "target-forward-only")
