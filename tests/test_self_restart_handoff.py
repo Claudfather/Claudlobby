@@ -220,8 +220,9 @@ def test_handoff_clock_is_read_only_in_an_owned_handoff_directory(tmp_path, shap
 def test_handoff_clock_is_taken_by_a_write_into_the_handoff_directory(tmp_path):
     """#2533: the stamp is a file created in the handoff's own directory, so a directory that
     takes no new file refuses it. A stamp taken anywhere else, in the default temp directory or
-    in the bot's own, would not notice the mode and would read another filesystem's clock. The
-    same call, once the directory takes a file again, gives the stamp."""
+    in the bot's own, would take no notice of the mode, and the temp directory can sit on a
+    filesystem with another clock. The same call, once the directory takes a file again, gives
+    the stamp."""
     bot_dir = tmp_path / "bot"
     handoff_dir = bot_dir / ".claude"
     handoff_dir.mkdir(parents=True)
