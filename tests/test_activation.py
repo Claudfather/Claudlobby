@@ -2222,6 +2222,27 @@ def test_preserved_handoff_request_that_cannot_be_timed_refuses_before_it_is_sen
     assert case.calls == []
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_preserved_handoff_request_in_an_unwritable_handoff_directory_refuses_before_it_is_sent(
+        preserved_handoff_case):
+    """#2533: a bot whose .claude/ exists but takes no new file cannot have its request timed
+    there, so the activation refuses on the stamp's own BotLifecycleError, with nothing recorded
+    and nothing sent. A stamp moved out of that directory would take no notice of the mode, and
+    this activation would go on to send."""
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir, kind="shell-below")
+    handoff_dir = case.bot_dir / ".claude"
+    handoff_dir.chmod(0o500)
+    try:
+        with pytest.raises(state.ActivationRefusal, match="cannot time its handoff request") as refused:
+            case.run()
+    finally:
+        handoff_dir.chmod(0o700)
+    assert isinstance(refused.value.__cause__, bot_operations.BotLifecycleError)
+    assert case.body["handoff_effects"] == {}
+    assert case.calls == []
+
+
 def test_preserved_handoff_saved_in_the_requests_own_file_clock_tick_stays_held(preserved_handoff_case, monkeypatch):
     """#2528: a capture saved just before the request can share the file clock's reading at
     the request (one 4 ms tick at 250 Hz). The request waits for the clock's next reading,
