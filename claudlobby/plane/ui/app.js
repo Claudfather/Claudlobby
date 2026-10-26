@@ -14,7 +14,7 @@ import { esc, ago, renderState, stateBlock } from "./panel-state.js";
 import { jget, createEventSource } from "./api-client.js";
 import * as interactionApi from "./api-client.js";
 import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
-import { hiddenTeams, setTeamHidden, fleetStatusCopy, connectionLabel } from "./workspace-display.js";
+import { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -719,9 +719,8 @@ function renderHeader(env) {
     el.innerHTML = `<span class="dim">${coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
-  const status = env.data.fleets?.length ? fleetStatusCopy({ bots: t.bots, presence: {
-    live_poll: t.live_poll, counts: Object.fromEntries(OV_PRESENCE_ORDER.map(key => [key,
-      env.data.fleets.reduce((n, f) => n + (f.presence?.counts?.[key] ?? NaN), 0)])) } }) : 'session counts unavailable';
+  const status = env.data.fleets?.length
+    ? aggregateFleetStatusCopy(env.data.fleets, t.bots) : 'session counts unavailable';
   el.innerHTML = `<b>${t.bots}</b> recorded bots · ${esc(status)}`
     + (t.provisional ? ` <small title="actors no registry scan has confirmed`
         + ` yet — a mistyped dispatch target mints one">(${t.provisional}`
