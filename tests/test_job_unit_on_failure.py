@@ -38,20 +38,20 @@ _FLEET = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
-      manager: kev
+      manager: lead
       bots:
-        kev:
+        lead:
           expertise: [eng]
-          manages: [mason]
+          manages: [builder]
           briefing:
             slots:
               morning: "*-*-* 08:30:00"
-        mason:
+        builder:
           expertise: [eng]
           scope:
             repos: [acme/alpha]
       sweep:
-        owner_bot: mason
+        owner_bot: builder
         repos: [acme/alpha]
         schedule: "*-*-* 02:30:00"
 """
@@ -61,10 +61,10 @@ _FLEET_NO_JOBS = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
-      manager: kev
+      manager: lead
       system_defaults: false
       bots:
-        kev:
+        lead:
           expertise: [eng]
 """
 
@@ -110,7 +110,7 @@ def test_every_fleet_job_service_names_the_failure_template(tmp_path):
     _, _, timers = _compose(tmp_path / "f")
     services = _job_services(timers)
     assert {f"{PREFIX}.fleet-pulse.service", f"{PREFIX}.code-audit-sweep.service",
-            f"{PREFIX}.briefing-kev-morning.service"} <= {path.name for path in services}
+            f"{PREFIX}.briefing-lead-morning.service"} <= {path.name for path in services}
     for service in services:
         assert _values(service.read_text(), "Unit", "OnFailure") == [ON_FAILURE], service.name
 
