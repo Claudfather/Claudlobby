@@ -22,6 +22,15 @@ change that moves the ref, not in every pull request; the `[vault]` tag cannot
 be the revision until a Claudron release carries the `documentation/` layout.
 This covers item 1 of #2520.
 
+### Docs — the test-suite guide no longer says the suite is red
+
+`documentation/test-suite.md` said the macOS suite was red (34 failed / 2125
+passed, as of 2026-08-01), and the root `CLAUDE.md` said it is not green. On
+2026-10-25 a full unsandboxed run at `c7529c7` was green: `10294 passed, 116
+skipped`, rc 0. The guide now gives that measurement and says to take the
+baseline from a fresh before run. It keeps the red-baseline reasoning for the
+case where it applies. `CLAUDE.md` now says the suite can go red.
+
 ### Fixed — a failed fleet job raises an alert (#2522)
 
 Every service the composer generates for a fleet job (the `defaults.jobs`
