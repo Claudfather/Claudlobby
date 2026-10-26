@@ -217,13 +217,22 @@ def test_a_later_push_builds_only_when_it_can_change_what_renders(site: Site, bu
 # quoting. set -f reads an unquoted glob as written, not as the files it matches here.
 READ_LIST = ('set -f; eval "$1" || exit; '
              r'for entry in "${NEVER_RENDERED[@]}"; do printf "%s\0" "$entry"; done')
+# The statements that set or extend the list: the block, and a NEVER_RENDERED+=(...) line
+# or block after it. A one-line statement ends at the ")" that ends its line; a block ends
+# at the line that starts with ")".
+LIST_STATEMENT = re.compile(r"^NEVER_RENDERED\+?=\((?:[^\n]*\)[ \t]*(?:#[^\n]*)?$|.*?^\))",
+                            re.M | re.S)
+# The entry these tests add: a folder no site keeps, so it cannot become an entry of the
+# gate's own list.
+PROBE = "no-site-has-this-folder/**"
 
 
 def _entries_without_a_case(gate: str) -> list[str]:
-    """The entries of the NEVER_RENDERED list in ``gate`` that have no row in ENTRY_PATHS."""
-    block = re.search(r"^NEVER_RENDERED=\(.*?^\)", gate, re.M | re.S)
-    assert block, "the gate should define NEVER_RENDERED"
-    read = subprocess.run(["bash", "-c", READ_LIST, "bash", block.group(0)],
+    """The entries ``gate`` puts on its NEVER_RENDERED list, in the block or in a line after it,
+    that have no row in ENTRY_PATHS."""
+    statements = LIST_STATEMENT.findall(gate)
+    assert statements, "the gate should define NEVER_RENDERED"
+    read = subprocess.run(["bash", "-c", READ_LIST, "bash", "\n".join(statements)],
                           env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
                           capture_output=True, text=True)
     assert read.returncode == 0, read.stderr
@@ -238,18 +247,56 @@ def test_every_never_rendered_entry_has_a_case():
 
 
 @pytest.mark.parametrize("added", [
-    pytest.param("'storybook/**'", id="single-quotes"),
-    pytest.param('"storybook/**"', id="double-quotes"),
-    pytest.param("storybook/**", id="unquoted"),
-    pytest.param("$'storybook/**'", id="ansi-c-quotes"),
-    pytest.param("storybook/\\*\\*", id="backslashes"),
-    pytest.param("'story'\"book/**\"", id="mixed-quotes"),
+    pytest.param(f"'{PROBE}'", id="single-quotes"),
+    pytest.param(f'"{PROBE}"', id="double-quotes"),
+    pytest.param(PROBE, id="unquoted"),
+    pytest.param(f"$'{PROBE}'", id="ansi-c-quotes"),
+    pytest.param(PROBE.replace("*", "\\*"), id="backslashes"),
+    pytest.param(f"'{PROBE[:7]}'\"{PROBE[7:]}\"", id="mixed-quotes"),
 ])
 def test_the_list_case_reads_an_added_entry_whatever_its_quoting(added):
     gate = GATE.read_text(encoding="utf-8")
     end = gate.index("\n)\n", gate.index("\nNEVER_RENDERED=(")) + 1
     with_entry = gate[:end] + f"  {added}\n" + gate[end:]
-    assert _entries_without_a_case(with_entry) == [*_entries_without_a_case(gate), "storybook/**"]
+    assert _entries_without_a_case(with_entry) == [*_entries_without_a_case(gate), PROBE]
+
+
+def _the_gate_with(text: str, *, inside: bool) -> str:
+    """The gate with ``text`` added to the NEVER_RENDERED block, or on the lines right after it."""
+    gate = GATE.read_text(encoding="utf-8")
+    close = gate.index("\n)\n", gate.index("\nNEVER_RENDERED=(")) + 1
+    at = close if inside else close + len(")\n")
+    return gate[:at] + text + gate[at:]
+
+
+def _the_list_case_on(gate: str, tmp_path: Path, monkeypatch) -> None:
+    """Run the list case itself, with ``gate`` as the gate it reads."""
+    edited = tmp_path / GATE.name
+    edited.write_text(gate, encoding="utf-8")
+    monkeypatch.setitem(globals(), "GATE", edited)
+    test_every_never_rendered_entry_has_a_case()
+
+
+@pytest.mark.parametrize("text, inside", [
+    pytest.param(f"  '{PROBE}'\n", True, id="in-the-list"),
+    pytest.param(f"NEVER_RENDERED+=('{PROBE}')\n", False, id="a-line-after-the-list"),
+    pytest.param(f"NEVER_RENDERED+=('{PROBE}')  # kept apart\n", False, id="a-line-with-a-comment"),
+    pytest.param(f"NEVER_RENDERED+=(\n  '{PROBE}'\n)\n", False, id="a-block-after-the-list"),
+])
+def test_the_list_case_fails_for_an_entry_without_a_case(tmp_path, monkeypatch, text, inside):
+    with pytest.raises(AssertionError, match=re.escape(PROBE)):
+        _the_list_case_on(_the_gate_with(text, inside=inside), tmp_path, monkeypatch)
+
+
+def test_the_list_case_reads_an_unquoted_glob_as_written(tmp_path, monkeypatch):
+    """With the working folder holding .github/workflows, bash without set -f reads an unquoted
+    .github/** as that folder, and the list case would fail for a name that is not an entry."""
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    expanded = subprocess.run(["bash", "-c", "echo .github/**"], cwd=tmp_path,
+                              capture_output=True, text=True).stdout.strip()
+    assert expanded == ".github/workflows", "the working folder should hold a match"
+    monkeypatch.chdir(tmp_path)
+    _the_list_case_on(_the_gate_with("  .github/**\n", inside=True), tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("entry, path", [pytest.param(entry, path, id=path)
