@@ -12,13 +12,13 @@ A preserve-state activation could refuse a handoff written just after its
 request, as one that predates it. The request was timed with
 `time.time_ns()`, and the kernel stamps a file from a coarser clock, which on
 a Raspberry Pi 5 with a 4 ms timer tick read up to 7.4 ms earlier. The request
-is now timed by a file created in the bot's own `.claude/` directory, which
-the same clock stamps at the same granularity, so a handoff written after the
-request never reads as older, whatever the kernel's tick or the filesystem's
-granularity. A handoff written before its request is still refused. A bot
-whose `.claude/` directory cannot take that file refuses before any handoff
-is sent. On a Pi, 8 of the 9 `test_preserved_activation_*` tests failed on
-main for this reason.
+is now timed on the handoff file's own clock, read by files created in the
+bot's own `.claude/` directory, at that clock's next tick. So a handoff written
+after the request never reads as older, and one written before it, even in the
+same tick, still does, whatever the kernel's tick or the filesystem's
+granularity. A bot whose `.claude/` directory cannot take those files refuses
+before any handoff is sent. On a Pi, 8 of the 9 `test_preserved_activation_*`
+tests failed on main for this reason.
 
 ### Fixed — links to Claudron's docs follow the files Claudfather/Claudron#231 moved (#2512)
 

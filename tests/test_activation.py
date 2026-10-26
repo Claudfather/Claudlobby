@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudlobby import activation, activation_state as state, runtime_admission as admission
+from claudlobby import activation, activation_state as state, bot_operations, runtime_admission as admission
 from claudlobby.activation_handoffs import _BEGIN as _HANDOFF_BEGIN, _END as _HANDOFF_END
 from claudlobby.activation_identity import read_selected_identity_bindings
 from claudlobby.config_plan import ConfigPlanBuilder
@@ -2220,6 +2220,25 @@ def test_preserved_handoff_request_that_cannot_be_timed_refuses_before_it_is_sen
         case.run()
     assert case.body["handoff_effects"] == {}
     assert case.calls == []
+
+
+def test_preserved_handoff_saved_in_the_requests_own_file_clock_tick_stays_held(preserved_handoff_case, monkeypatch):
+    """#2528: a capture saved just before the request can share the file clock's reading at
+    the request (one 4 ms tick at 250 Hz). The request waits for the clock's next reading,
+    so a resume still finds that capture older than the request and holds it."""
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir)
+    saved = (case.bot_dir / ".claude/session.md").stat().st_mtime_ns
+    readings = iter([saved, saved, saved + 4_000_000])
+    monkeypatch.setattr(bot_operations, "_file_clock_ns", lambda _directory: next(readings))
+    case.outcome[:] = [3, "handoff-timeout"]
+    with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+        case.run()
+    assert case.body["handoff_requests"][case.target]["started_at_ns"] == saved + 4_000_000
+    with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff") as refused:
+        case.run()
+    assert str(refused.value.__cause__.__cause__) == "handoff predates its request"
+    assert case.body["handoff_effects"][case.target] is None and len(case.calls) == 1
 
 
 @pytest.mark.parametrize("fresh", [False, True])

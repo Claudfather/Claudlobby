@@ -167,16 +167,40 @@ def test_request_bound_does_not_replace_existing_freshness_window(tmp_path, stal
 
 
 def test_handoff_clock_reads_the_clock_that_stamps_the_handoff_and_leaves_no_file(tmp_path):
-    """#2528: the stamp is taken in the handoff's own directory, so it falls between the
-    mtimes of files written there before and after it, and it leaves nothing there."""
+    """#2528: the stamp is read in the handoff's own directory, after its clock moves, so a
+    file written there before it reads older, one written after it does not, and the stamp
+    leaves nothing there."""
     handoff_dir = tmp_path / "bot" / ".claude"
     handoff_dir.mkdir(parents=True)
     before, after = handoff_dir / "before", handoff_dir / "after"
     before.write_bytes(b"x")
     stamp = bot_operations._handoff_clock_ns(tmp_path / "bot")
     after.write_bytes(b"x")
-    assert before.stat().st_mtime_ns <= stamp <= after.stat().st_mtime_ns
+    assert before.stat().st_mtime_ns < stamp <= after.stat().st_mtime_ns
     assert sorted(path.name for path in handoff_dir.iterdir()) == ["after", "before"]
+
+
+@pytest.mark.parametrize("readings", [
+    pytest.param([7_000, 7_000, 7_000, 11_000], id="same-tick"),
+    pytest.param([7_000, 6_000, 11_000], id="clock-stepped-back"),
+])
+def test_handoff_clock_takes_the_first_reading_after_its_clock_moves(tmp_path, monkeypatch, readings):
+    """A capture saved just before the request can share the clock's first reading (one
+    4 ms tick at 250 Hz), so the stamp is the first reading later than it."""
+    (tmp_path / "bot" / ".claude").mkdir(parents=True)
+    left = iter(readings)
+    monkeypatch.setattr(bot_operations, "_file_clock_ns", lambda _directory: next(left))
+    assert bot_operations._handoff_clock_ns(tmp_path / "bot") == 11_000
+    assert next(left, None) is None
+
+
+def test_handoff_clock_refuses_a_file_clock_that_does_not_move(tmp_path, monkeypatch):
+    (tmp_path / "bot" / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(bot_operations, "_file_clock_ns", lambda _directory: 7_000)
+    monkeypatch.setattr(bot_operations, "_HANDOFF_CLOCK_WAIT_S", 0.05)
+    with pytest.raises(bot_operations.BotLifecycleError, match="owned handoff directory") as refused:
+        bot_operations._handoff_clock_ns(tmp_path / "bot")
+    assert str(refused.value.__cause__) == "the handoff directory's file clock did not move"
 
 
 @pytest.mark.parametrize("shape", ["missing", "symlink"])

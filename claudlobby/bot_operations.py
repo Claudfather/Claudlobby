@@ -141,23 +141,44 @@ def _owned_handoff_dir(bot_dir: Path) -> Path:
     return handoff_dir
 
 
+# The coarsest file clock in common use, FAT's, keeps 2 s.
+_HANDOFF_CLOCK_WAIT_S = 5
+
+
+def _file_clock_ns(handoff_dir: Path) -> int:
+    """One reading of the clock that stamps files in handoff_dir: a new file's mtime.
+
+    The file has no name where the filesystem takes O_TMPFILE, and is unlinked
+    at once elsewhere.
+    """
+    with tempfile.TemporaryFile(dir=handoff_dir) as stream:
+        return os.fstat(stream.fileno()).st_mtime_ns
+
+
 def _handoff_clock_ns(bot_dir: Path) -> int:
-    """Now, in epoch nanoseconds, on the clock that stamps the owned handoff file (#2528).
+    """A handoff request's time, in epoch ns, on the clock that stamps the owned handoff file (#2528).
 
     A file's mtime comes from the filesystem, not from time.time_ns(): the
     kernel stamps files from a clock that advances once a timer tick (it
     trailed time_ns() by up to 7.4 ms with a 4 ms tick), and a filesystem can
     keep whole seconds. So a request timed with time_ns() can postdate the
     handoff written for it. A file created in the handoff's own directory is
-    stamped by the same clock, at the same granularity. It has no name where
-    the filesystem takes O_TMPFILE, and is unlinked at once elsewhere.
+    stamped by the same clock, at the same granularity. Its first reading can
+    equal a capture saved just before it, in the same tick, so the request
+    takes the clock's next reading: every file already written there reads
+    older than it, and no file written after it does.
     """
     handoff_dir = _owned_handoff_dir(bot_dir)
     try:
-        with tempfile.TemporaryFile(dir=handoff_dir) as stream:
-            return os.fstat(stream.fileno()).st_mtime_ns
+        first = _file_clock_ns(handoff_dir)
+        deadline = time.monotonic() + _HANDOFF_CLOCK_WAIT_S
+        while (stamp := _file_clock_ns(handoff_dir)) <= first:
+            if time.monotonic() > deadline:
+                raise OSError("the handoff directory's file clock did not move")
+            time.sleep(0.001)
     except OSError as exc:
         raise BotLifecycleError("self restart requires an owned handoff directory") from exc
+    return stamp
 
 
 def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
