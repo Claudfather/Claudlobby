@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from claudlobby import claudron_refs as cr
 from claudlobby.claudron_compat import CLAUDRON_INTEGRATION_URL
@@ -545,11 +546,11 @@ class TestCheck:
         assert code == 0, report
         assert "not text 1" in report
 
-    def test_an_absent_checkout_skips_with_a_notice(self, tmp_path):
+    def test_an_absent_checkout_fails_and_says_so(self, tmp_path):
         root = _repo(tmp_path / "repo", {"README.md": "Claudron `docs/CLI_CONTRACT.md`\n"})
         code, report = cr.check(root, tmp_path / "no-such-dir", SHA)
-        assert code == 0
-        assert report.startswith("SKIP")
+        assert code == 2
+        assert report.startswith("FAIL claudron-refs:") and "absent" in report
 
     def test_a_checkout_at_another_revision_is_refused(self, tmp_path):
         claudron, sha = _claudron(tmp_path / "claudron", CLAUDRON_FILES)
@@ -582,10 +583,11 @@ class TestCli:
         assert cr.main([]) == 2
         assert "usage" in capsys.readouterr().err
 
-    def test_an_absent_checkout_skips_zero(self, tmp_path, capsys):
+    def test_an_absent_checkout_exits_two(self, tmp_path, capsys):
         root = _repo(tmp_path / "repo", {"README.md": "Claudron `SCHEMA.md`\n"})
-        assert cr.main(["--claudron", str(tmp_path / "nope"), "--root", str(root)]) == 0
-        assert "SKIP" in capsys.readouterr().out
+        assert cr.main(["--claudron", str(tmp_path / "nope"), "--root", str(root)]) == 2
+        out = capsys.readouterr().out
+        assert "FAIL claudron-refs" in out and "SKIP" not in out
 
     def test_a_stale_reference_exits_one(self, tmp_path, capsys):
         claudron, sha = _claudron(tmp_path / "claudron", CLAUDRON_FILES)
@@ -671,3 +673,26 @@ class TestThisRepo:
         assert scan.skipped["plan"] > 0 and scan.skipped["dated"] > 0
         assert "documentation/plans/" not in " ".join(scan.files)
         assert "claudlobby/claudron_compat.py" in scan.files
+
+
+class TestWorkflow:
+    """The CI job that runs the gate must fail when it cannot read Claudron, not skip (#2520)."""
+
+    @staticmethod
+    def _job():
+        workflow = yaml.safe_load((ROOT / ".github/workflows/conformance.yml").read_text())
+        return workflow["jobs"]["claudron-refs-gate"]
+
+    def test_a_failed_claudron_fetch_fails_the_job(self):
+        job = self._job()
+        steps = job["steps"]
+        assert "continue-on-error" not in job
+        assert not [s.get("name") for s in steps if "continue-on-error" in s]
+        assert not [s.get("name") for s in steps if "SKIP" in f"{s.get('name', '')} {s.get('run', '')}"]
+        assert not [s.get("name") for s in steps if "if" in s]
+
+    def test_the_check_runs_after_the_one_claudron_checkout(self):
+        steps = self._job()["steps"]
+        fetch = [i for i, s in enumerate(steps) if s.get("with", {}).get("repository") == "Claudfather/Claudron"]
+        check = [i for i, s in enumerate(steps) if "claudlobby.claudron_refs --claudron" in s.get("run", "")]
+        assert len(fetch) == 1 and len(check) == 1 and fetch[0] < check[0]

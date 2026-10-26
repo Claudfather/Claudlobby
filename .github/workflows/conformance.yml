@@ -106,9 +106,10 @@ jobs:
   # Claudron paths and URLs: the docs, docstrings and instruction files here name files in the Claudron
   # repo, and nothing else checks that they exist. Claudron is checked out at the revision in
   # claudlobby/contracts/claudron-docs.ref (one full sha; documentation/integrations/claudron-integration.md
-  # says who moves it and when), and the check fails when a reference does not resolve there. Local-first
-  # like the clauDNA gates: an unavailable checkout skips with a notice, so a sibling outage cannot block a
-  # merge. Stdlib only, so there is no package to install.
+  # says who moves it and when), and the check fails when a reference does not resolve there. Unlike the
+  # clauDNA gates it does not skip when its checkout is unavailable: a gate that cannot read Claudron has not
+  # passed, and a ref file holding a sha Claudron lacks would otherwise merge green. A failed fetch fails the
+  # job; a re-run costs less than a pass that checked nothing. Stdlib only, so there is no package to install.
   claudron-refs-gate:
     runs-on: ubuntu-latest
     steps:
@@ -122,16 +123,10 @@ jobs:
           ref=$(python3 -m claudlobby.claudron_refs --print-ref)
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: Check out Claudron at that revision
-        id: claudron-checkout
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: Claudfather/Claudron
           ref: ${{ steps.claudron-ref.outputs.ref }}
           path: .claudron-checkout
-      - name: Skip unavailable Claudron checkout
-        if: steps.claudron-checkout.outcome != 'success'
-        run: echo '::notice::SKIP claudron-refs - Claudron checkout unavailable (local-first)'
       - name: Resolve every Claudron path this repo names
-        if: steps.claudron-checkout.outcome == 'success'
         run: python3 -m claudlobby.claudron_refs --claudron .claudron-checkout

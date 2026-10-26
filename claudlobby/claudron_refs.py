@@ -33,6 +33,9 @@ anchor or section is checked.
 
 **What it resolves.** A path with a folder must exist in the checkout as written, as a file or a
 folder. A bare file name must exist somewhere in it, since a bare name follows its renamed file.
+A file that Claudron renames, rather than moves, is read only when a marker or a URL sits beside
+its path: the unmarked ``docs/`` and ``documentation/`` rule reads a bare name only when Claudron
+has a file of that name.
 A URL naming ``main``, ``master`` or ``HEAD`` is resolved at the ref and listed in a note: it can
 pass here and still send a reader to a 404 after the next Claudron move. A URL naming any other
 revision than the ref is listed and not checked, since the checkout holds one revision.
@@ -43,12 +46,14 @@ revision than the ref is listed and not checked, since the checkout holds one re
 the skipped files by rule, and the files that are not UTF-8 text. A run that finds no reference at
 all fails: a gate that reads nothing has not passed.
 
-**Local-first.** An absent checkout skips with a notice (exit 0), like the other conformance gates:
-a sibling outage must not block a merge. A checkout at another revision than the ref is refused
-(exit 2), so a pass always names the revision it was resolved at.
+**Fails closed.** A checkout that is absent, or at another revision than the ref, is an error
+(exit 2): a gate that cannot read Claudron has not passed, and a pass always names the revision it
+was resolved at. In CI the job's checkout step has no ``continue-on-error``, so a failed fetch (an
+outage, a rate limit, a ref file holding a sha Claudron does not have) fails the job instead of
+skipping it. A re-run costs less than a green run that checked nothing.
 
-Exit codes: 0 every reference resolves (or the checkout is absent); 1 a reference does not
-resolve, or none was found; 2 a usage error, an invalid ref file, or a checkout at another revision.
+Exit codes: 0 every reference resolves; 1 a reference does not resolve, or none was found; 2 a
+usage error, an invalid ref file, an absent checkout, or a checkout at another revision.
 
 Stdlib only, so CI runs it without installing the package:
 ``python3 -m claudlobby.claudron_refs --claudron <checkout of Claudron at the ref>``.
@@ -395,9 +400,10 @@ def _url_note(urls: list[Reference], one: str, many: str, why: str) -> list[str]
 def check(root: Path, claudron: Path, ref: str, *, listing: bool = False) -> tuple[int, str]:
     """Resolve the repo's Claudron references in a checkout at ``ref`` -> (exit code, report)."""
     if not claudron.is_dir():
-        return 0, (
-            f"SKIP: the Claudron checkout {claudron} is absent, so claudron-refs has nothing to resolve "
-            "against (local-first: a sibling outage must not block a merge)."
+        return 2, (
+            f"FAIL claudron-refs: the Claudron checkout {claudron} is absent, so there is nothing to "
+            "resolve against. A gate that cannot read Claudron has not passed: check Claudron out at "
+            "the ref (`python3 -m claudlobby.claudron_refs --print-ref`) and pass that folder."
         )
     problem, note = verify_revision(claudron, ref)
     if problem:
