@@ -255,7 +255,7 @@ Each library category has its own format. Check the category's `README.md` for s
 4. Run `claudlobby --fleet <name> config diff PLAN_ID` to verify no unintended rendered drift
 5. Commit to a branch, PR, review
 
-**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite is not green, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
+**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite can go red, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
 
 ### Adding or modifying claudlobby/_runtime_scripts/ scripts
 
@@ -330,7 +330,7 @@ claudlobby/_runtime_scripts/selfstart-snapshot.sh  # how many bots self-started 
 # Testing (the venv is required — PEP 668 refuses a bare install on Homebrew/Debian)
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -e '.[dev]'
-./.venv/bin/pytest  # run test suite (unsandboxed; baseline is not green)
+./.venv/bin/pytest  # run test suite (unsandboxed)
 ```
 
 Use `--fleet <name>` for fleet reads and authoring. Configuration plans and activation cover the whole host; see `canary-rollout` for isolated validation.

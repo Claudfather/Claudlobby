@@ -29,10 +29,13 @@ is invisible. That is not hypothetical: it is exactly how a `claudlobby_cli` reg
 CI in #947, after a sandboxed diff reported one clean delta. Take the baseline unsandboxed or
 not at all.
 
-*Know the baseline.* The suite is **not fully green** on macOS — as of 2026-08-01 it is
-**34 failed / 2125 passed**, 24 of them the `tests/test_setup_backbone.py` cluster (#951). Do not
-assume your change caused a failure, and do not assume it didn't because the *count* matched —
-compare the failing test **names**:
+*Know the baseline, and measure it.* On 2026-10-25 the whole suite was **green** on macOS:
+`10294 passed, 116 skipped`, rc 0, at `c7529c7`. That was a full unsandboxed run of a prepared
+export on Python 3.11, #2517's before run. It has been red before: 34 failed / 2125 passed on
+2026-08-01, 24 of them the `tests/test_setup_backbone.py` cluster (#951). It can go red again,
+so take the baseline from a fresh before run, never from this paragraph. Do not assume your
+change caused a failure, and do not assume it didn't because the *count* matched — compare the
+failing test **names**:
 
 Prepare two separate disposable exports, one at the base commit and one with
 the candidate bytes. Give each its own editable-install venv, run
@@ -62,12 +65,13 @@ the other two cannot** (#1035). Drop any one and a live hole reopens.
    inside the band it certifies. Also makes `--tb=no`, verbosity and `log_cli` irrelevant
    by construction.
 3. **The count line — catches *how many*, the only axis that moves on an already-red suite.**
-   Re-read the baseline three paragraphs up: **34 failed / 2125 passed.** Our suite is not
-   green, so `rc = 1` is the **normal, expected state of both the before run and the after
-   run**. That makes the gate structurally incapable of telling a healthy 34-failure
-   baseline from a 38-failure baseline-plus-four-regressions — both are `rc 1`. The gate can
-   only ever discriminate *did not complete* (rc 2 / 5 / 127). On a suite that is already
-   red, counts are not a hedge; they are **the** signal on the only axis that changes.
+   When the before run is red, `rc = 1` is the **normal state of both the before run and the
+   after run**. The gate then cannot tell a healthy 34-failure baseline (2026-08-01's) from a
+   38-failure baseline plus four regressions: both are `rc 1`. It can only discriminate *did
+   not complete* (rc 2 / 5 / 127). On a suite that is already red, counts are not a hedge;
+   they are **the** signal on the only axis that changes. When the before run is green,
+   `rc 1` in the after run is a regression signal by itself, but read the names and counts
+   anyway.
 
    They are also the last survivor when the names mechanism itself breaks — which is exactly
    what #1012 did here. Measured on this suite: `1 failed, 20 passed` printed correctly
