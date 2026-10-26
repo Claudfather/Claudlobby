@@ -178,11 +178,11 @@ omitted. The flag is rejected for bootstrap and first adoption. A later explicit
 Preserve-state activation requires an explicit saved/recent handoff result and
 verification of the session capture's own fresh `last_updated` timestamp before
 stopping a live bot. A reference refresh or fresh file mtime alone is insufficient.
-The request is timed in the bot's own `.claude/` directory, at the next tick of
+The request is timed in the bot's own `.claude/` directory, at the next reading of
 the clock that stamps its handoff file, so a capture written after the request
 never reads as older, and one written before the request still does, even in
 the same tick (#2528). A bot whose `.claude/` directory cannot take that stamp
-refuses before any handoff is sent.
+refuses before that bot's handoff is sent.
 A timed-out preserve handoff retains its recorded request time. After inspecting
 the live session and allowing its genuine capture to finish, retry the same
 activation with `--resume`: it can verify a fresh capture whose file write and

@@ -214,3 +214,22 @@ def test_handoff_clock_is_read_only_in_an_owned_handoff_directory(tmp_path, shap
         (bot_dir / ".claude").symlink_to(tmp_path / "elsewhere")
     with pytest.raises(bot_operations.BotLifecycleError, match="owned handoff directory"):
         bot_operations._handoff_clock_ns(bot_dir)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_handoff_clock_is_taken_by_a_write_into_the_handoff_directory(tmp_path):
+    """#2533: the stamp is a file created in the handoff's own directory, so a directory that
+    takes no new file refuses it. A stamp taken anywhere else, in the default temp directory or
+    in the bot's own, would take no notice of the mode, and the temp directory can sit on a
+    filesystem with another clock. The same call, once the directory takes a file again, gives
+    the stamp."""
+    bot_dir = tmp_path / "bot"
+    handoff_dir = bot_dir / ".claude"
+    handoff_dir.mkdir(parents=True)
+    handoff_dir.chmod(0o500)
+    try:
+        with pytest.raises(bot_operations.BotLifecycleError, match="owned handoff directory"):
+            bot_operations._handoff_clock_ns(bot_dir)
+    finally:
+        handoff_dir.chmod(0o700)
+    assert bot_operations._handoff_clock_ns(bot_dir)
