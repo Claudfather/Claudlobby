@@ -218,10 +218,11 @@ def test_a_later_push_builds_only_when_it_can_change_what_renders(site: Site, bu
 READ_LIST = ('set -f; eval "$1" || exit; '
              r'for entry in "${NEVER_RENDERED[@]}"; do printf "%s\0" "$entry"; done')
 # The statements that set or extend the list: the block, and a NEVER_RENDERED+=(...) line
-# or block after it. A one-line statement ends at the ")" that ends its line; a block ends
-# at the line that starts with ")".
-LIST_STATEMENT = re.compile(r"^NEVER_RENDERED\+?=\((?:[^\n]*\)[ \t]*(?:#[^\n]*)?$|.*?^\))",
-                            re.M | re.S)
+# or block after it. A one-line statement is cut at the last ")" of its line that ends the
+# line or is followed by a comment, ";", "&&" or "||" (bash adds the entry in each case); a
+# block ends at the line that starts with ")".
+LIST_STATEMENT = re.compile(
+    r"^NEVER_RENDERED\+?=\((?:[^\n]*\)(?=[ \t]*(?:[;#]|&&|\|\||$))|.*?^\))", re.M | re.S)
 # The entry these tests add: a folder no site keeps, so it cannot become an entry of the
 # gate's own list.
 PROBE = "no-site-has-this-folder/**"
@@ -282,9 +283,17 @@ def _the_list_case_on(gate: str, tmp_path: Path, monkeypatch) -> None:
     pytest.param(f"NEVER_RENDERED+=('{PROBE}')\n", False, id="a-line-after-the-list"),
     pytest.param(f"NEVER_RENDERED+=('{PROBE}')  # kept apart\n", False, id="a-line-with-a-comment"),
     pytest.param(f"NEVER_RENDERED+=(\n  '{PROBE}'\n)\n", False, id="a-block-after-the-list"),
+    pytest.param(f"NEVER_RENDERED+=('{PROBE}');\n", False, id="a-line-with-a-semicolon"),
+    pytest.param(f"NEVER_RENDERED+=('{PROBE}') && :\n", False, id="a-line-and-a-command"),
+    pytest.param(f"NEVER_RENDERED+=('{PROBE}') || :\n", False, id="a-line-or-a-command"),
+    pytest.param(f"NEVER_RENDERED+=('.github/**'); NEVER_RENDERED+=('{PROBE}')\n", False,
+                 id="two-statements-on-a-line"),
 ])
 def test_the_list_case_fails_for_an_entry_without_a_case(tmp_path, monkeypatch, text, inside):
-    with pytest.raises(AssertionError, match=re.escape(PROBE)):
+    # The list case's own message. match=PROBE alone also takes the reader's failure when its bash
+    # rejects a statement: pytest quotes the statements in that report (with -v).
+    message = "give each entry its own path in ENTRY_PATHS: .*" + re.escape(PROBE)
+    with pytest.raises(AssertionError, match=message):
         _the_list_case_on(_the_gate_with(text, inside=inside), tmp_path, monkeypatch)
 
 
