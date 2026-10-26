@@ -637,12 +637,14 @@ def _oneshot_producer(phase: str, installed) -> bool:
 
 
 def _startable_producers(entries):
-    """Publish paired services and the failure template, but start only declared timers
-    (and resident services). Only OnFailure= starts a template's instances (#2522)."""
+    """Publish paired services, but start only their declared timers.
+
+    A unit template is published and never started: only OnFailure= starts
+    its instances (#2522)."""
     timer_services = {entry["service"] for entry in entries if entry["service"]}
     return (tuple(entry for entry in entries
                   if Path(entry["installed"]).name not in timer_services
-                  and not is_unit_template(entry["target"])), timer_services)
+                  and not is_unit_template(Path(entry["installed"]).name)), timer_services)
 
 
 def _require_preserved_handoff(bot_dir, *, not_before=None):

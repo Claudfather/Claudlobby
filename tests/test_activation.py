@@ -192,7 +192,8 @@ class NativeHost:
 def test_timer_paired_service_is_published_but_not_started_by_either_activation_path():
     entries = ({"installed": "/user/scheduled.service", "service": None},
                {"installed": "/user/scheduled.timer", "service": "scheduled.service"},
-               {"installed": "/user/added.service", "service": None})
+               {"installed": "/user/added.service", "service": None},
+               {"installed": "/user/fleet.job-failed@.service", "service": None})  # #2522
     startable, paired = activation._startable_producers(entries)
     assert paired == {"scheduled.service"}
     assert [Path(entry["installed"]).name for entry in startable] == [
