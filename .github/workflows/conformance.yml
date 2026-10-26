@@ -1,6 +1,6 @@
 name: conformance
 
-# Boundary phase L4 — the two conformance surfaces that the default test.yml lane
+# Boundary phase L4 — the conformance surfaces that the default test.yml lane
 # (which installs only `.[dev]`) cannot cover:
 #   * vault-tests   — the R3 hook-snippet parity gate + the N-bot contention test,
 #                     which importorskip/skipif on the [vault] extra and so SKIP
@@ -8,6 +8,8 @@ name: conformance
 #                     installs the pinned engine so they actually run.
 #   * rename-map    — the F8 drift gate: a live value in CLAUDNA_SKILL_RENAMES must
 #                     still name a real clauDNA skills/ dir.
+#   * claudron-refs — every Claudron path or URL this repo names must exist in
+#                     Claudron at the revision in claudlobby/contracts/claudron-docs.ref.
 #
 # NOTE for the repo admin: add `vault-tests` to the branch's REQUIRED status checks
 # so the R3 drift protection is real (a required check, not just present).
@@ -100,3 +102,36 @@ jobs:
       - name: Run released export contract gate
         if: steps.export-checkout.outcome == 'success'
         run: python -m claudlobby.conformance export-contract .claudna-export-checkout
+
+  # Claudron paths and URLs: the docs, docstrings and instruction files here name files in the Claudron
+  # repo, and nothing else checks that they exist. Claudron is checked out at the revision in
+  # claudlobby/contracts/claudron-docs.ref (one full sha; documentation/integrations/claudron-integration.md
+  # says who moves it and when), and the check fails when a reference does not resolve there. Local-first
+  # like the clauDNA gates: an unavailable checkout skips with a notice, so a sibling outage cannot block a
+  # merge. Stdlib only, so there is no package to install.
+  claudron-refs-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Read the Claudron revision the references are checked at
+        id: claudron-ref
+        run: |
+          ref=$(python3 -m claudlobby.claudron_refs --print-ref)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Check out Claudron at that revision
+        id: claudron-checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: Claudfather/Claudron
+          ref: ${{ steps.claudron-ref.outputs.ref }}
+          path: .claudron-checkout
+      - name: Skip unavailable Claudron checkout
+        if: steps.claudron-checkout.outcome != 'success'
+        run: echo '::notice::SKIP claudron-refs - Claudron checkout unavailable (local-first)'
+      - name: Resolve every Claudron path this repo names
+        if: steps.claudron-checkout.outcome == 'success'
+        run: python3 -m claudlobby.claudron_refs --claudron .claudron-checkout

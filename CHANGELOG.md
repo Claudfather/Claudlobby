@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a check that every Claudron path or URL this repo names exists in Claudron (#2520)
+
+`claudlobby/claudron_refs.py` finds each path into the Claudron repo that this
+repo's docs, docstrings, instruction files and one printed URL name, and the new
+`claudron-refs-gate` job in the `conformance` workflow fails when one does not
+exist in Claudron at the revision in `claudlobby/contracts/claudron-docs.ref`.
+Dated plans and decisions, the changelog and test fixtures quote paths as they
+were, so the check skips them and counts what it skips. The revision is a full
+Claudron commit sha, never a branch name, so a Claudron move turns the check red
+in the change that moves the ref, not in every pull request; the `[vault]` tag
+cannot be the revision until a Claudron release carries the `documentation/`
+layout. This covers item 1 of #2520.
+
 ### Fixed — a preserve-state activation times its handoff request on the handoff file's own clock (#2528)
 
 A preserve-state activation could refuse a handoff written just after its
