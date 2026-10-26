@@ -254,8 +254,8 @@ _SYSTEMD_NAME = re.compile(r"(?:[A-Za-z0-9_.@:-]|\\x[0-9a-fA-F]{2})+")
 _SUFFIXES = (".service", ".timer", ".socket", ".path", ".plist")
 # systemd template (prefix@.suffix): installable, never itself a loaded unit.
 _TEMPLATE = re.compile(r"(?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+@\.(?:service|timer|socket|path)")
-# One instance of such a template, ``prefix@instance.suffix``; the instance may be empty
-# only in the template itself.
+# One instance of such a template, such as ``prefix@instance.service``; the
+# instance is empty only in the template itself.
 _INSTANCE = re.compile(r"((?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+)@(?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+"
                        r"\.(service|timer|socket|path)")
 
