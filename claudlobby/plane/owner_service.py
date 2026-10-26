@@ -74,8 +74,8 @@ def managed_listeners(source_plan, inventory):
     installed = {str(unit.declaration.source) for unit in inventory.units if unit.installed}
     result = set()
     for item in source_plan.effects.get("units", ()):
-        if item["source"] not in installed or not item["enroll"]:
-            continue
+        if item["source"] not in installed or not item["enroll"] or item["admission"] is None:
+            continue  # a unit template (#2522) has no admission and listens on nothing
         unit = parse_unit_argv(item["admission"]["argv"])
         path = unit_socket(unit)
         if path is not None:

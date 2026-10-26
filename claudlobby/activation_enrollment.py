@@ -27,7 +27,7 @@ from .config_install import apply_config, prepare_config, read_config_install, r
 from .config_plan import ConfigPlan, ConfigPlanBuilder, path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .releases import read_release
-from .supervision_inventory import Adapter, _catalog, _environment, _properties, runtime_mask
+from .supervision_inventory import Adapter, _catalog, _environment, _properties, is_unit_template, runtime_mask
 
 
 _OWNER = "activation-enrollment-v1"
@@ -83,7 +83,8 @@ def _candidate(store, record, manager):
                 or environment.get("CLAUDLOBBY_CLI") != str(release.cli_path)
                 or environment.get("CLAUDLOBBY_ARTIFACT_ID") != release.inputs.artifact_id):
             raise ActivationError("candidate unit identity or phase is incomplete")
-        if item["enroll"]:
+        if item["enroll"] and not is_unit_template(declaration.source.name):
+            # A template has no admission: nothing starts it but OnFailure= (#2522).
             validate_unit_admission(release, declaration, item, plan.blob(item["sha256"]))
     return plan, units
 
@@ -121,7 +122,7 @@ def _wanted_by(content, source, paired_services):
             if separator != "=" or key.strip() != "WantedBy":
                 raise ActivationError("unsupported unit Install semantics")
             wanted.append(value.strip())
-    expected = ([] if source.name in paired_services else
+    expected = ([] if source.name in paired_services or is_unit_template(source.name) else
                 ["timers.target" if source.suffix == ".timer" else "default.target"])
     if wanted != expected or not expected and seen:
         raise ActivationError("unit Install target differs from its persistent service/timer role")
@@ -220,6 +221,8 @@ def _check_enablement(entry, *, allow_candidate, require_applied=False):
 
 
 def _native_quiet(adapter, manager, file, target, *, candidate=None):
+    if is_unit_template(target):
+        return  # no manager runs a template; its file placement is checked by the caller
     result = adapter.call("svc_activation_assert_external", file, target, str(os.getpid()))
     if result.returncode:
         raise ActivationError(f"candidate caller is hosted or unknown: {target}")

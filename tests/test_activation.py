@@ -23,7 +23,7 @@ from claudlobby import activation, activation_state as state, bot_operations, ru
 from claudlobby.activation_handoffs import _BEGIN as _HANDOFF_BEGIN, _END as _HANDOFF_END
 from claudlobby.activation_identity import read_selected_identity_bindings
 from claudlobby.config_plan import ConfigPlanBuilder
-from claudlobby.config_units import planned_units, unit_family
+from claudlobby.config_units import job_units, planned_units, unit_family
 from claudlobby.migration_apply import MigrationApplyError, apply_migration, read_migration
 from claudlobby.plane.db import db_file
 from claudlobby.plane.identity import resolve
@@ -526,8 +526,9 @@ def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause
         assert handoff.read_bytes() == before
 
 
-@pytest.fixture
-def cold(installed, monkeypatch, tmp_path):
+def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False):
+    """The cold host; ``fleet_job`` adds a fleet job whose service names the
+    fleet's failure template, staged through the real manifest reader (#2522)."""
     root, inputs, paths, _, directory = installed
     shutil.copytree(Path(__file__).resolve().parents[1] / "claudlobby/plane/migrations",
                     directory / "package/plane/migrations")
@@ -581,6 +582,29 @@ def cold(installed, monkeypatch, tmp_path):
             builder.file(destination / name, content, mode=mode)
         if bot:
             builder.file(working / "settings.json", b'{"permissions":{"deny":["Write"]}}\n')
+    if fleet_job:
+        timers, stem = root / "runtime/fleet/timers", "com.example.creds-check"
+        argv = admission.wrap_unit_argv(env, unit=stem, phase="producers", mode="oneshot",
+                                        argv=[str(release.native_path / "creds-check.sh"), "example"])
+        identity = "".join(admission.unit_systemd_environment(key, value) + "\n" for key, value in env.items())
+        files = {
+            stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(root),
+                              "EnvironmentVariables": env, "ProgramArguments": list(argv)}), 0o644),
+            stem + ".service": ((f"[Unit]\nOnFailure=com.example.job-failed@%n.service\n[Service]\n"
+                                 f"WorkingDirectory={root}\n{identity}"
+                                 f"ExecStart={admission.unit_systemd_command(argv)}\n").encode(), 0o644),
+            stem + ".timer": (f"[Timer]\nUnit={stem}.service\n[Install]\nWantedBy=timers.target\n".encode(), 0o644),
+            "com.example.job-failed@.service": ((
+                f"[Unit]\nDescription=claudlobby job-failed alert for %i (example)\n[Service]\nType=oneshot\n"
+                f"WorkingDirectory={root}\n{identity}"
+                f'ExecStart="{release.cli_path}" "--root" "{root}" "--fleet" "example" "fleet" "notify" '
+                '"--level" "alert" "--event" "job_failed" "--message" "%i failed"\n').encode(), 0o644),
+        }
+        builder.effects["units"].extend(job_units(files, destination=timers, scope="fleet",
+                                                  release_id=release.release_id, fleet="example"))
+        builder.directory(timers)
+        for name, (content, mode) in files.items():
+            builder.file(timers / name, content, mode=mode)
     plan = builder.seal()
     package = SimpleNamespace(native=release.native_path, artifact_id=release.inputs.artifact_id)
     native_directory = tmp_path / "private-native-user"
@@ -596,6 +620,11 @@ def cold(installed, monkeypatch, tmp_path):
     # output fixture checks ordering and the real operation-context SQL reader.
     monkeypatch.setattr(activation, "_registry_scan", host.registry_scan)
     return root, release, plan, host
+
+
+@pytest.fixture
+def cold(installed, monkeypatch, tmp_path):
+    return _cold_case(installed, monkeypatch, tmp_path)
 
 
 def test_backup_restore_preserves_work_and_activates_without_reviving_owner_access(cold, monkeypatch, tmp_path, capsys):
@@ -742,6 +771,23 @@ def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(col
     with pytest.raises(state.ActivationError, match="existing release selection"):
         activation.bootstrap_activation(root, "again", plan.plan_id, host.directory, adapter=host)
     assert host.starts == before
+
+
+def test_bootstrap_publishes_the_fleet_failure_template_and_never_starts_or_names_it(
+        installed, monkeypatch, tmp_path):
+    """#2522: the template is published with the producers and the activation
+    completes; only the job's timer starts, and no native call names the
+    template, which systemd would refuse."""
+    root, _, plan, host = _cold_case(installed, monkeypatch, tmp_path, fleet_job=True)
+    name = "com.example.job-failed@.service"
+    assert [d.source.name for d, _ in planned_units(plan, "Linux") if "job-failed" in d.source.name] == [name]
+    record = activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert record.status == "active" and tuple(record.body["completed"]) == state.STEPS
+    assert (host.directory / name).read_bytes() == (root / "runtime/fleet/timers" / name).read_bytes()
+    assert set(host.starts[-2:]) == {"claudlobby-keepalive.timer", "com.example.creds-check.timer"}
+    assert "com.example.creds-check.service" not in host.starts
+    assert not any(name in arg for _, args in host.calls for arg in args)
+    assert not list(host.directory.glob(f"*.wants/{name}"))
 
 
 @pytest.mark.parametrize("same_release", [False, True])
