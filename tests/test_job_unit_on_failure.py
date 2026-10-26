@@ -15,11 +15,11 @@ from textwrap import dedent
 
 import pytest
 
-from claudlobby import config_staging
+from claudlobby import config_staging, config_units
 from claudlobby.composer import compose_fleet_timers, compose_systemd_unit
 from claudlobby.config import load_fleet
 from claudlobby.config_plan import PlanError
-from claudlobby.config_units import planned_units, template_units
+from claudlobby.config_units import planned_units
 from claudlobby.context import native_environment
 from claudlobby.paths import Paths
 from claudlobby.runtime_admission import unit_systemd_environment
@@ -178,6 +178,8 @@ def test_template_units_claims_only_the_identity_its_own_bytes_spell(tmp_path):
     environment = {"CLAUDLOBBY_ROOT": "/data", "CLAUDLOBBY_CLI": "/data/state/releases/r-1/venv/bin/claudlobby"}
     family = {"working_directory": "/data", "environment": environment}
     content = _template_bytes(environment, "/data")
+    # By module attribute, so that on a tree without it only this test fails.
+    template_units = config_units.template_units
     [item] = template_units({TEMPLATE: (content, 0o644)}, [family, dict(family)], destination=tmp_path,
                             scope="fleet", release_id="r-1", fleet="alpha")
     assert item["source"] == str(tmp_path / TEMPLATE) and item["platform"] == "Linux"
