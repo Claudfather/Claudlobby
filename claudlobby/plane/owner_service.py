@@ -143,6 +143,8 @@ def admitted_action(method):
                 manager = _catalog(adapter.read('svc_inventory_catalog'))[0]
                 owners = []
                 for declaration, item in planned_units(plan, manager):
+                    if item['admission'] is None:
+                        continue  # a unit template (#2522) has no admission and is never the owner
                     unit = parse_unit_argv(item['admission']['argv'])
                     if (item['enroll'] and declaration.scope == 'host'
                             and declaration.fleet is None and declaration.bot is None
