@@ -86,6 +86,30 @@ test('explicit real handshake yields one canonical minted handle, exact signer b
   h.api.dispose();
 });
 
+for (const stage of ['challenge', 'assertion', 'issue'])
+  test(`failed ${stage} offers explicit Connect without claiming expiry or retrying`, async () => {
+    let failing = true;
+    const h = harness(stage === 'assertion' ? {
+      obtainSessionAssertion: async () => {
+        if (failing) throw new Error('Assertion unavailable');
+        return { version: 1, assertion: 'e30.e30.AAAA', expires_at: 1800000120 };
+      },
+    } : {});
+    if (stage !== 'assertion') h.overrides.set(stage, () => { throw new Error('Host unavailable'); });
+    assert.equal(await h.api.connect(), false);
+    assert.equal(h.api.snapshot().state, 'unavailable');
+    assert.equal(h.api.continuity().connectRequired, true);
+    assert.equal(h.api.continuity().reconnectRequired, false);
+    assert.doesNotMatch(h.api.snapshot().remediation, /expired/i);
+    const calls = h.calls.length;
+    h.api.activity({ visible: true, userInput: true }); await flush();
+    assert.equal(h.calls.length, calls, 'activity never retries an uncertain handshake');
+    failing = false; h.overrides.delete(stage);
+    assert.equal(await h.api.connect(), true);
+    assert.equal(h.api.continuity().connectRequired, false);
+    h.api.dispose();
+  });
+
 test('start and explicit check never sign in, synthesize pairing or replay a mutation', async () => {
   const h = harness(); await h.api.start();
   assert.equal(h.api.snapshot().state, 'denied');
@@ -108,6 +132,7 @@ for (const change of [
 ]) test(`issue refuses mismatched bound context or unsupported capability ${JSON.stringify(change)}`, async () => {
   const h = harness(); h.overrides.set('issue', () => reply(200, { ...ready(TOKEN), ...change }));
   assert.equal(await h.api.connect(), false); assert.notEqual(h.api.snapshot().state, 'ready');
+  assert.equal(h.api.continuity().connectRequired, false, 'terminal incompatibility cannot offer recovery');
   assert.equal(await h.api.readHandle.jget('/api/tasks'), null); assert.equal(h.calls.length, 2); h.api.dispose();
 });
 
@@ -195,6 +220,7 @@ test('unknown automatic renewal never retries on input, polling or timer callbac
   h.overrides.set('renew',()=>{throw new Error('lost renewal');});
   h.api.activity({visible:true,userInput:true});h.runTimer(0);await flush();
   assert.equal(h.api.snapshot().state,'unavailable');assert.equal(h.api.continuity().renewalUnknown,true);
+  assert.equal(h.api.continuity().reconnectRequired,false,'uncertain renewal is not known expiry');
   h.api.activity({visible:true,userInput:true});await flush();
   assert.equal(h.timers.filter(t=>t.active&&t.ms===0).length,0);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
@@ -240,6 +266,7 @@ test('lost renew and failed logout stay unknown, never replay, and status alone 
   const h = harness(); await h.api.connect();
   h.overrides.set('renew', () => { throw new Error('do not expose credentials'); });
   await h.api.renew(); assert.equal(h.api.snapshot().state, 'unavailable');
+  assert.equal(h.api.continuity().connectRequired, false, 'retained sessions recover through Check');
   assert.equal(h.calls.filter(c => c.url.endsWith('/renew')).length, 1);
   await h.api.check(); assert.equal(h.api.snapshot().state, 'ready');
   h.overrides.set('logout', () => reply(403, { state: 'denied' }));
@@ -252,7 +279,8 @@ test('expiry, monotonic rollback and nonfinite clock stop private reads without 
   for (const value of [900001, -1, NaN, Infinity]) {
     const h = harness(); await h.api.connect(); h.time = value;
     assert.equal(await h.api.readHandle.jget('/api/tasks'), null);
-    assert.equal(h.calls.length, 2); assert.notEqual(h.api.snapshot().state, 'ready'); h.api.dispose();
+    assert.equal(h.calls.length, 2); assert.notEqual(h.api.snapshot().state, 'ready');
+    assert.equal(h.api.continuity().reconnectRequired, value === 900001); h.api.dispose();
   }
 });
 

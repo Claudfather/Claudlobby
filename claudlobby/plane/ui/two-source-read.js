@@ -17,10 +17,12 @@ export function createWorkspaceReadTransport({ sources }) {
   if (!Array.isArray(sources) || ![1, 2].includes(sources.length)) throw new Error('One or two core read handles are required.');
   const rooms = new Map(), streams = new Set();
   let disposed = false;
-  const entries = sources.map(({ key, label, reader, connectionState, readFailure }) => {
+  const entries = sources.map(({ key, label, savedLabel, reader, connectionState, readFailure }) => {
     if (typeof key !== 'string' || !slug.test(key) || key.trim() !== key || typeof label !== 'string' || !label || label.length > 80 ||
+        savedLabel !== undefined && (typeof savedLabel !== 'string' || !savedLabel.trim() || savedLabel.length > 80
+          || !savedLabel.isWellFormed() || savedLabel.includes('\0')) ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
+    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
@@ -185,7 +187,7 @@ export function createWorkspaceReadTransport({ sources }) {
       if (values[i].state !== 'ok') return [];
       try {
         const label = values[i].data.host?.display_name;
-        if (typeof label === 'string' && label.trim() && label.length <= 80) e.label = label;
+        if (!e.savedLabel && typeof label === 'string' && label.trim() && label.length <= 80) e.label = label;
         const projected = project(e, path, values[i]);
         if (rosterRead) publishFleets(e, values[i].data, path, tickets[i]);
         return [{ e, v: projected }];

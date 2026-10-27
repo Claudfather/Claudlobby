@@ -362,9 +362,51 @@ function checkinArticle(data) {
   return el;
 }
 
+let activityRecovery = null;
+function renderActivityRecovery(env, restoreFocus) {
+  const sources = env?.data?.sources;
+  const unavailable = value => ['unavailable', 'disconnected'].includes(value);
+  const retryable = Array.isArray(sources)
+    ? sources.some(source => source.connection_state === 'ready' && unavailable(source.state))
+    : !env || unavailable(env.state);
+  const el = $("channel");
+  if (!retryable || sessionPaused) {
+    if (activityRecovery) { activityRecovery.retryable = false; activityRecovery.root.remove(); }
+    if (!sessionPaused && env?.state === 'ok' && env.data.coverage?.partial
+        && !env.data.threads.length && !env.data.checkins?.length && env.data.checkins_state !== 'unavailable') {
+      const note = document.createElement('p'); note.className = 'note';
+      note.textContent = 'No activity in readable sources. Other computers are not currently readable.'; el.append(note);
+    }
+    if (restoreFocus && !sessionPaused) { el.tabIndex = -1; el.focus(); }
+    return;
+  }
+  if (!activityRecovery) {
+    const root = document.createElement('div'), button = document.createElement('button'), note = document.createElement('p');
+    root.className = 'card'; button.className = 'pill ghost'; button.type = 'button';
+    note.className = 'note'; note.setAttribute('role', 'status'); note.setAttribute('aria-live', 'polite');
+    root.append(button, note);
+    activityRecovery = {root, button, note, busy:false, retryable:true,
+      paint() {
+        root.hidden = sessionPaused || !this.retryable;
+        button.textContent = this.busy ? 'Refreshing reads…' : 'Retry activity';
+        button.setAttribute('aria-disabled', String(this.busy));
+        note.textContent = this.busy ? 'Refreshing activity, tasks and team reads…'
+          : this.notice || 'Refreshes activity, tasks and team reads.';
+      }};
+    button.onclick = () => { void retryActivity(); };
+  }
+  activityRecovery.retryable = true;
+  activityRecovery.room = currentFleet; activityRecovery.epoch = sessionEpoch;
+  activityRecovery.notice = Array.isArray(sources) ? 'Some activity could not be read. Refreshes activity, tasks and team reads.' : '';
+  activityRecovery.paint(); el.append(activityRecovery.root);
+  if (restoreFocus) activityRecovery.button.focus();
+}
 function renderChannel(env) {
   const el = $("channel");
-  if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) return;
+  const retryFocused = !!activityRecovery && activityRecovery.button === document.activeElement;
+  if (renderState(el, env, { idleWhenEmpty: (d) => !d.coverage?.partial && !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) {
+    renderActivityRecovery(env, retryFocused); return;
+  }
   const existing = new Map(
     [...el.querySelectorAll("article.thread")].map((n) => [n.dataset.key, n]));
   const frag = document.createDocumentFragment();
@@ -408,6 +450,7 @@ function renderChannel(env) {
     frag.appendChild(article);
   }
   el.replaceChildren(frag);
+  renderActivityRecovery(env, retryFocused);
 }
 
 // WHY a card needs you, and what clears it — assignment arms plus the
@@ -524,12 +567,28 @@ function taskIssueNote(r) {
 
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  const focused = document.activeElement;
+  const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
+  const identity = focusedRail && focused?.dataset?.taskOpen
+    ? {id:focused.dataset.taskOpen, fleet:focused.dataset.taskFleet || ""} : null;
+  const restoreFocus = () => {
+    if (!identity) return; // A board refresh never takes focus from elsewhere.
+    const available = el => el?.isConnected && !el.hidden && !el.disabled && !el.closest("[hidden]");
+    const replacement = [attEl, taskEl].flatMap(el => [...el.querySelectorAll("[data-task-open]")])
+      .find(button => button.dataset.taskOpen === identity.id
+        && (button.dataset.taskFleet || "") === identity.fleet && available(button));
+    const destination = replacement || [focusedRail, attEl, taskEl].find(available);
+    if (!destination) return;
+    if (!replacement) destination.tabIndex = -1;
+    destination.focus();
+  };
   const coverage = env?.state === "ok" ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
                   { idleWhenEmpty: (d) => !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
+    restoreFocus();
     return;
   }
   const rows = env.data.tasks;
@@ -582,6 +641,7 @@ function renderTasks(env) {
     : stateBlock("idle", null, null, { label: partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: partial ? "no other tasks in readable sources" : "no other tasks" });
+  restoreFocus();
 }
 
 function railRow(a) {
@@ -1000,6 +1060,22 @@ async function refreshOverview() {
   }
 }
 
+async function retryActivity() {
+  const control = activityRecovery;
+  if (!control?.retryable || control.busy || sessionPaused || !control.button.isConnected
+      || control.room !== currentFleet || control.epoch !== sessionEpoch
+      || control.root.hidden || $("channel").hidden || control.root.closest('[hidden]')) return;
+  // Reuse an in-flight/scheduled read; repeated clicks never queue another one.
+  if (refreshInFlight || refreshTimer) { control.busy = true; control.paint(); return; }
+  const epoch = sessionEpoch, room = currentFleet;
+  control.busy = true; control.notice = ''; control.paint();
+  try { await refreshBoards(); }
+  catch {
+    if (!sessionPaused && epoch === sessionEpoch && room === currentFleet)
+      control.notice = 'Reads could not be refreshed. Try again.';
+  } finally { control.busy = false; control.paint(); }
+}
+
 async function refreshBoards() {
   if (sessionPaused) return;
   if (refreshInFlight) { refreshPending = true; return; }
@@ -1032,6 +1108,9 @@ async function refreshBoards() {
   restartSafety();
   } finally {
     refreshInFlight = false;
+    if (activityRecovery) {
+      activityRecovery.busy = false; activityRecovery.paint();
+    }
     if (refreshPending) scheduleRefresh();
   }
 }
@@ -1706,6 +1785,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
       onPause() {
         sessionPaused = true;
+        activityRecovery?.paint();
         ++sessionEpoch;
         ++generation; ++trustGen;
         invalidateOverview();

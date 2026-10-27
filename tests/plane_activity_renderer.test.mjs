@@ -63,6 +63,78 @@ function thread(reason = 'Any update?') {
 const html = t => api.threadArticle(t).innerHTML;
 const visible = text => text.replace(/<details>[\s\S]*?<\/details>/g, '');
 
+for (const outcome of ['healthy','unavailable','mixed','room','session','input','inflight','scheduled','stale','stale-epoch','partial-denied','partial-not_connected'])
+test(`explicit activity recovery reuses guarded reads and preserves keyboard focus: ${outcome}`,async()=>{
+  const document={activeElement:null,documentElement:{style:{setProperty(){}}}};
+  class Node {
+    constructor(tag='div'){this.tagName=tag;this.children=[];this.dataset={};this.attributes={};this.hidden=false;this._html='';}
+    get isConnected(){return this===channel || !!this.parent?.isConnected;}
+    contains(node){return node===this || this.children.some(c=>c.contains?.(node));}
+    get innerHTML(){return this._html;}
+    set innerHTML(value){this.replaceChildren();this._html=value;}
+    replaceChildren(...nodes){for(const child of this.children){child.parent=null;if(child.contains(document.activeElement))document.activeElement=null;}this.children=[];this.append(...nodes);}
+    append(...nodes){for(const node of nodes){if(node.tagName==='fragment'){this.append(...node.children);continue;}node.parent=this;this.children.push(node);}}
+    appendChild(node){this.append(node);}
+    remove(){if(this.parent)this.parent.children=this.parent.children.filter(n=>n!==this);this.parent=null;}
+    setAttribute(k,v){this.attributes[k]=v;}
+    closest(){return this.hidden?this:this.parent?.closest()||null;}
+    focus(){if(this.isConnected&&!this.closest())document.activeElement=this;}
+    querySelectorAll(selector){return selector==='article.thread'?this.children.filter(n=>n.tagName==='article'):[];}
+    querySelector(){return null;}
+  }
+  const channel=new Node(),focusedInput={};
+  document.getElementById=()=>channel;document.createElement=tag=>new Node(tag);document.createDocumentFragment=()=>new Node('fragment');
+  let resolve;const held=new Promise(r=>{resolve=r;}),reads=[],queued=[];
+  const state={...panel,document,conversationTaskLink,sessionPaused:false,sessionEpoch:1,generation:0,currentFleet:'north / team',
+    refreshInFlight:false,refreshPending:false,refreshTimer:null,fleetsSeen:true,clearTimeout(){},
+    syncWorkRoom(){},fleetQuery:()=>'?fleet='+encodeURIComponent(state.currentFleet),channelUrl(){return '/api/channel?limit=120';},refreshOverview(){},
+    jget(url){reads.push(url);return url.startsWith('/api/channel')?held:Promise.resolve({state:'ok',data:{}});},
+    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){}}};
+  const retry=source.slice(source.indexOf('async function retryActivity()'),source.indexOf('async function refreshBoards()'));
+  const refresh=source.slice(source.indexOf('async function refreshBoards()'),source.indexOf('function scheduleRefresh()'));
+  const view=runInNewContext(`${rendering}\n${retry}\n${refresh}\n({renderChannel,retryActivity,refreshBoards,control:()=>activityRecovery})`,state);
+  if(outcome.startsWith('partial-')) {
+    view.renderChannel({state:'ok',data:{threads:[],coverage:{partial:true},sources:[{state:'ok',connection_state:'ready'},{state:'unavailable',connection_state:outcome.slice(8)}]}});
+    assert.equal(view.control(),null);assert.ok(channel.children.some(node=>node.textContent?.includes('No activity in readable sources.')));return;
+  }
+  view.renderChannel({state:'unavailable',remediation:'This panel timed out.'});
+  const button=view.control().button;assert.equal(button.textContent,'Retry activity');assert.equal(button.isConnected,true);
+  if(outcome.startsWith('stale')){if(outcome==='stale')state.currentFleet='other';else state.sessionEpoch++;await view.retryActivity();assert.equal(reads.length,0);return;}
+  const existing=outcome==='inflight'?view.refreshBoards():null;
+  if(outcome==='scheduled')state.refreshTimer=17;
+  button.focus();let reading=view.retryActivity();assert.equal(button.attributes['aria-disabled'],'true');
+  assert.equal(button.textContent,'Refreshing reads…');
+  if(existing)reading=existing;
+  if(outcome==='scheduled'){assert.equal(reads.length,0);reading=view.refreshBoards();}
+  await view.retryActivity();await view.retryActivity();assert.equal(reads.length,4);assert.equal(queued.length,0);
+  assert.equal(document.activeElement,button,'busy uses aria-disabled without dropping keyboard focus');
+  if(outcome==='room'){state.currentFleet='south / team';state.generation++;channel.innerHTML='Other room';}
+  if(outcome==='session'){state.sessionPaused=true;state.sessionEpoch++;state.generation++;view.control().paint();}
+  if(outcome==='input')document.activeElement=focusedInput;
+  const healthy={state:'ok',data:{threads:[]}};
+  const response=outcome==='unavailable'?{state:'unavailable'}:outcome==='mixed'
+    ?{state:'ok',data:{threads:[thread()],coverage:{partial:true},sources:[{state:'ok',connection_state:'ready'},{state:'unavailable',connection_state:'ready'}]}}:healthy;
+  resolve(response);await reading;
+  assert.equal(reads.length,4);assert.equal(queued.length,0);
+  if(outcome==='healthy') {assert.equal(button.isConnected,false);assert.equal(document.activeElement,channel);assert.equal(channel.tabIndex,-1);}
+  if(['unavailable','mixed'].includes(outcome)){assert.equal(button.isConnected,true);assert.equal(button.textContent,'Retry activity');assert.equal(document.activeElement,button);}
+  if(outcome==='mixed')assert.ok(channel.children.some(n=>n.tagName==='article'),'healthy activity remains visible');
+  if(outcome==='input')assert.equal(document.activeElement,focusedInput);
+  if(outcome==='room')assert.equal(channel.innerHTML,'Other room','late rows cannot repaint another room');
+  if(outcome==='session'){assert.equal(view.control().root.hidden,true);assert.equal(button.attributes['aria-disabled'],'false');}
+});
+
+test('activity recovery does not offer retries for paused, denied or unconnected sources',()=>{
+  const document={documentElement:{style:{setProperty(){}}},getElementById:()=>({innerHTML:'',focus(){throw Error('unexpected focus');}})};
+  const view=runInNewContext(`${rendering}\n({renderChannel,control:()=>activityRecovery,pause(){sessionPaused=true;}})`,{...panel,document,sessionPaused:false,conversationTaskLink});
+  for(const state of ['denied','not_connected','disconnected']){
+    view.renderChannel({state:'unavailable',data:{sources:[{state:'unavailable',connection_state:state}]}});
+    assert.equal(view.control(),null);
+  }
+  view.renderChannel({state:'denied'});assert.equal(view.control(),null);
+  view.pause();view.renderChannel({state:'unavailable'});assert.equal(view.control(),null);
+});
+
 test('check-ins show recorded requests and reuse current bot inspection without claiming resolution', () => {
   const identity={uid:'actor_'+'7'.repeat(32),alias:'bot:example/lead',fleet:'example',provisional:false};
   const row={actor_uid:identity.uid,actor_alias:identity.alias,actor_short:'lead',fleet:identity.fleet,
@@ -462,4 +534,48 @@ test('task-specific partial coverage cannot become a clear empty board and prese
   board.renderTasks({state:'unavailable',remediation:'Task records could not be read.'});
   assert.equal(nodes['attn-count'].hidden,true);
   assert.doesNotMatch(nodes.tasks.innerHTML,/st-idle|no other tasks/);
+});
+
+for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])
+test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+  const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
+  const body = {}; document.activeElement = body;
+  const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
+    children:[], hidden:false, isConnected:true,
+    contains(node) { return this.children.includes(node); },
+    closest() { return this.hidden ? this : null; },
+    focus() { if (!this.hidden) document.activeElement=this; },
+    querySelectorAll() { return this.children; },
+    set innerHTML(value) {
+      for (const child of this.children) { child.isConnected=false; if (document.activeElement===child) document.activeElement=body; }
+      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => ({
+        dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
+        closest:() => this.hidden ? this : null,
+        focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
+      }));
+      if (change==='disabled') for (const child of this.children) child.disabled=true;
+    },
+  }]));
+  document.getElementById=id=>nodes[id];
+  const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`,{...panel,document});
+  const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
+  const env=tasks=>({state:'ok',data:{tasks}});
+  board.renderTasks(env([row]));
+  const original=nodes.tasks.children[0]; original.disabled=false;original.focus();
+  const outside={id:change==='modal'?'task-detail-close':'work-body'};
+  if (['elsewhere','modal'].includes(change)) document.activeElement=outside;
+  if (change==='hidden') nodes.tasks.hidden=true;
+  const peer={...row,task_id:change==='source'?'south::'+wi:row.task_id,fleet:'south / web'};
+  board.renderTasks(change==='unavailable'?{state:'unavailable'}:env(['removed','source'].includes(change)?[peer]
+    : [peer,{...row,attention:change==='lane'}]));
+  if (['elsewhere','modal'].includes(change)) assert.equal(document.activeElement,outside);
+  else if (['removed','source','unavailable','disabled'].includes(change)) {
+    assert.equal(document.activeElement,nodes.tasks); assert.equal(nodes.tasks.tabIndex,-1);
+  } else if (change==='hidden') assert.equal(document.activeElement,nodes.attention);
+  else {
+    assert.equal(document.activeElement,(change==='lane'?nodes.attention:nodes.tasks).children.find(button=>button.dataset.taskOpen===row.task_id&&button.dataset.taskFleet===row.fleet));
+    assert.notEqual(document.activeElement,original);
+    assert.equal(document.activeElement.dataset.taskFleet,row.fleet);
+  }
 });

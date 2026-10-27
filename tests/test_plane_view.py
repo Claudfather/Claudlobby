@@ -230,6 +230,76 @@ def test_channel_threads_the_whole_conversation(tmp_path):
     assert "recipient_raw" not in dispatch            # §11: raw id stays home
 
 
+
+def test_channel_grouped_histories_use_key_indexes_and_keep_chronology(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+
+    _full_capture(tmp_path)
+    initialize_plane(tmp_path)
+    # Key order differs from ledger order, including the latest thread.
+    keys = ("b" * 32, "a" * 32, "c" * 32)
+    rows = []
+    for key in keys:
+        rows.extend([
+            {"event_type": "work_item", "emitter": "t", "fleet": "f",
+             "payload": {"work_item_id": f"wi_{key}", "title": "Recorded task",
+                         "created_by": "bot:f/mgr"}},
+            {"event_type": "communication", "emitter": "t", "fleet": "f",
+             "payload": {"msg_id": f"msg_{key}", "sender": "bot:f/mgr",
+                         "recipient": "bot:f/worker", "message_class": "chat",
+                         "work_item_id": f"wi_{key}", "body": "Recorded message"}},
+        ])
+    for state, event in (("carrier_queued", "progress"),
+                         ("pane_submitted", "completed"),
+                         ("carrier_queued", "superseded")):
+        for key in keys:
+            rows.extend([
+                {"event_type": "transmission", "emitter": "t", "fleet": "f",
+                 "payload": {"msg_id": f"msg_{key}", "attempt_no": 1,
+                             "carrier": "tmux", "destination": "worker", "state": state}},
+                {"event_type": "task", "emitter": "t", "fleet": "f",
+                 "payload": {"work_item_id": f"wi_{key}", "assignment_id": f"asg_{key}",
+                             "event": event, "actor": "bot:f/worker"}},
+            ])
+    emit_batch(tmp_path, rows)
+    # Unselected history must not encourage a whole event-kind traversal.
+    emit_batch(tmp_path, [
+        {"event_type": kind, "emitter": "t", "fleet": "f", "payload": payload}
+        for number in range(100)
+        for kind, payload in (
+            ("transmission", {"msg_id": _lineage_id("msg", 1000 + number),
+                              "attempt_no": 1, "carrier": "tmux", "destination": "worker",
+                              "state": "carrier_queued"}),
+            ("task", {"work_item_id": _lineage_id("wi", 1000 + number),
+                      "assignment_id": _lineage_id("asg", 1000 + number), "event": "progress"}),
+        )])
+    original = view._ro_conn
+    plans = {}
+    class IndexedReader:
+        def __init__(self, conn): self.conn = conn
+        def execute(self, sql, parameters=()):
+            index = ("idx_events_msg" if "AND event <> 'received'" in sql else
+                     "idx_events_item" if "detail FROM events" in sql and "WHERE kind='task'" in sql else None)
+            if index:
+                plan = self.conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+                assert any(f"USING INDEX {index} (" in row[3] for row in plan), [tuple(row) for row in plan]
+                assert not any("idx_events_kind_seq" in row[3] for row in plan), plan
+                plans[index] = plan
+            return self.conn.execute(sql, parameters)
+        def __getattr__(self, name): return getattr(self.conn, name)
+    monkeypatch.setattr(view, "_ro_conn", lambda db: IndexedReader(original(db)))
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
+    assert body["state"] == "ok"
+    threads = body["data"]["threads"]
+    assert [t["work_item_id"] for t in threads] == [f"wi_{key}" for key in reversed(keys)]
+    assert set(plans) == {"idx_events_msg", "idx_events_item"}
+    for thread in threads:
+        assert [e["event"] for e in thread["task_events"]] == ["progress", "completed", "superseded"]
+        assert thread["terminal"] == "completed" and thread["delivered"]
+        assert [x["event"] for x in thread["messages"][0]["tx"]] == [
+            "carrier_queued", "pane_submitted", "carrier_queued"]
+        assert thread["latest_seq"] == thread["task_events"][-1]["ingest_seq"]
+
 def test_channel_projects_canonical_report_content_without_promoting_other_messages(tmp_path):
     from uuid import uuid4
     from claudlobby.report_payload import ReportPayload, encode_report_facts

@@ -50,8 +50,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   let epoch = 0, disposed = false, ended = false, busy = false, lastNow = null, expiryTimer = null;
   let continuityTimer = null, visible = false, lastActivity = null, autoAttempted = false;
   let renewalUnknown = false, continuityPaused = false, actionRequests = 0;
-  let renewing = false, disconnectRequested = false;
-  let accessRejected = false;
+  let renewing = false, disconnectRequested = false, reconnectRequired = false;
+  let accessRejected = false, connectIncomplete = false;
   const readFailures = new Map();
   const requests = new Set(), cursors = new Map();
   let owner, handle, actions = null, actionEpoch = 0, actionSourceChanged = () => {}, unsubscribe = () => {};
@@ -72,6 +72,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   function stop(note, permanent = false) {
     epoch++; ended ||= permanent; wipe();
+    if (permanent) { reconnectRequired = false; connectIncomplete = false; } // Presentation cannot override a terminal refusal.
     owner?.sessionControls.suspend(note);
   }
   function contextMatches() {
@@ -100,6 +101,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     let time;
     try { time = now(); } catch { return false; }
     if (requireToken && (!token || time >= expires)) {
+      reconnectRequired ||= !!token && time >= expires;
       stop('The connected session expired. Choose Connect again.');
       return false;
     }
@@ -109,13 +111,19 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     clearTimeout(expiryTimer);
     const gen = epoch;
     expiryTimer = setTimeout(() => {
-      if (!disposed && gen === epoch) stop('The connected session expired. Choose Connect again.');
+      if (!disposed && gen === epoch) {
+        reconnectRequired = true;
+        stop('The connected session expired. Choose Connect again.');
+      }
     }, Math.max(0, expires - now()));
   }
   function continuity() {
     const remaining = token ? Math.max(0, expires - now()) : 0;
     return Object.freeze({ warning: !!token && remaining <= RENEW_WINDOW,
-      renewalUnknown, remainingSeconds: Math.ceil(remaining / 1000) });
+      // An incomplete Connect needs a new explicit handshake, not a status probe.
+      // Keep that recovery separate from known expiry and terminal refusals.
+      connectRequired: connectIncomplete && !token && !ended && !accessRejected && handle.snapshot().state === 'unavailable',
+      renewalUnknown, reconnectRequired, remainingSeconds: Math.ceil(remaining / 1000) });
   }
   function continuityChanged() {
     try { onContinuityChange(); } catch { /* presentation cannot change admission */ }
@@ -375,7 +383,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     onReadAdmitted() {
       if (!pending || !valid()) throw new Error();
       if (token !== pending.token) autoAttempted = false;
-      token = pending.token; expires = pending.expires; pending = null; armExpiry();
+      token = pending.token; expires = pending.expires; pending = null; connectIncomplete = false; armExpiry();
       // A rotating token is retained only long enough to sign it out. Do not
       // publish a ready session after an explicit disconnect during renewal.
       if (disconnectRequested) throw new Error('Disconnect requested.');
@@ -389,8 +397,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   });
   async function connect() {
     if (disposed || ended || busy || !valid()) return false;
-    busy = true; disconnectRequested = false; continuityPaused = false; renewalUnknown = false; autoAttempted = false;
-    accessRejected = false;
+    busy = true; disconnectRequested = false; continuityPaused = false; renewalUnknown = false; autoAttempted = false; reconnectRequired = false;
+    accessRejected = false; connectIncomplete = false;
     stop('Signing in to the selected computer…');
     const gen = epoch;
     try {
@@ -426,7 +434,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       await handle.start(); // genuine issued response goes through the one profile checker
       return handle.snapshot().state === 'ready';
     } catch {
-      if (!disposed && gen === epoch) stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
+      if (!disposed && gen === epoch) {
+        connectIncomplete = !ended && !accessRejected;
+        stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
+      }
       return false;
     } finally { busy = false; scheduleContinuity(); }
   }

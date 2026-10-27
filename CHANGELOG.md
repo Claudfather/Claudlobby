@@ -19,6 +19,27 @@ now seeks per uid, and the sweep reads it only for a row the progress could
 defer. On the same fleet and instant, a run now reads 19.9 MB in under 0.1
 CPU-s, with the same answers. Nothing is migrated: every index it uses is schema 13's.
 
+### Fixed — Claudlobby knows clauDNA 0.19.0's renamed skills (#2543)
+
+clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded
+`/claudna:visual-crawl` into `/claudna:qa crawl`. `config validate` warned on
+`autonomous_runner.skill: /claudna:build` and passed the dead
+`/claudna:implement-plan`; it now accepts both new names, and its warning on an
+old one names the skill clauDNA renamed it to. The autonomous-runner skill and archetype, `fleet.yaml.example` and
+`documentation/bot-archetypes.md` name `/claudna:build`.
+
+### Fixed — `export-contract-gate` fails when `claudna.ref` is missing or empty (#2550)
+
+The job read its clauDNA ref with `echo "ref=$(cat claudlobby/contracts/claudna.ref)"`.
+A missing or empty file wrote `ref=`, and a checkout of another repository given an
+empty ref takes that repository's default branch, so the gate checked the contract of
+whatever clauDNA's default branch holds and read green. The step that reads the ref now
+fails the job, with an error that names `claudlobby/contracts/claudna.ref`, when the
+file is missing or holds no visible ASCII character, so a file of blanks, line endings
+or a byte-order mark counts as empty. The step runs before the job asks whether clauDNA
+answers, so an outage does not hide it. With a ref present, a clauDNA that does not
+answer still skips with its notice, and the ref reaches the checkout as before.
+
 ### Fixed — the clauDNA conformance jobs fail when clauDNA does not hold what they check out (#2539)
 
 `export-contract-gate` and `rename-map-gate` in the `conformance` workflow

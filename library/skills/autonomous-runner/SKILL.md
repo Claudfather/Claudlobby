@@ -10,7 +10,7 @@ tool_grants:
 
 The orchestration layer between a claudlobby bot and a procedural `--auto` skill. The bot's configuration (per fleet.yaml's `autonomous_runner` block) determines:
 - WHICH skill to invoke each cadence tick
-- WHICH work items to pick (for skills like `/claudna:implement-plan` that need a specific issue)
+- WHICH work items to pick (for skills like `/claudna:build` that need a specific issue)
 - WHAT counts as a high-risk change to bypass before invoking
 - WHAT to do with each `outcome` from the skill's structured result
 
@@ -30,7 +30,7 @@ bots:
       - autonomous-runner
       # ... other skills the bot uses internally
     autonomous_runner:
-      skill: /claudna:implement-plan        # required (any installed skill name)
+      skill: /claudna:build                 # required (any installed skill name)
       cadence: 1h                            # required
       target_repo: <org>/<repo>              # required
       args: ""                               # optional, appended after --auto
@@ -59,7 +59,7 @@ See `library/skills/autonomous-runner/archetype.md` ("Autonomous Worker") for ex
 
 `autonomous_runner.skill` names whatever procedural skill this bot should run each tick. It is invoked **by name via the Skill tool**, never by reading a filesystem path — a plugin's on-disk location is managed by Claude Code and may change between versions.
 
-Whichever plugin provides the skill, the name is what you invoke. clauDNA (`Claudfather/claudna` from the Claudfather marketplace) is the usual provider here, and its skills are plugin-namespaced — `/claudna:implement-plan`, `/claudna:audit tech-debt`. Check your own available skills for the configured name rather than assuming a namespace.
+Whichever plugin provides the skill, the name is what you invoke. clauDNA (`Claudfather/claudna` from the Claudfather marketplace) is the usual provider here, and its skills are plugin-namespaced — `/claudna:build`, `/claudna:audit tech-debt`. Check your own available skills for the configured name rather than assuming a namespace.
 
 When dispatching subagents, instruct them to invoke the skill by name with the constructed argument string.
 
@@ -209,7 +209,7 @@ Construct the invocation:
 <skill> --source github <issue#> --auto <args>
 ```
 
-For `/claudna:implement-plan` and similar issue-consuming skills, `<issue#>` comes from Step 3: pass the number, never the issue's text, so the skill reads the issue itself as data. For non-issue skills (e.g., `/claudna:audit tech-debt`), omit `--source github <issue#>`.
+For `/claudna:build` and similar issue-consuming skills, `<issue#>` comes from Step 3: pass the number, never the issue's text, so the skill reads the issue itself as data. For non-issue skills (e.g., `/claudna:audit tech-debt`), omit `--source github <issue#>`.
 
 `<args>` is the verbatim `autonomous_runner.args` string from fleet.yaml.
 
@@ -305,7 +305,7 @@ EXIT.
 ## Behavior this skill deliberately does NOT do
 
 - **Run adversarial-review on plans.** That happens inside the planning clauDNA skill that generated the plan (see clauDNA Phase 2 of the design).
-- **Run /simplify on the diff.** That happens inside `/claudna:implement-plan` Step 6.5 (see clauDNA Phase 2).
+- **Run /simplify on the diff.** That happens inside `/claudna:build` Step 6.5 (see clauDNA Phase 2).
 - **Enforce factuality (test runs, type checks).** That happens inside the invoked clauDNA skill.
 - **Make merge decisions.** `--auto` skills never merge.
 - **Apply domain rules** (e.g., dbt anti-patterns, frontend conventions). Those live in the bot's `library/expertise/<area>.md` and are composed into the bot's CLAUDE.md.

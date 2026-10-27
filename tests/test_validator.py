@@ -861,6 +861,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, skill=dead)
         report = validate(fleet, paths)
         assert self._auto_eligible_warned(report)
+        assert any(f"renamed it to '{live}'" in w for w in report.warnings)
 
     def test_bad_cadence_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)

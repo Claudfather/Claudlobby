@@ -564,11 +564,14 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     # JOIN below (rendered as delivery_state). It must NOT enter the display tx
     # list, or app.js's latest-tx would render the raw token "received" as the
     # newest carrier state for every delivered message — a regression.
+    # Pin the existing key index: planner estimates can otherwise prefer
+    # the whole transmission slice. Only per-message chronology is consumed.
     tx_rows = [dict(r) for r in conn.execute(
         f"SELECT msg_id, event, carrier, attempt_no, occurred_at, ingest_seq"
-        f" FROM events WHERE kind='transmission' AND msg_id IN ({ph})"
+        f" FROM events INDEXED BY idx_events_msg"
+        f" WHERE kind='transmission' AND msg_id IN ({ph})"
         f" AND event <> 'received'"
-        f" ORDER BY ingest_seq", msg_ids).fetchall()]
+        f" ORDER BY msg_id, ingest_seq", msg_ids).fetchall()]
     tx_by_msg: dict = {}
     for t in tx_rows:
         t["activated"] = t["event"] in _ACTIVATION_SET
@@ -649,11 +652,12 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             " FROM work_items w JOIN identity_registry f ON f.uid=w.fleet_uid AND f.kind='fleet'"
             f" WHERE w.work_item_id IN ({ph}) AND f.parent_uid=w.host_uid", wi_ids).fetchall()}
         # Task detail already carries its own bounded canonical history.
+        # As above, pin the key lookup while preserving each task's chronology.
         if report_task is None:
             for r in conn.execute(
                 f"SELECT work_item_id, assignment_id, event, occurred_at,"
-                f" ingest_seq, detail FROM events WHERE kind='task'"
-                f" AND work_item_id IN ({ph}) ORDER BY ingest_seq", wi_ids):
+                f" ingest_seq, detail FROM events INDEXED BY idx_events_item WHERE kind='task'"
+                f" AND work_item_id IN ({ph}) ORDER BY work_item_id, ingest_seq", wi_ids):
                 task_events_by_wi.setdefault(r["work_item_id"], []).append(dict(r))
 
     out = []
