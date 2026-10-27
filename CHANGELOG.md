@@ -11,8 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded
 `/claudna:visual-crawl` into `/claudna:qa crawl`. `config validate` warned on
 `autonomous_runner.skill: /claudna:build` and passed the dead
-`/claudna:implement-plan`; it now accepts both new names and warns on the old
-ones. The autonomous-runner skill and archetype, `fleet.yaml.example` and
+`/claudna:implement-plan`; it now accepts both new names, and its warning on an
+old one names the skill clauDNA renamed it to. The autonomous-runner skill and archetype, `fleet.yaml.example` and
 `documentation/bot-archetypes.md` name `/claudna:build`.
 
 ### Fixed — `export-contract-gate` fails when `claudna.ref` is missing or empty (#2550)
