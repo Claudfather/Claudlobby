@@ -183,6 +183,9 @@ class TestClaudnaRenameSSOT:
             assert DEAD_REF.search(dead), dead
             bare_banned = name not in LIBRARY_SKILLS  # /visual-crawl is ours (#2543)
             assert bool(DEAD_REF.search("/" + name)) == bare_banned, name
+        # A new dead name that is also a library skill widens the exemption: make it a choice.
+        dead_names = {k.removeprefix("/claudna:") for k in CLAUDNA_SKILL_RENAMES}
+        assert dead_names & LIBRARY_SKILLS == {"visual-crawl"}
 
     def test_session_guard_covers_every_dead_session_name(self):
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
