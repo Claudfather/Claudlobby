@@ -293,3 +293,70 @@ def test_the_last_progress_read_seeks_each_uid(tmp_path, uids):
                        ("u",) * uids + (None,) + ("u",) * uids + (None,), "e")
     assert len(steps) == 2 and not [d for d in steps if WALK.search(d)], steps
 
+
+# --- the progress is read only for a row the grace can defer -------------------------------
+
+def _eager_past_due_rows(conn, bot, *, now, max_age, progress_grace, entry):
+    """past_due_rows as it was before #2549: the progress read first, for every bot."""
+    at = datetime.fromtimestamp(now, timezone.utc).replace(microsecond=999999).isoformat()
+    lp = PR.last_progress_epoch(conn, entry["uids"], now) if progress_grace > 0 else None
+    out = []
+    for occurred_at, source_ref, asg, expected_by, set_at in PR.open_assignments(conn, F, bot, at, entry=entry):
+        da, exp = PR._epoch(occurred_at), PR._epoch(expected_by)
+        if da is None:
+            continue
+        verdict = PR.deadline_status(now, da, exp, lp, max_age, progress_grace, PR._epoch(set_at))
+        if verdict in PR.PAST_DUE:
+            out.append((da, exp, now - exp, PR._task_id(source_ref), asg, verdict))
+    return out
+
+
+def _grace_scene(tmp_path):
+    """w1: two rows past due, one not yet due, one capped, one a deadline fact
+    moved out; w2: one row not yet due; w3: past due, never reported."""
+    root = plane_root(tmp_path, initialize=True)
+    events = []
+    for n, bot, at, due in ((1, "w1", -7200, -3600), (2, "w1", -7000, 7200), (3, "w1", -400000, -390000),
+                            (4, "w1", -6000, -5000), (5, "w2", -6000, 3600), (6, "w3", -9000, -8000),
+                            (7, "w1", -8000, -7000)):
+        events += _assign(n, bot, at, ref=f"dispatch-log:t-{n}", expected_by=due)[2]
+    wi4, asg4 = f"wi_{4:0>32}", f"asg_{4:0>32}"
+    events += [_task(wi4, asg4, "deadline_changed", -5500, actor="bot:f/mgr", emitter=TASK_EMITTER,
+                     by="bot:f/mgr", reason="r", deadline=_at(3600)),
+               _task(f"wi_{1:0>32}", f"asg_{1:0>32}", "progress", -900, progress=50),
+               _marker("bot:f/w2", -300, {"status": "progress"})]
+    _emit(root, events)
+    return root
+
+
+@pytest.mark.parametrize("now_offset", [-3000, 0, 2400, 86400])
+@pytest.mark.parametrize("grace,max_age", [(2700, 86400), (2700, 0), (0, 86400), (60, 86400)])
+def test_the_lazy_progress_read_gives_every_verdict_the_eager_one_gave(tmp_path, now_offset, grace, max_age):
+    root = _grace_scene(tmp_path)
+    now = NOW_EPOCH + now_offset
+    with ro(root) as conn:
+        for bot, entry in PR.roster(conn, F).items():
+            assert PR.past_due_rows(conn, F, bot, now=now, max_age=max_age, progress_grace=grace, entry=entry) == \
+                _eager_past_due_rows(conn, bot, now=now, max_age=max_age, progress_grace=grace, entry=entry), bot
+
+
+def test_the_progress_is_read_only_for_a_row_the_grace_can_defer(tmp_path):
+    root = _grace_scene(tmp_path)
+    with ro(root) as conn:
+        reads: list[str] = []
+        conn.set_trace_callback(lambda s: reads.append(s) if "report_status" in s else None)
+        roster = PR.roster(conn, F)
+
+        def rows(bot):
+            reads.clear()
+            out = PR.past_due_rows(conn, F, bot, now=NOW_EPOCH, max_age=86400, progress_grace=2700,
+                                   entry=roster[bot])
+            return [(r[3], r[5]) for r in out], len(reads)
+
+        # w2's one row is not yet due: nothing to defer, nothing read
+        assert rows("w2") == ([], 0)
+        # w1: the capped row and the moved one need no progress; the two past
+        # due do, and its recent progress defers both — read once
+        assert rows("w1") == ([("t-3", "max_age_cap"), ("t-7", "progress_grace"), ("t-1", "progress_grace")], 1)
+        # w3 never reported: read once, and the row pages
+        assert rows("w3") == ([("t-6", "overdue")], 1)

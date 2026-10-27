@@ -284,8 +284,8 @@ ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 # task half off idx_events_kind_seq, which the planner picks for it once a bot
 # has three uids; INDEXED BY keeps the marker half on idx_events_subject, which
 # the planner drops for it at two. No index holds the event name, so the marker
-# half still reads every system event about the bot.
-# Params: (*uids, at, *uids, at).
+# half still reads every system event about the bot, and `past_due_rows` reads
+# this only for a row that needs it. Params: (*uids, at, *uids, at).
 LAST_PROGRESS_SQL = (
     "SELECT MAX(t) FROM ("
     "SELECT e.occurred_at AS t FROM events e WHERE +e.kind = 'task' AND e.event = 'progress'"
@@ -512,13 +512,20 @@ def past_due_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, m
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     at = datetime.fromtimestamp(now, timezone.utc).replace(microsecond=999999).isoformat()
     uids = (entry or {}).get("uids", [])
-    last_progress = last_progress_epoch(conn, uids, now) if progress_grace > 0 else None
+    # The progress decides only the grace, which `deadline_status` reaches
+    # after the deadline and the cap: a row it calls anything but overdue
+    # without the progress gets the same verdict with it. So the progress is
+    # read for the first row it could defer, and never for a bot with none (#2549).
+    last_progress, unread = None, progress_grace > 0
     out: list[tuple[int, int, int, Optional[str], str, str]] = []
     for occurred_at, source_ref, asg, expected_by, set_at in open_assignments(conn, fleet, bot, at, entry=entry):
         da, exp = _epoch(occurred_at), _epoch(expected_by)
         if da is None:
             continue
         verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace, _epoch(set_at))
+        if verdict == "overdue" and unread:
+            last_progress, unread = last_progress_epoch(conn, uids, now), False
+            verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace, _epoch(set_at))
         if verdict in PAST_DUE:
             out.append((da, exp, now - exp, _task_id(source_ref), asg, verdict))
     return out
