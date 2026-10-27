@@ -14,11 +14,11 @@ directory (missing, not a directory this user owns, or not writable), it
 refused without naming the bot, and said "no handoff was requested" even when
 earlier bots in the same activation had been handed off. The refusal now names
 the bot (`fleet/bot`) and its handoff directory, and lists the bots this
-activation has already handed off, in this run or an earlier one, or says that
-none was. It also says what a retry with `--resume` does with those handoffs:
-it keeps them and does not request them again, and, as before, refuses if one
-is more than 300 s old when it stops the sessions. What the activation does is
-unchanged.
+activation has already handed off, in this run or an earlier one, in the order
+their handoffs were requested, or says that none was. It also says what a
+retry with `--resume` does with those handoffs: it keeps them and does not
+request them again, and, as before, refuses if one is more than 300 s old when
+it stops the sessions. What the activation does is unchanged.
 
 ### Fixed — the clauDNA conformance jobs fail when clauDNA does not hold what they check out (#2539)
 

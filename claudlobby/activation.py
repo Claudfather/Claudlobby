@@ -668,13 +668,15 @@ def _handoff_request_time(unit, handed_off, old_bots):
 
     A refusal names the bot and its handoff directory, and the bots this activation has
     already handed off (``handed_off``, their targets), whose handoffs a retry keeps (#2547).
+    They are named in the order their handoffs were requested, which is ``old_bots``' order:
+    the store writes the record with sorted keys, so a retry reads its handoffs back by name.
     """
     from .bot_operations import _HANDOFF_FRESH_S, BotLifecycleError, _handoff_clock_ns
     bot_dir = unit.declaration.working_directory
     try:
         return _handoff_clock_ns(bot_dir)
     except BotLifecycleError as exc:
-        names = [_bot_label(old_bots[target]) if target in old_bots else target for target in handed_off]
+        names = [_bot_label(u) for t, u in old_bots.items() if t in handed_off]
         earlier = (f"already handed off in this activation: {', '.join(names)}; a retry keeps those handoffs "
                    "and does not request them again, and refuses if one is more than "
                    f"{_HANDOFF_FRESH_S} s old when it stops the sessions" if names

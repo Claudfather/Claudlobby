@@ -2359,9 +2359,10 @@ def test_preserved_handoff_request_in_an_unwritable_handoff_directory_refuses_be
 def _preserved_estate(tmp_path, monkeypatch, names):
     """Bots handed off one after another in one preserve-state activation (#2547).
 
-    Each read_activation returns a fresh copy of the record, as the store does, so the handoff
-    loop sees only what it read before it began. preserved_handoff_case shares one record, which
-    would let a refusal built from that read pass here.
+    Each read_activation parses the record afresh from sorted-key JSON, as the store does, so the
+    handoff loop sees only what it read before it began, and a retry reads the recorded handoffs
+    back in name order. preserved_handoff_case shares one record, which would let a refusal built
+    from that read pass here.
     """
     units, dirs, states = [], {}, {}
     for name in names:
@@ -2399,7 +2400,8 @@ def _preserved_estate(tmp_path, monkeypatch, names):
     store = SimpleNamespace(begin=begin, complete=complete, record_handoff=handoff,
                             arm_handoff_evidence=lambda *_: None)
     monkeypatch.setattr(activation, "read_activation",
-                        lambda *_: SimpleNamespace(body=deepcopy(body), status="activating"))
+                        lambda *_: SimpleNamespace(body=json.loads(json.dumps(body, sort_keys=True)),
+                                                   status="activating"))
     monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (tmp_path / "socket", True))
     monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_: str(tmp_path))
 
@@ -2468,6 +2470,17 @@ def test_a_retry_that_refuses_again_still_names_the_bots_handed_off_before_it(tm
         case.run()
     assert case.calls == ["alpha", "bravo"]
     assert case.body["handoff_effects"] == {"example.alpha.plist": "handed_off", "example.bravo.plist": "handed_off"}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_a_retry_names_the_bots_handed_off_in_the_order_it_requested_them(tmp_path, monkeypatch):
+    """#2547: the bots are declared out of name order, and the store reads the record back with
+    sorted keys. Both runs name the handed-off bots in the order their handoffs were requested."""
+    case = _preserved_estate(tmp_path, monkeypatch, ["bravo", "alpha", "charlie"])
+    for _ in range(2):
+        assert ("already handed off in this activation: example/bravo, example/alpha;"
+                in _refused_while_unwritable(case, "charlie"))
+    assert case.calls == ["bravo", "alpha"]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
