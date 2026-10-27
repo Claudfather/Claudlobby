@@ -9,6 +9,7 @@ from claudlobby.known_values import (
     _AUTO_ELIGIBLE_STANDALONE,
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    CLAUDNA_LIVE_SKILLS,
     CLAUDNA_SKILL_RENAMES,
     EXPERTISE_CORE_TOOLS,
     KNOWN_EFFORTS,
@@ -180,12 +181,8 @@ class TestClaudnaRenameSSOT:
         for dead in CLAUDNA_SKILL_RENAMES:
             name = dead.removeprefix("/claudna:")
             assert DEAD_REF.search(dead), dead
-            # A bare name that is also one of Claudlobby's own library skills
-            # names that live skill (/visual-crawl, #2543), so it stays legal.
-            if name in LIBRARY_SKILLS:
-                assert not DEAD_REF.search("/" + name), name
-            else:
-                assert DEAD_REF.search("/" + name), name
+            bare_banned = name not in LIBRARY_SKILLS  # /visual-crawl is ours (#2543)
+            assert bool(DEAD_REF.search("/" + name)) == bare_banned, name
 
     def test_session_guard_covers_every_dead_session_name(self):
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
@@ -217,6 +214,12 @@ class TestClaudnaRenameSSOT:
 
     def test_auto_eligible_is_subset_of_canonical(self):
         assert _AUTO_ELIGIBLE_RENAMES.items() <= CLAUDNA_SKILL_RENAMES.items()
+
+    def test_a_renamed_away_name_is_never_live(self):
+        # A name leaves the live sets the moment it gains a rename entry
+        # (known_values.py); pinned, so a dead name left in either fails (#2543).
+        assert CLAUDNA_LIVE_SKILLS.isdisjoint(CLAUDNA_SKILL_RENAMES)
+        assert AUTO_ELIGIBLE_SKILLS.isdisjoint(CLAUDNA_SKILL_RENAMES)
 
     def test_session_hyphen_typo_policy_agrees_across_guards(self):
         """The session-hyphen typo family (live verbs with no dead standalone,

@@ -6,13 +6,15 @@ with no aliases. Library fragments compose into live bot CLAUDE.md files and
 claudlobby/_runtime_scripts/ scripts inject skill keystrokes into live sessions, so a dead name here
 becomes a dead runtime affordance in every fleet. Both the plugin-namespaced
 form (``/claudna:security-audit``) and the bare doc-idiom form
-(``/security-audit``) are banned.
+(``/security-audit``) are banned, except a bare name that is also a Claudlobby
+library skill (``/visual-crawl``, #2543).
 """
 
 import re
 from pathlib import Path
 
 from claudlobby.known_values import CLAUDNA_SKILL_RENAMES
+from claudlobby.skill_refs import fleet_skill_names
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 
@@ -41,24 +43,20 @@ SNOWFLAKE_DEFERRED = (
 # space-form session verbs (e.g. /claudna:session-checkpoint) that have no
 # dead ancestor in the map.
 #
-# A bare `/name` that is one of Claudlobby's own library skills names that
-# skill, not a dead clauDNA one: clauDNA folded /claudna:visual-crawl into
-# /claudna:qa crawl, but library/skills/visual-crawl/ is live here (#2543). The
-# namespaced /claudna: form stays banned for every dead name.
-LIBRARY_SKILLS = frozenset(
-    p.name for p in (REPO_DIR / "library" / "skills").iterdir() if p.is_dir()
-)
+# Library-skill names enter namespaced, so only /claudna:<name> matches: a bare
+# /visual-crawl is Claudlobby's own library skill, not clauDNA's dead one (#2543).
+LIBRARY_SKILLS = fleet_skill_names(REPO_DIR / "library")
 _DEAD = sorted(k.removeprefix("/claudna:") for k in CLAUDNA_SKILL_RENAMES)
-_DEAD_NAMES = "|".join(re.escape(name) for name in _DEAD)
-_DEAD_BARE = "|".join(re.escape(name) for name in _DEAD if name not in LIBRARY_SKILLS)
+_DEAD_NAMES = "|".join(
+    re.escape(f"claudna:{name}" if name in LIBRARY_SKILLS else name) for name in _DEAD
+)
 DEAD_REF = re.compile(
-    rf"/(?:claudna:(?:{_DEAD_NAMES})"
-    r"|(?:claudna:)?(?:"
+    r"/(?:claudna:)?(?:"
     r"(?:vercel|neon|railway|modal)-[a-z-]+"
     r"|snowflake-(?:query|cutover)"
     r"|session-[a-z-]+"
-    rf"|{_DEAD_BARE}"
-    r"))\b"
+    rf"|{_DEAD_NAMES}"
+    r")\b"
 )
 
 

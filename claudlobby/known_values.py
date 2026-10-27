@@ -272,8 +272,8 @@ CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
 )
 
 # ── Autonomous runner ────────────────────────────────────────────
-# The --auto-eligible subset of the renamed skills; the live values (the whole
-# space-form) are what validator.py exact-matches. Selected from the canonical
+# The --auto-eligible subset of the renamed skills; the live values are what
+# validator.py exact-matches. Selected from the canonical
 # map by key so the two can never disagree — a dropped or misspelled key here
 # fails loudly at import.
 _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {

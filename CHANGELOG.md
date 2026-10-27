@@ -9,17 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed — Claudlobby knows clauDNA 0.19.0's renamed skills (#2543)
 
 clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded
-`/claudna:visual-crawl` into `/claudna:qa`, whose `crawl` mode takes `--auto`.
-Claudlobby still treated both old names as live: `config validate` warned on
+`/claudna:visual-crawl` into `/claudna:qa crawl`. `config validate` warned on
 `autonomous_runner.skill: /claudna:build` and passed the dead
-`/claudna:implement-plan`, and the autonomous-runner skill pointed bots at
-`/claudna:implement-plan`. `CLAUDNA_SKILL_RENAMES` now maps both old names to
-the live ones, so the `--auto` list, `CLAUDNA_LIVE_SKILLS` and the dead-name
-guard follow it. The autonomous-runner skill and archetype,
-`fleet.yaml.example` and `documentation/bot-archetypes.md` name the live
-skills. The guard still bans `/claudna:visual-crawl`, but no longer a bare
-`/visual-crawl`: that is Claudlobby's own `library/skills/visual-crawl/`,
-which stays live.
+`/claudna:implement-plan`; it now accepts both new names and warns on the old
+ones. The autonomous-runner skill and archetype, `fleet.yaml.example` and
+`documentation/bot-archetypes.md` name `/claudna:build`.
 
 ### Fixed — `export-contract-gate` fails when `claudna.ref` is missing or empty (#2550)
 
