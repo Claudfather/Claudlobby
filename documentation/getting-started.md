@@ -4,6 +4,8 @@ This is the installed-release path for a new host. Use a trusted matching releas
 
 For an existing checkout-based host, first read the [conversion prerequisite](existing-host-release-conversion.md). Do not pull incompatible framework source into a running installation.
 
+For the bounded lead/engineer/reviewer trial through the connected browser, use [First-team setup](first-team-setup.md). It joins release assembly, local owner/workspace approval and one explicit team launch; it requires separately provisioned access and matching candidate browser publication. Its cold-host/native acceptance is pending. The seed/direct-CLI walkthrough below remains available.
+
 ## Prerequisites
 
 - A working CPython accepted by the candidate wheel that can create a virtual environment (step 1 probes this by creating a disposable one), `git` for a source build, and enough disk for a copied Python environment and dependency wheels. Debian, Ubuntu and Raspberry Pi OS ship `venv` without `ensurepip` unless the `python3-venv` package is installed; `import venv` alone is not proof.
