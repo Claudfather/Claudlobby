@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shlex
 import shutil
 import socket
@@ -2180,7 +2181,7 @@ def preserved_handoff_case(tmp_path, monkeypatch):
     bot_dir = tmp_path / "worker"
     bot_dir.mkdir()
     unit = SimpleNamespace(target=target, installed=(SimpleNamespace(path=tmp_path / target),), declaration=SimpleNamespace(
-        scope="bot", source=bot_dir / target, working_directory=bot_dir))
+        scope="bot", source=bot_dir / target, working_directory=bot_dir, fleet="example", bot="worker"))
     body = {"completed": ["producers_paused"], "pending": None, "handoff_effects": {},
             "intent": {"preserve_bot_state": True, "install_directory": str(tmp_path),
                        "bot_states": {target: {"disposition": "restart"}}},
@@ -2354,6 +2355,156 @@ def test_preserved_handoff_request_in_an_unwritable_handoff_directory_refuses_be
     assert isinstance(refused.value.__cause__, bot_operations.BotLifecycleError)
     assert case.body["handoff_effects"] == {}
     assert case.calls == []
+
+def _preserved_estate(tmp_path, monkeypatch, names):
+    """Bots handed off one after another in one preserve-state activation (#2547).
+
+    Each read_activation returns a fresh copy of the record, as the store does, so the handoff
+    loop sees only what it read before it began. preserved_handoff_case shares one record, which
+    would let a refusal built from that read pass here.
+    """
+    units, dirs, states = [], {}, {}
+    for name in names:
+        target = f"example.{name}.plist"
+        bot_dir = tmp_path / name
+        _preserve_capture(bot_dir, kind="shell-below")
+        units.append(SimpleNamespace(target=target, installed=(SimpleNamespace(path=tmp_path / target),),
+                                     declaration=SimpleNamespace(scope="bot", source=bot_dir / target,
+                                                                 working_directory=bot_dir, fleet="example",
+                                                                 bot=name)))
+        dirs[name] = bot_dir
+        states[target] = {"disposition": "restart"}
+    body = {"completed": ["producers_paused"], "pending": None, "handoff_effects": {},
+            "intent": {"preserve_bot_state": True, "install_directory": str(tmp_path), "bot_states": states},
+            "previous_selection": {"activation_id": "previous"}}
+    calls, outcome = [], ["handoff-saved"]
+
+    class BotPauseReached(Exception):
+        pass
+
+    def begin(_activation, step):
+        if step == "sessions_quiesced":
+            raise BotPauseReached
+        body["pending"] = step
+
+    def complete(_activation, step, **_):
+        body["completed"].append(step)
+        body["pending"] = None
+
+    def handoff(_activation, *, target, result, request_started_ns=None):
+        if request_started_ns is not None:
+            body.setdefault("handoff_requests", {})[target] = {"started_at_ns": request_started_ns}
+        body["handoff_effects"][target] = result
+
+    store = SimpleNamespace(begin=begin, complete=complete, record_handoff=handoff,
+                            arm_handoff_evidence=lambda *_: None)
+    monkeypatch.setattr(activation, "read_activation",
+                        lambda *_: SimpleNamespace(body=deepcopy(body), status="activating"))
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (tmp_path / "socket", True))
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_: str(tmp_path))
+
+    def call(function, bot_dir, *_args, **_kwargs):
+        assert function == "svc_activation_handoff"
+        assert body["handoff_effects"][f"example.{bot_dir.name}.plist"] is None  # Fence before the send.
+        calls.append(bot_dir.name)
+        if outcome[0] == "handoff-saved":
+            _preserve_capture(bot_dir, kind="shell-below")
+        return subprocess.CompletedProcess([function], 0, outcome[0] + "\n", "")
+
+    def run():
+        return activation._quiesce_running(tmp_path, store, "upgrade", None, tuple(units),
+                                           SimpleNamespace(call=call))
+    return SimpleNamespace(run=run, body=body, calls=calls, dirs=dirs, outcome=outcome,
+                           BotPauseReached=BotPauseReached)
+
+
+def _refused_while_unwritable(case, name):
+    handoff_dir = case.dirs[name] / ".claude"
+    handoff_dir.chmod(0o500)
+    try:
+        with pytest.raises(state.ActivationRefusal, match="cannot time its handoff request") as refused:
+            case.run()
+    finally:
+        handoff_dir.chmod(0o700)
+    return str(refused.value)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_preserved_handoff_refusal_names_the_bot_and_the_bots_already_handed_off(tmp_path, monkeypatch):
+    """#2547: the second bot's handoff directory takes no new file. The refusal names that bot and
+    the directory, and says the first bot was handed off and that a retry keeps its handoff."""
+    case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
+    assert _refused_while_unwritable(case, "bravo") == (
+        "preserve-state activation cannot time its handoff request to example/bravo in that bot's handoff "
+        f"directory {case.dirs['bravo'] / '.claude'}, so no handoff was requested from it; inspect that "
+        "directory, then retry the same activation with --resume; already handed off in this activation: "
+        "example/alpha; a retry keeps those handoffs and does not request them again, and refuses if one is "
+        "more than 300 s old when it stops the sessions")
+    assert case.calls == ["alpha"]
+    assert case.body["handoff_effects"] == {"example.alpha.plist": "handed_off"}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_preserved_handoff_refusal_says_when_no_bot_was_handed_off(tmp_path, monkeypatch):
+    """#2547: when the first bot's directory refuses, nothing was handed off, and the refusal says so."""
+    case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
+    message = _refused_while_unwritable(case, "alpha")
+    assert f"to example/alpha in that bot's handoff directory {case.dirs['alpha'] / '.claude'}," in message
+    assert message.endswith("--resume; no bot has been handed off in this activation")
+    assert "example/bravo" not in message
+    assert case.calls == []
+    assert case.body["handoff_effects"] == {}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_a_retry_that_refuses_again_still_names_the_bots_handed_off_before_it(tmp_path, monkeypatch):
+    """#2547: the list includes what an earlier run of the same activation recorded. Once the
+    directory takes files, the retry sends only the handoff still owed."""
+    case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
+    for _ in range(2):
+        assert "already handed off in this activation: example/alpha;" in _refused_while_unwritable(case, "bravo")
+    assert case.calls == ["alpha"]
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert case.calls == ["alpha", "bravo"]
+    assert case.body["handoff_effects"] == {"example.alpha.plist": "handed_off", "example.bravo.plist": "handed_off"}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+def test_a_late_save_reconciled_by_the_retry_is_named_as_handed_off(tmp_path, monkeypatch):
+    """#2547: a request recorded with no result, whose save the retry verifies, counts as handed off."""
+    case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
+    case.outcome[0] = "handoff-timeout"
+    with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+        case.run()
+    assert case.body["handoff_effects"] == {"example.alpha.plist": None}
+    _preserve_capture(case.dirs["alpha"], kind="shell-below")  # The save lands after the door gave up.
+    assert "already handed off in this activation: example/alpha;" in _refused_while_unwritable(case, "bravo")
+    assert case.calls == ["alpha"]
+    assert case.body["handoff_effects"] == {"example.alpha.plist": "handed_off"}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a mode-0500 directory")
+@pytest.mark.parametrize("age_s,kept", [pytest.param(250, True, id="250s"), pytest.param(301, False, id="301s")])
+def test_a_handoff_the_retry_keeps_must_still_be_at_most_300_s_old_when_the_sessions_stop(
+        tmp_path, monkeypatch, age_s, kept):
+    """#2547 control for the refusal's last clause: the retry does not request a kept handoff again,
+    and one more than 300 s old when the activation stops the sessions refuses it."""
+    from datetime import datetime, timedelta, timezone
+    case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
+    _refused_while_unwritable(case, "bravo")
+    capture = case.dirs["alpha"] / ".claude/session.md"
+    then = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    capture.write_text(re.sub(r"last_updated: \S+", f"last_updated: {then:%Y-%m-%dT%H:%M:%SZ}",
+                              capture.read_text(), count=1))
+    os.utime(capture, (then.timestamp(), then.timestamp()))
+    if kept:
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+    else:
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+            case.run()
+    assert case.calls == ["alpha", "bravo"]
 
 
 def test_preserved_handoff_saved_in_the_requests_own_file_clock_tick_stays_held(preserved_handoff_case, monkeypatch):
