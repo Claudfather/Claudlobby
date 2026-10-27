@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a preserve-state activation's refusal names the bot whose handoff directory takes no file, and the bots already handed off (#2547)
+
+`host activate --preserve-bot-state` hands the running bots off one after
+another. When it could not time a bot's handoff request in that bot's handoff
+directory (missing, not a directory this user owns, or not writable), it
+refused without naming the bot, and said "no handoff was requested" even when
+earlier bots in the same activation had been handed off. The refusal now names
+the bot (`fleet/bot`) and its handoff directory, and lists the bots this
+activation has already handed off, in this run or an earlier one, or says that
+none was. It also says what a retry with `--resume` does with those handoffs:
+it keeps them and does not request them again, and, as before, refuses if one
+is more than 300 s old when it stops the sessions. What the activation does is
+unchanged.
+
 ### Fixed — the daily credential check probes the activated roster after an edit to `fleet.yaml` (#2515)
 
 Each fleet's daily credential check stopped before probing, with `fleet source

@@ -658,15 +658,31 @@ def _require_preserved_handoff(bot_dir, *, not_before=None):
                                 "with --resume; existing handoff attempts are never resent") from exc
 
 
-def _handoff_request_time(bot_dir):
-    """Time a preserved handoff request on the clock that stamps its handoff file (#2528)."""
-    from .bot_operations import BotLifecycleError, _handoff_clock_ns
+def _bot_label(unit):
+    """The fleet/bot a bot unit declares: the name an operator knows it by."""
+    return f"{unit.declaration.fleet}/{unit.declaration.bot}"
+
+
+def _handoff_request_time(unit, handed_off, old_bots):
+    """Time a preserved handoff request on the clock that stamps its handoff file (#2528).
+
+    A refusal names the bot and its handoff directory, and the bots this activation has
+    already handed off (``handed_off``, their targets), whose handoffs a retry keeps (#2547).
+    """
+    from .bot_operations import _HANDOFF_FRESH_S, BotLifecycleError, _handoff_clock_ns
+    bot_dir = unit.declaration.working_directory
     try:
         return _handoff_clock_ns(bot_dir)
     except BotLifecycleError as exc:
-        raise ActivationRefusal("preserve-state activation cannot time its handoff request in the bot's "
-                                "handoff directory; inspect that directory, then retry the same activation "
-                                "with --resume; no handoff was requested") from exc
+        names = [_bot_label(old_bots[target]) if target in old_bots else target for target in handed_off]
+        earlier = (f"already handed off in this activation: {', '.join(names)}; a retry keeps those handoffs "
+                   "and does not request them again, and refuses if one is more than "
+                   f"{_HANDOFF_FRESH_S} s old when it stops the sessions" if names
+                   else "no bot has been handed off in this activation")
+        raise ActivationRefusal(f"preserve-state activation cannot time its handoff request to {_bot_label(unit)} "
+                                f"in that bot's handoff directory {bot_dir / '.claude'}, so no handoff was "
+                                "requested from it; inspect that directory, then retry the same activation "
+                                f"with --resume; {earlier}") from exc
 
 
 def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
@@ -724,6 +740,9 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
         for target in unknown:
             # Proof of a late save reconciles the recorded attempt without any native call.
             store.record_handoff(activation_id, target=target, result="handed_off")
+        # The handoffs a refusal names, from this run or an earlier one: effects was read
+        # before the loop, so the loop adds its own (#2547).
+        handed_off = [target for target, result in effects.items() if result == "handed_off" or target in unknown]
         for target, unit in old_bots.items():
             if target in effects:
                 continue  # Recorded before interruption; never inject twice.
@@ -736,7 +755,7 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
                 continue
             if preserve and not restart:
                 raise ActivationRefusal("preserved stopped bot acquired a live private server before handoff")
-            requested = _handoff_request_time(unit.declaration.working_directory) if preserve else None
+            requested = _handoff_request_time(unit, handed_off, old_bots) if preserve else None
             store.record_handoff(activation_id, target=target, result=None,
                                  **({"request_started_ns": requested} if preserve else {}))
             result = adapter.call("svc_activation_handoff", unit.declaration.working_directory,
@@ -753,6 +772,7 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
             elif result.returncode:
                 raise ActivationError("legacy bot handoff did not complete")
             store.record_handoff(activation_id, target=target, result="handed_off")
+            handed_off.append(target)
         store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
             {"old_bots": sorted(sockets), "handoff": (
                 "explicit-save-and-fresh-capture-verified-or-stopped" if preserve else
