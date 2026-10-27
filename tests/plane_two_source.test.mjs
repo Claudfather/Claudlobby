@@ -267,7 +267,7 @@ async function appHarness(api) {
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const paints=[], timers=[], callbacks=[], overviewPaints=[], summaries=[], nodes=new Map();
   let now=Date.now();
-  const c={Date:class extends Date {static now(){return now;}},esc:value=>String(value),
+  const c={activityRecovery:null,Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
     syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},

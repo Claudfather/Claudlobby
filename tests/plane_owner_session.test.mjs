@@ -464,7 +464,7 @@ test(`app renewal restores worker selection and draft only with fresh matching a
     const body = document.getElementById('work-body'); body.value = 'Keep this unsent draft'; body.input();
     const before = storage.getItem('plane.pending-actions.v1');
     assert.equal(document.getElementById('work-send').disabled, false);
-    const bindings = { workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
+    const bindings = { activityRecovery:null, workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
       sessionPaused: false, sessionEpoch: 1, generation: 1, trustGen: 1,
       refreshTimer: null, safetyTimer: null, searchTimer: null, invalidateOverview() {},
       clearTimeout() {}, $: id => document.getElementById(id), showLoading() {} };
@@ -994,7 +994,7 @@ test('initial fleet discovery cannot change a newer room or resumed session', as
   const refresh = inspectionApp.slice(inspectionApp.indexOf('async function refreshBoards()'), inspectionApp.indexOf('function scheduleRefresh()'));
   for (const reason of ['room', 'session']) {
     const reply = deferred(), adopted = [];
-    const state = { sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
+    const state = { activityRecovery:null, sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
       refreshInFlight: false, refreshPending: false, refreshTimer: null, clearTimeout() {},
       jget: () => reply.promise, adoptFleets(value) { adopted.push(value); } };
     const pending = runInNewContext(`${refresh}\nrefreshBoards()`, state);

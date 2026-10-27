@@ -1380,7 +1380,7 @@ test('a refresh started before stream source loss cannot restore the cleared con
     const h = await conversationHarness({protected: guarded}), reports = h.get('task-reports');
     // app.js's own refreshBoards, coalescing, safety timer and stream callback; reads and timers are held here.
     const requests = [], timers = [], listeners = new Map(), painted = [];
-    const bindings = { fleetsSeen: true, workLoop: h.loop, $: id => h.get(id), esc:String,
+    const bindings = { activityRecovery:null, fleetsSeen: true, workLoop: h.loop, $: id => h.get(id), esc:String,
       jget(url) { const request = deferred(); requests.push({ url, ...request }); return request.promise; },
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }, clearTimeout() {},
       createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
