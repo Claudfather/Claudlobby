@@ -9,6 +9,157 @@ from claudlobby.command_result import CommandFailure, CommandOutput
 from claudlobby.commands import setup
 
 
+@pytest.mark.parametrize("repository", [None, "", "shop", "https://github.com/example-org/shop", "a/b/c",
+                                       "../shop", "a/..", "a/b\n", "a_/shop", "a-/shop", "a/" + "x" * 101])
+def test_team_template_requires_an_explicit_repository(repository):
+    with pytest.raises(CommandFailure, match="explicit OWNER/REPO"):
+        setup._template_config("revenue-web-app", "shop", repository, "Improve checkout tests")
+
+
+@pytest.mark.parametrize("goal", [None, "", " ", " leading", "trailing ", "two\nlines", "tabs\there", "null\0", "x" * 2001])
+def test_team_template_requires_a_bounded_approved_goal(goal):
+    with pytest.raises(CommandFailure, match="single-paragraph"):
+        setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
+
+
+def test_team_template_materializes_exact_scope_and_preserves_policy():
+    from claudlobby.config import load_fleet_snapshot
+
+    goal = 'Improve "checkout": café conversion tests'
+    content = setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
+    fleet, defaults = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    assert defaults["jobs"]["manager-checkin"]["enroll"] is True
+    assert content == setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
+    assert fleet.name == "shop" and fleet.service_prefix == "com.claudlobby.shop"
+    assert fleet.mission.startswith(f"Approved goal: {goal}.")
+    assert "Require explicit human permission" in fleet.mission
+    assert "reviewer approval alone never authorizes a merge" in fleet.bots["lead"].mission
+    assert {key: bot.expertise for key, bot in fleet.bots.items()} == {
+        "lead": ["orchestration"], "engineer": ["software-engineering"], "reviewer": ["code-review"]}
+    assert all(bot.scope.org == "example-org" and bot.scope.repos == ["example-org/shop"]
+               for bot in fleet.bots.values())
+    assert all("task-scoped-effects" in bot.guardrails and not bot.dangerously_skip_permissions
+               and not bot.channels and not bot.remote_control for bot in fleet.bots.values())
+    assert fleet.projects_derived and all(p.validation.tier == "review" for p in fleet.projects.values())
+
+
+def test_team_template_missing_resource_refuses_without_checkout_fallback(tmp_path, monkeypatch):
+    from claudlobby import resources
+
+    monkeypatch.setattr(resources, "get_resources", lambda: SimpleNamespace(seeds=tmp_path))
+    with pytest.raises(CommandFailure, match="installed team template"):
+        setup._template_config("revenue-web-app", "shop", "example-org/shop", "Improve checkout tests")
+    with pytest.raises(CommandFailure, match="unsupported team template"):
+        setup._template_config("other", "shop", "example-org/shop", "Improve checkout tests")
+
+
+def test_setup_parser_requires_one_source():
+    import argparse
+    from claudlobby.commands._setup_parsers import register_fleet_setup
+
+    parser = argparse.ArgumentParser()
+    register_fleet_setup(parser.add_subparsers())
+    assert parser.parse_args(["setup", "--config", "authored.yaml", "--install-directory", "/units"]).template is None
+    args = parser.parse_args(["setup", "--template", "revenue-web-app", "--repository", "example-org/shop",
+                              "--goal", "Improve checkout tests", "--install-directory", "/units"])
+    assert args.config is None and args.repository == "example-org/shop"
+    for flags in ([], ["--config", "file", "--template", "revenue-web-app"], ["--template", "other"]):
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args(["setup", "--install-directory", "/units", *flags])
+        assert refused.value.code == 2
+
+
+@pytest.fixture
+def team_setup(tmp_path, monkeypatch):
+    from claudlobby.commands import host, releases
+    from claudlobby import activation_state
+    from claudlobby.config_plan import ConfigPlanBuilder
+
+    root = tmp_path / "data"
+    root.mkdir()
+    args = SimpleNamespace(public_command="fleet.setup", root=str(root), fleet="shop", seed=False,
+                           config=None, template="revenue-web-app", repository="example-org/shop",
+                           goal="Improve checkout tests", replace_config=False,
+                           install_directory=str(tmp_path / "units"), activation_id="a1")
+    monkeypatch.setattr(releases, "_executing_release", lambda _: "r-" + "a" * 64)
+    monkeypatch.setattr(releases, "_release", lambda *_: object())
+    monkeypatch.setattr(activation_state, "read_selection", lambda _: None)
+    effects = []
+
+    def stage(stage_args, stage_root):
+        plan = ConfigPlanBuilder(stage_root, "r-" + "a" * 64, "b" * 64, ("shop",), effects={})
+        plan.input(stage_root / "local/shop/fleet.yaml")
+        plan.input(stage_root / "local/shop/projects.yaml")
+        sealed = plan.seal()
+        return CommandOutput({"plan_id": sealed.plan_id, "fleets": ["shop"]})
+
+    def activate(activation_args, activation_root):
+        effects.append((activation_args, activation_root))
+        return CommandOutput({"activation_id": activation_args.activation_id}, "r-" + "a" * 64, ("Activation fixture.",))
+
+    monkeypatch.setattr(releases, "_config_plan", stage)
+    monkeypatch.setattr(host, "_activate", activate)
+    return args, root, effects
+
+
+def test_template_setup_reuses_plan_activation_and_idempotent_copy(team_setup):
+    args, root, effects = team_setup
+    first = setup.dispatch(args)
+    content = (root / "local/shop/fleet.yaml").read_bytes()
+    second = setup.dispatch(args)
+    assert first.data["config_copied"] and not second.data["config_copied"]
+    assert (root / "local/shop/fleet.yaml").read_bytes() == content
+    assert all(not call.adopt_existing and target == root.resolve() for call, target in effects)
+    args.goal = "A different approved goal"
+    with pytest.raises(CommandFailure, match="--replace-config"):
+        setup.dispatch(args)
+    assert len(effects) == 2 and (root / "local/shop/fleet.yaml").read_bytes() == content
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "dangling-link"])
+def test_template_setup_never_adopts_existing_project_declaration(team_setup, kind):
+    args, root, effects = team_setup
+    projects = root / "local/shop/projects.yaml"
+    projects.parent.mkdir(parents=True)
+    if kind == "file":
+        projects.write_text("projects: {}\n")
+    elif kind == "directory":
+        projects.mkdir()
+    else:
+        projects.symlink_to(root / "missing")
+    with pytest.raises(CommandFailure, match="existing project declaration"):
+        setup.dispatch(args)
+    assert not effects and not (projects.parent / "fleet.yaml").exists()
+
+
+def test_template_setup_refuses_project_added_during_staging_and_restores_declaration(team_setup, monkeypatch):
+    from claudlobby.commands import releases
+
+    args, root, effects = team_setup
+    stage = releases._config_plan
+
+    def changed(stage_args, stage_root):
+        (root / "local/shop/projects.yaml").write_text("projects: {}\n")
+        return stage(stage_args, stage_root)
+
+    monkeypatch.setattr(releases, "_config_plan", changed)
+    with pytest.raises(CommandFailure, match="changed while staging") as refused:
+        setup.dispatch(args)
+    assert refused.value.data["config_declaration"] == "removed"
+    assert "correct --repository/--goal or use an authored --config FILE" in refused.value.error.hint
+    assert "correct the selected installed template" not in refused.value.error.hint
+    assert not effects and not (root / "local/shop/fleet.yaml").exists()
+    assert (root / "local/shop/projects.yaml").read_text() == "projects: {}\n"
+
+
+def test_template_setup_generated_bot_context_refuses_before_declaration(team_setup, monkeypatch):
+    args, root, effects = team_setup
+    monkeypatch.setenv("BOT_ID", "worker")
+    with pytest.raises(CommandFailure, match="operator shell"):
+        setup.dispatch(args)
+    assert not effects and not (root / "local").exists()
+
+
 def test_authorized_fleet_file_copy_is_atomic_and_requires_explicit_replacement(tmp_path):
     source = tmp_path / "operator" / "fleet.yaml"
     source.parent.mkdir()
@@ -105,6 +256,7 @@ def test_fleet_setup_refuses_mismatched_authored_name_before_activation(tmp_path
     with pytest.raises(CommandFailure, match="fleet declaration removed") as refused:
         run()
     assert refused.value.data["config_declaration"] == "removed"
+    assert f"correct {source} and rerun fleet setup" in refused.value.error.hint
     assert "config validate" in refused.value.error.hint and not (root / "local").exists()
     declared = root / "local/example/fleet.yaml"
     declared.parent.mkdir(parents=True)
