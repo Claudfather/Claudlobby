@@ -463,3 +463,47 @@ test('task-specific partial coverage cannot become a clear empty board and prese
   assert.equal(nodes['attn-count'].hidden,true);
   assert.doesNotMatch(nodes.tasks.innerHTML,/st-idle|no other tasks/);
 });
+
+for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])
+test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+  const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
+  const body = {}; document.activeElement = body;
+  const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
+    children:[], hidden:false, isConnected:true,
+    contains(node) { return this.children.includes(node); },
+    closest() { return this.hidden ? this : null; },
+    focus() { if (!this.hidden) document.activeElement=this; },
+    querySelectorAll() { return this.children; },
+    set innerHTML(value) {
+      for (const child of this.children) { child.isConnected=false; if (document.activeElement===child) document.activeElement=body; }
+      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => ({
+        dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
+        closest:() => this.hidden ? this : null,
+        focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
+      }));
+      if (change==='disabled') for (const child of this.children) child.disabled=true;
+    },
+  }]));
+  document.getElementById=id=>nodes[id];
+  const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`,{...panel,document});
+  const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
+  const env=tasks=>({state:'ok',data:{tasks}});
+  board.renderTasks(env([row]));
+  const original=nodes.tasks.children[0]; original.disabled=false;original.focus();
+  const outside={id:change==='modal'?'task-detail-close':'work-body'};
+  if (['elsewhere','modal'].includes(change)) document.activeElement=outside;
+  if (change==='hidden') nodes.tasks.hidden=true;
+  const peer={...row,task_id:change==='source'?'south::'+wi:row.task_id,fleet:'south / web'};
+  board.renderTasks(change==='unavailable'?{state:'unavailable'}:env(['removed','source'].includes(change)?[peer]
+    : [peer,{...row,attention:change==='lane'}]));
+  if (['elsewhere','modal'].includes(change)) assert.equal(document.activeElement,outside);
+  else if (['removed','source','unavailable','disabled'].includes(change)) {
+    assert.equal(document.activeElement,nodes.tasks); assert.equal(nodes.tasks.tabIndex,-1);
+  } else if (change==='hidden') assert.equal(document.activeElement,nodes.attention);
+  else {
+    assert.equal(document.activeElement,(change==='lane'?nodes.attention:nodes.tasks).children.find(button=>button.dataset.taskOpen===row.task_id&&button.dataset.taskFleet===row.fleet));
+    assert.notEqual(document.activeElement,original);
+    assert.equal(document.activeElement.dataset.taskFleet,row.fleet);
+  }
+});
