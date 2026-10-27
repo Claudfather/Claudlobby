@@ -1731,3 +1731,112 @@ test('recorded permission keeps an uncertain notification receipt across reload 
  assert.match(next.innerHTML,/requesting bot received the notice/);
  assert.equal(storage.getItem('plane.pending-permissions.v1'),'[]');
 });
+
+for (const kind of ['feedback', 'nudge']) for (const outcome of ['draft', 'recorded', 'unknown'])
+test(`composer opens ${kind} context without changing its ${outcome} draft, target or receipt`, async () => {
+  const assignment = {assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null};
+  const reads = [];
+  const h = harness((kind === 'feedback' ? feedbackOptions : nudgeOptions)({
+    jget(url) { reads.push(url); return ownerDetail(reads.length === 1 ? assignment : {...assignment,assignment_id:'asg_'+'f'.repeat(32)}); },
+    sendAction(request) { if (outcome === 'unknown') throw Error('lost response'); return receipt(request, 'recorded'); },
+  }));
+  await (kind === 'feedback' ? chooseFeedback(h) : chooseNudge(h));
+  h.get('work-body').value = 'Keep my task comment'; h.get('work-body').emit('input');
+  if (outcome !== 'draft') await h.get('work-form').onsubmit({preventDefault(){}});
+  const pending = h.storage.getItem('plane.pending-actions.v1'), notice = h.get('work-notice').textContent;
+  const recipient = h.get('work-recipient').value, label = h.get('work-task').textContent;
+  const counts = [h.preparations.length,h.sends.length,h.lookups.length];
+  assert.equal(h.get('work-open-task').hidden, false); assert.equal(h.get('work-open-task').disabled, false);
+  h.get('work-open-task').onclick(); await settle();
+  assert.deepEqual(reads, Array(2).fill(`/api/tasks/${nudgeTaskId}?fleet=web`));
+  assert.equal(h.get('task-detail').open, true); assert.match(h.get('task-detail-content').innerHTML, /Complete canonical body/);
+  h.get('task-detail-close').onclick(); await settle();
+  assert.equal(h.document.activeElement, h.get('work-open-task'));
+  assert.equal(h.get('work-body').value, 'Keep my task comment'); assert.equal(h.get('work-recipient').value, recipient);
+  assert.equal(h.get('work-task').textContent, label); assert.equal(h.get('work-notice').textContent, notice);
+  assert.equal(h.storage.getItem('plane.pending-actions.v1'), pending);
+  assert.deepEqual([h.preparations.length,h.sends.length,h.lookups.length], counts);
+  if (outcome === 'draft') {
+    await h.get('work-form').onsubmit({preventDefault(){}});
+    assert.equal(h.preparations[0].target.assignment_id, nudgeAssignment);
+    assert.equal(h.preparations[0].target.release_id, (kind === 'feedback' ? ownerFeedback : ownerNudge).release_id);
+    assert.equal(h.sends.length, 1);
+  } else {
+    assert.equal(h.get('work-send').disabled, true);
+    const original = new ActionState(h.storage).pending[0];
+    await h.pendingClick(original.request_id);
+    assert.equal(h.lookups[0].request_id, original.request_id);
+    assert.deepEqual(h.lookups[0].target, original.target); assert.equal(h.sends.length, 1);
+  }
+});
+
+test('composer context read keeps a qualified conversation task outside the board and checks its exact fleet UID', async () => {
+  const source = 'north', room = source+' / web', id = source+'::'+nudgeTaskId;
+  const fleetUid = source+'::fleet_'+'1'.repeat(32), hostUid = source+'::host_'+'2'.repeat(32);
+  const capability = {...ownerFeedback,room,scope:{...ownerFeedback.scope,fleet:room},
+    recipients:ownerFeedback.recipients.map(r=>({...r,id:source+'::'+r.id}))};
+  const thread = {key:'conversation-with-an-older-task',work_item_id:id,
+    task_link:{task_id:id,fleet:room,fleet_uid:fleetUid,host_uid:hostUid},messages:[]};
+  const reads = [], data = ownerDetail(); data.data.task = {...data.data.task,task_id:id,fleet:room,fleet_uid:fleetUid};
+  const h = harness(feedbackOptions({feedbackContext:()=>capability,jget(url){reads.push(url);return data;}}));
+  h.loop.setRoom(room); await settle(); h.update(conversationRead(thread),{state:'ok',data:{tasks:[]}});
+  h.channelOpen(thread); await settle();
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').onclick(); await settle();
+  h.get('work-body').value='Context from an older conversation'; h.get('work-body').emit('input');
+  // The reference survives replacement of the capped channel and board windows.
+  h.update(conversationRead(),{state:'ok',data:{tasks:[]}});
+  h.get('work-open-task').onclick(); await settle();
+  assert.deepEqual(reads,Array(2).fill(`/api/tasks/${encodeURIComponent(id)}?fleet=${encodeURIComponent(room)}`));
+  assert.match(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+  h.get('task-detail-close').onclick(); await settle();
+  data.data.task.fleet_uid = 'south::fleet_'+'1'.repeat(32);
+  h.get('work-open-task').onclick(); await settle();
+  assert.match(h.get('task-detail-content').innerHTML,/Task details are unavailable/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+  assert.equal(h.get('work-body').value,'Context from an older conversation');
+  assert.deepEqual([h.preparations.length,h.sends.length,h.lookups.length],[0,0,0]);
+});
+
+for (const loss of ['room','session','source']) test(`composer context read fences late data after ${loss} access loss`, async () => {
+  const held = deferred(); let reads = 0;
+  const h = harness(feedbackOptions({jget(){return ++reads === 1 ? ownerDetail() : held.promise;}}));
+  await chooseFeedback(h); h.update(conversationRead());
+  h.get('work-body').value='Keep this feedback'; h.get('work-body').emit('input');
+  const open = h.get('work-open-task'); open.onclick(); await settle();
+  assert.equal(reads,2);
+  if (loss === 'room') h.loop.setRoom('other');
+  else if (loss === 'session') h.loop.pause();
+  else h.loop.updateChannel({state:'disconnected'});
+  await settle(); held.resolve(ownerDetail()); await settle();
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+  open.onclick(); await settle(); assert.equal(reads,2);
+  assert.deepEqual([h.preparations.length,h.sends.length,h.lookups.length],[0,0,0]);
+});
+
+test('opening composer context during preparation does not reselect or cancel its frozen action', async () => {
+  const prepared = deferred(), h = harness(feedbackOptions({prepareAction:()=>prepared.promise}));
+  await chooseFeedback(h); const submitting = h.submit(); await settle();
+  h.get('work-open-task').onclick(); await settle();
+  const {body,...metadata} = h.preparations[0]; prepared.resolve({...metadata,semantic_sha256:'d'.repeat(64)});
+  await submitting;
+  assert.equal(h.preparations.length,1); assert.equal(h.sends.length,1); assert.equal(h.lookups.length,0);
+  assert.equal(h.sends[0].request_id,h.preparations[0].request_id);
+});
+
+
+for (const loss of ['room', 'session']) for (const remaining of [true, false])
+test(`composer context close restores visible rail focus after ${loss} loss (remaining card: ${remaining})`, async () => {
+  const h = harness(feedbackOptions()); await chooseFeedback(h);
+  h.get('work-open-task').onclick(); await settle();
+  const card = new h.Element('', {taskOpen:'task-b',taskFleet:'web'});
+  h.get('rail-right').children = remaining ? [card] : [];
+  if (loss === 'room') h.loop.setRoom('other');
+  else h.loop.pause();
+  await settle();
+  assert.equal(h.get('task-detail').open, false);
+  assert.equal(h.get('work-form').hidden, true);
+  assert.equal(h.get('work-open-task').hidden, true);
+  assert.equal(h.document.activeElement, remaining ? card : h.get('rail-right'));
+  if (!remaining) assert.equal(h.get('rail-right').tabIndex, -1);
+  assert.deepEqual([h.preparations.length,h.sends.length,h.lookups.length], [0,0,0]);
+});
