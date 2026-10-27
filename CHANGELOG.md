@@ -20,6 +20,20 @@ it keeps them and does not request them again, and, as before, refuses if one
 is more than 300 s old when it stops the sessions. What the activation does is
 unchanged.
 
+### Fixed — the clauDNA conformance jobs fail when clauDNA does not hold what they check out (#2539)
+
+`export-contract-gate` and `rename-map-gate` in the `conformance` workflow
+marked their clauDNA checkout `continue-on-error`, so a failed checkout read
+green while checking nothing. A ref clauDNA does not hold fails a checkout the
+way an outage does, so a typo in `claudlobby/contracts/claudna.ref`, or a tag
+not cut yet, passed `export-contract-gate` on every run. Each job now first asks
+whether clauDNA answers (`git ls-remote`). A clauDNA that does not answer still
+skips with its notice, so an outage cannot block merges. A clauDNA that answers
+must be checked out, so a ref it does not hold fails the job. `rename-map-gate`
+reads clauDNA's default branch and has no ref of its own; it makes the same
+choice, and it now fails, where it used to skip, when the checkout holds no
+`skills/` directory.
+
 ### Fixed — the daily credential check probes the activated roster after an edit to `fleet.yaml` (#2515)
 
 Each fleet's daily credential check stopped before probing, with `fleet source
