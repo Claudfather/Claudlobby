@@ -745,8 +745,11 @@ _telegram_api() {
 # the shared resolver, as one pair: the chat and the channel state dir of a bot
 # IN it. Fleet-scoped, so a fleet's creds alert never routes to another fleet's
 # channel. A refused pair exports NOTHING -- not even the unit's own chat -- so
-# no alert goes out on a split pair; check_alert_pair reports the refusal.
-resolve_alert_target "$(check_bots_dir)" fleet
+# no alert goes out on a split pair; check_alert_pair reports the refusal. A
+# selected run passes the activated roster the CLI handed it, so an edit to
+# fleet.yaml since activation cannot choose the sender (#2515); a direct run
+# has none, and the resolver reads fleet.yaml.
+resolve_alert_target "$(check_bots_dir)" fleet "$SELECTED_BOTS"
 # shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
 if [ -n "$_alert_chat_id" ]; then
     export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"

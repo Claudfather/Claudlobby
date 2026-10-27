@@ -272,6 +272,38 @@ def test_selected_check_uses_reviewed_roster_not_mutable_manifest(tmp_path):
     assert "telegram_f_bot2" not in state
 
 
+def test_selected_check_takes_its_alert_sender_from_the_activated_roster(tmp_path):
+    """#2515: the selected CLI hands the probe the roster frozen in the activated plan,
+    and the alert pair's sender is chosen from it too. An edit to fleet.yaml is not live
+    before activation, so it cannot choose the sender: here the edit drops bot1, the
+    first activated bot in the chat, and the pair still names bot1. Read from the
+    edited fleet.yaml, the pair named bot2."""
+    f = _fleet(tmp_path)
+    fleet_root = f["root"] / "local" / "f"
+    (fleet_root / "fleet.yaml").write_text(
+        "fleet:\n  name: f\n  bots:\n    bot2:\n      expertise: [x]\n")
+    release_id = "r-" + "a" * 64
+    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": release_id,
+           "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
+           "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+           "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f",
+           # The activated fleet chat, which the selected CLI passes from the plan.
+           "TELEGRAM_GROUP_CHAT_ID": "-1001234567890"}
+    result = subprocess.run(
+        ["bash", str(f["native"] / "creds-check.sh"),
+         "--selected-release", release_id, "--fleet", "f",
+         "--fleet-root", str(fleet_root),
+         "--bots-dir", str(fleet_root / "runtime" / "bots"),
+         "--bot", "bot1", "--bot", "bot2"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "tick-complete\n"
+    pair = json.loads(f["state"].read_text())["telegram_alert_pair_f"]
+    assert pair["status"] == "ok", pair
+    assert ("(sender: env:TELEGRAM_GROUP_CHAT_ID+bot:bot1, delivered by bot:bot1)"
+            in pair["detail"]), pair
+
+
 def test_selected_timer_delegates_to_selected_cli_before_probing(tmp_path):
     f = _fleet(tmp_path)
     called = tmp_path / "called"
