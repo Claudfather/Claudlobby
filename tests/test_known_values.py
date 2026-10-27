@@ -135,16 +135,14 @@ class TestSetsPopulated:
             "/claudna:access-path-audit": "/claudna:audit access-path",
             "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
             "/claudna:session-handoff": "/claudna:session handoff",
+            "/claudna:implement-plan": "/claudna:build",
+            "/claudna:visual-crawl": "/claudna:qa crawl",
         }
-        # The four standalones, with clauDNA 0.19.0's live names for the two
-        # it renamed: never /claudna:implement-plan or /claudna:visual-crawl,
-        # which no longer exist (#2543).
+        # The two un-consolidated standalones survive under their own names.
         assert _AUTO_ELIGIBLE_STANDALONE == frozenset(
             {
                 "/claudna:product-enhance",
                 "/claudna:product-vision",
-                "/claudna:qa crawl",
-                "/claudna:build",
             }
         )
         # SSOT invariant: eligible == the live rename targets + the survivors, so
@@ -177,12 +175,17 @@ class TestClaudnaRenameSSOT:
     pins against (#570)."""
 
     def test_doc_guard_covers_every_dead_name(self):
-        from tests.test_no_dead_claudna_refs import DEAD_REF
+        from tests.test_no_dead_claudna_refs import DEAD_REF, LIBRARY_SKILLS
 
         for dead in CLAUDNA_SKILL_RENAMES:
-            bare = "/" + dead.removeprefix("/claudna:")
+            name = dead.removeprefix("/claudna:")
             assert DEAD_REF.search(dead), dead
-            assert DEAD_REF.search(bare), bare
+            # A bare name that is also one of Claudlobby's own library skills
+            # names that live skill (/visual-crawl, #2543), so it stays legal.
+            if name in LIBRARY_SKILLS:
+                assert not DEAD_REF.search("/" + name), name
+            else:
+                assert DEAD_REF.search("/" + name), name
 
     def test_session_guard_covers_every_dead_session_name(self):
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
