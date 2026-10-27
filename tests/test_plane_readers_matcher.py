@@ -169,7 +169,7 @@ def test_the_deadline_fragment_seeks_the_assignments_own_events(tmp_path):
     _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
     with ro(root) as conn:
         plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + queries.OPEN_ASSIGNMENTS_AT_SQL,
-                                            ("actor_x",) + (None,) * 6)]
+                                            ("actor_x",) + (None,) * 10)]
     # "SEARCH d" on SQLite 3.36 and later, "SEARCH TABLE events AS d" before it
     steps = [d for d in plan if re.match(r"(SEARCH|SCAN) (TABLE events AS )?d\b", d)]
     walks = [d for d in steps if d.startswith("SCAN") or re.search(r"\(kind=\?\)", d)]

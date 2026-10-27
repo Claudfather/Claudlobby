@@ -1586,7 +1586,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         # open rows: (uid, occurred_at, source_ref, assignment_id, expected_by,
         # deadline_set_at), the deadline in force (#2469)
         open_rows = [(uid, *r) for uid in uids for r in conn.execute(
-            OPEN_ASSIGNMENTS_AT_SQL, (uid, None, None, None, None, None, None))]
+            OPEN_ASSIGNMENTS_AT_SQL, (uid,) + (None,) * 10)]
         open_n = len(open_rows)
         # attention / overdue are the fleet's OWN work, counted by the board's
         # card builder (one counting owner): the board groups by owning fleet,
