@@ -524,12 +524,28 @@ function taskIssueNote(r) {
 
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  const focused = document.activeElement;
+  const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
+  const identity = focusedRail && focused?.dataset?.taskOpen
+    ? {id:focused.dataset.taskOpen, fleet:focused.dataset.taskFleet || ""} : null;
+  const restoreFocus = () => {
+    if (!identity) return; // A board refresh never takes focus from elsewhere.
+    const available = el => el?.isConnected && !el.hidden && !el.disabled && !el.closest("[hidden]");
+    const replacement = [attEl, taskEl].flatMap(el => [...el.querySelectorAll("[data-task-open]")])
+      .find(button => button.dataset.taskOpen === identity.id
+        && (button.dataset.taskFleet || "") === identity.fleet && available(button));
+    const destination = replacement || [focusedRail, attEl, taskEl].find(available);
+    if (!destination) return;
+    if (!replacement) destination.tabIndex = -1;
+    destination.focus();
+  };
   const coverage = env?.state === "ok" ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
                   { idleWhenEmpty: (d) => !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
+    restoreFocus();
     return;
   }
   const rows = env.data.tasks;
@@ -582,6 +598,7 @@ function renderTasks(env) {
     : stateBlock("idle", null, null, { label: partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
   taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: partial ? "no other tasks in readable sources" : "no other tasks" });
+  restoreFocus();
 }
 
 function railRow(a) {
