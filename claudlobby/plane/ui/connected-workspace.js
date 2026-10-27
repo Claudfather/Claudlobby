@@ -399,7 +399,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       access.hidden = ['ready','setup_only'].includes(status.state);
       if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
-      const primaryOperation = expired ? 'connect' : status.state === 'unavailable' ? 'check'
+      const primaryOperation = expired || continuity?.connectRequired ? 'connect' : status.state === 'unavailable' ? 'check'
         : ['ready','setup_only','logout'].includes(status.state) ? 'logout'
         : status.state === 'renewing' ? 'renew' : 'connect';
       const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];
