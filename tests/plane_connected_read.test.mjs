@@ -585,3 +585,45 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
  assert.equal(h.api.connectionState(),current);
  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
 });
+
+test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
+  const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+  h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
+  h.overrides.set('status',()=>reply(200,setup()));
+  h.overrides.set('setup/context',()=>reply(200,{version:1,request:null}));
+  assert.equal(await h.api.connect(),true); assert.equal(h.api.snapshot().state,'setup_only');
+  assert.notEqual(h.api.readHandle.snapshot().state,'ready');
+  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);
+  assert.equal(h.calls.filter(c=>c.url.includes('/read/')).length,0);
+  assert.equal((await h.api.setupContext()).version,1);
+  assert.equal(h.calls.at(-1).init.credentials,'omit'); assert.equal(h.calls.at(-1).init.headers.Authorization,'Bearer '+TOKEN);
+  await h.api.check(); assert.equal(h.api.snapshot().state,'setup_only');
+  h.overrides.set('status',()=>reply(200,ready()));
+  h.overrides.set('read/tasks',init=>{assert.equal(init.headers.Authorization,'Bearer '+TOKEN);return reply(200,{state:'ok',data:{path:'read/tasks'}});});
+  await h.api.check(); assert.equal(h.api.snapshot().state,'ready');
+  assert.deepEqual(await h.api.readHandle.jget('/api/tasks'),{state:'ok',data:{path:'read/tasks'}});
+  h.api.dispose();
+});
+
+test('ordinary lifecycle sends no mutations during held connect or an invalid document context',async()=>{
+  const h=harness();await h.api.connect();
+  const held=deferred();h.overrides.set('issue',()=>held.promise);
+  const reconnect=h.api.connect();await flush();
+  await h.api.renew();await h.api.logout();
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);
+  held.resolve(reply(200,ready(TOKEN)));await reconnect;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.renew();await h.api.logout();
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);h.api.dispose();
+});
+
+
+test('ordinary check still fences retired document context without a network request',async()=>{
+  const h=harness();await h.api.connect();const count=h.calls.length;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,count);
+  assert.equal(await h.api.readHandle.jget('/api/summary'),null);
+  assert.equal(h.calls.length,count);h.api.dispose();
+});

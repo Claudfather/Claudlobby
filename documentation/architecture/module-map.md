@@ -22,6 +22,9 @@ claudlobby/
   plane/owner_permission_actions.py — Host-authorized task permission HTTP decisions and receipt recovery.
   plane/ui/permission-panel.js — Explicit scoped permission decisions and retained receipts in the shared dashboard; no effect execution.
   plane/owner_action_authorization.py — Fixed internal direct/connected action policy selection; connected full-binding scope fence, never browser-selected authority.
+  plane/owner_setup.py — Optional local first-team setup grant and retained canonical preview/activation receipt; connected identity is necessary but does not grant setup.
+  plane/owner_setup_http.py — Finite connected first-team context/preview/launch/receipt carrier, bounded owned work, existing setup and activation owners.
+  plane/ui/guided-setup.js — Shared first-team plan confirmation and original activation receipt controller; no read admission or automatic launch.
   plane/owner_connected_actions_http.py — Finite connected action HTTP carrier and bounded owned queue; canonical engines and explicit local grants remain the effect owners.
   config.py           — fleet.yaml parsing, BotConfig/FleetConfig dataclasses; `load_host_jobs` applies THIS host's override of `host.jobs` (`~/.config/claudlobby/system.yaml`, per job and per field, #1251) so host-local config never lives in the tracked tree; `FleetConfig.leaf_manager_bots()` (PR 4 chunk 4) is the second detectable role — a manager with at least one IN-FLEET report that is not itself a manager, a cross-fleet `manages:` target never counting toward it (F5, ruled)
   known_values.py     — Known-good value sets for fleet.yaml fields (SSOT for config + validator)
