@@ -63,12 +63,20 @@ def _check(args) -> CommandOutput:
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "credential check requires the selected executable") from exc
     except (ActivationError, PlanError, ReleaseError, OperationContextError) as exc:
-        raise CommandFailure("conflict", "selected credential scope cannot be verified") from exc
+        # The unit's failure alert points at its journal, so the cause goes there
+        # under the refusal: an activation holding the host clears by itself (#2515).
+        raise CommandFailure("conflict", "selected credential scope cannot be verified",
+                             hint=str(exc)) from exc
+    lines = [f"{result.fleet}: credential probe tick completed; inspect "
+             f"{result.state_path} for provider status."]
+    if result.fleet_source_changed:
+        lines.append(f"{result.fleet}: fleet.yaml has changed since activation; this run probed "
+                     "the activated roster, and the change is probed once it is activated.")
     return CommandOutput({"fleet": result.fleet, "native_outcome": result.checks,
                           "credential_health": result.health,
+                          "fleet_source_changed": result.fleet_source_changed,
                           "state_path": str(result.state_path)}, result.release_id,
-                         (f"{result.fleet}: credential probe tick completed; inspect "
-                          f"{result.state_path} for provider status.",))
+                         tuple(lines))
 
 
 def dispatch(args) -> CommandOutput:
