@@ -34,6 +34,22 @@ async function source(key, n) {
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
 
+test('duplicate saved labels win over host names without changing source, task or actor identities',async()=>{
+  const a=await source('a','a'),b=await source('b','b'),savedLabel='Same <computer>';
+  a.routes.get('/api/overview').data.host.display_name='Another host name';
+  const api=createTwoSourceReadTransport({sources:[{...a,savedLabel},{...b,savedLabel}]});
+  const overview=await api.jget('/api/overview');
+  assert.deepEqual(overview.data.sources.map(s=>s.label),[savedLabel,savedLabel]);
+  assert.deepEqual(overview.data.fleets.map(f=>f.alias),['a / team','b / team']);
+  assert.deepEqual(overview.data.fleets.map(f=>f.display_label),[savedLabel+' / team',savedLabel+' / team']);
+  const channel=await api.jget('/api/channel?limit=120');
+  assert.equal(channel.data.threads[0].work_item_id,'a::'+wi);
+  assert.equal(channel.data.threads[0].messages[0].sender_short,savedLabel+' / lead');
+  assert.equal(channel.data.threads[1].messages[0].sender_short,savedLabel+' / lead');
+  assert.equal(channel.data.threads[1].task_link.host_uid,'b::'+b.host);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('only core admitted read handles; distinct hosts; no action or mutation capability', async () => {
   assert.throws(() => createTwoSourceReadTransport({ sources: [{ key: 'a', label: 'a', reader: { snapshot: () => ({ state: 'ready' }) } }, {}] }));
   const a = await source('a','a'), b = await source('b','a');
