@@ -23,6 +23,7 @@ rollback is the flag, not a silent fallback.
 
 from __future__ import annotations
 
+import functools
 import os
 import json
 import sqlite3
@@ -154,9 +155,9 @@ _TERMINAL = "(" + ",".join(f"'{e}'" for e in TERMINAL) + ")"
 # its own column. Under one OR the planner could seek none of them and walked
 # every task event for each row it tested (#2549). Each test repeats the
 # terminal check, so together they close exactly the rows the OR closed. The
-# CROSS JOIN keeps the sibling test on the assignments first: left to the
-# planner, it drives from the task events by kind. Binds: eight instants, all
-# `at`; None = everything landed.
+# CROSS JOIN keeps the sibling test on the assignments first: without planner
+# statistics (#1620), SQLite drives it from the task events by kind. Binds:
+# eight instants, all `at`; None = everything landed.
 _TERMINAL_AS_OF = " AND t.event IN " + _TERMINAL + " AND (? IS NULL OR t.occurred_at <= ?)"
 _SIBLING_CLOSURE = (
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
@@ -280,12 +281,13 @@ ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 # resolves no id — F18 R2a). Both halves span EVERY uid of the bot (`%s` =
 # the marks): a case-variant alias mints a second actor, and a grace bound to
 # the first one paged a live, reporting worker (the adversarial lens).
-# Each half seeks per uid, never a whole kind (#2549). `+e.kind` keeps the
-# task half off idx_events_kind_seq, which the planner picks for it once a bot
-# has three uids; INDEXED BY keeps the marker half on idx_events_subject, which
-# the planner drops for it at two. No index holds the event name, so the marker
-# half still reads every system event about the bot, and `past_due_rows` reads
-# this only for a row that needs it. Params: (*uids, at, *uids, at).
+# Each half seeks per uid, never a whole kind (#2549). Without planner
+# statistics (#1620), SQLite walks idx_events_kind_seq for the task half once a
+# bot has three uids, and for the marker half at two: `+e.kind` keeps the task
+# half off it, and INDEXED BY keeps the marker half on idx_events_subject. No
+# index holds the event name, so the task half still reads every event the bot
+# acted and the marker half every system event about the bot; `past_due_rows`
+# reads this only for a row that needs it. Params: (*uids, at, *uids, at).
 LAST_PROGRESS_SQL = (
     "SELECT MAX(t) FROM ("
     "SELECT e.occurred_at AS t FROM events e WHERE +e.kind = 'task' AND e.event = 'progress'"
@@ -516,16 +518,18 @@ def past_due_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, m
     # after the deadline and the cap: a row it calls anything but overdue
     # without the progress gets the same verdict with it. So the progress is
     # read for the first row it could defer, and never for a bot with none (#2549).
-    last_progress, unread = None, progress_grace > 0
+    @functools.cache
+    def progress() -> Optional[int]:
+        return last_progress_epoch(conn, uids, now)
+
     out: list[tuple[int, int, int, Optional[str], str, str]] = []
     for occurred_at, source_ref, asg, expected_by, set_at in open_assignments(conn, fleet, bot, at, entry=entry):
-        da, exp = _epoch(occurred_at), _epoch(expected_by)
+        da, exp, moved = _epoch(occurred_at), _epoch(expected_by), _epoch(set_at)
         if da is None:
             continue
-        verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace, _epoch(set_at))
-        if verdict == "overdue" and unread:
-            last_progress, unread = last_progress_epoch(conn, uids, now), False
-            verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace, _epoch(set_at))
+        verdict = deadline_status(now, da, exp, None, max_age, progress_grace, moved)
+        if verdict == "overdue" and progress_grace > 0:
+            verdict = deadline_status(now, da, exp, progress(), max_age, progress_grace, moved)
         if verdict in PAST_DUE:
             out.append((da, exp, now - exp, _task_id(source_ref), asg, verdict))
     return out
