@@ -16,6 +16,8 @@ Before continuing, you need:
 
 **Credential gate:** stop here if provider/repository access, website membership or native Tailscale identity is missing or unverified. Do not borrow a running fleet's credentials, start the owner server or launch a team to discover whether access works. A cold-host validation stops at this gate and records its exploration events; the continuation below is for an operator who has separately established the prerequisites. The trial uses no Telegram channel.
 
+For a source build, replace the walkthrough's initial clone/cd with a checkout containing the exact reviewed integrated candidate revision supplied for this trial, and select that revision (`git switch --detach REVIEWED_CANDIDATE_REVISION`) before its build commands. Replace the placeholder with the reviewer's exact revision; if it is unavailable, stop. An unqualified `main` checkout does not supply these unmerged trial features.
+
 Assemble the candidate with the chosen getting-started path, retaining `WORK/host-setup.json`, `DATA` and its exact returned `RELEASE_CLI`. Source-build users complete sections 1–2 only; **do not copy/activate the seed fleet** for this browser trial. Assembly starts no bots. Read its unsuccessful result before proceeding; do not guess a CLI, release or native directory.
 
 From the successful assembly result, retain the exact release and native directory:
