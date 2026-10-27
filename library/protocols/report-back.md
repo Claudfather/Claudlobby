@@ -37,6 +37,18 @@ claudlobby --json assignment fail ASSIGNMENT_ID --reason "Verification failed" -
 `complete`, `fail`, and `return` are distinct lifecycle decisions. See
 `/fleet-ops` and each verb's `--help` for optional report evidence fields.
 
+**Past its deadline.** `claudlobby brief` shows the deadline watch for each of your
+assignments as `attention`. It reads `orphaned` when the assignment is past its
+deadline and under 24 hours old, you have recorded no progress in the last 45
+minutes (the default), and your session restarted after it was dispatched. The
+assignment is still open and still yours. Record `assignment progress` with what
+is done and what is next, and the brief reads `past_due` (`progress_grace`) for 45
+minutes from that report; keep reporting while you work. `complete`, `fail` and
+`return` end your hold on it. `block` does not clear the label. If you are waiting
+on something outside you, put what and until when in the `--reason`: only the
+manager (or an operator) can move a deadline (`assignment reschedule`).
+`/fleet-ops` lists every status.
+
 If there is **no current assignment**, submit an explicitly unlinked report
 to your own fleet manager; it does not change a task:
 

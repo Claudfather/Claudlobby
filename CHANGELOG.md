@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a worker is told what `orphaned` means and what ends it (#2546)
+
+A worker whose session restarted after an assignment was dispatched read
+`orphaned` in its brief with no text on what that meant for it, what to do, or
+what ended it. The report-back protocol, the fleet-ops skill, the status skill,
+the help of `assignment progress` and `assignment show`, and the brief now say:
+an `assignment progress` report moves it to `past_due` for 45 minutes (the
+default), `complete`, `fail` and `return` end the assignment, and a `block`
+changes nothing. Only the manager moves a deadline. The boot brief says it once,
+above the rows. The full brief explains an `orphaned` row, a `past_due` row held
+back by progress, and one aged out after 24 hours. The grace, the cap, the
+orphan rule and the brief's JSON are unchanged. The protocol text reaches a
+worker's composed instructions at its first restart after activation; the skill
+text is read on use.
+
 ### Fixed — Claudlobby knows clauDNA 0.19.0's renamed skills (#2543)
 
 clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded
