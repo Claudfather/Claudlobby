@@ -177,6 +177,32 @@ test('known expiry offers explicit Connect without reconnecting or disturbing an
   assert.equal(h.api.snapshot().computers[1].state,'ready');h.api.dispose();
 });
 
+for(const stage of ['challenge','assertion','issue'])
+ test(`failed ${stage} keeps explicit Connect available without expiry, automatic retry or peer disruption`,async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  await h.api.act(1,'connect');
+  const door=stage==='assertion' ? documentContext.shell_origin+'/api/plane/session-assertion'
+    : refs[0].endpoint_origin+'/api/owner/connected/'+stage;
+  h.overrides.set(door,()=>reply(503,{}));
+  assert.equal(await h.api.act(0,'connect'),false);
+  const rows=h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
+  const primary=rows[0].children[1].children[0];
+  assert.equal(h.api.snapshot().computers[0].state,'unavailable');
+  assert.doesNotMatch(rows[0].children[0].textContent,/expired/i);
+  assert.match(rows[0].children[2].textContent,/outcome is unknown/);
+  assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
+  assert.equal(rows[1].children[1].children[0].textContent,'Disconnect');
+  const calls=h.calls.length;
+  h.ui.listeners.get('input')({isTrusted:true});await flush();
+  assert.equal(h.calls.length,calls,'no handshake or mutation retries on activity');
+  assert.equal((await h.api.jget('/api/overview')).data.sources[1].connection_state,'ready');
+  h.overrides.delete(door);primary.click();await flush();
+  assert.equal(primary.textContent,'Disconnect');assert.match(rows[0].children[0].textContent,/Connected$/);
+  assert.equal(h.api.snapshot().computers[1].state,'ready');
+  assert.equal(h.calls.filter(c=>/\/(renew|logout|actions\/send)$/.test(c.url)).length,0);
+  h.api.dispose();
+ });
+
 test('idle warning requires trusted visible input to renew and removes activity listeners on close',async()=>{
   const h=harness({count:1});h.mount();await flush();await h.api.act(0,'connect');
   h.time=780000;h.timer(780000);await flush();
@@ -496,12 +522,19 @@ test('wrong source targets/scopes cannot reach either same-named lead; missing g
   assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,2);h.api.dispose();
 });
 
-test('late send through renewal remains unknown with original UUID; restored receipt is pure and no mutation replays',async()=>{
+for(const recovery of ['renew','failed-connect'])
+ test(`late send through ${recovery} stays unknown with original UUID and never replays`,async()=>{
   const h=harness({count:1});await h.api.checkAccount();await flush();await h.api.act(0,'connect');await h.api.jget('/api/overview');
   const context=await h.api.interactionContext(sourceA+' / team'),state=new ActionState({getItem:()=>null,setItem(){}});
   const request=state.begin(context,'message',{recipient:context.recipients[0].id,task_id:null},'Keep me',id(40));
   const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/actions/send',()=>held.promise);
-  const send=h.api.sendAction(request);await flush();await h.api.act(0,'renew');
+  const send=h.api.sendAction(request);await flush();
+  if(recovery==='renew')await h.api.act(0,'renew');
+  else {
+    const door=refs[0].endpoint_origin+'/api/owner/connected/issue';
+    h.overrides.set(door,()=>reply(503,{}));assert.equal(await h.api.act(0,'connect'),false);
+    h.overrides.delete(door);assert.equal(await h.api.act(0,'connect'),true);
+  }
   const {body,...metadata}=request;const raw={...metadata,scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'a-message-grant1'},target:{recipient:'actor_'+'c'.repeat(32),task_id:null},version:1,status:'delivered'};
   held.resolve(reply(200,raw));await assert.rejects(send,/unknown/);assert.equal(state.pending[0].request_id,id(40));
   await h.api.interactionContext(sourceA+' / team');h.receipts.set('a'+request.request_id,raw);
