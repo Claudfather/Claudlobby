@@ -363,11 +363,11 @@ fleet:
 #
 #     # autonomous_runner — turns a bot into an Autonomous Worker that picks
 #     # GitHub issues from a target repo per a cadence and runs a clauDNA --auto
-#     # skill (typically /claudna:implement-plan) to resolve them. The bot's
+#     # skill (typically /claudna:build) to resolve them. The bot's
 #     # CLAUDE.md gets a rendered "Autonomous Runner" section describing the job.
 #     # See library/skills/autonomous-runner/{SKILL.md,archetype.md} for details.
 #     autonomous_runner:
-#       skill: /claudna:implement-plan            # required: which clauDNA --auto skill to run
+#       skill: /claudna:build                     # required: which clauDNA --auto skill to run
 #       cadence: 1h                                # required: how often (15m | 1h | 6h | 24h, etc.)
 #       target_repo: my-org/my-repo                # required: <owner>/<repo>
 #       args: ""                                   # optional: appended after --auto
@@ -403,7 +403,7 @@ fleet:
 #       telegram:
 #         handle: my_dbt_auto_bot
 #       autonomous_runner:
-#         skill: /claudna:implement-plan
+#         skill: /claudna:build
 #         cadence: 1h
 #         target_repo: my-org/my-dbt-repo
 #         picker:

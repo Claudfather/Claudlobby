@@ -136,13 +136,15 @@ class TestSetsPopulated:
             "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
             "/claudna:session-handoff": "/claudna:session handoff",
         }
-        # The four un-consolidated standalones survive under their own names.
+        # The four standalones, with clauDNA 0.19.0's live names for the two
+        # it renamed: never /claudna:implement-plan or /claudna:visual-crawl,
+        # which no longer exist (#2543).
         assert _AUTO_ELIGIBLE_STANDALONE == frozenset(
             {
                 "/claudna:product-enhance",
                 "/claudna:product-vision",
-                "/claudna:visual-crawl",
-                "/claudna:implement-plan",
+                "/claudna:qa crawl",
+                "/claudna:build",
             }
         )
         # SSOT invariant: eligible == the live rename targets + the survivors, so

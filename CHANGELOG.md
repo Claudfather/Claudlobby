@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the `--auto` check knows clauDNA 0.19.0's renamed skills (#2543)
+
+clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded
+`/claudna:visual-crawl` into `/claudna:qa`, whose `crawl` mode takes `--auto`.
+`known_values.py` still listed the old names as `--auto`-eligible, so `config
+validate` warned on `autonomous_runner.skill: /claudna:build` and passed the
+dead `/claudna:implement-plan`. The eligible set now holds `/claudna:build` and
+`/claudna:qa crawl` in their place, and `fleet.yaml.example`'s autonomous-runner
+examples use `/claudna:build`. The two rename-map entries follow separately,
+because the dead-name guard reads that map and would fail until the
+autonomous-runner library text that still names the old skills changes with
+them.
+
 ### Fixed — `export-contract-gate` fails when `claudna.ref` is missing or empty (#2550)
 
 The job read its clauDNA ref with `echo "ref=$(cat claudlobby/contracts/claudna.ref)"`.
