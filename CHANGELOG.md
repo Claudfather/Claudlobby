@@ -16,8 +16,8 @@ closes under one `OR`, so it walked every task event for each assignment the
 bot had held; it is now three tests, each seeking its own index. The bot's
 last-progress read walked every system event once a bot had two uids; each half
 now seeks per uid, and the sweep reads it only for a row the progress could
-defer. On the same fleet and instant, a run now reads 19.9 MB in 0.07 CPU-s,
-with the same answers. Nothing is migrated: every index it uses is schema 13's.
+defer. On the same fleet and instant, a run now reads 19.9 MB in under 0.1
+CPU-s, with the same answers. Nothing is migrated: every index it uses is schema 13's.
 
 ### Fixed — the clauDNA conformance jobs fail when clauDNA does not hold what they check out (#2539)
 
