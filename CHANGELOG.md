@@ -20,6 +20,22 @@ that the change is probed once it is activated. A run that still stops before
 probing writes its cause under the refusal, and a probe that may have run
 without completing names the state file and the log to read.
 
+### Added — a check that every Claudron path or URL this repo names exists in Claudron (#2520)
+
+`claudlobby/claudron_refs.py` finds each path into the Claudron repo that this
+repo's docs, docstrings, instruction files and one printed URL name in one of
+four spellings, and the new `claudron-refs-gate` job in the `conformance`
+workflow fails when one does not exist in Claudron at the revision in
+`claudlobby/contracts/claudron-docs.ref`. The job also fails when it cannot
+fetch Claudron at that revision, and the module exits 2 for an absent checkout,
+so a mistyped sha in the ref file cannot merge green. Dated plans and
+decisions, the changelog and test fixtures quote paths as they were, so the
+check skips them and counts what it skips. The revision is a full Claudron
+commit sha, never a branch name, so a Claudron move turns the check red in the
+change that moves the ref, not in every pull request; the `[vault]` tag cannot
+be the revision until a Claudron release carries the `documentation/` layout.
+This covers item 1 of #2520.
+
 ### Docs — the test-suite guide no longer says the suite is red
 
 `documentation/test-suite.md` said the macOS suite was red (34 failed / 2125
