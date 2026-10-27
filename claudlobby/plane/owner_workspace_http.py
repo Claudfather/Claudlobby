@@ -5,6 +5,7 @@ import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
 import json
+import os
 import time
 import threading
 
@@ -12,7 +13,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response
 
 from .owner_access import AccessDenied, PrincipalRef
-from .owner_source import inspect_source
+from .owner_source import inspect_source, inspect_owner_setup
+from .db import db_file
 from .workspace_assertion import (AssertionRefused,
                                   _canonical_32_bytes, _origin, verify_workspace_assertion)
 
@@ -149,6 +151,11 @@ class WorkspaceBootstrapHTTP:
     def _source(self):
         return inspect_source(self.access.root)
 
+    def _setup_source(self):
+        if os.path.lexists(db_file(self.access.root)):
+            return self._source()
+        return inspect_owner_setup(self.access.root)
+
     async def _perform(self, scope, receive):
         deadline = _DEADLINE.get()
         is_stage = scope["path"].endswith("/stage")
@@ -164,7 +171,7 @@ class WorkspaceBootstrapHTTP:
                     or not principal.subject.isascii() or not principal.subject.isdecimal()
                     or int(principal.subject) <= 0 or str(int(principal.subject)) != principal.subject):
                 raise AccessDenied("workspace_bootstrap_denied")
-            await self._blocking(self._source)
+            await self._blocking(self._setup_source)
             return None, 204
         if (_header(scope, b"x-claudlobby-owner") != "1"
                 or (_header(scope, b"content-type") or "").split(";", 1)[0].lower() != "application/json"
@@ -179,7 +186,7 @@ class WorkspaceBootstrapHTTP:
         elif payload:
             raise InvalidRequest
         principal = await self._principal(scope, deadline)
-        await self._blocking(self._source)
+        await self._blocking(self._setup_source)
         if is_stage:
             expected = await self._blocking(self.workspace.expected, payload["nonce"], principal)
             if (expected.issuer != self.config.issuer
@@ -189,7 +196,7 @@ class WorkspaceBootstrapHTTP:
             attestation = await self._blocking(verify_workspace_assertion, payload["assertion"],
                                                keys, expected=expected)
             principal = await self._principal(scope, deadline)
-            await self._blocking(self._source)
+            await self._blocking(self._setup_source)
             admitted = await self._blocking(self.workspace.stage, attestation, principal)
             body = {"version": 1, "state": "awaiting_local_approval", "expires_at": int(admitted.expires_at)}
             admission = self.workspace.admit_proposal
@@ -201,7 +208,7 @@ class WorkspaceBootstrapHTTP:
                     "operational_origin": admitted.operational_origin, "expires_at": int(admitted.expires_at)}
             admission = self.workspace.admit_challenge
         principal = await self._principal(scope, deadline)
-        await self._blocking(self._source)
+        await self._blocking(self._setup_source)
         await self._blocking(admission, admitted, principal)
         if time.monotonic() >= deadline:
             raise TimeoutError

@@ -1553,8 +1553,13 @@ def test_legacy_adoption_resume_after_start_repair_reproves_old_bot_quiet(enroll
     assert adapter.calls == calls_before  # No native start or handoff replay.
 
 
-def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold):
+@pytest.mark.parametrize("prepared_owner", [False, True])
+def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold, monkeypatch, prepared_owner):
     root, _, plan, host = cold
+    if prepared_owner:
+        from claudlobby.plane.owner_access import OwnerAccess
+        ensure_host_uid(root / "state")
+        OwnerAccess.initialize(root).prepare_first_fleet()
     failed = _failed_worker_start(cold).body
     source, attempt = next((s, e) for s, e in failed["start_effects"].items() if e["target"] == _WORKER_UNIT)
     others = {s: e for s, e in failed["start_effects"].items() if s != source}
@@ -1575,6 +1580,10 @@ def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold):
         activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
                                            reason="again", adapter=host)
     host.fail_bot = None
+    if prepared_owner:
+        from claudlobby.plane import owner_source
+        assert not OwnerAccess(root).first_fleet_pending()
+        monkeypatch.setattr(owner_source, "bind_source", lambda root: pytest.fail("resume must not attest running recorder"))
     resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert resumed.status == "active"
     assert host.starts == starts + [_WORKER_UNIT, "claudlobby-keepalive.timer"]
@@ -2468,3 +2477,61 @@ def test_interrupted_bot_pause_reuses_capture_only_for_verified_quiet_target(
     assert observations == [{"installed_file": case.bot_dir.parent / case.target,
                              "target": case.target, "socket_path": case.bot_dir.parent / "socket"}]
     assert case.calls == []
+
+
+def test_first_activation_preserves_paired_owner_and_attests_only_new_recorder(cold):
+    from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
+    from claudlobby.plane.owner_source import inspect_source
+    root, release, plan, host = cold
+    ensure_host_uid(root / "state")
+    store = OwnerAccess.initialize(root)
+    store.prepare_first_fleet()
+    principal = PrincipalRef("tailscale:controlplane.tailscale.com", "1001")
+    challenge = store.begin_pairing(principal)
+    owner = store.confirm_pairing(challenge.token, expected_principal=principal)
+    store.workspace().initialize(expected_owner=owner)
+    assert not db_file(root).exists()
+    record = activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert record.status == "active"
+    assert store.current_grant() == owner
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT active FROM first_fleet_preparation").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM grants").fetchone() == (1,)
+    assert inspect_source(root) == owner.host_uid
+    store.retire_first_fleet()  # Explicit bootstrap resume does not rearm preparation.
+    assert store.current_grant() == owner
+
+
+def test_ordinary_owner_initialized_after_ingest_requires_explicit_binding_on_resume(cold, monkeypatch):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane import owner_source
+    root, _, plan, host = cold
+    _failed_worker_start(cold)
+    store = OwnerAccess.initialize(root)
+    assert not store.first_fleet_pending()
+    starts = host.starts[:]
+    with pytest.raises(state.ActivationError, match="explicit recovery"):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert host.starts == starts
+    owner_source.bind_source(root)
+    host.fail_bot = None
+    monkeypatch.setattr(owner_source, "bind_source", lambda root: pytest.fail("ordinary authority must not auto-bind"))
+    assert activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host).status == "active"
+    assert host.starts == starts + ["claudlobby-keepalive.timer"]
+
+
+@pytest.mark.parametrize("operation", ["bind_source", "retire_first_fleet"])
+def test_first_activation_owner_hook_errors_keep_activation_contract(cold, monkeypatch, operation):
+    from claudlobby.plane.owner_access import AccessUnavailable, OwnerAccess
+    from claudlobby.plane import owner_source
+    root, _, plan, host = cold
+    ensure_host_uid(root / "state")
+    OwnerAccess.initialize(root, before_first_fleet=True)
+
+    def unavailable(*args):
+        raise AccessUnavailable("synthetic authority interruption")
+
+    monkeypatch.setattr(owner_source if operation == "bind_source" else OwnerAccess, operation, unavailable)
+    with pytest.raises(state.ActivationError, match="explicit recovery"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert not host.starts

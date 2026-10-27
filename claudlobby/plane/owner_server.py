@@ -197,11 +197,11 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
     from .owner_access import AccessUnavailable, OwnerAccess
     from .owner_browser import _origin, create_owner_browser_app
     from .owner_ingress import ServePrincipalVerifier
-    from .owner_source import inspect_source
+    from .owner_source import inspect_owner_setup, fresh_owner_setup
     from .view import begin_shutdown
 
     OwnerAccess(root).current_grant()  # validate existing authority, no initialization
-    inspect_source(root)  # explicit local source attestation must already exist
+    inspect_owner_setup(root)  # Bound recorder, or strictly pre-activation owner-only state.
     try:
         workspace_bootstrap = None
         if workspace_issuer is not None or workspace_origin is not None:
@@ -219,6 +219,15 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
         raise
     except ValueError as exc:
         raise OwnerServerConfigurationError(str(exc)) from exc
+    if not (Path(root) / "state/plane/plane.db").exists():
+        fresh_owner_setup(root)
+        if socket_path is None:
+            directory = Path(root) / "state/owner"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            _private_directory(directory)
+            socket_path = directory / "owner.sock"
+        if Path(socket_path).resolve().is_relative_to(Path(root) / "state/plane"):
+            raise OwnerServerConfigurationError("pre-activation owner socket must be outside Plane storage")
     socket_path = socket_path or Path(root) / "state/plane/owner.sock"
 
     class OwnerServer(uvicorn.Server):
