@@ -195,6 +195,7 @@ test('unknown automatic renewal never retries on input, polling or timer callbac
   h.overrides.set('renew',()=>{throw new Error('lost renewal');});
   h.api.activity({visible:true,userInput:true});h.runTimer(0);await flush();
   assert.equal(h.api.snapshot().state,'unavailable');assert.equal(h.api.continuity().renewalUnknown,true);
+  assert.equal(h.api.continuity().reconnectRequired,false,'uncertain renewal is not known expiry');
   h.api.activity({visible:true,userInput:true});await flush();
   assert.equal(h.timers.filter(t=>t.active&&t.ms===0).length,0);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,1);
@@ -252,7 +253,8 @@ test('expiry, monotonic rollback and nonfinite clock stop private reads without 
   for (const value of [900001, -1, NaN, Infinity]) {
     const h = harness(); await h.api.connect(); h.time = value;
     assert.equal(await h.api.readHandle.jget('/api/tasks'), null);
-    assert.equal(h.calls.length, 2); assert.notEqual(h.api.snapshot().state, 'ready'); h.api.dispose();
+    assert.equal(h.calls.length, 2); assert.notEqual(h.api.snapshot().state, 'ready');
+    assert.equal(h.api.continuity().reconnectRequired, value === 900001); h.api.dispose();
   }
 });
 

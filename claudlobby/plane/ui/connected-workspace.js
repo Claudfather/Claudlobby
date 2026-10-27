@@ -372,9 +372,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
       const connection = client.connectionState?.() || status.state;
+      const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
       const labels = {ready:'Connected',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
-      label.textContent = `${name} · ${labels[connection] || 'Connection unconfirmed'}`;
+      label.textContent = `${name} · ${expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed'}`;
       label.title = new URL(reference.endpoint_origin).hostname;
       row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
@@ -392,7 +393,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       access.hidden = status.state === 'ready';
       if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
-      const primaryOperation = status.state === 'unavailable' ? 'check'
+      const primaryOperation = expired ? 'connect' : status.state === 'unavailable' ? 'check'
         : ['ready','logout'].includes(status.state) ? 'logout'
         : status.state === 'renewing' ? 'renew' : 'connect';
       const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];
