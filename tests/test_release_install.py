@@ -205,3 +205,182 @@ def test_installed_artifact_mismatch_cannot_seal(assembly):
         install.assemble_release(*args)
     directory, = (args[0] / "state/releases").iterdir()
     assert not (directory / "release.json").exists()
+
+
+@pytest.fixture
+def bootstrap_bundle(tmp_path, monkeypatch):
+    from claudlobby import bootstrap
+
+    directory = (tmp_path / 'bundle').resolve()
+    directory.mkdir()
+    script = directory / 'bootstrap.py'
+    script.write_bytes(Path(bootstrap.__file__).read_bytes())
+    wheel = directory / 'claudlobby-0.1.0-py3-none-any.whl'
+    with zipfile.ZipFile(wheel, 'w') as archive:
+        archive.writestr('claudlobby/bootstrap.py', script.read_bytes())
+        archive.writestr('claudlobby/_artifact.json', json.dumps({'source_revision': 'a' * 40}))
+    (directory / 'wheelhouse').mkdir()
+    (directory / 'wheelhouse/dependency-1.0-py3-none-any.whl').write_bytes(b'dependency fixture')
+    (directory / 'dependency.lock').write_text('dependency==1.0 --hash=sha256:' + 'c' * 64 + '\n')
+    (directory / 'rehearsal.json').write_text(json.dumps({'passed': True, 'source_revision': 'a' * 40,
+        'wheel_sha256': hashlib.sha256(wheel.read_bytes()).hexdigest()}))
+    (directory / 'built-on.txt').write_text('python 3.11.9\nplatform linux-aarch64\nlibc glibc 2.39\n')
+
+    def sums():
+        rows = [(p.relative_to(directory).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest())
+                for p in directory.rglob('*') if p.is_file() and p.name != 'SHA256SUMS']
+        (directory / 'SHA256SUMS').write_text(''.join(f'{digest}  ./{name}\n' for name, digest in sorted(rows)))
+    sums()
+    monkeypatch.setattr(bootstrap, '_platform', lambda _: None)
+    return bootstrap, script, wheel, sums
+
+
+def _installer(script, target):
+    with zipfile.ZipFile(target, 'w') as archive:
+        for path in script.parent.rglob('*'):
+            if path.is_file():
+                name = path.relative_to(script.parent).as_posix()
+                archive.write(path, '__main__.py' if name == 'bootstrap.py' else name)
+
+
+@pytest.mark.parametrize('packaged', [False, True])
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(bootstrap_bundle, tmp_path, monkeypatch, interrupted, packaged):
+    bootstrap, script, wheel, _ = bootstrap_bundle
+    calls = []
+    monkeypatch.setattr(bootstrap, '_run', lambda argv, env, **_: calls.append((argv, env)))
+    observed = {}
+    original_bundle = bootstrap._bundle
+    def inspect_bundle(script):
+        observed['input'] = script.parent
+        return original_bundle(script)
+    monkeypatch.setattr(bootstrap, '_bundle', inspect_bundle)
+    if packaged:
+        installer = tmp_path / 'install.pyz'
+        _installer(script, installer)
+        monkeypatch.setattr(bootstrap, '__loader__', bootstrap.zipimport.zipimporter(str(installer)))
+        monkeypatch.setattr(bootstrap, '__file__', str(installer / '__main__.py'))
+    else:
+        monkeypatch.setattr(bootstrap, '__file__', str(script))
+    class Setup:
+        def __init__(self, argv, env, start_new_session):
+            observed.update(argv=argv, env=env, owned=start_new_session, work=Path(argv[0]).parents[2])
+            assert Path(argv[argv.index('--wheel') + 1]).read_bytes() == wheel.read_bytes()
+            assert argv[argv.index('--interpreter') + 1] == str(Path(sys.executable).resolve())
+            assert observed['work'] not in Path(argv[-2]).parents
+        waits = 0
+        def wait(self):
+            self.waits += 1
+            assert observed['work'].is_dir(), 'setup inputs were deleted before child exit'
+            assert observed['input'].is_dir(), 'installer inputs were deleted before child exit'
+            if interrupted and self.waits <= 2:
+                raise KeyboardInterrupt
+            return 3
+        def poll(self): return 3
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', Setup)
+    monkeypatch.setenv('SECRET_TOKEN', 'not-forwarded')
+    monkeypatch.setenv('PYTHONPATH', '/not-forwarded')
+    root = (tmp_path / 'new-data').resolve()
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            bootstrap.main(['--root', str(root), '--json'])
+    else:
+        assert bootstrap.main(['--root', str(root), '--json']) == 3
+    assert not root.exists() and not observed['work'].exists()
+    assert observed['input'].exists() is (not packaged)
+    assert 'SECRET_TOKEN' not in observed['env'] and 'PYTHONPATH' not in observed['env']
+    assert observed['owned'] and observed['argv'][-1] == '--json'
+    assert len(calls) == 4
+    assert '--no-index' in calls[1][0] and '--require-hashes' in calls[1][0] and '--no-deps' in calls[1][0]
+    assert '--no-index' in calls[2][0] and '--no-deps' in calls[2][0]
+    assert all(env['PIP_CONFIG_FILE'] == os.devnull for _, env in calls)
+
+
+@pytest.mark.parametrize('fault', ['extra', 'symlink', 'missing-checksum', 'duplicate-checksum', 'traversal',
+                                 'changed-bytes', 'wrong-revision', 'failed-rehearsal', 'wrong-launcher', 'url-lock'])
+def test_bootstrap_carrier_refusals_precede_installation(bootstrap_bundle, tmp_path, monkeypatch, fault):
+    bootstrap, script, wheel, sums = bootstrap_bundle
+    directory = script.parent
+    if fault == 'extra': (directory / 'extra').write_text('unexpected')
+    elif fault == 'symlink':
+        p = directory / 'wheelhouse/dependency-1.0-py3-none-any.whl'
+        p.unlink(); p.symlink_to(wheel)
+    elif fault in {'wrong-revision', 'failed-rehearsal'}:
+        p = directory / 'rehearsal.json'; body = json.loads(p.read_text())
+        body.update({'source_revision': 'b' * 40} if fault == 'wrong-revision' else {'passed': False})
+        p.write_text(json.dumps(body)); sums()
+    elif fault == 'wrong-launcher': script.write_bytes(script.read_bytes() + b'\n'); sums()
+    elif fault == 'url-lock':
+        (directory / 'dependency.lock').write_text('dependency @ https://example.invalid/pkg.whl --hash=sha256:' + 'c' * 64)
+        sums()
+    elif fault == 'changed-bytes': (directory / 'built-on.txt').write_text('changed')
+    else:
+        p = directory / 'SHA256SUMS'; text = p.read_text()
+        if fault == 'missing-checksum': text = '\n'.join(text.splitlines()[1:]) + '\n'
+        elif fault == 'duplicate-checksum': text += text.splitlines()[0] + '\n'
+        else: text += 'a' * 64 + '  ../outside\n'
+        p.write_text(text)
+    monkeypatch.setattr(bootstrap, '_run', lambda *_: pytest.fail('installation started'))
+    root = (tmp_path / 'new-data').resolve()
+    with pytest.raises(bootstrap.BundleError): bootstrap.bootstrap(script, root)
+    assert not root.exists()
+
+
+@pytest.mark.parametrize('fault', ['traversal', 'symlink', 'duplicate', 'case-collision', 'extra',
+                                 'oversized', 'wrong-launcher'])
+def test_installer_rejects_bad_archive_before_installation(bootstrap_bundle, tmp_path, monkeypatch, fault):
+    bootstrap, script, wheel, sums = bootstrap_bundle
+    if fault == 'wrong-launcher':
+        script.write_bytes(script.read_bytes() + b'\n')
+        sums()  # Still must match the candidate module, even with updated checksums.
+    installer = tmp_path / 'install.pyz'
+    _installer(script, installer)
+    if fault == 'oversized':
+        monkeypatch.setattr(bootstrap, '_MAX_FILE', script.stat().st_size - 1)
+    elif fault != 'wrong-launcher':
+        name = {'traversal': '../escaped', 'symlink': 'linked', 'duplicate': 'built-on.txt',
+                'case-collision': 'BUILT-ON.TXT', 'extra': 'extra'}[fault]
+        info = zipfile.ZipInfo(name)
+        if fault == 'symlink': info.external_attr = 0o120777 << 16
+        with zipfile.ZipFile(installer, 'a') as archive:
+            if fault == 'duplicate':
+                with pytest.warns(UserWarning, match='Duplicate name'):
+                    archive.writestr(info, b'changed')
+            else: archive.writestr(info, b'changed')
+    monkeypatch.setattr(bootstrap, '_run', lambda *_: pytest.fail('installation started'))
+    directory = (tmp_path / 'extracted').resolve()
+    directory.mkdir()
+    root = (tmp_path / 'data').resolve()
+    with pytest.raises(bootstrap.BundleError):
+        bootstrap.bootstrap(bootstrap._extract_installer(installer, directory), root)
+    assert not root.exists() and not (tmp_path / 'escaped').exists()
+
+
+@pytest.mark.parametrize('target,machine,platform_tag,accepted', [
+    ('linux', 'aarch64', 'linux-aarch64', True), ('darwin', 'arm64', 'macosx-15.0-arm64', True),
+    ('darwin', 'arm64', 'macosx-10.9-universal2', True), ('darwin', 'x86_64', 'macosx-10.9-universal2', False),
+    ('darwin', 'x86_64', 'macosx-15.0-x86_64', False), ('linux', 'aarch64', 'macosx-15.0-arm64', False),
+    ('linux', 'armv7l', 'linux-armv7l', False)])
+def test_bootstrap_platform_contract(target, machine, platform_tag, accepted, monkeypatch):
+    from claudlobby import bootstrap
+    monkeypatch.setattr(bootstrap.sys, 'platform', target)
+    monkeypatch.setattr(bootstrap.sys, 'version_info', (3, 11, 9))
+    monkeypatch.setattr(bootstrap.platform, 'machine', lambda: machine)
+    text = f'python 3.11.9\nplatform {platform_tag}\nlibc unknown\n'
+    if accepted: bootstrap._platform(text)
+    else:
+        with pytest.raises(bootstrap.BundleError): bootstrap._platform(text)
+
+
+def test_bootstrap_install_failure_identifies_step_without_echoing_output(monkeypatch):
+    from claudlobby import bootstrap
+
+    class FailedInstall:
+        returncode = 1
+        def communicate(self, timeout):
+            return b'private stdout', b'private stderr'
+
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', lambda *args, **kwargs: FailedInstall())
+    with pytest.raises(bootstrap.BundleError, match='failed at dependency installation') as exc:
+        bootstrap._run(['unused'], {}, step='dependency installation')
+    assert 'private' not in str(exc.value)
