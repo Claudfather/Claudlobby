@@ -24,6 +24,9 @@ const reply = (status,value) => new Response(JSON.stringify(value),{status,heade
 const ok = data => ({state:'ok',provenance:{last_ingest_at:'2026-10-10T00:00:00Z'},data});
 const deferred = () => { let resolve; const promise=new Promise(r=>resolve=r);return {promise,resolve}; };
 const flush = async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));};
+const descendants = node => [node,...node.children.flatMap(descendants)];
+const proposalOf = row => descendants(row).find(node=>node.className==='connection-proposal');
+const optionOf = (row,operation) => descendants(row).find(node=>node.dataset.operation===operation && !node.className.includes('connection-primary'));
 function dom() {
   const elements=new Map(),observers=[],listeners=new Map();
   const document={visibilityState:'visible',activeElement:null,
@@ -254,7 +257,7 @@ test('controls retain focus across state updates and disable unsupported navigat
   const h=harness();h.mount();await h.api.checkAccount();await flush();
   for(const n of h.ui.nav)assert.equal(n.disabled,n.dataset.view!=='channel');assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
-  const connect=row.children[1].children[1];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[1],connect);
+  const connect=row.children[1].children[0];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[0],connect);
   for(const id of ['fleet','channel']){
     const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
     const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
@@ -282,13 +285,42 @@ test('account recheck preserves the same focused control rather than replacing i
 });
 
 
+test('computer cards offer one primary action and keep first-use setup and diagnostics in a native disclosure',async()=>{
+ const h=harness();h.mount();await h.api.checkAccount();await flush();
+ const row=h.ui.get('owner-session').children[1],actions=row.children[1],primary=actions.children[0],help=row.children.at(-1);
+ assert.equal(actions.children.length,1);assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
+ assert.equal(help.tagName,'DETAILS');assert.ok(!help.open);
+ assert.match(help.children[0].textContent,/Connection options/);
+ assert.equal(optionOf(row,'enroll').textContent,'Prepare local approval');
+ assert.ok(descendants(help).some(node=>node.href===refs[0].endpoint_origin+'/owner'));
+ assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/')).length,0,'showing guidance contacts no host');
+ primary.click();await flush();assert.equal(primary.textContent,'Disconnect');assert.equal(primary.disabled,false);
+ assert.equal(optionOf(row,'logout').hidden,true);assert.equal(optionOf(row,'check').hidden,false);
+ assert.equal(h.api.snapshot().computers[1].state,'denied','the other host is not automatically connected');
+ primary.click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
+ assert.equal(primary.textContent,'Connect');h.api.dispose();
+});
+
+test('uncertain local approval stays prominent with its original code and cannot be prepared again',async()=>{
+ const h=harness();h.mount();await h.api.checkAccount();await flush();await h.api.act(1,'connect');
+ h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>{throw new Error('lost reply');});
+ assert.equal(await h.api.act(0,'enroll'),false);
+ const row=h.ui.get('owner-session').children[1],help=row.children.at(-1),proposal=proposalOf(row),prepare=optionOf(row,'enroll');
+ assert.equal(help.open,true);assert.match(row.children[2].textContent,/may have been prepared.*do not prepare it again/);
+ assert.ok(proposal.children.some(c=>c.textContent.includes('Approval code:')));assert.equal(prepare.disabled,true);
+ const before=h.calls.length;prepare.click();await flush();assert.equal(h.calls.length,before);
+ assert.equal(h.api.snapshot().computers[1].state,'ready');
+ h.metadataStatus=403;await h.api.checkAccount();assert.equal(row.hidden,true);assert.equal(row.children[1].children[0].disabled,true);
+ assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));h.api.dispose();
+});
+
 test('first-use approval uses enrollment purpose only, preserves peer reads and requires later explicit Connect',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();await h.api.act(1,'connect');
  const before=h.calls.length;assert.equal(await h.api.act(0,'enroll'),true);
  const calls=h.calls.slice(before);assert.deepEqual(calls.map(c=>new URL(c.url).pathname),['/api/plane/context','/api/owner/workspace/challenge','/api/plane/host-assertion','/api/owner/workspace/stage']);
  const signer=calls.find(c=>c.url.endsWith('/host-assertion'));assert.equal(signer.init.credentials,'include');assert.deepEqual(Object.keys(JSON.parse(signer.init.body)).sort(),['host_uid','nonce','operational_origin','workspace_id']);
  assert.notEqual(h.api.snapshot().computers[0].state,'ready');assert.equal(h.api.snapshot().computers[1].state,'ready');
- const root=h.ui.get('owner-session'),first=root.children[1],proposal=first.children.at(-1).children[1];
+ const root=h.ui.get('owner-session'),first=root.children[1],proposal=proposalOf(first);
  assert.ok(proposal.children.some(c=>c.textContent.includes('Approval code:')));assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,1);
  assert.equal(await h.api.act(0,'enroll'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);
  // Synthetic host fixture now represents local approval; UI itself has no confirm door.
@@ -299,7 +331,7 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
 test('account loss during host staging erases approval code and fences late staged result',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
- assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[1].children.at(-1).children[1];assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=proposalOf(h.ui.get('owner-session').children[1]);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
@@ -308,8 +340,8 @@ test('forgetting approval returns keyboard focus to that computer, including an 
   const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();
   if(busy)h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
   const pending=h.api.act(0,'enroll');if(busy)await flush();else await pending;
-  const row=h.ui.get('owner-session').children[1],proposal=row.children.at(-1).children[1],cancel=proposal.children.at(-1);
-  cancel.focus();cancel.click();assert.ok([row,row.children[1].children[5]].includes(h.ui.document.activeElement));
+  const row=h.ui.get('owner-session').children[1],proposal=proposalOf(row),cancel=proposal.children.at(-1);
+  cancel.focus();cancel.click();assert.ok([row,optionOf(row,'enroll')].includes(h.ui.document.activeElement));
   assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));
   if(busy)held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));await pending;
   assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);h.api.dispose();
@@ -381,9 +413,10 @@ test('unavailable admitted host exposes explicit Disconnect and uses existing ca
   const h=harness({count:1});h.mount();await h.api.checkAccount();await flush();await h.api.act(0,'connect');
   h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/status',()=>reply(503,{}));
   await h.api.act(0,'check');assert.equal(h.api.snapshot().computers[0].state,'unavailable');
-  const buttons=h.ui.get('owner-session').children[1].children[1].children;
-  assert.equal(buttons[3].disabled,true);assert.equal(buttons[4].disabled,false);
-  buttons[4].click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
+  const row=h.ui.get('owner-session').children[1];
+  assert.equal(optionOf(row,'renew').disabled,true);assert.equal(optionOf(row,'logout').disabled,false);
+  assert.equal(row.children[1].children[0].textContent,'Check connection');
+  optionOf(row,'logout').click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');h.api.dispose();
 });
 
