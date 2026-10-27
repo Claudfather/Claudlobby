@@ -156,6 +156,27 @@ test('rendered connected controls acknowledge only their exact shell without wai
   }
 });
 
+test('known expiry offers explicit Connect without reconnecting or disturbing another computer',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  await h.api.act(0,'connect');h.time=1000;await h.api.act(1,'connect');
+  const rows=h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
+  const primary=rows[0].children[1].children[0];
+  const issued=()=>h.calls.filter(c=>c.url.endsWith('/issue')).length;
+  assert.equal(issued(),2);
+  h.time=900000;h.timer(900000);await flush();
+  assert.equal(h.api.snapshot().computers[0].state,'unavailable','expiry still revokes read admission');
+  assert.match(rows[0].children[0].textContent,/Session expired$/);
+  assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
+  assert.equal(rows[1].children[1].children[0].textContent,'Disconnect');
+  assert.equal(issued(),2,'no automatic reconnect');
+  primary.click();await flush();
+  assert.equal(issued(),3,'only the explicit click creates a fresh session');
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')||c.url.endsWith('/logout')).length,0);
+  assert.equal(primary.textContent,'Disconnect');
+  assert.match(rows[0].children[0].textContent,/Connected$/);
+  assert.equal(h.api.snapshot().computers[1].state,'ready');h.api.dispose();
+});
+
 test('idle warning requires trusted visible input to renew and removes activity listeners on close',async()=>{
   const h=harness({count:1});h.mount();await flush();await h.api.act(0,'connect');
   h.time=780000;h.timer(780000);await flush();
