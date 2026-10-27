@@ -94,7 +94,8 @@ jobs:
   # block merges. A clauDNA that answers must hold the ref in
   # claudlobby/contracts/claudna.ref: the checkout is not continue-on-error, so a
   # mistyped ref or a tag not cut yet fails the job instead of reading green while
-  # checking nothing (#2539).
+  # checking nothing (#2539). A ref file that is missing or empty fails the job
+  # before it asks whether clauDNA answers, so an outage does not hide it (#2550).
   export-contract-gate:
     runs-on: ubuntu-latest
     steps:
@@ -106,7 +107,12 @@ jobs:
         run: pip install -e '.[dev]'
       - name: Read consumed clauDNA ref
         id: export-ref
-        run: echo "ref=$(cat claudlobby/contracts/claudna.ref)" >> "$GITHUB_OUTPUT"
+        # A checkout given an empty ref takes clauDNA's default branch, and it trims the input of
+        # Unicode whitespace first, a byte-order mark included. A ref holds a visible ASCII
+        # character, so the file must too; LC_ALL=C gives the same answer on every runner.
+        run: |
+          LC_ALL=C grep -q '[[:graph:]]' claudlobby/contracts/claudna.ref || { echo "::error::export-contract: claudlobby/contracts/claudna.ref is missing or empty"; exit 1; }
+          echo "ref=$(cat claudlobby/contracts/claudna.ref)" >> "$GITHUB_OUTPUT"
       - name: Ask whether clauDNA answers
         id: export-reach
         run: |

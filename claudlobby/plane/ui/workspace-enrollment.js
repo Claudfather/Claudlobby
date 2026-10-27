@@ -98,7 +98,7 @@ export function createWorkspaceEnrollment({reference, issuer, operationalOrigin,
   function paint() {
     if (!panel) return;
     const {label, note, secret, instructions, cancel} = panel;
-    label.textContent = disposed ? '' : `Approve workspace ${currentContext()?.workspace.name || ''} from ${issuer} on ${new URL(endpoint).hostname}. Disconnect an existing session first. Approval is only available at this computer’s local terminal.`;
+    label.textContent = disposed ? '' : `Local approval for workspace ${currentContext()?.workspace.name || ''} from ${issuer} on ${new URL(endpoint).hostname}. Disconnect an existing session first. Approval is only available at this computer’s local terminal.`;
     const visible = ['awaiting_local_approval','unknown'].includes(state) && !!code;
     note.textContent = state === 'awaiting_local_approval' ? 'Workspace proposal saved. Approve it locally on this computer, then choose Connect.'
       : state === 'unknown' ? 'The proposal may have been saved. Inspect it locally with this code. It has not been confirmed here; do not resend automatically.'

@@ -111,12 +111,19 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     }
   }
   function matches(data) {
-    return keys(data, ['version','user','workspace','context_generation','references']) && data.version === 2
+    const names = data?.computer_names;
+    return keys(data, ['version','user','workspace','context_generation','references',...(names === undefined ? [] : ['computer_names'])]) && data.version === 2
       && keys(data.user, ['id']) && data.user.id === doc.user_id
       && keys(data.workspace, ['id','name']) && data.workspace.id === doc.workspace_id
       && typeof data.workspace.name === 'string' && data.workspace.name.length > 0 && data.workspace.name.length <= 80
       && data.context_generation === doc.context_generation && references(data.references)
-      && referenceKey(data.references) === referenceKey(doc.references);
+      && referenceKey(data.references) === referenceKey(doc.references)
+      && (names === undefined || Array.isArray(names) && names.length === data.references.length
+        && new Set(names.map(row => row?.reference_id)).size === names.length
+        && names.every(row => keys(row, ['reference_id','name'])
+          && data.references.some(ref => ref.reference_id === row.reference_id)
+          && typeof row.name === 'string' && row.name.trim() && row.name.length <= 80
+          && row.name.isWellFormed() && !row.name.includes('\0')));
   }
   async function accountAssertion(path, input, {signal}) {
     if (!current || disposed || phase !== 'ready') throw new Error('Reopen this workspace.');
@@ -129,14 +136,17 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     return result.data; // The host carrier owns the finite assertion DTO; never expose it through UI.
   }
   function admit(data) {
-    const context = Object.freeze({...data, user:Object.freeze({...data.user}), workspace:Object.freeze({...data.workspace}),
+    // Names are presentation only; the carrier receives the identity-only DTO.
+    const {computer_names:names, ...identity} = data;
+    const context = Object.freeze({...identity, user:Object.freeze({...data.user}), workspace:Object.freeze({...data.workspace}),
       references:Object.freeze(data.references.map(ref => Object.freeze({...ref})))});
     if (clients.length || !doc.references.length) { current = context; return false; }
     const nextClients = [], nextSubscriptions = [];
     let nextTransport = null;
     try {
       for (const reference of doc.references) {
-        const row = {reference,key:'c-' + BigInt('0x' + reference.reference_id.replaceAll('-','')).toString(36), client:createClient({reference,
+        const row = {reference,label:names?.find(row => row.reference_id === reference.reference_id)?.name,
+        key:'c-' + BigInt('0x' + reference.reference_id.replaceAll('-','')).toString(36), client:createClient({reference,
         documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
         currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options),
@@ -150,8 +160,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           currentContext:() => current, obtainAssertion:(input,options) => accountAssertion('/api/plane/host-assertion',input,options),
           fetch,now,setTimeout,clearTimeout,onChange:changed});
       }
-      nextTransport = createTransport({sources:nextClients.map(({client,key,reference}) => ({key,
-        label:computerLabel(reference), reader:client.readHandle,
+      nextTransport = createTransport({sources:nextClients.map(({client,key,reference,label}) => ({key,
+        label:computerLabel(reference), savedLabel:label, reader:client.readHandle,
         connectionState:() => client.connectionState?.() || client.snapshot().state,
         readFailure:url => client.readFailure?.(url)}))});
       for (const {client,actions,key} of nextClients) {
@@ -184,7 +194,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const ticket = sequence;
     loading = (async () => {
       try {
-        const result = await jsonRequest(doc.shell_origin + '/api/plane/context?workspace_id=' + encodeURIComponent(doc.workspace_id), {method:'GET'});
+        const result = await jsonRequest(doc.shell_origin + '/api/plane/context?workspace_id=' + encodeURIComponent(doc.workspace_id) + '&include=computer_names', {method:'GET'});
         if (disposed || ticket !== sequence) return false;
         if ([401,403,409].includes(result.status) || result.status === 200 && !matches(result.data)) { retire('denied'); return false; }
         if (result.status !== 200) throw new Error();
@@ -334,38 +344,48 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       row.setAttribute('aria-label', new URL(reference.endpoint_origin).hostname);
       const label = document.createElement('strong'); label.className = 'connection-name'; row.append(label);
       const actions = document.createElement('div'); actions.className = 'connection-actions'; row.append(actions);
+      const primary = document.createElement('button'); primary.type = 'button'; primary.className = 'pill connection-primary';
+      primary.addEventListener('click', () => { if (primary.isConnected && !primary.disabled) void act(index,primary.dataset.operation); });
+      actions.append(primary);
+      const detail = document.createElement('p'); detail.className = 'connection-detail'; row.append(detail);
+      const help = document.createElement('details'); help.className = 'connection-approval';
+      const summary = document.createElement('summary'); summary.textContent = 'Connection options and first-time setup'; help.append(summary); row.append(help);
+      const steps = document.createElement('p');
+      steps.textContent = 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
+      help.append(steps);
       const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
       access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';
       access.setAttribute('aria-label','Set up access on ' + new URL(reference.endpoint_origin).hostname + ' (opens in a new tab)');
-      actions.append(access);
+      help.append(access);
+      const options = document.createElement('div'); options.className = 'connection-actions'; help.append(options);
       const buttons = [];
-      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],['enroll','Approve workspace']]) {
+      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],['enroll','Prepare local approval']]) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'pill ghost'; button.textContent = title;
+        button.dataset.operation = operation;
         button.setAttribute('aria-label', title + ' ' + new URL(reference.endpoint_origin).hostname);
         button.addEventListener('click', () => { if (button.isConnected && !button.disabled) void act(index,operation); });
-        actions.append(button); buttons.push({button,operation});
+        options.append(button); buttons.push({button,operation});
       }
-      const detail = document.createElement('p'); detail.className = 'connection-detail'; row.append(detail);
-      const help = document.createElement('details'); help.className = 'connection-approval';
-      const summary = document.createElement('summary'); summary.textContent = 'Workspace approval steps'; help.append(summary); row.append(help);
       const proposal = document.createElement('div'); proposal.setAttribute('role','group');
+      proposal.className = 'connection-proposal';
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
       help.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
         onForget:() => { if (phase === 'ready') {
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); element.append(row);
-      controls.rows.push({row,label,detail,buttons,help,access,approvalState:'idle'});
+      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle'});
     });
     controls.rows.forEach((controls,index) => {
-      const {row,label,detail,buttons,help,access} = controls;
+      const {row,label,detail,primary,buttons,help,access} = controls;
       row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
       const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
       const connection = client.connectionState?.() || status.state;
+      const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
       const labels = {ready:'Connected',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
-      label.textContent = `${name} · ${labels[connection] || 'Connection unconfirmed'}`;
+      label.textContent = `${name} · ${expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed'}`;
       label.title = new URL(reference.endpoint_origin).hostname;
       row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
@@ -376,18 +396,31 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
         : '');
+      if (['awaiting_local_approval','unknown'].includes(approval.state))
+        detail.textContent = approval.state === 'unknown'
+          ? 'Local approval may have been prepared. Inspect the retained code on this computer; do not prepare it again. Connect only after local approval.'
+          : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
       access.hidden = status.state === 'ready';
       if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
-      for (const {button,operation} of buttons) {
-        button.hidden = ['renew','logout'].includes(operation) && !['ready','unavailable','renewing','logout'].includes(status.state);
-        button.disabled = row.hidden || pending.has(index)
+      const primaryOperation = expired || continuity?.connectRequired ? 'connect' : status.state === 'unavailable' ? 'check'
+        : ['ready','logout'].includes(status.state) ? 'logout'
+        : status.state === 'renewing' ? 'renew' : 'connect';
+      const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];
+      primary.dataset.operation = primaryOperation; primary.textContent = primaryTitle;
+      primary.setAttribute('aria-label', primaryTitle + ' ' + new URL(reference.endpoint_origin).hostname);
+      const disabled = operation => row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
         || approval.busy
         || ['connect','enroll'].includes(operation) && status.state === 'ready'
         || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
         || operation === 'renew' && status.state !== 'ready'
         || operation === 'logout' && !['ready','unavailable'].includes(status.state);
+      primary.disabled = disabled(primaryOperation);
+      for (const {button,operation} of buttons) {
+        button.hidden = operation === primaryOperation
+          || ['renew','logout'].includes(operation) && !['ready','unavailable','renewing','logout'].includes(status.state);
+        button.disabled = disabled(operation);
       }
     });
   }

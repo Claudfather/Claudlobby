@@ -40,7 +40,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const retainedScopes = new Set();
   let retainedComposition = null;
   let context = null, room = null, epoch = 0, board = null, channel = null;
-  let detailEpoch = 0, pendingDetail = null, compositionEpoch = 0, detailSnapshot = null, targetTitle = null;
+  let detailEpoch = 0, pendingDetail = null, compositionEpoch = 0, detailSnapshot = null, targetTitle = null, composerTask = null;
   let conversation = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
   let notice = "Choose a team to see its available actions.";
@@ -50,6 +50,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <form id="work-form" hidden>
       <div class="work-target"><label for="work-recipient">To</label>
         <select id="work-recipient"></select><span id="work-task"></span>
+        <button id="work-open-task" class="pill ghost" type="button" hidden>Open task</button>
         <button id="work-reset" class="pill ghost" type="button" hidden>New message</button></div>
       <p id="work-mode-note" class="note task-mode-note"></p>
       <label id="work-label" for="work-body">Message</label>
@@ -131,9 +132,17 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       + [...state.discarded.values()].filter(p => requestContext(p))
         .map(p => `<p class="note">Discarded locally · ${esc(p.kind)} to ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}. Outcome unknown; this ID is retained only until this tab reloads.</p>`).join("");
   }
+  // A retained read reference is presentation only: never rebuild an action
+  // target or refresh its preconditions when opening context from the composer.
+  const canOpenComposerTask = () => !!composerTask && !readsPaused
+    && composerTask.epoch === epoch && composerTask.room === room
+    && composerTask.context === context && composerTask.target === target
+    && (!channel || channel.state === "ok");
   function paint({ restoreDraft = false } = {}) {
     const usable = !!context && !!target;
     $("work-form").hidden = !usable;
+    $("work-open-task").hidden = !usable || !target.task_id;
+    $("work-open-task").disabled = !canOpenComposerTask();
     $("work-mode").textContent = context?.simulation ? "EXAMPLE · NO REAL BOT DELIVERY" : "";
     $("work-scope").textContent = roomLabel(context ? context.scope.fleet : (room || "All teams"));
     $("work-unavailable").textContent = usable ? "" : contextsByKind.has("feedback")
@@ -556,6 +565,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(context.scope), target.recipient);
         kind = nextKind; context = nextContext; targetTitle = task.title;
         target = context.version === 2 ? frozenTaskTarget(task, context, boardOnly, kind) : { recipient: leadId(context), task_id: task.task_id };
+        composerTask = { selection: Object.freeze({ ...selected }), room, epoch, context, target };
         opener = null; openerIdentity = null;
         closeDetail(); notice = context.simulation ? "Example task action. No real bot delivery."
           : kind === "feedback" ? "Send a comment about this task to the lead. This does not approve or change the task." : "This asks the team lead about the selected task. It does not approve or complete work. Refresh and select again if its assignment or release changes.";
@@ -580,6 +590,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // A channel-only read (stream source loss) leaves the board snapshot as read.
   function updateChannel(messages) {
     channel = messages;
+    $("work-open-task").disabled = !canOpenComposerTask();
     // Source loss also retires an unfinished detail read. Keep an already
     // displayed lifecycle snapshot, but never admit a held old response.
     if (selected && pendingDetail !== null && channel?.state !== "ok") {
@@ -610,6 +621,13 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   document.getElementById("rail-right").addEventListener("click", event => openTask(event));
   $("channel").addEventListener("click", event => openTask(event, true));
+  $("work-open-task").onclick = () => {
+    if (!canOpenComposerTask()) return;
+    selected = composerTask.selection;
+    opener = $("work-open-task"); openerIdentity = { ...selected };
+    detail(); $("task-detail-refresh").hidden = true;
+    dialog.showModal(); $("task-detail-close").focus();
+  };
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
@@ -626,7 +644,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       ? [...($(openerIdentity.panel)?.querySelectorAll("[data-task-open]") || [])] : [];
     const replacement = panelButtons.find(matches) || buttons.find(matches);
     const fallback = openerIdentity.panel === "channel" ? $("channel") : buttons[0] || rail;
-    const focusTarget = opener?.isConnected ? opener : replacement || fallback;
+    const openerAvailable = opener?.isConnected && !opener.hidden && !opener.disabled
+      && (opener !== $("work-open-task") || !$("work-form").hidden);
+    const focusTarget = openerAvailable ? opener : replacement || fallback;
     if (focusTarget === rail || focusTarget === $("channel")) focusTarget.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });

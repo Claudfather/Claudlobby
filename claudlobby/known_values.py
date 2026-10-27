@@ -228,6 +228,9 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
     "/claudna:review-changes": "/claudna:review-work",
     "/claudna:skill-health": "/claudna:using-claudna",
     "/claudna:product-brainstorm": "/claudna:product-vision",
+    "/claudna:implement-plan": "/claudna:build",
+    # qa engine modes
+    "/claudna:visual-crawl": "/claudna:qa crawl",
 }
 
 # Live clauDNA skills that library/ content is permitted to reference by name
@@ -252,10 +255,10 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
 CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
     {
         "/claudna:audit",
+        "/claudna:build",
         "/claudna:capture",
         "/claudna:claudron",
         "/claudna:development-retro",
-        "/claudna:implement-plan",
         "/claudna:index",
         "/claudna:modal",
         "/claudna:neon",
@@ -269,8 +272,8 @@ CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
 )
 
 # ── Autonomous runner ────────────────────────────────────────────
-# The --auto-eligible subset of the renamed skills; the live values (the whole
-# space-form) are what validator.py exact-matches. Selected from the canonical
+# The --auto-eligible subset of the renamed skills; the live values are what
+# validator.py exact-matches. Selected from the canonical
 # map by key so the two can never disagree — a dropped or misspelled key here
 # fails loudly at import.
 _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
@@ -282,6 +285,8 @@ _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
         "/claudna:access-path-audit",
         "/claudna:frontend-performance-audit",
         "/claudna:session-handoff",
+        "/claudna:implement-plan",
+        "/claudna:visual-crawl",
     )
 }
 
@@ -292,8 +297,6 @@ _AUTO_ELIGIBLE_STANDALONE: frozenset[str] = frozenset(
     {
         "/claudna:product-enhance",
         "/claudna:product-vision",
-        "/claudna:visual-crawl",
-        "/claudna:implement-plan",
     }
 )
 
