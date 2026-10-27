@@ -287,13 +287,16 @@ _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
 
 # --auto-capable clauDNA skills that were NOT consolidated (still invoked by
 # their own name). Kept separate from the rename map so their live names never
-# read as a dead-form value.
+# read as a dead-form value. /claudna:build and /claudna:qa crawl replaced
+# /claudna:implement-plan and /claudna:visual-crawl in clauDNA 0.19.0; they
+# sit here until those two renames enter CLAUDNA_SKILL_RENAMES, together with
+# the library/ text that still names the old skills (#2543).
 _AUTO_ELIGIBLE_STANDALONE: frozenset[str] = frozenset(
     {
         "/claudna:product-enhance",
         "/claudna:product-vision",
-        "/claudna:visual-crawl",
-        "/claudna:implement-plan",
+        "/claudna:qa crawl",
+        "/claudna:build",
     }
 )
 
