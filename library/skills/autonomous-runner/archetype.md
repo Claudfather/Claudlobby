@@ -1,6 +1,6 @@
 # Autonomous Worker — Bot Archetype
 
-A worker bot that picks GitHub issues from a target repo per a cadence, classifies risk, and runs a procedural `--auto` skill to resolve them (clauDNA's `/claudna:implement-plan` is the usual choice). Never merges. Reports outcomes to Telegram.
+A worker bot that picks GitHub issues from a target repo per a cadence, classifies risk, and runs a procedural `--auto` skill to resolve them (clauDNA's `/claudna:build` is the usual choice). Never merges. Reports outcomes to Telegram.
 
 This archetype is the recipe for composing a bot around the `autonomous-runner` skill. If/when other archetypes emerge (Manager Bot, Auditor Bot, Reviewer Bot), promote shared archetype documentation to a top-level `library/archetypes/` category.
 

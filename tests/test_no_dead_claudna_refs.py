@@ -40,16 +40,25 @@ SNOWFLAKE_DEFERRED = (
 # enumerated renames, and `session-[a-z-]+` bans hyphen-typos of the live
 # space-form session verbs (e.g. /claudna:session-checkpoint) that have no
 # dead ancestor in the map.
-_DEAD_NAMES = "|".join(
-    sorted(re.escape(k.removeprefix("/claudna:")) for k in CLAUDNA_SKILL_RENAMES)
+#
+# A bare `/name` that is one of Claudlobby's own library skills names that
+# skill, not a dead clauDNA one: clauDNA folded /claudna:visual-crawl into
+# /claudna:qa crawl, but library/skills/visual-crawl/ is live here (#2543). The
+# namespaced /claudna: form stays banned for every dead name.
+LIBRARY_SKILLS = frozenset(
+    p.name for p in (REPO_DIR / "library" / "skills").iterdir() if p.is_dir()
 )
+_DEAD = sorted(k.removeprefix("/claudna:") for k in CLAUDNA_SKILL_RENAMES)
+_DEAD_NAMES = "|".join(re.escape(name) for name in _DEAD)
+_DEAD_BARE = "|".join(re.escape(name) for name in _DEAD if name not in LIBRARY_SKILLS)
 DEAD_REF = re.compile(
-    r"/(?:claudna:)?(?:"
+    rf"/(?:claudna:(?:{_DEAD_NAMES})"
+    r"|(?:claudna:)?(?:"
     r"(?:vercel|neon|railway|modal)-[a-z-]+"
     r"|snowflake-(?:query|cutover)"
     r"|session-[a-z-]+"
-    rf"|{_DEAD_NAMES}"
-    r")\b"
+    rf"|{_DEAD_BARE}"
+    r"))\b"
 )
 
 

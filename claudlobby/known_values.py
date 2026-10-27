@@ -228,6 +228,9 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
     "/claudna:review-changes": "/claudna:review-work",
     "/claudna:skill-health": "/claudna:using-claudna",
     "/claudna:product-brainstorm": "/claudna:product-vision",
+    "/claudna:implement-plan": "/claudna:build",
+    # qa engine modes
+    "/claudna:visual-crawl": "/claudna:qa crawl",
 }
 
 # Live clauDNA skills that library/ content is permitted to reference by name
@@ -252,10 +255,10 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
 CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
     {
         "/claudna:audit",
+        "/claudna:build",
         "/claudna:capture",
         "/claudna:claudron",
         "/claudna:development-retro",
-        "/claudna:implement-plan",
         "/claudna:index",
         "/claudna:modal",
         "/claudna:neon",
@@ -282,21 +285,18 @@ _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
         "/claudna:access-path-audit",
         "/claudna:frontend-performance-audit",
         "/claudna:session-handoff",
+        "/claudna:implement-plan",
+        "/claudna:visual-crawl",
     )
 }
 
 # --auto-capable clauDNA skills that were NOT consolidated (still invoked by
 # their own name). Kept separate from the rename map so their live names never
-# read as a dead-form value. /claudna:build and /claudna:qa crawl replaced
-# /claudna:implement-plan and /claudna:visual-crawl in clauDNA 0.19.0; they
-# sit here until those two renames enter CLAUDNA_SKILL_RENAMES, together with
-# the library/ text that still names the old skills (#2543).
+# read as a dead-form value.
 _AUTO_ELIGIBLE_STANDALONE: frozenset[str] = frozenset(
     {
         "/claudna:product-enhance",
         "/claudna:product-vision",
-        "/claudna:qa crawl",
-        "/claudna:build",
     }
 )
 
