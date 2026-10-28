@@ -13,6 +13,7 @@ const connected = contextElement ? createConnectedWorkspace({documentContext:con
 export const mountSessionControls = connected?.mountSessionControls;
 export const dispose = connected?.dispose;
 export const roomLabel = connected?.roomLabel;
+export const retryOverview = connected?.retryOverview;
 export const interactionContext = connected?.interactionContext;
 export const nudgeContext = connected?.nudgeContext;
 export const feedbackContext = connected?.feedbackContext;

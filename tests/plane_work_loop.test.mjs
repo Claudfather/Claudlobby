@@ -1840,3 +1840,45 @@ test(`composer context close restores visible rail focus after ${loss} loss (rem
   if (!remaining) assert.equal(h.get('rail-right').tabIndex, -1);
   assert.deepEqual([h.preparations.length,h.sends.length,h.lookups.length], [0,0,0]);
 });
+
+const actionDenied = () => Object.assign(new Error('Refused'),{code:'action_not_authorized'});
+test('explicit team action denials explain authority while task history stays readable and controls stay disabled',async()=>{
+  const refuse=()=>{throw actionDenied();};
+  const h=harness(nudgeOptions({interactionContext:refuse,nudgeContext:refuse,feedbackContext:refuse}));
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  assert.match(h.get('work-unavailable').textContent,/not authorized.*Reading remains available.*host owner/);
+  assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
+  assert.match(h.get('task-action-note').textContent,/Task feedback and Nudges are not authorized/);
+  assert.ok(h.get('task-detail-content').querySelectorAll('[data-kind]').every(b=>b.disabled));
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+
+test('a late denied context cannot replace a new team composer or its draft',async()=>{
+  const old=deferred(),h=harness({interactionContext:room=>room==='old'?old.promise:context});
+  h.loop.setRoom('old');await settle();h.loop.setRoom('web');await settle();
+  h.get('work-body').value='Keep this draft';h.get('work-body').emit('input');
+  old.reject(actionDenied());await settle();
+  assert.equal(h.get('work-body').value,'Keep this draft');
+  assert.doesNotMatch(h.get('work-mode').textContent,/NOT AUTHORIZED/);
+  assert.equal(h.sends.length,0);
+});
+
+test('permission panel distinguishes explicit denial from unavailable access without admitting decisions',async()=>{
+  for(const denied of [true,false]) {
+    const h=harness(permissionOptions({permissionContext:()=>{throw denied?actionDenied():new Error('Offline');}}));
+    const panel=await openPermission(h);
+    assert.match(panel.innerHTML,denied?/Permission decisions are not authorized.*Reading remains available.*host owner/:/Permission access is unavailable/);
+    assert.equal(panel.querySelectorAll('[data-permission-decision]').length,0);
+    assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  }
+});
+
+test('message denial preserves the useful authorized feedback-only path',async()=>{
+  const h=harness(feedbackOptions({interactionContext:()=>{throw actionDenied();}}));
+  h.loop.setRoom('web');await settle();
+  assert.match(h.get('work-unavailable').textContent,/Open a task to give feedback/);
+  assert.doesNotMatch(h.get('work-mode').textContent,/NOT AUTHORIZED/);
+  h.open(nudgeTaskId);await settle();
+  const feedback=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback');
+  assert.equal(feedback.disabled,false);assert.equal(h.sends.length,0);
+});

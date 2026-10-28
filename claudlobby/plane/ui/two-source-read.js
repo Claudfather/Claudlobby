@@ -22,7 +22,7 @@ export function createWorkspaceReadTransport({ sources }) {
         savedLabel !== undefined && (typeof savedLabel !== 'string' || !savedLabel.trim() || savedLabel.length > 80
           || !savedLabel.isWellFormed() || savedLabel.includes('\0')) ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
+    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
@@ -93,19 +93,33 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   async function read(e, url) {
     if (!admitted(e)) return failed(e.state, e.reader.snapshot().remediation || 'This source is not currently readable. Check its owner session.');
-    const epoch = e.epoch;
+    const overview = url === '/api/overview';
+    if (overview && e.overviewTimeout) return e.overviewTimeout;
+    const epoch = e.epoch, revision = e.overviewRevision;
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
-    if (epoch !== e.epoch || !admitted(e)) return failed(e.state);
+    if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return failed(e.state);
+    const timedOut = e.readFailure?.(url) === 'timed_out';
     if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object'))
-      return failed('unavailable', e.readFailure?.(url) === 'timed_out'
-        ? `${url === '/api/overview' ? 'Team summary' : 'This panel'} timed out. Other reads and the computer connection are independent.`
-        : 'This panel could not be read. Other reads and the computer connection are independent.');
-    if (value.state !== 'ok' && e.readFailure?.(url) === 'timed_out') return {...value,
-      remediation:`${url === '/api/overview' ? 'Team summary' : 'This panel'} timed out. Other reads and the computer connection are independent.`};
-    // An endpoint refusal is local. Only authenticated lifecycle/stream facts
-    // change source epochs or schedule a coverage refresh.
+      value = failed('unavailable', 'This panel could not be read. Other reads and the computer connection are independent.');
+    if (value.state !== 'ok' && timedOut) value = {...value,
+      remediation:`${overview ? 'Team summary' : 'This panel'} timed out. Other reads and the computer connection are independent.`};
+    if (overview) {
+      const checkedAt = new Date().toISOString();
+      value = {...value, overview_checked_at:checkedAt, overview_read_at:e.overviewReadAt,
+        overview_retry_paused:value.state !== 'ok' && timedOut};
+      // Only this endpoint's deadline is latched. Stream activity, status checks
+      // and automatic renewal cannot turn it into another aggregate request.
+      if (value.overview_retry_paused) e.overviewTimeout = value;
+    }
     return value;
+  }
+  function retryOverview(key) {
+    const entry = entries.find(e => e.key === key);
+    if (!entry || !admitted(entry)) return false;
+    ++entry.overviewRevision; // A pre-retry timeout cannot relatch this source.
+    entry.overviewTimeout = null;
+    return true;
   }
   function publishFleets(e, data, path, ticket) {
     if (ticket !== e.rosterRequest) throw new Error('A newer roster read superseded this snapshot.');
@@ -139,7 +153,8 @@ export function createWorkspaceReadTransport({ sources }) {
     return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       provenance: values[i].provenance, remediation: values[i].remediation,
-      ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null } : {}),
+      ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null,
+        overview_retry_paused:values[i].overview_retry_paused === true, overview_checked_at:values[i].overview_checked_at, overview_read_at:values[i].overview_read_at } : {}),
       ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}),
       ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
         recorded_unavailable: values[i].data?.recorded_unavailable === true } : {}) }));
@@ -193,6 +208,12 @@ export function createWorkspaceReadTransport({ sources }) {
         if (!e.savedLabel && typeof label === 'string' && label.trim() && label.length <= 80) e.label = label;
         const projected = project(e, path, values[i]);
         if (rosterRead) publishFleets(e, values[i].data, path, tickets[i]);
+        if (path === '/api/overview') {
+          // A decoded envelope is not a successful summary until its projection
+          // and roster publication have both been accepted.
+          e.overviewReadAt = values[i].overview_checked_at;
+          values[i] = {...values[i], overview_read_at:e.overviewReadAt};
+        }
         return [{ e, v: projected }];
       } catch {
         values[i] = failed('unavailable', 'This source returned an unsupported or superseded read projection.');
@@ -283,7 +304,7 @@ export function createWorkspaceReadTransport({ sources }) {
     streams.add(facade); return facade;
   }
   function dispose() { disposed = true; for (const s of [...streams]) s.close(); for (const e of entries) e.unsubscribe(); }
-  return Object.freeze({ jget, createEventSource, dispose,
+  return Object.freeze({ jget, createEventSource, dispose, retryOverview,
     roomLabel(value) { const found = rooms.get(value); return found ? `${found.e.label} / ${found.raw.alias}` : value; },
     routeRoom(selected) {
       const value = !disposed && rooms.get(selected);

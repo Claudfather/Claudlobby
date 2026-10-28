@@ -299,9 +299,9 @@ test('context is unavailable before session readiness and refuses unsupported au
   h.controls.dispose();
 });
 
-test('context refusal checks current cookie once and returns null without replay', async () => {
+test('context refusal checks current cookie once and reports action denial without replay', async () => {
   const h = harness([ready, denied, ready]); await h.controls.ready;
-  assert.equal(await h.api.interactionContext('synthetic'), null);
+  await assert.rejects(h.api.interactionContext('synthetic'),{code:'action_not_authorized'});
   assert.equal(h.calls.filter(c => c.url.endsWith('/context')).length, 1);
   assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
   assert.deepEqual(h.replacements, []);
@@ -311,10 +311,11 @@ test('context refusal checks current cookie once and returns null without replay
 test('read-only owner context403 does not loop through lifecycle resume or disable the board', async () => {
   const contexts = [], board = { state: 'ok', data: { tasks: [] } };
   const h = harness([ready, denied, ready, ok(board)], {
-    onResume(api) { contexts.push(api.interactionContext('synthetic')); },
+    onResume(api) { contexts.push(assert.rejects(api.interactionContext('synthetic'), {code:'action_not_authorized'})); },
   });
   await h.controls.ready; await flush();
-  assert.deepEqual(await Promise.all(contexts), [null]);
+  assert.equal(contexts.length, 1);
+  await Promise.all(contexts);
   assert.equal(h.calls.filter(c => c.url.endsWith('/context')).length, 1);
   assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
   assert.equal(h.resumed, 1); assert.equal(h.paused, 1);
@@ -800,7 +801,7 @@ test('late context403 leaves context epoch ownership with the controller', async
   await h.controls.ready;
   const old = h.api.interactionContext(context.room);
   assert.deepEqual(await h.api.interactionContext(fresh.room), fresh);
-  late.resolve(denied); assert.equal(await old, null);
+  late.resolve(denied); await assert.rejects(old, {code:'action_not_authorized'});
   assert.equal(invalidated, 0); assert.equal(h.node('renew').disabled, false);
   assert.deepEqual(h.replacements, []); h.controls.dispose();
 });
@@ -826,7 +827,7 @@ test('owner nudge capability, prepare, send and receipt use exact independent v2
 });
 test('nudge context refusal does one direct status check while message/read access remains ready',async()=>{
   const h=harness([ready,denied,ready,ok(context),ok({state:'ok',data:{tasks:[]}})]);await h.controls.ready;
-  assert.equal(await h.api.nudgeContext('synthetic'),null);assert.equal(h.resumed,1);assert.equal(h.replacements.length,0);
+  await assert.rejects(h.api.nudgeContext('synthetic'),{code:'action_not_authorized'});assert.equal(h.resumed,1);assert.equal(h.replacements.length,0);
   assert.deepEqual(await h.api.interactionContext('synthetic'),context);assert.equal((await h.api.jget('/api/tasks')).state,'ok');
   assert.equal(h.calls.filter(call=>call.url==='/api/owner/status').length,2);
 });
@@ -1362,4 +1363,26 @@ test('read profile missing on renewal cannot reopen an admitted stream', async (
   assert.equal(await h.api.jget('/api/tasks'), null);
   assert.match(h.node('status').textContent, /compatibility/);
   h.controls.dispose();
+});
+
+for (const kind of ['message','nudge','feedback','permission']) test(`explicit ${kind} context denial keeps verified reads ready without retry`,async()=>{
+  const h=harness([ready,denied,ready,ok(['readable'])]);await h.controls.ready;
+  const read=kind==='message'?()=>h.api.interactionContext('synthetic'):kind==='permission'
+    ?()=>h.api.permissionContext('synthetic','wi_'+'1'.repeat(32)):()=>h.api[kind+'Context']('synthetic');
+  await assert.rejects(read(),{code:'action_not_authorized'});
+  assert.deepEqual(await h.api.jget('/api/tasks'),['readable']);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/context')).length,1);
+  assert.equal(h.resumed,1);assert.equal(h.node('renew').disabled,false);
+  assert.equal(h.calls.filter(c=>/\/(send|prepare|receipt)$/.test(c.url)).length,0);
+  h.controls.dispose();
+});
+
+test('context refusal with expired or unknown read session is not an action-only denial',async()=>{
+  for(const status of [denied,new Error('Offline')]) {
+    const h=harness([ready,denied,status]);await h.controls.ready;
+    assert.equal(await h.api.interactionContext('synthetic'),null);
+    assert.equal(h.node('renew').disabled,true);
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/context')).length,1);
+    h.controls.dispose();
+  }
 });
