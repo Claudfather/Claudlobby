@@ -19,6 +19,20 @@ way; it names the current-drift form again, which takes `--fleet`.
 `tests/test_cold_start_contract.py` now fails on a doc that passes `--fleet` or
 `--seed` to `config plan`, `config diff PLAN_ID` or `host activate`.
 
+### Fixed — a preserve-state activation's refusal names the bot whose handoff directory takes no file, and the bots already handed off (#2547)
+
+`host activate --preserve-bot-state` hands the running bots off one after
+another. When it could not time a bot's handoff request in that bot's handoff
+directory (missing, not a directory this user owns, or not writable), it
+refused without naming the bot, and said "no handoff was requested" even when
+earlier bots in the same activation had been handed off. The refusal now names
+the bot (`fleet/bot`) and its handoff directory, and lists the bots this
+activation has already handed off, in this run or an earlier one, in the order
+their handoffs were requested, or says that none was. It also says what a
+retry with `--resume` does with those handoffs: it keeps them and does not
+request them again, and, as before, refuses if one is more than 300 s old when
+it stops the sessions. What the activation does is unchanged.
+
 ### Fixed — the overdue sweep reads megabytes where it read gigabytes (#2549)
 
 The pulse runs the overdue sweep (`dispatch-overdue.py`, as `--all` and again as
