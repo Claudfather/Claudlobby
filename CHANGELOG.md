@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — fleet-ops says who runs `task escalate` and `task nudge`, and which assignments a progress report holds off (#2574, #2577)
+
+The fleet-ops skill, which every bot reads, told the reader to run `task escalate`
+and `task nudge`. Only the fleet manager is granted them, and their doors check no
+role, so the allow list decides. The skill now says the manager runs them, and
+points a worker at what it is granted: `assignment block` on its own work,
+`message send` for anything else. Its deadline-watch paragraph said a progress
+report holds off every past-deadline assignment of the bot; it holds off only
+those dispatched before it, as the watch requires, and the `overdue` and
+`past_due` rows now say so too. The help of `assignment progress` now says that
+more than 24 hours after the dispatch (the default) an assignment reads `past_due`
+with or without a report. Tests pin each sentence, and the brief's behaviour
+behind the two deadline-watch sentences.
+
 ### Added — a worker is told what `orphaned` means and what ends it (#2546)
 
 A worker whose session restarted after an assignment was dispatched read

@@ -361,28 +361,34 @@ reasoned changes. When open work waits on something outside its worker, the
 manager moves its deadline on the same assignment, recording only:
 `claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none
 --reason TEXT --request-id UUID`. Every overdue reader takes the newest deadline,
-so the page and the board follow it, and the worker keeps its assignment ID. To record a request for human guidance, including before
-assignment, use `task escalate TASK_ID --question "The decision needed" --request-id UUID`.
+so the page and the board follow it, and the worker keeps its assignment ID.
+The manager records a request for human guidance, including before assignment,
+with `task escalate TASK_ID --question "The decision needed" --request-id UUID`.
 Escalation leaves the task open; recording it does not prove a human was notified.
-To ask the fleet manager to revisit an open task, use `claudlobby --json task nudge
-TASK_ID --reason "Why this needs attention" --request-id UUID`. The task fact and
+The manager records a nudge on an open task, such as one an operator asks for,
+with `claudlobby --json task nudge TASK_ID --reason "Why this needs attention"
+--request-id UUID`; `--by ACTOR` records whose request it was. The task fact and
 manager request commit before notification. Inspect the notification outcome;
-replaying the same request does not resend an uncertain message.
+replaying the same request does not resend an uncertain message. A worker is
+granted neither command. On work assigned to it, it records
+`assignment block ASSIGNMENT_ID --reason TEXT`, which keeps the assignment and
+notifies the manager; about anything else, it sends the manager a message
+(`message send`, below).
 
 **The deadline watch.** `claudlobby --json brief` gives each open assignment of
 yours an `attention` (`work.items[].attention`, with a `status` and a `reason`).
 Before its deadline an assignment reads `not_due`. After it, the watch reads your
 progress reports: your newest `assignment progress`, on any assignment of yours,
-keeps your past-deadline assignments out of `overdue` and `orphaned` while it is
-under 45 minutes old (the default; an operator can change it). `block` is not
-progress.
+keeps your past-deadline assignments dispatched before it out of `overdue` and
+`orphaned` while it is under 45 minutes old (the default; an operator can change
+it); one dispatched after it waits for a newer report. `block` is not progress.
 
 | `status` | What it tells you | What changes it |
 | --- | --- | --- |
 | `not_due` | Before its deadline, or open-ended. | The deadline passes. |
-| `overdue` | Past its deadline, no progress in the last 45 minutes, and your session has run since the dispatch. | You record progress, or the assignment ends. |
+| `overdue` | Past its deadline, no progress since its dispatch in the last 45 minutes, and your session has run since the dispatch. | You record progress, or the assignment ends. |
 | `orphaned` (`respawned_after_dispatch`) | The same, but your session started after the dispatch, so the session that received it has ended. The assignment is still open and still yours. | You record progress, or the assignment ends. |
-| `past_due` (`progress_grace`) | Past its deadline, held back by a progress report under 45 minutes old. | 45 minutes after that report it reads `overdue` or `orphaned` again; a newer report holds it back again. |
+| `past_due` (`progress_grace`) | Past its deadline, held back by a progress report made since its dispatch and under 45 minutes old. | 45 minutes after that report it reads `overdue` or `orphaned` again; a newer report holds it back again. |
 | `past_due` (`max_age_cap`) | More than 24 hours after the dispatch or, once the manager has moved the deadline, after the move or the new deadline, whichever is later: aged out, no longer flagged, and not resolved. | The assignment ends. |
 | `unknown` | The watch could not read some of its evidence (the brief's `DEGRADED` section says which). It says nothing about the assignment. | The evidence becomes readable. |
 
