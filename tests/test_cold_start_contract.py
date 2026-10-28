@@ -204,3 +204,68 @@ def test_example_ids_in_onboarding_docs_are_obviously_fake(doc: Path):
         f"{doc.relative_to(REPO_ROOT)} carries ID-shaped numbers that are not obviously "
         f"fake placeholders: {real_looking}"
     )
+
+
+# --- Staging and activation never take --fleet or --seed (#2567) ---------------
+
+# `config plan`, `config diff PLAN_ID` and `host activate` cover the whole host, and
+# each refuses --fleet and --seed ("host preparation rejects --fleet and --seed",
+# `_host_root` in claudlobby/commands/releases.py), so a doc that passes either stages
+# nothing. After `config plan`, argparse reads a bare `--fleet X` as `--fleet-path X`.
+# The form that works is the sealed CLI with an explicit --root on every command
+# (library/protocols/canary-rollout.md).
+_HOST_WIDE = re.compile(
+    r"\bconfig\s+plan\b|\bhost\s+activate\b|\bconfig\s+diff\s+(?:--json\s+)*(?!-)[^\s;&|]"
+)
+_FLEET_OR_SEED = re.compile(r"(?<![\w-])--(?:fleet|seed)(?![\w-])")
+_SPAN_RE = re.compile(r"`([^`\n]+)`")
+_COMMAND_SEP = re.compile(r";|&&|\|\|?")
+_COMMENT_RE = re.compile(r"(?:^|\s)#.*")
+
+
+def _commands(text: str) -> list[tuple[int, str]]:
+    """(line, command) for each command a doc shows: a code-fence line, with its
+    backslash continuations joined and its comment cut, or an inline code span.
+    Each is split at `;`, `&&`, `||` and `|`, so a flag counts only in its own command."""
+    found: list[tuple[int, str]] = []
+    fenced, pending, start = False, "", 0
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            fenced, pending = not fenced, ""
+            continue
+        if not fenced:
+            found += [(number, part) for span in _SPAN_RE.findall(line)
+                      for part in _COMMAND_SEP.split(span)]
+            continue
+        start = start if pending else number
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        code, pending = _COMMENT_RE.sub("", pending + line), ""
+        found += [(start, part) for part in _COMMAND_SEP.split(code)]
+    return found
+
+
+def _command_docs() -> list[Path]:
+    docs = [REPO_ROOT / name for name in ("README.md", "CLAUDE.md", "AGENTS.md")]
+    for top in ("documentation", "library", "templates", ".claude"):
+        docs += sorted(p for p in (REPO_ROOT / top).rglob("*")
+                       if p.suffix in (".md", ".j2") and p.is_file())
+    return docs
+
+
+def test_no_doc_passes_fleet_or_seed_to_staging_or_activation():
+    """A stranger following our own procedure must stage something (#2567).
+    CHANGELOG.md is not read: it records what was, not what to type."""
+    offenders = [
+        f"{doc.relative_to(REPO_ROOT)}:{line}: {command.strip()}"
+        for doc in _command_docs()
+        for line, command in _commands(doc.read_text())
+        if _HOST_WIDE.search(command) and _FLEET_OR_SEED.search(command)
+    ]
+    assert not offenders, (
+        "these pass --fleet or --seed to a host-wide command, which refuses it:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse the sealed CLI with --root on every command and no --fleet "
+        "(library/protocols/canary-rollout.md)."
+    )

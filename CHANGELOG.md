@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the documented canary loop stages something (#2567)
+
+`documentation/validating-bot-changes.md` told a reader to stage with `--fleet`,
+which `config plan` refuses ("host preparation rejects --fleet and --seed"), so
+nothing was staged. Its loop now runs the sealed CLI that `host setup` reports,
+with `--root` on every command and no `--fleet` on staging or activation, as
+`library/protocols/canary-rollout.md` does. The two unchecked canary steps of the
+runtime-neutral observability P1 plan copied the same form and now match it. The
+root `CLAUDE.md` asked for a plan's `config diff` with `--fleet`, refused the same
+way; it names the current-drift form again, which takes `--fleet`.
+`tests/test_cold_start_contract.py` now fails on a doc that passes `--fleet` or
+`--seed` to `config plan`, `config diff PLAN_ID` or `host activate`.
+
 ### Added — a worker is told what `orphaned` means and what ends it (#2546)
 
 A worker whose session restarted after an assignment was dispatched read
