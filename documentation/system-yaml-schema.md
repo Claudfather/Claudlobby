@@ -484,9 +484,13 @@ claudlobby --root <data root> --fleet <fleet> fleet notify --level alert --event
   keeps failing; every failure is still recorded.
 - **What stays out:** bot services (fleet-pulse watches them), host jobs, which
   have no fleet to notify, and launchd, which has no `OnFailure=`: the plists
-  carry nothing. #2532 tracks a sweep for those. The template has no
-  `OnFailure=` of its own, so an alert that fails leaves only its journal,
-  `journalctl --user -u '<service_prefix>.job-failed@*'`.
+  carry nothing. fleet-pulse reports those instead: once a sweep it lists the
+  owned units that are failed (`claudlobby host supervision failed`), records
+  each episode once as `unit_failed`, and pages a fleet's own unit through
+  the fleet's escalation chat; a host unit pages nobody until a host recipient
+  is declared (#1611). The template has no `OnFailure=` of its own: an
+  instance whose alert failed stays failed, and fleet-pulse reports it too.
+  Its journal is `journalctl --user -u '<service_prefix>.job-failed@*'`.
 
 To see one alert without failing a job, start an instance by hand:
 `systemctl --user start <service_prefix>.job-failed@test.service` raises one

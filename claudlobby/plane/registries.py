@@ -166,6 +166,14 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # activity_stuck, and not one of fleet-pulse's Telegram escalation types:
     # the remedy is a person looking at the pane.
     "pane_unknown": "critical",
+    # #2532: an owned host or fleet unit in the failed state (systemd
+    # ActiveState=failed, or a launchd job not running after a non-zero exit),
+    # recorded by fleet-pulse once an episode: data.unit, scope, surface,
+    # detail, and template for a failure template's instance. Critical like the
+    # fleet_alert a failure template records. Not one of fleet-pulse's
+    # escalation types: the pulse pages a fleet's own unit itself, once an
+    # episode, and a host unit pages nobody until #1611 names a recipient.
+    "unit_failed": "critical",
     # #996: the bot's own StopFailure hook recording a usage-limit stop (the
     # limit line in data.limit_line), and keepalive's one resume for a reset
     # (data.menu, data.outcome).

@@ -166,6 +166,31 @@ def test_supervision_reap_requires_an_explicit_mode_with_full_schema_command(tmp
     assert body["error"]["hint"] == "inspect claudlobby host supervision reap-orphans --help"
 
 
+def test_supervision_failed_refuses_on_a_host_with_no_selected_release(tmp_path, capsys):
+    body = call(capsys, ["--root", str(tmp_path), "--json", "host", "supervision", "failed"], expected=6)
+    assert body["command"] == "host.supervision.failed"
+    assert body["error"]["code"] == "unavailable"
+    assert body["error"]["message"] == ("failed units cannot be read: "
+                                        "no release is selected on this host, so it owns no unit yet")
+
+
+def test_supervision_failed_reports_the_read_with_full_schema_command(tmp_path, monkeypatch, capsys):
+    from claudlobby import failed_units
+    data = {"release_id": "r-test", "platform": "Linux", "declared": 3, "units": [
+        {"unit": "com.t.creds-check.service", "scope": "fleet", "fleet": "F", "bot": None, "surface": "systemd",
+         "state": "failed", "detail": "ActiveState=failed SubState=failed Result=exit-code ExecMainStatus=4",
+         "template": None}]}
+    roots = []
+    monkeypatch.setattr(failed_units, "read_failed_units", lambda root: roots.append(root) or data)
+    body = call(capsys, ["--root", str(tmp_path), "--json", "host", "supervision", "failed"])
+    assert body["command"] == "host.supervision.failed" and body["release_id"] == "r-test"
+    assert body["data"] == data and roots == [tmp_path.resolve()]
+    assert main(["--root", str(tmp_path), "host", "supervision", "failed"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "failed: com.t.creds-check.service (fleet F), systemd "
+        "ActiveState=failed SubState=failed Result=exit-code ExecMainStatus=4"]
+
+
 def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidate, monkeypatch, capsys):
     root, release, plan, directory = candidate
     calls = []
