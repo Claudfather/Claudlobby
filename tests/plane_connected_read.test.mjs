@@ -469,6 +469,63 @@ test('signer and lost issue deadlines stop explicitly without retrying either mu
   assert.equal(issued.api.snapshot().state, 'unavailable'); issued.api.dispose();
 });
 
+test('finite source gate shares two slots with distinct contexts and starts deadlines only on dispatch', async () => {
+  const h = harness(); await h.api.connect();
+  const first = deferred(), second = deferred();
+  h.overrides.set('read/tasks', () => first.promise);
+  h.overrides.set('read/channel', () => second.promise);
+  const reads = [h.api.readHandle.jget('/api/tasks'), h.api.readHandle.jget('/api/channel')];
+  await flush();
+  const timerCount = h.timers.filter(t => t.active && t.ms === 15000).length;
+  const actions = h.api.createActions({ key: 'pi' });
+  reads.push(h.api.readHandle.jget('/api/summary'), actions.interactionContext('team'), actions.nudgeContext('team'));
+  await flush();
+  assert.equal(h.calls.filter(c => /\/read\/|\/actions\/context/.test(c.url)).length, 2);
+  assert.equal(h.timers.filter(t => t.active && t.ms === 15000).length, timerCount, 'queued reads consume no network deadline');
+  first.resolve(reply(200, { state: 'ok', data: {} })); await flush();
+  assert.deepEqual(h.calls.filter(c => c.url.endsWith('/actions/context')).map(c => JSON.parse(c.init.body)),
+    [{ room: 'team' }, { room: 'team', kind: 'nudge' }], 'distinct capabilities remain separate FIFO reads');
+  second.resolve(reply(200, { state: 'ok', data: {} }));
+  await Promise.all(reads); h.api.dispose();
+});
+
+test('finite source slots remain held through response bodies and do not block another host', async () => {
+  const h = harness(), other = harness(); await h.api.connect(); await other.api.connect();
+  const bodies = [];
+  for (const path of ['read/tasks', 'read/channel']) h.overrides.set(path, () => new Response(new ReadableStream({ start(c) { bodies.push(c); } })));
+  const reads = [h.api.readHandle.jget('/api/tasks'), h.api.readHandle.jget('/api/channel')]; await flush();
+  reads.push(h.api.readHandle.jget('/api/summary')); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 0);
+  assert.equal((await other.api.readHandle.jget('/api/summary')).state, 'ok');
+  bodies[0].enqueue(new TextEncoder().encode(JSON.stringify({ state: 'ok', data: {} }))); bodies[0].close();
+  await flush(); assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 1);
+  bodies[1].enqueue(new TextEncoder().encode(JSON.stringify({ state: 'ok', data: {} }))); bodies[1].close();
+  await Promise.all(reads); h.api.dispose(); other.api.dispose();
+});
+
+test('finite source queue is bounded and dispose aborts waiting reads before dispatch', async () => {
+  const h = harness(); await h.api.connect();
+  h.overrides.set('read/tasks', init => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })));
+  const reads = Array.from({ length: 11 }, () => h.api.readHandle.jget('/api/tasks'));
+  await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/tasks')).length, 2);
+  assert.equal(await reads[10], null, 'overflow settles instead of retaining an unbounded waiter');
+  h.api.dispose(); assert.deepEqual(await Promise.all(reads), Array(11).fill(null));
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/tasks')).length, 2, 'no queued request escaped disposal');
+});
+
+test('finite source timeout cannot release a slot before the network attempt settles', async () => {
+  const h = harness(); await h.api.connect();
+  const held = [deferred(), deferred()]; let attempt = 0;
+  h.overrides.set('read/tasks', () => held[attempt++].promise);
+  const reads = [h.api.readHandle.jget('/api/tasks'), h.api.readHandle.jget('/api/tasks')]; await flush();
+  reads.push(h.api.readHandle.jget('/api/summary')); await flush(); h.runTimer(15000); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 0, 'abort signal alone does not release the slot');
+  held[0].resolve(reply(200, { state: 'ok', data: {} })); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 1);
+  held[1].resolve(reply(200, { state: 'ok', data: {} })); await Promise.all(reads); h.api.dispose();
+});
+
 test('read timeout covers a held response body after headers without publishing late rows', async () => {
   const h = harness(); assert.equal(await h.api.connect(), true);
   h.api.readHandle.createEventSource('/api/stream');await flush();const epoch=h.api.snapshot().epoch;
