@@ -52,9 +52,11 @@ ts=$(ts_iso)
 
 # State directory for the sweep's persistent markers. It is HOST-GLOBAL: every
 # fleet's sweep on this root runs against it, their timers in the same second,
-# so every file kept here names its fleet (`<fleet>.<key>`) or its bot
-# (`<bot>.<key>`). A name without either is one file shared by every fleet's
-# sweep, which let one fleet's page debounce another fleet's (#1903).
+# so every file kept here names its fleet (`<fleet>.<key>`), its bot
+# (`<bot>.<key>`), or the host (`_host.<key>`, which only the one sweep that
+# reports for the host keeps). A name without one of these is one file shared
+# by every fleet's sweep, which let one fleet's page debounce another fleet's
+# (#1903).
 state_dir="${CLAUDLOBBY_ROOT}/state/pulse"
 mkdir -p "$state_dir"
 
@@ -1288,11 +1290,22 @@ _overdue_reader_guard || true
 # two-fleet host re-paged every open escalation on its owner's very next
 # sweep (reproduced). One flat file per fleet (the `_emit_new_orphans`
 # pattern) fixes it and drops the mkdir/glob it needed.
+# _seen_keep <seen-file> <listed-file>: keep only the keys this sweep listed.
+_seen_keep() {
+    local _m _keep
+    [ -s "$1" ] || return 0
+    _keep=$(safe_mktemp)
+    while IFS= read -r _m; do
+        [ -n "$_m" ] || continue
+        grep -qxF "$_m" "$2" 2>/dev/null && printf '%s\n' "$_m" >> "$_keep"
+    done < "$1"
+    mv "$_keep" "$1"
+}
 _esc_task_page() { _reader_page task_escalated_reader "$1"; _ESC_TASK_PAGE_FAILED=$_READER_PAGE_FAILED; }
 _esc_task_seen="$state_dir/${fleet}.escalated"
 _task_escalations() {
     [ -n "$_ESCALATION_CHAT_ID" ] || return 0
-    local _rc=0 _rows _rows_err _seen _eid _tid _by _at _q _msg _esc_rc _esc_err _why _m _keep
+    local _rc=0 _rows _rows_err _seen _eid _tid _by _at _q _msg _esc_rc _esc_err _why
     _rows=$(safe_mktemp)
     _rows_err=$(safe_mktemp)
     python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalated \
@@ -1345,18 +1358,19 @@ _task_escalations() {
     done < "$_rows"
     # Rows that no longer escalate: forget them from THIS FLEET's seen-file
     # only, so a genuine re-escalation pages again.
-    if [ -s "$_esc_task_seen" ]; then
-        _keep=$(safe_mktemp)
-        while IFS= read -r _m; do
-            [ -n "$_m" ] || continue
-            grep -qxF "$_m" "$_seen" 2>/dev/null && printf '%s\n' "$_m" >> "$_keep"
-        done < "$_esc_task_seen"
-        mv "$_keep" "$_esc_task_seen"
-    fi
+    _seen_keep "$_esc_task_seen" "$_seen"
     rm -f "$_rows" "$_seen"
     return 0
 }
 _task_escalations || true
+
+# --- The host's first fleet by name --------------------------------------------
+# What belongs to the host rather than to a fleet (a browser no bot started, a
+# host unit) is reported by one sweep a host, so N fleets never report it N
+# times: the sweep of the host's first fleet by name, else this one.
+_HOST_FIRST_FLEET=""
+IFS="$(printf '\t')" read -r _HOST_FIRST_FLEET _ < <(discover_fleet_manifests 2>/dev/null | LC_ALL=C sort) || true
+[ -n "$_HOST_FIRST_FLEET" ] || _HOST_FIRST_FLEET="$fleet"
 
 # --- Browsers outside a render scope (#2332) ----------------------------------
 # A browser that a bot session opened on the host's desktop (a login CLI, an
@@ -1381,11 +1395,10 @@ _BROWSER_AGE_S=900
 _browser_seen="$state_dir/${fleet}.browsers"
 _BROWSER_SUMMARY=""
 _browsers_outside_render() {
-    local _units=() _first="" _f _fpath _bd _b _label _rows _seen _key _keep _m _rc
+    local _units=() _f _fpath _bd _b _label _rows _seen _key _rc
     local _pid _start _age _procs _pss _owner _unit _name _obot _bot_dir _who _data _msg
     while IFS="$(printf '\t')" read -r _f _fpath; do
         [ -n "$_f" ] || continue
-        [ -n "$_first" ] || _first="$_f"
         _bd=$(resolve_bots_dir "$_f" 2>/dev/null || true)
         [ -d "$_bd" ] || continue
         for _b in "$_bd"/*/; do
@@ -1394,7 +1407,6 @@ _browsers_outside_render() {
             [ -n "$_label" ] && _units+=(--unit "$_label=$_f/$(basename "$_b")")
         done
     done < <(discover_fleet_manifests 2>/dev/null | LC_ALL=C sort)
-    [ -n "$_first" ] || _first="$fleet"
     _rows=$(safe_mktemp)
     if ! python3 "$LIB_DIR/browser-scan.py" --pattern "$BROWSER_EXE_PATTERN" --min-age "$_BROWSER_AGE_S" \
             ${_units[@]+"${_units[@]}"} > "$_rows"; then
@@ -1406,7 +1418,7 @@ _browsers_outside_render() {
         case "$_pid$_start$_age$_procs$_pss" in ''|*[!0-9]*) continue ;; esac
         case "$_owner" in
             "$fleet"/*) _obot="${_owner#*/}"; _bot_dir="$BOTS_DIR/$_obot"; _who="$_obot's session started it" ;;
-            -) [ "$fleet" = "$_first" ] || continue
+            -) [ "$fleet" = "$_HOST_FIRST_FLEET" ] || continue
                _obot=""; _bot_dir="${_current_bot_dir:-}"; _who="no bot started it" ;;
             *) continue ;;
         esac
@@ -1428,14 +1440,7 @@ _browsers_outside_render() {
         notify_manager "$_bot_dir" "$_msg" || _rc=$?
         [ "$_rc" -eq 0 ] && printf '%s\n' "$_key" >> "$_browser_seen"
     done < "$_rows"
-    if [ -s "$_browser_seen" ]; then
-        _keep=$(safe_mktemp)
-        while IFS= read -r _m; do
-            [ -n "$_m" ] || continue
-            grep -qxF "$_m" "$_seen" 2>/dev/null && printf '%s\n' "$_m" >> "$_keep"
-        done < "$_browser_seen"
-        mv "$_keep" "$_browser_seen"
-    fi
+    _seen_keep "$_browser_seen" "$_seen"
     return 0
 }
 _browsers_outside_render || true
@@ -1526,6 +1531,124 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
     fi
 fi
 
+# --- Owned units in the failed state, reported ONCE per episode (#2532) -------
+# A job unit that exits non-zero raises an alert only through a failure
+# template it names in OnFailure= (#2522). A host job, a launchd job, a unit
+# whose OnFailure= was dropped and the template's own instances name none, so
+# each failed in silence. Once a sweep, `host supervision failed` lists the
+# units the selected plan declares that are failed now (systemd's
+# ActiveState=failed, or a launchd job not running after a non-zero exit) or
+# running between two states. A bot's own unit is left to the per-bot checks.
+# The leg runs after the critical escalation, so a slow read on a loaded host
+# never costs that page its place inside the sweep's cap.
+#
+# ONCE PER EPISODE, keyed by unit in a seen-file per owner (the escalation
+# file's shape). An episode opens on the first sweep that reads its unit failed
+# and ends on the first that reads it neither failed nor running, so a failure
+# that clears and recurs is reported again, and a run in progress keeps an
+# episode open without opening one. A unit that fails run after run is one
+# episode until it succeeds or is reset, and a failure that clears and recurs
+# between two sweeps reads as one episode.
+#
+# A fleet's own unit is recorded once as `unit_failed` on the fleet and paged
+# once through the escalation's chat and sender, the leg the critical
+# escalation pages on; a page that did not go out is tried again each sweep,
+# with no second record. A host unit belongs to no fleet: the host's first
+# fleet's sweep records it once on the host's own anchor, where host jobs
+# record their events, and pages nobody until a host recipient is declared
+# (#1611). A refused read touches no key and says why on stderr. A sweep bound
+# to a selected release also pages its own debounced guard, on the re-notify
+# window rather than every ten minutes: unlike a plane outage, a refusal here
+# can be structural and last. An unbound sweep (a fixture or harness call)
+# pages no guard: it has no release whose units it could own.
+_units_seen="$state_dir/${fleet}.units_failed"
+_units_paged="$state_dir/${fleet}.units_failed.paged"
+_host_units_seen="$state_dir/_host.units_failed"
+_UNITS_SUMMARY=""
+# The read's result as one tab-separated row per unit, the event's data last;
+# its refusal on stderr.
+_FAILED_UNITS_ROWS='import json, sys
+try:
+    result = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit("the read printed no result")
+if not result.get("ok"):
+    sys.exit((result.get("error") or {}).get("message") or "the read was refused")
+for unit in result["data"]["units"]:
+    data = {key: unit[key] for key in ("unit", "scope", "surface", "detail", "template")}
+    print("\t".join([" ".join(str(unit[key] or "-").split()) for key in
+                     ("unit", "scope", "fleet", "surface", "state", "template", "detail")] + [json.dumps(data)]))'
+_units_page() { _reader_page failed_units_reader "$1"; return "$_READER_PAGE_FAILED"; }
+_failed_units() {
+    local _json _err _rows _rc=0 _why _now _host_now _seen _listed _msg
+    local _unit _scope _ufleet _surface _state _tmpl _detail _data
+    _json=$(safe_mktemp); _err=$(safe_mktemp); _rows=$(safe_mktemp)
+    ( trap - ERR; set +e
+      claudlobby_cli --root "$CLAUDLOBBY_ROOT" --json host supervision failed >"$_json" 2>"$_err"
+      _cli=$?
+      [ "$_cli" -ne 127 ] || exit 127
+      python3 -S -E -c "$_FAILED_UNITS_ROWS" "$_json" >"$_rows" 2>>"$_err" || exit $(( _cli ? _cli : 1 ))
+      exit "$_cli" ) || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        _why=$(tail -n 1 "$_err" 2>/dev/null | cut -c1-200 || true)
+        echo "fleet-pulse: failed-units read refused (rc=$_rc): ${_why} - no unit judged this sweep and no key touched" >&2
+        if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] && [ -n "$_ESCALATION_CHAT_ID" ]; then
+            debounce_notify "$state_dir" "$fleet" failed_units_reader_refused _units_page \
+                "FLEET ALERT: the failed-units read for ${fleet} is refused - a failed job unit cannot be seen until it reads again. (${_why})" \
+                "" "$_RENOTIFY_AFTER_S" || true
+        fi
+        rm -f "$_json" "$_err" "$_rows"
+        return 0
+    fi
+    debounce_clear "$state_dir" "$fleet" failed_units_reader_refused
+    _now=$(safe_mktemp); _host_now=$(safe_mktemp)
+    while IFS="$(printf '\t')" read -r _unit _scope _ufleet _surface _state _tmpl _detail _data; do
+        if [ "$_scope" = fleet ] && [ "$_ufleet" = "$fleet" ]; then
+            _seen="$_units_seen"; _listed="$_now"
+        elif [ "$_scope" = host ] && [ "$fleet" = "$_HOST_FIRST_FLEET" ]; then
+            _seen="$_host_units_seen"; _listed="$_host_now"
+        else
+            continue
+        fi
+        # Listed, a unit keeps its open episode; only a failed one opens one.
+        printf '%s\n' "$_unit" >> "$_listed"
+        [ "$_state" = failed ] || continue
+        _UNITS_SUMMARY="$_UNITS_SUMMARY $_unit ($_scope, $_surface $_detail);"
+        if ! grep -qxF "$_unit" "$_seen" 2>/dev/null; then
+            if [ "$_scope" = host ]; then
+                # With no fleet, emit_fleet_event anchors on the host itself.
+                FLEET_NAME="" CLAUDLOBBY_FLEET="" emit_fleet_event "unit_failed" "pulse" "$_data" ""
+            else
+                emit_fleet_event "unit_failed" "pulse" "$_data" "" fleet
+            fi
+            printf '%s\n' "$_unit" >> "$_seen"
+        fi
+        [ "$_scope" = fleet ] && [ -n "$_ESCALATION_CHAT_ID" ] || continue
+        grep -qxF "$_unit" "$_units_paged" 2>/dev/null && continue
+        _msg="FLEET ALERT (${fleet}): ${_unit} failed (${_surface} ${_detail})"
+        [ "$_tmpl" = - ] || _msg="${_msg}, so the failure alert it sends did not go out"
+        if [ "$_surface" = systemd ]; then
+            _msg="${_msg}. Its log: journalctl --user -u ${_unit}"
+        else
+            _msg="${_msg}."
+        fi
+        _reader_page unit_failed "$_msg"
+        if [ "$_READER_PAGE_FAILED" = 0 ]; then
+            printf '%s\n' "$_unit" >> "$_units_paged"
+        else
+            emit_fleet_event "alert_delivery_failed" "pulse" \
+                "$(printf '{"for_event":"unit_failed","unit":"%s","channel":"telegram","exit":%s,"debounced":false}' \
+                    "$(json_escape "$_unit")" "$_READER_PAGE_RC")" "" fleet
+        fi
+    done < "$_rows"
+    _seen_keep "$_units_seen" "$_now"
+    _seen_keep "$_units_paged" "$_now"
+    if [ "$fleet" = "$_HOST_FIRST_FLEET" ]; then _seen_keep "$_host_units_seen" "$_host_now"; fi
+    rm -f "$_json" "$_err" "$_rows" "$_now" "$_host_now"
+    return 0
+}
+_failed_units || true
+
 # --- Human-readable summary ---------------------------------------------------
 _summary_file="$state_dir/${fleet}.pulse-summary.txt"
 _summary_tmp=$(safe_mktemp)
@@ -1614,6 +1737,7 @@ _summary_tmp=$(safe_mktemp)
         printf "%-12s %-8s %-18s %s\n" "$_s_bid" "$_s_session_status" "$_s_svc_status" "$_s_alerts"
     done
     [ -z "$_BROWSER_SUMMARY" ] || printf "Browsers outside a render scope:%s\n" "$_BROWSER_SUMMARY"
+    [ -z "$_UNITS_SUMMARY" ] || printf "Failed units:%s\n" "$_UNITS_SUMMARY"
 } > "$_summary_tmp" && mv "$_summary_tmp" "$_summary_file"
 _events_reader_guard || true
 

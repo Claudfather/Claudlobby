@@ -113,8 +113,12 @@ def register_release_subparsers(sub):
     register_host_repos(hosts)
     from ._host_owner_parsers import register_host_owner
     register_host_owner(hosts)
-    supervision = hosts.add_parser("supervision", help="Inspect selected-fleet supervision cleanup")
+    supervision = hosts.add_parser("supervision", help="Inspect the selected release's supervised units")
     supervision_actions = supervision.add_subparsers(dest="supervision_command", required=True)
+    failed = supervision_actions.add_parser(
+        "failed", help="List the owned host and fleet units that are failed now; changes nothing")
+    failed.add_argument("--json", action="store_true", help="One schema-1 result object")
+    failed.set_defaults(func=_dispatch_host_supervision, public_command="host.supervision.failed")
     reap = supervision_actions.add_parser("reap-orphans", help="Reap stale units in declared bot directories")
     reap.add_argument("--bot", metavar="BOT", help="Limit to one declared bot")
     mode = reap.add_mutually_exclusive_group(required=True)

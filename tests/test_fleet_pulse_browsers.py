@@ -77,11 +77,11 @@ class Host:
                 conf += f"MANAGER_TMUX={manager[1]}\nMANAGER_TMUX_SOCKET={manager[0]}\n"
             (bot / "bot.conf").write_text(conf)
 
-    def sweep(self, fleet: str):
+    def sweep(self, fleet: str, **extra):
         env = {"PATH": f"{self.bin}:/usr/local/bin:/usr/bin:/bin", "HOME": str(self.root / "home"),
                "LANG": "C.UTF-8", "CLAUDLOBBY_ROOT": str(self.root), "FLEET_NAME": fleet,
                "PLANE_EMIT_DISABLED": "0", "EMIT_CAPTURE": str(self.capture), "TG_CAPTURE": str(self.tg),
-               "TMUX_TMPDIR": str(self.tmux), "BROWSER_SCAN_PROC": str(self.proc.root)}
+               "TMUX_TMPDIR": str(self.tmux), "BROWSER_SCAN_PROC": str(self.proc.root), **extra}
         result = subprocess.run(["bash", str(self.lib / "fleet-pulse.sh"), fleet], env=env,
                                 capture_output=True, text=True, errors="replace", timeout=300)
         assert result.returncode == 0, result.stderr[-3000:]
