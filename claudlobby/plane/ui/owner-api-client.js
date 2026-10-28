@@ -11,6 +11,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   monotonicNow = () => globalThis.performance.now(),
   requestTimeout = 8000,
   actionTimeout = 8000,
+  readGate = null,
   verifyReadFailures = false,
   onActionPause = () => {},
   onReadAdmitted = () => {},
@@ -83,8 +84,10 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   async function request(url, action = false, body = {}, timeout = requestTimeout) {
     const controller = new AbortController();
     reads.add(controller);
-    const timer = setTimeout(() => controller.abort(new DOMException('Read request timed out.', 'TimeoutError')), timeout);
-    try {
+    let timer;
+    const dispatch = async () => {
+      if (controller.signal.aborted) throw new ReadRequestUnavailable();
+      timer = setTimeout(() => controller.abort(new DOMException('Read request timed out.', 'TimeoutError')), timeout);
       const response = await fetch(url, { method: action ? 'POST' : 'GET',
         credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,
         ...(action ? { headers: { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' }, body: JSON.stringify(body) } : {}),
@@ -95,6 +98,12 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       catch (error) { if (response.status !== 403 && !(error instanceof SyntaxError)) throw error; }
       if (controller.signal.aborted) throw new Error();
       return { status: response.status, data };
+    };
+    try {
+      // Queue only finite reads. The network deadline starts on dispatch;
+      // pause/dispose can abort this registered controller while it waits.
+      const finiteRead = action ? url === '/api/owner/actions/context' : !url.startsWith('/api/owner/');
+      return await (readGate && finiteRead ? readGate(dispatch, controller.signal) : dispatch());
     } finally {
       clearTimeout(timer);
       reads.delete(controller);

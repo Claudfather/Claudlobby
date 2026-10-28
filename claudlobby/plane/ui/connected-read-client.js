@@ -28,6 +28,35 @@ function secret(v) {
 const cursor = v => typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v)
   && Number.isSafeInteger(Number(v));
 
+// Each connected source owns its slots. Context is a read despite its POST
+// carrier; lifecycle and write requests never enter this queue.
+function finiteReadGate() {
+  let active = 0;
+  const queue = [];
+  function drain() {
+    while (active < 2 && queue.length) {
+      const job = queue.shift();
+      job.signal.removeEventListener('abort', job.abort);
+      if (job.signal.aborted) { job.reject(new ReadRequestUnavailable()); continue; }
+      active++;
+      Promise.resolve().then(job.dispatch).then(job.resolve, job.reject).finally(() => {
+        active--; drain();
+      });
+    }
+  }
+  return (dispatch, signal) => new Promise((resolve, reject) => {
+    if (signal.aborted || queue.length >= 8) { reject(new ReadRequestUnavailable()); return; }
+    const job = { dispatch, signal, resolve, reject, abort() {
+      const index = queue.indexOf(job);
+      if (index !== -1) queue.splice(index, 1);
+      signal.removeEventListener('abort', job.abort);
+      reject(new ReadRequestUnavailable());
+    } };
+    signal.addEventListener('abort', job.abort, { once: true });
+    queue.push(job); drain();
+  });
+}
+
 /** Trusted document/account boundary in; only a real host handshake admits reads.
  * No credentials, assertion data, global controls or actions are exported.
  */
@@ -375,6 +404,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
 
   owner = createOwnerTransport({ fetch: carrier, EventSource: FetchStream,
     monotonicNow, setTimeout, clearTimeout, requestTimeout: 15000, actionTimeout:15000,
+    readGate: finiteReadGate(),
     verifyReadFailures: true, onAccessEnded: () => {},
     onActionPause:(scope,kind,recipient) => actions?.pause(scope,kind,recipient),
     onDispose() {

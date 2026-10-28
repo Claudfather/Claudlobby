@@ -26,6 +26,7 @@ function harness(replies = [ready], hooks = {}) {
   }
   const api = createOwnerTransport({
     monotonicNow,
+    readGate: hooks.readGate,
     EventSource: NativeStream, location: { replace(path) { replacements.push(path); } },
     setTimeout(callback, duration) { timers.add(callback); timeouts.push(duration); return callback; }, clearTimeout(callback) { timers.delete(callback); },
     async fetch(url, options) {
@@ -243,6 +244,24 @@ const action = { request_id: '11111111-1111-4111-8111-111111111111', kind: 'mess
   submitted_at: '2026-01-01T00:00:00.000Z', body: 'Exact message\nwith a second line.' };
 const receipt = value => ({ ...value, body: undefined, version: 1, status: 'delivered' });
 const ok = data => ({ status: 200, data });
+
+test('finite read gate leaves lifecycle, writes and receipt operations outside its queue', async () => {
+  const queued = [], held = deferred();
+  const h = harness([ready, ok(nudgeMetadata), ok(receipt(action)), ok(receipt(action)), ready], {
+    readGate(dispatch, signal) { queued.push({ dispatch, signal }); return held.promise; },
+  });
+  await h.controls.ready;
+  const timeoutCount = h.timeouts.length;
+  const read = h.api.jget('/api/tasks'), capability = h.api.interactionContext('synthetic'); await flush();
+  assert.equal(queued.length, 2);
+  assert.equal(h.timeouts.length, timeoutCount, 'waiting work has no network timer');
+  await h.api.prepareAction({ ...nudgeMetadata, body: 'Reason' });
+  await h.api.sendAction(action); await h.api.actionReceipt(action);
+  assert.deepEqual(h.calls.slice(1).map(c => c.url), ['/api/owner/actions/prepare', '/api/owner/actions/send', '/api/owner/actions/receipt']);
+  await h.click('check'); assert.ok(queued.every(job => job.signal.aborted));
+  held.resolve({ status: 200, data: {} }); await Promise.all([read, capability]);
+  assert.equal(queued.length, 2); h.controls.dispose();
+});
 
 test('owner actions use exact canonical metadata and protected POST headers, stripping receipt bodies', async () => {
   const h = harness([ready, ok(context), ok(receipt(action)), ok(receipt(action))]); await h.controls.ready;
