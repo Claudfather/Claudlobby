@@ -281,6 +281,56 @@ async function appHarness(api) {
     advance:ms=>{now+=ms;},
     async refresh(){now+=60000;await c.refreshBoards();await settle();}};
 }
+test('zero-readable first fleet discovery stays eligible after admission without waiting for overview',async()=>{
+  const a=await source('a','a'),b=await source('b','b');
+  for(const item of [a,b]) { item.setStatus('sign_in_required');await item.reader.start(); }
+  const api=createTwoSourceReadTransport({sources:[a,b]}),h=await appHarness(api);h.c.openStream();
+  await h.refresh();assert.equal(h.c.fleetsSeen,false);assert.equal(h.c.fleets.length,0);
+  const held=deferred();a.routes.set('/api/overview',held.promise);
+  a.setStatus('ready');await a.reader.start();await h.refresh();
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,1);
+  assert.equal(h.c.fleetsSeen,true);assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team']);
+  held.resolve(roster('team'));await h.settle();api.dispose();
+});
+for(const fallback of [false,true]) test(`first overview room discovery paints its own response (fallback: ${fallback})`,async()=>{
+  const a=await source('a','a'),b=await source('b','b');
+  if(fallback)b.routes.set('/api/overview',{state:'unreadable',provenance:null});
+  const api=createTwoSourceReadTransport({sources:[a,b]}),h=await appHarness(api);
+  h.c.fleetsSeen=true;h.c.openStream();
+  await h.c.refreshOverview();await h.settle();
+  assert.equal(h.overviewPaints.at(-1).state,'ok');
+  assert.match(h.nodes.get('overview').innerHTML,/Team summary read at/);
+  assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team','b / team']);
+  assert.equal(h.overviewPaints.at(-1).data.coverage.reachable,fallback?1:2);
+  assert.ok(h.callbacks.some(t=>t.ms===400),'routing discovery still coalesces a board refresh');
+  api.dispose();
+});
+test('actual source loss still retires a held overview after routing discovery',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);h.c.fleetsSeen=true;h.c.openStream();
+  const held=deferred();a.routes.set('/api/overview',held.promise);
+  const reading=h.c.refreshOverview();await h.settle();
+  b.setStatus('sign_in_required');await b.reader.start();
+  held.resolve(roster('team'));await reading;await h.settle();
+  assert.equal(h.overviewPaints.at(-1).state,'unavailable');
+  assert.ok(h.overviewPaints.every(v=>v.state!=='ok'),'old private response cannot repaint after real access loss');
+  api.dispose();
+});
+for(const retirement of ['replacement','removal']) test(`All teams board cannot repaint retired room tasks after ${retirement}`,async()=>{
+  const {api,a,b}=await pair();let tasksReturned=false;
+  const h=await appHarness({...api,jget:async path=>{const value=await api.jget(path);if(path==='/api/tasks')tasksReturned=true;return value;}});
+  h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.openStream();
+  a.routes.set('/api/tasks',ok({tasks:[{task_id:wi,fleet:'team',fleet_uid:fleet,title:'old room task'}],issues:[],attention_count:0}));
+  const held=deferred();for(const item of [a,b])item.routes.set('/api/channel?limit=120',held.promise);
+  const board=h.c.refreshBoards();await h.settle();
+  assert.equal(tasksReturned,true,'old task leg finishes while channel keeps the batch pending');
+  const next=roster('team','fleet_'+'9'.repeat(32));if(retirement==='removal')next.data.fleets=[];
+  a.routes.set('/api/overview',next);h.advance(60000);await h.c.refreshOverview();await h.settle();
+  assert.equal(h.overviewPaints.at(-1).state,'ok','new canonical overview survives its own routing retirement');
+  assert.notEqual(h.c.fleets.find(f=>f.alias==='a / team')?.uid,'a::'+fleet);
+  held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));await board;await h.settle();
+  assert.equal(h.paints.length,0,'already fulfilled old tasks cannot repaint with the held batch');
+  api.dispose();
+});
 test('real app overview-only refresh admits new teams, retains unavailable selection, and routes renamed teams',async()=>{
   const a=await source('a','a'), b=await source('b','b');
   a.setStatus('sign_in_required');await a.reader.start();
@@ -584,14 +634,13 @@ test('app recovers canonical teams after Connect while overview stays unavailabl
   assert.equal(reads.filter(path=>path==='/api/fleets').length,1,'unadmitted source does not trigger a registry fallback');
   a.setStatus('ready');await a.reader.start();
   const before=a.calls.length;await h.refresh();
-  assert.equal(a.calls.slice(before).filter(c=>c.url==='/api/fleets').length,1);
+  assert.equal(a.calls.slice(before).filter(c=>c.url==='/api/fleets').length,2,'fast initial discovery plus one failed-overview fallback');
   assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['mini / team']);
   assert.equal(h.c.fleets[0].uid,'mini::'+fleet);
   assert.equal(rooms.at(-1),'mini / team','discovery rebinds the action room through the existing room path');
   assert.deepEqual(api.routeRoom('mini / team'),{key:'mini',fleet:'team'});
-  const trailing=h.callbacks.filter(x=>x.ms===400).at(-1);assert.ok(trailing);
-  const next=a.calls.length;trailing.cb();
-  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,0,'direct discovery already selected the correct first board room');
+  const next=a.calls.length;await h.c.refreshBoards();await h.settle();
   assert.equal(a.calls.slice(next).filter(c=>c.url==='/api/fleets').length,0,'fast refresh does not repeat overview discovery');
   const channel=h.paints.findLast(v=>v.data?.threads);
   assert.equal(channel.data.threads[0].task_link.host_uid,'mini::'+a.host);
@@ -599,7 +648,7 @@ test('app recovers canonical teams after Connect while overview stays unavailabl
   const detail=await api.jget(`/api/tasks/${encodeURIComponent(link.task_id)}?fleet=${encodeURIComponent(link.fleet)}`);
   assert.equal(detail.data.task.fleet,'mini / team');
   assert.equal((await api.jget(`/api/tasks/${wi}?fleet=mini%20%2F%20team`)).state,'invalid');
-  assert.equal(h.callbacks.filter(x=>x.ms===400).length,1,'stable recovered teams do not add a refresh loop');
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,0,'stable recovered teams do not add a refresh loop');
   api.dispose();
 });
 
@@ -619,12 +668,12 @@ test('successful partial empty overview remains authoritative without a stream-d
     driven++;pending.cb();
     await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
   }
-  assert.equal(driven,2,'initial discovery and changed overview each retire one batch, then settle');
-  assert.equal(h.callbacks.filter(x=>x.ms===400).length,2);
-  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,2,'first registry publication retires its own batch, then initial discovery settles');
+  assert.equal(driven,1,'routing discovery coalesces one refresh without retiring its own batch');
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,1);
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,1,'first registry publication stays usable');
   assert.equal(reads.slice(reads.indexOf('/api/overview')+1).includes('/api/fleets'),false,'healthy empty ownership is not contradicted by a fallback');
   assert.deepEqual(Array.from(h.c.fleets),[]);
-  assert.equal(h.paints.length,2,'stable partial overview paints without suppressing roster revision notifications');
+  assert.equal(h.paints.length,2,'only the board with current room ownership paints');
   assert.equal(api.routeRoom('a / team'),null);
   assert.equal((await api.jget(`/api/tasks/${encodeURIComponent('a::'+wi)}?fleet=a%20%2F%20team`)).state,'unknown');
   assert.equal(api.routeRoom('b / team'),null);
@@ -664,13 +713,13 @@ test('failed overview leg discovers teams while healthy empty peer stays authori
     driven++;pending.cb();
     await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
   }
-  assert.equal(driven,2);assert.equal(h.callbacks.filter(x=>x.ms===400).length,2);
-  assert.equal(h.paints.length,2);
+  assert.equal(driven,1);assert.equal(h.callbacks.filter(x=>x.ms===400).length,1);
+  assert.equal(h.paints.length,2,'room retirement fences the already pending board');
   assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['b / team']);
   assert.equal(api.routeRoom('a / team'),null);
   assert.deepEqual(api.routeRoom('b / team'),{key:'b',fleet:'team'});
-  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,2,'healthy source only receives initial discovery, never overview fallback');
-  assert.equal(b.calls.filter(c=>c.url==='/api/fleets').length,4,'failed source receives one fallback per overview batch');
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,1,'healthy source only receives initial discovery, never overview fallback');
+  assert.equal(b.calls.filter(c=>c.url==='/api/fleets').length,2,'failed source receives initial discovery plus one fallback per overview batch');
   const overview=await api.jget('/api/overview');
   assert.equal(overview.data.coverage.partial,true);
   assert.equal(overview.data.sources[1].state,'unreadable');
