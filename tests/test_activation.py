@@ -2468,3 +2468,131 @@ def test_interrupted_bot_pause_reuses_capture_only_for_verified_quiet_target(
     assert observations == [{"installed_file": case.bot_dir.parent / case.target,
                              "target": case.target, "socket_path": case.bot_dir.parent / "socket"}]
     assert case.calls == []
+
+
+class _HandoffClock:
+    """The clocks a preserved handoff is judged by, moved only by the handoff door (#2553).
+
+    One reading in epoch ns stands for the wall clock (`datetime.now`) and for the clock
+    that stamps the handoff file (`_file_clock_ns`). A door call takes `seconds` from its
+    own start and the bot saves its handoff as the call returns, so a handoff reads exactly
+    as old as the time that followed its call, never older. Calls that overlap end
+    together: the clock moves to the latest end, not to the sum of their durations.
+    """
+
+    def __init__(self, seconds, start_s=1_800_000_000):
+        self.ns = start_s * 1_000_000_000
+        self.step = int(seconds * 1_000_000_000)
+        self.reads = 0
+        self.lock = threading.Lock()
+
+    def file_clock_ns(self, _directory):
+        # A request takes the file clock's next reading (#2528), a few ns past the wall
+        # clock, so timing a request never moves it.
+        with self.lock:
+            self.reads += 1
+            return self.ns + self.reads
+
+    def call_ends(self, started):
+        with self.lock:
+            self.ns = max(self.ns, started + self.step)
+            return started + self.step
+
+
+def _clocked_datetime(clock):
+    from datetime import datetime
+
+    class _Instances(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class ClockedDatetime(datetime, metaclass=_Instances):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(clock.ns / 1_000_000_000, tz)
+    return ClockedDatetime
+
+
+def _save_capture_at(bot_dir, ns):
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ns // 1_000_000_000))
+    path = bot_dir / ".claude/session.md"
+    path.write_bytes((f"---\ncwd: {bot_dir}\nlast_updated: {stamp}\nreferences_refreshed: {stamp}\n"
+                      "schema_version: 2\n---\n\n## Decisions\n- Acceptance observation saved.\n").encode())
+    os.utime(path, ns=(ns, ns))
+
+
+def _preserved_fleet(tmp_path, monkeypatch, *, bots, seconds):
+    """`bots` running bots, each restarting, whose handoff door call takes `seconds`."""
+    clock = _HandoffClock(seconds)
+    monkeypatch.setattr(bot_operations, "datetime", _clocked_datetime(clock))
+    monkeypatch.setattr(bot_operations, "_file_clock_ns", clock.file_clock_ns)
+    units, by_dir = [], {}
+    for index in range(1, bots + 1):
+        target = f"example.worker{index:02d}.plist"
+        bot_dir = tmp_path / f"worker{index:02d}"
+        (bot_dir / ".claude").mkdir(parents=True)
+        by_dir[bot_dir] = target
+        units.append(SimpleNamespace(target=target, installed=(SimpleNamespace(path=tmp_path / target),),
+                                     declaration=SimpleNamespace(scope="bot", source=bot_dir / target,
+                                                                 working_directory=bot_dir)))
+    body = {"completed": ["producers_paused"], "pending": None, "handoff_effects": {},
+            "intent": {"preserve_bot_state": True, "install_directory": str(tmp_path),
+                       "bot_states": {unit.target: {"disposition": "restart"} for unit in units}},
+            "previous_selection": {"activation_id": "previous"}}
+    record = SimpleNamespace(body=body, status="activating")
+    calls, steps = [], []
+
+    class BotPauseReached(Exception):
+        pass
+
+    def begin(_activation, step):
+        steps.append(step)
+        if step == "sessions_quiesced":
+            raise BotPauseReached
+        body["pending"] = step
+
+    def complete(_activation, step, **_):
+        body["completed"].append(step)
+        body["pending"] = None
+
+    def handoff(_activation, *, target, result, request_started_ns=None):
+        if request_started_ns is not None:
+            body.setdefault("handoff_requests", {})[target] = {"started_at_ns": request_started_ns}
+        body["handoff_effects"][target] = result
+    store = SimpleNamespace(begin=begin, complete=complete, record_handoff=handoff,
+                            arm_handoff_evidence=lambda *_: None)
+    monkeypatch.setattr(activation, "read_activation", lambda *_: record)
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (tmp_path / "socket", True))
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_: str(tmp_path))
+
+    def call(function, *args, **kwargs):
+        assert function == "svc_activation_handoff" and args[-1] == "explicit" and kwargs == {"timeout": 45}
+        bot_dir = Path(args[0])
+        assert body["handoff_effects"][by_dir[bot_dir]] is None  # Fence before the send.
+        started = clock.ns
+        calls.append((by_dir[bot_dir], started))
+        time.sleep(0.02)  # Room for calls made together to overlap.
+        _save_capture_at(bot_dir, clock.call_ends(started))
+        return subprocess.CompletedProcess([function], 0, "handoff-saved\n", "")
+
+    adapter = SimpleNamespace(call=call)
+
+    def run():
+        return activation._quiesce_running(tmp_path, store, "upgrade", None, tuple(units), adapter)
+    return SimpleNamespace(run=run, clock=clock, units=units, body=body, calls=calls, steps=steps,
+                           adapter=adapter, BotPauseReached=BotPauseReached)
+
+
+@pytest.mark.parametrize("seconds", [30, 45])
+def test_a_preserved_activation_of_20_bots_reaches_the_bot_pause_on_the_handoffs_it_verified(
+        tmp_path, monkeypatch, seconds):
+    """#2553: a preserved activation hands each running bot off and verifies its save as the
+    door call returns. A call takes `seconds` here: 30 s is pre-stop-handoff.sh's save poll and
+    45 s the adapter's bound. The bots' pause then requires every restarting bot's handoff to
+    be at most 300 s old, so it must not refuse a handoff verified fresh for the time the other
+    bots' handoffs took."""
+    case = _preserved_fleet(tmp_path, monkeypatch, bots=20, seconds=seconds)
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert len(case.calls) == 20
+    assert set(case.body["handoff_effects"].values()) == {"handed_off"}
