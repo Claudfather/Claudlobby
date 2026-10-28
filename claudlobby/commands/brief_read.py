@@ -69,8 +69,8 @@ def dispatch(args) -> CommandOutput:
         if context.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no operational brief")
         root = shlex.quote(str(context.paths.root))
-        restage = (f"run claudlobby --root {root} --fleet {shlex.quote(context.fleet.name)} "
-                   "config plan, then host activate the reviewed plan")
+        restage = (f"run claudlobby --root {root} config plan --release RELEASE_ID "
+                   "(host releases lists the IDs), then host activate the reviewed plan")
         selection = read_selection(context.paths.root)
         if selection is None:
             raise CommandFailure("conflict", "active brief selection is unavailable",

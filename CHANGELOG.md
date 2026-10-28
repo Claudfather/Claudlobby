@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the re-stage hints, a doc line and a switch row name commands that run (#2575)
+
+`claudlobby brief` and `claudlobby checkin` end two of their refusals (the active
+selection is unavailable; the fleet's bots or manager changed after activation)
+with the command that re-stages the host. They printed `--root ROOT --fleet FLEET
+config plan`. `config plan` covers the whole host, so it refuses `--fleet` ("host
+preparation rejects --fleet and --seed"), and the line left out the `--release`
+it requires, so a reader who typed it saw only "command syntax". The hints now
+print `claudlobby --root ROOT config plan --release RELEASE_ID`, say that `host
+releases` lists the IDs, and send the reader on to `host activate` with the
+reviewed plan. `documentation/validating-bot-changes.md` showed `bot remove`
+without the `--root` it requires; it gives `--root` and `--fleet` now. The
+`mcp-direct-launch` row of the switch tables, generated into
+`documentation/fleet-yaml-schema.md` and `documentation/system-yaml-schema.md`,
+put `--fleet` in front of `host cache warm, then config plan, config diff
+PLAN_ID`; each command in the row now carries its own flags, and the two tables
+are regenerated. `tests/test_restage_hints.py` runs the command each hint
+prints, and `tests/test_cold_start_contract.py` also fails on a switch row that
+passes `--fleet` or `--seed` to staging or activation, and on a doc that shows
+`bot remove` without `--root` and `--fleet`.
+
 ### Fixed — a failed host job, launchd job or failure alert is reported (#2532)
 
 fleet-pulse now asks, once a sweep, which units the selected release owns are in

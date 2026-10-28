@@ -52,7 +52,7 @@ Write down what you saw: *"composed `<fleet>`, restarted `<bot>`, invoked `/<ski
 
 ### Reaping a throwaway (guaranteed teardown)
 
-For a selected throwaway bot, first remove its declaration from authored `fleet.yaml`, stage and activate that change, then run `claudlobby --fleet <fleet> bot remove BOT --purge` from an operator shell. Removal verifies native ownership and refuses uncommitted work. `bot stop BOT` only pauses a declared bot; it is not permanent teardown. This reviewed sequence cannot be replaced by a shell exit trap.
+For a selected throwaway bot, first remove its declaration from authored `fleet.yaml`, stage and activate that change, then run `<sealed-cli> --root <canary-root> --fleet <fleet> bot remove BOT --purge` from an operator shell. Removal verifies native ownership and refuses uncommitted work. `bot stop BOT` only pauses a declared bot; it is not permanent teardown. This reviewed sequence cannot be replaced by a shell exit trap.
 
 ## In review
 
