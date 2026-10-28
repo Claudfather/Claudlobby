@@ -14,6 +14,7 @@ from textwrap import dedent
 
 from claudlobby import defaults
 from claudlobby.composer import (
+    _resolve_fleet_ops_grants,
     _resolve_skill_grants,
     _resolve_skill_permissions,
     compose_bot,
@@ -444,6 +445,26 @@ class TestGrantUnion:
                 assert manager_grants <= set(allow)
             else:
                 assert manager_grants.isdisjoint(allow)
+
+    def test_fleet_ops_says_the_manager_runs_task_escalate_and_task_nudge(self, fleet_dir):
+        """#2574. Every bot reads fleet-ops, and neither door checks a role, so the allow list decides who
+        runs them, and only the manager's holds them. The sentences naming them say the manager runs them,
+        and each route they give a worker instead is one the worker holds."""
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        grants = {bot_id: set(_resolve_fleet_ops_grants(fleet.bots[bot_id], fleet)) for bot_id in ("lead", "worker-1")}
+        for command in ("task escalate", "task nudge"):
+            grant = f"Bash(claudlobby --json {command} *)"
+            assert grant in grants["lead"] and grant not in grants["worker-1"], command
+        assert "Bash(claudlobby --json assignment block *)" in grants["worker-1"]
+        text = (source_package().library / "skills" / "fleet-ops" / "SKILL.md").read_text()
+        assert '"Bash(claudlobby --json message send *)"' in text.split("---", 2)[1]   # the skill grants it to every bot
+        start = text.index("For a setback,")
+        para = " ".join(text[start:text.index("\n\n", start)].split())
+        assert "The manager records a request for human guidance" in para and "`task escalate TASK_ID" in para
+        assert "The manager records a nudge on an open task" in para and "task nudge TASK_ID" in para
+        assert ", use `task escalate" not in para and ", use `claudlobby --json task nudge" not in para
+        assert "A worker is granted neither command" in para
+        assert "`assignment block ASSIGNMENT_ID --reason TEXT`" in para and "(`message send`, below)" in para
 
     def test_a_required_skill_is_symlinked(self, fleet_dir):
         _write_protocol(fleet_dir, "needs-gadget", requires_skills=["gadget"])
