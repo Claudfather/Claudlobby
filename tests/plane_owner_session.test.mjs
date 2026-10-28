@@ -450,6 +450,7 @@ for (const renewal of ['same scope', 'new viewer', 'removed recipient', 'no mess
 test(`app renewal restores worker selection and draft only with fresh matching authority: ${renewal}`, async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const pause = app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
+  const directory = app.slice(app.indexOf('let agentPresence ='), app.indexOf('function agentDirectoryCard('));
   const sync = app.slice(app.indexOf('function syncWorkRoom()'), app.indexOf('const ownerSession ='));
   const controller = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
     .replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
@@ -483,11 +484,11 @@ test(`app renewal restores worker selection and draft only with fresh matching a
     const body = document.getElementById('work-body'); body.value = 'Keep this unsent draft'; body.input();
     const before = storage.getItem('plane.pending-actions.v1');
     assert.equal(document.getElementById('work-send').disabled, false);
-    const bindings = { activityRecovery:null, workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
+    const bindings = { activityRecovery:null, interactionApi:{}, currentView:'channel', workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
       sessionPaused: false, sessionEpoch: 1, generation: 1, trustGen: 1,
       refreshTimer: null, safetyTimer: null, searchTimer: null, invalidateOverview() {},
       clearTimeout() {}, $: id => document.getElementById(id), showLoading() {} };
-    paused = true; runInNewContext(`(function() { ${pause} })()`, bindings);
+    paused = true; runInNewContext(`${directory}\n(function() { ${pause} })()`, bindings);
     assert.equal(bindings.workRoom, undefined);
     assert.equal(document.getElementById('work-send').disabled, true);
     assert.equal(document.getElementById('work-form').hidden, true);
@@ -687,15 +688,16 @@ test('both resume callbacks preserve equipment through loading DOM replacement a
 
 test('grid half-completed reads never paint across pause, and paused polls issue no requests', async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const directory = app.slice(app.indexOf('function agentDirectoryVisible()'), app.indexOf('function resetAgentPresence()'));
   const poll = app.slice(app.indexOf('async function pollGrid()'), app.indexOf('const PRESENCE_ORDER'));
   for (const first of ['grid', 'presence']) {
     const grid = deferred(), presence = deferred(), rendered = [], calls = [];
-    const state = { sessionPaused: false, sessionEpoch: 1, currentView: 'grid', currentFleet: 'synthetic',
+    const state = { interactionApi:{}, sessionPaused: false, sessionEpoch: 1, currentView: 'grid', currentFleet: 'synthetic',
       fleetQuery: () => '?fleet=synthetic', renderGrid: value => rendered.push(value),
       renderPresenceStrip: value => rendered.push(value),
       jget(url) { calls.push(url); return url.startsWith('/api/grid') ? grid.promise : presence.promise; },
     };
-    const pending = runInNewContext(`${poll}\npollGrid()`, state);
+    const pending = runInNewContext(`${directory}\n${poll}\npollGrid()`, state);
     (first === 'grid' ? grid : presence).resolve({ state: 'ok', data: first === 'grid'
       ? { panes: [{ fleet: 'synthetic', bot: 'worker', lines: ['old private frame'] }] }
       : { bots: [], counts: { working: 1 } } });
@@ -1010,13 +1012,14 @@ test('equipment action checks current exact identity and authority, then only se
 
 
 test('initial fleet discovery cannot change a newer room or resumed session', async () => {
+  const directory = inspectionApp.slice(inspectionApp.indexOf('function agentDirectoryVisible()'), inspectionApp.indexOf('function resetAgentPresence()'));
   const refresh = inspectionApp.slice(inspectionApp.indexOf('async function refreshBoards()'), inspectionApp.indexOf('function scheduleRefresh()'));
   for (const reason of ['room', 'session']) {
     const reply = deferred(), adopted = [];
-    const state = { activityRecovery:null, sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
+    const state = { activityRecovery:null, interactionApi:{}, currentView:'channel', sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
       refreshInFlight: false, refreshPending: false, refreshTimer: null, clearTimeout() {},
       jget: () => reply.promise, adoptFleets(value) { adopted.push(value); } };
-    const pending = runInNewContext(`${refresh}\nrefreshBoards()`, state);
+    const pending = runInNewContext(`${directory}\n${refresh}\nrefreshBoards()`, state);
     state.generation++; if (reason === 'session') state.sessionPaused = true;
     reply.resolve({ state: 'ok', data: { default: 'old room' } }); await pending;
     assert.deepEqual(adopted, []);
