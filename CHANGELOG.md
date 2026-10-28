@@ -25,6 +25,23 @@ host's own anchor, and pages nobody until a host recipient is declared (#1611).
 Before this, a host job, a launchd job, a unit without `OnFailure=` and an
 instance of the failure template itself could fail and raise nothing.
 
+### Added — a worker is told what `orphaned` means and what ends it (#2546)
+
+A worker whose session restarted after an assignment was dispatched read
+`orphaned` in its brief with no text on what that meant for it, what to do, or
+what ended it. The fleet-ops skill, the status skill, the help of `assignment
+progress` and `assignment show`, and the brief now say: an `assignment progress`
+report moves it to `past_due` for 45 minutes (the default), `complete`, `fail`
+and `return` end the assignment, and a `block` changes nothing. Only a manager
+or an operator moves a deadline. The boot brief says it once, above the rows.
+The full brief explains an `orphaned` row, a `past_due` row held back by
+progress, and one aged out after 24 hours. The report-back protocol carries one
+sentence: a progress report holds the flag back for 45 minutes, a block does
+not, and the fleet-ops skill has the rest. The grace, the cap, the orphan rule
+and the brief's JSON are unchanged. The protocol text reaches a worker's
+composed instructions at its first restart after activation; the skill text is
+read on use.
+
 ### Fixed — a preserve-state activation's refusal names the bot whose handoff directory takes no file, and the bots already handed off (#2547)
 
 `host activate --preserve-bot-state` hands the running bots off one after
