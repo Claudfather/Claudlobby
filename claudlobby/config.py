@@ -2350,13 +2350,29 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
     return merged
 
 
+class EmptyFleetConfigError(ValueError):
+    """fleet.yaml holds no YAML document: zero bytes, whitespace or comments (#2267).
+
+    Carries only the path and the byte count, which hold no authored value.
+    """
+
+    def __init__(self, path: Path, size: int):
+        self.path, self.size = path, size
+        super().__init__(f"{path}: fleet configuration holds no YAML document ({size} bytes)")
+
+
 def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[FleetConfig, dict]:
     """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
 
-    with fleet_yaml.open() as f:
-        doc = yaml.safe_load(f)
+    content = fleet_yaml.read_bytes()
+    # Whitespace is judged on the bytes: PyYAML refuses a tab where no token may start.
+    if not content.strip():
+        raise EmptyFleetConfigError(fleet_yaml, len(content))
+    doc = yaml.safe_load(content)
+    if doc is None and yaml.compose(content) is None:  # comments only; `---` or `null` is a document
+        raise EmptyFleetConfigError(fleet_yaml, len(content))
     return _fleet_document(fleet_yaml, doc, lambda: load_projects(
         projects_yaml if projects_yaml is not None else fleet_yaml.parent / "projects.yaml"))
 

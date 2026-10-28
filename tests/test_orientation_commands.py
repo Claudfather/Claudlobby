@@ -216,3 +216,51 @@ def test_registry_freshness_names_selected_fleet_and_incomplete_scan(staging_cas
     unknown = _call(capsys, case.root, "context", "show")["context"]["registry"]
     assert unknown["state"] == "unreadable"
     assert unknown["entity_count"] is None and unknown["entity_counts_by_type"] is None
+
+
+_REFUSING = (("config", "validate"), ("fleet", "status"),
+             ("context", "show", "--bot", "secondary-manager"))
+
+
+@pytest.mark.parametrize("content, says", [
+    (b"", "(0 bytes)"),
+    (b"\n \t\n", "holds no YAML document"),
+    (b"# retired fleet\n", "holds no YAML document"),
+], ids=["zero-bytes", "whitespace-only", "comment-only"])
+def test_empty_fleet_manifest_is_named_by_every_refusing_command(staging_case, monkeypatch, capsys,
+                                                                 content, says):
+    # #2267: an empty manifest names the file and why, at the same rc, and is left untouched.
+    monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
+    manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
+                      staging_case.package).fleet_yaml
+    manifest.write_bytes(content)
+    for operation in _REFUSING:
+        assert main(["--root", str(staging_case.root), "--json", "--fleet", "secondary", *operation]) == 4
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert error["code"] == "conflict"
+        assert str(manifest) in error["message"] and says in error["message"]
+        if content:
+            assert f"({len(content)} bytes" in error["message"]
+        assert "last good copy" in error["hint"] and f"git log -- {manifest}" in error["hint"]
+    assert manifest.read_bytes() == content
+
+
+@pytest.mark.parametrize("content", [
+    "fleets:\n  token: SECRET-orientation-planted\n",
+    "--- # SECRET-orientation-planted\n",
+], ids=["malformed-mapping", "null-document"])
+def test_non_empty_invalid_manifest_keeps_the_generic_refusal(staging_case, monkeypatch, capsys, content):
+    monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
+    manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
+                      staging_case.package).fleet_yaml
+    manifest.write_text(content)
+    generic = {"config": "selected fleet configuration is invalid",
+               "fleet": "context selectors or fleet configuration are invalid",
+               "context": "context selectors or fleet configuration are invalid"}
+    for operation in _REFUSING:
+        assert main(["--root", str(staging_case.root), "--json", "--fleet", "secondary", *operation]) == 4
+        captured = capsys.readouterr()
+        assert "SECRET-orientation" not in captured.out + captured.err
+        error = json.loads(captured.out)["error"]
+        assert error["code"] == "conflict" and error["message"] == generic[operation[0]]
+        assert "last good copy" not in str(error["hint"])
