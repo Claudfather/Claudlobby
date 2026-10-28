@@ -55,7 +55,10 @@ NON_TERMINAL_CLAUSE = (
 # terminal report closes every row that carried it — so this closes an
 # assignment when a terminal task event by the instant names it OR a sibling
 # assignment of the same assignee with the same dispatch-log source_ref.
-# Params: (assignee_uid, at, at, at, at, at, at) — the assignee resolved to a
+# One NOT EXISTS per way a row closes, each seeking its own column; under one
+# OR none could, and each row walked every task event (#2549). The fragment is
+# byte-identical to plane-readers.py's `_SIBLING_CLOSURE`, which says why.
+# Params: the assignee_uid, then `at` ten times — the assignee resolved to a
 # uid by the caller on the small registry (case-insensitively), so the read
 # hits idx_assignments_assignee; `at` None = unbounded (everything landed).
 # --- the fleet axis of an alias, in SQL (U) -----------------------------------
@@ -135,21 +138,23 @@ EFFECTIVE_DEADLINE_SQL = ("NULLIF(COALESCE(" + _NEWEST_DEADLINE_FACT.format(col=
 # `deadline_status`).
 DEADLINE_SET_AT_SQL = _NEWEST_DEADLINE_FACT.format(col="d.occurred_at")
 
+_TERMINAL_AS_OF = f" AND t.event IN ({_TERMINAL}) AND (? IS NULL OR t.occurred_at <= ?)"
 OPEN_ASSIGNMENTS_AT_SQL = (
     "SELECT a.occurred_at, a.source_ref, a.assignment_id, " + EFFECTIVE_DEADLINE_SQL + ", "
     + DEADLINE_SET_AT_SQL +
     " FROM assignments a"
     " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    f"    AND t.event IN ({_TERMINAL}) AND (? IS NULL OR t.occurred_at <= ?)"
-    "    AND (t.assignment_id = a.assignment_id"
-    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
-    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
-    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
-    "              AND (? IS NULL OR s.occurred_at <= ?)))"
-    "      OR (t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
-    "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
-    "          AND t.ingest_seq>a.ingest_seq)))"
+    " AND t.assignment_id = a.assignment_id" + _TERMINAL_AS_OF + ")"
+    "  AND NOT EXISTS (SELECT 1 FROM assignments s CROSS JOIN events t"
+    " WHERE a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    " AND s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    " AND (? IS NULL OR s.occurred_at <= ?)"
+    " AND t.kind='task' AND t.assignment_id = s.assignment_id" + _TERMINAL_AS_OF + ")"
+    "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    " AND t.work_item_id = a.work_item_id AND t.ingest_seq > a.ingest_seq"
+    " AND t.emitter='claudlobby.tasks.v1' AND t.event='cancelled' AND t.assignment_id IS NULL"
+    + _TERMINAL_AS_OF + ")"
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
 
