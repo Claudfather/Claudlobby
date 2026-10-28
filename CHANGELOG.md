@@ -9,16 +9,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed — fleet-ops says who runs `task escalate` and `task nudge`, and which assignments a progress report holds off (#2574, #2577)
 
 The fleet-ops skill, which every bot reads, told the reader to run `task escalate`
-and `task nudge`. Only the fleet manager is granted them, and their doors check no
-role, so the allow list decides. The skill now says the manager runs them, and
-points a worker at what it is granted: `assignment block` on its own work,
-`message send` for anything else. Its deadline-watch paragraph said a progress
-report holds off every past-deadline assignment of the bot; it holds off only
-those dispatched before it, as the watch requires, and the `overdue` and
-`past_due` rows now say so too. The help of `assignment progress` now says that
-more than 24 hours after the dispatch (the default) an assignment reads `past_due`
-with or without a report. Tests pin each sentence, and the brief's behaviour
-behind the two deadline-watch sentences.
+and `task nudge`. Fleet-ops grants them only to the fleet manager, but their doors
+check no role, so a worker whose own permissions allow them, such as through the
+bare `Bash` that an `allow_all` expertise adds, can run them too. The skill now
+says both are the manager's commands and a worker leaves them to the manager: a
+worker that waits on something outside its assignment records `assignment block`
+with a reason, and for anything else it sends the manager a message. Its
+deadline-watch paragraph said a progress report holds off every past-deadline
+assignment of the bot; it holds off only those dispatched before it, as the watch
+requires, and the `overdue` and `past_due` rows now say so too. The help of
+`assignment progress` now says that an assignment past its deadline reads
+`past_due`, with or without a report, more than 24 hours (the default) after the
+dispatch or, once the manager has moved the deadline, after the later of the move
+and the new deadline. Tests pin each sentence, and the brief's behaviour behind
+the two deadline-watch sentences.
 
 ### Fixed — a failed host job, launchd job or failure alert is reported (#2532)
 

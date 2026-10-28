@@ -369,11 +369,12 @@ The manager records a nudge on an open task, such as one an operator asks for,
 with `claudlobby --json task nudge TASK_ID --reason "Why this needs attention"
 --request-id UUID`; `--by ACTOR` records whose request it was. The task fact and
 manager request commit before notification. Inspect the notification outcome;
-replaying the same request does not resend an uncertain message. A worker is
-granted neither command. On work assigned to it, it records
-`assignment block ASSIGNMENT_ID --reason TEXT`, which keeps the assignment and
-notifies the manager; about anything else, it sends the manager a message
-(`message send`, below).
+replaying the same request does not resend an uncertain message. Fleet-ops grants
+both commands only to the manager, and a worker leaves them to the manager even
+where its own permissions would let it run them. A worker that waits on something
+outside its assignment records `assignment block ASSIGNMENT_ID --reason TEXT`,
+which keeps the assignment and notifies the manager; about anything else, it sends
+the manager a message (`message send`, below).
 
 **The deadline watch.** `claudlobby --json brief` gives each open assignment of
 yours an `attention` (`work.items[].attention`, with a `status` and a `reason`).
