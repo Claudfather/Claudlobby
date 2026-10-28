@@ -4230,7 +4230,7 @@ _FLEET_PULSE_JOB = "fleet-pulse"
 #: heard: systemd starts one instance per failed unit, named for it, and the
 #: instance runs the selected release's `fleet notify`. Bot services stay out
 #: (fleet-pulse watches them), and so do host jobs and launchd, which has no
-#: OnFailure= (#2532).
+#: OnFailure=: fleet-pulse reports a failed one of those once an episode (#2532).
 JOB_FAILED_TEMPLATE = "job-failed"
 #: The `--event` the template's alert carries. `fleet notify` records a
 #: `fleet_alert` whose data names it, so `event list --type fleet_alert` finds it.
@@ -4252,9 +4252,9 @@ def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, p
     The instance calls the selected CLI directly, not through the unit-start
     wrapper, whose argv names exactly one unit: `fleet notify` takes its own
     admission, bound to the release in CLAUDLOBBY_RELEASE_ID. ``%i`` is the
-    failed unit's name. The template has no OnFailure= of its own, so an alert
-    that fails leaves only its journal (#2532), and no [Install] section: only
-    OnFailure= starts it.
+    failed unit's name. The template has no OnFailure= of its own: an instance
+    whose alert fails stays failed, and fleet-pulse reports it (#2532). It has
+    no [Install] section: only OnFailure= starts it.
     """
     environment = native_environment(paths)
     argv = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],

@@ -20,6 +20,25 @@ more than 24 hours after the dispatch (the default) an assignment reads `past_du
 with or without a report. Tests pin each sentence, and the brief's behaviour
 behind the two deadline-watch sentences.
 
+### Fixed — a failed host job, launchd job or failure alert is reported (#2532)
+
+fleet-pulse now asks, once a sweep, which units the selected release owns are in
+the failed state: `claudlobby host supervision failed`, a new read-only command,
+lists each unit the selected plan declares that systemd holds in
+`ActiveState=failed`, or that launchd has loaded, not running, after a non-zero
+exit, with its scope, its fleet and the native fields that decided it. An
+instance counts when the plan declares its template, and a unit's name never
+makes it owned. Bot services stay with the pulse's per-bot checks. Each failure
+episode is reported once: it opens on the first sweep that reads its unit
+failed and ends on the first that reads it neither failed nor running, so a
+failure that clears and recurs is reported again. A fleet's own unit is recorded
+as the critical `unit_failed` on the fleet and paged once through the fleet's
+escalation chat, the leg the critical escalation pages on. A host unit is
+recorded once a host, by the sweep of the host's first fleet by name, on the
+host's own anchor, and pages nobody until a host recipient is declared (#1611).
+Before this, a host job, a launchd job, a unit without `OnFailure=` and an
+instance of the failure template itself could fail and raise nothing.
+
 ### Fixed — the documented canary loop stages something (#2567)
 
 `documentation/validating-bot-changes.md` told a reader to stage with `--fleet`,

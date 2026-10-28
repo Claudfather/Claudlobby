@@ -10,7 +10,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 
 ## How it works
 
-`claudlobby fleet pulse` admits the selected fleet and runs its private sweep. The sweep checks tmux sessions, supervised services, pane freshness, and git WIP, and records each bot's new Claude Code compactions as `compaction` events (read them with `claudlobby --json event list --type compaction`). Its completed result means the tick finished, not that all bots are healthy. Findings are recorded on the plane as fleet events. Read those events and the returned summary before acting.
+`claudlobby fleet pulse` admits the selected fleet and runs its private sweep. The sweep checks tmux sessions, supervised services, pane freshness, and git WIP, reports each of the fleet's own units it finds in the failed state once an episode, and records each bot's new Claude Code compactions as `compaction` events (read them with `claudlobby --json event list --type compaction`). Its completed result means the tick finished, not that all bots are healthy. Findings are recorded on the plane as fleet events. Read those events and the returned summary before acting.
 
 ## Steps
 
@@ -58,6 +58,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 | `compaction` | Informational, no action. A `bot compact` you sent appears here once the pulse records it (`trigger: manual`, `pre_tokens` to `post_tokens`); `claudlobby --json fleet compactions record` records it at once. An `auto` one means the bot reached Claude Code's own limit. |
 | `wip_uncommitted` | **Read `paths`, not `dirty_files`.** The count cannot tell a mid-edit from a virtualenv — `M lib/foo.py` and `?? .venv/` are both `1`. Any path that is source, config or content: do NOT restart, task in flight. Only artifact paths you recognise (`.venv/`, `node_modules/`, a build dir): not work in flight — say which paths you saw and why you judged them artifacts. `unchanged_for_s` past ~2h on a *source* path is stale WIP: flag to the human. Never read it as a licence to restart, because a brand-new source file is untracked too. |
 | `browser_outside_render` | A browser has run more than 15 minutes outside a render scope. `owner` is the bot whose session started it, or null when no bot did. Nothing stops it: ask that bot what opened it, or tell the operator, and have it closed where it was opened; never by name. |
+| `unit_failed` | One of the fleet's units is in the failed state: a job, or the alert a failed job sends. `data.detail` says what was read. Read its log (`journalctl --user -u <unit>`) and tell the operator; fixing the unit is theirs. |
 
 `bot start` is manager-to-other only. Report supervised session recovery only
 when `ok` is true, `data.state` is `running`, `data.native_outcome` is

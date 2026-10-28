@@ -51,6 +51,7 @@ class Adapter:
 
     _FUNCTIONS = frozenset({
         "svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_inventory_state", "svc_bot_unit_owned_by",
+        "svc_inventory_failed",
         "svc_activation_snapshot", "svc_activation_assert_external",
         "svc_activation_pause", "svc_activation_resume", "svc_activation_reload",
         "svc_activation_clear_runtime_mask",
@@ -292,18 +293,37 @@ def _require_no_selection(data_root):
         raise InventoryError(f"bootstrap selection cannot be proved absent: {exc}") from exc
 
 
+def _launchd_header(line: str) -> bool:
+    return line.split("\t") == ["PID", "Status", "Label"] or line.split() == ["PID", "Status", "Label"]
+
+
+def _launchd_row(line: str) -> list[str]:
+    """One launchctl list row: [PID or "-", last exit status, label]."""
+    row = line.split()
+    if len(row) != 3 or not re.fullmatch(r"-|[0-9]+", row[0]) or not re.fullmatch(r"-?[0-9]+", row[1]):
+        raise InventoryError("unknown launchctl list row")
+    return row
+
+
+def launchd_list_rows(text: str) -> list[list[str]]:
+    """Every row of a launchctl list output after its header, in the catalog's grammar."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _launchd_header(line):
+            return [_launchd_row(row) for row in lines[index + 1:]]
+    raise InventoryError("launchctl list printed no header")
+
+
 def _catalog(text):
     manager, domain, directories, names, loaded = "", "", [], set(), {}
     launchd_rows = False
     for line in text.splitlines():
         fields = line.split("\t")
-        if fields == ["PID", "Status", "Label"] or line.split() == ["PID", "Status", "Label"]:
+        if _launchd_header(line):
             launchd_rows = True
             continue
         if launchd_rows:
-            row = line.split()
-            if len(row) != 3 or not re.fullmatch(r"-|[0-9]+", row[0]) or not re.fullmatch(r"-?[0-9]+", row[1]):
-                raise InventoryError("unknown launchctl list row")
+            row = _launchd_row(line)
             key, value = "loaded", row[2] + ".plist"
         elif len(fields) == 2:
             key, value = fields
@@ -337,13 +357,24 @@ def _catalog(text):
     return manager, domain, directories, names, loaded
 
 
-def _properties(text, *, foreign=False):
+def _key_values(lines) -> dict[str, str]:
+    """One unit's `systemctl show` lines as a dict; a repeated or bare key refuses."""
     result = {}
-    for line in text.splitlines():
+    for line in lines:
         key, separator, value = line.partition("=")
         if not separator or key in result:
             raise InventoryError("ambiguous native unit properties")
         result[key] = value
+    return result
+
+
+def systemd_show_blocks(text: str) -> list[dict[str, str]]:
+    """`systemctl show` of several units: one dict per blank-line-separated block."""
+    return [_key_values(block.splitlines()) for block in text.split("\n\n") if block.strip()]
+
+
+def _properties(text, *, foreign=False):
+    result = _key_values(text.splitlines())
     required = {"Id", "LoadState", "ActiveState", "UnitFileState", "FragmentPath",
                 "DropInPaths", "NeedDaemonReload", "Triggers", "TriggeredBy"}
     service_fields = {"WorkingDirectory", "Environment", "ExecStart"}
