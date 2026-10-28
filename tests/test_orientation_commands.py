@@ -244,23 +244,27 @@ def test_empty_fleet_manifest_is_named_by_every_refusing_command(staging_case, m
         if content:
             assert f"({len(content)} bytes" in error["message"]
         assert "last good copy" in error["hint"]
-        assert f"git log -- {shlex.quote(str(manifest))}" in error["hint"]
+        assert (f"git -C {shlex.quote(str(manifest.parent))} log -- fleet.yaml"
+                in error["hint"])
     assert manifest.read_bytes() == content
     # A root with a space stays one argument in the suggested command.
     spaced = Path("/tmp/data team/local/secondary/fleet.yaml")
-    assert "git log -- '/tmp/data team/local/secondary/fleet.yaml'" in str(
+    assert "git -C '/tmp/data team/local/secondary' log -- fleet.yaml" in str(
         empty_fleet_conflict(spaced, len(content)).error.hint)
+    odd = Path("/tmp/data/local/secondary/fleet copy.yaml")
+    assert "log -- 'fleet copy.yaml'" in str(empty_fleet_conflict(odd, 0).error.hint)
 
 
 @pytest.mark.parametrize("content", [
-    "fleets:\n  token: SECRET-orientation-planted\n",
-    "--- # SECRET-orientation-planted\n",
-], ids=["malformed-mapping", "null-document"])
+    b"fleets:\n  token: SECRET-orientation-planted\n",
+    b"--- # SECRET-orientation-planted\n",
+    b"fleet:\n  name: \xff\xfeSECRET-orientation-planted\n",
+], ids=["malformed-mapping", "null-document", "invalid-encoding"])
 def test_non_empty_invalid_manifest_keeps_the_generic_refusal(staging_case, monkeypatch, capsys, content):
     monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
     manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
                       staging_case.package).fleet_yaml
-    manifest.write_text(content)
+    manifest.write_bytes(content)
     generic = {"config": "selected fleet configuration is invalid",
                "fleet": "context selectors or fleet configuration are invalid",
                "context": "context selectors or fleet configuration are invalid"}
@@ -271,3 +275,4 @@ def test_non_empty_invalid_manifest_keeps_the_generic_refusal(staging_case, monk
         error = json.loads(captured.out)["error"]
         assert error["code"] == "conflict" and error["message"] == generic[operation[0]]
         assert "last good copy" not in str(error["hint"])
+    assert manifest.read_bytes() == content

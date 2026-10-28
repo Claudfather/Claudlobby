@@ -128,7 +128,8 @@ def empty_fleet_conflict(path, size: int) -> CommandFailure:
                f"({size} bytes of whitespace or comments)")
     return CommandFailure("conflict", message,
                           hint=f"restore {path} from its last good copy; where the file is tracked, "
-                               f"`git log -- {shlex.quote(str(path))}` lists the copies")
+                               f"`git -C {shlex.quote(str(path.parent))} log -- {shlex.quote(path.name)}` "
+                               "lists the copies")
 
 
 def selection_read_conflict(message: str, *, release_id: str | None = None,

@@ -68,7 +68,7 @@ _BLESSED_RAW_READS = {
     # only for emptiness and length, and the parsed document takes the same
     # _fleet_document -> BotConfig audit path as the yaml.safe_load(f) it replaced.
     ("config.py", "fleet_yaml.read_bytes()"),
-    ("config.py", "yaml.safe_load(content)"),
+    ("config.py", "yaml.safe_load(text)"),
     # config explain rereads the already selected, validated fleet manifest
     # solely to distinguish authored scalar declarations from defaults. The
     # parsed values never become grants or paths; effective values still come
