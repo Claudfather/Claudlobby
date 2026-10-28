@@ -59,6 +59,34 @@ test('overview deadline pauses only its source leg until explicit retry, preserv
   api.dispose();assert.equal(api.retryOverview('b'),false);a.reader.dispose();b.reader.dispose();
 });
 
+test('exact server query timeout pauses only that overview without releasing its data',async()=>{
+  const {api,a,b}=await pair();
+  for (const failure of [{state:'unavailable',reason:'query_timeout'}, {state:'unreadable',reason:'other'}]) {
+    b.routes.set('/api/overview',failure);
+    assert.equal((await api.jget('/api/overview')).data.sources[1].overview_retry_paused,false,
+      'other states or reasons must not latch');
+  }
+  const poison=roster('unaccepted');poison.data.totals.bots=999;
+  b.routes.set('/api/overview',{state:'unreadable',reason:'query_timeout',provenance:null,data:poison.data});
+  const timed=await api.jget('/api/overview');
+  assert.equal(timed.data.sources[1].state,'unreadable');
+  assert.equal(timed.data.sources[1].overview_retry_paused,true);
+  assert.equal(timed.data.sources[1].connection_state,'ready');
+  assert.equal(timed.data.sources[1].host,null);
+  assert.equal(timed.data.totals.bots,1);
+  assert.deepEqual(timed.data.fleets.map(f=>f.alias),['a / team']);
+  const counts=()=>[a,b].map(s=>s.calls.filter(c=>c.url==='/api/overview').length),before=counts();
+  await api.jget('/api/overview');
+  assert.deepEqual(counts(),[before[0]+1,before[1]],'healthy peer refreshes while server timeout is paused');
+  assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
+  b.routes.set('/api/overview',roster('team'));
+  assert.equal(api.retryOverview('b'),true);
+  const recovered=await api.jget('/api/overview');
+  assert.equal(recovered.data.coverage.reachable,2);
+  assert.equal(recovered.data.sources[1].overview_retry_paused,false);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('rejected overview projection never becomes the last successful summary timestamp',async()=>{
   const {api,a,b}=await pair();
   b.routes.set('/api/overview',ok({fleets:[{alias:'team',uid:fleet,bots:1}],totals:{bots:1}})); // Missing required host.

@@ -11,7 +11,7 @@ from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_owner_feedback import gateway  # noqa: F401
 from tests.test_plane_owner_feedback_http import feedback_http, post, counts  # noqa: F401
 from tests.test_task_permissions import SCOPE
-from tests.test_plane_owner_messages import native_receiver
+from tests.test_plane_owner_messages import native_receiver, native_owner_gateway  # noqa: F401
 
 
 @pytest.fixture
@@ -178,3 +178,99 @@ def test_unproven_list_rows_do_not_hide_genuine_requests_and_poison_is_local(per
     rows = post(client, 'context', query).json()['permissions']
     assert rows == [second.as_dict(), {'permission_id': permission.permission_id,
         'task_id': permission.task_id, 'state': 'unavailable'}]
+
+
+@pytest.fixture
+def native_permissions_http(native_owner_gateway, monkeypatch):
+    """Reuse selected owner-unit proof; HTTP/native observations remain synthetic."""
+    from fastapi.testclient import TestClient
+    from claudlobby import task_operations
+    from claudlobby.commands import message_write
+    from claudlobby.plane.owner_browser import COOKIE_NAME, create_owner_browser_app
+    from claudlobby.plane.owner_source import bind_source
+    from tests.test_plane_owner_browser import ORIGIN
+    from tests.test_plane_two_fleets import _Sampler
+
+    (adapter, reader, owner, ctx, _), host, _ = native_owner_gateway
+    monkeypatch.setattr(message_write, '_RECEIPT_WAIT_S', 0)
+    task = task_operations.admit(ctx, str(uuid4()), title='Review selected native work')
+    bot = replace(ctx, caller=ctx.bots['manager'], caller_fleet_uid=ctx.fleet_uid)
+    permission = task_permissions.request_permission(bot, str(uuid4()), task.task_id,
+        scope=SCOPE, reason='Ready for review').permission
+    grant = adapter.access.allow_permissions(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+        actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    bind_source(adapter.root)
+    async def verify(_scope):
+        return reader.principal
+    app = create_owner_browser_app(adapter.root, verify_principal=verify,
+        expected_origin=ORIGIN, sampler=_Sampler([]), package=adapter.package)
+    client = TestClient(app, base_url=ORIGIN)
+    client.cookies.set(COOKIE_NAME, reader.token, domain='plane.example.test', path='/')
+    query = {'kind':'permission', 'room':'example', 'task_id':permission.task_id}
+    response = post(client, 'context', query)
+    assert response.status_code == 200, response.text
+    return (client, adapter, reader, ctx, permission, grant, response.json()), host, app
+
+
+def test_native_owner_permission_context_decision_and_receipt_preserve_actor_and_no_resend(native_permissions_http, monkeypatch):
+    fixture, _, _ = native_permissions_http
+    client, adapter, _, ctx, permission, _, context = fixture
+    calls = native_receiver(monkeypatch)
+    assert context['permissions'] == [permission.as_dict()]
+    row = prepare(fixture)
+    sent = post(client, 'send', {**row, 'body':'Reviewed these exact terms'})
+    assert sent.status_code == 200, sent.text
+    result = sent.json()
+    assert result['status'] == 'recorded' and result['permission']['state'] == 'approved'
+    assert result['permission']['decided_by']['uid'] == ctx.caller.uid
+    assert result['execution'] == 'not_requested' and result['notification'] == 'received'
+    before = counts(adapter)
+    assert post(client, 'receipt', row).json() == result
+    assert post(client, 'send', {**row, 'body':'Reviewed these exact terms'}).json() == result
+    assert counts(adapter) == before and len(calls) == 1
+
+
+def test_native_owner_permission_first_proof_refusal_is_not_started(native_permissions_http, monkeypatch):
+    fixture, host, _ = native_permissions_http
+    client, adapter, *_ = fixture
+    calls = native_receiver(monkeypatch)
+    row = prepare(fixture)
+    before = counts(adapter)
+    host.external_result = 0
+    refused = post(client, 'send', {**row, 'body':'Reviewed these exact terms'})
+    assert refused.status_code == 403 and refused.json()['effect'] == 'not_started'
+    assert counts(adapter) == before and calls == []
+
+
+def test_native_owner_permission_post_record_proof_refusal_never_claims_not_started(native_permissions_http, monkeypatch):
+    from claudlobby.plane import owner_permission_actions
+    fixture, host, _ = native_permissions_http
+    client, adapter, *_ = fixture
+    calls = native_receiver(monkeypatch)
+    row = prepare(fixture)
+    decide = owner_permission_actions.decide_and_notify_permission
+    def lose_proof(*args, **kwargs):
+        result = decide(*args, **kwargs)
+        host.external_result = 0
+        return result
+    monkeypatch.setattr(owner_permission_actions, 'decide_and_notify_permission', lose_proof)
+    sent = post(client, 'send', {**row, 'body':'Reviewed these exact terms'})
+    assert sent.status_code == 403 and 'effect' not in sent.json()
+    assert len(calls) == 1
+    # Restore only the synthetic ancestry observation; inspect the original ID.
+    host.external_result = 1
+    before = counts(adapter)
+    recovered = post(client, 'receipt', row)
+    assert recovered.status_code == 200 and recovered.json()['status'] == 'recorded'
+    assert recovered.json()['permission']['state'] == 'approved'
+    assert counts(adapter) == before and len(calls) == 1
+
+
+@pytest.mark.parametrize('carrier', ['BOT_SERVICE', 'CLAUDLOBBY_TIMER_CONTEXT'])
+def test_native_owner_permission_proof_does_not_admit_bot_or_timer_selectors(native_permissions_http, monkeypatch, carrier):
+    fixture, _, _ = native_permissions_http
+    client, adapter, _, _, permission, _, _ = fixture
+    before = counts(adapter)
+    monkeypatch.setenv(carrier, '')
+    denied = post(client, 'context', {'kind':'permission', 'room':'example', 'task_id':permission.task_id})
+    assert denied.status_code == 403 and counts(adapter) == before
