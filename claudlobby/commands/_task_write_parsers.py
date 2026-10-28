@@ -7,6 +7,14 @@ from ..command_result import execute
 _DEADLINE_HELP = ("RFC3339 deadline, or 'none' for open-ended; omitted freezes now plus the "
                   "fleet manager's observability.dispatch_deadline (default 86400s, 0 open-ended)")
 
+# The page `assignment progress --help` prints (#2546). The 45 minutes is the matcher's
+# DEFAULT_PROGRESS_GRACE_S, pinned by tests/test_assignee_attention.py.
+_PROGRESS_HELP = ("Record that you are working on the assignment, with what is done and what is next, then notify "
+                  "the fleet manager. This is the report the deadline watch reads: in claudlobby brief, an "
+                  "assignment past its deadline reads overdue, or orphaned when your session restarted after the "
+                  "dispatch, until you report; for the 45 minutes after a report (the default) it reads past_due. "
+                  "complete, fail and return end the assignment. block does not clear the watch.")
+
 
 def _dispatch(args):
     module = (".task_permissions" if args.public_command.startswith("task.permission.") else
@@ -17,8 +25,8 @@ def _dispatch(args):
                    json_output=args.json, request_id=getattr(args, "request_id", None))
 
 
-def _route(children, verb, command, help):
-    parser = children.add_parser(verb, help=help)
+def _route(children, verb, command, help, description=None):
+    parser = children.add_parser(verb, help=help, description=description)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
     parser.add_argument("--request-id", required=True, metavar="UUID",
                         help="Caller-retained canonical UUID for this operation")
@@ -132,7 +140,8 @@ def register_task_write_subparsers(task_children, assignment_children):
 
     for verb in ("progress", "block", "return", "complete", "fail"):
         reporting = _route(assignment_children, verb, "assignment." + verb,
-                           "Record a linked report, then notify the fleet manager")
+                           "Record a linked report, then notify the fleet manager",
+                           description=_PROGRESS_HELP if verb == "progress" else None)
         reporting.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
         reporting.add_argument("--summary" if verb in ("progress", "complete") else "--reason",
                                required=True, metavar="TEXT")

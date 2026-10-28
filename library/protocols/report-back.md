@@ -37,6 +37,11 @@ claudlobby --json assignment fail ASSIGNMENT_ID --reason "Verification failed" -
 `complete`, `fail`, and `return` are distinct lifecycle decisions. See
 `/fleet-ops` and each verb's `--help` for optional report evidence fields.
 
+**Past its deadline.** An assignment your brief marks `orphaned` (your session
+restarted after the dispatch) or `overdue` is still open and still yours: record
+`assignment progress`, which holds the flag back for 45 minutes (the default);
+`block` does not. `/fleet-ops` says what each status means and what ends it.
+
 If there is **no current assignment**, submit an explicitly unlinked report
 to your own fleet manager; it does not change a task:
 

@@ -17,8 +17,8 @@ def _review_dispatch(args):
                    json_output=args.json)
 
 
-def _route(children, verb, command, help):
-    parser = children.add_parser(verb, help=help)
+def _route(children, verb, command, help, description=None):
+    parser = children.add_parser(verb, help=help, description=description)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
     parser.set_defaults(func=_dispatch, public_command=command)
     return parser
@@ -44,7 +44,10 @@ def register_task_read_subparsers(sub, task_children):
 
     assignment = sub.add_parser("assignment", help="Read canonical assignment records")
     children = assignment.add_subparsers(dest="assignment_command", required=True)
-    showing = _route(children, "show", "assignment.show", "Show one canonical assignment ID")
+    showing = _route(children, "show", "assignment.show", "Show one canonical assignment ID",
+                     description="Show one canonical assignment ID: its state, history, task and recorded "
+                                 "delivery. The deadline watch (not_due, overdue, orphaned, past_due) is not "
+                                 "part of this record; claudlobby brief reports it.")
     showing.add_argument("assignment_id", metavar="ASSIGNMENT_ID",
                          help="An assignment ID, or asg_ and at least 8 of its hex digits")
     return children
