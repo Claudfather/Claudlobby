@@ -91,7 +91,7 @@ def team_setup(tmp_path, monkeypatch):
         plan.input(stage_root / "local/shop/fleet.yaml")
         plan.input(stage_root / "local/shop/projects.yaml")
         sealed = plan.seal()
-        return CommandOutput({"plan_id": sealed.plan_id, "fleets": ["shop"]})
+        return CommandOutput(releases._plan_data(sealed), sealed.release_id)
 
     def activate(activation_args, activation_root):
         effects.append((activation_args, activation_root))
@@ -364,3 +364,75 @@ def test_host_setup_names_assembly_cause_and_retained_directory_without_subproce
         setup.dispatch(args)
     assert "SECRET" not in refused.value.error.message
     assert "retained" not in refused.value.error.hint
+
+
+@pytest.mark.parametrize("source_kind", ["template", "config"])
+def test_plan_only_retains_exact_plan_and_freshness_without_activation(team_setup, monkeypatch, source_kind):
+    from claudlobby.commands import host
+    from claudlobby.config_plan import read_plan, PlanError
+    from claudlobby import releases
+
+    args, root, effects = team_setup
+    args.plan_only = True
+    args.install_directory = None
+    if source_kind == "config":
+        source = root.parent / "authored.yaml"
+        source.write_bytes(setup._template_config(args.template, args.fleet, args.repository, args.goal))
+        args.config = str(source)
+        args.template = args.repository = args.goal = None
+    monkeypatch.setattr(host, "_activate", lambda *_: pytest.fail("plan-only invoked activation"))
+    first = setup.dispatch(args)
+    plan = read_plan(root, first.data["plan_id"])
+    assert first.release_id == plan.release_id == first.data["release_id"]
+    assert first.data["release_seal"] == plan.release_seal
+    assert first.data["changes"] == [] and first.data["fleets"] == ["shop"]
+    assert first.data["activation"] == "not_requested" and first.data["config_copied"]
+    assert first.data["config"] == str(root / "local/shop/fleet.yaml")
+    assert str(root / "local/shop/fleet.yaml") in plan.inputs
+    assert plan.inputs[str(root / "local/shop/projects.yaml")]["state"]["node"] == {"kind": "absent"}
+    second = setup.dispatch(args)
+    assert second.data["plan_id"] == plan.plan_id and not second.data["config_copied"]
+    monkeypatch.setattr(releases, "read_release", lambda *_: SimpleNamespace(seal_sha256=plan.release_seal))
+    plan.check_fresh()
+    (root / "local/shop/projects.yaml").write_text("projects: {}\n")
+    with pytest.raises(PlanError, match="configuration input changed"):
+        plan.check_fresh()
+    assert not effects and not (root / "state/activation").exists()
+
+
+def test_plan_only_preplan_refusal_rolls_back_declaration(team_setup, monkeypatch):
+    from claudlobby.commands import releases, host
+
+    args, root, effects = team_setup
+    args.plan_only = True
+    args.install_directory = None
+    monkeypatch.setattr(host, "_activate", lambda *_: pytest.fail("plan-only invoked activation"))
+    monkeypatch.setattr(releases, "_config_plan", lambda *_: (_ for _ in ()).throw(
+        CommandFailure("conflict", "conflict: configuration could not be staged from these inputs")))
+    with pytest.raises(CommandFailure) as refused:
+        setup.dispatch(args)
+    assert refused.value.data["config_declaration"] == "removed"
+    assert not (root / "local").exists() and not effects
+
+
+def test_activation_requires_install_directory_before_declaration(team_setup):
+    args, root, effects = team_setup
+    args.install_directory = None
+    with pytest.raises(CommandFailure, match="--install-directory is required"):
+        setup.dispatch(args)
+    assert not (root / "local").exists() and not effects
+
+
+def test_plan_only_parser_needs_no_native_directory_and_dispatch_has_no_activation_id(monkeypatch):
+    import argparse
+    from claudlobby.commands import _setup_parsers
+
+    parser = argparse.ArgumentParser()
+    _setup_parsers.register_fleet_setup(parser.add_subparsers())
+    args = parser.parse_args(["setup", "--config", "authored.yaml", "--plan-only"])
+    assert args.plan_only and args.install_directory is None
+    observed = {}
+    monkeypatch.setattr(_setup_parsers, "execute", lambda command, fn, **kwargs: observed.update(kwargs))
+    args.json = False
+    _setup_parsers._dispatch(args)
+    assert args.activation_id is None and observed["request_id"] is None

@@ -267,6 +267,9 @@ def _fleet_setup(args) -> CommandOutput:
 
     root = _root(args)
     _operator_shell()  # activation itself checks native ancestry
+    plan_only = getattr(args, "plan_only", False)
+    if not plan_only and not getattr(args, "install_directory", None):
+        raise CommandFailure("invalid_argument", "invalid argument: --install-directory is required unless --plan-only")
     if args.seed or not args.fleet or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.fleet):
         raise CommandFailure("invalid_argument", "invalid argument: fleet setup requires one exact --fleet name")
     executing = _executing_release(root)
@@ -330,6 +333,10 @@ def _fleet_setup(args) -> CommandOutput:
                              release_id=exc.release_id or executing,
                              hint=(retry_text + f"claudlobby --root {shlex.quote(str(root))} --fleet {args.fleet} config validate "
                                    "reports authored errors for an installed declaration")) from exc
+    if plan_only:
+        return CommandOutput({**staged.data, "fleet": args.fleet, "config": str(destination),
+                              "config_copied": changed, "activation": "not_requested"}, executing,
+                             (f"Fleet {args.fleet} prepared as configuration plan {staged.data['plan_id']}; no activation performed.",))
     activation = _activate(SimpleNamespace(plan_id=staged.data["plan_id"],
                                             install_directory=args.install_directory,
                                             activation_id=args.activation_id, adopt_existing=False), root)
