@@ -7,13 +7,15 @@ from ..command_result import execute
 _DEADLINE_HELP = ("RFC3339 deadline, or 'none' for open-ended; omitted freezes now plus the "
                   "fleet manager's observability.dispatch_deadline (default 86400s, 0 open-ended)")
 
-# The page `assignment progress --help` prints (#2546). The 45 minutes is the matcher's
-# DEFAULT_PROGRESS_GRACE_S, pinned by tests/test_assignee_attention.py.
+# The page `assignment progress --help` prints (#2546). The 45 minutes and the 24 hours are the matcher's
+# DEFAULT_PROGRESS_GRACE_S and DEFAULT_OVERDUE_MAX_AGE_S, pinned by tests/test_assignee_attention.py.
 _PROGRESS_HELP = ("Record that you are working on the assignment, with what is done and what is next, then notify "
                   "the fleet manager. This is the report the deadline watch reads: in claudlobby brief, an "
                   "assignment past its deadline reads overdue, or orphaned when your session restarted after the "
                   "dispatch, until you report; for the 45 minutes after a report (the default) it reads past_due. "
-                  "complete, fail and return end the assignment. block does not clear the watch.")
+                  "More than 24 hours after the dispatch (the default) or, once the manager has moved the deadline, "
+                  "after the move or the new deadline, whichever is later, it reads past_due with or without a "
+                  "report. complete, fail and return end the assignment. block does not clear the watch.")
 
 
 def _dispatch(args):
