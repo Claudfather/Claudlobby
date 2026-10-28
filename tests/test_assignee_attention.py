@@ -215,7 +215,7 @@ def test_report_back_tells_a_worker_what_orphaned_means_and_what_clears_it():
     assert "`assignment progress`" in para and "holds the flag back for" in para     # the number: the numbers test below
     assert "`block` does not" in para
     assert "`/fleet-ops` says what each status means and what ends it" in para      # the rest of the explanation is there
-    assert "task nudge" not in para        # a worker's composed grants hold no `task nudge`: the fleet manager's do
+    assert "task nudge" not in para        # fleet-ops grants `task nudge` to the fleet manager only
 
 
 def test_a_workers_composed_instructions_carry_the_paragraph(fleet_dir):
