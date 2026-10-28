@@ -23,6 +23,7 @@ rollback is the flag, not a silent fallback.
 
 from __future__ import annotations
 
+import functools
 import os
 import json
 import sqlite3
@@ -147,20 +148,29 @@ _TERMINAL = "(" + ",".join(f"'{e}'" for e in TERMINAL) + ")"
 # the SECOND (reproduced — the re-check timer kept asking about a task every
 # reader else already called done). Byte-identical to the fragment
 # `queries.OPEN_ASSIGNMENTS_AT_SQL` inlines — OPEN_SQL's own pin against that
-# constant is what keeps this file's copy from forking. Binds (at, at, at,
-# at); None = everything landed.
+# constant is what keeps this file's copy from forking.
+#
+# One NOT EXISTS per way a row closes (its own events; the assignments that
+# share its ref, then theirs; the work item's cancels after it), each seeking
+# its own column. Under one OR the planner could seek none of them and walked
+# every task event for each row it tested (#2549). Each test repeats the
+# terminal check, so together they close exactly the rows the OR closed. The
+# CROSS JOIN keeps the sibling test on the assignments first: without planner
+# statistics (#1620), SQLite drives it from the task events by kind. Binds:
+# eight instants, all `at`; None = everything landed.
+_TERMINAL_AS_OF = " AND t.event IN " + _TERMINAL + " AND (? IS NULL OR t.occurred_at <= ?)"
 _SIBLING_CLOSURE = (
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    "    AND t.event IN " + _TERMINAL +
-    " AND (? IS NULL OR t.occurred_at <= ?)"
-    "    AND (t.assignment_id = a.assignment_id"
-    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
-    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
-    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
-    "              AND (? IS NULL OR s.occurred_at <= ?)))"
-    "      OR (t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
-    "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
-    "          AND t.ingest_seq>a.ingest_seq)))"
+    " AND t.assignment_id = a.assignment_id" + _TERMINAL_AS_OF + ")"
+    "  AND NOT EXISTS (SELECT 1 FROM assignments s CROSS JOIN events t"
+    " WHERE a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    " AND s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    " AND (? IS NULL OR s.occurred_at <= ?)"
+    " AND t.kind='task' AND t.assignment_id = s.assignment_id" + _TERMINAL_AS_OF + ")"
+    "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    " AND t.work_item_id = a.work_item_id AND t.ingest_seq > a.ingest_seq"
+    " AND t.emitter='claudlobby.tasks.v1' AND t.event='cancelled' AND t.assignment_id IS NULL"
+    + _TERMINAL_AS_OF + ")"
 )
 # THE deadline of assignment `a`, and when a manager last moved it (#2469):
 # byte-identical twins of `queries.EFFECTIVE_DEADLINE_SQL` and
@@ -271,13 +281,20 @@ ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 # resolves no id — F18 R2a). Both halves span EVERY uid of the bot (`%s` =
 # the marks): a case-variant alias mints a second actor, and a grace bound to
 # the first one paged a live, reporting worker (the adversarial lens).
-# Params: (*uids, at, *uids, at).
+# Each half seeks per uid, never a whole kind (#2549). Without planner
+# statistics (#1620), SQLite walks idx_events_kind_seq for the task half once a
+# bot has three uids, and for the marker half at two: `+e.kind` keeps the task
+# half off it, and INDEXED BY keeps the marker half on idx_events_subject. No
+# index holds the event name, so the task half still reads every event the bot
+# acted and the marker half every system event about the bot; `past_due_rows`
+# reads this only for a row that needs it. Params: (*uids, at, *uids, at).
 LAST_PROGRESS_SQL = (
     "SELECT MAX(t) FROM ("
-    "SELECT e.occurred_at AS t FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
+    "SELECT e.occurred_at AS t FROM events e WHERE +e.kind = 'task' AND e.event = 'progress'"
     " AND e.actor_uid IN (%s) AND e.occurred_at <= ?"
     " UNION ALL"
-    " SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'report_status'"
+    " SELECT e.occurred_at FROM events e INDEXED BY idx_events_subject"
+    " WHERE e.kind = 'system' AND e.event = 'report_status'"
     " AND e.subject_uid IN (%s) AND json_extract(e.detail, '$.status') = 'progress' AND e.occurred_at <= ?)"
 )
 DISPATCH = "dispatch-log:"
@@ -323,7 +340,8 @@ def open_assignments(conn: sqlite3.Connection, fleet: str, bot: str, at: Optiona
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     out: list[tuple] = []
     for uid in (entry or {}).get("uids", []):
-        out.extend(tuple(r) for r in conn.execute(OPEN_SQL, (uid, at, at, at, at, at, at)))
+        # the uid, then `at` for the row's own bound and the open test's eight
+        out.extend(tuple(r) for r in conn.execute(OPEN_SQL, (uid,) + (at,) * 10))
     out.sort(key=lambda r: (r[0] or ""))
     return out
 
@@ -496,13 +514,22 @@ def past_due_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, m
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     at = datetime.fromtimestamp(now, timezone.utc).replace(microsecond=999999).isoformat()
     uids = (entry or {}).get("uids", [])
-    last_progress = last_progress_epoch(conn, uids, now) if progress_grace > 0 else None
+    # The progress decides only the grace, which `deadline_status` reaches
+    # after the deadline and the cap: a row it calls anything but overdue
+    # without the progress gets the same verdict with it. So the progress is
+    # read for the first row it could defer, and never for a bot with none (#2549).
+    @functools.cache
+    def progress() -> Optional[int]:
+        return last_progress_epoch(conn, uids, now)
+
     out: list[tuple[int, int, int, Optional[str], str, str]] = []
     for occurred_at, source_ref, asg, expected_by, set_at in open_assignments(conn, fleet, bot, at, entry=entry):
-        da, exp = _epoch(occurred_at), _epoch(expected_by)
+        da, exp, moved = _epoch(occurred_at), _epoch(expected_by), _epoch(set_at)
         if da is None:
             continue
-        verdict = deadline_status(now, da, exp, last_progress, max_age, progress_grace, _epoch(set_at))
+        verdict = deadline_status(now, da, exp, None, max_age, progress_grace, moved)
+        if verdict == "overdue" and progress_grace > 0:
+            verdict = deadline_status(now, da, exp, progress(), max_age, progress_grace, moved)
         if verdict in PAST_DUE:
             out.append((da, exp, now - exp, _task_id(source_ref), asg, verdict))
     return out
@@ -1355,10 +1382,10 @@ def fleet_open_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
     Empty = the fleet has nothing open; a plane that cannot answer RAISES
     (`connect`), so the caller refuses instead of reporting a quiet fleet."""
     uid = fleet_uid(conn, fleet)
-    # uid for the scope, then the 4 `_SIBLING_CLOSURE` binds — None throughout,
+    # uid for the scope, then the 8 `_SIBLING_CLOSURE` binds — None throughout,
     # "everything landed": this reads the CURRENT open set, never an as-of one.
     rows = [dict(zip(FLEET_OPEN_COLS, r))
-            for r in conn.execute(FLEET_OPEN_SQL, (uid, None, None, None, None))]
+            for r in conn.execute(FLEET_OPEN_SQL, (uid,) + (None,) * 8)]
     facts = menu_facts(conn, [r["assignment_id"] for r in rows])
     for r in rows:
         # None for an id-less dispatch (a `sha:` ref, or none) — the row is
