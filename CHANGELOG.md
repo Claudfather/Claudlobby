@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — content-check reads a just-opened pull request (#2581)
+
+content-check fetched a pull request's head through `refs/pull/N/head`, and a
+run on a just-opened pull request could find that ref missing: the fetch
+failed, and the required check read FAILURE without checking a line until the
+next push or a re-run. The action now fetches the event's head commit by its
+sha, which is the commit the check's result is attached to; a pull request
+from a branch in the repository has that commit on its branch before it is
+opened. A run that cannot fetch it says that it checked nothing and should be
+re-run. The pull request is still read only as git objects: nothing from it is
+checked out or run.
+
 ### Fixed — a failed host job, launchd job or failure alert is reported (#2532)
 
 fleet-pulse now asks, once a sweep, which units the selected release owns are in

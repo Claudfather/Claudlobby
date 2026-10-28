@@ -26,13 +26,20 @@ runs:
     - name: Fetch the pull request as data
       shell: bash
       env:
-        PR: ${{ github.event.pull_request.number }}
+        # The commit this check's result is attached to, fetched by its sha
+        # and never through refs/pull/N/head, which a just-opened pull
+        # request's run can find missing (#2581). A pull request from a branch
+        # here has its head on that branch before the pull request exists.
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
-        if [ -z "$PR" ]; then
+        if [ -z "$HEAD_SHA" ]; then
           echo "::error::content-check runs on pull_request_target: no pull request in this event"
           exit 2
         fi
-        git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/content-check/head"
+        git fetch --no-tags --quiet origin "+${HEAD_SHA}:refs/content-check/head" || {
+          echo "::error::content-check could not fetch the head commit ${HEAD_SHA}, so it checked nothing: re-run this job"
+          exit 1
+        }
     - name: Check the added lines
       shell: bash
       env:
