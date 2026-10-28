@@ -4,6 +4,7 @@ import builtins
 import hashlib
 import json
 from pathlib import Path
+import shlex
 import sqlite3
 
 import pytest
@@ -11,6 +12,7 @@ import yaml
 
 from claudlobby import composer, context
 from claudlobby.__main__ import main
+from claudlobby.command_result import empty_fleet_conflict
 from tests.test_config_staging import staging_case, _fleet, _tree, _write
 
 
@@ -241,8 +243,13 @@ def test_empty_fleet_manifest_is_named_by_every_refusing_command(staging_case, m
         assert str(manifest) in error["message"] and says in error["message"]
         if content:
             assert f"({len(content)} bytes" in error["message"]
-        assert "last good copy" in error["hint"] and f"git log -- {manifest}" in error["hint"]
+        assert "last good copy" in error["hint"]
+        assert f"git log -- {shlex.quote(str(manifest))}" in error["hint"]
     assert manifest.read_bytes() == content
+    # A root with a space stays one argument in the suggested command.
+    spaced = Path("/tmp/data team/local/secondary/fleet.yaml")
+    assert "git log -- '/tmp/data team/local/secondary/fleet.yaml'" in str(
+        empty_fleet_conflict(spaced, len(content)).error.hint)
 
 
 @pytest.mark.parametrize("content", [
