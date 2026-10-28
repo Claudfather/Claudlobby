@@ -121,6 +121,17 @@ class CommandFailure(Exception):
         super().__init__(message)
 
 
+def empty_fleet_conflict(path, size: int) -> CommandFailure:
+    """Name an empty fleet.yaml by path and size, which hold no authored value (#2267)."""
+    message = (f"fleet configuration is empty: {path} (0 bytes)" if size == 0 else
+               f"fleet configuration holds no YAML document: {path} "
+               f"({size} bytes of whitespace or comments)")
+    return CommandFailure("conflict", message,
+                          hint=f"restore {path} from its last good copy; where the file is tracked, "
+                               f"`git -C {shlex.quote(str(path.parent))} log -- {shlex.quote(path.name)}` "
+                               "lists the copies")
+
+
 def selection_read_conflict(message: str, *, release_id: str | None = None,
                             hint: str = "retry the same read") -> CommandFailure:
     """A selection switched while a snapshot was read; no mutation is retried."""

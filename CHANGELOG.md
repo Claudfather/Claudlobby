@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — an empty `fleet.yaml` is named, with its size, instead of "configuration is invalid" (#2267)
+
+`config validate`, `fleet status` and `context show` refused an empty `fleet.yaml`
+with the generic line they print for every config error, so the operator was sent
+to check selectors and `fleet.manager`, never an empty file. A zero-byte file now
+reads `fleet configuration is empty: <path> (0 bytes)`, and one holding only
+whitespace or comments says it holds no YAML document and how many bytes it has.
+The hint says to restore the file from its last good copy and that
+`git log -- <path>` lists the copies where it is tracked. The exit status stays
+4, the file is never rewritten, and only the path and the size are shown. A file
+with a document in it, even `---` or `null`, and every other config error keep
+the generic line, since those errors can quote a secret value.
+
 ### Fixed — fleet-ops says who runs `task escalate` and `task nudge`, and which assignments a progress report holds off (#2574, #2577)
 
 The fleet-ops skill, which every bot reads, told the reader to run `task escalate`
