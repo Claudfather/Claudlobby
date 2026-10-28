@@ -1036,7 +1036,7 @@ function invalidateOverview() {
 }
 
 async function refreshOverview() {
-  if (sessionPaused || overviewInFlight || Date.now() < overviewDueAt) return;
+  if (sessionPaused || agentDirectoryVisible() || overviewInFlight || Date.now() < overviewDueAt) return;
   overviewInFlight = true;
   const epoch = overviewEpoch, session = sessionEpoch;
   overviewDueAt = Date.now() + OVERVIEW_INTERVAL;
@@ -1054,7 +1054,7 @@ async function refreshOverview() {
     if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
   } finally {
     overviewInFlight = false;
-    if (!sessionPaused) overviewTimer = setTimeout(() => {
+    if (!sessionPaused && !agentDirectoryVisible()) overviewTimer = setTimeout(() => {
       overviewTimer = null; void refreshOverview();
     }, Math.max(0, overviewDueAt - Date.now()));
   }
@@ -1077,7 +1077,7 @@ async function retryActivity() {
 }
 
 async function refreshBoards() {
-  if (sessionPaused) return;
+  if (sessionPaused || agentDirectoryVisible() && document.visibilityState === "hidden") return;
   if (refreshInFlight) { refreshPending = true; return; }
   refreshInFlight = true;
   refreshPending = false;
@@ -1095,6 +1095,20 @@ async function refreshBoards() {
     adoptFleets(env);
   }
   syncWorkRoom();
+  if (agentDirectoryVisible()) {
+    // Identity pushes may refresh the directory; live sampling stays on the
+    // minute safety cadence (or an explicit refresh), never every ledger row.
+    const readPresence = !agentPresence || Date.now() >= agentPresenceDue;
+    if (readPresence) agentPresenceDue = Date.now() + 60000;
+    const [identities, presence] = await Promise.all([
+      jget("/api/identities"), readPresence ? jget("/api/presence") : agentPresence,
+    ]);
+    if (sessionPaused || epoch !== sessionEpoch || gen !== generation || !agentDirectoryVisible()) return;
+    if (readPresence) agentPresence = presence || { state: "unavailable" };
+    renderFleet(identities); renderAgentDirectory(identities, agentPresence);
+    restartSafety();
+    return;
+  }
   const q = fleetQuery();
   void refreshOverview(); // the expensive summary never holds conversation rendering
   const [ch, tk, fl, sm] = await Promise.all([
@@ -1138,6 +1152,7 @@ function openStream() {
         // Learning rooms schedules another board read without retiring the
         // canonical overview that just supplied those same room identities.
         if (payload.coverage_changed || payload.routing_retired) ++generation;
+        if (payload.coverage_changed || payload.routing_retired) resetAgentPresence();
         if (payload.coverage_changed) invalidateOverview();
         scheduleRefresh();
       }
@@ -1156,6 +1171,7 @@ function openStream() {
       // read would have re-armed the safety timer, so the coalesced refetch
       // takes its place — the same door a pushed row uses, never a new one.
       ++generation;
+      resetAgentPresence();
       invalidateOverview();
       scheduleRefresh();
       renderSummary(env);
@@ -1335,13 +1351,75 @@ function pickFleet(f) {
     card.classList.toggle("on", card.dataset.fleet === currentFleet);
   }
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
-  if (currentView === "grid") pollGrid();     // so does the grid
+  if (currentView === "grid" && !agentDirectoryVisible()) pollGrid();
   refreshBoards();               // guarded path (generation stale-guard)
   if (!$("search-results").hidden) {
     // active search: re-fire in the NEW room — otherwise the visible
     // hits stay scoped to the old room under the new tab's highlight
     $("search").dispatchEvent(new Event("input"));
   }
+}
+
+let agentPresence = null, agentPresenceDue = 0;
+function agentDirectoryVisible() {
+  return typeof interactionApi.dispose === "function" && currentView === "grid";
+}
+function resetAgentPresence() {
+  agentPresence = null; agentPresenceDue = 0;
+  if (agentDirectoryVisible()) renderState($("grid"), { state: "loading" });
+}
+function agentDirectoryCard(actor, presence) {
+  const source = presence?.data?.sources?.find(s => actor.uid.startsWith(s.key + "::"));
+  const observed = presence?.data?.bots?.find(b => b.alias === actor.alias);
+  const live = source?.state === "ok" && source.sampler_available
+    && ["up", "down"].includes(observed?.live) ? observed.live : "unknown";
+  const heartbeat = source?.state === "ok" && !source.recorded_unavailable
+    && observed ? PRESENCE_WORD[observed.presence] || "unknown" : "unknown";
+  const team = fleets.find(f => f.alias === actor.fleet);
+  return `<article class="agent-card"><h3>${esc(actor.short || actor.alias)}</h3>`
+    + `<p>${esc(team?.display_label || actor.fleet)}</p>`
+    + `<dl><dt>Recorded activity</dt><dd>${esc(ago(actor.last_seen))}</dd>`
+    + `<dt>Live session</dt><dd>${esc(live)}</dd>`
+    + `<dt>Recorded heartbeat</dt><dd>${esc(heartbeat)}</dd></dl>`
+    + (source?.provenance?.checked_at ? `<small>Presence checked ${esc(ago(source.provenance.checked_at))}</small>` : "")
+    + (actor.provisional ? `<p class="dim">Unconfirmed identity; messaging is unavailable.</p>` : "")
+    + `<button class="pill ghost" type="button" data-agent-team="${esc(actor.uid)}"`
+    + ` ${!team || actor.provisional ? "disabled" : ""}>Open team</button></article>`;
+}
+function openAgentTeam(uid) {
+  if (sessionPaused || !agentDirectoryVisible()) return;
+  const identity = rosterIdentities.get(uid);
+  if (!identity || identity.provisional
+      || fleets.find(f => f.alias === identity.fleet)?.uid !== identity.fleet_uid) return;
+  // Opening a room admits its normal composer separately. Never retain a
+  // recipient to select later when authority arrives, and never send here.
+  setView("channel"); pickFleet(identity.fleet);
+  $("fleet").scrollIntoView({ block: "nearest" });
+}
+function renderAgentDirectory(env, presence) {
+  const el = $("grid");
+  if (!env || env.state !== "ok") { renderState(el, env); return; }
+  const focused = document.activeElement?.dataset?.agentTeam;
+  const rows = env.data.identities.filter(a => a.kind === "actor" && a.fleet);
+  const sources = env.data.sources || [];
+  el.innerHTML = `<div class="agent-directory-note"><h2>Recorded agents</h2>`
+    + `<p>${rows.length} agents in readable records. Open a team, then use Message beside an agent to choose the recipient. Nothing sends automatically.</p>`
+    + `<p class="dim">Up to 200 recorded identities per computer; older agents may be omitted. Recorded activity does not prove a live session.</p>`
+    + `<button class="pill ghost" type="button" id="agent-directory-refresh">Refresh agents and presence</button></div>`
+    + sources.filter(s => s.state !== "ok").map(s => `<p class="agent-directory-note">${esc(s.label)}: ${esc(s.state)}. Its agents are not shown.</p>`).join("")
+    + rows.map(a => agentDirectoryCard(a, presence)).join("")
+    + (!rows.length ? `<p class="agent-directory-note">No recorded agents in the readable sources.</p>` : "");
+  const epoch = sessionEpoch, version = rosterGeneration;
+  el.querySelectorAll("[data-agent-team]").forEach(button => {
+    button.addEventListener("click", () => {
+      if (button.isConnected && !button.disabled && epoch === sessionEpoch && version === rosterGeneration)
+        openAgentTeam(button.dataset.agentTeam);
+    });
+    if (button.dataset.agentTeam === focused && !button.disabled) button.focus();
+  });
+  $("agent-directory-refresh").addEventListener("click", () => {
+    if (!sessionPaused && agentDirectoryVisible()) { agentPresenceDue = 0; void refreshBoards(); }
+  });
 }
 
 const STATUS_DOT = { up: "live", down: "", sampling: "warn" };
@@ -1446,7 +1524,7 @@ function renderGrid(env) {
 // the frames still render; the badges just go absent (the recorded half is
 // the degradable one).
 async function pollGrid() {
-  if (sessionPaused || currentView !== "grid") return;
+  if (sessionPaused || currentView !== "grid" || agentDirectoryVisible()) return;
   const epoch = sessionEpoch, fleet = currentFleet;
   const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
@@ -1499,8 +1577,10 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  const wasDirectory = agentDirectoryVisible();
   if (view !== "fleet") closeEquipment();
   currentView = view;
+  document.body.classList.toggle("agent-directory-view", agentDirectoryVisible());
   $("channel").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
   if (view !== "channel") $("search").value = "";
@@ -1511,11 +1591,17 @@ function setView(view) {
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
   clearInterval(gridTimer);
-  if (view === "grid") {
+  if (agentDirectoryVisible()) {
+    ++generation;
+    clearTimeout(overviewTimer); overviewTimer = null;
+    renderState($("grid"), { state: "loading" });
+    void refreshBoards();
+  } else if (view === "grid") {
     renderState($("grid"), { state: "loading" });
     pollGrid();
     gridTimer = setInterval(pollGrid, 5000);
   }
+  if (wasDirectory && view !== "grid") { ++generation; scheduleRefresh(); }
   clearInterval(trustTimer);
   if (view === "trust") {
     renderState($("trust"), { state: "loading" });
@@ -1591,7 +1677,7 @@ function openFocus(bot, fleet) {
 function closeFocus() {
   $("focus-overlay").hidden = true;
   clearInterval(focusTimer);
-  if (currentView === "grid") {   // resume the grid poll
+  if (currentView === "grid" && !agentDirectoryVisible()) {   // resume the direct grid poll
     gridTimer = setInterval(pollGrid, 5000);
     pollGrid();
   }
@@ -1609,9 +1695,12 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     clearInterval(focusTimer); clearInterval(gridTimer);
     clearInterval(trustTimer);
+    if (agentDirectoryVisible()) clearTimeout(safetyTimer);
   } else if (!$("focus-overlay").hidden && $("focus-title").dataset.bot) {
     openFocus($("focus-title").dataset.bot,
               $("focus-title").dataset.fleet || null);
+  } else if (agentDirectoryVisible()) {
+    scheduleRefresh();
   } else if (currentView === "grid") {
     gridTimer = setInterval(pollGrid, 5000); pollGrid();
   } else if (currentView === "trust") {
@@ -1793,6 +1882,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         activityRecovery?.paint();
         ++sessionEpoch;
         ++generation; ++trustGen;
+        resetAgentPresence();
         invalidateOverview();
         // Invalidate the action context as well as reads. pause saves the
         // current draft in memory; resume must fetch fresh authority for this room.

@@ -429,7 +429,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (button.dataset.view === 'channel' && !['denied','disposed'].includes(phase)) continue;
+        if (['channel','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
+          button.disabled = false; button.title = ''; continue;
+        }
         button.disabled = true; button.title = unavailable;
       }
       const search = document.getElementById('search'); if (search) { search.disabled = true; search.title = unavailable; search.value = ''; }

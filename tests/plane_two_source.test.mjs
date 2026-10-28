@@ -34,6 +34,24 @@ async function source(key, n) {
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
 
+test('directory presence keeps colliding aliases source-qualified and retires lost-source reads', async () => {
+  const {api,a,b}=await pair();
+  for(const item of [a,b])item.routes.set('/api/presence',ok({bots:[{alias:'bot:team/lead',live:'sampling',presence:'working'}],sampler_available:item===a}));
+  const result=await api.jget('/api/presence');
+  assert.deepEqual(result.data.bots.map(x=>x.alias),['a::bot:team/lead','b::bot:team/lead']);
+  assert.deepEqual(result.data.sources.map(x=>x.sampler_available),[true,false]);
+  assert.notEqual((await api.jget('/api/grid')).state,'ok');
+  assert.ok([...a.calls,...b.calls].every(x=>!x.url.startsWith('/api/grid')));
+  const held=deferred();b.routes.set('/api/presence',held.promise);
+  const reading=api.jget('/api/presence');await new Promise(r=>setImmediate(r));
+  a.setStatus('sign_in_required');await a.reader.start();
+  held.resolve(ok({bots:[{alias:'bot:team/lead',live:'up',presence:'idle'}],sampler_available:true}));
+  const partial=await reading;
+  assert.equal(partial.data.coverage.reachable,1);
+  assert.deepEqual(partial.data.bots.map(x=>x.alias),['b::bot:team/lead']);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('duplicate saved labels win over host names without changing source, task or actor identities',async()=>{
   const a=await source('a','a'),b=await source('b','b'),savedLabel='Same <computer>';
   a.routes.get('/api/overview').data.host.display_name='Another host name';
@@ -267,7 +285,7 @@ async function appHarness(api) {
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const paints=[], timers=[], callbacks=[], overviewPaints=[], summaries=[], nodes=new Map();
   let now=Date.now();
-  const c={activityRecovery:null,Date:class extends Date {static now(){return now;}},esc:value=>String(value),
+  const c={activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
     syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
@@ -281,6 +299,39 @@ async function appHarness(api) {
     advance:ms=>{now+=ms;},
     async refresh(){now+=60000;await c.refreshBoards();await settle();}};
 }
+test('visible directory coalesces identity pushes but refreshes presence only once a minute',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api),directory=[];
+  for(const item of [a,b]) {
+    item.routes.set('/api/identities',ok({identities:[]}));
+    item.routes.set('/api/presence',ok({bots:[],sampler_available:false}));
+  }
+  Object.assign(h.c,{document:{visibilityState:'visible'},currentView:'grid',agentPresence:null,agentPresenceDue:0,
+    agentDirectoryVisible(){return this.currentView==='grid';},
+    renderAgentDirectory:(identities,presence)=>directory.push({identities,presence}),renderState(){}});
+  // The page's real invalidator must discard its cache on source/room loss.
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const {runInNewContext}=await import('node:vm');
+  runInNewContext(app.slice(app.indexOf('function resetAgentPresence()'),app.indexOf('function agentDirectoryCard(')),h.c);
+  h.c.agentDirectoryVisible=()=>h.c.currentView==='grid';h.c.fleetsSeen=true;
+  await h.c.refreshBoards();h.c.openStream();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,1);
+  for(let i=0;i<4;i++)a.streams[0].onmessage({data:JSON.stringify({rows:[{family:'metric',ingest_seq:i}]})});
+  const refresh=h.callbacks.filter(x=>x.ms===400);assert.equal(refresh.length,1);
+  refresh[0].cb();await h.settle();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,1);
+  assert.equal(directory.length,2);
+  assert.ok(a.calls.every(x=>!['/api/tasks','/api/overview','/api/summary','/api/grid'].includes(x.url)));
+  h.advance(60000);await h.c.refreshBoards();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2);
+  a.streams[0].onopen({});assert.equal(h.c.agentPresence,null);assert.equal(h.c.agentPresenceDue,0);
+  h.c.currentView='channel';await h.c.refreshBoards();await h.settle();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2,'Activity never requests presence');
+  h.c.currentView='grid';h.c.agentPresence=null;h.c.agentPresenceDue=h.c.Date.now()+60000;
+  h.c.document.visibilityState='hidden';const calls=a.calls.length;await h.c.refreshBoards();assert.equal(a.calls.length,calls);
+  h.c.document.visibilityState='visible';await h.c.refreshBoards();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,3,'missing cache is retried immediately on visible return');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
 test('zero-readable first fleet discovery stays eligible after admission without waiting for overview',async()=>{
   const a=await source('a','a'),b=await source('b','b');
   for(const item of [a,b]) { item.setStatus('sign_in_required');await item.reader.start(); }
@@ -414,7 +465,7 @@ test('fleet selection immediately retires the held board before the queued new-r
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',$:()=>({hidden:true})});
-  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('const STATUS_DOT')),h.c);
+  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('let agentPresence =')),h.c);
   h.c.fleetsSeen=true;h.c.currentFleet='all';
   const held=deferred();for(const source of [a,b])source.routes.set('/api/channel?limit=120',held.promise);
   const reading=h.c.refreshBoards();await new Promise(r=>setImmediate(r));

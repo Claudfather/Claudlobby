@@ -683,6 +683,24 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 /* Roster inspection uses native buttons, with the existing name treatment. */
 .bot-inspect { border:0; padding:0; background:transparent; color:var(--ink); text-align:left; overflow-wrap:anywhere }
 .bot-inspect:hover { text-decoration:underline }
+
+.plane-workspace.agent-directory-view main { grid-template-columns:minmax(0,1fr); }
+.agent-directory-view #rail-fleet,
+.agent-directory-view #rail-right,
+.agent-directory-view #overview,
+.agent-directory-view #work-loop,
+.agent-directory-view #rail-channel > h2,
+.agent-directory-view header > span.pill { display:none; }
+.agent-directory-view #grid { grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); padding:0; gap:16px; }
+.agent-directory-note { grid-column:1/-1; font-size:13px; line-height:1.6; }
+.agent-directory-note p { margin:0 0 10px; }
+.agent-card { border:1px solid var(--edge); border-radius:12px; padding:18px; background:var(--panel); }
+.agent-card h3 { margin:0 0 6px; font-size:16px; }
+.agent-card p, .agent-card small { font-size:12px; color:var(--dim); }
+.agent-card dl { display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px; margin:18px 0; }
+.agent-card dt { color:var(--dim); }
+.agent-card dd { margin:0; }
+.agent-card button { display:block; margin-top:16px; }
 .ed-message { margin:12px 0; }
 
 .ed-message-note:empty { display:none; }

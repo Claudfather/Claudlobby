@@ -140,7 +140,9 @@ export function createWorkspaceReadTransport({ sources }) {
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       provenance: values[i].provenance, remediation: values[i].remediation,
       ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null } : {}),
-      ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}) }));
+      ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}),
+      ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
+        recorded_unavailable: values[i].data?.recorded_unavailable === true } : {}) }));
   }
   async function jget(input) {
     try {
@@ -148,9 +150,9 @@ export function createWorkspaceReadTransport({ sources }) {
     const url = new URL(input, 'https://plane.invalid');
     if (url.origin !== 'https://plane.invalid') return failed('invalid');
     const path = url.pathname, detail = /^\/api\/tasks\/([^/]+)$/.exec(path);
-    const roster = ['/api/fleets', '/api/channel', '/api/tasks', '/api/identities', '/api/overview', '/api/summary'];
+    const roster = ['/api/fleets', '/api/channel', '/api/tasks', '/api/identities', '/api/overview', '/api/summary', '/api/presence'];
     if (!detail && !roster.includes(path)) return failed();
-    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : detail || ['/api/tasks', '/api/identities'].includes(path) ? ['fleet'] : [];
+    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : detail || ['/api/tasks', '/api/identities', '/api/presence'].includes(path) ? ['fleet'] : [];
     if ([...url.searchParams.keys()].some(k => !allowed.includes(k) || url.searchParams.getAll(k).length !== 1)) return failed('invalid');
     if (path === '/api/channel' && url.searchParams.has('limit') && url.searchParams.get('limit') !== '120') return failed('invalid');
     const selected = url.searchParams.get('fleet');
@@ -228,6 +230,7 @@ export function createWorkspaceReadTransport({ sources }) {
       checkins_truncated: good.some(x => x.v.data.checkins_truncated),
       lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
     if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
+    if (path === '/api/presence') data.bots = good.flatMap(x => x.v.data.bots);
     if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
     if (path === '/api/overview') {
       data.fleets = good.flatMap(x => x.v.data.fleets);
@@ -249,6 +252,7 @@ export function createWorkspaceReadTransport({ sources }) {
         ['checkin_id', 'actor_uid'], ['actor_alias'], ['fleet']))}) } };
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
     if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid', 'fleet_uid'], ['alias'], ['fleet'])) } };
+    if (path === '/api/presence') return { ...v, data: { ...d, bots: d.bots.map(x => fields(e, x, [], ['alias'])) } };
     if (path === '/api/overview' && (!d.totals || !d.host)) throw new Error('Missing source facts.');
     if (path === '/api/overview') return { ...v, data: { ...d, fleets: d.fleets.map(x => ({...fields(e, x, ['uid'], ['acked_by'], ['alias']),display_label:`${e.label} / ${x.alias}`})) } };
     return v;
