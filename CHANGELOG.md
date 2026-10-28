@@ -20,6 +20,19 @@ retry with `--resume` does with those handoffs: it keeps them and does not
 request them again, and, as before, refuses if one is more than 300 s old when
 it stops the sessions. What the activation does is unchanged.
 
+### Fixed — the overdue sweep reads megabytes where it read gigabytes (#2549)
+
+The pulse runs the overdue sweep (`dispatch-overdue.py`, as `--all` and again as
+`--orphans`) for each fleet every five minutes. Measured on main, one `--all` for
+a 5-bot fleet read 17.1 GB through the page cache in 23.5 CPU-s, because two of
+its statements could use no index. The open test put its three ways a row
+closes under one `OR`, so it walked every task event for each assignment the
+bot had held; it is now three tests, each seeking its own index. The bot's
+last-progress read walked every system event once a bot had two uids; each half
+now seeks per uid, and the sweep reads it only for a row the progress could
+defer. On the same fleet and instant, a run now reads 19.9 MB in under 0.1
+CPU-s, with the same answers. Nothing is migrated: every index it uses is schema 13's.
+
 ### Fixed — Claudlobby knows clauDNA 0.19.0's renamed skills (#2543)
 
 clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded

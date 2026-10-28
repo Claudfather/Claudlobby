@@ -44,6 +44,7 @@ def ro(root: Path):
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -52,6 +53,22 @@ REPO = Path(__file__).resolve().parent.parent
 F = "f"
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 NOW_EPOCH = int(datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc).timestamp())
+
+
+def _at(seconds: float) -> str:
+    """The instant `seconds` from NOW_EPOCH, as a door stamps it."""
+    return datetime.fromtimestamp(NOW_EPOCH + seconds, timezone.utc).isoformat()
+
+
+# A plan step that walks: a scan, or a seek on the kind alone.
+WALK = re.compile(r"^SCAN|\(kind=\?\)")
+
+
+def plan_steps(conn, sql: str, params, aliases: str) -> list[str]:
+    """The EXPLAIN QUERY PLAN steps on the tables aliased *aliases* (one letter each)."""
+    plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    # "SEARCH t" on SQLite 3.36 and later, "SEARCH TABLE events AS t" before it
+    return [d for d in plan if re.match(rf"(SEARCH|SCAN) (TABLE \w+ AS )?[{aliases}]\b", d)]
 MATCHER = REPO / "claudlobby/_runtime_scripts" / "dispatch-overdue.py"
 FLEET_YAML = ("fleet:\n  manager: w2\n  name: f\n  service_prefix: com.test\n  bots:\n"
               "    w1:\n      expertise: [software-engineering]\n"

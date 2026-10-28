@@ -39,15 +39,14 @@ What remains is the plane-reader suite (the file is renamed to say so).
 from __future__ import annotations
 
 import os
-import re
 from datetime import datetime, timezone
 
 import pytest
 
 from claudlobby.plane import queries
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _deadline_changed, _dispatch, _matcher, _report,
-                                  _scene, _stdlib_readers, plane_root, ro)
+from tests.plane_fixtures import (F, NOW_EPOCH, REPO, WALK, _at, _deadline_changed, _dispatch, _matcher,
+                                  _report, _scene, _stdlib_readers, plan_steps, plane_root, ro)
 from tests.plane_fixtures import _live_dispatch
 
 
@@ -125,11 +124,6 @@ def test_the_expiry_cap_and_the_progress_grace_hold_on_the_plane(tmp_path):
 
 # --- a deadline fact moves the deadline the watchdog reads (#2469) -------------------
 
-def _at(seconds: int) -> str:
-    """The instant `seconds` from NOW_EPOCH, as a door stamps it."""
-    return datetime.fromtimestamp(NOW_EPOCH + seconds, timezone.utc).isoformat()
-
-
 def _verdicts(root, now):
     r = _matcher(root, "--all", str(now), "--fleet", F)
     assert r.returncode == 0, r.stderr
@@ -168,12 +162,8 @@ def test_the_deadline_fragment_seeks_the_assignments_own_events(tmp_path):
     root = plane_root(tmp_path)
     _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
     with ro(root) as conn:
-        plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + queries.OPEN_ASSIGNMENTS_AT_SQL,
-                                            ("actor_x",) + (None,) * 6)]
-    # "SEARCH d" on SQLite 3.36 and later, "SEARCH TABLE events AS d" before it
-    steps = [d for d in plan if re.match(r"(SEARCH|SCAN) (TABLE events AS )?d\b", d)]
-    walks = [d for d in steps if d.startswith("SCAN") or re.search(r"\(kind=\?\)", d)]
-    assert len(steps) == 2 and not walks, plan
+        steps = plan_steps(conn, queries.OPEN_ASSIGNMENTS_AT_SQL, ("actor_x",) + (None,) * 10, "d")
+    assert len(steps) == 2 and not [d for d in steps if WALK.search(d)], steps
 
 
 @pytest.mark.parametrize("report_at,closed", [
