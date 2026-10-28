@@ -232,6 +232,10 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[f
     return info.st_mtime, stamp
 
 
+# A handoff is fresh while at most this many seconds old, by its capture's timestamp and its file's mtime.
+_HANDOFF_FRESH_S = 300
+
+
 def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
                         not_before: int | None = None) -> float:
     """Require a fresh owned handoff; explicit capture already witnessed its write.
@@ -248,7 +252,7 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
     # Explicit capture's changed checksum proves a fresh write, but resume
     # still reads last_updated. Require a recent model timestamp on both
     # paths; tolerate future clock skew observed in the live canary.
-    if not (-30 <= mtime_age <= 300) or age > 300:
+    if not (-30 <= mtime_age <= _HANDOFF_FRESH_S) or age > _HANDOFF_FRESH_S:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from ValueError(
             "handoff is stale")
     return age
