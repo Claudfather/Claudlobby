@@ -29,7 +29,7 @@ export function createWorkspaceReadTransport({ sources }) {
   const admittedHosts = entries.map(e => e.reader.snapshot().read_profile?.host_uid).filter(Boolean);
   if (new Set(admittedHosts).size !== admittedHosts.length)
     throw new Error('Distinct independently admitted hosts are required.');
-  function notify() { for (const stream of streams) stream.refresh(); }
+  function notify(change) { for (const stream of streams) stream.refresh(change); }
   function adopt(e, snapshot) {
     const host = snapshot.read_profile?.host_uid;
     let state = snapshot.state === 'ready' ? 'ok' :
@@ -117,12 +117,13 @@ export function createWorkspaceReadTransport({ sources }) {
     const next = rows.map(({alias, uid, bots, provisional}) => ({alias, uid, bots, provisional}));
     const identity = rows => JSON.stringify(rows.map(f => [f.alias, f.uid]).sort((a,b) => a[0].localeCompare(b[0])));
     const changed = identity(next) !== identity(e.fleets);
+    const retired = e.fleets.some(old => !next.some(f => f.alias === old.alias && f.uid === old.uid));
     if (changed) ++e.routingRevision;
     e.fleets = next;
     rooms.clear();
     for (const entry of entries) for (const f of entry.fleets) rooms.set(room(entry, f.alias), { e: entry, raw: f });
     // A channel leg may have combined before this newly learned ownership.
-    if (changed) notify();
+    if (changed) notify({ routing_changed: true, routing_retired: retired });
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
@@ -258,7 +259,8 @@ export function createWorkspaceReadTransport({ sources }) {
     const facade = { onmessage: null, onopen: null, onerror: null,
       addEventListener(name, cb) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(cb); },
       removeEventListener(name, cb) { listeners.get(name)?.delete(cb); },
-      refresh() { facade.onmessage?.({ data: JSON.stringify({ rows: [], coverage_changed: true }) }); },
+      refresh(change = { coverage_changed: true }) {
+        facade.onmessage?.({ data: JSON.stringify({ rows: [], ...change }) }); },
       close() { children.forEach(s => s.close()); streams.delete(facade); } };
     for (const e of entries) {
       const child = e.reader.createEventSource(url); children.push(child);

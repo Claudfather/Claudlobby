@@ -1134,8 +1134,11 @@ function openStream() {
     try {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
-      if (payload.rows.length || payload.coverage_changed) {
-        if (payload.coverage_changed) { ++generation; invalidateOverview(); }
+      if (payload.rows.length || payload.coverage_changed || payload.routing_changed) {
+        // Learning rooms schedules another board read without retiring the
+        // canonical overview that just supplied those same room identities.
+        if (payload.coverage_changed || payload.routing_retired) ++generation;
+        if (payload.coverage_changed) invalidateOverview();
         scheduleRefresh();
       }
     } catch { /* malformed push — the next board refresh corrects */ }
@@ -1246,8 +1249,10 @@ function savePick(f) {
 // first fleet. One fleet = no dimension at all (null, no tabs).
 function adoptFleets(env) {
   if (!env || !env.data || (env.state !== "ok" && !Array.isArray(env.data.fleet_choices))) return;
-  fleetsSeen = true;
   fleets = env.data.fleet_choices || env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  // An empty unreadable first snapshot is not discovery. A later degraded
+  // overview must not erase a dimension already learned from a readable reply.
+  fleetsSeen ||= env.data.coverage?.reachable !== 0 || fleets.length > 0;
   const names = fleets.map((f) => f.alias);
   if (names.length < 2) { currentFleet = null; return; }
   if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
