@@ -190,6 +190,87 @@ def test_healthz_503_when_absent(client):
     assert r.json()["state"] == "absent"
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_envelope_interrupts_sql_after_admission_and_releases_connection(tmp_path, monkeypatch, admitted):
+    import sqlite3
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    ticks = []
+    def clock():
+        ticks.append(len(ticks) * 2.0)
+        return ticks[-1]
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=clock))
+    opened = []
+    original = view._ro_conn
+    def connect(db):
+        conn = original(db)
+        opened.append(conn)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", connect)
+    def admission(conn):
+        assert conn.in_transaction
+        # The real source admission replaces then clears its own handler.
+        conn.set_progress_handler(lambda: 0, 10_000)
+        conn.execute("SELECT 1").fetchone()
+        conn.set_progress_handler(None, 0)
+    def expensive(conn):
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    result = view._envelope(tmp_path, expensive,
+                            admit_connection=admission if admitted else None,
+                            snapshot=True)
+    assert result["state"] == "unreadable" and "data" not in result
+    assert result["reason"] == "query_timeout"
+    assert result["remediation"] == "query timed out — retry this read"
+    assert ticks[-1] == view._QUERY_SECONDS  # real VM callback reached cutoff
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+    # No expired state or interrupted connection leaks into a following read.
+    ticks.clear()
+    healthy = view._envelope(tmp_path, lambda conn: conn.execute("SELECT 7").fetchone()[0])
+    assert healthy["state"] == "ok" and healthy["data"] == 7
+    assert "last_ingest_seq" in healthy["provenance"]
+
+
+@pytest.mark.parametrize("outcome", ["ok", "unknown", "detail", "short"])
+def test_envelope_budget_includes_success_and_error_provenance(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    elapsed = 0.0
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    def body(conn):
+        nonlocal elapsed
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+        elapsed = 9.0
+        if outcome == "unknown":
+            raise view.UnknownFleet("not this fleet")
+        if outcome == "detail":
+            raise view.TaskDetailError("unknown", "not this task")
+        return {"private": "must not escape on timeout"}
+    def provenance(root, conn):
+        nonlocal elapsed
+        # Body used most of the SAME budget; provenance must not get ten more
+        # seconds, including when called from a typed exception handler.
+        elapsed = 10.0
+        if outcome == "short":
+            # A short statement may not reach the VM callback interval.
+            return {"head": conn.execute("SELECT 1").fetchone()[0]}
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    monkeypatch.setattr(view, "_provenance", provenance)
+    result = view._envelope(tmp_path, body)
+    assert result["state"] == "unreadable" and "data" not in result
+    assert result["reason"] == "query_timeout"
+    assert result["remediation"] == "query timed out — retry this read"
+    assert set(result["provenance"]) == {"db", "checked_at"}
+
+
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
     initialize_plane(tmp_path)

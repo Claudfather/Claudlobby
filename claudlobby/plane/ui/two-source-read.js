@@ -99,7 +99,8 @@ export function createWorkspaceReadTransport({ sources }) {
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
     if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return failed(e.state);
-    const timedOut = e.readFailure?.(url) === 'timed_out';
+    const timedOut = e.readFailure?.(url) === 'timed_out'
+      || value?.state === 'unreadable' && value.reason === 'query_timeout';
     if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object'))
       value = failed('unavailable', 'This panel could not be read. Other reads and the computer connection are independent.');
     if (value.state !== 'ok' && timedOut) value = {...value,

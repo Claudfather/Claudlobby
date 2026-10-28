@@ -4,7 +4,6 @@ This adapter authenticates the locally granted human and records through the
 canonical task owner. It never executes an approved effect or retries a send.
 """
 from contextlib import closing
-import os
 import json
 import re
 from uuid import UUID
@@ -24,7 +23,7 @@ from .ids import ID_PATTERNS
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
 from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
-from .owner_feedback import _FEEDBACK_GENERATED_ENV
+from .owner_service import admitted_action, check_action_process
 from .owner_source import admit_source, inspect_source
 
 _FIELDS = {"version", "kind", "request_id", "scope", "target", "decision", "semantic_sha256"}
@@ -35,11 +34,11 @@ class OwnerPermissionActions:
         self.root, self.package = root, package
         self.authorization = action_authorization(root, authorization)
 
+    @admitted_action
     def _context(self, reader, room):
         if type(reader) is not VerifiedReader:
             raise AccessDenied("verified_reader_required")
-        if any(key in os.environ for key in _FEEDBACK_GENERATED_ENV):
-            raise AccessDenied("generated_context_refused")
+        check_action_process(self.root, self.package)
         _text(room)
         host = inspect_source(self.root)
         access = self.authorization

@@ -42,6 +42,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -248,6 +249,12 @@ def _provenance(root: Path, conn: sqlite3.Connection | None) -> dict:
     return prov
 
 
+# Below the connected read's 15-second transport deadline. This bounds active
+# SQLite work per envelope, not concurrent requests or Python/OS blocking work.
+_QUERY_SECONDS = 10.0
+_QUERY_PROGRESS_STEPS = 10_000
+
+
 def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
     """Run `fn(conn)` -> data under the panel-state contract. Classification
     of the pre-connect shape comes from source_state.probe_source — the
@@ -271,6 +278,22 @@ def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
         return fail(SOURCE_UNREADABLE,
                     "db exists but cannot be opened — check permissions;"
                     " `claudlobby plane doctor`")
+    deadline = time.monotonic() + _QUERY_SECONDS
+    expired = False
+
+    def progress():
+        nonlocal expired
+        expired = expired or time.monotonic() >= deadline
+        return int(expired)
+
+    def provenance():
+        if progress():
+            raise sqlite3.OperationalError("interrupted")
+        result = _provenance(root, conn)
+        if progress():
+            raise sqlite3.OperationalError("interrupted")
+        return result
+
     try:
         conn = _ro_conn(db)
     except (sqlite3.Error, OSError) as exc:
@@ -282,20 +305,31 @@ def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
             conn.execute("BEGIN")
             if admit_connection is not None:
                 admit_connection(conn)
-        data = fn(conn)
-        return {"state": SOURCE_OK, "provenance": _provenance(root, conn),
-                "data": data}
-    except TaskDetailError as exc:
-        return {"state": exc.state, "provenance": _provenance(root, conn),
-                "remediation": exc.remediation}
-    except UnknownFleet as exc:
-        return {"state": "unknown", "provenance": _provenance(root, conn),
-                "remediation": str(exc)}
+        # Admission owns and clears its own progress handler. Install ours
+        # afterward, retaining one deadline for the body and provenance SQL.
+        conn.set_progress_handler(progress, _QUERY_PROGRESS_STEPS)
+        if progress():
+            raise sqlite3.OperationalError("interrupted")
+        try:
+            data = fn(conn)
+            return {"state": SOURCE_OK, "provenance": provenance(),
+                    "data": data}
+        except TaskDetailError as exc:
+            return {"state": exc.state, "provenance": provenance(),
+                    "remediation": exc.remediation}
+        except UnknownFleet as exc:
+            return {"state": "unknown", "provenance": provenance(),
+                    "remediation": str(exc)}
     except (sqlite3.Error, OSError, TaskStateError) as exc:
+        if expired:
+            return {**fail(SOURCE_UNREADABLE,
+                           "query timed out — retry this read"),
+                    "reason": "query_timeout"}
         return fail(SOURCE_UNREADABLE,
                     f"query failed: {exc} — schema drift? run"
                     " `claudlobby plane doctor`")
     finally:
+        conn.set_progress_handler(None, 0)
         conn.close()
 
 
@@ -1913,6 +1947,11 @@ def create_app(
                 raise
             raise AccessUnavailable("owner source unavailable") from exc
         if admit_connection is not None and result["state"] in {SOURCE_ABSENT, SOURCE_UNREADABLE}:
+            if result["state"] == SOURCE_UNREADABLE and result.get("reason") == "query_timeout":
+                # The closing owner gate still re-admits this response. Expose
+                # only the retry signal, never source paths or partial data.
+                return {"state": SOURCE_UNREADABLE, "reason": "query_timeout",
+                        "remediation": "query timed out — retry this read"}
             raise AccessUnavailable("owner source unavailable")
         return result
 

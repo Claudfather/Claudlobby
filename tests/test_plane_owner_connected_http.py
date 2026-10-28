@@ -501,6 +501,47 @@ def test_finite_read_deadline_no_private_body_and_shutdown_stream_ownership(conn
         assert result.status_code == 503 and not consumer._readers
 
 
+@pytest.mark.parametrize("closing_loss", [None, "expired", "revoked", "source"])
+def test_real_sql_timeout_signal_is_sanitized_and_closing_admission_wins(connected_http, monkeypatch, closing_loss):
+    from claudlobby.plane import view
+
+    app, access, _, clock, _ = connected_http
+    ticks = []
+    def now():
+        ticks.append(len(ticks) * 2.0)
+        return ticks[-1]
+    def expensive(conn, root):
+        try:
+            return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                                " SELECT x+1 FROM n WHERE x<1000000000)"
+                                " SELECT sum(x) FROM n").fetchone()[0]
+        finally:
+            # Changes occur after opening admission, before the real closing
+            # source/credential check; none may be hidden by the retry signal.
+            if closing_loss == "expired":
+                clock[0] += 3600
+            elif closing_loss == "revoked":
+                _, binding = access.workspace().status()
+                access.workspace().revoke(expected_binding=binding, expected_owner=binding.owner)
+            elif closing_loss == "source":
+                (root / "state" / "host-uid").unlink()
+    with TestClient(app, base_url=HOST) as client:
+        ready = login(client, connected_http)
+        monkeypatch.setattr(view, "time", types.SimpleNamespace(monotonic=now))
+        monkeypatch.setattr(view, "_fetch_summary", expensive)
+        result = client.get(PREFIX + "read/summary", headers=headers(ready["token"]))
+        assert ticks[-1] == view._QUERY_SECONDS
+        if closing_loss is None:
+            assert result.status_code == 200
+            assert result.json() == {"state": "unreadable", "reason": "query_timeout",
+                                     "remediation": "query timed out — retry this read"}
+        else:
+            assert result.status_code == (503 if closing_loss == "source" else 403)
+            assert result.json()["state"] == ("unavailable" if closing_loss == "source" else "denied")
+            assert "reason" not in result.json()
+        assert "data" not in result.json() and "provenance" not in result.json()
+
+
 def test_head_runs_real_canonical_get_queries_not_static_fallback(connected_http, monkeypatch):
     import claudlobby.plane.view as view
     calls = []
