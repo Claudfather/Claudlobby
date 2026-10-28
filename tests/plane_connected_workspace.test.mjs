@@ -517,7 +517,7 @@ test('wrong source targets/scopes cannot reach either same-named lead; missing g
   for(const patch of [{target:{...request.target,recipient:sourceB+'::actor_'+'c'.repeat(32)}},{target:{...request.target,task_id:sourceB+'::'+wi}},{scope:{...request.scope,fleet:sourceB+' / team'}},{scope:{...request.scope,viewer:'forged'}}])await assert.rejects(h.api.prepareAction({...request,...patch}),/unknown/);
   assert.equal(h.calls.length,before);
   h.grants.delete('nudge');const statusBefore=h.calls.filter(c=>c.url.endsWith('/status')).length;
-  assert.equal(await h.api.nudgeContext(sourceA+' / team'),null);
+  await assert.rejects(h.api.nudgeContext(sourceA+' / team'),{code:'action_not_authorized'});
   assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length-statusBefore,1);
   assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,2);h.api.dispose();
 });
@@ -732,4 +732,21 @@ test('actual host rejection is distinct from a missing computer session',async()
  const view=await h.api.jget('/api/overview');
  assert.equal(view.data.sources[0].connection_state,'denied');
  assert.equal(view.data.sources[0].state,'denied');h.api.dispose();
+});
+
+test('explicit connected summary retry forwards only its source key and successful reconnect clears its latch',async()=>{
+  const retries=[];
+  const h=harness({count:1,dependencies:{createTransport(options){
+    const transport=createWorkspaceReadTransport(options);
+    return {...transport,retryOverview(key){retries.push(key);return transport.retryOverview(key);}};
+  }}});
+  assert.equal(h.api.retryOverview(sourceA),false);
+  h.mount();await h.api.checkAccount();await flush();
+  assert.equal(await h.api.act(0,'connect'),true);
+  assert.deepEqual(retries,[sourceA]);
+  assert.equal(h.api.retryOverview(sourceA),true);
+  assert.equal(h.api.retryOverview(sourceB),false);
+  assert.deepEqual(retries,[sourceA,sourceA,sourceB]);
+  await h.api.act(0,'check');assert.equal(retries.length,3,'status checks cannot clear a timeout latch');
+  h.api.dispose();assert.equal(h.api.retryOverview(sourceA),false);assert.equal(retries.length,3);
 });

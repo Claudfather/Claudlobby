@@ -258,8 +258,13 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   async function actionContext(room,kind,task) {
     const source = actionSource(room); if (!source) return null;
     const ticket = sequence;
-    const value = await source.row.actions[kind](source.fleet,task);
-    return disposed || phase !== 'ready' || ticket !== sequence ? null : value;
+    try {
+      const value = await source.row.actions[kind](source.fleet,task);
+      return disposed || phase !== 'ready' || ticket !== sequence ? null : value;
+    } catch (error) {
+      if (disposed || phase !== 'ready' || ticket !== sequence) return null;
+      throw error;
+    }
   }
   async function actionOperation(name,value) {
     const source = actionSource(value?.scope?.fleet);
@@ -309,7 +314,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         return await row.enrollment.start();
       }
       const result = await row.client[operation]();
-      if (operation === 'connect' && result) row.enrollment.cancel();
+      if (operation === 'connect' && result) {
+        row.enrollment.cancel();
+        transport?.retryOverview?.(row.key);
+      }
       return result;
     }
     catch { return false; }
@@ -477,7 +485,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     mount?.cleanup?.(); retire('disposed');
     for (const stream of [...streams]) stream.close(); listeners.clear();
   }
-  return Object.freeze({jget,roomLabel:room => transport?.roomLabel(room) || room,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
+  return Object.freeze({jget,retryOverview:key => !disposed && phase === 'ready' && !!current && (transport?.retryOverview?.(key) || false),roomLabel:room => transport?.roomLabel(room) || room,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
     interactionContext:room => actionContext(room,'interactionContext'),
     nudgeContext:room => actionContext(room,'nudgeContext'),feedbackContext:room => actionContext(room,'feedbackContext'),
     permissionContext:(room,task) => actionContext(room,'permissionContext',task),

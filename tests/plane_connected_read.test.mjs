@@ -668,3 +668,14 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
  assert.equal(h.api.connectionState(),current);
  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
 });
+
+test('source-qualified context denials remain distinct and stale source denials are discarded',async()=>{
+  const h=harness(),actions=h.api.createActions({key:'computer-1'});await h.api.connect();
+  h.overrides.set('actions/context',()=>reply(403,{state:'denied'}));
+  await assert.rejects(actions.interactionContext('team'),{code:'action_not_authorized'});
+  assert.equal(h.api.snapshot().state,'ready');
+  const pending=deferred();h.overrides.set('actions/context',()=>pending.promise);
+  const old=actions.interactionContext('team');await flush();
+  h.api.dispose();pending.resolve(reply(403,{state:'denied'}));
+  assert.equal(await old,null);h.api.dispose();
+});

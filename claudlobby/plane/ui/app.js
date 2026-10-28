@@ -924,6 +924,8 @@ function renderOverview(env) {
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
       <div class="ov-line">${s.connection_state === 'ready' && s.state !== 'ok'
         ? 'Team summary unavailable; activity and task records remain independent.' : 'Separate source snapshot; recent windows are per source.'}</div>
+      ${s.overview_retry_paused ? `<div class="ov-line">Automatic summary retries paused. Timeout recorded ${esc(s.overview_checked_at || 'at an unknown time')}.${s.overview_read_at ? ` Last successful summary ${esc(s.overview_read_at)}.` : ' No successful summary recorded in this connection.'}</div>
+        ${typeof interactionApi.retryOverview === 'function' && s.connection_state === 'ready' ? `<button type="button" class="pill ghost" data-overview-retry="${esc(s.key)}" aria-label="Retry summary for ${esc(s.label)}">Retry summary</button>` : ''}` : ''}
     </div>`).join('');
     return;
   }
@@ -989,6 +991,8 @@ $("task-detail").addEventListener("click", toggleMessageBody);
 // ONE delegated listener for the strip's cards (re-rendered on every refresh;
 // per-card listeners were re-attached each time — simplify lens)
 $("overview").addEventListener("click", (e) => {
+  const retry = e.target.closest("[data-overview-retry]");
+  if (retry) { void retryOverviewSummary(retry); return; }
   const c = e.target.closest(".ov-card.pick");
   if (c) pickFleet(c.dataset.fleet);
 });
@@ -1035,9 +1039,23 @@ function invalidateOverview() {
   renderHeader(env); renderHostFacts(env); renderOverview(env);
 }
 
+function paintOverviewRetry(busy) {
+  for (const button of $("overview")?.querySelectorAll?.('[data-overview-retry]') || []) {
+    button.disabled = busy;
+    button.textContent = busy ? 'Reading summary…' : 'Retry summary';
+  }
+}
+async function retryOverviewSummary(button) {
+  if (sessionPaused || agentDirectoryVisible() || overviewInFlight || !button.isConnected
+      || button.disabled || button.closest('[hidden]') || typeof interactionApi.retryOverview !== 'function') return;
+  if (!interactionApi.retryOverview(button.dataset.overviewRetry)) return;
+  overviewDueAt = 0;
+  await refreshOverview();
+}
 async function refreshOverview() {
   if (sessionPaused || agentDirectoryVisible() || overviewInFlight || Date.now() < overviewDueAt) return;
   overviewInFlight = true;
+  paintOverviewRetry(true);
   const epoch = overviewEpoch, session = sessionEpoch;
   overviewDueAt = Date.now() + OVERVIEW_INTERVAL;
   clearTimeout(overviewTimer); overviewTimer = null;
@@ -1047,13 +1065,15 @@ async function refreshOverview() {
     adoptFleets(ov);
     if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
     renderHeader(ov); renderHostFacts(ov); renderFleetTabs(); renderOverview(ov);
-    const note = ov?.state === "ok"
-      ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
+    const note = ov?.data?.sources
+      ? "Computer summaries are separate snapshots. Available summaries refresh about once a minute; activity and tasks refresh independently."
+      : ov?.state === "ok" ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
       : "Team summary unavailable. Retrying within a minute; activity and tasks refresh separately.";
     const el = $("overview");
     if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
   } finally {
     overviewInFlight = false;
+    paintOverviewRetry(false);
     if (!sessionPaused && !agentDirectoryVisible()) overviewTimer = setTimeout(() => {
       overviewTimer = null; void refreshOverview();
     }, Math.max(0, overviewDueAt - Date.now()));

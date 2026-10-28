@@ -36,7 +36,12 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
     const before = stamp(), ticket = {};
     contextRequests.set(kind,ticket);
     const read = kind === 'message' ? owner.interactionContext : kind === 'nudge' ? owner.nudgeContext : owner.feedbackContext;
-    const value = await read(rawRoom);
+    let value;
+    try { value = await read(rawRoom); }
+    catch (error) {
+      if (contextRequests.get(kind) !== ticket || before !== stamp() || snapshot().state !== 'ready') return null;
+      throw error;
+    }
     if (contextRequests.get(kind) !== ticket || before !== stamp() || snapshot().state !== 'ready' || value?.scope?.host !== snapshot().read_profile?.host_uid
         || value.room !== rawRoom || value.scope.fleet !== rawRoom || value.simulation !== false
         || !(kind === 'message' ? validContext(value) && value.actions.length === 1 && value.actions[0] === kind
@@ -50,7 +55,12 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
     if (snapshot().state !== 'ready') return null;
     const task = bare(selectedTask,'wi'), before = stamp(), ticket = {};
     contextRequests.set('permission',ticket);
-    const value = await owner.permissionContext(rawRoom,task);
+    let value;
+    try { value = await owner.permissionContext(rawRoom,task); }
+    catch (error) {
+      if (contextRequests.get('permission') !== ticket || before !== stamp() || snapshot().state !== 'ready') return null;
+      throw error;
+    }
     if (contextRequests.get('permission') !== ticket || before !== stamp() || snapshot().state !== 'ready'
         || !validPermissionContext(value) || value.scope.host !== snapshot().read_profile?.host_uid
         || value.room !== rawRoom || value.task_id !== task) return null;

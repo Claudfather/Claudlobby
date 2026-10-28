@@ -12,7 +12,7 @@ const wi = 'wi_' + '1'.repeat(32), fleet = 'fleet_' + '2'.repeat(32), actor = 'a
 const ok = data => ({ state: 'ok', provenance: { last_ingest_at: '2026-01-01' }, data });
 function deferred() { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; }
 async function source(key, n) {
-  const host = 'host_' + n.repeat(32), calls = [], streams = [], routes = new Map();
+  const host = 'host_' + n.repeat(32), calls = [], streams = [], routes = new Map(), failures = new Map();
   routes.set('/api/fleets', ok({ fleets: [{ alias: 'team', uid: fleet, bots: 1, provisional: 0 }], default: 'team' }));
   const thread = { key: wi, work_item_id: wi, task_link: { task_id: wi, fleet: 'team', fleet_uid: fleet, host_uid: host }, task_events: [], messages: [{ msg_id: 'msg_' + '4'.repeat(32), sender_alias: 'team/lead', recipient_alias: null, sender_short: 'lead', body: '<literal>', work_item_id: wi, tx: [] }] };
   routes.set('/api/channel?limit=120', ok({ threads: [thread], lineage: { unresolved_threads: 1 } }));
@@ -30,9 +30,60 @@ async function source(key, n) {
     return { status: 200, json: async () => data };
   } });
   await reader.start();
-  return { key, label: key, reader, host, calls, streams, routes, setStatus(value) { status = value; } };
+  return { key, label: key, reader, host, calls, streams, routes, failures, readFailure:url=>failures.get(url), setStatus(value) { status = value; } };
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
+
+test('overview deadline pauses only its source leg until explicit retry, preserving other reads and timestamps',async()=>{
+  const {api,a,b}=await pair();
+  const first=await api.jget('/api/overview'),lastRead=first.data.sources[1].overview_read_at;
+  b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
+  const timed=await api.jget('/api/overview'),sourceB=timed.data.sources[1];
+  assert.equal(sourceB.overview_retry_paused,true);assert.equal(sourceB.overview_read_at,lastRead);
+  assert.equal(sourceB.connection_state,'ready');assert.equal(timed.data.coverage.reachable,1);
+  const counts=()=>[a,b].map(s=>s.calls.filter(c=>c.url==='/api/overview').length),before=counts();
+  await b.reader.start(); // Ordinary authenticated status does not retry the aggregate.
+  const again=await api.jget('/api/overview');
+  assert.deepEqual(counts(),[before[0]+1,before[1]]);
+  assert.equal(again.data.sources[1].overview_checked_at,sourceB.overview_checked_at);
+  assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
+  assert.equal((await api.jget('/api/tasks')).data.coverage.reachable,2);
+  assert.equal((await api.jget('/api/summary')).data.coverage.reachable,2);
+  assert.equal(api.retryOverview('missing'),false);
+  assert.equal(api.retryOverview('a'),true);
+  await api.jget('/api/overview');assert.equal(counts()[1],before[1],'retrying a peer cannot clear this source');
+  b.failures.clear();b.routes.set('/api/overview',roster('team'));
+  assert.equal(api.retryOverview('b'),true);
+  const restored=await api.jget('/api/overview');
+  assert.equal(restored.data.coverage.reachable,2);assert.equal(restored.data.sources[1].overview_retry_paused,false);
+  api.dispose();assert.equal(api.retryOverview('b'),false);a.reader.dispose();b.reader.dispose();
+});
+
+test('rejected overview projection never becomes the last successful summary timestamp',async()=>{
+  const {api,a,b}=await pair();
+  b.routes.set('/api/overview',ok({fleets:[{alias:'team',uid:fleet,bots:1}],totals:{bots:1}})); // Missing required host.
+  const invalid=await api.jget('/api/overview');
+  assert.equal(invalid.data.sources[1].state,'unavailable');
+  b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
+  const timed=await api.jget('/api/overview');
+  assert.equal(timed.data.sources[1].overview_retry_paused,true);
+  assert.equal(timed.data.sources[1].overview_read_at,null,'no rejected payload may claim a successful read');
+  assert.ok(timed.data.sources[1].overview_checked_at,'the real timeout attempt still has its timestamp');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('ordinary overview failures remain retryable automatically and stale timeout cannot relatch an explicit retry',async()=>{
+  const {api,a,b}=await pair();b.routes.set('/api/overview',null);
+  await api.jget('/api/overview');const before=b.calls.filter(c=>c.url==='/api/overview').length;
+  assert.equal((await api.jget('/api/overview')).data.sources[1].overview_retry_paused,false);
+  assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
+  const held=deferred();b.routes.set('/api/overview',held.promise);
+  const old=api.jget('/api/overview');await new Promise(r=>setImmediate(r));
+  assert.equal(api.retryOverview('b'),true);b.failures.set('/api/overview','timed_out');held.resolve(null);await old;
+  b.failures.clear();b.routes.set('/api/overview',roster('team'));
+  assert.equal((await api.jget('/api/overview')).data.coverage.reachable,2);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
 
 test('directory presence keeps colliding aliases source-qualified and retires lost-source reads', async () => {
   const {api,a,b}=await pair();
@@ -73,7 +124,7 @@ test('only core admitted read handles; distinct hosts; no action or mutation cap
   const a = await source('a','a'), b = await source('b','a');
   assert.throws(() => createTwoSourceReadTransport({ sources: [a,b] }), /independently/);
   const { api, a: x } = await pair();
-  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
   for (const path of ['/api/owner/actions/send','/api/tasks?fleet=unregistered','/api/channel?limit=999','/api/tasks?fleet=a%20%2F%20team&fleet=b','https://wrong/api/tasks','/api/inventory']) assert.notEqual((await api.jget(path)).state, 'ok');
   assert.ok(x.calls.every(c => !c.opts.method || c.opts.method === 'GET'));
 });
@@ -199,7 +250,15 @@ test('renderer shows per-host availability and partial totals without inventing 
   context.renderOverview(env); assert.match(nodes.get('overview').innerHTML, /Host B/);
   env.data.sources[0].connection_state='not_connected';env.data.sources[0].state='not_connected';
   env.data.sources[1].connection_state='ready';env.data.sources[1].remediation='Team summary timed out. Other reads and the computer connection are independent.';
+  env.data.sources[1].overview_retry_paused=true;
+  env.data.sources[1].overview_checked_at='2026-10-28T19:00:00Z';
+  env.data.sources[1].overview_read_at='2026-10-28T18:00:00Z';
+  context.interactionApi.retryOverview=()=>true;
   context.renderOverview(env);context.renderHeader(env);context.renderSummary(env);
+  assert.match(nodes.get('overview').innerHTML,/Automatic summary retries paused/);
+  assert.match(nodes.get('overview').innerHTML,/data-overview-retry="b"/);
+  assert.match(nodes.get('overview').innerHTML,/Retry summary for Host B/);
+  assert.match(nodes.get('overview').innerHTML,/2026-10-28T18:00:00Z/);
   assert.match(nodes.get('overview').innerHTML,/Not connected/);
   assert.match(nodes.get('overview').innerHTML,/Connected/);
   assert.match(nodes.get('overview').innerHTML,/Team summary timed out/);
@@ -285,7 +344,7 @@ async function appHarness(api) {
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const paints=[], timers=[], callbacks=[], overviewPaints=[], summaries=[], nodes=new Map();
   let now=Date.now();
-  const c={activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
+  const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
     syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
@@ -350,7 +409,7 @@ for(const fallback of [false,true]) test(`first overview room discovery paints i
   h.c.fleetsSeen=true;h.c.openStream();
   await h.c.refreshOverview();await h.settle();
   assert.equal(h.overviewPaints.at(-1).state,'ok');
-  assert.match(h.nodes.get('overview').innerHTML,/Team summary read at/);
+  assert.match(h.nodes.get('overview').innerHTML,/Computer summaries are separate snapshots\. Available summaries refresh about once a minute/);
   assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team','b / team']);
   assert.equal(h.overviewPaints.at(-1).data.coverage.reachable,fallback?1:2);
   assert.ok(h.callbacks.some(t=>t.ms===400),'routing discovery still coalesces a board refresh');
@@ -453,7 +512,7 @@ test('slow overview does not block activity and stream traffic respects its minu
   assert.equal(h.paints.length,10,'ordinary activity keeps painting independently');
   held.resolve(roster('team'));await h.settle();
   assert.equal(h.overviewPaints.at(-1).state,'ok');
-  assert.match(h.nodes.get('overview').innerHTML,/Team summary read at/);
+  assert.match(h.nodes.get('overview').innerHTML,/Computer summaries are separate snapshots\. Available summaries refresh about once a minute/);
   h.advance(59999);await h.c.refreshBoards();await h.settle();
   assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,1);
   h.advance(1);await h.c.refreshBoards();await h.settle();
@@ -603,7 +662,7 @@ test('workspace transport accepts only one or two distinct core-issued handles; 
     assert.throws(()=>createWorkspaceReadTransport({sources}));
   assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
   const api=createWorkspaceReadTransport({sources:[a]});
-  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
   assert.notEqual((await api.jget('/api/owner/actions/context')).state,'ok');
   assert.notEqual((await api.jget('/api/owner/actions/send')).state,'ok');
   assert.ok(a.calls.every(c=>!c.opts.method||c.opts.method==='GET'));
@@ -944,4 +1003,22 @@ test('hidden teams are an explicit local preference, with reveal and a safe visi
   assert.equal(buttons.some(b=>'hideTeam' in b.dataset),false,'missing stable UIDs have no ineffective hide controls');
   const before=values.size;setTeamHidden(undefined,true,storage);setTeamHidden('',true,storage);assert.equal(values.size,before);
   assert.equal(hiddenTeams({getItem(){throw new Error('blocked storage');}}).size,0);
+});
+
+ test('explicit summary retry reuses the app single-flight and ignores hidden or duplicate clicks',async()=>{
+  const {api,a,b}=await pair();b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
+  await api.jget('/api/overview');
+  const held=deferred();b.routes.set('/api/overview',held.promise);b.failures.clear();
+  const h=await appHarness(api),button={dataset:{overviewRetry:'b'},isConnected:true,disabled:false,closest:()=>null};
+  h.nodes.set('overview',{innerHTML:'',querySelectorAll:()=>[button]});
+  const before=b.calls.filter(c=>c.url==='/api/overview').length;
+  const reading=h.c.retryOverviewSummary(button);await h.settle();
+  assert.equal(button.disabled,true);assert.equal(button.textContent,'Reading summary…');
+  await h.c.retryOverviewSummary(button);
+  assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
+  held.resolve(roster('team'));await reading;
+  assert.equal(button.disabled,false);assert.equal(button.textContent,'Retry summary');
+  button.closest=()=>({hidden:true});await h.c.retryOverviewSummary(button);
+  assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
+  api.dispose();a.reader.dispose();b.reader.dispose();
 });
