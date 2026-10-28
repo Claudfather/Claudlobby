@@ -187,13 +187,11 @@ def _fleet_ops() -> str:
 
 def test_report_back_tells_a_worker_what_orphaned_means_and_what_clears_it():
     para = _report_back()
-    assert "`orphaned`" in para and "restarted after it was dispatched" in para
+    assert "`orphaned`" in para and "`overdue`" in para and "restarted after the dispatch" in para
     assert "still open and still yours" in para
-    assert "no progress in the last 45 minutes" in para
-    assert "`assignment progress`" in para and "`past_due`" in para and "`progress_grace`" in para
-    assert "`complete`, `fail` and `return` end" in para
-    assert "`block` does not clear" in para
-    assert "`assignment reschedule`" in para and "only the manager" in para
+    assert "`assignment progress`" in para and "holds the flag back for" in para     # the number: the numbers test below
+    assert "`block` does not" in para
+    assert "`/fleet-ops` says what each status means and what ends it" in para      # the rest of the explanation is there
     assert "task nudge" not in para        # a worker's composed grants hold no `task nudge`: the fleet manager's do
 
 
