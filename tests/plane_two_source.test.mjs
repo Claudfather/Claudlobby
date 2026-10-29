@@ -34,6 +34,25 @@ async function source(key, n) {
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
 
+test('accepted source paints before a held peer and rechecks admission before final combination', async () => {
+  const {api,a,b}=await pair(), held=deferred();
+  b.routes.set('/api/channel?limit=120',held.promise);
+  let settled=false, accept;
+  const progress=new Promise(resolve=>{accept=resolve;});
+  const reading=api.jget('/api/channel?limit=120',accept).then(value=>{settled=true;return value;});
+  const partial=await progress;
+  assert.equal(settled,false,'a usable source is published without awaiting its peer');
+  assert.deepEqual(partial.data.coverage,{total:2,reachable:1,partial:true});
+  assert.equal(partial.data.sources[1].state,'checking');
+  assert.deepEqual(partial.data.threads.map(t=>t.work_item_id),['a::'+wi]);
+  a.setStatus('sign_in_required');await a.reader.start();
+  held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));
+  const final=await reading;
+  assert.equal(final.data.sources[0].state,'denied');
+  assert.equal(final.data.threads.length,0,'the earlier accepted source cannot survive loss of admission');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('overview deadline pauses only its source leg until explicit retry, preserving other reads and timestamps',async()=>{
   const {api,a,b}=await pair();
   const first=await api.jget('/api/overview'),lastRead=first.data.sources[1].overview_read_at;
@@ -375,7 +394,7 @@ async function appHarness(api) {
   const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
-    syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
+    syncWorkRoom:()=>false,workLoop:{update(){},updateChannel(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
     renderChannel:v=>paints.push(v),renderTasks:v=>paints.push(v),renderFleet(){},renderSummary:v=>summaries.push(v),renderHeader(){},renderHostFacts(){},renderFleetTabs(){},renderOverview:v=>overviewPaints.push(v)};
   runInNewContext(app.slice(app.indexOf('function adoptFleets('),app.indexOf('function renderFleetTabs()')),c);
   runInNewContext(app.slice(app.indexOf('function applyFleetVisibility('),app.indexOf('// ONE pick path')),c);
@@ -386,6 +405,54 @@ async function appHarness(api) {
     advance:ms=>{now+=ms;},
     async refresh(){now+=60000;await c.refreshBoards();await settle();}};
 }
+test('fast board panels paint independently and accepted channel task links open before paired tasks settle',async()=>{
+  const {runInNewContext}=await import('node:vm');
+  const {conversationTaskLink}=await import('../claudlobby/plane/ui/work-loop.js');
+  const controller=await readFile(new URL('../claudlobby/plane/ui/work-loop.js',import.meta.url),'utf8');
+  for (const heldPanel of ['channel','tasks']) {
+    const {api}=await pair(),held=deferred(),updates=[];
+    const h=await appHarness({...api,jget:(url,progress)=>url.startsWith('/api/'+heldPanel)?held.promise:api.jget(url,progress)});
+    h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.workLoop.update=(...values)=>updates.push(values);
+    const opening={channel:null,readsPaused:false,compositionEpoch:0,conversationTaskLink,
+      selected:null,opener:null,openerIdentity:null,detail:()=>{opening.opened=true;},dialog:{showModal(){}},$:()=>({focus(){}})};
+    h.c.workLoop.updateChannel=value=>{opening.channel=value;};
+    const reading=h.c.refreshBoards();await h.settle();
+    assert.equal(h.paints.length,1,'the unheld panel renders independently');
+    assert.ok(h.summaries.length>0,'recording status renders independently too');
+    assert.equal(updates.length,0,'partial panels do not change paired action state');
+    if (heldPanel==='tasks') {
+      const thread=opening.channel.data.threads[0],link=thread.task_link;
+      const button={dataset:{taskOpen:link.task_id,taskFleet:link.fleet,taskHost:link.host_uid,
+        taskFleetUid:link.fleet_uid,taskThread:thread.key}};
+      runInNewContext(controller.slice(controller.indexOf('  function openTask('),controller.indexOf('  document.getElementById("rail-right")')),opening);
+      opening.openTask({target:{closest:()=>button}},true);
+      assert.equal(opening.opened,true,'the actual task-link handler uses the newly painted channel');
+      assert.equal(opening.selected.id,link.task_id);assert.equal(opening.selected.hostUid,link.host_uid);
+    }
+    held.resolve(heldPanel==='channel'?ok({threads:[],lineage:{unresolved_threads:0}}):ok({tasks:[],issues:[],issue_count:0,attention_count:0}));
+    await reading;
+    assert.equal(h.paints.length,2);assert.equal(updates.length,1);
+    api.dispose();
+  }
+});
+
+test('initial discovery paints the healthy source before a held peer and fences late progress after pause',async()=>{
+  const {api,a,b}=await pair(),held=deferred();
+  b.routes.set('/api/fleets',held.promise);
+  const h=await appHarness(api);h.c.currentFleet='all';
+  let shown;const firstPaint=new Promise(resolve=>{shown=resolve;});
+  const paint=h.c.renderTasks;h.c.renderTasks=value=>{paint(value);shown();};
+  const reading=h.c.refreshBoards();
+  await firstPaint;await h.settle();
+  assert.ok(h.paints.length>0,'first usable source reaches the board while peer discovery is held');
+  const before=h.paints.length;
+  h.c.sessionPaused=true;h.c.sessionEpoch++;
+  held.resolve(ok({fleets:[{alias:'team',uid:fleet}],default:'team'}));
+  await reading;await h.settle();
+  assert.equal(h.paints.length,before,'late discovery and read progress cannot repaint a paused session');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('visible directory coalesces identity pushes but refreshes presence only once a minute',async()=>{
   const {api,a,b}=await pair(),h=await appHarness(api),directory=[];
   for(const item of [a,b]) {
@@ -461,12 +528,16 @@ for(const retirement of ['replacement','removal']) test(`All teams board cannot 
   const held=deferred();for(const item of [a,b])item.routes.set('/api/channel?limit=120',held.promise);
   const board=h.c.refreshBoards();await h.settle();
   assert.equal(tasksReturned,true,'old task leg finishes while channel keeps the batch pending');
+  assert.equal(h.paints.length,1,'the accepted task panel paints before retirement');
+  assert.equal(h.paints[0].data.tasks[0].title,'old room task');
+  const beforeRetirement=h.paints.slice();
   const next=roster('team','fleet_'+'9'.repeat(32));if(retirement==='removal')next.data.fleets=[];
   a.routes.set('/api/overview',next);h.advance(60000);await h.c.refreshOverview();await h.settle();
   assert.equal(h.overviewPaints.at(-1).state,'ok','new canonical overview survives its own routing retirement');
   assert.notEqual(h.c.fleets.find(f=>f.alias==='a / team')?.uid,'a::'+fleet);
+  assert.deepEqual(h.paints,beforeRetirement,'retirement cannot repaint the old board');
   held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));await board;await h.settle();
-  assert.equal(h.paints.length,0,'already fulfilled old tasks cannot repaint with the held batch');
+  assert.deepEqual(h.paints,beforeRetirement,'held completion cannot add any paint after retirement');
   api.dispose();
 });
 test('real app overview-only refresh admits new teams, retains unavailable selection, and routes renamed teams',async()=>{
@@ -556,14 +627,18 @@ test('fleet selection immediately retires the held board before the queued new-r
   h.c.fleetsSeen=true;h.c.currentFleet='all';
   const held=deferred();for(const source of [a,b])source.routes.set('/api/channel?limit=120',held.promise);
   const reading=h.c.refreshBoards();await new Promise(r=>setImmediate(r));
+  assert.equal(h.paints.length,1,'the available task panel paints before selection changes');
+  const beforeRetirement=h.paints.slice();
   h.c.pickFleet('a / team');
+  assert.deepEqual(h.paints,beforeRetirement,'changing selection cannot repaint the prior board');
   held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));await reading;await new Promise(r=>setImmediate(r));
-  assert.equal(h.paints.length,0,'the old room cannot paint after the selected room changed');
+  assert.deepEqual(h.paints,beforeRetirement,'the old room cannot paint after the selected room changed');
   assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,1,'new room waits for the active batch');
   const trailing=h.callbacks.filter(x=>x.ms===400).at(-1);assert.ok(trailing);
   trailing.cb();await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
   assert.ok(a.calls.some(c=>c.url==='/api/channel?limit=120&fleet=team'));
-  assert.equal(h.paints.length,2);
+  assert.ok(a.calls.some(c=>c.url==='/api/tasks?fleet=team'));
+  assert.equal(h.paints.length,beforeRetirement.length+2,'only the queued new-room panels add paints');
   api.dispose();
 });
 test('disconnect retires held overview and fast summary before either can repaint',async()=>{
@@ -571,17 +646,21 @@ test('disconnect retires held overview and fast summary before either can repain
   const h=await appHarness({...api,jget:path=>path==='/api/overview'?overview.promise:path==='/api/summary'?summary.promise:api.jget(path)});
   h.c.fleetsSeen=true;h.c.currentFleet='all';
   const reading=h.c.refreshBoards();await h.settle();
+  assert.equal(h.paints.length,2,'available activity and tasks paint before pause');
+  const beforePause=h.paints.slice();
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const pause=app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
   Object.assign(h.c,{trustGen:0,searchTimer:null,workRoom:undefined});h.c.workLoop.pause=()=>{};
   runInNewContext(`function pause(){${pause}};pause()`,h.c);
   assert.equal(h.overviewPaints.at(-1).state,'unavailable');
+  assert.deepEqual(h.paints,beforePause,'pause cannot repaint the old board');
   overview.resolve(roster('team'));summary.resolve(ok({daemon_serving:true}));
   await reading;await h.settle();
   assert.equal(h.overviewPaints.length,1,'late success cannot overwrite paused summary');
   assert.equal(h.summaries.length,0,'late recording status cannot overwrite paused status');
-  assert.equal(h.paints.length,0);assert.equal(h.nodes.get('beat-label').textContent,'session access paused');
+  assert.deepEqual(h.paints,beforePause,'held reads cannot add paints after pause');
+  assert.equal(h.nodes.get('beat-label').textContent,'session access paused');
   api.dispose();
 });
 test('source coverage change retires a completed held overview and selection updates without another read',async()=>{

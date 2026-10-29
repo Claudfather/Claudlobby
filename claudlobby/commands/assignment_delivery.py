@@ -45,7 +45,8 @@ def dispatch(args) -> CommandOutput:
     from ..task_operations import TaskRecordingError, _reader
     from ..task_queries import TaskQueryError, show_assignment
     from ..task_state import TaskStateError
-    from .message_write import _body, _request_id, _effect_failure
+    from .message_write import _body, _request_id
+    from ..application_messages import _effect_failure
 
     release_id = None
     try:

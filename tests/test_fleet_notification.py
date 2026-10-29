@@ -226,7 +226,7 @@ def test_a_failed_message_write_alerts_the_same_target(private_alert, monkeypatc
     """The message-write alert reaches the pulse's target, also when the
     manager's .env tiers cannot be read."""
     from claudlobby import env_tiers
-    from claudlobby.commands.message_write import _alert_tiers
+    from claudlobby.application_messages import _alert_tiers
 
     context, package, manager, _ = private_alert
     fleet, pulse_target = _pulse_fleet(tmp_path)

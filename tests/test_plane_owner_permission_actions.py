@@ -17,7 +17,7 @@ from tests.test_plane_owner_messages import native_receiver, native_owner_gatewa
 @pytest.fixture
 def permissions_http(feedback_http, monkeypatch):
     from claudlobby import message_operations
-    from claudlobby.commands import message_write
+    from claudlobby import application_messages as message_write
     monkeypatch.setattr(message_operations, 'read_recipient_box', lambda *a, **k: None)
     monkeypatch.setattr(message_write, '_RECEIPT_WAIT_S', 0)
     _, client, adapter, reader, ctx, options, _ = feedback_http
@@ -185,7 +185,7 @@ def native_permissions_http(native_owner_gateway, monkeypatch):
     """Reuse selected owner-unit proof; HTTP/native observations remain synthetic."""
     from fastapi.testclient import TestClient
     from claudlobby import task_operations
-    from claudlobby.commands import message_write
+    from claudlobby import application_messages as message_write
     from claudlobby.plane.owner_browser import COOKIE_NAME, create_owner_browser_app
     from claudlobby.plane.owner_source import bind_source
     from tests.test_plane_owner_browser import ORIGIN
