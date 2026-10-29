@@ -6,18 +6,121 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed — the `--auto` check knows clauDNA 0.19.0's renamed skills (#2543)
+### Fixed — an empty `fleet.yaml` is named, with its size, instead of "configuration is invalid" (#2267)
+
+`config validate`, `fleet status` and `context show` refused an empty `fleet.yaml`
+with the generic line they print for every config error, so the operator was sent
+to check selectors and `fleet.manager`, never an empty file. A zero-byte file now
+reads `fleet configuration is empty: <path> (0 bytes)`, and one holding only
+whitespace or comments says it holds no YAML document and how many bytes it has.
+The hint says to restore the file from its last good copy and that
+`git log -- <path>` lists the copies where it is tracked. The exit status stays
+4, the file is never rewritten, and only the path and the size are shown. A file
+with a document in it, even `---` or `null`, and every other config error keep
+the generic line, since those errors can quote a secret value.
+
+### Fixed — fleet-ops says who runs `task escalate` and `task nudge`, and which assignments a progress report holds off (#2574, #2577)
+
+The fleet-ops skill, which every bot reads, told the reader to run `task escalate`
+and `task nudge`. Fleet-ops grants them only to the fleet manager, but their doors
+check no role, so a worker whose own permissions allow them, such as through the
+bare `Bash` that an `allow_all` expertise adds, can run them too. The skill now
+says both are the manager's commands and a worker leaves them to the manager: a
+worker that waits on something outside its assignment records `assignment block`
+with a reason, and for anything else it sends the manager a message. Its
+deadline-watch paragraph said a progress report holds off every past-deadline
+assignment of the bot; it holds off only those dispatched before it, as the watch
+requires, and the `overdue` and `past_due` rows now say so too. The help of
+`assignment progress` now says that an assignment past its deadline reads
+`past_due`, with or without a report, more than 24 hours (the default) after the
+dispatch or, once the manager has moved the deadline, after the later of the move
+and the new deadline. Tests pin each sentence, and the brief's behaviour behind
+the two deadline-watch sentences.
+
+### Fixed — a failed host job, launchd job or failure alert is reported (#2532)
+
+fleet-pulse now asks, once a sweep, which units the selected release owns are in
+the failed state: `claudlobby host supervision failed`, a new read-only command,
+lists each unit the selected plan declares that systemd holds in
+`ActiveState=failed`, or that launchd has loaded, not running, after a non-zero
+exit, with its scope, its fleet and the native fields that decided it. An
+instance counts when the plan declares its template, and a unit's name never
+makes it owned. Bot services stay with the pulse's per-bot checks. Each failure
+episode is reported once: it opens on the first sweep that reads its unit
+failed and ends on the first that reads it neither failed nor running, so a
+failure that clears and recurs is reported again. A fleet's own unit is recorded
+as the critical `unit_failed` on the fleet and paged once through the fleet's
+escalation chat, the leg the critical escalation pages on. A host unit is
+recorded once a host, by the sweep of the host's first fleet by name, on the
+host's own anchor, and pages nobody until a host recipient is declared (#1611).
+Before this, a host job, a launchd job, a unit without `OnFailure=` and an
+instance of the failure template itself could fail and raise nothing.
+
+### Fixed — the documented canary loop stages something (#2567)
+
+`documentation/validating-bot-changes.md` told a reader to stage with `--fleet`,
+which `config plan` refuses ("host preparation rejects --fleet and --seed"), so
+nothing was staged. Its loop now runs the sealed CLI that `host setup` reports,
+with `--root` on every command and no `--fleet` on staging or activation, as
+`library/protocols/canary-rollout.md` does. The two unchecked canary steps of the
+runtime-neutral observability P1 plan copied the same form and now match it. The
+root `CLAUDE.md` asked for a plan's `config diff` with `--fleet`, refused the same
+way; it names the current-drift form again, which takes `--fleet`.
+`tests/test_cold_start_contract.py` now fails on a doc that passes `--fleet` or
+`--seed` to `config plan`, `config diff PLAN_ID` or `host activate`.
+
+### Added — a worker is told what `orphaned` means and what ends it (#2546)
+
+A worker whose session restarted after an assignment was dispatched read
+`orphaned` in its brief with no text on what that meant for it, what to do, or
+what ended it. The fleet-ops skill, the status skill, the help of `assignment
+progress` and `assignment show`, and the brief now say: an `assignment progress`
+report moves it to `past_due` for 45 minutes (the default), `complete`, `fail`
+and `return` end the assignment, and a `block` changes nothing. Only a manager
+or an operator moves a deadline. The boot brief says it once, above the rows.
+The full brief explains an `orphaned` row, a `past_due` row held back by
+progress, and one aged out after 24 hours. The report-back protocol carries one
+sentence: a progress report holds the flag back for 45 minutes, a block does
+not, and the fleet-ops skill has the rest. The grace, the cap, the orphan rule
+and the brief's JSON are unchanged. The protocol text reaches a worker's
+composed instructions at its first restart after activation; the skill text is
+read on use.
+
+### Fixed — a preserve-state activation's refusal names the bot whose handoff directory takes no file, and the bots already handed off (#2547)
+
+`host activate --preserve-bot-state` hands the running bots off one after
+another. When it could not time a bot's handoff request in that bot's handoff
+directory (missing, not a directory this user owns, or not writable), it
+refused without naming the bot, and said "no handoff was requested" even when
+earlier bots in the same activation had been handed off. The refusal now names
+the bot (`fleet/bot`) and its handoff directory, and lists the bots this
+activation has already handed off, in this run or an earlier one, in the order
+their handoffs were requested, or says that none was. It also says what a
+retry with `--resume` does with those handoffs: it keeps them and does not
+request them again, and, as before, refuses if one is more than 300 s old when
+it stops the sessions. What the activation does is unchanged.
+
+### Fixed — the overdue sweep reads megabytes where it read gigabytes (#2549)
+
+The pulse runs the overdue sweep (`dispatch-overdue.py`, as `--all` and again as
+`--orphans`) for each fleet every five minutes. Measured on main, one `--all` for
+a 5-bot fleet read 17.1 GB through the page cache in 23.5 CPU-s, because two of
+its statements could use no index. The open test put its three ways a row
+closes under one `OR`, so it walked every task event for each assignment the
+bot had held; it is now three tests, each seeking its own index. The bot's
+last-progress read walked every system event once a bot had two uids; each half
+now seeks per uid, and the sweep reads it only for a row the progress could
+defer. On the same fleet and instant, a run now reads 19.9 MB in under 0.1
+CPU-s, with the same answers. Nothing is migrated: every index it uses is schema 13's.
+
+### Fixed — Claudlobby knows clauDNA 0.19.0's renamed skills (#2543)
 
 clauDNA 0.19.0 renamed `/claudna:implement-plan` to `/claudna:build` and folded
-`/claudna:visual-crawl` into `/claudna:qa`, whose `crawl` mode takes `--auto`.
-`known_values.py` still listed the old names as `--auto`-eligible, so `config
-validate` warned on `autonomous_runner.skill: /claudna:build` and passed the
-dead `/claudna:implement-plan`. The eligible set now holds `/claudna:build` and
-`/claudna:qa crawl` in their place, and `fleet.yaml.example`'s autonomous-runner
-examples use `/claudna:build`. The two rename-map entries follow separately,
-because the dead-name guard reads that map and would fail until the
-autonomous-runner library text that still names the old skills changes with
-them.
+`/claudna:visual-crawl` into `/claudna:qa crawl`. `config validate` warned on
+`autonomous_runner.skill: /claudna:build` and passed the dead
+`/claudna:implement-plan`; it now accepts both new names, and its warning on an
+old one names the skill clauDNA renamed it to. The autonomous-runner skill and archetype, `fleet.yaml.example` and
+`documentation/bot-archetypes.md` name `/claudna:build`.
 
 ### Fixed — `export-contract-gate` fails when `claudna.ref` is missing or empty (#2550)
 

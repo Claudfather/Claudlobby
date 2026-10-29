@@ -17,10 +17,11 @@ from pathlib import Path
 import re
 import sqlite3
 
-from ..command_result import CommandFailure, CommandOutput
+from ..command_result import CommandFailure, CommandOutput, empty_fleet_conflict
 
 
 def _context(args):
+    from ..config import EmptyFleetConfigError
     from ..context import BotNotFoundError, generated_selectors, resolve_context
     from ..paths import InvalidPathSelector
     import yaml
@@ -48,6 +49,8 @@ def _context(args):
         raise CommandFailure("conflict", "fleet configuration is not valid YAML",
                              hint=f"{getattr(exc, 'problem', None) or 'YAML syntax error'}{where}; "
                                   "fix the selected fleet.yaml") from exc
+    except EmptyFleetConfigError as exc:
+        raise empty_fleet_conflict(exc.path, exc.size) from exc
     except ValueError as exc:
         # Config errors may quote secret scalar values. Do not forward them.
         raise CommandFailure("conflict", "context selectors or fleet configuration are invalid",

@@ -12,7 +12,7 @@ const wi = 'wi_' + '1'.repeat(32), fleet = 'fleet_' + '2'.repeat(32), actor = 'a
 const ok = data => ({ state: 'ok', provenance: { last_ingest_at: '2026-01-01' }, data });
 function deferred() { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; }
 async function source(key, n) {
-  const host = 'host_' + n.repeat(32), calls = [], streams = [], routes = new Map();
+  const host = 'host_' + n.repeat(32), calls = [], streams = [], routes = new Map(), failures = new Map();
   routes.set('/api/fleets', ok({ fleets: [{ alias: 'team', uid: fleet, bots: 1, provisional: 0 }], default: 'team' }));
   const thread = { key: wi, work_item_id: wi, task_link: { task_id: wi, fleet: 'team', fleet_uid: fleet, host_uid: host }, task_events: [], messages: [{ msg_id: 'msg_' + '4'.repeat(32), sender_alias: 'team/lead', recipient_alias: null, sender_short: 'lead', body: '<literal>', work_item_id: wi, tx: [] }] };
   routes.set('/api/channel?limit=120', ok({ threads: [thread], lineage: { unresolved_threads: 1 } }));
@@ -30,16 +30,148 @@ async function source(key, n) {
     return { status: 200, json: async () => data };
   } });
   await reader.start();
-  return { key, label: key, reader, host, calls, streams, routes, setStatus(value) { status = value; } };
+  return { key, label: key, reader, host, calls, streams, routes, failures, readFailure:url=>failures.get(url), setStatus(value) { status = value; } };
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
+
+test('accepted source paints before a held peer and rechecks admission before final combination', async () => {
+  const {api,a,b}=await pair(), held=deferred();
+  b.routes.set('/api/channel?limit=120',held.promise);
+  let settled=false, accept;
+  const progress=new Promise(resolve=>{accept=resolve;});
+  const reading=api.jget('/api/channel?limit=120',accept).then(value=>{settled=true;return value;});
+  const partial=await progress;
+  assert.equal(settled,false,'a usable source is published without awaiting its peer');
+  assert.deepEqual(partial.data.coverage,{total:2,reachable:1,partial:true});
+  assert.equal(partial.data.sources[1].state,'checking');
+  assert.deepEqual(partial.data.threads.map(t=>t.work_item_id),['a::'+wi]);
+  a.setStatus('sign_in_required');await a.reader.start();
+  held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));
+  const final=await reading;
+  assert.equal(final.data.sources[0].state,'denied');
+  assert.equal(final.data.threads.length,0,'the earlier accepted source cannot survive loss of admission');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('overview deadline pauses only its source leg until explicit retry, preserving other reads and timestamps',async()=>{
+  const {api,a,b}=await pair();
+  const first=await api.jget('/api/overview'),lastRead=first.data.sources[1].overview_read_at;
+  b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
+  const timed=await api.jget('/api/overview'),sourceB=timed.data.sources[1];
+  assert.equal(sourceB.overview_retry_paused,true);assert.equal(sourceB.overview_read_at,lastRead);
+  assert.equal(sourceB.connection_state,'ready');assert.equal(timed.data.coverage.reachable,1);
+  const counts=()=>[a,b].map(s=>s.calls.filter(c=>c.url==='/api/overview').length),before=counts();
+  await b.reader.start(); // Ordinary authenticated status does not retry the aggregate.
+  const again=await api.jget('/api/overview');
+  assert.deepEqual(counts(),[before[0]+1,before[1]]);
+  assert.equal(again.data.sources[1].overview_checked_at,sourceB.overview_checked_at);
+  assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
+  assert.equal((await api.jget('/api/tasks')).data.coverage.reachable,2);
+  assert.equal((await api.jget('/api/summary')).data.coverage.reachable,2);
+  assert.equal(api.retryOverview('missing'),false);
+  assert.equal(api.retryOverview('a'),true);
+  await api.jget('/api/overview');assert.equal(counts()[1],before[1],'retrying a peer cannot clear this source');
+  b.failures.clear();b.routes.set('/api/overview',roster('team'));
+  assert.equal(api.retryOverview('b'),true);
+  const restored=await api.jget('/api/overview');
+  assert.equal(restored.data.coverage.reachable,2);assert.equal(restored.data.sources[1].overview_retry_paused,false);
+  api.dispose();assert.equal(api.retryOverview('b'),false);a.reader.dispose();b.reader.dispose();
+});
+
+test('exact server query timeout pauses only that overview without releasing its data',async()=>{
+  const {api,a,b}=await pair();
+  for (const failure of [{state:'unavailable',reason:'query_timeout'}, {state:'unreadable',reason:'other'}]) {
+    b.routes.set('/api/overview',failure);
+    assert.equal((await api.jget('/api/overview')).data.sources[1].overview_retry_paused,false,
+      'other states or reasons must not latch');
+  }
+  const poison=roster('unaccepted');poison.data.totals.bots=999;
+  b.routes.set('/api/overview',{state:'unreadable',reason:'query_timeout',provenance:null,data:poison.data});
+  const timed=await api.jget('/api/overview');
+  assert.equal(timed.data.sources[1].state,'unreadable');
+  assert.equal(timed.data.sources[1].overview_retry_paused,true);
+  assert.equal(timed.data.sources[1].connection_state,'ready');
+  assert.equal(timed.data.sources[1].host,null);
+  assert.equal(timed.data.totals.bots,1);
+  assert.deepEqual(timed.data.fleets.map(f=>f.alias),['a / team']);
+  const counts=()=>[a,b].map(s=>s.calls.filter(c=>c.url==='/api/overview').length),before=counts();
+  await api.jget('/api/overview');
+  assert.deepEqual(counts(),[before[0]+1,before[1]],'healthy peer refreshes while server timeout is paused');
+  assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
+  b.routes.set('/api/overview',roster('team'));
+  assert.equal(api.retryOverview('b'),true);
+  const recovered=await api.jget('/api/overview');
+  assert.equal(recovered.data.coverage.reachable,2);
+  assert.equal(recovered.data.sources[1].overview_retry_paused,false);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('rejected overview projection never becomes the last successful summary timestamp',async()=>{
+  const {api,a,b}=await pair();
+  b.routes.set('/api/overview',ok({fleets:[{alias:'team',uid:fleet,bots:1}],totals:{bots:1}})); // Missing required host.
+  const invalid=await api.jget('/api/overview');
+  assert.equal(invalid.data.sources[1].state,'unavailable');
+  b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
+  const timed=await api.jget('/api/overview');
+  assert.equal(timed.data.sources[1].overview_retry_paused,true);
+  assert.equal(timed.data.sources[1].overview_read_at,null,'no rejected payload may claim a successful read');
+  assert.ok(timed.data.sources[1].overview_checked_at,'the real timeout attempt still has its timestamp');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('ordinary overview failures remain retryable automatically and stale timeout cannot relatch an explicit retry',async()=>{
+  const {api,a,b}=await pair();b.routes.set('/api/overview',null);
+  await api.jget('/api/overview');const before=b.calls.filter(c=>c.url==='/api/overview').length;
+  assert.equal((await api.jget('/api/overview')).data.sources[1].overview_retry_paused,false);
+  assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
+  const held=deferred();b.routes.set('/api/overview',held.promise);
+  const old=api.jget('/api/overview');await new Promise(r=>setImmediate(r));
+  assert.equal(api.retryOverview('b'),true);b.failures.set('/api/overview','timed_out');held.resolve(null);await old;
+  b.failures.clear();b.routes.set('/api/overview',roster('team'));
+  assert.equal((await api.jget('/api/overview')).data.coverage.reachable,2);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('directory presence keeps colliding aliases source-qualified and retires lost-source reads', async () => {
+  const {api,a,b}=await pair();
+  for(const item of [a,b])item.routes.set('/api/presence',ok({bots:[{alias:'bot:team/lead',live:'sampling',presence:'working'}],sampler_available:item===a}));
+  const result=await api.jget('/api/presence');
+  assert.deepEqual(result.data.bots.map(x=>x.alias),['a::bot:team/lead','b::bot:team/lead']);
+  assert.deepEqual(result.data.sources.map(x=>x.sampler_available),[true,false]);
+  assert.notEqual((await api.jget('/api/grid')).state,'ok');
+  assert.ok([...a.calls,...b.calls].every(x=>!x.url.startsWith('/api/grid')));
+  const held=deferred();b.routes.set('/api/presence',held.promise);
+  const reading=api.jget('/api/presence');await new Promise(r=>setImmediate(r));
+  a.setStatus('sign_in_required');await a.reader.start();
+  held.resolve(ok({bots:[{alias:'bot:team/lead',live:'up',presence:'idle'}],sampler_available:true}));
+  const partial=await reading;
+  assert.equal(partial.data.coverage.reachable,1);
+  assert.deepEqual(partial.data.bots.map(x=>x.alias),['b::bot:team/lead']);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('duplicate saved labels win over host names without changing source, task or actor identities',async()=>{
+  const a=await source('a','a'),b=await source('b','b'),savedLabel='Same <computer>';
+  a.routes.get('/api/overview').data.host.display_name='Another host name';
+  const api=createTwoSourceReadTransport({sources:[{...a,savedLabel},{...b,savedLabel}]});
+  const overview=await api.jget('/api/overview');
+  assert.deepEqual(overview.data.sources.map(s=>s.label),[savedLabel,savedLabel]);
+  assert.deepEqual(overview.data.fleets.map(f=>f.alias),['a / team','b / team']);
+  assert.deepEqual(overview.data.fleets.map(f=>f.display_label),[savedLabel+' / team',savedLabel+' / team']);
+  const channel=await api.jget('/api/channel?limit=120');
+  assert.equal(channel.data.threads[0].work_item_id,'a::'+wi);
+  assert.equal(channel.data.threads[0].messages[0].sender_short,savedLabel+' / lead');
+  assert.equal(channel.data.threads[1].messages[0].sender_short,savedLabel+' / lead');
+  assert.equal(channel.data.threads[1].task_link.host_uid,'b::'+b.host);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
 
 test('only core admitted read handles; distinct hosts; no action or mutation capability', async () => {
   assert.throws(() => createTwoSourceReadTransport({ sources: [{ key: 'a', label: 'a', reader: { snapshot: () => ({ state: 'ready' }) } }, {}] }));
   const a = await source('a','a'), b = await source('b','a');
   assert.throws(() => createTwoSourceReadTransport({ sources: [a,b] }), /independently/);
   const { api, a: x } = await pair();
-  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
   for (const path of ['/api/owner/actions/send','/api/tasks?fleet=unregistered','/api/channel?limit=999','/api/tasks?fleet=a%20%2F%20team&fleet=b','https://wrong/api/tasks','/api/inventory']) assert.notEqual((await api.jget(path)).state, 'ok');
   assert.ok(x.calls.every(c => !c.opts.method || c.opts.method === 'GET'));
 });
@@ -165,7 +297,15 @@ test('renderer shows per-host availability and partial totals without inventing 
   context.renderOverview(env); assert.match(nodes.get('overview').innerHTML, /Host B/);
   env.data.sources[0].connection_state='not_connected';env.data.sources[0].state='not_connected';
   env.data.sources[1].connection_state='ready';env.data.sources[1].remediation='Team summary timed out. Other reads and the computer connection are independent.';
+  env.data.sources[1].overview_retry_paused=true;
+  env.data.sources[1].overview_checked_at='2026-10-28T19:00:00Z';
+  env.data.sources[1].overview_read_at='2026-10-28T18:00:00Z';
+  context.interactionApi.retryOverview=()=>true;
   context.renderOverview(env);context.renderHeader(env);context.renderSummary(env);
+  assert.match(nodes.get('overview').innerHTML,/Automatic summary retries paused/);
+  assert.match(nodes.get('overview').innerHTML,/data-overview-retry="b"/);
+  assert.match(nodes.get('overview').innerHTML,/Retry summary for Host B/);
+  assert.match(nodes.get('overview').innerHTML,/2026-10-28T18:00:00Z/);
   assert.match(nodes.get('overview').innerHTML,/Not connected/);
   assert.match(nodes.get('overview').innerHTML,/Connected/);
   assert.match(nodes.get('overview').innerHTML,/Team summary timed out/);
@@ -251,10 +391,10 @@ async function appHarness(api) {
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const paints=[], timers=[], callbacks=[], overviewPaints=[], summaries=[], nodes=new Map();
   let now=Date.now();
-  const c={Date:class extends Date {static now(){return now;}},esc:value=>String(value),
+  const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
-    syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
+    syncWorkRoom:()=>false,workLoop:{update(){},updateChannel(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
     renderChannel:v=>paints.push(v),renderTasks:v=>paints.push(v),renderFleet(){},renderSummary:v=>summaries.push(v),renderHeader(){},renderHostFacts(){},renderFleetTabs(){},renderOverview:v=>overviewPaints.push(v)};
   runInNewContext(app.slice(app.indexOf('function adoptFleets('),app.indexOf('function renderFleetTabs()')),c);
   runInNewContext(app.slice(app.indexOf('function applyFleetVisibility('),app.indexOf('// ONE pick path')),c);
@@ -265,6 +405,141 @@ async function appHarness(api) {
     advance:ms=>{now+=ms;},
     async refresh(){now+=60000;await c.refreshBoards();await settle();}};
 }
+test('fast board panels paint independently and accepted channel task links open before paired tasks settle',async()=>{
+  const {runInNewContext}=await import('node:vm');
+  const {conversationTaskLink}=await import('../claudlobby/plane/ui/work-loop.js');
+  const controller=await readFile(new URL('../claudlobby/plane/ui/work-loop.js',import.meta.url),'utf8');
+  for (const heldPanel of ['channel','tasks']) {
+    const {api}=await pair(),held=deferred(),updates=[];
+    const h=await appHarness({...api,jget:(url,progress)=>url.startsWith('/api/'+heldPanel)?held.promise:api.jget(url,progress)});
+    h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.workLoop.update=(...values)=>updates.push(values);
+    const opening={channel:null,readsPaused:false,compositionEpoch:0,conversationTaskLink,
+      selected:null,opener:null,openerIdentity:null,detail:()=>{opening.opened=true;},dialog:{showModal(){}},$:()=>({focus(){}})};
+    h.c.workLoop.updateChannel=value=>{opening.channel=value;};
+    const reading=h.c.refreshBoards();await h.settle();
+    assert.equal(h.paints.length,1,'the unheld panel renders independently');
+    assert.ok(h.summaries.length>0,'recording status renders independently too');
+    assert.equal(updates.length,0,'partial panels do not change paired action state');
+    if (heldPanel==='tasks') {
+      const thread=opening.channel.data.threads[0],link=thread.task_link;
+      const button={dataset:{taskOpen:link.task_id,taskFleet:link.fleet,taskHost:link.host_uid,
+        taskFleetUid:link.fleet_uid,taskThread:thread.key}};
+      runInNewContext(controller.slice(controller.indexOf('  function openTask('),controller.indexOf('  document.getElementById("rail-right")')),opening);
+      opening.openTask({target:{closest:()=>button}},true);
+      assert.equal(opening.opened,true,'the actual task-link handler uses the newly painted channel');
+      assert.equal(opening.selected.id,link.task_id);assert.equal(opening.selected.hostUid,link.host_uid);
+    }
+    held.resolve(heldPanel==='channel'?ok({threads:[],lineage:{unresolved_threads:0}}):ok({tasks:[],issues:[],issue_count:0,attention_count:0}));
+    await reading;
+    assert.equal(h.paints.length,2);assert.equal(updates.length,1);
+    api.dispose();
+  }
+});
+
+test('initial discovery paints the healthy source before a held peer and fences late progress after pause',async()=>{
+  const {api,a,b}=await pair(),held=deferred();
+  b.routes.set('/api/fleets',held.promise);
+  const h=await appHarness(api);h.c.currentFleet='all';
+  let shown;const firstPaint=new Promise(resolve=>{shown=resolve;});
+  const paint=h.c.renderTasks;h.c.renderTasks=value=>{paint(value);shown();};
+  const reading=h.c.refreshBoards();
+  await firstPaint;await h.settle();
+  assert.ok(h.paints.length>0,'first usable source reaches the board while peer discovery is held');
+  const before=h.paints.length;
+  h.c.sessionPaused=true;h.c.sessionEpoch++;
+  held.resolve(ok({fleets:[{alias:'team',uid:fleet}],default:'team'}));
+  await reading;await h.settle();
+  assert.equal(h.paints.length,before,'late discovery and read progress cannot repaint a paused session');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('visible directory coalesces identity pushes but refreshes presence only once a minute',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api),directory=[];
+  for(const item of [a,b]) {
+    item.routes.set('/api/identities',ok({identities:[]}));
+    item.routes.set('/api/presence',ok({bots:[],sampler_available:false}));
+  }
+  Object.assign(h.c,{document:{visibilityState:'visible'},currentView:'grid',agentPresence:null,agentPresenceDue:0,
+    agentDirectoryVisible(){return this.currentView==='grid';},
+    renderAgentDirectory:(identities,presence)=>directory.push({identities,presence}),renderState(){}});
+  // The page's real invalidator must discard its cache on source/room loss.
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const {runInNewContext}=await import('node:vm');
+  runInNewContext(app.slice(app.indexOf('function resetAgentPresence()'),app.indexOf('function agentDirectoryCard(')),h.c);
+  h.c.agentDirectoryVisible=()=>h.c.currentView==='grid';h.c.fleetsSeen=true;
+  await h.c.refreshBoards();h.c.openStream();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,1);
+  for(let i=0;i<4;i++)a.streams[0].onmessage({data:JSON.stringify({rows:[{family:'metric',ingest_seq:i}]})});
+  const refresh=h.callbacks.filter(x=>x.ms===400);assert.equal(refresh.length,1);
+  refresh[0].cb();await h.settle();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,1);
+  assert.equal(directory.length,2);
+  assert.ok(a.calls.every(x=>!['/api/tasks','/api/overview','/api/summary','/api/grid'].includes(x.url)));
+  h.advance(60000);await h.c.refreshBoards();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2);
+  a.streams[0].onopen({});assert.equal(h.c.agentPresence,null);assert.equal(h.c.agentPresenceDue,0);
+  h.c.currentView='channel';await h.c.refreshBoards();await h.settle();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2,'Activity never requests presence');
+  h.c.currentView='grid';h.c.agentPresence=null;h.c.agentPresenceDue=h.c.Date.now()+60000;
+  h.c.document.visibilityState='hidden';const calls=a.calls.length;await h.c.refreshBoards();assert.equal(a.calls.length,calls);
+  h.c.document.visibilityState='visible';await h.c.refreshBoards();
+  assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,3,'missing cache is retried immediately on visible return');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+test('zero-readable first fleet discovery stays eligible after admission without waiting for overview',async()=>{
+  const a=await source('a','a'),b=await source('b','b');
+  for(const item of [a,b]) { item.setStatus('sign_in_required');await item.reader.start(); }
+  const api=createTwoSourceReadTransport({sources:[a,b]}),h=await appHarness(api);h.c.openStream();
+  await h.refresh();assert.equal(h.c.fleetsSeen,false);assert.equal(h.c.fleets.length,0);
+  const held=deferred();a.routes.set('/api/overview',held.promise);
+  a.setStatus('ready');await a.reader.start();await h.refresh();
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,1);
+  assert.equal(h.c.fleetsSeen,true);assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team']);
+  held.resolve(roster('team'));await h.settle();api.dispose();
+});
+for(const fallback of [false,true]) test(`first overview room discovery paints its own response (fallback: ${fallback})`,async()=>{
+  const a=await source('a','a'),b=await source('b','b');
+  if(fallback)b.routes.set('/api/overview',{state:'unreadable',provenance:null});
+  const api=createTwoSourceReadTransport({sources:[a,b]}),h=await appHarness(api);
+  h.c.fleetsSeen=true;h.c.openStream();
+  await h.c.refreshOverview();await h.settle();
+  assert.equal(h.overviewPaints.at(-1).state,'ok');
+  assert.match(h.nodes.get('overview').innerHTML,/Computer summaries are separate snapshots\. Available summaries refresh about once a minute/);
+  assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team','b / team']);
+  assert.equal(h.overviewPaints.at(-1).data.coverage.reachable,fallback?1:2);
+  assert.ok(h.callbacks.some(t=>t.ms===400),'routing discovery still coalesces a board refresh');
+  api.dispose();
+});
+test('actual source loss still retires a held overview after routing discovery',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);h.c.fleetsSeen=true;h.c.openStream();
+  const held=deferred();a.routes.set('/api/overview',held.promise);
+  const reading=h.c.refreshOverview();await h.settle();
+  b.setStatus('sign_in_required');await b.reader.start();
+  held.resolve(roster('team'));await reading;await h.settle();
+  assert.equal(h.overviewPaints.at(-1).state,'unavailable');
+  assert.ok(h.overviewPaints.every(v=>v.state!=='ok'),'old private response cannot repaint after real access loss');
+  api.dispose();
+});
+for(const retirement of ['replacement','removal']) test(`All teams board cannot repaint retired room tasks after ${retirement}`,async()=>{
+  const {api,a,b}=await pair();let tasksReturned=false;
+  const h=await appHarness({...api,jget:async path=>{const value=await api.jget(path);if(path==='/api/tasks')tasksReturned=true;return value;}});
+  h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.openStream();
+  a.routes.set('/api/tasks',ok({tasks:[{task_id:wi,fleet:'team',fleet_uid:fleet,title:'old room task'}],issues:[],attention_count:0}));
+  const held=deferred();for(const item of [a,b])item.routes.set('/api/channel?limit=120',held.promise);
+  const board=h.c.refreshBoards();await h.settle();
+  assert.equal(tasksReturned,true,'old task leg finishes while channel keeps the batch pending');
+  assert.equal(h.paints.length,1,'the accepted task panel paints before retirement');
+  assert.equal(h.paints[0].data.tasks[0].title,'old room task');
+  const beforeRetirement=h.paints.slice();
+  const next=roster('team','fleet_'+'9'.repeat(32));if(retirement==='removal')next.data.fleets=[];
+  a.routes.set('/api/overview',next);h.advance(60000);await h.c.refreshOverview();await h.settle();
+  assert.equal(h.overviewPaints.at(-1).state,'ok','new canonical overview survives its own routing retirement');
+  assert.notEqual(h.c.fleets.find(f=>f.alias==='a / team')?.uid,'a::'+fleet);
+  assert.deepEqual(h.paints,beforeRetirement,'retirement cannot repaint the old board');
+  held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));await board;await h.settle();
+  assert.deepEqual(h.paints,beforeRetirement,'held completion cannot add any paint after retirement');
+  api.dispose();
+});
 test('real app overview-only refresh admits new teams, retains unavailable selection, and routes renamed teams',async()=>{
   const a=await source('a','a'), b=await source('b','b');
   a.setStatus('sign_in_required');await a.reader.start();
@@ -336,7 +611,7 @@ test('slow overview does not block activity and stream traffic respects its minu
   assert.equal(h.paints.length,10,'ordinary activity keeps painting independently');
   held.resolve(roster('team'));await h.settle();
   assert.equal(h.overviewPaints.at(-1).state,'ok');
-  assert.match(h.nodes.get('overview').innerHTML,/Team summary read at/);
+  assert.match(h.nodes.get('overview').innerHTML,/Computer summaries are separate snapshots\. Available summaries refresh about once a minute/);
   h.advance(59999);await h.c.refreshBoards();await h.settle();
   assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,1);
   h.advance(1);await h.c.refreshBoards();await h.settle();
@@ -348,18 +623,22 @@ test('fleet selection immediately retires the held board before the queued new-r
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',$:()=>({hidden:true})});
-  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('const STATUS_DOT')),h.c);
+  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('let agentPresence =')),h.c);
   h.c.fleetsSeen=true;h.c.currentFleet='all';
   const held=deferred();for(const source of [a,b])source.routes.set('/api/channel?limit=120',held.promise);
   const reading=h.c.refreshBoards();await new Promise(r=>setImmediate(r));
+  assert.equal(h.paints.length,1,'the available task panel paints before selection changes');
+  const beforeRetirement=h.paints.slice();
   h.c.pickFleet('a / team');
+  assert.deepEqual(h.paints,beforeRetirement,'changing selection cannot repaint the prior board');
   held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));await reading;await new Promise(r=>setImmediate(r));
-  assert.equal(h.paints.length,0,'the old room cannot paint after the selected room changed');
+  assert.deepEqual(h.paints,beforeRetirement,'the old room cannot paint after the selected room changed');
   assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,1,'new room waits for the active batch');
   const trailing=h.callbacks.filter(x=>x.ms===400).at(-1);assert.ok(trailing);
   trailing.cb();await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
   assert.ok(a.calls.some(c=>c.url==='/api/channel?limit=120&fleet=team'));
-  assert.equal(h.paints.length,2);
+  assert.ok(a.calls.some(c=>c.url==='/api/tasks?fleet=team'));
+  assert.equal(h.paints.length,beforeRetirement.length+2,'only the queued new-room panels add paints');
   api.dispose();
 });
 test('disconnect retires held overview and fast summary before either can repaint',async()=>{
@@ -367,17 +646,21 @@ test('disconnect retires held overview and fast summary before either can repain
   const h=await appHarness({...api,jget:path=>path==='/api/overview'?overview.promise:path==='/api/summary'?summary.promise:api.jget(path)});
   h.c.fleetsSeen=true;h.c.currentFleet='all';
   const reading=h.c.refreshBoards();await h.settle();
+  assert.equal(h.paints.length,2,'available activity and tasks paint before pause');
+  const beforePause=h.paints.slice();
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const pause=app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
   Object.assign(h.c,{trustGen:0,searchTimer:null,workRoom:undefined});h.c.workLoop.pause=()=>{};
   runInNewContext(`function pause(){${pause}};pause()`,h.c);
   assert.equal(h.overviewPaints.at(-1).state,'unavailable');
+  assert.deepEqual(h.paints,beforePause,'pause cannot repaint the old board');
   overview.resolve(roster('team'));summary.resolve(ok({daemon_serving:true}));
   await reading;await h.settle();
   assert.equal(h.overviewPaints.length,1,'late success cannot overwrite paused summary');
   assert.equal(h.summaries.length,0,'late recording status cannot overwrite paused status');
-  assert.equal(h.paints.length,0);assert.equal(h.nodes.get('beat-label').textContent,'session access paused');
+  assert.deepEqual(h.paints,beforePause,'held reads cannot add paints after pause');
+  assert.equal(h.nodes.get('beat-label').textContent,'session access paused');
   api.dispose();
 });
 test('source coverage change retires a completed held overview and selection updates without another read',async()=>{
@@ -486,7 +769,7 @@ test('workspace transport accepts only one or two distinct core-issued handles; 
     assert.throws(()=>createWorkspaceReadTransport({sources}));
   assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
   const api=createWorkspaceReadTransport({sources:[a]});
-  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
   assert.notEqual((await api.jget('/api/owner/actions/context')).state,'ok');
   assert.notEqual((await api.jget('/api/owner/actions/send')).state,'ok');
   assert.ok(a.calls.every(c=>!c.opts.method||c.opts.method==='GET'));
@@ -568,14 +851,13 @@ test('app recovers canonical teams after Connect while overview stays unavailabl
   assert.equal(reads.filter(path=>path==='/api/fleets').length,1,'unadmitted source does not trigger a registry fallback');
   a.setStatus('ready');await a.reader.start();
   const before=a.calls.length;await h.refresh();
-  assert.equal(a.calls.slice(before).filter(c=>c.url==='/api/fleets').length,1);
+  assert.equal(a.calls.slice(before).filter(c=>c.url==='/api/fleets').length,2,'fast initial discovery plus one failed-overview fallback');
   assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['mini / team']);
   assert.equal(h.c.fleets[0].uid,'mini::'+fleet);
   assert.equal(rooms.at(-1),'mini / team','discovery rebinds the action room through the existing room path');
   assert.deepEqual(api.routeRoom('mini / team'),{key:'mini',fleet:'team'});
-  const trailing=h.callbacks.filter(x=>x.ms===400).at(-1);assert.ok(trailing);
-  const next=a.calls.length;trailing.cb();
-  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,0,'direct discovery already selected the correct first board room');
+  const next=a.calls.length;await h.c.refreshBoards();await h.settle();
   assert.equal(a.calls.slice(next).filter(c=>c.url==='/api/fleets').length,0,'fast refresh does not repeat overview discovery');
   const channel=h.paints.findLast(v=>v.data?.threads);
   assert.equal(channel.data.threads[0].task_link.host_uid,'mini::'+a.host);
@@ -583,7 +865,7 @@ test('app recovers canonical teams after Connect while overview stays unavailabl
   const detail=await api.jget(`/api/tasks/${encodeURIComponent(link.task_id)}?fleet=${encodeURIComponent(link.fleet)}`);
   assert.equal(detail.data.task.fleet,'mini / team');
   assert.equal((await api.jget(`/api/tasks/${wi}?fleet=mini%20%2F%20team`)).state,'invalid');
-  assert.equal(h.callbacks.filter(x=>x.ms===400).length,1,'stable recovered teams do not add a refresh loop');
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,0,'stable recovered teams do not add a refresh loop');
   api.dispose();
 });
 
@@ -603,12 +885,12 @@ test('successful partial empty overview remains authoritative without a stream-d
     driven++;pending.cb();
     await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
   }
-  assert.equal(driven,2,'initial discovery and changed overview each retire one batch, then settle');
-  assert.equal(h.callbacks.filter(x=>x.ms===400).length,2);
-  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,2,'first registry publication retires its own batch, then initial discovery settles');
+  assert.equal(driven,1,'routing discovery coalesces one refresh without retiring its own batch');
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,1);
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,1,'first registry publication stays usable');
   assert.equal(reads.slice(reads.indexOf('/api/overview')+1).includes('/api/fleets'),false,'healthy empty ownership is not contradicted by a fallback');
   assert.deepEqual(Array.from(h.c.fleets),[]);
-  assert.equal(h.paints.length,2,'stable partial overview paints without suppressing roster revision notifications');
+  assert.equal(h.paints.length,2,'only the board with current room ownership paints');
   assert.equal(api.routeRoom('a / team'),null);
   assert.equal((await api.jget(`/api/tasks/${encodeURIComponent('a::'+wi)}?fleet=a%20%2F%20team`)).state,'unknown');
   assert.equal(api.routeRoom('b / team'),null);
@@ -648,13 +930,13 @@ test('failed overview leg discovers teams while healthy empty peer stays authori
     driven++;pending.cb();
     await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
   }
-  assert.equal(driven,2);assert.equal(h.callbacks.filter(x=>x.ms===400).length,2);
-  assert.equal(h.paints.length,2);
+  assert.equal(driven,1);assert.equal(h.callbacks.filter(x=>x.ms===400).length,1);
+  assert.equal(h.paints.length,2,'room retirement fences the already pending board');
   assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['b / team']);
   assert.equal(api.routeRoom('a / team'),null);
   assert.deepEqual(api.routeRoom('b / team'),{key:'b',fleet:'team'});
-  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,2,'healthy source only receives initial discovery, never overview fallback');
-  assert.equal(b.calls.filter(c=>c.url==='/api/fleets').length,4,'failed source receives one fallback per overview batch');
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,1,'healthy source only receives initial discovery, never overview fallback');
+  assert.equal(b.calls.filter(c=>c.url==='/api/fleets').length,2,'failed source receives initial discovery plus one fallback per overview batch');
   const overview=await api.jget('/api/overview');
   assert.equal(overview.data.coverage.partial,true);
   assert.equal(overview.data.sources[1].state,'unreadable');
@@ -828,4 +1110,22 @@ test('hidden teams are an explicit local preference, with reveal and a safe visi
   assert.equal(buttons.some(b=>'hideTeam' in b.dataset),false,'missing stable UIDs have no ineffective hide controls');
   const before=values.size;setTeamHidden(undefined,true,storage);setTeamHidden('',true,storage);assert.equal(values.size,before);
   assert.equal(hiddenTeams({getItem(){throw new Error('blocked storage');}}).size,0);
+});
+
+ test('explicit summary retry reuses the app single-flight and ignores hidden or duplicate clicks',async()=>{
+  const {api,a,b}=await pair();b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
+  await api.jget('/api/overview');
+  const held=deferred();b.routes.set('/api/overview',held.promise);b.failures.clear();
+  const h=await appHarness(api),button={dataset:{overviewRetry:'b'},isConnected:true,disabled:false,closest:()=>null};
+  h.nodes.set('overview',{innerHTML:'',querySelectorAll:()=>[button]});
+  const before=b.calls.filter(c=>c.url==='/api/overview').length;
+  const reading=h.c.retryOverviewSummary(button);await h.settle();
+  assert.equal(button.disabled,true);assert.equal(button.textContent,'Reading summary…');
+  await h.c.retryOverviewSummary(button);
+  assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
+  held.resolve(roster('team'));await reading;
+  assert.equal(button.disabled,false);assert.equal(button.textContent,'Retry summary');
+  button.closest=()=>({hidden:true});await h.c.retryOverviewSummary(button);
+  assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
+  api.dispose();a.reader.dispose();b.reader.dispose();
 });

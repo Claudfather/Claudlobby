@@ -34,18 +34,18 @@ When you add a new pulse check or event type, extend the harness with an asserti
 
 ## When the behavior needs a live bot
 
-Some changes (a skill's actual output, a guardrail's enforcement, a protocol's workflow) can't be asserted by the headless harness. For those, run the loop by hand:
+Some changes (a skill's actual output, a guardrail's enforcement, a protocol's workflow) can't be asserted by the headless harness. For those, run the loop by hand in an independent canary root, with the sealed CLI that `host setup` reported and an explicit `--root` on every command (`library/protocols/canary-rollout.md`). Staging and activation cover the whole host, so they take no `--fleet` or `--seed`:
 
 ```bash
-claudlobby --fleet <fleet> config plan --release RELEASE_ID
-claudlobby config diff PLAN_ID
-claudlobby host activate PLAN_ID --install-directory INSTALL_DIR
+<sealed-cli> --root <canary-root> config plan --release RELEASE_ID
+<sealed-cli> --root <canary-root> config diff PLAN_ID
+<sealed-cli> --root <canary-root> host activate PLAN_ID --install-directory INSTALL_DIR
 # Activation performs the required bot restarts; inspect its outcome.
 # drive the affected path, then observe:
-claudlobby event list --bot <bot> --limit 20      # the plane's rows for the bot
-claudlobby fleet uptime --bot <bot>                 # heartbeat history, from the plane
-claudlobby fleet utilization                        # busy share of observed heartbeat time; no history is unknown
-claudlobby --fleet <fleet> bot session BOT  # inspect the selected private session
+<sealed-cli> --root <canary-root> event list --bot <bot> --limit 20   # the plane's rows for the bot
+<sealed-cli> --root <canary-root> fleet uptime --bot <bot>             # heartbeat history, from the plane
+<sealed-cli> --root <canary-root> fleet utilization                    # busy share of observed heartbeat time; no history is unknown
+<sealed-cli> --root <canary-root> --fleet <fleet> bot session BOT      # inspect the selected private session
 ```
 
 Write down what you saw: *"composed `<fleet>`, restarted `<bot>`, invoked `/<skill>`, observed `<result>`."*

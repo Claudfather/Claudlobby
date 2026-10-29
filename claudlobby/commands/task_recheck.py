@@ -107,7 +107,7 @@ def _dispatch(args) -> CommandOutput:
                          max_age_h=args.max_age_h, repeat_h=args.repeat_h, by=args.by)
         notification = None
         if result.message_id is not None:
-            from .task_write import _committed_notification
+            from ..application_tasks import _committed_notification
             notification = _committed_notification(ctx, route, selected.paths.package, result,
                                                    result.body or "", send_on_replay=False)
     data = {"fleet": selected.fleet.name, "manager": selected.fleet.manager,

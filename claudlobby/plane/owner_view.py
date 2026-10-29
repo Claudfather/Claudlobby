@@ -1,8 +1,7 @@
-"""Internal protected Plane factory; no CLI/runtime or identity adapter yet.
+"""Protected canonical Plane reads shared by direct and connected ingress.
 
-The injected verifier is trusted server code, not a browser identity claim.
-This seam exercises the read boundary with disposable data while ingress,
-pairing UI and browser credential transport are still being established.
+Credential adapters supply trusted verifiers. This gate owns fresh admission
+before the response and its body; it never creates identity or grants.
 """
 
 from pathlib import Path
@@ -13,6 +12,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..context import resolve_paths
+from .finite_reads import finite_read
 from .owner_source import admit_source, source_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef, VerifiedReader
 
@@ -80,6 +80,12 @@ class _OwnerReadGate:
         self.access.authorize_read(reader.token, reader.principal, host_uid=host_uid)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if finite_read(scope):
+            await self.state.finite_reads.run(self._serve, scope, receive, send)
+        else:
+            await self._serve(scope, receive, send)
+
+    async def _serve(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
             await self.app(scope, receive, send)
             return
@@ -165,9 +171,9 @@ def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
                      sampler=None, package=None):
     """Guard the canonical view, including static/health/error/stream paths.
 
-    No default verifier and no public login/session route. Runtime callers
-    continue to use view.create_app until trusted ingress is implemented and
-    validated. The source root selects the authority; a request cannot do so.
+    This factory supplies no login/session route or default verifier. Browser
+    and connected adapters provide credential handling around this same gate.
+    The source root selects the authority; a request cannot do so.
     """
     if not callable(verify_reader):
         raise ValueError("an explicit trusted reader verifier is required")

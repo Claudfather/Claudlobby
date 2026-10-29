@@ -27,7 +27,8 @@ from .owner_actions import ActionNotStarted, OwnerActions
 from .ids import read_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, PAIRING_SECONDS, SESSION_SECONDS
 from .owner_view import VerifiedReader, create_owner_app
-from .owner_source import inspect_source
+from .owner_source import inspect_source, SourceDenied, SourceUnavailable
+from .owner_observation import owner_pairing_state, owner_read_profile, source_refusal
 
 COOKIE_NAME = "__Host-claudlobby-owner"
 _COOKIE_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -233,7 +234,7 @@ class _OwnerBrowser:
     def _read_profile(self, reader: VerifiedReader) -> dict:
         host_uid = inspect_source(self.access.root)
         self.access.authorize_read(reader.token, reader.principal, host_uid=host_uid)
-        return {"version": 1, "profile": "direct-owner-read-v1", "host_uid": host_uid}
+        return owner_read_profile(host_uid)
 
     def _ready(self, principal: PrincipalRef, token: str, **data) -> JSONResponse:
         reader = VerifiedReader(principal, token)
@@ -244,7 +245,7 @@ class _OwnerBrowser:
 
     def _status(self, principal: PrincipalRef, token: str | None) -> JSONResponse:
         grant = self.access.current_grant()
-        if grant is None or not grant.active:
+        if owner_pairing_state(grant) != "paired":
             return _response({"state": "needs_pairing"})
         if grant.principal != principal:
             raise AccessDenied("owner_not_paired")
@@ -459,6 +460,10 @@ class _OwnerBrowser:
             unavailable = isinstance(exc.refusal, (AccessUnavailable, OperationContextUnavailableError))
             response = _response({"state": "unavailable" if unavailable else "denied",
                                   "effect": "not_started"}, 503 if unavailable else 403)
+        except (SourceUnavailable, SourceDenied) as exc:
+            observation = source_refusal(exc)
+            response = _response({"state": observation.state},
+                                 503 if observation.state == 'unavailable' else 403)
         except AccessDenied as exc:
             # A delayed denial must not erase a newer cookie from a concurrent
             # successful sign-in or renewal. Only explicit logout deletes it.

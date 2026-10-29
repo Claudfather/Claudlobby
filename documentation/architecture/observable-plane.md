@@ -231,6 +231,70 @@ The view's GET-only contract remains intact, with pairing/session mutations
 in the separate authority transport below. No real protected use is claimed by
 the synthetic policy tests.
 
+### Shared serving operations and finite reads
+
+CLI and owner HTTP adapters call the same transport-neutral message, task
+notification and permission workflows (`application_messages.py`,
+`application_tasks.py`, `application_permissions.py`). Those workflows return
+application data and a release reference; CLI text stays in command facades.
+Canonical task policy, durable requests, native delivery and receipt inspection
+remain with their existing owners. The shared owner binding check compares
+already-admitted host, fleet, human and roster evidence; it never creates a grant.
+
+`owner_observation.py` shares retained pairing state, the strict read-profile
+factory and typed source failures across existing CLI/HTTP adapters. Source binding
+required, foreign source and unavailable source stay distinct. This internal model
+adds no authority or I/O and leaves legacy wire shapes intact; current session,
+exact action grants and endpoint availability remain independently checked. Richer
+browser recovery detail needs a versioned compatibility change and is not implied
+by these retained observations.
+
+One `FiniteReads` instance belongs to each canonical view application and is
+shared by its direct-owner, connected and local finite-read entry points.
+It reserves before protected native admission and permits at most eight accepted
+operations, with no waiting admission queue. A server-owned scope marker prevents
+nested adapters from reserving twice. The 15-second response budget includes
+admission and execution. Timeout or disconnect abandons response delivery;
+accepted synchronous work retains its slot until it actually settles. Late
+private output is suppressed. Shutdown refuses new work and drains accepted work.
+This bounds outstanding work; it does not terminate arbitrary Python/filesystem
+work or impose a CPU quota. The SQL progress deadline remains a separate inner
+cooperative bound. Separate serving processes have separate capacity limits.
+
+Streams keep their own lifetime and revocation handling. Pairing/session lifecycle
+routes and started mutations keep their existing capacity, deadline, receipt and
+drain owners. A finite read timeout never cancels or replays an action.
+Connected action workers return a result to the HTTP caller, which alone sends
+the response; worker deadline cancellation cannot interrupt a JSON response body.
+
+Overview uses the board's same bounded task selection and canonical attention and
+permission reduction, but requests counts without actor aliases, card formatting
+or presentation-only delivery/nudge evidence. Ownership and assignment axes remain
+separate, and the 200-task coverage limit stays disclosed. The connected renderer
+may publish accepted healthy source/panel results before a held peer completes;
+unread sources remain explicit and partial totals never imply full coverage.
+Epoch/account fences apply to every partial update. Channel task links receive the
+accepted channel snapshot, while action selection keeps its paired final board and
+channel snapshots.
+
+### Owner-only maintenance follow-up
+
+Serving consolidation does not change host-wide activation. Independently updating
+the owner service requires an explicit artifact-consumer dependency contract first:
+identify which installed package, runtime scripts, composed settings, schema and
+native unit specification each running consumer reads and when it reads them.
+A replacement must prove compatibility with the selected host release, recorder
+schema, authority state, browser protocol and canonical action execution; changing
+shared hooks/settings or schema can still require coordinated activation.
+
+A future narrow operation must preserve stopped/paused intent, timer schedules and
+unrelated bot processes, stop new owner admission, drain reads and started actions,
+then replace only its declared compatible components through the native supervisor
+adapter. Recovery must account for any irreversible schema change and retained
+unknown requests. Platform-neutral unit/job metadata and explicit dependencies
+precede that operation; replacing a Python path or hand-editing a service is not
+an owner-only upgrade mechanism.
+
 ### Local owner administration
 
 The supported local authority door is `claudlobby --root DATA_ROOT host owner`.

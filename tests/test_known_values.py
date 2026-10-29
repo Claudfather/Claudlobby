@@ -9,6 +9,7 @@ from claudlobby.known_values import (
     _AUTO_ELIGIBLE_STANDALONE,
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    CLAUDNA_LIVE_SKILLS,
     CLAUDNA_SKILL_RENAMES,
     EXPERTISE_CORE_TOOLS,
     KNOWN_EFFORTS,
@@ -135,16 +136,14 @@ class TestSetsPopulated:
             "/claudna:access-path-audit": "/claudna:audit access-path",
             "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
             "/claudna:session-handoff": "/claudna:session handoff",
+            "/claudna:implement-plan": "/claudna:build",
+            "/claudna:visual-crawl": "/claudna:qa crawl",
         }
-        # The four standalones, with clauDNA 0.19.0's live names for the two
-        # it renamed: never /claudna:implement-plan or /claudna:visual-crawl,
-        # which no longer exist (#2543).
+        # The two un-consolidated standalones survive under their own names.
         assert _AUTO_ELIGIBLE_STANDALONE == frozenset(
             {
                 "/claudna:product-enhance",
                 "/claudna:product-vision",
-                "/claudna:qa crawl",
-                "/claudna:build",
             }
         )
         # SSOT invariant: eligible == the live rename targets + the survivors, so
@@ -177,12 +176,16 @@ class TestClaudnaRenameSSOT:
     pins against (#570)."""
 
     def test_doc_guard_covers_every_dead_name(self):
-        from tests.test_no_dead_claudna_refs import DEAD_REF
+        from tests.test_no_dead_claudna_refs import DEAD_REF, LIBRARY_SKILLS
 
         for dead in CLAUDNA_SKILL_RENAMES:
-            bare = "/" + dead.removeprefix("/claudna:")
+            name = dead.removeprefix("/claudna:")
             assert DEAD_REF.search(dead), dead
-            assert DEAD_REF.search(bare), bare
+            bare_banned = name not in LIBRARY_SKILLS  # /visual-crawl is ours (#2543)
+            assert bool(DEAD_REF.search("/" + name)) == bare_banned, name
+        # A new dead name that is also a library skill widens the exemption: make it a choice.
+        dead_names = {k.removeprefix("/claudna:") for k in CLAUDNA_SKILL_RENAMES}
+        assert dead_names & LIBRARY_SKILLS == {"visual-crawl"}
 
     def test_session_guard_covers_every_dead_session_name(self):
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
@@ -214,6 +217,12 @@ class TestClaudnaRenameSSOT:
 
     def test_auto_eligible_is_subset_of_canonical(self):
         assert _AUTO_ELIGIBLE_RENAMES.items() <= CLAUDNA_SKILL_RENAMES.items()
+
+    def test_a_renamed_away_name_is_never_live(self):
+        # A name leaves the live sets the moment it gains a rename entry
+        # (known_values.py); pinned, so a dead name left in either fails (#2543).
+        assert CLAUDNA_LIVE_SKILLS.isdisjoint(CLAUDNA_SKILL_RENAMES)
+        assert AUTO_ELIGIBLE_SKILLS.isdisjoint(CLAUDNA_SKILL_RENAMES)
 
     def test_session_hyphen_typo_policy_agrees_across_guards(self):
         """The session-hyphen typo family (live verbs with no dead standalone,

@@ -139,7 +139,7 @@ test('trusted source labels name computers without conflating a read failure wit
 
 test('rendered connected controls acknowledge only their exact shell without waiting for host/account reads',async()=>{
   const h=harness({count:0}),messages=[],held=deferred();
-  h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
+  h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2)+'&include=computer_names',()=>held.promise);
   h.ui.document.defaultView={parent:{postMessage:(...args)=>messages.push(args)}};
   h.mount();
   assert.equal(h.ui.get('owner-session').hidden,false);
@@ -265,6 +265,22 @@ test('provider outage retains known current context honestly; initial outage adm
   const first=harness();first.metadataStatus=503;assert.equal(await first.api.checkAccount(),false);assert.equal(first.api.snapshot().phase,'unavailable');assert.equal(await first.api.act(0,'connect'),false);assert.equal(first.calls.length,1);first.api.dispose();
 });
 
+test('incremental reads use the same account and transport fence as final reads',async()=>{
+  const held=deferred(),paints=[];let progress;
+  const h=harness({dependencies:{createTransport:()=>({
+    jget(url,onUpdate){progress=onUpdate;return held.promise;},dispose(){},
+  })}});
+  await h.api.checkAccount();await flush();
+  const reading=h.api.jget('/api/tasks',value=>paints.push(value));
+  const accepted=ok({tasks:[]});progress(accepted);assert.deepEqual(paints,[accepted]);
+  h.metadataStatus=401;await h.api.checkAccount();
+  progress(ok({tasks:[{title:'late private'}]}));
+  held.resolve(accepted);
+  assert.equal((await reading).state,'denied');
+  assert.equal(paints.length,1,'retired account cannot receive late source progress');
+  h.api.dispose();
+});
+
 test('observed account refusal retires clients, fences held private reads and clears all private regions even if callback throws',async()=>{
   const h=harness();h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
   for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])h.ui.get(name).append(h.ui.document.createElement('b'));
@@ -278,9 +294,9 @@ test('observed account refusal retires clients, fences held private reads and cl
 });
 
 test('metadata total body deadline and disposal reject late responses without issuing hosts',async()=>{
-  const h=harness();let body;h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>new Response(new ReadableStream({start(c){body=c;}}),{headers:{'Content-Type':'application/json'}}));
+  const h=harness();let body;h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2)+'&include=computer_names',()=>new Response(new ReadableStream({start(c){body=c;}}),{headers:{'Content-Type':'application/json'}}));
   const checking=h.api.checkAccount();await flush();h.timer(8000);assert.equal(await checking,false);assert.equal(h.api.snapshot().phase,'unavailable');assert.equal(h.calls.length,1);h.api.dispose();
-  const late=harness(),held=deferred();late.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
+  const late=harness(),held=deferred();late.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2)+'&include=computer_names',()=>held.promise);
   const pending=late.api.checkAccount();late.api.dispose();assert.equal(await pending,false);held.resolve(reply(200,late.metadata));await flush();assert.equal(late.api.snapshot().phase,'disposed');assert.equal(late.calls.length,1);
 });
 
@@ -302,7 +318,7 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
 
 test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  for(const n of h.ui.nav)assert.equal(n.disabled,n.dataset.view!=='channel');assert.equal(h.ui.get('search').disabled,true);
+  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
   const connect=row.children[1].children[0];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[0],connect);
   for(const id of ['fleet','channel']){
@@ -398,7 +414,7 @@ test('forgetting approval returns keyboard focus to that computer, including an 
 test('temporary account loading is aria-disabled and activation guarded without blurring focus',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
   const check=h.ui.get('owner-session').children[0].children[1];check.focus();
-  const held=deferred();h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
+  const held=deferred();h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2)+'&include=computer_names',()=>held.promise);
   const before=h.calls.length,pending=h.api.checkAccount();await flush();
   assert.equal(check.disabled,false);assert.equal(check.attributes['aria-disabled'],'true');assert.equal(h.ui.document.activeElement,check);
   check.click();assert.equal(h.calls.length,before+1);
@@ -517,7 +533,7 @@ test('wrong source targets/scopes cannot reach either same-named lead; missing g
   for(const patch of [{target:{...request.target,recipient:sourceB+'::actor_'+'c'.repeat(32)}},{target:{...request.target,task_id:sourceB+'::'+wi}},{scope:{...request.scope,fleet:sourceB+' / team'}},{scope:{...request.scope,viewer:'forged'}}])await assert.rejects(h.api.prepareAction({...request,...patch}),/unknown/);
   assert.equal(h.calls.length,before);
   h.grants.delete('nudge');const statusBefore=h.calls.filter(c=>c.url.endsWith('/status')).length;
-  assert.equal(await h.api.nudgeContext(sourceA+' / team'),null);
+  await assert.rejects(h.api.nudgeContext(sourceA+' / team'),{code:'action_not_authorized'});
   assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length-statusBefore,1);
   assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,2);h.api.dispose();
 });
@@ -602,6 +618,49 @@ test('stable source routing uses readable computer/team display labels without c
   assert.equal(h.api.roomLabel(fleet.alias),fleet.display_label);
   const capability=await h.api.interactionContext(fleet.alias);assert.equal(capability.scope.fleet,fleet.alias);
   h.api.dispose();
+});
+
+for(const duplicate of [false,true]) test(`saved computer names stay presentation only before and after Connect (duplicates: ${duplicate})`,async()=>{
+  const h=harness(),names=['Office <computer>',duplicate?'Office <computer>':'Workshop'];
+  h.metadata={...h.metadata,computer_names:refs.map((ref,i)=>({reference_id:ref.reference_id,name:names[i]})).reverse()};
+  h.mount();assert.equal(await h.api.checkAccount(),true);await flush();
+  assert.equal(new URL(h.calls[0].url).searchParams.get('include'),'computer_names');
+  const cards=h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
+  for(let i=0;i<2;i++) {
+    assert.equal(cards[i].children[0].textContent,names[i]+' · Not connected');
+    assert.equal(cards[i].children[0].title,new URL(refs[i].endpoint_origin).hostname);
+    assert.equal(await h.api.act(i,'connect'),true,'carrier must receive its unchanged identity-only context');
+  }
+  const overviewDoor=refs[0].endpoint_origin+'/api/owner/connected/read/overview';
+  h.overrides.set(overviewDoor,()=>reply(200,ok({fleets:[{alias:'team',uid:fleetUID,bots:1,provisional:0}],host:{display_name:'Host override'},totals:{fleets:1,bots:1,provisional:0,working:0,attention:0,overdue:0,live_poll:'ok',recorder_gaps:[]}})));
+  const overview=await h.api.jget('/api/overview');
+  for(const [i,key] of [sourceA,sourceB].entries()) {
+    assert.equal(overview.data.sources[i].label,names[i]);
+    assert.equal(overview.data.fleets[i].display_label,names[i]+' / team');
+    assert.equal(overview.data.fleets[i].alias,key+' / team');
+    assert.equal(cards[i].children[0].textContent,names[i]+' · Connected');
+    assert.equal(h.api.roomLabel(key+' / team'),names[i]+' / team');
+  }
+  const context=await h.api.interactionContext(sourceA+' / team');
+  const state=new ActionState({getItem:()=>null,setItem(){}});
+  const request=state.begin(context,'message',{recipient:context.recipients[0].id,task_id:null},'A saved-name comment',id(44));
+  assert.equal(context.scope.fleet,sourceA+' / team');assert.match(request.target.recipient,new RegExp('^'+sourceA+'::actor_'));
+  const receipt=await h.api.sendAction(request);assert.equal(receipt.request_id,request.request_id);assert.deepEqual(receipt.target,request.target);
+  assert.equal(h.calls.filter(c=>c.url===refs[1].endpoint_origin+'/api/owner/connected/actions/send').length,0);
+  const detail=await h.api.jget(`/api/tasks/${encodeURIComponent(sourceA+'::'+wi)}?fleet=${encodeURIComponent(sourceA+' / team')}`);
+  assert.equal(detail.data.task.task_id,sourceA+'::'+wi);
+  h.metadata={...h.metadata,context_generation:id(99)};
+  assert.equal(await h.api.checkAccount(),false);assert.equal(h.api.snapshot().phase,'denied','existing name-change generation invalidation remains authoritative');
+  h.api.dispose();
+});
+
+for(const names of [[],[{reference_id:id(99),name:'Other'}],refs.map(()=>({reference_id:refs[0].reference_id,name:'Same'})),
+  refs.map(ref=>({reference_id:ref.reference_id,name:' '})),refs.map(ref=>({reference_id:ref.reference_id,name:'x'.repeat(81)})),
+  refs.map(ref=>({reference_id:ref.reference_id,name:'bad\0name'})),refs.map(ref=>({reference_id:ref.reference_id,name:'\ud800'}))])
+test(`display metadata requires bounded names exactly once per saved reference: ${JSON.stringify(names)}`,async()=>{
+  const h=harness();h.metadata={...h.metadata,computer_names:names};
+  assert.equal(await h.api.checkAccount(),false);assert.equal(h.api.snapshot().phase,'denied');
+  assert.equal(h.calls.length,1);h.api.dispose();
 });
 
 test('overview completed before source loss cannot consume the later recovery refresh',async()=>{
@@ -791,4 +850,22 @@ test('expired or revoked browser receipt retains original identifiers with local
   assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+
+test('explicit connected summary retry forwards only its source key and successful reconnect clears its latch',async()=>{
+  const retries=[];
+  const h=harness({count:1,dependencies:{createTransport(options){
+    const transport=createWorkspaceReadTransport(options);
+    return {...transport,retryOverview(key){retries.push(key);return transport.retryOverview(key);}};
+  }}});
+  assert.equal(h.api.retryOverview(sourceA),false);
+  h.mount();await h.api.checkAccount();await flush();
+  assert.equal(await h.api.act(0,'connect'),true);
+  assert.deepEqual(retries,[sourceA]);
+  assert.equal(h.api.retryOverview(sourceA),true);
+  assert.equal(h.api.retryOverview(sourceB),false);
+  assert.deepEqual(retries,[sourceA,sourceA,sourceB]);
+  await h.api.act(0,'check');assert.equal(retries.length,3,'status checks cannot clear a timeout latch');
+  h.api.dispose();assert.equal(h.api.retryOverview(sourceA),false);assert.equal(retries.length,3);
+
 });

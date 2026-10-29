@@ -1314,3 +1314,31 @@ svc_inventory_state() {
     _svc_activation_read "$1" "$2" || return 3
     printf '%s %s %s\n' "$SVC_ACT_FILE_STATE" "$SVC_ACT_LOAD" "$SVC_ACT_ACTIVE"
 }
+
+# The units the manager holds failed or between states, for the failed-units
+# read (#2532), after the catalog's manager line. Linux: one systemctl show
+# block per such unit, none when there is none. Darwin: launchctl list, the
+# catalog's read, whose Status column is each job's last exit status. Reads
+# only; which of these units are owned is the inventory owner's question.
+svc_inventory_failed() {
+    printf 'manager\t%s\n' "$_OS"
+    case "$_OS" in
+        Linux)
+            local output name rest
+            output=$(systemctl --user list-units --all --no-legend --no-pager --plain --full \
+                --state=failed,activating,deactivating,reloading) || return 3
+            set --
+            while read -r name rest; do
+                [ -z "$name" ] || set -- "$@" "$name"
+            done <<EOF
+$output
+EOF
+            [ "$#" -eq 0 ] || systemctl --user show \
+                --property=Id,ActiveState,SubState,Result,ExecMainStatus -- "$@" || return 3
+            ;;
+        Darwin)
+            launchctl list || return 3
+            ;;
+        *) return 3 ;;
+    esac
+}

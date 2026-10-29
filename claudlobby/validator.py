@@ -35,6 +35,7 @@ from .config import (
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    CLAUDNA_SKILL_RENAMES,
     DEPRECATED_ENV_TIERS,
     ENV_TIERS,
     EXPERTISE_CORE_TOOLS,
@@ -1535,8 +1536,16 @@ def _validate_bots(
         ar = bot.autonomous_runner
         if ar is not None:
             if ar.skill not in AUTO_ELIGIBLE_SKILLS:
+                # A renamed-away skill names its successor; a similarity match
+                # misses /claudna:implement-plan -> /claudna:build (#2543).
+                renamed = CLAUDNA_SKILL_RENAMES.get(ar.skill)
                 suggestion = closest_match(ar.skill, AUTO_ELIGIBLE_SKILLS)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                if renamed:
+                    hint = f" — clauDNA renamed it to '{renamed}'"
+                elif suggestion:
+                    hint = f" — did you mean '{suggestion}'?"
+                else:
+                    hint = ""
                 report.warn(
                     "autonomous-runner",
                     f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "

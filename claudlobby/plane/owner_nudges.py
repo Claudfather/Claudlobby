@@ -14,8 +14,8 @@ import re
 
 from ..activation_identity import read_selected_identity_bindings
 from ..active_config import resolve_active_context
-from ..command_result import CommandOutput
-from ..commands.task_write import nudge_bound_task
+from ..application_result import ApplicationOutcome
+from ..application_tasks import nudge_bound_task
 from ..message_context import resolve_message_route
 from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
                                ReceiptObservation, receipt)
@@ -97,7 +97,7 @@ class OwnerNudges:
     def nudge(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
               task_id: str, manager_uid: str, expected_assignment_id: str | None,
               expected_release_id: str, request_id: str, reason: str,
-              expected_grant: OwnerNudgeGrant) -> CommandOutput:
+              expected_grant: OwnerNudgeGrant) -> ApplicationOutcome:
         """Commit one nudge then notify; keep its UUID after any uncertain result.
 
         The caller must supply its selected assignment (None means queued),

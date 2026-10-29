@@ -167,12 +167,12 @@ def admitted_action(method):
                 inventory = collect_enrollment(self.root, (declaration,), adapter=adapter,
                     only_names=frozenset({declaration.source.name}))
                 inventory.require_complete()
-                if len(inventory.units) != 1 or not inventory.units[0].installed:
+                if len(inventory.units) != 1 or len(inventory.units[0].installed) != 1:
                     raise AccessDenied('generated_context_refused')
                 enrolled = inventory.units[0]
                 if enrolled.generated != frozen:
                     raise AccessDenied('generated_context_refused')
-                proof = adapter.call('svc_activation_assert_external', declaration.source,
+                proof = adapter.call('svc_activation_assert_external', enrolled.installed[0].path,
                                      enrolled.target, str(os.getpid()))
                 if proof.returncode != 1:
                     raise AccessDenied('generated_context_refused')

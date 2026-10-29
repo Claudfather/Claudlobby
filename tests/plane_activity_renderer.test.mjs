@@ -12,6 +12,31 @@ test('roster message entry names the exact bot and remains disabled until existi
   assert.match(html,/data-bot-message="north::actor_/);assert.match(html,/disabled>Message Worker &lt;one&gt;/);
   assert.match(html,/aria-label="Message Worker &lt;one&gt; in north \/ team"/);
 });
+test('connected directory separates recorded activity from live evidence and opens only the exact current team',()=>{
+  const a={uid:'north::actor_'+'a'.repeat(32),alias:'north::bot:team/worker',short:'Worker <one>',fleet:'north / team',kind:'actor',last_seen:'2026-01-01',provisional:false};
+  const b={...a,uid:a.uid.replace('north::','south::'),alias:a.alias.replace('north::','south::'),fleet:'south / team',provisional:true};
+  const fleet={alias:a.fleet,uid:'north::fleet_'+'b'.repeat(32),display_label:'North / team'},opened=[];
+  const grid={innerHTML:'',querySelectorAll:()=>[]},refresh={addEventListener(){}},roster={scrollIntoView(){}};
+  const c={interactionApi:{dispose(){}},currentView:'grid',sessionPaused:false,sessionEpoch:1,rosterGeneration:1,
+    document:{activeElement:null},$:id=>id==='grid'?grid:id==='fleet'?roster:refresh,
+    fleets:[fleet],rosterIdentities:new Map([[a.uid,{...a,fleet_uid:fleet.uid}],[b.uid,b]]),
+    esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=> 'recently',
+    PRESENCE_WORD:{working:'working',idle:'idle',unknown:'unknown'},
+    setView:view=>{opened.push(view);},pickFleet:room=>opened.push(room),renderState(){}};
+  runInNewContext(source.slice(source.indexOf('let agentPresence ='),source.indexOf('const STATUS_DOT')),c);
+  const presence={data:{sources:[{key:'north',state:'ok',sampler_available:true}],
+    bots:[{alias:a.alias,live:'sampling',presence:'working'}]}};
+  c.renderAgentDirectory({state:'ok',data:{identities:[a,b,{...a,kind:'actor',fleet:null}],sources:[{key:'north',label:'North',state:'ok'},{key:'south',label:'South',state:'ok'}]}},presence);
+  assert.match(grid.innerHTML,/2 agents in readable records/);assert.match(grid.innerHTML,/200 recorded identities/);
+  assert.match(grid.innerHTML,/Worker &lt;one&gt;/);assert.match(grid.innerHTML,/Live session<\/dt><dd>unknown/);
+  assert.match(grid.innerHTML,/Recorded heartbeat<\/dt><dd>working/);
+  assert.match(grid.innerHTML,/Unconfirmed identity/);assert.doesNotMatch(grid.innerHTML,/running|pane-card|<pre/);
+  c.renderAgentDirectory({state:'ok',data:{identities:[a],sources:[{key:'north',label:'North',state:'ok'},{key:'south',label:'South',state:'not_connected'}]}},presence);
+  assert.match(grid.innerHTML,/South: not_connected/);assert.doesNotMatch(grid.innerHTML,/data-agent-team="south::/);
+  c.openAgentTeam(a.uid);assert.deepEqual(opened,['channel',a.fleet]);opened.length=0;
+  c.openAgentTeam(b.uid);c.rosterIdentities.get(a.uid).fleet_uid='changed';c.openAgentTeam(a.uid);
+  c.sessionPaused=true;c.openAgentTeam(a.uid);assert.equal(opened.length,0);
+});
 const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
 const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');
@@ -62,6 +87,79 @@ function thread(reason = 'Any update?') {
 }
 const html = t => api.threadArticle(t).innerHTML;
 const visible = text => text.replace(/<details>[\s\S]*?<\/details>/g, '');
+
+for (const outcome of ['healthy','unavailable','mixed','room','session','input','inflight','scheduled','stale','stale-epoch','partial-denied','partial-not_connected'])
+test(`explicit activity recovery reuses guarded reads and preserves keyboard focus: ${outcome}`,async()=>{
+  const document={activeElement:null,documentElement:{style:{setProperty(){}}}};
+  class Node {
+    constructor(tag='div'){this.tagName=tag;this.children=[];this.dataset={};this.attributes={};this.hidden=false;this._html='';}
+    get isConnected(){return this===channel || !!this.parent?.isConnected;}
+    contains(node){return node===this || this.children.some(c=>c.contains?.(node));}
+    get innerHTML(){return this._html;}
+    set innerHTML(value){this.replaceChildren();this._html=value;}
+    replaceChildren(...nodes){for(const child of this.children){child.parent=null;if(child.contains(document.activeElement))document.activeElement=null;}this.children=[];this.append(...nodes);}
+    append(...nodes){for(const node of nodes){if(node.tagName==='fragment'){this.append(...node.children);continue;}node.parent=this;this.children.push(node);}}
+    appendChild(node){this.append(node);}
+    remove(){if(this.parent)this.parent.children=this.parent.children.filter(n=>n!==this);this.parent=null;}
+    setAttribute(k,v){this.attributes[k]=v;}
+    closest(){return this.hidden?this:this.parent?.closest()||null;}
+    focus(){if(this.isConnected&&!this.closest())document.activeElement=this;}
+    querySelectorAll(selector){return selector==='article.thread'?this.children.filter(n=>n.tagName==='article'):[];}
+    querySelector(){return null;}
+  }
+  const channel=new Node(),focusedInput={};
+  document.getElementById=()=>channel;document.createElement=tag=>new Node(tag);document.createDocumentFragment=()=>new Node('fragment');
+  let resolve;const held=new Promise(r=>{resolve=r;}),reads=[],queued=[];
+  const state={...panel,document,conversationTaskLink,sessionPaused:false,sessionEpoch:1,generation:0,currentFleet:'north / team',
+    refreshInFlight:false,refreshPending:false,refreshTimer:null,fleetsSeen:true,clearTimeout(){},
+    syncWorkRoom(){},fleetQuery:()=>'?fleet='+encodeURIComponent(state.currentFleet),channelUrl(){return '/api/channel?limit=120';},refreshOverview(){},
+    agentDirectoryVisible:()=>false,
+    jget(url){reads.push(url);return url.startsWith('/api/channel')?held:Promise.resolve({state:'ok',data:{}});},
+    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
+  const retry=source.slice(source.indexOf('async function retryActivity()'),source.indexOf('async function refreshBoards()'));
+  const refresh=source.slice(source.indexOf('async function refreshBoards()'),source.indexOf('function scheduleRefresh()'));
+  const view=runInNewContext(`${rendering}\n${retry}\n${refresh}\n({renderChannel,retryActivity,refreshBoards,control:()=>activityRecovery})`,state);
+  if(outcome.startsWith('partial-')) {
+    view.renderChannel({state:'ok',data:{threads:[],coverage:{partial:true},sources:[{state:'ok',connection_state:'ready'},{state:'unavailable',connection_state:outcome.slice(8)}]}});
+    assert.equal(view.control(),null);assert.ok(channel.children.some(node=>node.textContent?.includes('No activity in readable sources.')));return;
+  }
+  view.renderChannel({state:'unavailable',remediation:'This panel timed out.'});
+  const button=view.control().button;assert.equal(button.textContent,'Retry activity');assert.equal(button.isConnected,true);
+  if(outcome.startsWith('stale')){if(outcome==='stale')state.currentFleet='other';else state.sessionEpoch++;await view.retryActivity();assert.equal(reads.length,0);return;}
+  const existing=outcome==='inflight'?view.refreshBoards():null;
+  if(outcome==='scheduled')state.refreshTimer=17;
+  button.focus();let reading=view.retryActivity();assert.equal(button.attributes['aria-disabled'],'true');
+  assert.equal(button.textContent,'Refreshing reads…');
+  if(existing)reading=existing;
+  if(outcome==='scheduled'){assert.equal(reads.length,0);reading=view.refreshBoards();}
+  await view.retryActivity();await view.retryActivity();assert.equal(reads.length,4);assert.equal(queued.length,0);
+  assert.equal(document.activeElement,button,'busy uses aria-disabled without dropping keyboard focus');
+  if(outcome==='room'){state.currentFleet='south / team';state.generation++;channel.innerHTML='Other room';}
+  if(outcome==='session'){state.sessionPaused=true;state.sessionEpoch++;state.generation++;view.control().paint();}
+  if(outcome==='input')document.activeElement=focusedInput;
+  const healthy={state:'ok',data:{threads:[]}};
+  const response=outcome==='unavailable'?{state:'unavailable'}:outcome==='mixed'
+    ?{state:'ok',data:{threads:[thread()],coverage:{partial:true},sources:[{state:'ok',connection_state:'ready'},{state:'unavailable',connection_state:'ready'}]}}:healthy;
+  resolve(response);await reading;
+  assert.equal(reads.length,4);assert.equal(queued.length,0);
+  if(outcome==='healthy') {assert.equal(button.isConnected,false);assert.equal(document.activeElement,channel);assert.equal(channel.tabIndex,-1);}
+  if(['unavailable','mixed'].includes(outcome)){assert.equal(button.isConnected,true);assert.equal(button.textContent,'Retry activity');assert.equal(document.activeElement,button);}
+  if(outcome==='mixed')assert.ok(channel.children.some(n=>n.tagName==='article'),'healthy activity remains visible');
+  if(outcome==='input')assert.equal(document.activeElement,focusedInput);
+  if(outcome==='room')assert.equal(channel.innerHTML,'Other room','late rows cannot repaint another room');
+  if(outcome==='session'){assert.equal(view.control().root.hidden,true);assert.equal(button.attributes['aria-disabled'],'false');}
+});
+
+test('activity recovery does not offer retries for paused, denied or unconnected sources',()=>{
+  const document={documentElement:{style:{setProperty(){}}},getElementById:()=>({innerHTML:'',focus(){throw Error('unexpected focus');}})};
+  const view=runInNewContext(`${rendering}\n({renderChannel,control:()=>activityRecovery,pause(){sessionPaused=true;}})`,{...panel,document,sessionPaused:false,conversationTaskLink});
+  for(const state of ['denied','not_connected','disconnected']){
+    view.renderChannel({state:'unavailable',data:{sources:[{state:'unavailable',connection_state:state}]}});
+    assert.equal(view.control(),null);
+  }
+  view.renderChannel({state:'denied'});assert.equal(view.control(),null);
+  view.pause();view.renderChannel({state:'unavailable'});assert.equal(view.control(),null);
+});
 
 test('check-ins show recorded requests and reuse current bot inspection without claiming resolution', () => {
   const identity={uid:'actor_'+'7'.repeat(32),alias:'bot:example/lead',fleet:'example',provisional:false};

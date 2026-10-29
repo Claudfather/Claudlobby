@@ -782,6 +782,24 @@ def _row_text(title: str | None) -> str:
     return _clip(title) if (title or "").strip() else "(title not recorded)"
 
 
+# One line under an assignment whose attention does not say what it means (#2546).
+# Keyed by (status, reason). `overdue` and `not_due` say it in their names; `unknown`
+# is explained by the DEGRADED section. The 45 minutes and 24 hours are the matcher's
+# defaults (DEFAULT_PROGRESS_GRACE_S, DEFAULT_OVERDUE_MAX_AGE_S), pinned by
+# tests/test_assignee_attention.py. The JSON brief carries status and reason only.
+_WATCH_NOTES = {
+    ("orphaned", "respawned_after_dispatch"):
+        "orphaned: past its deadline, issued to a session that has since restarted; "
+        "assignment progress moves it to past_due for 45 minutes (the default), block does not",
+    ("past_due", "progress_grace"):
+        "past_due: held back by a progress report under 45 minutes old (the default); "
+        "without a newer one it reads overdue or orphaned again",
+    ("past_due", "max_age_cap"):
+        "past_due: more than 24 hours after the dispatch or, once the manager has moved the deadline, after the "
+        "move or the new deadline, whichever is later (the default); no longer flagged, and not resolved",
+}
+
+
 def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
@@ -862,6 +880,9 @@ def format_brief(brief: dict) -> str:
                 )
                 if attention and attention.get("past_due"):
                     out.append("      PAST DUE (literal deadline; watchdog status above)")
+                note = _WATCH_NOTES.get((status, attention.get("reason"))) if attention else None
+                if note:
+                    out.append(f"      {note}")
             if item["historical_references"]:
                 out.append(
                     "      historical references: "
@@ -1026,6 +1047,13 @@ BOOT_CHAR_BUDGET = 1000
 # else), then overdue, then open oldest-first.
 BOOT_DETAIL_LIMIT = 3
 
+# What an ORPHANED row means, said once above the rows (#2546). The session reading
+# this payload holds the assignment, and its own progress report is what clears
+# the status. Cap-exempt like the header; the 45 minutes is the matcher's
+# DEFAULT_PROGRESS_GRACE_S, pinned by tests/test_assignee_attention.py.
+BOOT_ORPHANED_HINT = ("  orphaned: past its deadline, issued to a session that has since restarted; "
+                      "assignment progress clears it for 45 minutes by default")
+
 
 def boot_provenance(paths: Paths, now: int, *, fleet_name: str | None = None,
                     viewer: str | None = None,
@@ -1089,9 +1117,7 @@ def _boot_detail_lines(work: dict, now: int) -> tuple[list[str], int]:
         age = f"{age_s // 3600}h" if age_s >= 3600 else f"{age_s // 60}m"
         assignment_id = f" / {assignment['assignment_id']}" if assignment else ""
         note = ""
-        if status == "orphaned":
-            note = " (issued pre-restart; may need re-issue)"
-        elif status == "overdue":
+        if status == "overdue":
             overdue_s = observation.get("elapsed_past_deadline_s") or 0
             note = f" (+{overdue_s // 60}m past deadline)"
         lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}:"
@@ -1133,6 +1159,8 @@ def format_boot_brief(brief: dict, prov: dict) -> str:
                 f"work: {len(items)} open, {queued} queued, {overdue} overdue, "
                 f"{orphaned} orphaned, {history_issues} history issue(s){mark}"
             )
+            if orphaned:
+                exempt.append(BOOT_ORPHANED_HINT)
             detail, hidden = _boot_detail_lines(work, _epoch(brief["generated_at"]) or 0)
             if hidden:
                 exempt.append(f"  (+{hidden} more — door)")

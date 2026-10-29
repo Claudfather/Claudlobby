@@ -74,5 +74,5 @@ class SetupHTTP(ConnectedActionsHTTP):
         translated={**scope,"path":"/api/owner/connected/actions/"+mapped,"setup_operation":operation}
         await super().__call__(translated,receive,send)
 
-    async def _serve(self,scope,receive,send,operation,progress,headers):
-        return await super()._serve(scope,receive,send,scope["setup_operation"],progress,headers)
+    async def _response(self,scope,receive,operation,progress):
+        return await super()._response(scope,receive,scope["setup_operation"],progress)

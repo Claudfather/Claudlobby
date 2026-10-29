@@ -27,6 +27,7 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
            ("host", "job", "list"): "host.job.list", ("host", "job", "show"): "host.job.show",
            ("host", "job", "run"): "host.job.run",
            ("host", "supervision", "reap-orphans"): "host.supervision.reap-orphans",
+           ("host", "supervision", "failed"): "host.supervision.failed",
            ("host", "credentials", "reconcile"): "host.credentials.reconcile",
            ("host", "credentials", "check"): "host.credentials.check",
            ("host", "channels", "check"): "host.channels.check",
@@ -118,6 +119,17 @@ class CommandFailure(Exception):
         self.data = data if data is not None else {}
         self.release_id = release_id
         super().__init__(message)
+
+
+def empty_fleet_conflict(path, size: int) -> CommandFailure:
+    """Name an empty fleet.yaml by path and size, which hold no authored value (#2267)."""
+    message = (f"fleet configuration is empty: {path} (0 bytes)" if size == 0 else
+               f"fleet configuration holds no YAML document: {path} "
+               f"({size} bytes of whitespace or comments)")
+    return CommandFailure("conflict", message,
+                          hint=f"restore {path} from its last good copy; where the file is tracked, "
+                               f"`git -C {shlex.quote(str(path.parent))} log -- {shlex.quote(path.name)}` "
+                               "lists the copies")
 
 
 def selection_read_conflict(message: str, *, release_id: str | None = None,

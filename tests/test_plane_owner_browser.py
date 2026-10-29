@@ -405,7 +405,8 @@ def test_login_rotation_renewal_expiry_logout_and_revoke(browser):
     assert second.status_code == 200
     token2 = _session_cookie(client)
     assert token2 != token1
-    with TestClient(client.app, base_url=ORIGIN) as replay:
+    # Separate cookie jar, not another startup/shutdown of the shared app.
+    with closing(TestClient(client.app, base_url=ORIGIN)) as replay:
         replay.headers["Cookie"] = f"{COOKIE_NAME}={token1}"
         assert replay.get("/api/tasks").status_code == 403
         denied = _post(replay, "renew")
@@ -415,7 +416,7 @@ def test_login_rotation_renewal_expiry_logout_and_revoke(browser):
     token3 = _session_cookie(client)
     assert token3 not in {token1, token2}
     assert token3 not in renewed.text
-    with TestClient(client.app, base_url=ORIGIN) as replay:
+    with closing(TestClient(client.app, base_url=ORIGIN)) as replay:
         replay.headers["Cookie"] = f"{COOKIE_NAME}={token2}"
         assert replay.get("/api/tasks").status_code == 403
     clock[0] += SESSION_SECONDS
@@ -461,7 +462,8 @@ def test_other_deployment_cookie_and_wrong_principal_are_denied(browser, tmp_pat
     challenge = other_store.begin_pairing(OWNER)
     other_store.confirm_pairing(challenge.token, expected_principal=OWNER)
     other_token = other_store.open_session(OWNER).token
-    with TestClient(client.app, base_url=ORIGIN) as foreign:
+    # Closing HTTP resources must not stop the app used by the original jar.
+    with closing(TestClient(client.app, base_url=ORIGIN)) as foreign:
         foreign.headers["Cookie"] = f"{COOKIE_NAME}={other_token}"
         assert foreign.get("/api/tasks").status_code == 403
     assert client.get("/api/tasks", headers={"Cookie": f"{COOKIE_NAME}={token}"}).status_code == 200

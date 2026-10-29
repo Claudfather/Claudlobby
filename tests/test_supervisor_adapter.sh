@@ -62,6 +62,17 @@ EOF
 cat > "$T/bin/systemctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
+# svc_inventory_failed: FAKE_LISTED is list-units' rows (printf %b), and each
+# unit shown by name prints a failed block.
+if [ "$1" = "--user" ] && [ "$2" = "list-units" ]; then
+    printf '%b' "${FAKE_LISTED:-}"
+    exit "${FAKE_LISTED_EXIT:-0}"
+fi
+if [ "$1" = "--user" ] && [ "$2" = "show" ] && [ "$3" = "--property=Id,ActiveState,SubState,Result,ExecMainStatus" ]; then
+    shift 4
+    for _u in "$@"; do printf 'Result=exit-code\nId=%s\nActiveState=failed\nSubState=failed\n\n' "$_u"; done
+    exit 0
+fi
 if [ "$1" = "--user" ] && [ "$2" = "show" ]; then
     if [ "${6:-}" = "SubState" ]; then
         printf 'ActiveState=active\nSubState=%s\n' "${FAKE_SUBSTATE:-exited}"
@@ -637,6 +648,41 @@ assert_eq "live private server with another session: .tmux-env kept" "true" "$([
 stop_xray FAKE_TMUX_NO_SERVER="$T/elsewhere/svc-xray"
 assert_eq "no-server text for another socket: stop refuses" "3" "$xrc"
 assert_eq "no-server text for another socket: .tmux-env kept" "true" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+reset_fakes
+
+# svc_inventory_failed (#2532): the failed-units read. Linux lists the units
+# failed or between states and shows each by name; Darwin prints the catalog's
+# launchctl list. Each starts with the catalog's manager line and reads only.
+reset_fakes
+as_os Linux
+rc=0; out=$(export FAKE_LISTED='a.service loaded failed failed A\nb.timer loaded activating start start B\n'; svc_inventory_failed) || rc=$?
+assert_eq "Linux failed read: rc 0" "0" "$rc"
+assert_eq "Linux failed read: the manager line, then a block per listed unit" \
+    "$(printf 'manager\tLinux\nResult=exit-code\nId=a.service\nActiveState=failed\nSubState=failed\n\nResult=exit-code\nId=b.timer\nActiveState=failed\nSubState=failed')" "$out"
+assert_contains "Linux failed read: lists the units failed or between states" \
+    "--user list-units --all --no-legend --no-pager --plain --full --state=failed,activating,deactivating,reloading" "$(cat "$FAKE_LOG")"
+assert_contains "Linux failed read: shows the listed units by name" \
+    "--user show --property=Id,ActiveState,SubState,Result,ExecMainStatus -- a.service b.timer" "$(cat "$FAKE_LOG")"
+reset_fakes
+rc=0; out=$(svc_inventory_failed) || rc=$?
+assert_eq "Linux failed read, nothing listed: rc 0" "0" "$rc"
+assert_eq "Linux failed read, nothing listed: the manager line alone" "$(printf 'manager\tLinux')" "$out"
+assert_eq "Linux failed read, nothing listed: shows nothing" "0" "$(grep -c -- '--user show' "$FAKE_LOG" || true)"
+reset_fakes
+rc=0; (export FAKE_LISTED_EXIT=1; svc_inventory_failed) >/dev/null || rc=$?
+assert_eq "Linux failed read: a list that fails refuses (rc 3)" "3" "$rc"
+reset_fakes
+as_os Darwin
+rc=0; out=$(svc_inventory_failed) || rc=$?
+assert_eq "Darwin failed read: rc 0" "0" "$rc"
+assert_eq "Darwin failed read: the manager line, then launchctl list" \
+    "$(printf 'manager\tDarwin\nPID\tStatus\tLabel\n123\t0\tsvc-alpha')" "$out"
+reset_fakes
+rc=0; (export FAKE_LIST_EXIT=1; svc_inventory_failed) >/dev/null || rc=$?
+assert_eq "Darwin failed read: a list that fails refuses (rc 3)" "3" "$rc"
+as_os SunOS
+rc=0; svc_inventory_failed >/dev/null || rc=$?
+assert_eq "Other OS: svc_inventory_failed rc 3" "3" "$rc"
 reset_fakes
 
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
