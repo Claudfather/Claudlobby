@@ -852,6 +852,28 @@ test('expired or revoked browser receipt retains original identifiers with local
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
 
+test('failed setup approval refresh disables new work but keeps the goal and original recovery identifiers',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const button=title=>panel.children.find(e=>e.tagName==='BUTTON'&&e.textContent===title);
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+  const plan=h.api.snapshot().plan,check=h.client.setupContext;
+  assert.equal(button('Launch this exact plan').disabled,false);
+  h.client.setupContext=async()=>{throw new Error('approval revoked');};
+  assert.equal(await h.api.run('context'),false);
+  assert.equal(h.api.snapshot().context,null);assert.equal(h.api.snapshot().plan,plan);
+  assert.equal(h.api.snapshot().goal,'Improve tests');
+  assert.equal(button('Preview team').disabled,true);assert.equal(button('Launch this exact plan').disabled,true);
+  const before=h.calls.length;
+  assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,before);
+  h.client.setupContext=check;await h.api.run('context');await h.api.run('preview');await h.api.run('launch');
+  const saved=h.saved.get('test');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  h.client.setupContext=async()=>{throw new Error('approval revoked');};
+  assert.equal(await h.api.run('context'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(h.saved.get('test'),saved);assert.equal(button('Check original activation receipt').disabled,false);
+  await h.api.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+
 test('explicit connected summary retry forwards only its source key and successful reconnect clears its latch',async()=>{
   const retries=[];
   const h=harness({count:1,dependencies:{createTransport(options){

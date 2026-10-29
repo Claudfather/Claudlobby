@@ -29,6 +29,9 @@ def test_team_template_materializes_exact_scope_and_preserves_policy():
     content = setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
     fleet, defaults = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
     assert defaults["jobs"]["manager-checkin"]["enroll"] is True
+    assert defaults["jobs"]["reload-fleet"]["enroll"] is False
+    assert fleet.plugins.startup_policy == "verify-existing"
+    assert "claudna@Claudfather" in fleet.plugins.required
     assert content == setup._template_config("revenue-web-app", "shop", "example-org/shop", goal)
     assert fleet.name == "shop" and fleet.service_prefix == "com.claudlobby.shop"
     assert fleet.mission.startswith(f"Approved goal: {goal}.")

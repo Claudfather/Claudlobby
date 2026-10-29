@@ -2984,6 +2984,15 @@ class TestPluginsBotConf:
         conf = self._compose(tmp_path, plugins=plugins)
         assert 'export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"' in conf
 
+    def test_verify_existing_retains_requirements_without_auto_sync(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        conf = self._compose(tmp_path, plugins=PluginsConfig(
+            required=["claudna@Claudfather"], startup_policy="verify-existing"))
+        assert "export FLEET_PLUGIN_STARTUP_POLICY=verify-existing" in conf
+        assert "export FLEET_PLUGINS_REQUIRED=claudna@Claudfather" in conf
+        assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
+
     def test_bot_conf_no_sync_without_plugins(self, tmp_path):
         conf = self._compose(tmp_path)
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
@@ -3094,6 +3103,18 @@ class TestPluginsSettingsLocal:
             "claudna@Claudfather": True,
             "telegram@claude-plugins-official": True,
         }
+
+    def test_verify_existing_enables_plugins_without_marketplace_provisioning(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        plugins = PluginsConfig(required=["claudna@Claudfather"], startup_policy="verify-existing",
+                                marketplaces={"Claudfather": {"source": {"source": "github", "repo": "Claudfather/clauDNA"}}})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins)
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["enabledPlugins"] == {"claudna@Claudfather": True}
+        assert "extraKnownMarketplaces" not in result
 
     def test_settings_local_has_extra_marketplaces(self, tmp_path):
         from claudlobby.config import PluginsConfig

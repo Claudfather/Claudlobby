@@ -1373,11 +1373,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.
     plugins_required = list(fleet.plugins.required)
+    if fleet.plugins.startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
+    if fleet.plugins.startup_policy == "verify-existing":
+        lines.append("export FLEET_PLUGIN_STARTUP_POLICY=verify-existing")
     for _chan_plugin in _channel_plugins(bot.channels):
         if _chan_plugin not in plugins_required:
             plugins_required.append(_chan_plugin)
     if plugins_required:
-        lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
+        if fleet.plugins.startup_policy == "manage":
+            lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
         lines.append(
             f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(plugins_required))}"
         )
@@ -3210,7 +3215,7 @@ def compose_settings_local(
         plugin: plugin in selected_plugins
         for plugin in sorted(inherited_plugins | selected_plugins)
     }
-    if fleet.plugins.marketplaces:
+    if fleet.plugins.marketplaces and fleet.plugins.startup_policy == "manage":
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
     # MCP trust allowlist — see docstring for the derive-and-fail-closed rationale.

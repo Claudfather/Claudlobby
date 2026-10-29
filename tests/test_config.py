@@ -147,6 +147,16 @@ class TestRemoteControlRoleDefault:
 
 
 class TestCoercePlugins:
+    def test_startup_policy_defaults_and_verify_existing(self):
+        assert _coerce_plugins(None).startup_policy == "manage"
+        result = _coerce_plugins({"startup_policy": "verify-existing"})
+        assert result.startup_policy == "verify-existing"
+        assert result.required == DEFAULT_PLUGINS
+
+    def test_unknown_startup_policy_refuses(self):
+        with pytest.raises(ValueError, match="plugins.startup_policy"):
+            _coerce_plugins({"startup_policy": "skip"})
+
     def test_defaults_applied_when_no_plugins_section(self):
         result = _coerce_plugins(None)
         assert result.required == DEFAULT_PLUGINS

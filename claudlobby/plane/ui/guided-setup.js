@@ -27,6 +27,9 @@ export function createGuidedSetup({client, storage, storageKey,
   }
   async function run(operation) {
     if (disposed || busy || !active()) return false;
+    // Rechecking approval retires permission for new work immediately. Keep
+    // the draft/plan and original pending identifiers available for recovery.
+    if (operation === 'context') context = null;
     const ticket = epoch; busy = true; changed();
     try {
       if (operation === 'context') {

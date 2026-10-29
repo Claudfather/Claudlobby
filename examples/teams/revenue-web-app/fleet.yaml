@@ -9,6 +9,9 @@ fleet:
   accounts:
     default: ~/.claude
 
+  plugins:
+    startup_policy: verify-existing
+
   defaults:
     account: default
     model: sonnet
@@ -18,6 +21,7 @@ fleet:
     dangerously_skip_permissions: false
     jobs:
       manager-checkin: { enroll: true }
+      reload-fleet: { enroll: false }
     scope:
       org: example-org
       repos: [example-org/revenue-web-app]
