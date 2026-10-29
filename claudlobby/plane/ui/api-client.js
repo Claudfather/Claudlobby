@@ -1,10 +1,10 @@
 // The same renderer consumes either native host reads or an admitted workspace.
-import { createConnectedWorkspace } from "./connected-workspace.js";
+import { createConnectedWorkspace, MAX_WORKSPACE_CONTEXT_BYTES } from "./connected-workspace.js";
 
 const contextElement = globalThis.document?.getElementById('workspace-document-context');
 let context;
 if (contextElement) {
-  try { context = JSON.parse(contextElement.textContent.length <= 16384 ? contextElement.textContent : ''); }
+  try { context = JSON.parse(contextElement.textContent.length <= MAX_WORKSPACE_CONTEXT_BYTES ? contextElement.textContent : ''); }
   catch { context = null; }
   contextElement.remove();
 }

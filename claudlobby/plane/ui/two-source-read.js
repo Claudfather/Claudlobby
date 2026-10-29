@@ -1,5 +1,5 @@
-// One or two trusted core-issued read handles. Carrier/session provisioning is external.
-import { isOwnerReadHandle } from "./owner-api-client.js";
+// Bounded trusted core-issued read handles. Carrier/session provisioning is external.
+import { isOwnerReadHandle, MAX_SAVED_COMPUTERS, MAX_WORKSPACE_CONTEXT_BYTES } from "./owner-api-client.js";
 
 const slug = /^[a-z][a-z0-9-]{0,31}$/;
 const taskID = /^wi_[0-9a-f]{32}$/;
@@ -8,13 +8,15 @@ const failed = (state = 'unavailable', remediation = 'This read is unavailable i
 const sum = (rows, key) => rows.every(r => Number.isSafeInteger(r[key]) && r[key] >= 0)
   ? rows.reduce((n, r) => n + r[key], 0) : null;
 
+export { MAX_SAVED_COMPUTERS, MAX_WORKSPACE_CONTEXT_BYTES };
+
 export function createTwoSourceReadTransport({ sources }) {
   if (!Array.isArray(sources) || sources.length !== 2) throw new Error('Exactly two core read handles are required.');
   return createWorkspaceReadTransport({ sources });
 }
 
 export function createWorkspaceReadTransport({ sources }) {
-  if (!Array.isArray(sources) || ![1, 2].includes(sources.length)) throw new Error('One or two core read handles are required.');
+  if (!Array.isArray(sources) || sources.length < 1 || sources.length > MAX_SAVED_COMPUTERS) throw new Error('One to eight core read handles are required.');
   const rooms = new Map(), streams = new Set();
   let disposed = false;
   const entries = sources.map(({ key, label, savedLabel, reader, connectionState, readFailure }) => {

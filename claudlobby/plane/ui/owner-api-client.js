@@ -1,3 +1,8 @@
+// Shared finite navigation metadata limits; never host action authority.
+export const MAX_SAVED_COMPUTERS = 8;
+// Max canonical context22300bytes; round up for a readable finite wire budget.
+export const MAX_WORKSPACE_CONTEXT_BYTES = 24 * 1024;
+
 const readHandles = new WeakSet();
 export const isOwnerReadHandle = handle => readHandles.has(handle);
 // Only trusted carriers mark a dispatched finite read as ambiguously unavailable.

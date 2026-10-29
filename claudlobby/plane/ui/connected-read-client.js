@@ -1,4 +1,4 @@
-import { createOwnerTransport, ReadRequestUnavailable } from "./owner-api-client.js";
+import { createOwnerTransport, ReadRequestUnavailable, MAX_SAVED_COMPUTERS } from "./owner-api-client.js";
 import { createSourceActionInterface } from "./connected-actions.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -115,7 +115,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (!keys(c, ['version', 'user', 'workspace', 'context_generation', 'references']) || c.version !== 2
         || !keys(c.user, ['id']) || !keys(c.workspace, ['id', 'name'])
         || c.user.id !== doc.subject || c.workspace.id !== doc.workspace_id
-        || c.context_generation !== doc.context_generation || !Array.isArray(c.references) || c.references.length > 2) return false;
+        || c.context_generation !== doc.context_generation || !Array.isArray(c.references) || c.references.length > MAX_SAVED_COMPUTERS) return false;
     const matches = c.references.filter(r => r?.reference_id === ref.reference_id);
     return matches.length === 1 && keys(matches[0], ['reference_id', 'endpoint_origin', 'revision'])
       && matches[0].endpoint_origin === ref.endpoint_origin && matches[0].revision === ref.revision;

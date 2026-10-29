@@ -722,3 +722,15 @@ test('source-qualified context denials remain distinct and stale source denials 
   assert.equal(await old,null);h.api.dispose();
 
 });
+
+
+test('current account metadata accepts eight exact references and retires a ninth before host traffic', async () => {
+  const h=harness();
+  h.context={...h.context,references:Array.from({length:8},(_,i)=>i?{reference_id:uuid(30+i),endpoint_origin:`https://host${i}.example.test`,revision:1}:{...ref})};
+  assert.equal(await h.api.connect(),true);
+  assert.equal(h.api.snapshot().state,'ready');
+  h.context={...h.context,references:[...h.context.references,{reference_id:uuid(50),endpoint_origin:'https://ninth.example.test',revision:1}]};
+  const before=h.calls.length;await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,before);
+  h.api.dispose();
+});

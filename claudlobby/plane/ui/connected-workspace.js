@@ -2,7 +2,9 @@
 import { createConnectedReadClient } from "./connected-read-client.js";
 import { createWorkspaceEnrollment } from "./workspace-enrollment.js";
 import { createGuidedSetup } from "./guided-setup.js";
-import { createWorkspaceReadTransport } from "./two-source-read.js";
+import { createWorkspaceReadTransport, MAX_SAVED_COMPUTERS, MAX_WORKSPACE_CONTEXT_BYTES } from "./two-source-read.js";
+
+export { MAX_WORKSPACE_CONTEXT_BYTES };
 
 const uuid = value => typeof value === 'string' && value.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 const keys = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
@@ -16,7 +18,7 @@ function origin(value) {
   catch { return false; }
 }
 function references(value) {
-  return Array.isArray(value) && value.length <= 2 && value.every(ref => keys(ref, ['reference_id', 'endpoint_origin', 'revision'])
+  return Array.isArray(value) && value.length <= MAX_SAVED_COMPUTERS && value.every(ref => keys(ref, ['reference_id', 'endpoint_origin', 'revision'])
     && uuid(ref.reference_id) && origin(ref.endpoint_origin) && Number.isSafeInteger(ref.revision) && ref.revision > 0)
     && new Set(value.map(ref => ref.reference_id)).size === value.length
     && new Set(value.map(ref => ref.endpoint_origin)).size === value.length;
@@ -92,7 +94,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       let length = 0; const chunks = [];
       for (;;) {
         const part = await reader.read(); if (part.done) break;
-        length += part.value.byteLength; if (length > 16384) throw new Error(); chunks.push(part.value);
+        length += part.value.byteLength; if (length > MAX_WORKSPACE_CONTEXT_BYTES) throw new Error(); chunks.push(part.value);
       }
       if (abort.signal.aborted) throw new Error();
       const bytes = new Uint8Array(length); let offset = 0;

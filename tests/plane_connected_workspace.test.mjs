@@ -869,3 +869,14 @@ test('explicit connected summary retry forwards only its source key and successf
   h.api.dispose();assert.equal(h.api.retryOverview(sourceA),false);assert.equal(retries.length,3);
 
 });
+
+
+test('workspace document permits eight exact saved computers and refuses a ninth or duplicate', async () => {
+  const references=Array.from({length:8},(_,i)=>({reference_id:id(40+i),endpoint_origin:`https://host${i}.example.test`,revision:1}));
+  const h=harness({references});h.mount();await h.api.checkAccount();await flush();
+  assert.equal(h.api.snapshot().phase,'ready');assert.equal(h.api.snapshot().computers.length,8);h.api.dispose();
+  for(const bad of [[...references,{reference_id:id(60),endpoint_origin:'https://ninth.example.test',revision:1}],[...references.slice(0,7),references[0]]]) {
+    const rejected=harness({references:bad});rejected.mount();await rejected.api.checkAccount();await flush();
+    assert.notEqual(rejected.api.snapshot().phase,'ready');rejected.api.dispose();
+  }
+});
