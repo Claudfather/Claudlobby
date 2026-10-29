@@ -16,6 +16,20 @@ from tests.test_plane_two_fleets import _seed
 TABLES = HOST_TABLES
 
 
+@pytest.mark.parametrize(('failure', 'state', 'reason', 'operation'), [
+    (SourceNeedsBinding, 'unavailable', 'source_binding_required', 'bind_source'),
+    (SourceDenied, 'denied', 'source_denied', 'inspect_source'),
+    (SourceUnavailable, 'unavailable', 'source_unavailable', 'inspect_source'),
+])
+def test_source_recovery_preserves_typed_failure_without_pairing_or_foreign_rebind(failure, state, reason, operation):
+    from claudlobby.plane.owner_observation import source_refusal
+
+    observed = source_refusal(failure('synthetic source failure'))
+    assert (observed.version, observed.state, observed.reason, observed.next_operation) == (1, state, reason, operation)
+    with pytest.raises(TypeError):
+        source_refusal(AccessDenied('session_unavailable'))
+
+
 def add_row(root, table, host_uid, *, legacy=False):
     """Explicit synthetic SQL fixture, including tombstone and null fleet."""
     with sqlite3.connect(db_file(root)) as conn:

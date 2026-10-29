@@ -14,8 +14,8 @@ import re
 
 from ..activation_identity import read_selected_identity_bindings
 from ..active_config import resolve_active_context
-from ..command_result import CommandOutput
-from ..commands.task_write import feedback_bound_task
+from ..application_result import ApplicationOutcome
+from ..application_tasks import feedback_bound_task
 from ..message_context import resolve_message_route
 from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
                                ReceiptObservation, receipt)
@@ -102,7 +102,7 @@ class OwnerFeedback:
     def submit(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
               task_id: str, manager_uid: str, expected_assignment_id: str | None,
               expected_release_id: str, request_id: str, text: str,
-              expected_grant: OwnerFeedbackGrant) -> CommandOutput:
+              expected_grant: OwnerFeedbackGrant) -> ApplicationOutcome:
         """Record a comment then attempt its first notification; retain the UUID.
 
         Assignment None explicitly selects unassigned or terminal work. Actor,

@@ -115,7 +115,7 @@ test(`explicit activity recovery reuses guarded reads and preserves keyboard foc
     syncWorkRoom(){},fleetQuery:()=>'?fleet='+encodeURIComponent(state.currentFleet),channelUrl(){return '/api/channel?limit=120';},refreshOverview(){},
     agentDirectoryVisible:()=>false,
     jget(url){reads.push(url);return url.startsWith('/api/channel')?held:Promise.resolve({state:'ok',data:{}});},
-    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){}}};
+    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
   const retry=source.slice(source.indexOf('async function retryActivity()'),source.indexOf('async function refreshBoards()'));
   const refresh=source.slice(source.indexOf('async function refreshBoards()'),source.indexOf('function scheduleRefresh()'));
   const view=runInNewContext(`${rendering}\n${retry}\n${refresh}\n({renderChannel,retryActivity,refreshBoards,control:()=>activityRecovery})`,state);

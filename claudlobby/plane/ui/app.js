@@ -1060,17 +1060,20 @@ async function refreshOverview() {
   overviewDueAt = Date.now() + OVERVIEW_INTERVAL;
   clearTimeout(overviewTimer); overviewTimer = null;
   try {
-    const ov = await jget("/api/overview");
-    if (sessionPaused || session !== sessionEpoch || epoch !== overviewEpoch) return;
-    adoptFleets(ov);
-    if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
-    renderHeader(ov); renderHostFacts(ov); renderFleetTabs(); renderOverview(ov);
-    const note = ov?.data?.sources
-      ? "Computer summaries are separate snapshots. Available summaries refresh about once a minute; activity and tasks refresh independently."
-      : ov?.state === "ok" ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
-      : "Team summary unavailable. Retrying within a minute; activity and tasks refresh separately.";
-    const el = $("overview");
-    if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
+    const paint = ov => {
+      if (sessionPaused || session !== sessionEpoch || epoch !== overviewEpoch) return;
+      adoptFleets(ov);
+      if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
+      renderHeader(ov); renderHostFacts(ov); renderFleetTabs(); renderOverview(ov);
+      const note = ov?.data?.sources
+        ? "Computer summaries are separate snapshots. Available summaries refresh about once a minute; activity and tasks refresh independently."
+        : ov?.state === "ok" ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
+        : "Team summary unavailable. Retrying within a minute; activity and tasks refresh separately.";
+      const el = $("overview");
+      if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
+      paintOverviewRetry(true);
+    };
+    paint(await jget("/api/overview", paint));
   } finally {
     overviewInFlight = false;
     paintOverviewRetry(false);
@@ -1110,9 +1113,21 @@ async function refreshBoards() {
     // be known first — the old flow fetched the firehose, discovered the
     // fleets from the roster, and refetched (one wasted round trip and one
     // flash of the wrong room on every load).
-    const env = await jget("/api/fleets");
-    if (sessionPaused || gen !== generation) return;
+    let firstSource;
+    const usable = new Promise(resolve => { firstSource = resolve; });
+    const discovery = jget("/api/fleets", value => {
+      if (value?.state === "ok" && value.data?.coverage?.reachable > 0) firstSource(value);
+    });
+    const env = await Promise.race([discovery, usable]);
+    if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
     adoptFleets(env);
+    // Continue discovering the held peer without holding the first usable board.
+    void discovery.then(value => {
+      if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
+      adoptFleets(value);
+      if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
+      renderFleetTabs();
+    });
   }
   syncWorkRoom();
   if (agentDirectoryVisible()) {
@@ -1131,13 +1146,26 @@ async function refreshBoards() {
   }
   const q = fleetQuery();
   void refreshOverview(); // the expensive summary never holds conversation rendering
-  const [ch, tk, fl, sm] = await Promise.all([
-    jget(channelUrl()), jget("/api/tasks" + q),
-    jget("/api/identities" + q), jget("/api/summary"),
+  const current = () => !sessionPaused && epoch === sessionEpoch && gen === generation;
+  const panel = async (url, paint) => {
+    const accepted = value => { if (current()) paint(value); };
+    const value = await jget(url, accepted);
+    accepted(value);
+    return value;
+  };
+  const conversation = Promise.all([
+    panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
+    panel("/api/tasks" + q, renderTasks),
+  ]).then(([ch, tk]) => {
+    // Partial paints never replace the work-loop's paired canonical snapshots.
+    if (current()) workLoop.update(tk, ch);
+  });
+  await Promise.all([
+    conversation,
+    panel("/api/identities" + q, value => { renderFleet(value); renderFleetTabs(); }),
+    panel("/api/summary", renderSummary),
   ]);
-  if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
-  renderFleet(fl); renderChannel(ch); renderTasks(tk); renderSummary(sm);
-  workLoop.update(tk, ch);
+  if (!current()) return;
   renderFleetTabs();
   restartSafety();
   } finally {

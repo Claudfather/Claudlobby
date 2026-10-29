@@ -17,6 +17,7 @@ from ..request_receipts import ReceiptConflict, semantic_digest
 from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
 from .owner_messages import OwnerMessages
+from .owner_action_binding import check_owner_binding
 from .owner_source import inspect_source
 
 
@@ -86,12 +87,10 @@ class OwnerActions:
             host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
-        if (ctx.context.fleet.name != room or ctx.host_uid != host
-                or bindings["host_uid"] != host or ctx.fleet_uid != grant.fleet_uid
-                or ctx.caller.uid != grant.actor_uid or ctx.caller.alias != grant.actor_alias
-                or ctx.caller_fleet_uid is not None
-                or {name: actor.uid for name, actor in ctx.bots.items()} != bindings["bots"]):
+        if ctx.context.fleet.name != room:
             raise AccessDenied("message_binding_changed")
+        check_owner_binding(ctx, host=host, bindings=bindings, grant=grant,
+                            refusal="message_binding_changed")
         recipients = [{"id": actor.uid, "label": name} for name, actor in sorted(ctx.bots.items())]
         if not 1 <= len(recipients) <= 100:
             raise AccessUnavailable("owner actions unavailable")

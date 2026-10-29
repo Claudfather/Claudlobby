@@ -265,6 +265,22 @@ test('provider outage retains known current context honestly; initial outage adm
   const first=harness();first.metadataStatus=503;assert.equal(await first.api.checkAccount(),false);assert.equal(first.api.snapshot().phase,'unavailable');assert.equal(await first.api.act(0,'connect'),false);assert.equal(first.calls.length,1);first.api.dispose();
 });
 
+test('incremental reads use the same account and transport fence as final reads',async()=>{
+  const held=deferred(),paints=[];let progress;
+  const h=harness({dependencies:{createTransport:()=>({
+    jget(url,onUpdate){progress=onUpdate;return held.promise;},dispose(){},
+  })}});
+  await h.api.checkAccount();await flush();
+  const reading=h.api.jget('/api/tasks',value=>paints.push(value));
+  const accepted=ok({tasks:[]});progress(accepted);assert.deepEqual(paints,[accepted]);
+  h.metadataStatus=401;await h.api.checkAccount();
+  progress(ok({tasks:[{title:'late private'}]}));
+  held.resolve(accepted);
+  assert.equal((await reading).state,'denied');
+  assert.equal(paints.length,1,'retired account cannot receive late source progress');
+  h.api.dispose();
+});
+
 test('observed account refusal retires clients, fences held private reads and clears all private regions even if callback throws',async()=>{
   const h=harness();h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
   for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])h.ui.get(name).append(h.ui.document.createElement('b'));

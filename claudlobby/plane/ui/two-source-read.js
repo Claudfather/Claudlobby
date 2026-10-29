@@ -160,7 +160,8 @@ export function createWorkspaceReadTransport({ sources }) {
       ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
         recorded_unavailable: values[i].data?.recorded_unavailable === true } : {}) }));
   }
-  async function jget(input) {
+  // Optional accepted partial snapshots; the Promise still settles with the full read.
+  async function jget(input, onUpdate) {
     try {
     if (disposed || typeof input !== 'string' || !input.startsWith('/api/') || input.includes('#')) return failed('invalid');
     const url = new URL(input, 'https://plane.invalid');
@@ -190,80 +191,92 @@ export function createWorkspaceReadTransport({ sources }) {
     const epochs = chosen.map(e => e.epoch), revisions = chosen.map(e => e.routingRevision);
     const rosterRead = path === '/api/fleets' || path === '/api/overview';
     const tickets = chosen.map(e => rosterRead ? ++e.rosterRequest : null);
-    const values = await Promise.all(chosen.map(e => read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''))));
-    // One host may finish before its loss while the other host is still reading.
-    // Recheck admission at combination, not only when each request completed.
-    chosen.forEach((e, i) => {
-      if (values[i].state === 'ok' && (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision))
-        values[i] = failed(e.state);
-    });
-    if (owning) {
-      const v = values[0];
-      if (v.state !== 'ok') return v;
-      return project(owning.e, path, v);
-    }
-    let good = entries.flatMap((e, i) => {
-      if (values[i].state !== 'ok') return [];
-      try {
-        const label = values[i].data.host?.display_name;
-        if (!e.savedLabel && typeof label === 'string' && label.trim() && label.length <= 80) e.label = label;
-        const projected = project(e, path, values[i]);
-        if (rosterRead) publishFleets(e, values[i].data, path, tickets[i]);
-        if (path === '/api/overview') {
-          // A decoded envelope is not a successful summary until its projection
-          // and roster publication have both been accepted.
-          e.overviewReadAt = values[i].overview_checked_at;
-          values[i] = {...values[i], overview_read_at:e.overviewReadAt};
-        }
-        return [{ e, v: projected }];
-      } catch {
-        values[i] = failed('unavailable', 'This source returned an unsupported or superseded read projection.');
-        return [];
-      }
-    });
-    if (path === '/api/overview') {
-      // Recover only failed overview legs. A healthy overview, including an
-      // empty registry, remains authoritative for its source. Keep overview
-      // health unchanged: this read restores routing, not host telemetry.
-      const fallback = await Promise.all(entries.map((e, i) =>
-        values[i].state !== 'ok' && epochs[i] === e.epoch && admitted(e)
-          ? read(e, '/api/fleets') : null));
-      entries.forEach((e, i) => {
-        // Any peer may lose admission while the registry fallback is held.
-        if (epochs[i] !== e.epoch || !admitted(e)) {
-          values[i] = failed(e.state);
-          return;
-        }
-        if (fallback[i]?.state === 'ok') {
-          try { publishFleets(e, fallback[i].data, '/api/fleets', tickets[i]); }
-          catch { /* malformed or superseded registry cannot grant a room */ }
+    const values = chosen.map(() => failed('checking', 'This source read is still in progress.'));
+    const projected = new Map();
+    function combine() {
+      // A settled source can lose admission while a peer is still pending.
+      chosen.forEach((e, i) => {
+        if (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision
+            || rosterRead && tickets[i] !== e.rosterRequest) {
+          values[i] = failed(e.state); projected.delete(e);
         }
       });
-      good = good.filter(({ e }) => values[entries.indexOf(e)].state === 'ok');
+      if (owning) return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
+      const good = entries.flatMap((e, i) => {
+        if (!projected.has(e)) return [];
+        try { return [{e, v:project(e, path, values[i])}]; }
+        catch { values[i] = failed('unavailable'); return []; }
+      });
+      const data = { sources: sourceFacts(values, path), coverage: coverage(values),
+        windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
+      if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
+      if (path === '/api/fleets') data.fleets = data.fleet_choices;
+      if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads),
+        checkins: good.flatMap(x => x.v.data.checkins || []).sort((a,b) =>
+          (Date.parse(b.occurred_at) || 0) - (Date.parse(a.occurred_at) || 0)),
+        checkins_state: good.length && good.every(x => x.v.data.checkins_state === 'ok') ? 'ok' : 'unavailable',
+        checkins_truncated: good.some(x => x.v.data.checkins_truncated),
+        lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
+      if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
+      if (path === '/api/presence') data.bots = good.flatMap(x => x.v.data.bots);
+      if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
+      if (path === '/api/overview') {
+        data.fleets = good.flatMap(x => x.v.data.fleets);
+        const totals = good.map(x => x.v.data.totals);
+        data.totals = Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k, sum(totals, k)]));
+        data.totals.live_poll = totals.some(t => t.live_poll !== 'ok') ? 'unavailable' : 'ok';
+        data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
+      }
+      // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
+      return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
+        ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
     }
-    const data = { sources: sourceFacts(values, path), coverage: coverage(values),
-      windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
-    if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
-    if (path === '/api/fleets') data.fleets = data.fleet_choices;
-    if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads),
-      checkins: good.flatMap(x => x.v.data.checkins || []).sort((a,b) =>
-        (Date.parse(b.occurred_at) || 0) - (Date.parse(a.occurred_at) || 0)),
-      checkins_state: good.length && good.every(x => x.v.data.checkins_state === 'ok') ? 'ok' : 'unavailable',
-      checkins_truncated: good.some(x => x.v.data.checkins_truncated),
-      lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
-    if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
-    if (path === '/api/presence') data.bots = good.flatMap(x => x.v.data.bots);
-    if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
-    if (path === '/api/overview') {
-      data.fleets = good.flatMap(x => x.v.data.fleets);
-      const totals = good.map(x => x.v.data.totals);
-      data.totals = Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k, sum(totals, k)]));
-      data.totals.live_poll = totals.some(t => t.live_poll !== 'ok') ? 'unavailable' : 'ok';
-      data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
+    let progressTimer = null, complete = false;
+    function progress() {
+      if (typeof onUpdate !== 'function' || progressTimer !== null || complete) return;
+      // Coalesce peers settling in the same turn; this schedules paints, never reads.
+      progressTimer = setTimeout(() => {
+        progressTimer = null;
+        if (!complete && !disposed) { try { onUpdate(combine()); } catch { /* presentation cannot fail a read */ } }
+      }, 0);
     }
-    // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
-    return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
-      ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
+    try {
+      await Promise.all(chosen.map(async (e, i) => {
+        values[i] = await read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''));
+        if (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision) values[i] = failed(e.state);
+        if (values[i].state === 'ok') {
+          try {
+            const label = values[i].data.host?.display_name;
+            if (!e.savedLabel && typeof label === 'string' && label.trim() && label.length <= 80) e.label = label;
+            const value = project(e, path, values[i]);
+            if (rosterRead) publishFleets(e, values[i].data, path, tickets[i]);
+            if (path === '/api/overview') {
+              // Retain only a projection whose roster publication was accepted.
+              e.overviewReadAt = values[i].overview_checked_at;
+              values[i] = {...values[i], overview_read_at:e.overviewReadAt};
+            }
+            projected.set(e, value);
+          } catch {
+            values[i] = failed('unavailable', 'This source returned an unsupported or superseded read projection.');
+          }
+        }
+        progress();
+        // Discover routing independently of an unavailable summary. A slow
+        // fallback must not hold an already accepted peer's display.
+        if (path === '/api/overview' && values[i].state !== 'ok' && epochs[i] === e.epoch && admitted(e)) {
+          const fallback = await read(e, '/api/fleets');
+          if (fallback.state === 'ok' && epochs[i] === e.epoch && admitted(e)) {
+            try { publishFleets(e, fallback.data, '/api/fleets', tickets[i]); }
+            catch { /* malformed or superseded registry cannot grant a room */ }
+          }
+          progress();
+        }
+      }));
+      return combine();
+    } finally {
+      complete = true;
+      clearTimeout(progressTimer);
+    }
   }
     catch { return failed('unavailable', 'This source returned an unsupported read projection.'); }
   }

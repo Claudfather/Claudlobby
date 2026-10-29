@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl
 from starlette.responses import JSONResponse
 
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
+from .owner_observation import owner_read_profile
 from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json, _DEADLINE
 from .owner_view import _ReadStopped
 from .session_assertion import verify_session_assertion
@@ -42,10 +43,12 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         self.connected = access.connected()
         self.read_app = read_app.with_admission(self._reader, self._admit_reader)
         self._readers = set()
+        self.finite_reads = read_app.state.finite_reads
 
     async def shutdown(self):
         # The corrected bootstrap owns cancellation/drain of mutation workers.
         await super().shutdown()
+        await self.finite_reads.shutdown()
         readers = tuple(self._readers)
         for reader in readers:
             reader.cancel()
@@ -103,7 +106,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         if not admission.created_at <= now < admission.expires_at:
             raise AccessDenied("connected_session_denied")
         return {"version": 1, "state": "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
-            "read_profile": {"version": 1, "profile": "direct-owner-read-v1", "host_uid": admission.owner.host_uid},
+            "read_profile": owner_read_profile(admission.owner.host_uid),
             "session_context": {"issuer": binding.issuer, "subject": binding.subject,
                 "workspace_id": binding.workspace_id, "binding_revision": binding.revision,
                 "binding_generation": binding.generation, "operational_origin": binding.operational_origin}}
@@ -290,26 +293,24 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 # query/source/response gates, with only the outgoing body removed.
                 inner = {**scope, "method": "GET", "path": "/api/" + suffix,
                          "raw_path": ("/api/" + suffix).encode()}
+                if suffix != "stream":
+                    await self.finite_reads.run(self.read_app, inner, receive, cors_send)
+                    return
                 job = asyncio.create_task(self.read_app(inner, receive, cors_send))
                 self._readers.add(job)
                 try:
-                    if suffix == "stream":
-                        ready = asyncio.create_task(started.wait())
-                        try:
-                            done, _ = await asyncio.wait({job, ready}, timeout=READ_SECONDS,
-                                                         return_when=asyncio.FIRST_COMPLETED)
-                            if not done:
-                                raise asyncio.TimeoutError
-                        finally:
-                            ready.cancel()
-                            await asyncio.gather(ready, return_exceptions=True)
-                        # Observe child completion without forwarding cancellation
-                        # from the request into it. A healthy stream has no idle deadline.
-                        await asyncio.wait({job})
-                    else:
-                        done, _ = await asyncio.wait({job}, timeout=READ_SECONDS)
+                    ready = asyncio.create_task(started.wait())
+                    try:
+                        done, _ = await asyncio.wait({job, ready}, timeout=READ_SECONDS,
+                                                     return_when=asyncio.FIRST_COMPLETED)
                         if not done:
                             raise asyncio.TimeoutError
+                    finally:
+                        ready.cancel()
+                        await asyncio.gather(ready, return_exceptions=True)
+                    # Only stream establishment has a deadline. A healthy stream
+                    # has no idle deadline; cancellation still unwinds its producer.
+                    await asyncio.wait({job})
                     if job.cancelled():
                         if not self._stopping:
                             raise asyncio.CancelledError
@@ -322,7 +323,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                     await asyncio.gather(job, return_exceptions=True)
                     if not started.is_set():
                         await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
-                    # Started finite responses remain incomplete, never replaced.
+                    # Never replace a stream response after headers have started.
                 finally:
                     if not job.done():
                         job.cancel()

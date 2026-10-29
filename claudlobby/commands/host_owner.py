@@ -21,7 +21,8 @@ import warnings
 
 from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import ACTION_DENIALS, AccessDenied, AccessUnavailable, OwnerAccess
-from ..plane.owner_source import SourceDenied, SourceNeedsBinding, SourceUnavailable
+from ..plane.owner_source import SourceDenied, SourceUnavailable
+from ..plane.owner_observation import owner_pairing_state, source_refusal
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
               "FLEET_NAME", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT")
@@ -299,7 +300,7 @@ def dispatch(args):
             status = store.local_action_status()
             grant, messages, nudges, feedbacks = (status.owner, status.message_grants,
                                                   status.nudge_grants, status.feedback_grants)
-            state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
+            state = owner_pairing_state(grant)
             lines = [f"Owner access: {state}."]
             for message in messages:
                 lines.append("Message grant: " + json.dumps(asdict(message), ensure_ascii=True))
@@ -411,15 +412,20 @@ def dispatch(args):
             raise CommandFailure("invalid_argument", "unsupported owner command")
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid host root selector") from exc
-    except SourceNeedsBinding as exc:
-        raise CommandFailure("unavailable", "Plane source lacks required binding or indexes; verify the selected installation "
-            "and re-run host owner bind-source. Binding refuses foreign or mixed-host history.") from exc
-    except SourceDenied as exc:
-        raise CommandFailure("conflict", "Plane source is foreign or mixed-host; select the correct installation "
-            "or investigate its history. Do not rebind this source.") from exc
-    except SourceUnavailable as exc:
-        raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
-            "database and schema locally. Pairing again cannot repair source state.") from exc
+    except (SourceUnavailable, SourceDenied) as exc:
+        observation = source_refusal(exc)
+        code, message = {
+            'source_binding_required': ('unavailable',
+                "Plane source lacks required binding or indexes; verify the selected installation "
+                "and re-run host owner bind-source. Binding refuses foreign or mixed-host history."),
+            'source_denied': ('conflict',
+                "Plane source is foreign or mixed-host; select the correct installation "
+                "or investigate its history. Do not rebind this source."),
+            'source_unavailable': ('unavailable',
+                "Plane source cannot be verified; inspect the selected installation's "
+                "database and schema locally. Pairing again cannot repair source state."),
+        }[observation.reason]
+        raise CommandFailure(code, message) from exc
     except AccessDenied as exc:
         if args.owner_action == "initialize-connected":
             raise CommandFailure("conflict", "connected initialization requires the current native paired owner; inspect host owner status") from exc

@@ -22,8 +22,8 @@ export const prepareAction = connected?.prepareAction;
 export const sendAction = connected?.sendAction;
 export const actionReceipt = connected?.actionReceipt;
 
-export async function jget(url) {
-  if (connected) return connected.jget(url);
+export async function jget(url, onUpdate) {
+  if (connected) return connected.jget(url, onUpdate);
   try {
     const response = await fetch(url);
     return await response.json();

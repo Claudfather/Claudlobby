@@ -223,12 +223,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     changed();
     return loading;
   }
-  async function jget(url) {
+  async function jget(url, onUpdate) {
     if (disposed || phase === 'denied') return failure('denied');
     if (phase === 'empty') return failure('empty', 'Save a computer address in your website workspace, then open it again.');
     if (phase !== 'ready' || !transport) return failure('unavailable', 'Check your account before connecting a computer.');
     const ticket = sequence, active = transport, recovery = new Map(clients.map(row => [row.key,row.actionRecoveryPending]));
-    const value = await active.jget(url);
+    const value = await active.jget(url, typeof onUpdate === 'function' ? value => {
+      if (!disposed && phase === 'ready' && ticket === sequence && active === transport) onUpdate(value);
+    } : undefined);
     if (disposed || phase !== 'ready' || ticket !== sequence || active !== transport) return failure('denied');
     let renamed = false;
     for (const source of value?.data?.sources || []) {

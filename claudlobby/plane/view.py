@@ -820,6 +820,12 @@ def _detail_assignment(assignment, aliases):
     return result
 
 
+def _task_attention_reasons(arm, escalation):
+    return (["escalated"] if escalation else []) + [
+        name for name, _s, _a, _w in ATTENTION_ARMS
+        if name != "escalated" and arm and arm[name]]
+
+
 def _detail_attention(conn, snapshot, task):
     # Full canonical reduction precedes presentation caps: an unanswered raise
     # survives later ignored nudges even when its event is outside the display.
@@ -829,8 +835,7 @@ def _detail_attention(conn, snapshot, task):
     if task.open and task.current_assignment and not task.blockers:
         arm = conn.execute(ATTENTION_ARMS_SQL + " AND a.assignment_id=?",
             (*attention_arms_params(_now_iso()), task.current_assignment.assignment_id)).fetchone()
-    reasons = (["escalated"] if escalation else []) + [name for name, _s, _a, _w in ATTENTION_ARMS
-               if name != "escalated" and arm and arm[name]]
+    reasons = _task_attention_reasons(arm, escalation)
     lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
     return {"attention": bool(reasons) or bool(task.blockers), "attention_reason": reasons,
             "attention_since": escalation.occurred_at if escalation else arm[reasons[0] + "_at"] if reasons else None,
@@ -839,7 +844,7 @@ def _detail_attention(conn, snapshot, task):
             "attention_act_reason": arm[lead + "_reason"] if lead and not escalation else None}
 
 
-def _add_permission_attention(conn, root, task, card):
+def _permission_attention(conn, root, task):
     """Discovery only: decisions and authority remain in the permission owner."""
     try:
         items, truncated = list_task_permissions(conn, task.task_id, root=root,
@@ -848,6 +853,11 @@ def _add_permission_attention(conn, root, task, card):
         incomplete = truncated or any(item["state"] == "unavailable" for item in items)
     except (TaskQueryError, TaskStateError):
         pending, incomplete = 0, True
+    return pending, incomplete
+
+
+def _add_permission_attention(conn, root, task, card):
+    pending, incomplete = _permission_attention(conn, root, task)
     card["permission_pending"] = pending
     card["permission_incomplete"] = incomplete
     if pending:
@@ -948,12 +958,15 @@ def _fetch_task_detail(conn, task_id, fleet, names=None, *, root):
     return data
 
 
-def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
+def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path,
+                 summary_only: bool = False) -> dict:
     """Recent fleet-owned Tasks, with current-assignment evidence kept separate.
 
     The work-item query enforces the 200-card cap before any board projection;
     the existing Task reducer then supplies lifecycle for only those IDs. An
     empty slice still audits the selected fleet for orphan task history.
+    Summary reads share this selection and canonical reduction, but stop before
+    presentation-only aliases, delivery/nudge evidence and card formatting.
     """
     own_snapshot = not conn.in_transaction
     if own_snapshot:
@@ -964,6 +977,8 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
             "SELECT uid, alias FROM identity_registry WHERE kind='fleet'")}
         selected_uid = next((uid for uid, name in fleet_names.items() if name == fleet), None)
         if fleet is not None and selected_uid is None:
+            if summary_only:
+                return {"attention_count": 0, "overdue_count": 0, "truncated": False}
             return {"tasks": [], "attention_count": 0, "issues": [],
                     "issue_count": 0, "issue_limit": 50, "issue_scope": "fleet",
                     "limit": 200, "truncated": False}
@@ -994,42 +1009,16 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
             if uid is None or task_id not in by_id:
                 issues.append({"code": "unresolved_task", "task_id": task_id,
                                "assignment_id": None, "event_id": None, "blocking": True})
-        actor_ids = {task.created_by_uid for task in tasks}
-        actor_ids.update(event.actor_uid for task in tasks for event in task.history
-                         if event.actor_uid)
-        actor_ids.update(uid for task in tasks for assignment in task.assignments
-                         for uid in (assignment.assignee_uid, assignment.assigned_by_uid))
-        aliases = {}
-        actor_ids = sorted(actor_ids)
-        for start in range(0, len(actor_ids), 400):
-            batch = actor_ids[start:start + 400]
-            aliases.update(conn.execute(
-                "SELECT uid, alias FROM identity_registry WHERE uid IN ("
-                + ",".join("?" * len(batch)) + ")", batch).fetchall())
-        labels = ({} if fleet else qualified_labels(
-            aliases.get(task.current_assignment.assignee_uid)
-            for task in tasks if task.current_assignment))
         current = {task.current_assignment.assignment_id: task
                    for task in tasks if task.open and task.current_assignment and not task.blockers}
         ids = list(current)
         arms = {}
-        nudges = {}
-        delivery = {}
-        delivery_msg = {}
         if ids:
             ph = ",".join("?" * len(ids))
             now = _now_iso()
             arms = {row["assignment_id"]: row for row in conn.execute(
                 ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
                 (*attention_arms_params(now), *ids))}
-            nudges = {row["assignment_id"]: row for row in conn.execute(
-                NUDGE_STATE_SQL + f" AND a.assignment_id IN ({ph})", ids)}
-            delivery_msg = {row[0]: row[1] for row in conn.execute(
-                ASSIGNMENT_DELIVERY_MSG_SQL.format(ph=ph), ids) if row[1]}
-            msg_ids = sorted(set(delivery_msg.values()))
-            if msg_ids:
-                delivery = {row["msg_id"]: row["delivery"] for row in conn.execute(
-                    DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(msg_ids))), msg_ids)}
         # Only a candidate filter: raw events never establish permission state.
         # Batch once so tasks without requests do not repeat canonical reduction.
         permission_tasks = set()
@@ -1050,6 +1039,50 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
                 "THEN json_extract(detail, '$.task_id') END IN ("
                 + ",".join("?" * len(selected)) + ")",
                 (PERMISSION_EMITTER, *permission_fleets, *selected))}
+        if summary_only:
+            attention = overdue = 0
+            for task_id, _uid in candidates:
+                task = by_id.get(task_id)
+                if task is None:
+                    attention += 1
+                    continue
+                assignment = task.current_assignment if task.open else None
+                arm = arms.get(assignment.assignment_id if assignment else None)
+                reasons = _task_attention_reasons(arm, escalations.get(task_id))
+                pending, incomplete = (0, False)
+                if (task.host_uid, task.fleet_uid, task.task_id) in permission_tasks:
+                    pending, incomplete = _permission_attention(conn, root, task)
+                attention += bool(reasons) or bool(task.blockers) or bool(pending) or incomplete
+                overdue += "overdue" in reasons
+            return {"attention_count": attention, "overdue_count": overdue,
+                    "truncated": truncated}
+        actor_ids = {task.created_by_uid for task in tasks}
+        actor_ids.update(event.actor_uid for task in tasks for event in task.history
+                         if event.actor_uid)
+        actor_ids.update(uid for task in tasks for assignment in task.assignments
+                         for uid in (assignment.assignee_uid, assignment.assigned_by_uid))
+        aliases = {}
+        actor_ids = sorted(actor_ids)
+        for start in range(0, len(actor_ids), 400):
+            batch = actor_ids[start:start + 400]
+            aliases.update(conn.execute(
+                "SELECT uid, alias FROM identity_registry WHERE uid IN ("
+                + ",".join("?" * len(batch)) + ")", batch).fetchall())
+        labels = ({} if fleet else qualified_labels(
+            aliases.get(task.current_assignment.assignee_uid)
+            for task in tasks if task.current_assignment))
+        nudges = {}
+        delivery = {}
+        delivery_msg = {}
+        if ids:
+            nudges = {row["assignment_id"]: row for row in conn.execute(
+                NUDGE_STATE_SQL + f" AND a.assignment_id IN ({ph})", ids)}
+            delivery_msg = {row[0]: row[1] for row in conn.execute(
+                ASSIGNMENT_DELIVERY_MSG_SQL.format(ph=ph), ids) if row[1]}
+            msg_ids = sorted(set(delivery_msg.values()))
+            if msg_ids:
+                delivery = {row["msg_id"]: row["delivery"] for row in conn.execute(
+                    DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(msg_ids))), msg_ids)}
         cards = []
         for task_id, _uid in candidates:
             task = by_id.get(task_id)
@@ -1063,9 +1096,7 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
             aid = assignment.assignment_id if assignment else None
             arm = arms.get(aid)
             escalation = escalations.get(task_id)
-            reasons = (["escalated"] if escalation else []) + [
-                name for name, _s, _a, _w in ATTENTION_ARMS
-                if name != "escalated" and arm and arm[name]]
+            reasons = _task_attention_reasons(arm, escalation)
             lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
             nudge = nudges.get(aid)
             message_id = delivery_msg.get(aid) or (assignment.dispatch_message_id
@@ -1118,6 +1149,14 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
     finally:
         if own_snapshot:
             conn.rollback()
+
+
+def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
+    return _query_tasks(conn, fleet, root=root)
+
+
+def _fetch_task_summary(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
+    return _query_tasks(conn, fleet, root=root, summary_only=True)
 
 
 # The rail renders PARTICIPANTS. The 2b registry scan mints an identity
@@ -1574,10 +1613,10 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
       per actor because the query is indexed on the assignee.
     * `open` — assignment axis (work assigned to this fleet's bots), kept
       separate from the work-ownership axis below (`open_scope`).
-    * `attention` / `overdue` — the board's own cards for the tasks this
-      fleet OWNS (`_fetch_tasks`, the one counting owner, whose reasons come
-      from `ATTENTION_ARMS_SQL` and canonical permission reads); overdue is cards led or joined by the
-      deadline arm. `attention_truncated` discloses the board's card cap.
+    * `attention` / `overdue` — tasks this fleet OWNS, through the board's
+      shared bounded query and canonical attention/permission definitions.
+      Overdue is tasks with the deadline arm; `attention_truncated` discloses
+      the same task cap as the board, without building its presentation.
     * `orphaned` — the watchdog's split (#835): an id'd overdue dispatch
       older than the bot's `.spawn` was lost to a restart. It needs the
       bot's DIRECTORY, so a fleet with none under the view's root reports
@@ -1626,13 +1665,11 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         open_rows = [(uid, *r) for uid in uids for r in conn.execute(
             OPEN_ASSIGNMENTS_AT_SQL, (uid,) + (None,) * 10)]
         open_n = len(open_rows)
-        # attention / overdue are the fleet's OWN work, counted by the board's
-        # card builder (one counting owner): the board groups by owning fleet,
-        # so an assignee-axis count here disagreed with it for cross-fleet work
-        board = _fetch_tasks(conn, alias, root=root)
-        attention = board["attention_count"]
-        overdue = sum(1 for card in board["tasks"]
-                      if "overdue" in card["attention_reason"])
+        # Ownership-axis summary shares the board's bounded canonical task and
+        # permission reduction, without constructing its cards/evidence.
+        task_summary = _fetch_task_summary(conn, alias, root=root)
+        attention = task_summary["attention_count"]
+        overdue = task_summary["overdue_count"]
         orphaned: int | None = 0
         orphaned_reason = None
         fleet_dirs = {b: d for (fl_, b), d in bot_dirs.items() if fl_ == alias}
@@ -1688,7 +1725,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
             "open": open_n, "open_scope": "assigned_to_fleet_bots",
             "attention": attention, "overdue": overdue,
             "attention_scope": "owning_fleet_tasks",
-            "attention_truncated": board["truncated"],
+            "attention_truncated": task_summary["truncated"],
             "orphaned": orphaned, "orphaned_reason": orphaned_reason,
             "newest_report_at": newest[0] if newest else None,
             "reports_24h": reports_24h,
@@ -1873,10 +1910,13 @@ def begin_shutdown(app) -> None:
     if event is None:
         return
     loop = getattr(state, "loop", None)
-    if loop is not None and loop.is_running():
-        loop.call_soon_threadsafe(event.set)
-    else:   # pragma: no cover - the loop is gone; nothing is streaming
+    def stop_reads():
+        state.finite_reads.stopping = True
         event.set()
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(stop_reads)
+    else:   # pragma: no cover - the loop is gone; nothing is streaming
+        stop_reads()
 
 
 def _stopping(app) -> bool:
@@ -1917,6 +1957,8 @@ def create_app(
     sampler = sampler or PaneSampler(root)
 
     from contextlib import asynccontextmanager
+    from .finite_reads import FiniteReads, FiniteReadMiddleware
+    finite_reads = FiniteReads()
 
     @asynccontextmanager
     async def _lifespan(_app):  # pragma: no cover - exercised live
@@ -1926,6 +1968,7 @@ def create_app(
         # their response normally instead of being cancelled at the graceful
         # ceiling. Also set on the way out, for a runner that reaches the
         # lifespan's shutdown first (uvicorn does not — see begin_shutdown).
+        finite_reads.stopping = False
         _app.state.shutting_down = asyncio.Event()
         _app.state.loop = asyncio.get_running_loop()
         sampler.start()
@@ -1933,10 +1976,13 @@ def create_app(
             yield
         finally:
             _app.state.shutting_down.set()
+            await finite_reads.shutdown()
             await sampler.stop()
 
     app = FastAPI(title="observable plane", docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=_lifespan)
+    app.state.finite_reads = finite_reads
+    app.add_middleware(FiniteReadMiddleware, owner=finite_reads)
     started_at = _now_iso()
 
     def envelope(fn, *, snapshot=False):

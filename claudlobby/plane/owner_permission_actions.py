@@ -14,7 +14,7 @@ from ..operation_context import bind_task_context, OperationContextError
 from ..request_queries import read_request
 from ..request_receipts import ReceiptConflict
 from ..runtime_admission import RuntimeIdentity, mutation_admission
-from ..commands.task_permissions import decide_and_notify_permission, inspect_permission_notification
+from ..application_permissions import decide_and_notify_permission, inspect_permission_notification
 from ..task_permissions import (list_task_permissions,
                                permission_decision_digest, read_permission)
 from ..task_queries import TaskQueryError
@@ -24,6 +24,7 @@ from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
 from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
 from .owner_service import admitted_action, check_action_process
+from .owner_action_binding import check_owner_binding
 from .owner_source import admit_source, inspect_source
 
 _FIELDS = {"version", "kind", "request_id", "scope", "target", "decision", "semantic_sha256"}
@@ -48,12 +49,8 @@ class OwnerPermissionActions:
             host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
-        if (ctx.host_uid != host or ctx.fleet_uid != grant.fleet_uid
-                or bindings["host_uid"] != host or bindings["fleet_uid"] != grant.fleet_uid
-                or ctx.caller.uid != grant.actor_uid or ctx.caller.alias != grant.actor_alias
-                or ctx.caller_fleet_uid is not None
-                or {name: actor.uid for name, actor in ctx.bots.items()} != bindings["bots"]):
-            raise AccessDenied("permission_binding_changed")
+        check_owner_binding(ctx, host=host, bindings=bindings, grant=grant,
+                            refusal="permission_binding_changed")
         from ..activation_state import read_selection
         selection = read_selection(self.root)
         if selection is None:

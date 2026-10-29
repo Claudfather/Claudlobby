@@ -186,7 +186,7 @@ def test_unread_tiers_fail_only_a_telegram_alert_with_no_target(active, monkeypa
     sent (#2234). Only an alert with no target fails for the unread tiers."""
     root, host = active
     _generated(monkeypatch, root, host.release)
-    from claudlobby.commands import message_write
+    from claudlobby import application_messages as message_write
     monkeypatch.setattr(message_write, "_alert_tiers", lambda route: ({}, False))
     original = message_operations.emit_batch
     def recorder(root_path, raws, **kwargs):
