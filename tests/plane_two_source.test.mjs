@@ -762,9 +762,9 @@ test('real renderer refreshes later-admission task links when channel combines b
   api.dispose();
 });
 
-test('workspace transport accepts only one or two distinct core-issued handles; old factory stays exactly two',async()=>{
-  const a=await source('a','a'),b=await source('b','b'),c=await source('c','c');
-  for(const sources of [[],[a,b,c],[a,{...b,key:'a'}],[a,{...b,reader:a.reader}],
+test('workspace transport accepts one to eight distinct core-issued handles; old factory stays exactly two',async()=>{
+  const a=await source('a','a'),b=await source('b','b');
+  for(const sources of [[],Array(9).fill(a),[a,{...b,key:'a'}],[a,{...b,reader:a.reader}],
     [{key:'forged',label:'forged',reader:{snapshot:()=>a.reader.snapshot()}}]])
     assert.throws(()=>createWorkspaceReadTransport({sources}));
   assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
@@ -1000,7 +1000,7 @@ test('held old one-source detail cannot paint private bytes after disposal or co
 // public demo's root adapter, or create a second owner-handle module instance.
 test('canonical module graph stays inside its release directory', async () => {
   const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js', 'permission-panel.js',
-    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js', 'workspace-display.js'];
+    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js', 'workspace-display.js', 'guided-setup.js'];
   for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
     for (const name of files) {
       const source = await readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
@@ -1128,4 +1128,22 @@ test('hidden teams are an explicit local preference, with reveal and a safe visi
   button.closest=()=>({hidden:true});await h.c.retryOverviewSummary(button);
   assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before+1);
   api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+
+test('generic workspace admits eight independent sources, refuses nine, and scopes an unavailable peer', async () => {
+  const rows = await Promise.all(Array.from({length:8}, (_,i) => source('h'+i, String(i+1))));
+  assert.throws(() => createWorkspaceReadTransport({sources:[]}), /One to eight/);
+  assert.throws(() => createWorkspaceReadTransport({sources:[...rows,rows[0]]}), /One to eight/);
+  assert.throws(() => createTwoSourceReadTransport({sources:rows}), /Exactly two/);
+  const api = createWorkspaceReadTransport({sources:rows});
+  try {
+    assert.equal((await api.jget('/api/fleets')).data.fleets.length,8);
+    rows[7].setStatus('sign_in_required');await rows[7].reader.start();
+    const result=await api.jget('/api/channel?limit=120');
+    assert.deepEqual(result.data.coverage,{total:8,reachable:7,partial:true});
+    assert.equal(result.data.threads.length,7);
+    assert.ok(result.data.threads.every(t=>!t.work_item_id.startsWith('h7::')));
+    assert.equal(api.routeRoom('h0 / team').key,'h0');
+  } finally { api.dispose();rows.forEach(row=>row.reader.dispose()); }
 });

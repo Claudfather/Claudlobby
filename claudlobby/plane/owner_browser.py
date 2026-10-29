@@ -198,6 +198,7 @@ class _OwnerBrowser:
         self.workspace_bootstrap = None
         self.connected_reads = None
         self.connected_actions = None
+        self.connected_setup = None
         if workspace_bootstrap is not None:
             from .owner_workspace_http import WorkspaceBootstrapHTTP
             self.workspace_bootstrap = WorkspaceBootstrapHTTP(self.access,
@@ -210,6 +211,9 @@ class _OwnerBrowser:
             from .owner_connected_actions_http import ConnectedActionsHTTP
             self.connected_actions = ConnectedActionsHTTP(self.access, config=workspace_bootstrap,
                 authority=self.authority, verify_principal=self.verify_principal, package=package)
+            from .owner_setup_http import SetupHTTP
+            self.connected_setup = SetupHTTP(self.access, config=workspace_bootstrap,
+                authority=self.authority, verify_principal=self.verify_principal)
 
     async def _principal(self, scope: Scope) -> PrincipalRef:
         principal = await self.verify_principal(scope)
@@ -323,6 +327,10 @@ class _OwnerBrowser:
         return response
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (scope["type"] == "http" and self.connected_setup is not None
+                and scope["path"].startswith("/api/owner/connected/setup/")):
+            await self.connected_setup(scope, receive, send)
+            return
         if (scope["type"] == "http" and self.connected_actions is not None
                 and scope["path"].startswith("/api/owner/connected/actions/")):
             await self.connected_actions(scope, receive, send)
@@ -337,6 +345,7 @@ class _OwnerBrowser:
                 async def receive():
                     message = await original_receive()
                     if message["type"] == "lifespan.shutdown":
+                        await self.connected_setup.shutdown()
                         await self.connected_actions.shutdown()
                         await self.connected_reads.shutdown()
                         await self.workspace_bootstrap.shutdown()

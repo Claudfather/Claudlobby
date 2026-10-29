@@ -29,6 +29,9 @@ def register_host_owner(hosts):
     ):
         route = actions.add_parser(action, help=help_text)
         route.add_argument("--json", action="store_true", help="Structured result (status only)")
+        if action == "initialize":
+            route.add_argument("--before-first-fleet", action="store_true",
+                help="Explicitly prepare host identity and owner authority before first activation")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
     for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
                               ("feedback", "task-linked comments"),
@@ -45,6 +48,18 @@ def register_host_owner(hosts):
         revoke.add_argument("--fleet-uid", required=True, help="Exact retained fleet UID; active config is not required")
         revoke.add_argument("--json", action="store_true", help="Not supported for interactive approval")
         revoke.set_defaults(func=_dispatch, public_command="host.owner.revoke-" + capability)
+    allow = actions.add_parser("allow-setup", help="Approve one connected first-team setup (interactive)")
+    allow.add_argument("--template", required=True, choices=["revenue-web-app"])
+    allow.add_argument("--target-fleet", required=True)
+    allow.add_argument("--repository", required=True, metavar="OWNER/REPO")
+    allow.add_argument("--release", required=True)
+    allow.add_argument("--install-directory", required=True, type=Path)
+    allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
+    allow.set_defaults(func=_dispatch, public_command="host.owner.allow-setup", owner_action="allow-setup")
+    for action in ("setup-status", "revoke-setup"):
+        route = actions.add_parser(action, help="Inspect/revoke the retained first-team setup approval")
+        route.add_argument("--json", action="store_true")
+        route.set_defaults(func=_dispatch, public_command="host.owner." + action, owner_action=action)
     serve = actions.add_parser("serve", help="Serve owner Plane on a private Unix socket (foreground)")
     serve.add_argument("--json", action="store_true", help="Not supported for the foreground server")
     serve.add_argument("--origin", required=True, help="Exact external HTTPS origin configured in Tailscale Serve")

@@ -5108,6 +5108,47 @@ boot_send_settled() {
     esac
 }
 
+# plugin_verify_required <python> <required-list> <bot-dir>
+# Read only the selected account registry and installed plugin artifacts.
+# Refuse unavailable evidence; never call the plugin manager or seed stamps.
+plugin_verify_required() {
+    local python="${1:?}" required="${2-}" bot_dir="${3:?}"
+    "$python" -I -B - "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$required" "$bot_dir" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+account, required, bot_dir = sys.argv[1:]
+if not required.split():
+    sys.exit(0)
+try:
+    plugins = json.loads((Path(account) / "plugins/installed_plugins.json").read_bytes())["plugins"]
+    if not isinstance(plugins, dict):
+        raise ValueError()
+    for ref in required.split():
+        entries = plugins.get(ref)
+        if not isinstance(entries, list) or not entries:
+            raise ValueError()
+        available = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError()
+            scope = entry.get("scope")
+            if scope != "user" and not (scope in ("project", "local") and entry.get("projectPath") == bot_dir):
+                continue
+            location = entry.get("installPath")
+            if isinstance(location, str) and Path(location).is_absolute():
+                manifest = json.loads((Path(location) / ".claude-plugin/plugin.json").read_bytes())
+                if isinstance(manifest, dict) and manifest.get("name") == ref.split("@", 1)[0]:
+                    available = True
+        if not available:
+            raise ValueError()
+except (OSError, ValueError, TypeError, KeyError):
+    print("start-bot: verify-existing requires readable installed plugins for this account; no plugins changed, launch refused", file=sys.stderr)
+    sys.exit(3)
+PY
+}
+
 # plugin_ensure <plugin> <claude_bin> <log> <once_flag>
 #
 # Installs `plugin` via `claude plugin install` the moment
@@ -5144,6 +5185,7 @@ boot_send_settled() {
 # a bare `epoch="$(door)"` whose door returns 1 IS a failing statement under
 # set -e, and the first cut aborted its own suite on exactly the
 # unresolvable-clock case.
+
 plugin_ensure() {
     local plugin="${1:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
     local claude_bin="${2:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"

@@ -287,3 +287,113 @@ def test_foreign_marker_precedes_missing_index_remediation(tmp_path):
         conn.execute("UPDATE owner_source_binding SET host_uid='foreign-host'")
     with pytest.raises(SourceDenied):
         inspect_source(tmp_path)
+
+
+def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
+    from claudlobby import activation
+    from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    store = OwnerAccess.initialize(tmp_path)
+    store.prepare_first_fleet()
+    principal = PrincipalRef("tailscale:controlplane.tailscale.com", "1001")
+    challenge = store.begin_pairing(principal)
+    grant = store.confirm_pairing(challenge.token, expected_principal=principal)
+    assert inspect_owner_setup(tmp_path) == grant.host_uid
+    activation._bootstrap_plane(tmp_path, None)  # Existing bootstrap eligibility seam, no effects.
+    with pytest.raises(AccessUnavailable):
+        inspect_source(tmp_path)
+    assert not db_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize("entry", ["plane.db", "spool", "staged", "owner.sock", "unknown"])
+def test_pre_activation_owner_refuses_other_plane_content(tmp_path, entry):
+    from claudlobby import activation
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path).prepare_first_fleet()
+    (db_file(tmp_path).parent / entry).write_text("synthetic unexpected state")
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+    with pytest.raises(activation.ActivationError):
+        activation._bootstrap_plane(tmp_path, None)
+
+
+@pytest.mark.parametrize("problem", ["foreign", "corrupt", "redirected", "activation", "runtime", "selection", "workspace_schema", "connected_schema"])
+def test_fresh_owner_admission_never_masks_old_or_invalid_state(tmp_path, problem):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    store = OwnerAccess.initialize(tmp_path)
+    store.prepare_first_fleet()
+    if problem == "foreign":
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("UPDATE metadata SET host_uid=?", ("host_" + "f" * 32,))
+    elif problem == "corrupt":
+        store.path.write_bytes(b"not a database")
+    elif problem == "redirected":
+        old = store.path.with_name("private-copy")
+        store.path.rename(old)
+        store.path.symlink_to(old)
+    elif problem == "selection":
+        (tmp_path / "state/selected-release.json").write_text("invalid")
+    elif problem in {"workspace_schema", "connected_schema"}:
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("CREATE TABLE " + problem.split("_")[0] + "_metadata(singleton,version)")
+            conn.execute("INSERT INTO " + problem.split("_")[0] + "_metadata VALUES(1,99)")
+    else:
+        directory = tmp_path / ("state/activations" if problem == "activation" else "runtime")
+        directory.mkdir()
+        (directory / "begun").write_text("retained")
+    with pytest.raises((AccessUnavailable, ValueError)):
+        inspect_owner_setup(tmp_path)
+
+
+def test_default_authority_without_explicit_fresh_marker_never_falls_back(tmp_path):
+    from claudlobby import activation
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path)
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+    with pytest.raises(activation.ActivationError):
+        activation._bootstrap_plane(tmp_path, None)
+
+
+def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_path):
+    from claudlobby import activation
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    store = OwnerAccess.initialize(tmp_path)
+    store.prepare_first_fleet()
+    store.retire_first_fleet()
+    store.retire_first_fleet()
+    # Even if all external activation/recorder/runtime witnesses disappeared.
+    assert not db_file(tmp_path).exists()
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+    with pytest.raises(activation.ActivationError):
+        activation._bootstrap_plane(tmp_path, None)
+
+
+@pytest.mark.parametrize("overlay", ["local/example", "local/system/example"])
+@pytest.mark.parametrize("redirected", [False, True])
+def test_fresh_owner_refuses_retained_overlay_runtime_without_manifest(tmp_path, overlay, redirected):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    runtime = tmp_path / overlay / "runtime"
+    runtime.parent.mkdir(parents=True)
+    if redirected:
+        target = tmp_path / "old-runtime"
+        target.mkdir()
+        runtime.symlink_to(target, target_is_directory=True)
+    else:
+        runtime.mkdir()
+        (runtime / "retained").write_text("old installation")
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)

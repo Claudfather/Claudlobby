@@ -669,6 +669,48 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
 });
 
+test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
+  const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+  h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
+  h.overrides.set('status',()=>reply(200,setup()));
+  h.overrides.set('setup/context',()=>reply(200,{version:1,request:null}));
+  assert.equal(await h.api.connect(),true); assert.equal(h.api.snapshot().state,'setup_only');
+  assert.notEqual(h.api.readHandle.snapshot().state,'ready');
+  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);
+  assert.equal(h.calls.filter(c=>c.url.includes('/read/')).length,0);
+  assert.equal((await h.api.setupContext()).version,1);
+  assert.equal(h.calls.at(-1).init.credentials,'omit'); assert.equal(h.calls.at(-1).init.headers.Authorization,'Bearer '+TOKEN);
+  await h.api.check(); assert.equal(h.api.snapshot().state,'setup_only');
+  h.overrides.set('status',()=>reply(200,ready()));
+  h.overrides.set('read/tasks',init=>{assert.equal(init.headers.Authorization,'Bearer '+TOKEN);return reply(200,{state:'ok',data:{path:'read/tasks'}});});
+  await h.api.check(); assert.equal(h.api.snapshot().state,'ready');
+  assert.deepEqual(await h.api.readHandle.jget('/api/tasks'),{state:'ok',data:{path:'read/tasks'}});
+  h.api.dispose();
+});
+
+test('ordinary lifecycle sends no mutations during held connect or an invalid document context',async()=>{
+  const h=harness();await h.api.connect();
+  const held=deferred();h.overrides.set('issue',()=>held.promise);
+  const reconnect=h.api.connect();await flush();
+  await h.api.renew();await h.api.logout();
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);
+  held.resolve(reply(200,ready(TOKEN)));await reconnect;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.renew();await h.api.logout();
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);h.api.dispose();
+});
+
+
+test('ordinary check still fences retired document context without a network request',async()=>{
+  const h=harness();await h.api.connect();const count=h.calls.length;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,count);
+  assert.equal(await h.api.readHandle.jget('/api/summary'),null);
+  assert.equal(h.calls.length,count);h.api.dispose();
+});
+
 test('source-qualified context denials remain distinct and stale source denials are discarded',async()=>{
   const h=harness(),actions=h.api.createActions({key:'computer-1'});await h.api.connect();
   h.overrides.set('actions/context',()=>reply(403,{state:'denied'}));
@@ -678,4 +720,17 @@ test('source-qualified context denials remain distinct and stale source denials 
   const old=actions.interactionContext('team');await flush();
   h.api.dispose();pending.resolve(reply(403,{state:'denied'}));
   assert.equal(await old,null);h.api.dispose();
+
+});
+
+
+test('current account metadata accepts eight exact references and retires a ninth before host traffic', async () => {
+  const h=harness();
+  h.context={...h.context,references:Array.from({length:8},(_,i)=>i?{reference_id:uuid(30+i),endpoint_origin:`https://host${i}.example.test`,revision:1}:{...ref})};
+  assert.equal(await h.api.connect(),true);
+  assert.equal(h.api.snapshot().state,'ready');
+  h.context={...h.context,references:[...h.context.references,{reference_id:uuid(50),endpoint_origin:'https://ninth.example.test',revision:1}]};
+  const before=h.calls.length;await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,before);
+  h.api.dispose();
 });

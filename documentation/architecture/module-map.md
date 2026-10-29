@@ -5,6 +5,8 @@ the root `CLAUDE.md` in #2035, which keeps only where to start. It lives here ra
 `claudlobby/CLAUDE.md` because Codex reads that file on its way to
 `claudlobby/_runtime_scripts/`, within one 32 KiB budget.
 
+The [website boundary](website-boundary.md) maps the shared operational UI and host capabilities to the thin account/product site.
+
 ```
 claudlobby/
   task_permissions.py — Canonical task-scoped permission requests, explicit human decisions and exact bot/scope checks over existing Plane facts; `commands/task_permissions.py` owns CLI admission and local terminal confirmation. No effect execution. Reference: `documentation/architecture/task-permissions.md`.
@@ -29,6 +31,9 @@ claudlobby/
   plane/owner_permission_actions.py — Host-authorized task permission HTTP decisions and receipt recovery.
   plane/ui/permission-panel.js — Explicit scoped permission decisions and retained receipts in the shared dashboard; no effect execution.
   plane/owner_action_authorization.py — Fixed internal direct/connected action policy selection; connected full-binding scope fence, never browser-selected authority.
+  plane/owner_setup.py — Optional local first-team setup grant and retained canonical preview/activation receipt; connected identity is necessary but does not grant setup.
+  plane/owner_setup_http.py — Finite connected first-team context/preview/launch/receipt carrier, bounded owned work, existing setup and activation owners.
+  plane/ui/guided-setup.js — Shared first-team plan confirmation and original activation receipt controller; no read admission or automatic launch.
   plane/owner_connected_actions_http.py — Finite connected action HTTP carrier and bounded owned queue; canonical engines and explicit local grants remain the effect owners.
   config.py           — fleet.yaml parsing, BotConfig/FleetConfig dataclasses; `load_host_jobs` applies THIS host's override of `host.jobs` (`~/.config/claudlobby/system.yaml`, per job and per field, #1251) so host-local config never lives in the tracked tree; `FleetConfig.leaf_manager_bots()` (PR 4 chunk 4) is the second detectable role — a manager with at least one IN-FLEET report that is not itself a manager, a cross-fleet `manages:` target never counting toward it (F5, ruled)
   known_values.py     — Known-good value sets for fleet.yaml fields (SSOT for config + validator)
@@ -50,6 +55,7 @@ claudlobby/
   paths.py            — Path resolution helpers
   doctor.py           — Pre-flight fleet health diagnostic
   freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited; deny-by-default rungs (#703): denied source values, externals report + unused-declaration WARN, fleet-tier .env guard, rendered tools/ (backs `claudlobby config validate --runtime`)
+  bootstrap.py        — Stdlib first command copied byte-identically into a trusted bundle or single-file installer; safely extracts the carrier, validates checksums, installs a temporary matching CLI offline and delegates host setup without selection or activation.
   setup_observations.py — Passive package, executable and storage facts for `host status`, in text and JSON; never changes recorded diagnosis or grants bootstrap authority. No credential/native-manager probes, SQLite or initialization. Owns the shared runtime executable names consumed by commands/setup.py.
   status.py           — Fleet health dashboard (tmux/systemd/fleet-state + the plane: the newest `bot.heartbeat` sample per bot for heartbeat/pane state through presence's own `LATEST_HEARTBEAT_SQL`, and the heartbeat series behind the utilization columns — F18 R2b, keepalive.log is gone; a plane that cannot answer renders those columns `unknown`, flags health `?`, says why under the table and in `--json`'s `plane_unreachable`, never blank-as-healthy)
   stop_record.py      — The stop door's local record of a deliberate stop (#2243): `bot stop` writes `<bot>/data/.stopped` (who, when, an optional reason) before the unit file goes, whatever the plane does, and `bot start` removes it. fleet-pulse, `fleet status` and `fleet reconcile` read it beside the unit-file fact (`svc_is_registered` in the sweep, its parity-pinned mirror `unit_installed` in `fleet status`, enrollment in reconcile): a recorded stop is silent and reads `stopped`. A missing unit with no record never reads `stopped`; fleet-pulse raises `unit_missing` for it

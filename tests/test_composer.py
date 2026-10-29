@@ -53,6 +53,67 @@ def _make_paths(root: Path) -> Paths:
     return Paths(root=root, fleet_dir=root, package=source_package())
 
 
+class TestRevenueWebAppCandidate:
+    @pytest.mark.parametrize("bot_id", ["lead", "engineer", "reviewer"])
+    def test_shipped_roles_compose_scoped_policy_without_extra_connections(self, tmp_path, bot_id):
+        from claudlobby.composer import (
+            _resolve_channel_permissions, compose_claude_md, compose_fleet_timers,
+            resolve_effective_skills,
+        )
+
+        candidate = Path(__file__).resolve().parents[1] / "examples/teams/revenue-web-app/fleet.yaml"
+        fleet, defaults = load_fleet(candidate)
+        paths = _make_paths(tmp_path)
+        bot = fleet.bots[bot_id]
+        instructions = compose_claude_md(bot, fleet, paths)
+        settings = compose_settings_local(bot, fleet, paths)
+        conf = compose_bot_conf(bot, fleet, paths)
+
+        assert "example-org/revenue-web-app" in instructions
+        assert fleet.mission in instructions
+        assert "claudlobby --json task permission request TASK_ID" in instructions
+        assert "claudlobby --json task permission check PERMISSION_ID" in instructions
+        allowed = settings["permissions"]["allow"]
+        assert "Bash(claudlobby --json request show *)" in allowed
+        for verb in ("request", "show", "check"):
+            assert f"Bash(claudlobby --json task permission {verb} *)" in allowed
+        for verb in ("approve", "decline", "revoke"):
+            assert f"Bash(claudlobby --json task permission {verb} *)" not in allowed
+        assert "Without explicit human confirmation" in instructions
+        assert "Always create a feature branch" in instructions
+        assert "skip Telegram-specific posts and tools, never canonical reports" in instructions
+        # Channel selection disables wiring/grants; inherited prose is retained.
+        assert "Both channels fire at lifecycle boundaries" in instructions
+        if bot_id == "lead":
+            assert "checkin" in resolve_effective_skills(bot, fleet, paths, is_manager=True)
+            timers = compose_fleet_timers(fleet, paths, defaults)
+            assert (timers / f"{fleet.service_prefix}.manager-checkin.timer").is_file()
+            assert (timers / f"{fleet.service_prefix}.manager-checkin.plist").is_file()
+            assert f"{fleet.service_prefix}.manager-checkin" not in (timers / "DORMANT").read_text()
+            assert "Auto-merge (`gh pr merge --squash`)" in instructions
+            assert "only when the selected merge guardrails allow it" in instructions
+            assert "Re-merge only when the selected merge guardrails allow it" in instructions
+            assert "auto-merge and re-merge guidance: reviewer approval alone never authorizes a merge" in instructions
+            assert "check its current scope immediately before acting" in instructions
+        assert bot.channels == []
+        assert not bot.remote_control
+        assert bot.permission_mode == "default"
+        assert not bot.dangerously_skip_permissions
+        assert "--dangerously-skip-permissions" not in conf
+        assert "--remote-control" not in conf
+        assert "--channels" not in conf
+        assert not any("telegram" in name for name, enabled in settings["enabledPlugins"].items() if enabled)
+        assert _resolve_channel_permissions(bot) == []
+        if bot_id == "lead":
+            # Default status/checkin skill grants do not select a channel/plugin.
+            assert "mcp__plugin_telegram_telegram__reply" in settings["permissions"]["allow"]
+        assert set(compose_mcp_json(bot, paths)["mcpServers"]) == {"github"}
+        assert fleet.manager == "lead"
+        assert set(fleet.bots) == {"lead", "engineer", "reviewer"}
+        assert fleet.bots["lead"].manages == ["engineer", "reviewer"]
+        assert fleet.bots["engineer"].reports_to == fleet.bots["reviewer"].reports_to == "lead"
+
+
 class TestScaffoldEnvMerge:
     """scaffold_env_files preserves existing values and appends new stubs."""
 
@@ -2923,6 +2984,15 @@ class TestPluginsBotConf:
         conf = self._compose(tmp_path, plugins=plugins)
         assert 'export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"' in conf
 
+    def test_verify_existing_retains_requirements_without_auto_sync(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        conf = self._compose(tmp_path, plugins=PluginsConfig(
+            required=["claudna@Claudfather"], startup_policy="verify-existing"))
+        assert "export FLEET_PLUGIN_STARTUP_POLICY=verify-existing" in conf
+        assert "export FLEET_PLUGINS_REQUIRED=claudna@Claudfather" in conf
+        assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
+
     def test_bot_conf_no_sync_without_plugins(self, tmp_path):
         conf = self._compose(tmp_path)
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
@@ -3033,6 +3103,18 @@ class TestPluginsSettingsLocal:
             "claudna@Claudfather": True,
             "telegram@claude-plugins-official": True,
         }
+
+    def test_verify_existing_enables_plugins_without_marketplace_provisioning(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        plugins = PluginsConfig(required=["claudna@Claudfather"], startup_policy="verify-existing",
+                                marketplaces={"Claudfather": {"source": {"source": "github", "repo": "Claudfather/clauDNA"}}})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins)
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["enabledPlugins"] == {"claudna@Claudfather": True}
+        assert "extraKnownMarketplaces" not in result
 
     def test_settings_local_has_extra_marketplaces(self, tmp_path):
         from claudlobby.config import PluginsConfig

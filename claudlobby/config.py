@@ -849,6 +849,7 @@ class PluginsConfig:
     marketplaces: dict[str, dict] = field(default_factory=dict)
     required: list[str] = field(default_factory=list)
     include_defaults: bool = True
+    startup_policy: str = "manage"
 
 
 # Built-in defaults — installed + enabled on every bot unless
@@ -1117,6 +1118,9 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
     include_defaults = True
     additional: list[str] = []
     extra_marketplaces: dict[str, dict] = {}
+    startup_policy = (raw or {}).get("startup_policy", "manage")
+    if startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
 
     if raw:
         include_defaults = bool(raw.get("include_defaults", True))
@@ -1143,6 +1147,7 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
         marketplaces=marketplaces,
         required=required,
         include_defaults=include_defaults,
+        startup_policy=startup_policy,
     )
 
 

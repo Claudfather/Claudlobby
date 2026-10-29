@@ -452,3 +452,24 @@ def test_service_handover_refuses_live_foreground_without_changing_it(socket_pat
         preflight(starts, managed={(unit.unit, socket_path)})
         assert {p.name: p.stat().st_ino for p in root.iterdir()} == before
     preflight(starts)
+
+
+def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monkeypatch):
+    import uvicorn
+    from claudlobby.plane.ids import ensure_host_uid
+    from claudlobby.plane import owner_server
+    root = socket_path.parent
+    ensure_host_uid(root / "state")
+    OwnerAccess.initialize(root).prepare_first_fleet()
+    seen = []
+    def stopped(server, *, sockets):
+        server.started = True
+        seen.append(Path(sockets[0].getsockname()))
+    monkeypatch.setattr(uvicorn.Server, "run", stopped)
+    owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable))
+    assert seen == [root / "state/owner/owner.sock"]
+    assert not seen[0].exists()
+    assert {p.name for p in (root / "state/plane").iterdir()} == {"owner-access.db"}
+    with pytest.raises(OwnerServerConfigurationError, match="outside Plane"):
+        owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                           socket_path=root / "state/plane/owner.sock")
