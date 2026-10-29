@@ -250,7 +250,7 @@ browser recovery detail needs a versioned compatibility change and is not implie
 by these retained observations.
 
 One `FiniteReads` instance belongs to each canonical view application and is
-shared by its direct-owner, connected and local finite-read entry points.
+shared by its direct-owner, connected and local finite API data-read entry points.
 It reserves before protected native admission and permits at most eight accepted
 operations, with no waiting admission queue. A server-owned scope marker prevents
 nested adapters from reserving twice. The 15-second response budget includes
@@ -260,6 +260,9 @@ private output is suppressed. Shutdown refuses new work and drains accepted work
 This bounds outstanding work; it does not terminate arbitrary Python/filesystem
 work or impose a CPU quota. The SQL progress deadline remains a separate inner
 cooperative bound. Separate serving processes have separate capacity limits.
+Root and static assets retain their existing authorization and response gates,
+but do not compete for data slots: a saturated API must not prevent the page and
+its recovery controls from loading.
 
 Streams keep their own lifetime and revocation handling. Pairing/session lifecycle
 routes and started mutations keep their existing capacity, deadline, receipt and

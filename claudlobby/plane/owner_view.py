@@ -1,7 +1,9 @@
 """Protected canonical Plane reads shared by direct and connected ingress.
 
 Credential adapters supply trusted verifiers. This gate owns fresh admission
-before the response and its body; it never creates identity or grants.
+before the response and its body; it never creates identity or grants. Only
+finite API data reads reserve shared capacity; root/static authorization stays
+on this same gate without competing for data slots.
 """
 
 from pathlib import Path

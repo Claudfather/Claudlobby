@@ -1,6 +1,7 @@
 """Per-serving-process finite read ownership; streams and mutations stay separate.
 
-All finite GET/HEAD responses, including protected assets, share this owner.
+Finite /api/ data GET/HEAD responses share this owner; streams are separate.
+Root/static assets retain their existing authorization and response gates.
 A response deadline abandons delivery, not accepted synchronous work. The slot
 remains held until the shielded ASGI operation (including its threadpool work)
 settles. SQL progress deadlines remain an independent cooperative inner bound.
@@ -18,6 +19,7 @@ _SCOPE_OWNER = "claudlobby.finite_read_owner"
 
 def finite_read(scope):
     return (scope["type"] == "http" and scope["method"] in {"GET", "HEAD"}
+            and scope.get("path", "").startswith("/api/")
             and scope.get("path") != "/api/stream")
 
 
@@ -33,7 +35,7 @@ class FiniteReads:
 
     async def run(self, app, scope, receive, send):
         # The marker is server-owned ASGI scope state, never a request header.
-        if scope.get(_SCOPE_OWNER) is self:
+        if not finite_read(scope) or scope.get(_SCOPE_OWNER) is self:
             await app(scope, receive, send)
             return
         async def unavailable():

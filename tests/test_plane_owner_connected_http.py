@@ -556,6 +556,25 @@ def test_finite_read_shared_capacity_survives_abandonment_until_sync_settlement(
                 await target(direct_scope, quiet_receive, collect)
                 assert refused[0]["status"] == 503
             assert len(calls) == 1
+            # Full data capacity must not block an authenticated shell/assets.
+            # These still traverse the exact native/source/session gates.
+            for path in ("/", "/app.js"):
+                rendered = []
+                async def collect(message):
+                    rendered.append(message)
+                await app.read_app({**direct_scope, "path": path}, quiet_receive, collect)
+                assert rendered[0]["status"] == 200
+                assert any(message.get("body") for message in rendered)
+                assert len(owner.workers) == 1
+            denied = []
+            async def collect_denied(message):
+                denied.append(message)
+            # A connected bearer copied into a direct cookie is not authority.
+            invalid_asset = scope("/app.js", [
+                (b"cookie", (COOKIE_NAME + "=" + ready["token"]).encode())])
+            await app.read_app(invalid_asset, quiet_receive, collect_denied)
+            assert denied[0]["status"] == 403
+            assert len(calls) == 1 and len(owner.workers) == 1
             release.set()
             await asyncio.wait_for(asyncio.gather(*tuple(owner.workers)), 3)
             await asyncio.sleep(0)
