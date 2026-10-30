@@ -39,6 +39,7 @@ SWEEP = re.compile(r"(?<![\w.-])data/")
 
 #: library-relative path -> (lines SWEEP matches, why they survive).
 KEEP = {
+    "guardrails/task-scoped-effects.md": (1, "the requester's own restart-safe permission payload and UUID, not an address sent to another bot"),
     "protocols/token-efficiency.md": (1, "rule zero says your own data/ is not an address"),
     "protocols/comms-topology.md": (4, "Bot to bot says how a path in your bot directory fails its reader"),
     "protocols/report-back.md": (1, "Where the detail goes says never your own data/"),

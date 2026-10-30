@@ -1,10 +1,10 @@
 // The same renderer consumes either native host reads or an admitted workspace.
-import { createConnectedWorkspace } from "./connected-workspace.js";
+import { createConnectedWorkspace, MAX_WORKSPACE_CONTEXT_BYTES } from "./connected-workspace.js";
 
 const contextElement = globalThis.document?.getElementById('workspace-document-context');
 let context;
 if (contextElement) {
-  try { context = JSON.parse(contextElement.textContent.length <= 16384 ? contextElement.textContent : ''); }
+  try { context = JSON.parse(contextElement.textContent.length <= MAX_WORKSPACE_CONTEXT_BYTES ? contextElement.textContent : ''); }
   catch { context = null; }
   contextElement.remove();
 }
@@ -13,6 +13,7 @@ const connected = contextElement ? createConnectedWorkspace({documentContext:con
 export const mountSessionControls = connected?.mountSessionControls;
 export const dispose = connected?.dispose;
 export const roomLabel = connected?.roomLabel;
+export const retryOverview = connected?.retryOverview;
 export const interactionContext = connected?.interactionContext;
 export const nudgeContext = connected?.nudgeContext;
 export const feedbackContext = connected?.feedbackContext;
@@ -21,8 +22,8 @@ export const prepareAction = connected?.prepareAction;
 export const sendAction = connected?.sendAction;
 export const actionReceipt = connected?.actionReceipt;
 
-export async function jget(url) {
-  if (connected) return connected.jget(url);
+export async function jget(url, onUpdate) {
+  if (connected) return connected.jget(url, onUpdate);
   try {
     const response = await fetch(url);
     return await response.json();

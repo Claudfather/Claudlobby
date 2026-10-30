@@ -131,7 +131,9 @@ export function createPermissionPanel({api, storage}) {
       if (!validPermissionContext(value) || value.room !== task.fleet || value.task_id !== task.task_id
           || !['prepareAction','sendAction','actionReceipt'].every(k => typeof api[k] === 'function')) throw new Error();
       context = JSON.parse(JSON.stringify(value)); note = '';
-    } catch { if (token === epoch) note = 'Permission access is unavailable. Check this computer’s owner approval, then refresh the task.'; }
+    } catch (error) { if (token === epoch) note = error?.code === 'action_not_authorized'
+      ? 'Permission decisions are not authorized for this team. Reading remains available. The host owner must approve action access.'
+      : 'Permission access is unavailable. Check this computer’s connection, then refresh the task.'; }
     if (token === epoch) paint();
   }
   function close() { ++epoch; element = null; task = null; context = null; form = null; }

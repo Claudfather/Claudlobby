@@ -72,7 +72,7 @@ class ConnectedActionsHTTP(WorkspaceBootstrapHTTP):
         await self._blocking(self.actions.admit_response, operation, current, result)
         return result, 200
 
-    async def _serve(self, scope, receive, send, operation, progress, headers):
+    async def _response(self, scope, receive, operation, progress):
         try:
             body, status = await self._perform_action(scope, receive, operation, progress)
         except ActionNotStarted as exc:
@@ -87,13 +87,7 @@ class ConnectedActionsHTTP(WorkspaceBootstrapHTTP):
             body, status = {"state": "unavailable"}, 503
         if operation == "send" and scope["method"] == "POST" and status in (403, 503) and not progress[0]:
             body["effect"] = "not_started"
-        if status == 204:
-            await Response(status_code=204, headers={**headers,
-                "Access-Control-Allow-Methods": "POST",
-                "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Claudlobby-Owner",
-                "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"})(scope, receive, send)
-        else:
-            await JSONResponse(body, status, headers=headers)(scope, receive, send)
+        return body, status
 
     async def __call__(self, scope, receive, send):
         headers = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
@@ -117,18 +111,12 @@ class ConnectedActionsHTTP(WorkspaceBootstrapHTTP):
                 body["effect"] = "not_started"
             await JSONResponse(body, 503, headers=headers)(scope, receive, send)
             return
-        active, emitted = True, False
         progress = [False]
-        async def guarded_send(message):
-            nonlocal emitted
-            if active:
-                emitted = True
-                await send(message)
         seconds = self.response_seconds(scope)
         deadline = time.monotonic() + seconds
         token = _DEADLINE.set(deadline)
         try:
-            job = asyncio.create_task(self._serve(scope, receive, guarded_send, operation, progress, headers))
+            job = asyncio.create_task(self._response(scope, receive, operation, progress))
         finally:
             _DEADLINE.reset(token)
         self._workers.add(job)
@@ -141,21 +129,20 @@ class ConnectedActionsHTTP(WorkspaceBootstrapHTTP):
             if not done.cancelled():
                 done.exception()
         job.add_done_callback(finished)
-        try:
-            completed, _ = await asyncio.wait({job}, timeout=seconds)
-            if completed:
-                if not job.cancelled():
-                    job.result()
-                elif not emitted:
-                    await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
-            else:
-                active = False
-                if not emitted:
-                    body = {"state": "unavailable"}
-                    if operation == "send" and scope["method"] == "POST" and not progress[0]:
-                        body["effect"] = "not_started"
-                    await JSONResponse(body, 503, headers=headers)(scope, receive, send)
-        finally:
-            # A disconnected caller drops only response ownership. The job stays
-            # counted until its deadline/cancellation drains started local work.
-            active = False
+        # A disconnected caller drops only response ownership. The job stays
+        # counted until its deadline/cancellation drains started local work.
+        # Only this caller sends: operation cancellation cannot truncate a body.
+        completed, _ = await asyncio.wait({job}, timeout=seconds)
+        if completed:
+            body, status = job.result() if not job.cancelled() else ({"state": "unavailable"}, 503)
+        else:
+            body, status = {"state": "unavailable"}, 503
+            if operation == "send" and scope["method"] == "POST" and not progress[0]:
+                body["effect"] = "not_started"
+        if status == 204:
+            await Response(status_code=204, headers={**headers,
+                "Access-Control-Allow-Methods": "POST",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Claudlobby-Owner",
+                "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"})(scope, receive, send)
+        else:
+            await JSONResponse(body, status, headers=headers)(scope, receive, send)

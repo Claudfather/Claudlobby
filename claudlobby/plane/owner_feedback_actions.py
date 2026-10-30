@@ -20,6 +20,7 @@ from .owner_access import AccessDenied, AccessUnavailable
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
 from .owner_feedback import OwnerFeedback
 from .owner_task_action_protocol import metadata
+from .owner_action_binding import check_owner_binding
 from .owner_source import admit_source, inspect_source, source_host_uid
 
 
@@ -38,12 +39,10 @@ class OwnerFeedbackActions:
                                           host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
-        if (ctx.context.fleet.name != room or ctx.host_uid != host or ctx.fleet_uid != grant.fleet_uid
-                or bindings["host_uid"] != host or bindings["fleet_uid"] != grant.fleet_uid
-                or ctx.caller.uid != grant.actor_uid or ctx.caller.alias != grant.actor_alias
-                or ctx.caller_fleet_uid is not None
-                or {name: actor.uid for name, actor in ctx.bots.items()} != bindings["bots"]):
+        if ctx.context.fleet.name != room:
             raise AccessDenied("feedback_binding_changed")
+        check_owner_binding(ctx, host=host, bindings=bindings, grant=grant,
+                            refusal="feedback_binding_changed")
         manager_name = selected.fleet.manager
         manager = ctx.bots[manager_name]
         route = resolve_message_route(manager_name, root=self.root, fleet=room,

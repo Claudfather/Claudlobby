@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from ..command_result import CommandFailure, CommandOutput
+from ..command_result import CommandFailure, CommandOutput, empty_fleet_conflict
 
 
 _REMEDIES = {
@@ -82,6 +82,7 @@ def _runtime_audit(args, context) -> CommandOutput:
 
 
 def dispatch(args) -> CommandOutput:
+    from ..config import EmptyFleetConfigError
     from ..context import generated_selectors, load_context, resolve_paths
     from ..paths import InvalidPathSelector
     from ..validator import render_warnings, validate, warning_summary
@@ -114,6 +115,8 @@ def dispatch(args) -> CommandOutput:
     except RuntimeError as exc:
         raise CommandFailure("unavailable", "installed library package is unavailable",
                              hint="build and select a sealed release with packaged resources") from exc
+    except EmptyFleetConfigError as exc:
+        raise empty_fleet_conflict(exc.path, exc.size) from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise CommandFailure("conflict", "selected fleet configuration is invalid") from exc
 

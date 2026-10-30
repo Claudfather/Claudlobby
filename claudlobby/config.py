@@ -6,6 +6,7 @@ flattens lists, and resolves team membership.
 
 from __future__ import annotations
 import difflib
+import locale
 import logging
 import os
 import re
@@ -848,6 +849,7 @@ class PluginsConfig:
     marketplaces: dict[str, dict] = field(default_factory=dict)
     required: list[str] = field(default_factory=list)
     include_defaults: bool = True
+    startup_policy: str = "manage"
 
 
 # Built-in defaults — installed + enabled on every bot unless
@@ -1116,6 +1118,9 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
     include_defaults = True
     additional: list[str] = []
     extra_marketplaces: dict[str, dict] = {}
+    startup_policy = (raw or {}).get("startup_policy", "manage")
+    if startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
 
     if raw:
         include_defaults = bool(raw.get("include_defaults", True))
@@ -1142,6 +1147,7 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
         marketplaces=marketplaces,
         required=required,
         include_defaults=include_defaults,
+        startup_policy=startup_policy,
     )
 
 
@@ -2350,13 +2356,31 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
     return merged
 
 
+class EmptyFleetConfigError(ValueError):
+    """fleet.yaml holds no YAML document: zero bytes, whitespace or comments (#2267).
+
+    Carries only the path and the byte count, which hold no authored value.
+    """
+
+    def __init__(self, path: Path, size: int):
+        self.path, self.size = path, size
+        super().__init__(f"{path}: fleet configuration holds no YAML document ({size} bytes)")
+
+
 def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[FleetConfig, dict]:
     """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
 
-    with fleet_yaml.open() as f:
-        doc = yaml.safe_load(f)
+    content = fleet_yaml.read_bytes()
+    # Whitespace is judged on the bytes: PyYAML refuses a tab where no token may start.
+    if not content.strip():
+        raise EmptyFleetConfigError(fleet_yaml, len(content))
+    # Decode as open() did, so a bad encoding stays a UnicodeDecodeError (a ValueError).
+    text = content.decode(locale.getpreferredencoding(False))
+    doc = yaml.safe_load(text)
+    if doc is None and yaml.compose(text) is None:  # comments only; `---` or `null` is a document
+        raise EmptyFleetConfigError(fleet_yaml, len(content))
     return _fleet_document(fleet_yaml, doc, lambda: load_projects(
         projects_yaml if projects_yaml is not None else fleet_yaml.parent / "projects.yaml"))
 

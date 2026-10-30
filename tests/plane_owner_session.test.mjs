@@ -26,6 +26,7 @@ function harness(replies = [ready], hooks = {}) {
   }
   const api = createOwnerTransport({
     monotonicNow,
+    readGate: hooks.readGate,
     EventSource: NativeStream, location: { replace(path) { replacements.push(path); } },
     setTimeout(callback, duration) { timers.add(callback); timeouts.push(duration); return callback; }, clearTimeout(callback) { timers.delete(callback); },
     async fetch(url, options) {
@@ -64,7 +65,9 @@ test('default and synthetic transports do not mount session controls or probe ow
     const carrierURL = moduleURL((await readUI('connected-read-client.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
     const adapterURL = moduleURL((await readUI('two-source-read.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
     const enrollmentURL = moduleURL(await readUI('workspace-enrollment.js'));
+    const setupURL = moduleURL(await readUI('guided-setup.js'));
     const workspaceURL = moduleURL((await readUI('connected-workspace.js'))
+      .replace('"./guided-setup.js"', JSON.stringify(setupURL))
       .replace('"./workspace-enrollment.js"', JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"', JSON.stringify(carrierURL)).replace('"./two-source-read.js"', JSON.stringify(adapterURL)));
     const normal = await load((await readUI('api-client.js')).replace('"./connected-workspace.js"', JSON.stringify(workspaceURL)));
     assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.feedbackContext,undefined);assert.equal(normal.prepareAction,undefined);
@@ -244,6 +247,24 @@ const action = { request_id: '11111111-1111-4111-8111-111111111111', kind: 'mess
 const receipt = value => ({ ...value, body: undefined, version: 1, status: 'delivered' });
 const ok = data => ({ status: 200, data });
 
+test('finite read gate leaves lifecycle, writes and receipt operations outside its queue', async () => {
+  const queued = [], held = deferred();
+  const h = harness([ready, ok(nudgeMetadata), ok(receipt(action)), ok(receipt(action)), ready], {
+    readGate(dispatch, signal) { queued.push({ dispatch, signal }); return held.promise; },
+  });
+  await h.controls.ready;
+  const timeoutCount = h.timeouts.length;
+  const read = h.api.jget('/api/tasks'), capability = h.api.interactionContext('synthetic'); await flush();
+  assert.equal(queued.length, 2);
+  assert.equal(h.timeouts.length, timeoutCount, 'waiting work has no network timer');
+  await h.api.prepareAction({ ...nudgeMetadata, body: 'Reason' });
+  await h.api.sendAction(action); await h.api.actionReceipt(action);
+  assert.deepEqual(h.calls.slice(1).map(c => c.url), ['/api/owner/actions/prepare', '/api/owner/actions/send', '/api/owner/actions/receipt']);
+  await h.click('check'); assert.ok(queued.every(job => job.signal.aborted));
+  held.resolve({ status: 200, data: {} }); await Promise.all([read, capability]);
+  assert.equal(queued.length, 2); h.controls.dispose();
+});
+
 test('owner actions use exact canonical metadata and protected POST headers, stripping receipt bodies', async () => {
   const h = harness([ready, ok(context), ok(receipt(action)), ok(receipt(action))]); await h.controls.ready;
   assert.deepEqual(await h.api.interactionContext('synthetic'), context);
@@ -280,9 +301,9 @@ test('context is unavailable before session readiness and refuses unsupported au
   h.controls.dispose();
 });
 
-test('context refusal checks current cookie once and returns null without replay', async () => {
+test('context refusal checks current cookie once and reports action denial without replay', async () => {
   const h = harness([ready, denied, ready]); await h.controls.ready;
-  assert.equal(await h.api.interactionContext('synthetic'), null);
+  await assert.rejects(h.api.interactionContext('synthetic'),{code:'action_not_authorized'});
   assert.equal(h.calls.filter(c => c.url.endsWith('/context')).length, 1);
   assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
   assert.deepEqual(h.replacements, []);
@@ -292,10 +313,11 @@ test('context refusal checks current cookie once and returns null without replay
 test('read-only owner context403 does not loop through lifecycle resume or disable the board', async () => {
   const contexts = [], board = { state: 'ok', data: { tasks: [] } };
   const h = harness([ready, denied, ready, ok(board)], {
-    onResume(api) { contexts.push(api.interactionContext('synthetic')); },
+    onResume(api) { contexts.push(assert.rejects(api.interactionContext('synthetic'), {code:'action_not_authorized'})); },
   });
   await h.controls.ready; await flush();
-  assert.deepEqual(await Promise.all(contexts), [null]);
+  assert.equal(contexts.length, 1);
+  await Promise.all(contexts);
   assert.equal(h.calls.filter(c => c.url.endsWith('/context')).length, 1);
   assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
   assert.equal(h.resumed, 1); assert.equal(h.paused, 1);
@@ -431,6 +453,7 @@ for (const renewal of ['same scope', 'new viewer', 'removed recipient', 'no mess
 test(`app renewal restores worker selection and draft only with fresh matching authority: ${renewal}`, async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const pause = app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
+  const directory = app.slice(app.indexOf('let agentPresence ='), app.indexOf('function agentDirectoryCard('));
   const sync = app.slice(app.indexOf('function syncWorkRoom()'), app.indexOf('const ownerSession ='));
   const controller = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
     .replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
@@ -464,11 +487,11 @@ test(`app renewal restores worker selection and draft only with fresh matching a
     const body = document.getElementById('work-body'); body.value = 'Keep this unsent draft'; body.input();
     const before = storage.getItem('plane.pending-actions.v1');
     assert.equal(document.getElementById('work-send').disabled, false);
-    const bindings = { activityRecovery:null, workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
+    const bindings = { activityRecovery:null, interactionApi:{}, currentView:'channel', workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
       sessionPaused: false, sessionEpoch: 1, generation: 1, trustGen: 1,
       refreshTimer: null, safetyTimer: null, searchTimer: null, invalidateOverview() {},
       clearTimeout() {}, $: id => document.getElementById(id), showLoading() {} };
-    paused = true; runInNewContext(`(function() { ${pause} })()`, bindings);
+    paused = true; runInNewContext(`${directory}\n(function() { ${pause} })()`, bindings);
     assert.equal(bindings.workRoom, undefined);
     assert.equal(document.getElementById('work-send').disabled, true);
     assert.equal(document.getElementById('work-form').hidden, true);
@@ -668,15 +691,16 @@ test('both resume callbacks preserve equipment through loading DOM replacement a
 
 test('grid half-completed reads never paint across pause, and paused polls issue no requests', async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const directory = app.slice(app.indexOf('function agentDirectoryVisible()'), app.indexOf('function resetAgentPresence()'));
   const poll = app.slice(app.indexOf('async function pollGrid()'), app.indexOf('const PRESENCE_ORDER'));
   for (const first of ['grid', 'presence']) {
     const grid = deferred(), presence = deferred(), rendered = [], calls = [];
-    const state = { sessionPaused: false, sessionEpoch: 1, currentView: 'grid', currentFleet: 'synthetic',
+    const state = { interactionApi:{}, sessionPaused: false, sessionEpoch: 1, currentView: 'grid', currentFleet: 'synthetic',
       fleetQuery: () => '?fleet=synthetic', renderGrid: value => rendered.push(value),
       renderPresenceStrip: value => rendered.push(value),
       jget(url) { calls.push(url); return url.startsWith('/api/grid') ? grid.promise : presence.promise; },
     };
-    const pending = runInNewContext(`${poll}\npollGrid()`, state);
+    const pending = runInNewContext(`${directory}\n${poll}\npollGrid()`, state);
     (first === 'grid' ? grid : presence).resolve({ state: 'ok', data: first === 'grid'
       ? { panes: [{ fleet: 'synthetic', bot: 'worker', lines: ['old private frame'] }] }
       : { bots: [], counts: { working: 1 } } });
@@ -779,7 +803,7 @@ test('late context403 leaves context epoch ownership with the controller', async
   await h.controls.ready;
   const old = h.api.interactionContext(context.room);
   assert.deepEqual(await h.api.interactionContext(fresh.room), fresh);
-  late.resolve(denied); assert.equal(await old, null);
+  late.resolve(denied); await assert.rejects(old, {code:'action_not_authorized'});
   assert.equal(invalidated, 0); assert.equal(h.node('renew').disabled, false);
   assert.deepEqual(h.replacements, []); h.controls.dispose();
 });
@@ -805,7 +829,7 @@ test('owner nudge capability, prepare, send and receipt use exact independent v2
 });
 test('nudge context refusal does one direct status check while message/read access remains ready',async()=>{
   const h=harness([ready,denied,ready,ok(context),ok({state:'ok',data:{tasks:[]}})]);await h.controls.ready;
-  assert.equal(await h.api.nudgeContext('synthetic'),null);assert.equal(h.resumed,1);assert.equal(h.replacements.length,0);
+  await assert.rejects(h.api.nudgeContext('synthetic'),{code:'action_not_authorized'});assert.equal(h.resumed,1);assert.equal(h.replacements.length,0);
   assert.deepEqual(await h.api.interactionContext('synthetic'),context);assert.equal((await h.api.jget('/api/tasks')).state,'ok');
   assert.equal(h.calls.filter(call=>call.url==='/api/owner/status').length,2);
 });
@@ -991,13 +1015,14 @@ test('equipment action checks current exact identity and authority, then only se
 
 
 test('initial fleet discovery cannot change a newer room or resumed session', async () => {
+  const directory = inspectionApp.slice(inspectionApp.indexOf('function agentDirectoryVisible()'), inspectionApp.indexOf('function resetAgentPresence()'));
   const refresh = inspectionApp.slice(inspectionApp.indexOf('async function refreshBoards()'), inspectionApp.indexOf('function scheduleRefresh()'));
   for (const reason of ['room', 'session']) {
     const reply = deferred(), adopted = [];
-    const state = { activityRecovery:null, sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
+    const state = { activityRecovery:null, interactionApi:{}, currentView:'channel', sessionPaused: false, sessionEpoch: 0, generation: 0, fleetsSeen: false,
       refreshInFlight: false, refreshPending: false, refreshTimer: null, clearTimeout() {},
       jget: () => reply.promise, adoptFleets(value) { adopted.push(value); } };
-    const pending = runInNewContext(`${refresh}\nrefreshBoards()`, state);
+    const pending = runInNewContext(`${directory}\n${refresh}\nrefreshBoards()`, state);
     state.generation++; if (reason === 'session') state.sessionPaused = true;
     reply.resolve({ state: 'ok', data: { default: 'old room' } }); await pending;
     assert.deepEqual(adopted, []);
@@ -1340,4 +1365,26 @@ test('read profile missing on renewal cannot reopen an admitted stream', async (
   assert.equal(await h.api.jget('/api/tasks'), null);
   assert.match(h.node('status').textContent, /compatibility/);
   h.controls.dispose();
+});
+
+for (const kind of ['message','nudge','feedback','permission']) test(`explicit ${kind} context denial keeps verified reads ready without retry`,async()=>{
+  const h=harness([ready,denied,ready,ok(['readable'])]);await h.controls.ready;
+  const read=kind==='message'?()=>h.api.interactionContext('synthetic'):kind==='permission'
+    ?()=>h.api.permissionContext('synthetic','wi_'+'1'.repeat(32)):()=>h.api[kind+'Context']('synthetic');
+  await assert.rejects(read(),{code:'action_not_authorized'});
+  assert.deepEqual(await h.api.jget('/api/tasks'),['readable']);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/context')).length,1);
+  assert.equal(h.resumed,1);assert.equal(h.node('renew').disabled,false);
+  assert.equal(h.calls.filter(c=>/\/(send|prepare|receipt)$/.test(c.url)).length,0);
+  h.controls.dispose();
+});
+
+test('context refusal with expired or unknown read session is not an action-only denial',async()=>{
+  for(const status of [denied,new Error('Offline')]) {
+    const h=harness([ready,denied,status]);await h.controls.ready;
+    assert.equal(await h.api.interactionContext('synthetic'),null);
+    assert.equal(h.node('renew').disabled,true);
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/context')).length,1);
+    h.controls.dispose();
+  }
 });

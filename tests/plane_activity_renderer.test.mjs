@@ -12,6 +12,31 @@ test('roster message entry names the exact bot and remains disabled until existi
   assert.match(html,/data-bot-message="north::actor_/);assert.match(html,/disabled>Message Worker &lt;one&gt;/);
   assert.match(html,/aria-label="Message Worker &lt;one&gt; in north \/ team"/);
 });
+test('connected directory separates recorded activity from live evidence and opens only the exact current team',()=>{
+  const a={uid:'north::actor_'+'a'.repeat(32),alias:'north::bot:team/worker',short:'Worker <one>',fleet:'north / team',kind:'actor',last_seen:'2026-01-01',provisional:false};
+  const b={...a,uid:a.uid.replace('north::','south::'),alias:a.alias.replace('north::','south::'),fleet:'south / team',provisional:true};
+  const fleet={alias:a.fleet,uid:'north::fleet_'+'b'.repeat(32),display_label:'North / team'},opened=[];
+  const grid={innerHTML:'',querySelectorAll:()=>[]},refresh={addEventListener(){}},roster={scrollIntoView(){}};
+  const c={interactionApi:{dispose(){}},currentView:'grid',sessionPaused:false,sessionEpoch:1,rosterGeneration:1,
+    document:{activeElement:null},$:id=>id==='grid'?grid:id==='fleet'?roster:refresh,
+    fleets:[fleet],rosterIdentities:new Map([[a.uid,{...a,fleet_uid:fleet.uid}],[b.uid,b]]),
+    esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=> 'recently',
+    PRESENCE_WORD:{working:'working',idle:'idle',unknown:'unknown'},
+    setView:view=>{opened.push(view);},pickFleet:room=>opened.push(room),renderState(){}};
+  runInNewContext(source.slice(source.indexOf('let agentPresence ='),source.indexOf('const STATUS_DOT')),c);
+  const presence={data:{sources:[{key:'north',state:'ok',sampler_available:true}],
+    bots:[{alias:a.alias,live:'sampling',presence:'working'}]}};
+  c.renderAgentDirectory({state:'ok',data:{identities:[a,b,{...a,kind:'actor',fleet:null}],sources:[{key:'north',label:'North',state:'ok'},{key:'south',label:'South',state:'ok'}]}},presence);
+  assert.match(grid.innerHTML,/2 agents in readable records/);assert.match(grid.innerHTML,/200 recorded identities/);
+  assert.match(grid.innerHTML,/Worker &lt;one&gt;/);assert.match(grid.innerHTML,/Live session<\/dt><dd>unknown/);
+  assert.match(grid.innerHTML,/Recorded heartbeat<\/dt><dd>working/);
+  assert.match(grid.innerHTML,/Unconfirmed identity/);assert.doesNotMatch(grid.innerHTML,/running|pane-card|<pre/);
+  c.renderAgentDirectory({state:'ok',data:{identities:[a],sources:[{key:'north',label:'North',state:'ok'},{key:'south',label:'South',state:'not_connected'}]}},presence);
+  assert.match(grid.innerHTML,/South: not_connected/);assert.doesNotMatch(grid.innerHTML,/data-agent-team="south::/);
+  c.openAgentTeam(a.uid);assert.deepEqual(opened,['channel',a.fleet]);opened.length=0;
+  c.openAgentTeam(b.uid);c.rosterIdentities.get(a.uid).fleet_uid='changed';c.openAgentTeam(a.uid);
+  c.sessionPaused=true;c.openAgentTeam(a.uid);assert.equal(opened.length,0);
+});
 const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
 const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');
@@ -88,8 +113,9 @@ test(`explicit activity recovery reuses guarded reads and preserves keyboard foc
   const state={...panel,document,conversationTaskLink,sessionPaused:false,sessionEpoch:1,generation:0,currentFleet:'north / team',
     refreshInFlight:false,refreshPending:false,refreshTimer:null,fleetsSeen:true,clearTimeout(){},
     syncWorkRoom(){},fleetQuery:()=>'?fleet='+encodeURIComponent(state.currentFleet),channelUrl(){return '/api/channel?limit=120';},refreshOverview(){},
+    agentDirectoryVisible:()=>false,
     jget(url){reads.push(url);return url.startsWith('/api/channel')?held:Promise.resolve({state:'ok',data:{}});},
-    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){}}};
+    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
   const retry=source.slice(source.indexOf('async function retryActivity()'),source.indexOf('async function refreshBoards()'));
   const refresh=source.slice(source.indexOf('async function refreshBoards()'),source.indexOf('function scheduleRefresh()'));
   const view=runInNewContext(`${rendering}\n${retry}\n${refresh}\n({renderChannel,retryActivity,refreshBoards,control:()=>activityRecovery})`,state);

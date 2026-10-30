@@ -74,6 +74,7 @@ vaults/
 
 # Active fleet config (root mode) — the .example files are the canonical templates
 fleet.yaml
+!/examples/teams/revenue-web-app/fleet.yaml
 projects.yaml
 
 # Claude fleet bot telemetry — supervision hooks may write these relative to

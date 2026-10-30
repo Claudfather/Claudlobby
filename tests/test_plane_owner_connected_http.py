@@ -489,16 +489,146 @@ def test_a_call_its_caller_abandoned_never_runs_once_a_worker_reaches_it(connect
     asyncio.run(scenario())
 
 
-def test_finite_read_deadline_no_private_body_and_shutdown_stream_ownership(connected_http, monkeypatch):
-    import claudlobby.plane.owner_connected_http as module
-    consumer = connected_http[0].connected_reads
-    async def held(scope, receive, send):
-        await asyncio.Event().wait()
-    consumer.read_app = held
-    monkeypatch.setattr(module, "READ_SECONDS", .03)
-    with TestClient(connected_http[0], base_url=HOST) as client:
-        result = client.get(PREFIX + "read/tasks", headers=headers("A"*43))
-        assert result.status_code == 503 and not consumer._readers
+@pytest.mark.parametrize("abandon", ["timeout", "cancel", "disconnect"])
+def test_finite_read_shared_capacity_survives_abandonment_until_sync_settlement(
+        connected_http, monkeypatch, abandon):
+    from claudlobby.plane import finite_reads, view
+    app, access, *_ = connected_http
+    # Real connected login and direct cookie, with the actual canonical sync route.
+    ready = login(TestClient(app, base_url=HOST), connected_http)
+    direct = access.open_session(OWNER)
+    owner = app.state.finite_reads
+    monkeypatch.setattr(finite_reads, "READ_CAPACITY", 1)
+    monkeypatch.setattr(finite_reads, "READ_SECONDS", .3 if abandon == "timeout" else 5)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    original = view._fetch_tasks
+    def held(*args, **kwargs):
+        calls.append(1)
+        entered.set()
+        assert release.wait(5), "test did not release the real synchronous read"
+        return original(*args, **kwargs)
+    monkeypatch.setattr(view, "_fetch_tasks", held)
+
+    async def run():
+        def scope(path, headers):
+            return {"type": "http", "method": "GET", "path": path,
+                "query_string": b"", "headers": [(b"host", b"host.example.test"), *headers]}
+        connected = scope(PREFIX + "read/tasks", [
+            (b"origin", PLANE.encode()), (b"authorization", ("Bearer " + ready["token"]).encode())])
+        direct_scope = scope("/api/tasks", [(b"cookie", (COOKIE_NAME + "=" + direct.token).encode())])
+        disconnect = asyncio.Event()
+        received = False
+        async def receive():
+            nonlocal received
+            if not received:
+                received = True
+                return {"type": "http.request", "body": b""}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+        output = []
+        async def send(message):
+            output.append(message)
+        request = asyncio.create_task(app(connected, receive, send))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            if abandon == "cancel":
+                request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+            else:
+                if abandon == "disconnect":
+                    disconnect.set()
+                await asyncio.wait_for(request, 2)
+            assert len(owner.workers) == 1
+            retained = list(output)
+            if abandon == "timeout":
+                assert output[0]["status"] == 503
+            else:
+                assert output == []
+            # Direct and local routes share the reservation; neither admits work.
+            async def quiet_receive():
+                await asyncio.Event().wait()
+            for target in (app.read_app, app.read_app.app):
+                refused = []
+                async def collect(message):
+                    refused.append(message)
+                await target(direct_scope, quiet_receive, collect)
+                assert refused[0]["status"] == 503
+            assert len(calls) == 1
+            # Full data capacity must not block an authenticated shell/assets.
+            # These still traverse the exact native/source/session gates.
+            for path in ("/", "/app.js"):
+                rendered = []
+                async def collect(message):
+                    rendered.append(message)
+                await app.read_app({**direct_scope, "path": path}, quiet_receive, collect)
+                assert rendered[0]["status"] == 200
+                assert any(message.get("body") for message in rendered)
+                assert len(owner.workers) == 1
+            denied = []
+            async def collect_denied(message):
+                denied.append(message)
+            # A connected bearer copied into a direct cookie is not authority.
+            invalid_asset = scope("/app.js", [
+                (b"cookie", (COOKIE_NAME + "=" + ready["token"]).encode())])
+            await app.read_app(invalid_asset, quiet_receive, collect_denied)
+            assert denied[0]["status"] == 403
+            assert len(calls) == 1 and len(owner.workers) == 1
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tuple(owner.workers)), 3)
+            await asyncio.sleep(0)
+            assert not owner.workers and output == retained
+            recovered = []
+            async def collect(message):
+                recovered.append(message)
+            await app.read_app(direct_scope, quiet_receive, collect)
+            assert recovered[0]["status"] == 200 and len(calls) == 2
+            await owner.shutdown()
+        finally:
+            release.set()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("closing_loss", [None, "expired", "revoked", "source"])
+def test_real_sql_timeout_signal_is_sanitized_and_closing_admission_wins(connected_http, monkeypatch, closing_loss):
+    from claudlobby.plane import view
+
+    app, access, _, clock, _ = connected_http
+    ticks = []
+    def now():
+        ticks.append(len(ticks) * 2.0)
+        return ticks[-1]
+    def expensive(conn, root):
+        try:
+            return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                                " SELECT x+1 FROM n WHERE x<1000000000)"
+                                " SELECT sum(x) FROM n").fetchone()[0]
+        finally:
+            # Changes occur after opening admission, before the real closing
+            # source/credential check; none may be hidden by the retry signal.
+            if closing_loss == "expired":
+                clock[0] += 3600
+            elif closing_loss == "revoked":
+                _, binding = access.workspace().status()
+                access.workspace().revoke(expected_binding=binding, expected_owner=binding.owner)
+            elif closing_loss == "source":
+                (root / "state" / "host-uid").unlink()
+    with TestClient(app, base_url=HOST) as client:
+        ready = login(client, connected_http)
+        monkeypatch.setattr(view, "time", types.SimpleNamespace(monotonic=now))
+        monkeypatch.setattr(view, "_fetch_summary", expensive)
+        result = client.get(PREFIX + "read/summary", headers=headers(ready["token"]))
+        assert ticks[-1] == view._QUERY_SECONDS
+        if closing_loss is None:
+            assert result.status_code == 200
+            assert result.json() == {"state": "unreadable", "reason": "query_timeout",
+                                     "remediation": "query timed out — retry this read"}
+        else:
+            assert result.status_code == (503 if closing_loss == "source" else 403)
+            assert result.json()["state"] == ("unavailable" if closing_loss == "source" else "denied")
+            assert "reason" not in result.json()
+        assert "data" not in result.json() and "provenance" not in result.json()
 
 
 def test_head_runs_real_canonical_get_queries_not_static_fallback(connected_http, monkeypatch):
@@ -643,11 +773,12 @@ def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_
     consumer = connected_http[0].connected_reads
     async def run():
         entered = asyncio.Event()
+        settled = asyncio.Event()
         async def held(scope, receive, send):
             if suffix == "stream":
                 await send({"type": "http.response.start", "status": 200, "headers": []})
             entered.set()
-            await asyncio.Event().wait()
+            await settled.wait()
         consumer.read_app = held
         scope = {"type": "http", "method": "GET", "path": PREFIX + "read/" + suffix, "query_string": b"",
             "headers": [(b"host", b"host.example.test"), (b"origin", PLANE.encode()), (b"authorization", b"Bearer " + b"A"*43)]}
@@ -672,6 +803,10 @@ def test_caller_cancellation_still_propagates_and_cleans_owned_reader(connected_
         with pytest.raises(asyncio.CancelledError):
             await bounded(request, "the cancelled request", state)
         assert not consumer._readers
+        if suffix == "tasks":
+            assert len(consumer.finite_reads.workers) == 1
+            settled.set()
+            await asyncio.gather(*tuple(consumer.finite_reads.workers))
         if stopping:
             release.set()
             await bounded(shutdown, "shutdown", state)

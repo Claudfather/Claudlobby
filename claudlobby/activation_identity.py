@@ -9,12 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from .active_config import context_from_plan
-from .activation_state import ActivationError, read_activation, read_selection
-from .config_plan import ConfigPlan, read_plan
+from .active_config import context_from_plan, _selected_activation, _plan_for_selection
+from .activation_state import ActivationError
+from .config_plan import ConfigPlan
 from .operation_context import OperationContextError, _host_uid
 from .plane.ids import ID_PATTERNS
-from .releases import read_release
 from .resources import PackageResources, get_resources
 
 
@@ -88,19 +87,16 @@ def read_selected_identity_bindings(root: Path, fleet: str, *,
                                     package: PackageResources | None = None) -> dict:
     """Read one active fleet binding without Plane; a mutating caller holds admission."""
     package = package if package is not None else get_resources()
-    selected = read_selection(root)
-    if selected is None:
-        raise ActivationError("host has no active configuration")
-    record = read_activation(root, selected["activation_id"])
-    if (record.status != "active" or record.body["intent"]["plan_id"] != selected["plan_id"]
-            or record.body["intent"]["release_id"] != selected["release_id"]):
+    selected, record = _selected_activation(root)
+    if record.status != "active":
         raise ActivationError("selected identity activation is incomplete")
-    release = read_release(root, selected["release_id"], verify_files=False)
-    if release.native_path != package.native or release.inputs.artifact_id != package.artifact_id:
-        raise ActivationError("active identity bindings and executing package differ")
-    plan = read_plan(root, selected["plan_id"])
-    if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-        raise ActivationError("active identity bindings and selected release differ")
+    plan = _plan_for_selection(root, selected, package)
+    return _selected_bindings(plan, record, fleet, package=package)
+
+
+def _selected_bindings(plan: ConfigPlan, record, fleet: str, *,
+                       package: PackageResources) -> dict:
+    """Validate recorded binding observation; callers separately require active."""
     if fleet not in plan.fleets:
         raise ActivationError("requested fleet is not in the selected activation")
     payload = record.body.get("identity_bindings")

@@ -27,7 +27,8 @@ from .owner_actions import ActionNotStarted, OwnerActions
 from .ids import read_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, PAIRING_SECONDS, SESSION_SECONDS
 from .owner_view import VerifiedReader, create_owner_app
-from .owner_source import inspect_source
+from .owner_source import inspect_source, SourceDenied, SourceUnavailable
+from .owner_observation import owner_pairing_state, owner_read_profile, source_refusal
 
 COOKIE_NAME = "__Host-claudlobby-owner"
 _COOKIE_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -197,6 +198,7 @@ class _OwnerBrowser:
         self.workspace_bootstrap = None
         self.connected_reads = None
         self.connected_actions = None
+        self.connected_setup = None
         if workspace_bootstrap is not None:
             from .owner_workspace_http import WorkspaceBootstrapHTTP
             self.workspace_bootstrap = WorkspaceBootstrapHTTP(self.access,
@@ -209,6 +211,9 @@ class _OwnerBrowser:
             from .owner_connected_actions_http import ConnectedActionsHTTP
             self.connected_actions = ConnectedActionsHTTP(self.access, config=workspace_bootstrap,
                 authority=self.authority, verify_principal=self.verify_principal, package=package)
+            from .owner_setup_http import SetupHTTP
+            self.connected_setup = SetupHTTP(self.access, config=workspace_bootstrap,
+                authority=self.authority, verify_principal=self.verify_principal)
 
     async def _principal(self, scope: Scope) -> PrincipalRef:
         principal = await self.verify_principal(scope)
@@ -229,7 +234,7 @@ class _OwnerBrowser:
     def _read_profile(self, reader: VerifiedReader) -> dict:
         host_uid = inspect_source(self.access.root)
         self.access.authorize_read(reader.token, reader.principal, host_uid=host_uid)
-        return {"version": 1, "profile": "direct-owner-read-v1", "host_uid": host_uid}
+        return owner_read_profile(host_uid)
 
     def _ready(self, principal: PrincipalRef, token: str, **data) -> JSONResponse:
         reader = VerifiedReader(principal, token)
@@ -240,7 +245,7 @@ class _OwnerBrowser:
 
     def _status(self, principal: PrincipalRef, token: str | None) -> JSONResponse:
         grant = self.access.current_grant()
-        if grant is None or not grant.active:
+        if owner_pairing_state(grant) != "paired":
             return _response({"state": "needs_pairing"})
         if grant.principal != principal:
             raise AccessDenied("owner_not_paired")
@@ -322,6 +327,10 @@ class _OwnerBrowser:
         return response
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (scope["type"] == "http" and self.connected_setup is not None
+                and scope["path"].startswith("/api/owner/connected/setup/")):
+            await self.connected_setup(scope, receive, send)
+            return
         if (scope["type"] == "http" and self.connected_actions is not None
                 and scope["path"].startswith("/api/owner/connected/actions/")):
             await self.connected_actions(scope, receive, send)
@@ -336,6 +345,7 @@ class _OwnerBrowser:
                 async def receive():
                     message = await original_receive()
                     if message["type"] == "lifespan.shutdown":
+                        await self.connected_setup.shutdown()
                         await self.connected_actions.shutdown()
                         await self.connected_reads.shutdown()
                         await self.workspace_bootstrap.shutdown()
@@ -450,6 +460,10 @@ class _OwnerBrowser:
             unavailable = isinstance(exc.refusal, (AccessUnavailable, OperationContextUnavailableError))
             response = _response({"state": "unavailable" if unavailable else "denied",
                                   "effect": "not_started"}, 503 if unavailable else 403)
+        except (SourceUnavailable, SourceDenied) as exc:
+            observation = source_refusal(exc)
+            response = _response({"state": observation.state},
+                                 503 if observation.state == 'unavailable' else 403)
         except AccessDenied as exc:
             # A delayed denial must not erase a newer cookie from a concurrent
             # successful sign-in or renewal. Only explicit logout deletes it.

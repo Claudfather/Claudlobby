@@ -13,8 +13,9 @@ from pathlib import Path
 from uuid import UUID
 
 from ..active_config import resolve_active_context
-from ..command_result import CommandFailure, CommandOutput
-from ..commands.message_write import deliver_bound_message
+from ..command_result import CommandFailure
+from ..application_result import ApplicationOutcome
+from ..application_messages import deliver_bound_message
 from ..message_context import resolve_message_route
 from ..message_payload import MessageBody
 from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
@@ -104,7 +105,7 @@ class OwnerMessages:
     @admitted_action
     def send(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
              recipient_uid: str, request_id: str, text: str,
-             expected_grant: OwnerMessageGrant) -> CommandOutput:
+             expected_grant: OwnerMessageGrant) -> ApplicationOutcome:
         """Authorize one ordinary send; reuse canonical idempotency and proof.
 
         Exceptions may follow a committed/native effect. Keep the original

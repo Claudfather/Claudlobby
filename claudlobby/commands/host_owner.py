@@ -21,7 +21,8 @@ import warnings
 
 from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import ACTION_DENIALS, AccessDenied, AccessUnavailable, OwnerAccess
-from ..plane.owner_source import SourceDenied, SourceNeedsBinding, SourceUnavailable
+from ..plane.owner_source import SourceDenied, SourceUnavailable
+from ..plane.owner_observation import owner_pairing_state, source_refusal
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
               "FLEET_NAME", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT")
@@ -266,7 +267,7 @@ def dispatch(args):
         raise CommandFailure("conflict", "owner commands require an operator shell without bot or fleet selectors")
     if args.root is None or args.fleet or args.seed:
         raise CommandFailure("invalid_argument", "owner commands require explicit --root and no fleet or seed")
-    if args.owner_action not in {"status", "workspace-status"} and args.json:
+    if args.owner_action not in {"status", "workspace-status", "setup-status"} and args.json:
         raise CommandFailure("invalid_argument", "--json is supported for owner status and workspace-status only")
     try:
         paths = resolve_paths(root=args.root)
@@ -290,6 +291,11 @@ def dispatch(args):
             except OSError as exc:
                 raise CommandFailure("unavailable", "owner server failed; inspect local logs and configured resources") from exc
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
+        if args.owner_action == "setup-status":
+            from ..plane.owner_setup import OwnerSetup
+            grant = OwnerSetup(store).local()
+            return CommandOutput({"grant": asdict(grant) if grant else None},
+                                 lines=("First-team setup approval retained." if grant else "No setup approval.",))
         if args.owner_action == "workspace-status":
             state, binding = store.workspace().status()
             return CommandOutput({"state": state, "effective_active": state == "active",
@@ -299,7 +305,7 @@ def dispatch(args):
             status = store.local_action_status()
             grant, messages, nudges, feedbacks = (status.owner, status.message_grants,
                                                   status.nudge_grants, status.feedback_grants)
-            state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
+            state = owner_pairing_state(grant)
             lines = [f"Owner access: {state}."]
             for message in messages:
                 lines.append("Message grant: " + json.dumps(asdict(message), ensure_ascii=True))
@@ -316,6 +322,43 @@ def dispatch(args):
                                   "permission_grants": [asdict(p) for p in status.permission_grants]},
                                  lines=tuple(lines))
         with _terminal(paths.root) as terminal:
+            if args.owner_action in {"allow-setup", "revoke-setup"}:
+                from ..plane.owner_setup import OwnerSetup
+                from ..plane.owner_source import fresh_owner_setup
+                from .host import _operator_shell
+                from .releases import _release, _executing_release
+                _operator_shell(paths.root)
+                setup = OwnerSetup(store)
+                if args.owner_action == "allow-setup":
+                    fresh_owner_setup(paths.root)
+                    if _executing_release(paths.root) != args.release:
+                        raise CommandFailure("release_mismatch", "setup approval requires this release's sealed CLI")
+                    release = _release(paths.root, args.release)
+                    # Native search-path observation only; no enrollment or start.
+                    from ..supervision_inventory import Adapter, _catalog
+                    _, _, directories, _, _ = _catalog(Adapter(paths.package).read("svc_inventory_catalog"))
+                    directory = args.install_directory
+                    if directory not in directories:
+                        raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
+                    grant = setup.candidate(_active_owner(store).principal, template=args.template,
+                        fleet=args.target_fleet, repository=args.repository, release_id=args.release,
+                        release_seal=release.seal_sha256, install_directory=str(directory))
+                    terminal.write("Approve one first-team setup from the bound connected workspace.\n"
+                        "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
+                        "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
+                    terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
+                    _approve(terminal, "ALLOW-SETUP")
+                    fresh_owner_setup(paths.root)
+                    if _release(paths.root, args.release).seal_sha256 != grant.release_seal:
+                        raise CommandFailure("conflict", "setup release changed during approval")
+                    setup.allow(grant)
+                    return CommandOutput({"state": "allowed"}, lines=("One first-team setup approved.",))
+                grant = setup.local()
+                if grant is None: raise CommandFailure("not_found", "no retained setup approval")
+                terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
+                _approve(terminal, "REVOKE-SETUP")
+                setup.revoke(grant)
+                return CommandOutput({"state": "revoked"}, lines=("Setup approval revoked; started activation is not undone.",))
             if args.owner_action == "initialize-connected":
                 owner = _active_owner(store)
                 _describe(terminal, owner)
@@ -381,6 +424,23 @@ def dispatch(args):
                 bind_source(paths.root, expected_host_uid=host_uid)
                 return CommandOutput({"state": "bound"}, lines=("Plane source bound to this installation.",))
             if args.owner_action == "initialize":
+                before_first = getattr(args, "before_first_fleet", False)
+                if before_first:
+                    from .releases import _executing_release, _release
+                    from ..plane.owner_source import fresh_owner_setup
+                    release_id = _executing_release(paths.root)
+                    if release_id is None:
+                        raise CommandFailure("release_mismatch", "fresh owner preparation requires the sealed assembled release CLI")
+                    _release(paths.root, release_id)
+                    fresh_owner_setup(paths.root, allow_absent=True)
+                    terminal.write("Prepare a new host identity and owner authority before its first team.\n"
+                                   "This grants no activation, private reads or fleet actions.\n")
+                    _approve(terminal, "INITIALIZE")
+                    fresh_owner_setup(paths.root, allow_absent=True)
+                    from ..plane.ids import ensure_host_uid
+                    ensure_host_uid(paths.root / "state")
+                    OwnerAccess.initialize(paths.root, before_first_fleet=True)
+                    return CommandOutput({"state": "initialized"}, lines=("Pre-activation owner authority is initialized.",))
                 host_uid = read_host_uid(paths.root / "state")
                 terminal.write("Prepare owner access for host " + json.dumps(host_uid) + ".\n"
                                "This does not pair anyone or expose a network service.\n")
@@ -411,15 +471,20 @@ def dispatch(args):
             raise CommandFailure("invalid_argument", "unsupported owner command")
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid host root selector") from exc
-    except SourceNeedsBinding as exc:
-        raise CommandFailure("unavailable", "Plane source lacks required binding or indexes; verify the selected installation "
-            "and re-run host owner bind-source. Binding refuses foreign or mixed-host history.") from exc
-    except SourceDenied as exc:
-        raise CommandFailure("conflict", "Plane source is foreign or mixed-host; select the correct installation "
-            "or investigate its history. Do not rebind this source.") from exc
-    except SourceUnavailable as exc:
-        raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
-            "database and schema locally. Pairing again cannot repair source state.") from exc
+    except (SourceUnavailable, SourceDenied) as exc:
+        observation = source_refusal(exc)
+        code, message = {
+            'source_binding_required': ('unavailable',
+                "Plane source lacks required binding or indexes; verify the selected installation "
+                "and re-run host owner bind-source. Binding refuses foreign or mixed-host history."),
+            'source_denied': ('conflict',
+                "Plane source is foreign or mixed-host; select the correct installation "
+                "or investigate its history. Do not rebind this source."),
+            'source_unavailable': ('unavailable',
+                "Plane source cannot be verified; inspect the selected installation's "
+                "database and schema locally. Pairing again cannot repair source state."),
+        }[observation.reason]
+        raise CommandFailure(code, message) from exc
     except AccessDenied as exc:
         if args.owner_action == "initialize-connected":
             raise CommandFailure("conflict", "connected initialization requires the current native paired owner; inspect host owner status") from exc

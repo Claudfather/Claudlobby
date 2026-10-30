@@ -190,6 +190,87 @@ def test_healthz_503_when_absent(client):
     assert r.json()["state"] == "absent"
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_envelope_interrupts_sql_after_admission_and_releases_connection(tmp_path, monkeypatch, admitted):
+    import sqlite3
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    ticks = []
+    def clock():
+        ticks.append(len(ticks) * 2.0)
+        return ticks[-1]
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=clock))
+    opened = []
+    original = view._ro_conn
+    def connect(db):
+        conn = original(db)
+        opened.append(conn)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", connect)
+    def admission(conn):
+        assert conn.in_transaction
+        # The real source admission replaces then clears its own handler.
+        conn.set_progress_handler(lambda: 0, 10_000)
+        conn.execute("SELECT 1").fetchone()
+        conn.set_progress_handler(None, 0)
+    def expensive(conn):
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    result = view._envelope(tmp_path, expensive,
+                            admit_connection=admission if admitted else None,
+                            snapshot=True)
+    assert result["state"] == "unreadable" and "data" not in result
+    assert result["reason"] == "query_timeout"
+    assert result["remediation"] == "query timed out — retry this read"
+    assert ticks[-1] == view._QUERY_SECONDS  # real VM callback reached cutoff
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+    # No expired state or interrupted connection leaks into a following read.
+    ticks.clear()
+    healthy = view._envelope(tmp_path, lambda conn: conn.execute("SELECT 7").fetchone()[0])
+    assert healthy["state"] == "ok" and healthy["data"] == 7
+    assert "last_ingest_seq" in healthy["provenance"]
+
+
+@pytest.mark.parametrize("outcome", ["ok", "unknown", "detail", "short"])
+def test_envelope_budget_includes_success_and_error_provenance(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    elapsed = 0.0
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    def body(conn):
+        nonlocal elapsed
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+        elapsed = 9.0
+        if outcome == "unknown":
+            raise view.UnknownFleet("not this fleet")
+        if outcome == "detail":
+            raise view.TaskDetailError("unknown", "not this task")
+        return {"private": "must not escape on timeout"}
+    def provenance(root, conn):
+        nonlocal elapsed
+        # Body used most of the SAME budget; provenance must not get ten more
+        # seconds, including when called from a typed exception handler.
+        elapsed = 10.0
+        if outcome == "short":
+            # A short statement may not reach the VM callback interval.
+            return {"head": conn.execute("SELECT 1").fetchone()[0]}
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    monkeypatch.setattr(view, "_provenance", provenance)
+    result = view._envelope(tmp_path, body)
+    assert result["state"] == "unreadable" and "data" not in result
+    assert result["reason"] == "query_timeout"
+    assert result["remediation"] == "query timed out — retry this read"
+    assert set(result["provenance"]) == {"db", "checked_at"}
+
+
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
     initialize_plane(tmp_path)
@@ -1068,7 +1149,7 @@ def test_index_ids_are_unique_and_the_room_panel_owns_its_id(tmp_path):
     assert "fleet-room" in ids and "fleet" in ids
     js = ui.joinpath("app.js").read_text()
     assert '$("fleet-room")' in js
-    assert 'jget("/api/fleets")' in js          # the dimension's source
+    assert re.search(r'\bjget\("/api/fleets"\s*[,)]', js)  # exact dimension source
     assert "localStorage" in js and "try {" in js   # the remembered pick
 
 
@@ -1334,12 +1415,14 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
     """Structural: the page owns the strip's panel, app.js fetches the
     overview door and routes card clicks through the ONE pick path the
     tabs use, and the mark + the strip are styled."""
+    import re
     from importlib.resources import files
     ui = files("claudlobby.plane").joinpath("ui")
     html = ui.joinpath("index.html").read_text()
     assert 'id="overview"' in html
     js = ui.joinpath("app.js").read_text()
-    assert 'jget("/api/overview")' in js and "function renderOverview" in js
+    assert re.search(r'\bjget\("/api/overview"\s*[,)]', js)
+    assert "function renderOverview" in js
     assert js.count("function pickFleet") == 1
     assert "pickFleet(b.dataset.fleet)" in js       # the tab row
     assert "pickFleet(c.dataset.fleet)" in js       # the strip's cards
@@ -1598,6 +1681,37 @@ def test_overview_attention_is_the_boards_owning_fleet_count(tmp_path):
     assert fleets["b"]["open_scope"] == "assigned_to_fleet_bots"
 
 
+
+def test_overview_summary_skips_board_presentation_and_delivery_evidence(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+
+    _canonical_delivery(tmp_path, "d1", tx_state="failed", fleet="a")
+    _dispatch(tmp_path, "d2", fleet="a", worker="bot:b/ramanujan",
+              expected_by=PAST, tx_state=None)
+    _canonical_delivery(tmp_path, "d3", tx_state="pane_submitted", fleet="b")
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    boards = {alias: client.get(f"/api/tasks?fleet={alias}").json()["data"]
+              for alias in ("a", "b")}
+    # The shared reducer still supplies failed-delivery/deadline attention;
+    # only the board's presentation and extra evidence reads are unnecessary.
+    def no_cards(*args, **kwargs):
+        pytest.fail("overview constructed board presentation")
+    for name in ("_fetch_tasks", "_task_assignment", "_task_event"):
+        monkeypatch.setattr(view, name, no_cards)
+    for name in ("NUDGE_STATE_SQL", "ASSIGNMENT_DELIVERY_MSG_SQL", "DELIVERY_STATUS_SQL"):
+        monkeypatch.setattr(view, name, "INVALID presentation-only SQL")
+    body = client.get("/api/overview").json()
+    assert body["state"] == "ok"
+    fleets = {row["alias"]: row for row in body["data"]["fleets"]}
+    for alias, board in boards.items():
+        assert fleets[alias]["attention"] == board["attention_count"]
+        assert fleets[alias]["overdue"] == sum(
+            "overdue" in card["attention_reason"] for card in board["tasks"])
+        assert fleets[alias]["attention_truncated"] == board["truncated"]
+    assert (fleets["a"]["attention"], fleets["a"]["overdue"]) == (2, 1)
+    assert fleets["b"]["attention"] == 0
+
+
 def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path):
     import sqlite3
     from claudlobby.plane import view
@@ -1818,6 +1932,10 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     assert len(capped["tasks"]) == 200 and capped["truncated"] is True
     assert queued not in {card["task_id"] for card in capped["tasks"]}
     assert capped["attention_count"] == 0  # only the visible slice is counted
+    team = next(row for row in client.get("/api/overview").json()["data"]["fleets"]
+                if row["alias"] == "f")
+    assert team["attention"] == 0 and team["overdue"] == 0
+    assert team["attention_truncated"] is True
 
 
 def test_board_discloses_unknown_task_history_without_an_all_clear(tmp_path):

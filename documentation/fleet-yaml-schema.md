@@ -180,6 +180,8 @@ plugins:
 
 **`include_defaults`** — Boolean (default `true`). Set to `false` to disable the built-in default plugins and marketplaces. Unusual — the validator warns when this is set.
 
+**`startup_policy`** — `manage` (default) keeps normal startup marketplace registration and plugin installation/update. `verify-existing` retains selected plugin enablement but refuses startup unless the selected account already has readable installed artifacts for every required plugin. It performs no startup marketplace/plugin maintenance, disables automatic plugin sync and omits marketplace provisioning from bot settings. To prevent scheduled refresh as well, set `defaults.jobs.reload-fleet.enroll: false`; this policy does not change other account or Claude Code behavior. The first-team template uses both settings and requires its plugins to be installed beforehand.
+
 Each bot's generated `settings.local.json` explicitly enables its selected fleet plugins and channel plugins. Plugin keys already present in that bot's selected account `settings.json` are set to `false` when the bot did not select them, so a channel-less bot does not inherit a host-enabled Telegram plugin. `channels: []` still removes the channel flag; `isolation.shared_config` controls tool access rather than Claude's plugin settings.
 
 ### `fleet.system_defaults`
