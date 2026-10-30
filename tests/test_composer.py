@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import plistlib
 import subprocess
 from dataclasses import replace
@@ -1434,7 +1435,7 @@ class TestHooksMergeAndSettings:
         post_groups = settings["hooks"]["PostToolUse"]
         assert post_groups[0]["matcher"] == "Bash"
 
-    def test_no_hooks_omits_key(self, tmp_path):
+    def test_no_authored_hooks_keeps_only_the_static_orientation(self, tmp_path):
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
@@ -1444,7 +1445,13 @@ class TestHooksMergeAndSettings:
         fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test", service_prefix="com.test")
 
         settings = compose_settings_local(bot, fleet, paths)
-        assert "hooks" not in settings
+        assert set(settings["hooks"]) == {"SessionStart"}
+        groups = settings["hooks"]["SessionStart"]
+        assert len(groups) == 1 and "matcher" not in groups[0]
+        assert len(groups[0]["hooks"]) == 1
+        hook = groups[0]["hooks"][0]
+        assert "fleet-ops-orientation.md" in hook["command"]
+        assert hook["timeout"] == 5
 
     def test_bot_only_hooks_no_defaults(self, tmp_path):
         root = tmp_path / "claudlobby"
@@ -3705,6 +3712,9 @@ class TestDefaultStartupPromptIgnition:
         bot = self._bot()
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
         line = self._startup_prompt_line(conf)
+        assert "fleet-ops guide supplied at session start" in line
+        assert "If that guide is unavailable, invoke /fleet-ops" in line
+        assert "CLAUDE.md and invoke /fleet-ops" not in line
         assert line.index("/fleet-ops") < line.index("claudlobby --json context show")
         assert line.index("claudlobby --json context show") < line.index("claudlobby --json brief")
         assert "report its error and stop" in line
@@ -3754,6 +3764,28 @@ class TestDefaultStartupPromptIgnition:
         result = compose_settings_local(bot, self._fleet(bot), self._paths(tmp_path))
         allow = result.get("permissions", {}).get("allow", [])
         assert not any("brief --bot" in p for p in allow)
+
+
+    def test_static_orientation_is_one_unmatched_hook_and_preserves_authored_hooks(self, tmp_path):
+        parent = tmp_path / "operator's data $HOME"
+        parent.mkdir()
+        paths = self._paths(parent)
+        bot = self._bot(startup_prompt="Hang tight.", hooks={
+            "SessionStart": [{"command": "echo authored", "matcher": "resume"}],
+        })
+        settings = compose_settings_local(bot, self._fleet(bot), paths)
+        groups = settings["hooks"]["SessionStart"]
+        orientation = [(group, hook) for group in groups for hook in group["hooks"]
+                       if "fleet-ops-orientation.md" in hook["command"]]
+        assert len(orientation) == 1
+        group, hook = orientation[0]
+        assert "matcher" not in group
+        assert hook["type"] == "command" and hook["timeout"] == 5
+        assert shlex.split(hook["command"])[1] == str(
+            paths.bot_runtime(bot.bot_id) / ".claude/fleet-ops-orientation.md")
+        assert any(g.get("matcher") == "resume" and h["command"] == "echo authored"
+                   for g in groups for h in g["hooks"])
+        assert bot.hooks == {"SessionStart": [{"command": "echo authored", "matcher": "resume"}]}
 
 
 class TestVoiceLayouts:

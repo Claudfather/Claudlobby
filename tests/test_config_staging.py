@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -130,6 +131,53 @@ def _files(plan, change):
     return {name: plan.blob(entry["sha256"])
             for name, entry in change.after["files"].items()}
 
+
+
+def test_plan_freezes_the_effective_fleet_ops_body_without_metadata(staging_case):
+    case = staging_case
+    skill = _write(case.paths.fleet_config_dir / "library/skills/fleet-ops/SKILL.md",
+                   "---\nname: fleet-ops\ntool_grants: []\n---\n# Selected fleet guide\n"
+                   "Use literal commands; never infer identity from hook input.\n")
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    expected = "# Selected fleet guide\nUse literal commands; never infer identity from hook input.\n"
+    for bot in ("primary-manager", "primary-worker"):
+        target = case.paths.bot_runtime(bot) / composer.FLEET_OPS_ORIENTATION_FILE
+        assert plan.content(_changes(plan)[target]).decode() == expected
+        assert not target.exists(), "preview must not publish the guide"
+    skill.write_text(skill.read_text().replace("Selected fleet guide", "Changed guide"))
+    assert plan.content(_changes(plan)[target]).decode() == expected
+    with pytest.raises(PlanError, match="input changed"):
+        plan.check_fresh()
+
+
+def test_exact_orientation_hook_reads_only_the_frozen_body_and_fails_open(staging_case):
+    from tests.conftest import constructed_env
+
+    case = staging_case
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    bot_dir = case.paths.bot_runtime("primary-worker")
+    changes = _changes(plan)
+    settings = json.loads(plan.content(changes[bot_dir / ".claude/settings.local.json"]))
+    hooks = [h for g in settings["hooks"]["SessionStart"] for h in g["hooks"]
+             if "fleet-ops-orientation.md" in h["command"]]
+    assert len(hooks) == 1
+    guide = bot_dir / composer.FLEET_OPS_ORIENTATION_FILE
+    body = plan.content(changes[guide])
+    assert body.startswith(b"# Fleet operations") and b"tool_grants:" not in body
+    guide.parent.mkdir(parents=True)
+    guide.write_bytes(body)
+    before = _tree(case.root)
+    result = subprocess.run(["/bin/bash", "-c", hooks[0]["command"]],
+                            input='{"session_id":"not-an-identity","cwd":"/foreign"}',
+                            env=constructed_env(BOT_DIR="/foreign"), capture_output=True, text=True,
+                            timeout=10)
+    assert result.returncode == 0 and result.stdout == body.decode()
+    assert _tree(case.root) == before
+    guide.unlink()
+    result = subprocess.run(["/bin/bash", "-c", hooks[0]["command"]],
+                            env=constructed_env(), capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0
+    assert result.stdout == "fleet-ops orientation unavailable; invoke /fleet-ops before fleet operations.\n"
 
 
 def test_host_plan_probes_shared_vault_once_and_refreshes_next_request(staging_case, tmp_path, monkeypatch):
