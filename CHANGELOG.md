@@ -27,6 +27,37 @@ prints, and `tests/test_cold_start_contract.py` also fails on a switch row that
 passes `--fleet` or `--seed` to staging or activation, and on a doc that shows
 `bot remove` without `--root` and `--fleet`.
 
+### Fixed — an empty `fleet.yaml` is named, with its size, instead of "configuration is invalid" (#2267)
+
+`config validate`, `fleet status` and `context show` refused an empty `fleet.yaml`
+with the generic line they print for every config error, so the operator was sent
+to check selectors and `fleet.manager`, never an empty file. A zero-byte file now
+reads `fleet configuration is empty: <path> (0 bytes)`, and one holding only
+whitespace or comments says it holds no YAML document and how many bytes it has.
+The hint says to restore the file from its last good copy and that
+`git log -- <path>` lists the copies where it is tracked. The exit status stays
+4, the file is never rewritten, and only the path and the size are shown. A file
+with a document in it, even `---` or `null`, and every other config error keep
+the generic line, since those errors can quote a secret value.
+
+### Fixed — fleet-ops says who runs `task escalate` and `task nudge`, and which assignments a progress report holds off (#2574, #2577)
+
+The fleet-ops skill, which every bot reads, told the reader to run `task escalate`
+and `task nudge`. Fleet-ops grants them only to the fleet manager, but their doors
+check no role, so a worker whose own permissions allow them, such as through the
+bare `Bash` that an `allow_all` expertise adds, can run them too. The skill now
+says both are the manager's commands and a worker leaves them to the manager: a
+worker that waits on something outside its assignment records `assignment block`
+with a reason, and for anything else it sends the manager a message. Its
+deadline-watch paragraph said a progress report holds off every past-deadline
+assignment of the bot; it holds off only those dispatched before it, as the watch
+requires, and the `overdue` and `past_due` rows now say so too. The help of
+`assignment progress` now says that an assignment past its deadline reads
+`past_due`, with or without a report, more than 24 hours (the default) after the
+dispatch or, once the manager has moved the deadline, after the later of the move
+and the new deadline. Tests pin each sentence, and the brief's behaviour behind
+the two deadline-watch sentences.
+
 ### Fixed — a failed host job, launchd job or failure alert is reported (#2532)
 
 fleet-pulse now asks, once a sweep, which units the selected release owns are in

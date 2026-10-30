@@ -1,7 +1,10 @@
 // Account metadata selects navigation; only host-issued core handles admit reads.
 import { createConnectedReadClient } from "./connected-read-client.js";
 import { createWorkspaceEnrollment } from "./workspace-enrollment.js";
-import { createWorkspaceReadTransport } from "./two-source-read.js";
+import { createGuidedSetup } from "./guided-setup.js";
+import { createWorkspaceReadTransport, MAX_SAVED_COMPUTERS, MAX_WORKSPACE_CONTEXT_BYTES } from "./two-source-read.js";
+
+export { MAX_WORKSPACE_CONTEXT_BYTES };
 
 const uuid = value => typeof value === 'string' && value.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 const keys = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
@@ -15,7 +18,7 @@ function origin(value) {
   catch { return false; }
 }
 function references(value) {
-  return Array.isArray(value) && value.length <= 2 && value.every(ref => keys(ref, ['reference_id', 'endpoint_origin', 'revision'])
+  return Array.isArray(value) && value.length <= MAX_SAVED_COMPUTERS && value.every(ref => keys(ref, ['reference_id', 'endpoint_origin', 'revision'])
     && uuid(ref.reference_id) && origin(ref.endpoint_origin) && Number.isSafeInteger(ref.revision) && ref.revision > 0)
     && new Set(value.map(ref => ref.reference_id)).size === value.length
     && new Set(value.map(ref => ref.endpoint_origin)).size === value.length;
@@ -56,7 +59,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     clearTimeout(refreshTimer); refreshTimer = null;
     for (const request of requests) request.abort();
     for (const stop of unsubscribes) stop(); unsubscribes = [];
-    for (const {client,enrollment} of clients) { enrollment.dispose(); client.dispose(); }
+    for (const {client,enrollment,setup} of clients) { setup?.dispose(); enrollment.dispose(); client.dispose(); }
     transport?.dispose(); transport = null;
     for (const stream of streams) stream.detach();
     paused = true; invoke(mount?.onPause);
@@ -91,7 +94,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       let length = 0; const chunks = [];
       for (;;) {
         const part = await reader.read(); if (part.done) break;
-        length += part.value.byteLength; if (length > 16384) throw new Error(); chunks.push(part.value);
+        length += part.value.byteLength; if (length > MAX_WORKSPACE_CONTEXT_BYTES) throw new Error(); chunks.push(part.value);
       }
       if (abort.signal.aborted) throw new Error();
       const bytes = new Uint8Array(length); let offset = 0;
@@ -153,6 +156,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         onContinuityChange:changed, monotonicNow, documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
         row.client.activity?.({visible:mount?.document.visibilityState === 'visible'});
+        row.setup = createGuidedSetup({client:row.client,storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -164,9 +168,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         label:computerLabel(reference), savedLabel:label, reader:client.readHandle,
         connectionState:() => client.connectionState?.() || client.snapshot().state,
         readFailure:url => client.readFailure?.(url)}))});
-      for (const {client,actions,key} of nextClients) {
+      for (const {client,actions,key,setup} of nextClients) {
         let previous = client.snapshot();
         nextSubscriptions.push(client.subscribe(state => {
+          setup.connectionChanged(state);
           if (state.epoch !== previous.epoch || state.state !== previous.state) {
             previous = state; actions.invalidate(); invoke(mount?.onActionSourceChange,key);
           }
@@ -181,7 +186,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const stream of streams) stream.detach();
       for (const stop of nextSubscriptions) invoke(stop);
       invoke(() => nextTransport?.dispose());
-      for (const {client,enrollment} of nextClients) {
+      for (const {client,enrollment,setup} of nextClients) {
+        invoke(() => setup?.dispose());
         invoke(() => enrollment?.dispose()); invoke(() => client.dispose());
       }
       current = null; clients = []; transport = null; unsubscribes = [];
@@ -223,12 +229,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     changed();
     return loading;
   }
-  async function jget(url) {
+  async function jget(url, onUpdate) {
     if (disposed || phase === 'denied') return failure('denied');
     if (phase === 'empty') return failure('empty', 'Save a computer address in your website workspace, then open it again.');
     if (phase !== 'ready' || !transport) return failure('unavailable', 'Check your account before connecting a computer.');
     const ticket = sequence, active = transport, recovery = new Map(clients.map(row => [row.key,row.actionRecoveryPending]));
-    const value = await active.jget(url);
+    const value = await active.jget(url, typeof onUpdate === 'function' ? value => {
+      if (!disposed && phase === 'ready' && ticket === sequence && active === transport) onUpdate(value);
+    } : undefined);
     if (disposed || phase !== 'ready' || ticket !== sequence || active !== transport) return failure('denied');
     let renamed = false;
     for (const source of value?.data?.sources || []) {
@@ -258,8 +266,13 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   async function actionContext(room,kind,task) {
     const source = actionSource(room); if (!source) return null;
     const ticket = sequence;
-    const value = await source.row.actions[kind](source.fleet,task);
-    return disposed || phase !== 'ready' || ticket !== sequence ? null : value;
+    try {
+      const value = await source.row.actions[kind](source.fleet,task);
+      return disposed || phase !== 'ready' || ticket !== sequence ? null : value;
+    } catch (error) {
+      if (disposed || phase !== 'ready' || ticket !== sequence) return null;
+      throw error;
+    }
   }
   async function actionOperation(name,value) {
     const source = actionSource(value?.scope?.fleet);
@@ -305,11 +318,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     pending.add(index); changed();
     try {
       if (operation === 'enroll') {
-        if (row.client.snapshot().state === 'ready' || !await checkAccount()) return false;
+        if (['ready','setup_only'].includes(row.client.snapshot().state) || !await checkAccount()) return false;
         return await row.enrollment.start();
       }
       const result = await row.client[operation]();
-      if (operation === 'connect' && result) row.enrollment.cancel();
+      if (operation === 'connect' && result) {
+        row.enrollment.cancel();
+        transport?.retryOverview?.(row.key);
+      }
       return result;
     }
     catch { return false; }
@@ -369,6 +385,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const proposal = document.createElement('div'); proposal.setAttribute('role','group');
       proposal.className = 'connection-proposal';
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
+      const setupPanel = document.createElement("div"); setupPanel.setAttribute("role","group"); setupPanel.setAttribute("aria-label","First-team setup " + new URL(reference.endpoint_origin).hostname); help.append(setupPanel);
+      clients[index].setup.mountPanel({document,element:setupPanel});
       help.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
         onForget:() => { if (phase === 'ready') {
           const button = buttons.find(({operation}) => operation === 'enroll').button;
@@ -384,7 +402,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const connection = client.connectionState?.() || status.state;
       const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
-      const labels = {ready:'Connected',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
+      const labels = {ready:'Connected',setup_only:'First-team setup',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
       label.textContent = `${name} · ${expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed'}`;
       label.title = new URL(reference.endpoint_origin).hostname;
       row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
@@ -400,11 +418,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         detail.textContent = approval.state === 'unknown'
           ? 'Local approval may have been prepared. Inspect the retained code on this computer; do not prepare it again. Connect only after local approval.'
           : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
-      access.hidden = status.state === 'ready';
+      access.hidden = ['ready','setup_only'].includes(status.state);
       if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
       const primaryOperation = expired || continuity?.connectRequired ? 'connect' : status.state === 'unavailable' ? 'check'
-        : ['ready','logout'].includes(status.state) ? 'logout'
+        : ['ready','setup_only','logout'].includes(status.state) ? 'logout'
         : status.state === 'renewing' ? 'renew' : 'connect';
       const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];
       primary.dataset.operation = primaryOperation; primary.textContent = primaryTitle;
@@ -412,14 +430,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const disabled = operation => row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
         || approval.busy
-        || ['connect','enroll'].includes(operation) && status.state === 'ready'
+        || ['connect','enroll'].includes(operation) && ['ready','setup_only'].includes(status.state)
         || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
-        || operation === 'renew' && status.state !== 'ready'
-        || operation === 'logout' && !['ready','unavailable'].includes(status.state);
+        || operation === 'renew' && !['ready','setup_only'].includes(status.state)
+        || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state);
       primary.disabled = disabled(primaryOperation);
       for (const {button,operation} of buttons) {
         button.hidden = operation === primaryOperation
-          || ['renew','logout'].includes(operation) && !['ready','unavailable','renewing','logout'].includes(status.state);
+          || ['renew','logout'].includes(operation) && !['ready','setup_only','unavailable','renewing','logout'].includes(status.state);
         button.disabled = disabled(operation);
       }
     });
@@ -429,7 +447,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (button.dataset.view === 'channel' && !['denied','disposed'].includes(phase)) continue;
+        if (['channel','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
+          button.disabled = false; button.title = ''; continue;
+        }
         button.disabled = true; button.title = unavailable;
       }
       const search = document.getElementById('search'); if (search) { search.disabled = true; search.title = unavailable; search.value = ''; }
@@ -475,7 +495,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     mount?.cleanup?.(); retire('disposed');
     for (const stream of [...streams]) stream.close(); listeners.clear();
   }
-  return Object.freeze({jget,roomLabel:room => transport?.roomLabel(room) || room,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
+  return Object.freeze({jget,retryOverview:key => !disposed && phase === 'ready' && !!current && (transport?.retryOverview?.(key) || false),roomLabel:room => transport?.roomLabel(room) || room,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
     interactionContext:room => actionContext(room,'interactionContext'),
     nudgeContext:room => actionContext(room,'nudgeContext'),feedbackContext:room => actionContext(room,'feedbackContext'),
     permissionContext:(room,task) => actionContext(room,'permissionContext',task),

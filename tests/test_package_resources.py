@@ -4,6 +4,8 @@ import hashlib
 from email.parser import BytesParser
 from importlib import metadata as importlib_metadata
 import json
+import platform
+import sysconfig
 from pathlib import Path
 import shutil
 import subprocess
@@ -108,7 +110,7 @@ def _copy_installed_dependencies(wheel, installed):
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    for directory in ("claudlobby", "library", "templates", "missions"):
+    for directory in ("claudlobby", "library", "templates", "missions", "examples"):
         shutil.copytree(REPO / directory, source / directory,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources"))
     for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed", "fleet.yaml.example",
@@ -116,15 +118,19 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         shutil.copy2(REPO / name, source / name)
     removed_module = source / "claudlobby/_removed_for_build_smoke.py"
     removed_module.write_text("REMOVED_BUILD_SMOKE = True\n")
-    # A private index proves authored inputs without a commit, remote or identity.
+    # A private local revision lets the real bundle consumer validate its wheel identity.
     _run(["git", "init", "--quiet"], source)
     _run(["git", "add", "."], source)
+    assert "examples/teams/revenue-web-app/fleet.yaml" in _run(["git", "ls-files"], source).splitlines()
+    _run(["git", "-c", "user.name=Build fixture", "-c", "user.email=fixture@example.invalid",
+          "commit", "--quiet", "-m", "Record isolated package fixture"], source)
     ignored = ("voices/local/operator.md", "library/skills/printify/config.json",
-               "claudlobby/_runtime_scripts/fleet-state.json")
+               "claudlobby/_runtime_scripts/fleet-state.json", "examples/teams/private/fleet.yaml")
     for name in ignored:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("PRIVATE-OPERATOR-FIXTURE-DO-NOT-PACKAGE\n")
+    assert _run(["git", "check-ignore", "examples/teams/private/fleet.yaml"], source).strip() == "examples/teams/private/fleet.yaml"
 
     before_removal = tmp_path / "before-removal"
     _run([sys.executable, "-m", "build", "--no-isolation", "--wheel",
@@ -163,7 +169,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     assert "claudlobby/_resources/library/voices/vito-corleone.md" in payload
     assert not any(name.startswith("claudlobby/_resources/voices/") for name in payload)
     for name in ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
-                 "missions/fleet.md.seed"):
+                 "missions/fleet.md.seed", "examples/teams/revenue-web-app/fleet.yaml"):
         assert payload["claudlobby/_resources/seeds/" + name][0] == (source / name).read_bytes()
         source_inputs.add(source / name)
     assert payload["claudlobby/system.yaml"][0] == (source / "claudlobby/system.yaml").read_bytes()
@@ -200,7 +206,9 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
                   hashlib.sha256(path.read_bytes()).hexdigest()]
         digest.update((json.dumps(record, separators=(",", ":")) + "\n").encode())
     assert metadata["content_sha256"] == digest.hexdigest()
-    assert metadata["artifact_id"] == "source-" + digest.hexdigest()
+    revision = _run(["git", "rev-parse", "HEAD"], source).strip()
+    assert metadata["source_revision"] == revision
+    assert metadata["artifact_id"] == revision + "-" + digest.hexdigest()
     assert "release_id" not in metadata
     assert not set(metadata["resource_sources"]).intersection(ignored)
     with tarfile.open(next(rebuilt.glob("*.tar.gz"))) as archive:
@@ -249,6 +257,7 @@ assert r.native.is_relative_to(pathlib.Path(sys.argv[1]).resolve())
 assert (r.native / 'git-credential-github-app').stat().st_mode & 0o111
 assert (r.seeds / '.env.seed.example').is_file()
 assert (r.seeds / 'missions/fleet.md.seed').is_file()
+assert (r.seeds / 'examples/teams/revenue-web-app/fleet.yaml').is_file()
 assert not {'yaml', 'jinja2', 'pydantic'} & sys.modules.keys()
 assert not hasattr(r, 'release_id')
 print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha256}))
@@ -256,6 +265,66 @@ print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha2
     installed_identity = json.loads(_run(
         [python, "-I", "-S", "-B", "-c", script, installed], tmp_path))
     assert installed_identity == {key: metadata[key] for key in installed_identity}
+    # The installed consumer works with the source tree unavailable, not by
+    # resolving a nearby repository recipe.
+    _run([python, "-I", "-B", "-c", """
+from pathlib import Path
+from claudlobby.commands.setup import _template_config
+from claudlobby.config import load_fleet_snapshot
+content = _template_config('revenue-web-app', 'shop', 'example-org/shop', 'Improve checkout tests')
+fleet, _ = load_fleet_snapshot(Path('/unused/fleet.yaml'), content, None)
+assert fleet.name == 'shop' and fleet.service_prefix == 'com.claudlobby.shop'
+assert set(fleet.bots) == {'lead', 'engineer', 'reviewer'}
+assert all(bot.scope.repos == ['example-org/shop'] for bot in fleet.bots.values())
+assert 'Improve checkout tests' in fleet.mission
+assert all(not bot.channels and not bot.remote_control for bot in fleet.bots.values())
+"""], tmp_path)
+    template_help = _run([cli, "fleet", "setup", "--help"], tmp_path)
+    assert "--template {revenue-web-app}" in template_help and "--repository OWNER/REPO" in template_help
+
+    # Real first-command observation from a synthetic local bundle. Reuse the
+    # installed core dependency closure above; no registry/manager/provider calls.
+    bundle = tmp_path / "trusted-bundle"
+    bundle.mkdir()
+    (bundle / "bootstrap.py").write_bytes((installed / "claudlobby/bootstrap.py").read_bytes())
+    shutil.copy2(wheel, bundle / wheel.name)
+    wheelhouse = bundle / "wheelhouse"
+    wheelhouse.mkdir()
+    pins = []
+    for distribution in importlib_metadata.distributions(path=[str(installed)]):
+        if canonicalize_name(distribution.metadata["Name"]) not in dependencies:
+            continue
+        tag = next(line[5:] for line in distribution.read_text("WHEEL").splitlines() if line.startswith("Tag: "))
+        name = canonicalize_name(distribution.metadata["Name"]).replace("-", "_")
+        dependency = wheelhouse / f"{name}-{distribution.version}-{tag}.whl"
+        with zipfile.ZipFile(dependency, "w") as archive:
+            for relative in distribution.files:
+                path = Path(distribution.locate_file(relative))
+                if path.is_file() and path.resolve().is_relative_to(installed.resolve()):
+                    archive.write(path, Path(relative).as_posix())
+        pins.append(f"{distribution.metadata['Name']}=={distribution.version} --hash=sha256:{hashlib.sha256(dependency.read_bytes()).hexdigest()}")
+    assert pins
+    (bundle / "dependency.lock").write_text("\n".join(sorted(pins)) + "\n")
+    (bundle / "rehearsal.json").write_text(json.dumps({"passed": True, "source_revision": metadata["source_revision"],
+        "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest()}))
+    (bundle / "built-on.txt").write_text(f"python {platform.python_version()}\nplatform {sysconfig.get_platform()}\nlibc unknown\n")
+    files = sorted(path for path in bundle.rglob("*") if path.is_file())
+    (bundle / "SHA256SUMS").write_text("".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{path.relative_to(bundle).as_posix()}\n" for path in files))
+    host_root = (tmp_path / "no-native-host").resolve()
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    # Canonical native inventory refuses without launchctl/systemctl on PATH.
+    # This reaches the actual installed CLI but cannot observe the real manager.
+    outcome = subprocess.run([sys.executable, "-I", "-B", str(bundle / "bootstrap.py"), "--root", str(host_root), "--json"],
+        cwd=tmp_path, env=constructed_env(PATH=str(empty_path)), text=True, capture_output=True, timeout=180)
+    result = json.loads(outcome.stdout)
+    supported = sys.version_info[:2] == (3, 11) and ((sys.platform == "darwin" and platform.machine() == "arm64")
+        or (sys.platform == "linux" and platform.machine() == "aarch64"))
+    assert not result["ok"] and not host_root.exists()
+    assert result["error"]["code"] == ("unavailable" if supported else "invalid_bundle")
+    assert outcome.returncode == (6 if supported else 2)
+    print("offline bootstrap observation:", json.dumps({"supported_host": supported, "exit": outcome.returncode, "canonical_error": result["error"], "root_absent": not host_root.exists()}, sort_keys=True))
+    assert not list(Path(__import__("os").environ["TMPDIR"]).glob("claudlobby-bootstrap-*"))
 
     data, outside = tmp_path / "data", tmp_path / "outside"
     data.mkdir()

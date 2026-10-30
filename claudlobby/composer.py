@@ -56,6 +56,7 @@ from .loader import (
     iter_guardrail_permissions,
     iter_library_requires,
     iter_skill_grants,
+    load_library_item,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -1373,11 +1374,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.
     plugins_required = list(fleet.plugins.required)
+    if fleet.plugins.startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
+    if fleet.plugins.startup_policy == "verify-existing":
+        lines.append("export FLEET_PLUGIN_STARTUP_POLICY=verify-existing")
     for _chan_plugin in _channel_plugins(bot.channels):
         if _chan_plugin not in plugins_required:
             plugins_required.append(_chan_plugin)
     if plugins_required:
-        lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
+        if fleet.plugins.startup_policy == "manage":
+            lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
         lines.append(
             f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(plugins_required))}"
         )
@@ -1466,9 +1472,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # A bot with no declared prompt begins through the universal fleet-ops
         # skill, whose exact grants cover context show and brief. Two forms,
         # because the brief can arrive two ways:
-        #   - brief.on_start armed: the bot's own SessionStart hook already
-        #     injected its brief, so the prompt points at what is already in
-        #     context rather than naming a read the bot must run itself.
+        #   - brief.on_start armed: reuse the hook's usable payload, with one
+        #     bounded normal read only when that payload did not arrive.
         #   - otherwise: ask for the canonical brief read after context show.
         # NOTE: no backticks around the command. bot.conf is fully `source`d
         # (claudlobby/_runtime_scripts/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
@@ -1476,7 +1481,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # here would run as a real command substitution at every boot,
         # not render as text.
         preface = (
-            "Welcome back. Read your CLAUDE.md and invoke /fleet-ops. "
+            "Welcome back. Read your CLAUDE.md, including its automatically supplied "
+            "fleet-ops section. If that section is unavailable, invoke /fleet-ops; "
+            "reconsult /fleet-ops when needed. "
             "Run claudlobby --json context show to confirm your generated "
             "fleet and bot. If a read refuses, report its error and stop; "
             "do not guess context from environment variables. "
@@ -1484,7 +1491,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         if _boot_brief_armed(bot):
             default = (
                 preface + "Then read the fleet-brief you were given at session "
-                "start. If it shows open rows of "
+                "start. Reuse a usable injected brief even if individual sections "
+                "are unavailable. Only if no usable boot payload arrived or the "
+                "hook printed fleet-brief unavailable (rc ...), run "
+                "claudlobby --json brief --startup-wait 120 once with a Bash tool "
+                "timeout of 180000 ms. If that read refuses, report its error and "
+                "stop; do not activate or resend anything. If the brief shows open rows of "
                 "yours, continue them and report; if anything is blocked, "
                 "say so. Otherwise idle and await messages."
             )
@@ -1495,7 +1507,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             # characters, not the glyph (measured via a real
             # private composition).
             default = (
-                preface + "Then run claudlobby --json brief and act on what it "
+                preface + "Then run claudlobby --json brief --startup-wait 120 "
+                "once with a Bash tool timeout of 180000 ms. Act on what it "
                 "shows: continue your own open rows, report anything "
                 "blocked, then idle and await messages."
             )
@@ -1680,6 +1693,19 @@ def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Pat
                 continue
             _add(src.name, src)
     return linked
+
+
+def compose_fleet_ops_orientation(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
+    """Load the effective guide as library prose, without frontmatter or grants."""
+    skills = resolve_effective_skills(bot, fleet, paths,
+                                      is_manager=bot.bot_id in fleet.manager_bots())
+    source = resolve_skill_sources(paths, skills, _log.warning).get("fleet-ops")
+    if source is None:
+        raise ValueError("the universal fleet-ops skill is unavailable")
+    item = load_library_item(source / "SKILL.md")
+    if item is None or not item.body.strip():
+        raise ValueError("the universal fleet-ops guide is empty")
+    return item.body
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -2275,6 +2301,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         privilege_runners=privilege_runners,
+        fleet_ops_body=compose_fleet_ops_orientation(bot, fleet, paths),
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
@@ -2404,7 +2431,8 @@ def _with_brief_boot_hook(
     fleet_arg = f" --fleet {fleet}" if fleet else ""
     fallback = (
         f'echo "fleet-brief unavailable (rc $?) — '
-        f'claudlobby{fleet_arg} brief --bot {bot_id}"'
+        f'claudlobby{fleet_arg} brief --bot {bot_id} --startup-wait 120; '
+        f'use a Bash tool timeout of 180000 ms for this one read"'
     )
     cmd = f"{exe}{fleet_arg} brief --bot {bot_id} --boot || {fallback}"
     out = {k: list(v) for k, v in hooks.items()}
@@ -3210,7 +3238,7 @@ def compose_settings_local(
         plugin: plugin in selected_plugins
         for plugin in sorted(inherited_plugins | selected_plugins)
     }
-    if fleet.plugins.marketplaces:
+    if fleet.plugins.marketplaces and fleet.plugins.startup_policy == "manage":
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
     # MCP trust allowlist — see docstring for the derive-and-fail-closed rationale.

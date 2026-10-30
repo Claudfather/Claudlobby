@@ -70,6 +70,13 @@ def _reading(paths: Paths, now: int = NOW) -> tuple[str, str]:
     return only
 
 
+def _by_assignment(paths: Paths, now: int = NOW) -> dict[str, tuple[str, str]]:
+    """The same readings keyed by assignment ID, for a claim about which assignment reads what."""
+    items = build_brief(_fleet(), paths, WORKER, now)["work"]["items"]
+    return {item["attention"]["assignment_id"]: (item["attention"]["status"], item["attention"]["reason"])
+            for item in items}
+
+
 ORPHANED = ("orphaned", "respawned_after_dispatch")
 GRACE = ("past_due", "progress_grace")
 CAPPED = ("past_due", "max_age_cap")
@@ -123,6 +130,13 @@ def test_the_expiry_cap_ends_the_flag_even_for_a_worker_that_keeps_reporting(pat
     assert _reading(paths, DISPATCHED + CAP_S + GRACE_S + 10) == CAPPED
 
 
+def test_with_no_report_at_all_the_expiry_cap_still_ends_the_flag(paths: Paths):
+    _land(paths, _dispatch(WORKER, DISPATCHED, DEADLINE, task_id="t-a"))
+    _restart(paths)
+    assert _reading(paths, DISPATCHED + CAP_S) == ORPHANED      # never reported: flagged to the cap's last second
+    assert _reading(paths, DISPATCHED + CAP_S + 1) == CAPPED    # then aged out, though nobody reported
+
+
 def test_progress_on_one_assignment_holds_back_every_past_due_assignment_of_the_bot(paths: Paths):
     _land(paths, _dispatch(WORKER, DISPATCHED, DEADLINE, task_id="t-a"))
     wi_b, asg_b = _land(paths, _dispatch(WORKER, DISPATCHED + 1, DEADLINE, task_id="t-b"))
@@ -130,6 +144,15 @@ def test_progress_on_one_assignment_holds_back_every_past_due_assignment_of_the_
     assert _readings(paths) == [ORPHANED, ORPHANED]
     _fact(paths, wi_b, asg_b, "progress", NOW - 100)
     assert _readings(paths) == [GRACE, GRACE]
+
+
+def test_a_progress_report_holds_back_only_the_assignments_dispatched_before_it(paths: Paths):
+    wi, asg = _land(paths, _dispatch(WORKER, DISPATCHED, DEADLINE, task_id="t-a"))
+    _fact(paths, wi, asg, "progress", NOW - 2000)
+    _, asg_b = _land(paths, _dispatch(WORKER, NOW - 1900, NOW - 1000, task_id="t-b"))   # after that report
+    assert _by_assignment(paths) == {asg: GRACE, asg_b: ("overdue", "none")}   # the report predates t-b
+    _fact(paths, wi, asg, "progress", NOW - 50)
+    assert _by_assignment(paths) == {asg: GRACE, asg_b: GRACE}                 # a newer one holds back both
 
 
 def test_a_moved_deadline_clears_the_flag_and_moves_the_expiry_cap_with_it(paths: Paths):
@@ -192,7 +215,7 @@ def test_report_back_tells_a_worker_what_orphaned_means_and_what_clears_it():
     assert "`assignment progress`" in para and "holds the flag back for" in para     # the number: the numbers test below
     assert "`block` does not" in para
     assert "`/fleet-ops` says what each status means and what ends it" in para      # the rest of the explanation is there
-    assert "task nudge" not in para        # a worker's composed grants hold no `task nudge`: the fleet manager's do
+    assert "task nudge" not in para        # fleet-ops grants `task nudge` to the fleet manager only
 
 
 def test_a_workers_composed_instructions_carry_the_paragraph(fleet_dir):
@@ -217,6 +240,10 @@ def test_fleet_ops_explains_every_attention_status():
                  "`past_due` (`max_age_cap`)", "`unknown`"):
         assert cell in section, cell
     assert "on any assignment of yours" in section          # the clock is the bot's, not the assignment's
+    assert "past-deadline assignments dispatched before it" in section     # and only those (the claims above)
+    assert "one dispatched after it waits for a newer report" in section
+    assert "no progress since its dispatch in the last 45 minutes" in section
+    assert "held back by a progress report made since its dispatch and under 45 minutes old" in section
     assert "`block` is not progress" in section
     assert "`complete`, `fail` and `return` end the assignment" in section
     assert "`assignment reschedule`" in section and "`block --reason`" in section
@@ -238,7 +265,8 @@ def _help(capsys, *argv: str) -> str:
 def test_assignment_progress_help_explains_the_deadline_watch(capsys):
     text = _help(capsys, "assignment", "progress")
     for needle in ("what is done and what is next", "then notify the fleet manager", "orphaned", "past_due",
-                   "45 minutes", "complete, fail and return end the assignment", "block does not clear the watch"):
+                   "45 minutes", "complete, fail and return end the assignment", "block does not clear the watch",
+                   "More than 24 hours after the dispatch", "past_due with or without a report"):
         assert needle in text, needle
 
 
@@ -343,7 +371,8 @@ def test_the_numbers_the_surfaces_print_are_the_matchers_defaults(capsys):
     assert (doors.DEFAULT_PROGRESS_GRACE_S, doors.DEFAULT_OVERDUE_MAX_AGE_S) == (GRACE_S, CAP_S)
     minutes, hours = f"{GRACE_S // 60} minutes", f"{CAP_S // 3600} hours"
     assert minutes in _report_back() and minutes in _fleet_ops() and hours in _fleet_ops()
-    assert minutes in _help(capsys, "assignment", "progress")
+    progress_help = _help(capsys, "assignment", "progress")
+    assert minutes in progress_help and hours in progress_help
     assert minutes in BOOT_ORPHANED_HINT
     assert minutes in _WATCH_NOTES[ORPHANED] and minutes in _WATCH_NOTES[GRACE] and hours in _WATCH_NOTES[CAPPED]
 

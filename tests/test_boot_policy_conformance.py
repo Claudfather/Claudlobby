@@ -284,9 +284,12 @@ class TestStartBotShScrubsTheLeakedMarkers:
         return lines[0]
 
     def test_the_launch_command_unsets_the_leaked_markers(self):
-        assert re.search(
-            r"\. '\$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "
-            r"CLAUDE_CODE_SESSION_ID; exec \$CLAUDE ", self._line())
+        line = self._line()
+        loaded = line.index(". '$BOT_ENV_FILE';")
+        scrubbed = re.search(
+            r"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "
+            r"CLAUDE_CODE_SESSION_ID; exec \$CLAUDE ", line)
+        assert scrubbed and loaded < scrubbed.start()
 
     def test_a_bot_started_from_inside_a_claude_session_sees_no_marker(self, tmp_path):
         import os

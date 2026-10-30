@@ -1,7 +1,16 @@
+// Shared finite navigation metadata limits; never host action authority.
+export const MAX_SAVED_COMPUTERS = 8;
+// Max canonical context22300bytes; round up for a readable finite wire budget.
+export const MAX_WORKSPACE_CONTEXT_BYTES = 24 * 1024;
+
 const readHandles = new WeakSet();
 export const isOwnerReadHandle = handle => readHandles.has(handle);
 // Only trusted carriers mark a dispatched finite read as ambiguously unavailable.
 export class ReadRequestUnavailable extends Error {}
+// A context refusal with a separately verified current read session.
+export class ActionContextDenied extends Error {
+  constructor() { super('This action is not authorized for this team.'); this.code = 'action_not_authorized'; }
+}
 
 // Selected only by the trusted owner browser server, inside its read gate.
 // Explicit renewal avoids assuming when a restored page's session began.
@@ -11,6 +20,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   monotonicNow = () => globalThis.performance.now(),
   requestTimeout = 8000,
   actionTimeout = 8000,
+  readGate = null,
   verifyReadFailures = false,
   onActionPause = () => {},
   onReadAdmitted = () => {},
@@ -83,8 +93,10 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   async function request(url, action = false, body = {}, timeout = requestTimeout) {
     const controller = new AbortController();
     reads.add(controller);
-    const timer = setTimeout(() => controller.abort(new DOMException('Read request timed out.', 'TimeoutError')), timeout);
-    try {
+    let timer;
+    const dispatch = async () => {
+      if (controller.signal.aborted) throw new ReadRequestUnavailable();
+      timer = setTimeout(() => controller.abort(new DOMException('Read request timed out.', 'TimeoutError')), timeout);
       const response = await fetch(url, { method: action ? 'POST' : 'GET',
         credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,
         ...(action ? { headers: { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' }, body: JSON.stringify(body) } : {}),
@@ -95,6 +107,12 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       catch (error) { if (response.status !== 403 && !(error instanceof SyntaxError)) throw error; }
       if (controller.signal.aborted) throw new Error();
       return { status: response.status, data };
+    };
+    try {
+      // Queue only finite reads. The network deadline starts on dispatch;
+      // pause/dispose can abort this registered controller while it waits.
+      const finiteRead = action ? url === '/api/owner/actions/context' : !url.startsWith('/api/owner/');
+      return await (readGate && finiteRead ? readGate(dispatch, controller.signal) : dispatch());
     } finally {
       clearTimeout(timer);
       reads.delete(controller);
@@ -214,6 +232,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       }
       await checkActionSession(gen);
       if (disposed || gen !== generation || mode !== 'ready') throw unknown();
+      if (path === 'context') throw new ActionContextDenied();
       if (path === 'send' && result.data?.effect === 'not_started') {
         const refusal = new Error('This submission was refused before delivery; your draft is kept.');
         refusal.effect = 'not_started';
@@ -258,7 +277,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
           context.scope?.fleet !== room || !Array.isArray(context.actions) ||
           context.actions.length !== 1 || context.actions[0] !== 'message') return null;
       return context;
-    } catch { return null; }
+    } catch (error) { if (error?.code === 'action_not_authorized') throw error; return null; }
   }
   async function taskContext(room, kind) {
     if (typeof room !== 'string' || !room || room === 'all') return null;
@@ -269,7 +288,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
           || !Array.isArray(context.recipients) || context.recipients.length !== 1 || context.recipients[0].lead !== true
           || !/^r-[0-9a-f]{64}$/.test(context.release_id)) return null;
       return context; // Shared controller validates the complete capability.
-    } catch { return null; }
+    } catch (error) { if (error?.code === 'action_not_authorized') throw error; return null; }
   }
   const nudgeContext = room => taskContext(room, 'nudge');
   const feedbackContext = room => taskContext(room, 'feedback');
@@ -279,7 +298,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       const context = await ownerAction('context', {room, kind:'permission', task_id});
       return context?.version === 2 && context.simulation === false && context.room === room && context.scope?.fleet === room
         && context.task_id === task_id && context.actions?.length === 1 && context.actions[0] === 'permission' ? context : null;
-    } catch { return null; }
+    } catch (error) { if (error?.code === 'action_not_authorized') throw error; return null; }
   }
   function actionMetadata(value, preparing = false) {
     const scope = { workspace: value?.scope?.workspace, host: value?.scope?.host,

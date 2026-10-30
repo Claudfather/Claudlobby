@@ -924,6 +924,8 @@ function renderOverview(env) {
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
       <div class="ov-line">${s.connection_state === 'ready' && s.state !== 'ok'
         ? 'Team summary unavailable; activity and task records remain independent.' : 'Separate source snapshot; recent windows are per source.'}</div>
+      ${s.overview_retry_paused ? `<div class="ov-line">Automatic summary retries paused. Timeout recorded ${esc(s.overview_checked_at || 'at an unknown time')}.${s.overview_read_at ? ` Last successful summary ${esc(s.overview_read_at)}.` : ' No successful summary recorded in this connection.'}</div>
+        ${typeof interactionApi.retryOverview === 'function' && s.connection_state === 'ready' ? `<button type="button" class="pill ghost" data-overview-retry="${esc(s.key)}" aria-label="Retry summary for ${esc(s.label)}">Retry summary</button>` : ''}` : ''}
     </div>`).join('');
     return;
   }
@@ -989,6 +991,8 @@ $("task-detail").addEventListener("click", toggleMessageBody);
 // ONE delegated listener for the strip's cards (re-rendered on every refresh;
 // per-card listeners were re-attached each time — simplify lens)
 $("overview").addEventListener("click", (e) => {
+  const retry = e.target.closest("[data-overview-retry]");
+  if (retry) { void retryOverviewSummary(retry); return; }
   const c = e.target.closest(".ov-card.pick");
   if (c) pickFleet(c.dataset.fleet);
 });
@@ -1035,26 +1039,45 @@ function invalidateOverview() {
   renderHeader(env); renderHostFacts(env); renderOverview(env);
 }
 
+function paintOverviewRetry(busy) {
+  for (const button of $("overview")?.querySelectorAll?.('[data-overview-retry]') || []) {
+    button.disabled = busy;
+    button.textContent = busy ? 'Reading summary…' : 'Retry summary';
+  }
+}
+async function retryOverviewSummary(button) {
+  if (sessionPaused || agentDirectoryVisible() || overviewInFlight || !button.isConnected
+      || button.disabled || button.closest('[hidden]') || typeof interactionApi.retryOverview !== 'function') return;
+  if (!interactionApi.retryOverview(button.dataset.overviewRetry)) return;
+  overviewDueAt = 0;
+  await refreshOverview();
+}
 async function refreshOverview() {
-  if (sessionPaused || overviewInFlight || Date.now() < overviewDueAt) return;
+  if (sessionPaused || agentDirectoryVisible() || overviewInFlight || Date.now() < overviewDueAt) return;
   overviewInFlight = true;
+  paintOverviewRetry(true);
   const epoch = overviewEpoch, session = sessionEpoch;
   overviewDueAt = Date.now() + OVERVIEW_INTERVAL;
   clearTimeout(overviewTimer); overviewTimer = null;
   try {
-    const ov = await jget("/api/overview");
-    if (sessionPaused || session !== sessionEpoch || epoch !== overviewEpoch) return;
-    adoptFleets(ov);
-    if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
-    renderHeader(ov); renderHostFacts(ov); renderFleetTabs(); renderOverview(ov);
-    const note = ov?.state === "ok"
-      ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
-      : "Team summary unavailable. Retrying within a minute; activity and tasks refresh separately.";
-    const el = $("overview");
-    if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
+    const paint = ov => {
+      if (sessionPaused || session !== sessionEpoch || epoch !== overviewEpoch) return;
+      adoptFleets(ov);
+      if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
+      renderHeader(ov); renderHostFacts(ov); renderFleetTabs(); renderOverview(ov);
+      const note = ov?.data?.sources
+        ? "Computer summaries are separate snapshots. Available summaries refresh about once a minute; activity and tasks refresh independently."
+        : ov?.state === "ok" ? `Team summary read at ${new Date(Date.now()).toLocaleTimeString()}; updates about once a minute.`
+        : "Team summary unavailable. Retrying within a minute; activity and tasks refresh separately.";
+      const el = $("overview");
+      if (el) el.innerHTML = `<div class="ov-line dim">${esc(note)}</div>` + el.innerHTML;
+      paintOverviewRetry(true);
+    };
+    paint(await jget("/api/overview", paint));
   } finally {
     overviewInFlight = false;
-    if (!sessionPaused) overviewTimer = setTimeout(() => {
+    paintOverviewRetry(false);
+    if (!sessionPaused && !agentDirectoryVisible()) overviewTimer = setTimeout(() => {
       overviewTimer = null; void refreshOverview();
     }, Math.max(0, overviewDueAt - Date.now()));
   }
@@ -1077,7 +1100,7 @@ async function retryActivity() {
 }
 
 async function refreshBoards() {
-  if (sessionPaused) return;
+  if (sessionPaused || agentDirectoryVisible() && document.visibilityState === "hidden") return;
   if (refreshInFlight) { refreshPending = true; return; }
   refreshInFlight = true;
   refreshPending = false;
@@ -1090,20 +1113,59 @@ async function refreshBoards() {
     // be known first — the old flow fetched the firehose, discovered the
     // fleets from the roster, and refetched (one wasted round trip and one
     // flash of the wrong room on every load).
-    const env = await jget("/api/fleets");
-    if (sessionPaused || gen !== generation) return;
+    let firstSource;
+    const usable = new Promise(resolve => { firstSource = resolve; });
+    const discovery = jget("/api/fleets", value => {
+      if (value?.state === "ok" && value.data?.coverage?.reachable > 0) firstSource(value);
+    });
+    const env = await Promise.race([discovery, usable]);
+    if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
     adoptFleets(env);
+    // Continue discovering the held peer without holding the first usable board.
+    void discovery.then(value => {
+      if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
+      adoptFleets(value);
+      if (syncWorkRoom()) { ++generation; scheduleRefresh(); }
+      renderFleetTabs();
+    });
   }
   syncWorkRoom();
+  if (agentDirectoryVisible()) {
+    // Identity pushes may refresh the directory; live sampling stays on the
+    // minute safety cadence (or an explicit refresh), never every ledger row.
+    const readPresence = !agentPresence || Date.now() >= agentPresenceDue;
+    if (readPresence) agentPresenceDue = Date.now() + 60000;
+    const [identities, presence] = await Promise.all([
+      jget("/api/identities"), readPresence ? jget("/api/presence") : agentPresence,
+    ]);
+    if (sessionPaused || epoch !== sessionEpoch || gen !== generation || !agentDirectoryVisible()) return;
+    if (readPresence) agentPresence = presence || { state: "unavailable" };
+    renderFleet(identities); renderAgentDirectory(identities, agentPresence);
+    restartSafety();
+    return;
+  }
   const q = fleetQuery();
   void refreshOverview(); // the expensive summary never holds conversation rendering
-  const [ch, tk, fl, sm] = await Promise.all([
-    jget(channelUrl()), jget("/api/tasks" + q),
-    jget("/api/identities" + q), jget("/api/summary"),
+  const current = () => !sessionPaused && epoch === sessionEpoch && gen === generation;
+  const panel = async (url, paint) => {
+    const accepted = value => { if (current()) paint(value); };
+    const value = await jget(url, accepted);
+    accepted(value);
+    return value;
+  };
+  const conversation = Promise.all([
+    panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
+    panel("/api/tasks" + q, renderTasks),
+  ]).then(([ch, tk]) => {
+    // Partial paints never replace the work-loop's paired canonical snapshots.
+    if (current()) workLoop.update(tk, ch);
+  });
+  await Promise.all([
+    conversation,
+    panel("/api/identities" + q, value => { renderFleet(value); renderFleetTabs(); }),
+    panel("/api/summary", renderSummary),
   ]);
-  if (sessionPaused || epoch !== sessionEpoch || gen !== generation) return;
-  renderFleet(fl); renderChannel(ch); renderTasks(tk); renderSummary(sm);
-  workLoop.update(tk, ch);
+  if (!current()) return;
   renderFleetTabs();
   restartSafety();
   } finally {
@@ -1134,8 +1196,12 @@ function openStream() {
     try {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
-      if (payload.rows.length || payload.coverage_changed) {
-        if (payload.coverage_changed) { ++generation; invalidateOverview(); }
+      if (payload.rows.length || payload.coverage_changed || payload.routing_changed) {
+        // Learning rooms schedules another board read without retiring the
+        // canonical overview that just supplied those same room identities.
+        if (payload.coverage_changed || payload.routing_retired) ++generation;
+        if (payload.coverage_changed || payload.routing_retired) resetAgentPresence();
+        if (payload.coverage_changed) invalidateOverview();
         scheduleRefresh();
       }
     } catch { /* malformed push — the next board refresh corrects */ }
@@ -1153,6 +1219,7 @@ function openStream() {
       // read would have re-armed the safety timer, so the coalesced refetch
       // takes its place — the same door a pushed row uses, never a new one.
       ++generation;
+      resetAgentPresence();
       invalidateOverview();
       scheduleRefresh();
       renderSummary(env);
@@ -1246,8 +1313,10 @@ function savePick(f) {
 // first fleet. One fleet = no dimension at all (null, no tabs).
 function adoptFleets(env) {
   if (!env || !env.data || (env.state !== "ok" && !Array.isArray(env.data.fleet_choices))) return;
-  fleetsSeen = true;
   fleets = env.data.fleet_choices || env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  // An empty unreadable first snapshot is not discovery. A later degraded
+  // overview must not erase a dimension already learned from a readable reply.
+  fleetsSeen ||= env.data.coverage?.reachable !== 0 || fleets.length > 0;
   const names = fleets.map((f) => f.alias);
   if (names.length < 2) { currentFleet = null; return; }
   if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
@@ -1330,13 +1399,75 @@ function pickFleet(f) {
     card.classList.toggle("on", card.dataset.fleet === currentFleet);
   }
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
-  if (currentView === "grid") pollGrid();     // so does the grid
+  if (currentView === "grid" && !agentDirectoryVisible()) pollGrid();
   refreshBoards();               // guarded path (generation stale-guard)
   if (!$("search-results").hidden) {
     // active search: re-fire in the NEW room — otherwise the visible
     // hits stay scoped to the old room under the new tab's highlight
     $("search").dispatchEvent(new Event("input"));
   }
+}
+
+let agentPresence = null, agentPresenceDue = 0;
+function agentDirectoryVisible() {
+  return typeof interactionApi.dispose === "function" && currentView === "grid";
+}
+function resetAgentPresence() {
+  agentPresence = null; agentPresenceDue = 0;
+  if (agentDirectoryVisible()) renderState($("grid"), { state: "loading" });
+}
+function agentDirectoryCard(actor, presence) {
+  const source = presence?.data?.sources?.find(s => actor.uid.startsWith(s.key + "::"));
+  const observed = presence?.data?.bots?.find(b => b.alias === actor.alias);
+  const live = source?.state === "ok" && source.sampler_available
+    && ["up", "down"].includes(observed?.live) ? observed.live : "unknown";
+  const heartbeat = source?.state === "ok" && !source.recorded_unavailable
+    && observed ? PRESENCE_WORD[observed.presence] || "unknown" : "unknown";
+  const team = fleets.find(f => f.alias === actor.fleet);
+  return `<article class="agent-card"><h3>${esc(actor.short || actor.alias)}</h3>`
+    + `<p>${esc(team?.display_label || actor.fleet)}</p>`
+    + `<dl><dt>Recorded activity</dt><dd>${esc(ago(actor.last_seen))}</dd>`
+    + `<dt>Live session</dt><dd>${esc(live)}</dd>`
+    + `<dt>Recorded heartbeat</dt><dd>${esc(heartbeat)}</dd></dl>`
+    + (source?.provenance?.checked_at ? `<small>Presence checked ${esc(ago(source.provenance.checked_at))}</small>` : "")
+    + (actor.provisional ? `<p class="dim">Unconfirmed identity; messaging is unavailable.</p>` : "")
+    + `<button class="pill ghost" type="button" data-agent-team="${esc(actor.uid)}"`
+    + ` ${!team || actor.provisional ? "disabled" : ""}>Open team</button></article>`;
+}
+function openAgentTeam(uid) {
+  if (sessionPaused || !agentDirectoryVisible()) return;
+  const identity = rosterIdentities.get(uid);
+  if (!identity || identity.provisional
+      || fleets.find(f => f.alias === identity.fleet)?.uid !== identity.fleet_uid) return;
+  // Opening a room admits its normal composer separately. Never retain a
+  // recipient to select later when authority arrives, and never send here.
+  setView("channel"); pickFleet(identity.fleet);
+  $("fleet").scrollIntoView({ block: "nearest" });
+}
+function renderAgentDirectory(env, presence) {
+  const el = $("grid");
+  if (!env || env.state !== "ok") { renderState(el, env); return; }
+  const focused = document.activeElement?.dataset?.agentTeam;
+  const rows = env.data.identities.filter(a => a.kind === "actor" && a.fleet);
+  const sources = env.data.sources || [];
+  el.innerHTML = `<div class="agent-directory-note"><h2>Recorded agents</h2>`
+    + `<p>${rows.length} agents in readable records. Open a team, then use Message beside an agent to choose the recipient. Nothing sends automatically.</p>`
+    + `<p class="dim">Up to 200 recorded identities per computer; older agents may be omitted. Recorded activity does not prove a live session.</p>`
+    + `<button class="pill ghost" type="button" id="agent-directory-refresh">Refresh agents and presence</button></div>`
+    + sources.filter(s => s.state !== "ok").map(s => `<p class="agent-directory-note">${esc(s.label)}: ${esc(s.state)}. Its agents are not shown.</p>`).join("")
+    + rows.map(a => agentDirectoryCard(a, presence)).join("")
+    + (!rows.length ? `<p class="agent-directory-note">No recorded agents in the readable sources.</p>` : "");
+  const epoch = sessionEpoch, version = rosterGeneration;
+  el.querySelectorAll("[data-agent-team]").forEach(button => {
+    button.addEventListener("click", () => {
+      if (button.isConnected && !button.disabled && epoch === sessionEpoch && version === rosterGeneration)
+        openAgentTeam(button.dataset.agentTeam);
+    });
+    if (button.dataset.agentTeam === focused && !button.disabled) button.focus();
+  });
+  $("agent-directory-refresh").addEventListener("click", () => {
+    if (!sessionPaused && agentDirectoryVisible()) { agentPresenceDue = 0; void refreshBoards(); }
+  });
 }
 
 const STATUS_DOT = { up: "live", down: "", sampling: "warn" };
@@ -1441,7 +1572,7 @@ function renderGrid(env) {
 // the frames still render; the badges just go absent (the recorded half is
 // the degradable one).
 async function pollGrid() {
-  if (sessionPaused || currentView !== "grid") return;
+  if (sessionPaused || currentView !== "grid" || agentDirectoryVisible()) return;
   const epoch = sessionEpoch, fleet = currentFleet;
   const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
@@ -1494,8 +1625,10 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  const wasDirectory = agentDirectoryVisible();
   if (view !== "fleet") closeEquipment();
   currentView = view;
+  document.body.classList.toggle("agent-directory-view", agentDirectoryVisible());
   $("channel").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
   if (view !== "channel") $("search").value = "";
@@ -1506,11 +1639,17 @@ function setView(view) {
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
   clearInterval(gridTimer);
-  if (view === "grid") {
+  if (agentDirectoryVisible()) {
+    ++generation;
+    clearTimeout(overviewTimer); overviewTimer = null;
+    renderState($("grid"), { state: "loading" });
+    void refreshBoards();
+  } else if (view === "grid") {
     renderState($("grid"), { state: "loading" });
     pollGrid();
     gridTimer = setInterval(pollGrid, 5000);
   }
+  if (wasDirectory && view !== "grid") { ++generation; scheduleRefresh(); }
   clearInterval(trustTimer);
   if (view === "trust") {
     renderState($("trust"), { state: "loading" });
@@ -1586,7 +1725,7 @@ function openFocus(bot, fleet) {
 function closeFocus() {
   $("focus-overlay").hidden = true;
   clearInterval(focusTimer);
-  if (currentView === "grid") {   // resume the grid poll
+  if (currentView === "grid" && !agentDirectoryVisible()) {   // resume the direct grid poll
     gridTimer = setInterval(pollGrid, 5000);
     pollGrid();
   }
@@ -1604,9 +1743,12 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     clearInterval(focusTimer); clearInterval(gridTimer);
     clearInterval(trustTimer);
+    if (agentDirectoryVisible()) clearTimeout(safetyTimer);
   } else if (!$("focus-overlay").hidden && $("focus-title").dataset.bot) {
     openFocus($("focus-title").dataset.bot,
               $("focus-title").dataset.fleet || null);
+  } else if (agentDirectoryVisible()) {
+    scheduleRefresh();
   } else if (currentView === "grid") {
     gridTimer = setInterval(pollGrid, 5000); pollGrid();
   } else if (currentView === "trust") {
@@ -1788,6 +1930,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         activityRecovery?.paint();
         ++sessionEpoch;
         ++generation; ++trustGen;
+        resetAgentPresence();
         invalidateOverview();
         // Invalidate the action context as well as reads. pause saves the
         // current draft in memory; resume must fetch fresh authority for this room.

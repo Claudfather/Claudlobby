@@ -469,6 +469,63 @@ test('signer and lost issue deadlines stop explicitly without retrying either mu
   assert.equal(issued.api.snapshot().state, 'unavailable'); issued.api.dispose();
 });
 
+test('finite source gate shares two slots with distinct contexts and starts deadlines only on dispatch', async () => {
+  const h = harness(); await h.api.connect();
+  const first = deferred(), second = deferred();
+  h.overrides.set('read/tasks', () => first.promise);
+  h.overrides.set('read/channel', () => second.promise);
+  const reads = [h.api.readHandle.jget('/api/tasks'), h.api.readHandle.jget('/api/channel')];
+  await flush();
+  const timerCount = h.timers.filter(t => t.active && t.ms === 15000).length;
+  const actions = h.api.createActions({ key: 'pi' });
+  reads.push(h.api.readHandle.jget('/api/summary'), actions.interactionContext('team'), actions.nudgeContext('team'));
+  await flush();
+  assert.equal(h.calls.filter(c => /\/read\/|\/actions\/context/.test(c.url)).length, 2);
+  assert.equal(h.timers.filter(t => t.active && t.ms === 15000).length, timerCount, 'queued reads consume no network deadline');
+  first.resolve(reply(200, { state: 'ok', data: {} })); await flush();
+  assert.deepEqual(h.calls.filter(c => c.url.endsWith('/actions/context')).map(c => JSON.parse(c.init.body)),
+    [{ room: 'team' }, { room: 'team', kind: 'nudge' }], 'distinct capabilities remain separate FIFO reads');
+  second.resolve(reply(200, { state: 'ok', data: {} }));
+  await Promise.all(reads); h.api.dispose();
+});
+
+test('finite source slots remain held through response bodies and do not block another host', async () => {
+  const h = harness(), other = harness(); await h.api.connect(); await other.api.connect();
+  const bodies = [];
+  for (const path of ['read/tasks', 'read/channel']) h.overrides.set(path, () => new Response(new ReadableStream({ start(c) { bodies.push(c); } })));
+  const reads = [h.api.readHandle.jget('/api/tasks'), h.api.readHandle.jget('/api/channel')]; await flush();
+  reads.push(h.api.readHandle.jget('/api/summary')); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 0);
+  assert.equal((await other.api.readHandle.jget('/api/summary')).state, 'ok');
+  bodies[0].enqueue(new TextEncoder().encode(JSON.stringify({ state: 'ok', data: {} }))); bodies[0].close();
+  await flush(); assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 1);
+  bodies[1].enqueue(new TextEncoder().encode(JSON.stringify({ state: 'ok', data: {} }))); bodies[1].close();
+  await Promise.all(reads); h.api.dispose(); other.api.dispose();
+});
+
+test('finite source queue is bounded and dispose aborts waiting reads before dispatch', async () => {
+  const h = harness(); await h.api.connect();
+  h.overrides.set('read/tasks', init => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })));
+  const reads = Array.from({ length: 11 }, () => h.api.readHandle.jget('/api/tasks'));
+  await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/tasks')).length, 2);
+  assert.equal(await reads[10], null, 'overflow settles instead of retaining an unbounded waiter');
+  h.api.dispose(); assert.deepEqual(await Promise.all(reads), Array(11).fill(null));
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/tasks')).length, 2, 'no queued request escaped disposal');
+});
+
+test('finite source timeout cannot release a slot before the network attempt settles', async () => {
+  const h = harness(); await h.api.connect();
+  const held = [deferred(), deferred()]; let attempt = 0;
+  h.overrides.set('read/tasks', () => held[attempt++].promise);
+  const reads = [h.api.readHandle.jget('/api/tasks'), h.api.readHandle.jget('/api/tasks')]; await flush();
+  reads.push(h.api.readHandle.jget('/api/summary')); await flush(); h.runTimer(15000); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 0, 'abort signal alone does not release the slot');
+  held[0].resolve(reply(200, { state: 'ok', data: {} })); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/read/summary')).length, 1);
+  held[1].resolve(reply(200, { state: 'ok', data: {} })); await Promise.all(reads); h.api.dispose();
+});
+
 test('read timeout covers a held response body after headers without publishing late rows', async () => {
   const h = harness(); assert.equal(await h.api.connect(), true);
   h.api.readHandle.createEventSource('/api/stream');await flush();const epoch=h.api.snapshot().epoch;
@@ -610,4 +667,70 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
  late.resolve(reply(403,{state:'denied'}));await checking;
  assert.equal(h.api.connectionState(),current);
  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
+});
+
+test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
+  const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+  h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
+  h.overrides.set('status',()=>reply(200,setup()));
+  h.overrides.set('setup/context',()=>reply(200,{version:1,request:null}));
+  assert.equal(await h.api.connect(),true); assert.equal(h.api.snapshot().state,'setup_only');
+  assert.notEqual(h.api.readHandle.snapshot().state,'ready');
+  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);
+  assert.equal(h.calls.filter(c=>c.url.includes('/read/')).length,0);
+  assert.equal((await h.api.setupContext()).version,1);
+  assert.equal(h.calls.at(-1).init.credentials,'omit'); assert.equal(h.calls.at(-1).init.headers.Authorization,'Bearer '+TOKEN);
+  await h.api.check(); assert.equal(h.api.snapshot().state,'setup_only');
+  h.overrides.set('status',()=>reply(200,ready()));
+  h.overrides.set('read/tasks',init=>{assert.equal(init.headers.Authorization,'Bearer '+TOKEN);return reply(200,{state:'ok',data:{path:'read/tasks'}});});
+  await h.api.check(); assert.equal(h.api.snapshot().state,'ready');
+  assert.deepEqual(await h.api.readHandle.jget('/api/tasks'),{state:'ok',data:{path:'read/tasks'}});
+  h.api.dispose();
+});
+
+test('ordinary lifecycle sends no mutations during held connect or an invalid document context',async()=>{
+  const h=harness();await h.api.connect();
+  const held=deferred();h.overrides.set('issue',()=>held.promise);
+  const reconnect=h.api.connect();await flush();
+  await h.api.renew();await h.api.logout();
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);
+  held.resolve(reply(200,ready(TOKEN)));await reconnect;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.renew();await h.api.logout();
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);h.api.dispose();
+});
+
+
+test('ordinary check still fences retired document context without a network request',async()=>{
+  const h=harness();await h.api.connect();const count=h.calls.length;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,count);
+  assert.equal(await h.api.readHandle.jget('/api/summary'),null);
+  assert.equal(h.calls.length,count);h.api.dispose();
+});
+
+test('source-qualified context denials remain distinct and stale source denials are discarded',async()=>{
+  const h=harness(),actions=h.api.createActions({key:'computer-1'});await h.api.connect();
+  h.overrides.set('actions/context',()=>reply(403,{state:'denied'}));
+  await assert.rejects(actions.interactionContext('team'),{code:'action_not_authorized'});
+  assert.equal(h.api.snapshot().state,'ready');
+  const pending=deferred();h.overrides.set('actions/context',()=>pending.promise);
+  const old=actions.interactionContext('team');await flush();
+  h.api.dispose();pending.resolve(reply(403,{state:'denied'}));
+  assert.equal(await old,null);h.api.dispose();
+
+});
+
+
+test('current account metadata accepts eight exact references and retires a ninth before host traffic', async () => {
+  const h=harness();
+  h.context={...h.context,references:Array.from({length:8},(_,i)=>i?{reference_id:uuid(30+i),endpoint_origin:`https://host${i}.example.test`,revision:1}:{...ref})};
+  assert.equal(await h.api.connect(),true);
+  assert.equal(h.api.snapshot().state,'ready');
+  h.context={...h.context,references:[...h.context.references,{reference_id:uuid(50),endpoint_origin:'https://ninth.example.test',revision:1}]};
+  const before=h.calls.length;await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,before);
+  h.api.dispose();
 });

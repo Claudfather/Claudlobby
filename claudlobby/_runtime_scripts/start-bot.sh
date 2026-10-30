@@ -15,6 +15,18 @@ load_bot_conf "$BOT_DIR"
 native_admission start-bot
 install_error_trap "$BOT_DIR"
 
+# Verify before consent writes, boot locks or tmux work. Keep the required
+# plugin list intact; this policy never installs or refreshes account plugins.
+_sb_plugin_startup_policy="${FLEET_PLUGIN_STARTUP_POLICY:-manage}"
+case "$_sb_plugin_startup_policy" in
+    manage) ;;
+    verify-existing)
+        unset CLAUDE_CODE_SYNC_PLUGIN_INSTALL
+        plugin_verify_required "$_NATIVE_ADMISSION_PYTHON" "${FLEET_PLUGINS_REQUIRED:-}" "$BOT_DIR" || exit 3
+        ;;
+    *) printf 'start-bot: unknown plugin startup policy; refusing launch\n' >&2; exit 3 ;;
+esac
+
 # --- Boot-mass mitigation -----------------------------------------------------
 # When the whole fleet is mass-restarted (e.g. reconcile-fleet --enroll, or
 # systemd restarts triggered by keepalive), all bots race to spawn their channel
@@ -287,7 +299,7 @@ CLAUDE="$(fleet_claude_bin)"
 # honours it run true instead of a browser; without it, xdg-open with no display
 # falls back to a console browser. Before the env file, so a bot that declares
 # DISPLAY, WAYLAND_DISPLAY or BROWSER in its own fleet.yaml env still gets them.
-CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
+CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FILE'; if [ \"\${FLEET_PLUGIN_STARTUP_POLICY:-manage}\" = verify-existing ]; then unset CLAUDE_CODE_SYNC_PLUGIN_INSTALL; fi; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
@@ -298,7 +310,7 @@ CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FIL
 # Failures never block bot startup (a network blip must not down the
 # fleet) — but marketplace registration is verified against the registry
 # and surfaced as a fleet event when it did not land, never swallowed.
-if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
+if [ "$_sb_plugin_startup_policy" = manage ] && command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
     LOG="$BOT_DIR/logs/startup.log"
     setup_log_dir "$LOG"
 

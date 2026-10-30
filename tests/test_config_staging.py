@@ -132,6 +132,27 @@ def _files(plan, change):
 
 
 
+def test_plan_freezes_the_effective_fleet_ops_body_without_metadata(staging_case):
+    case = staging_case
+    content = "Use literal commands; never infer identity from external input.\n" * 300
+    skill = _write(case.paths.fleet_config_dir / "library/skills/fleet-ops/SKILL.md",
+                   "---\nname: fleet-ops\ndescription: FROZEN_ORIENTATION_METADATA\ntool_grants: []\n---\n"
+                   "# Selected fleet guide\n" + content + "Guide tail sentinel.\n")
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    expected = "## Selected fleet guide\n" + content + "Guide tail sentinel."
+    assert len(expected) > 10000  # Beyond the native SessionStart output-preview boundary.
+    for bot in ("primary-manager", "primary-worker"):
+        target = case.paths.bot_runtime(bot) / "CLAUDE.md"
+        content = plan.content(_changes(plan)[target]).decode()
+        assert expected in content
+        assert "FROZEN_ORIENTATION_METADATA" not in content
+        assert not target.exists(), "preview must not publish instructions"
+    skill.write_text(skill.read_text().replace("Selected fleet guide", "Changed guide"))
+    assert expected in plan.content(_changes(plan)[target]).decode()
+    with pytest.raises(PlanError, match="input changed"):
+        plan.check_fresh()
+
+
 def test_host_plan_probes_shared_vault_once_and_refreshes_next_request(staging_case, tmp_path, monkeypatch):
     from claudlobby import claudron_compat, validator
     case = staging_case

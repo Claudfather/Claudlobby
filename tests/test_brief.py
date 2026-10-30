@@ -1644,3 +1644,165 @@ def test_unresolved_history_alone_prevents_no_work_claim(paths: Paths):
     assert brief["work"]["issues"]
     boot = format_boot_brief(brief, boot_provenance(paths, NOW))
     assert "unresolved history" in boot and "no open tasks for this bot" not in boot
+
+
+@pytest.fixture
+def startup_brief(active, monkeypatch):
+    """Real selected/journal/identity inputs, with only native time progression controlled."""
+    from claudlobby import activation_state, brief, env_tiers
+    from claudlobby.commands import brief_read
+    from claudlobby.paths import load_lib_module
+
+    root, release = active
+    selected = activation_state.read_selection(root)
+    original = activation_state.read_activation(root, selected["activation_id"]).body
+    original = json.loads(json.dumps(original))
+
+    def write(body):
+        activation_state._write(activation_state._record_path(root, selected["activation_id"]),
+                                {"record": body, "sha256": activation_state._digest(body)})
+
+    pending = {**original, "status": "activating",
+               "completed": list(activation_state.STEPS[:activation_state.STEPS.index("bots_started")]),
+               "pending": "bots_started"}
+    write(pending)
+    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **kw: {})
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    return root, release, selected, original, pending, write, brief_read
+
+
+def test_startup_wait_admits_one_brief_only_after_active(startup_brief, monkeypatch, capsys):
+    from claudlobby import active_config, activation_identity, activation_state, brief, context
+    from claudlobby.__main__ import main
+
+    root, release, selected, original, pending, write, reader = startup_brief
+    package = context.get_resources()
+    with pytest.raises(activation_state.ActivationError, match="incomplete"):
+        active_config.load_active_context(root, "example", package=package)
+    with pytest.raises(activation_state.ActivationError, match="incomplete"):
+        activation_identity.read_selected_identity_bindings(root, "example", package=package)
+    builds, sleeps = [], []
+    real_build = brief.build_brief
+
+    def build(*a, **kw):
+        assert activation_state.read_activation(root, selected["activation_id"]).status == "active"
+        builds.append(True)
+        return real_build(*a, **kw)
+
+    class Clock:
+        @staticmethod
+        def monotonic():
+            return len(sleeps)
+
+        @staticmethod
+        def sleep(seconds):
+            assert not builds and seconds == 1
+            sleeps.append(seconds)
+            write(original)
+
+    monkeypatch.setattr(reader, "time", Clock)
+    monkeypatch.setattr(brief, "build_brief", build)
+    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "120"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["release_id"] == release.release_id and result["data"]["brief"]["bot"] == "manager"
+    assert builds == [True] and sleeps == [1]
+
+
+def test_startup_wait_deadline_has_no_brief_or_queries(startup_brief, monkeypatch, capsys):
+    from claudlobby import brief
+    from claudlobby.__main__ import main
+
+    root, release, selected, original, pending, write, reader = startup_brief
+    sleeps = []
+    monkeypatch.setattr(brief, "build_brief", lambda *a, **kw: pytest.fail("brief before active"))
+
+    class Clock:
+        @staticmethod
+        def monotonic():
+            return len(sleeps)
+
+        @staticmethod
+        def sleep(seconds):
+            sleeps.append(seconds)
+
+    monkeypatch.setattr(reader, "time", Clock)
+    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "1"]) == 8
+    result = json.loads(capsys.readouterr().out)
+    assert result["data"] == {} and result["release_id"] == release.release_id
+    assert result["error"]["retryable"] is False and "still incomplete" in result["error"]["message"]
+    assert sleeps == [1]
+
+
+@pytest.mark.parametrize("damage", ["early", "bindings", "origin", "package"])
+def test_startup_wait_invalid_preflight_never_sleeps(startup_brief, monkeypatch, capsys, damage):
+    from claudlobby import active_config
+    from claudlobby.__main__ import main
+
+    root, release, selected, original, pending, write, reader = startup_brief
+    if damage == "early":
+        write({**pending, "completed": pending["completed"][:-1], "pending": "ingest_started"})
+    elif damage == "bindings":
+        write({**pending, "identity_bindings": None})
+    elif damage == "package":
+        real = active_config._selected_plan
+        monkeypatch.setattr(active_config, "_selected_plan", lambda root, package: real(root, source_package()))
+    else:
+        for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example", "BOT_ID": "worker",
+                           "BOT_DIR": str(root / "wrong-bot")}.items():
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(reader.time, "sleep", lambda *a: pytest.fail("invalid context was waited on"))
+    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "120"]) in (4, 7)
+    result = json.loads(capsys.readouterr().out)
+    assert result["data"] == {} and result["error"]["retryable"] is False
+
+
+@pytest.mark.parametrize("damage", ["selection", "bindings", "terminal", "intent"])
+def test_startup_wait_changed_observation_stops_without_brief(startup_brief, monkeypatch, capsys, damage):
+    from claudlobby import activation_state, brief
+    from claudlobby.__main__ import main
+
+    root, release, selected, original, pending, write, reader = startup_brief
+    sleeps = []
+    monkeypatch.setattr(brief, "build_brief", lambda *a, **kw: pytest.fail("changed startup served work"))
+
+    class Clock:
+        @staticmethod
+        def monotonic():
+            return len(sleeps)
+
+        @staticmethod
+        def sleep(seconds):
+            assert not sleeps
+            sleeps.append(seconds)
+            if damage == "selection":
+                activation_state._write(root / "state/selected-release.json",
+                                        {**selected, "activation_id": "different"})
+            elif damage == "bindings":
+                write({**pending, "identity_bindings": None})
+            elif damage == "terminal":
+                write({**pending, "status": "rolled_back"})
+            else:
+                write({**pending, "intent": {**pending["intent"], "plan_id": "different"}})
+
+    monkeypatch.setattr(reader, "time", Clock)
+    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "120"]) == 4
+    result = json.loads(capsys.readouterr().out)
+    assert result["data"] == {} and result["error"]["retryable"] is False and sleeps == [1]
+
+
+def test_startup_wait_bounds_and_boot_rejection_precede_observation(monkeypatch, capsys):
+    from claudlobby.__main__ import main
+    from claudlobby.commands import brief_read
+
+    monkeypatch.setattr(brief_read, "_wait_for_startup", lambda *a: pytest.fail("invalid wait observed startup"))
+    for args in (["--startup-wait", "0"], ["--startup-wait", "301"],
+                 ["--startup-wait", "-1"], ["--boot", "--startup-wait", "120"]):
+        assert main(["--json", "brief", *args]) == 2
+        result = json.loads(capsys.readouterr().out)
+        assert result["error"]["code"] == "invalid_argument"
+    for value in ("nan", "1.5"):
+        with pytest.raises(SystemExit) as rejected:
+            main(["--json", "brief", "--startup-wait", value])
+        assert rejected.value.code == 2
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"

@@ -7,6 +7,8 @@ from urllib.parse import parse_qsl
 from starlette.responses import JSONResponse
 
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
+from .owner_source import SourceUnavailable
+from .owner_observation import owner_read_profile
 from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json, _DEADLINE
 from .owner_view import _ReadStopped
 from .session_assertion import verify_session_assertion
@@ -42,10 +44,12 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         self.connected = access.connected()
         self.read_app = read_app.with_admission(self._reader, self._admit_reader)
         self._readers = set()
+        self.finite_reads = read_app.state.finite_reads
 
     async def shutdown(self):
         # The corrected bootstrap owns cancellation/drain of mutation workers.
         await super().shutdown()
+        await self.finite_reads.shutdown()
         readers = tuple(self._readers)
         for reader in readers:
             reader.cancel()
@@ -89,9 +93,22 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         finally:
             _DEADLINE.reset(token)
 
+    def _session_source(self,principal):
+        from .owner_setup import OwnerSetup
+        try: return self._setup_source()
+        except SourceUnavailable:
+            # A partially applied canonical activation may leave an unbound
+            # recorder. Only the locally granted original activation is recoverable;
+            # read/action routes continue to require their recorder admission.
+            try:
+                return OwnerSetup(self.access).recovery_host(principal)
+            except (AccessDenied, AccessUnavailable):
+                pass
+            raise  # Preserve the original recorder classification.
+
     async def _admission(self, token, principal):
         # A fresh source preflight precedes any session mutation.
-        host_uid = await self._blocking(self._source)
+        host_uid = await self._blocking(self._session_source,principal)
         admission = await self._blocking(self.connected.authorize, token, principal,
             host_uid=host_uid, operational_origin=self.config.operational_origin)
         self._binding_config(admission.binding)
@@ -102,8 +119,18 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         now = self.access._now()
         if not admission.created_at <= now < admission.expires_at:
             raise AccessDenied("connected_session_denied")
-        return {"version": 1, "state": "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
-            "read_profile": {"version": 1, "profile": "direct-owner-read-v1", "host_uid": admission.owner.host_uid},
+        try:
+            self._source()
+            setup_only=False
+        except SourceUnavailable:
+            # Setup-only is a positive admission, never a generic outage label.
+            if self._session_source(admission.owner.principal) != admission.owner.host_uid:
+                raise AccessDenied("connected_session_denied")
+            setup_only=True
+        return {"version": 1, "state": "setup_only" if setup_only else "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
+            ("setup_profile" if setup_only else "read_profile"): (
+                {"version": 1, "profile": "first-team-setup-v1", "host_uid": admission.owner.host_uid}
+                if setup_only else owner_read_profile(admission.owner.host_uid)),
             "session_context": {"issuer": binding.issuer, "subject": binding.subject,
                 "workspace_id": binding.workspace_id, "binding_revision": binding.revision,
                 "binding_generation": binding.generation, "operational_origin": binding.operational_origin}}
@@ -121,7 +148,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         else:
             token = _token(scope)
         principal = await self._principal(scope, deadline)
-        host_uid = await self._blocking(self._source)
+        host_uid = await self._blocking(self._session_source,principal)
         if action != "status":
             if (_header(scope, b"x-claudlobby-owner") != "1"
                     or (_header(scope, b"content-type") or "").split(";", 1)[0].lower() != "application/json"):
@@ -146,7 +173,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 "binding_revision": e.binding_revision, "binding_generation": e.binding_generation,
                 "expires_at": math.floor(challenge.expires_at)}
             principal = await self._principal(scope, deadline)
-            await self._blocking(self._source)
+            await self._blocking(self._session_source,principal)
             await self._blocking(self.connected.admit_challenge, challenge, principal)
             return body, 202
         if action == "issue":
@@ -155,7 +182,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             keys = await self.keys.get(payload["assertion"])
             attestation = await self._blocking(verify_session_assertion, payload["assertion"], keys, expected=expected)
             principal = await self._principal(scope, deadline)
-            await self._blocking(self._source)
+            await self._blocking(self._session_source,principal)
             session = await self._blocking(self.connected.issue, attestation, principal)
             token = session.token
         else:
@@ -165,7 +192,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                                      operational_origin=self.config.operational_origin)
                 # Final current owner/binding check, without requiring the deleted token.
                 principal = await self._principal(scope, deadline)
-                await self._blocking(self._source)
+                await self._blocking(self._session_source,principal)
                 binding = await self._blocking(self.workspace.active_binding, principal)
                 if binding != admission.binding:
                     raise AccessDenied("connected_session_denied")
@@ -176,7 +203,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 token = session.token
         principal = await self._principal(scope, deadline)
         admission = await self._admission(token, principal)
-        body = self._ready(admission)
+        body = await self._blocking(self._ready,admission)
         if action in {"issue", "renew"}:
             body["token"] = token
         return body, 200
@@ -191,7 +218,10 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         token = _DEADLINE.set(time.monotonic() + READ_SECONDS)
         try:
             principal = await self._read_principal(scope)
-            await self._blocking(self._source)
+            if scope["path"].startswith(PREFIX+"read/"):
+                await self._blocking(self._source)
+            else:
+                await self._blocking(self._session_source,principal)
             binding = await self._blocking(self.workspace.active_binding, principal)
             self._binding_config(binding)
         except asyncio.TimeoutError:
@@ -290,26 +320,24 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 # query/source/response gates, with only the outgoing body removed.
                 inner = {**scope, "method": "GET", "path": "/api/" + suffix,
                          "raw_path": ("/api/" + suffix).encode()}
+                if suffix != "stream":
+                    await self.finite_reads.run(self.read_app, inner, receive, cors_send)
+                    return
                 job = asyncio.create_task(self.read_app(inner, receive, cors_send))
                 self._readers.add(job)
                 try:
-                    if suffix == "stream":
-                        ready = asyncio.create_task(started.wait())
-                        try:
-                            done, _ = await asyncio.wait({job, ready}, timeout=READ_SECONDS,
-                                                         return_when=asyncio.FIRST_COMPLETED)
-                            if not done:
-                                raise asyncio.TimeoutError
-                        finally:
-                            ready.cancel()
-                            await asyncio.gather(ready, return_exceptions=True)
-                        # Observe child completion without forwarding cancellation
-                        # from the request into it. A healthy stream has no idle deadline.
-                        await asyncio.wait({job})
-                    else:
-                        done, _ = await asyncio.wait({job}, timeout=READ_SECONDS)
+                    ready = asyncio.create_task(started.wait())
+                    try:
+                        done, _ = await asyncio.wait({job, ready}, timeout=READ_SECONDS,
+                                                     return_when=asyncio.FIRST_COMPLETED)
                         if not done:
                             raise asyncio.TimeoutError
+                    finally:
+                        ready.cancel()
+                        await asyncio.gather(ready, return_exceptions=True)
+                    # Only stream establishment has a deadline. A healthy stream
+                    # has no idle deadline; cancellation still unwinds its producer.
+                    await asyncio.wait({job})
                     if job.cancelled():
                         if not self._stopping:
                             raise asyncio.CancelledError
@@ -322,7 +350,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                     await asyncio.gather(job, return_exceptions=True)
                     if not started.is_set():
                         await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
-                    # Started finite responses remain incomplete, never replaced.
+                    # Never replace a stream response after headers have started.
                 finally:
                     if not job.done():
                         job.cancel()

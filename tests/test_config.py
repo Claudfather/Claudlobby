@@ -92,7 +92,10 @@ class TestFleetManager:
         assert fleet.manager_bots() == {"coordinator"}
         assert fleet.leaf_manager_bots() == set()
 
-    @pytest.mark.parametrize("template", ["fleet.yaml.seed", "fleet.yaml.example"])
+    @pytest.mark.parametrize("template", [
+        "fleet.yaml.seed", "fleet.yaml.example",
+        "examples/teams/revenue-web-app/fleet.yaml",
+    ])
     def test_cold_fleet_templates_declare_a_local_manager(self, template):
         fleet, _ = load_fleet(Path(__file__).resolve().parents[1] / template)
         assert fleet.manager in fleet.bots
@@ -144,6 +147,16 @@ class TestRemoteControlRoleDefault:
 
 
 class TestCoercePlugins:
+    def test_startup_policy_defaults_and_verify_existing(self):
+        assert _coerce_plugins(None).startup_policy == "manage"
+        result = _coerce_plugins({"startup_policy": "verify-existing"})
+        assert result.startup_policy == "verify-existing"
+        assert result.required == DEFAULT_PLUGINS
+
+    def test_unknown_startup_policy_refuses(self):
+        with pytest.raises(ValueError, match="plugins.startup_policy"):
+            _coerce_plugins({"startup_policy": "skip"})
+
     def test_defaults_applied_when_no_plugins_section(self):
         result = _coerce_plugins(None)
         assert result.required == DEFAULT_PLUGINS

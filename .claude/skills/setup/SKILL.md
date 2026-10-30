@@ -10,7 +10,7 @@ Use [`documentation/getting-started.md`](../../../documentation/getting-started.
 
 For `--check-only`, check the host prerequisites and report what is missing without making changes. The host needs working Python with `venv` and `ssl`, `git` for a source build, `tmux`, an installed and authenticated Claude Code CLI, and a working launchd user domain or systemd user manager. Linux unattended operation additionally needs user lingering enabled through the host administrator. If the intended fleet uses Telegram, verify its channel plugin and token provisioning. Optional jobs may require their own tools; do not describe Node, `jq`, `gh`, or Claudron as installed by host setup.
 
-For setup, follow the walkthrough in order:
+For a requested connected-browser first-team trial, follow [First-team setup](../../../documentation/first-team-setup.md) instead of the seed activation steps below. Check its candidate publication, native ingress and credential prerequisites first; stop at its credential gate. Cold-host/native acceptance remains pending. For the seed/direct-CLI path, follow the walkthrough in order:
 
 1. Build a wheel, download dependency wheels, construct the hash lock, and install the bootstrap wheel in a separate build directory. Follow the walkthrough's outside-checkout installed-wheel check; stop on a missing or wrong installation. Verify the wheel and lock are present before assembly.
 2. Run the bootstrap wheel's `claudlobby --root DATA host setup --wheel WHEEL --dependency-lock LOCK --wheelhouse DIR --interpreter PYTHON --json`. Use the returned sealed CLI and native install directory; host setup assembles but does not select or start a release.

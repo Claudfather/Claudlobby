@@ -128,10 +128,13 @@ class TestKnobArmed:
             # probed artifact and the runtime artifact are one object
             assert cmd.startswith("/fake/bin/claudlobby brief --bot alex --boot")
             assert "||" in cmd  # fail-open: a door failure injects one line
-            fallback = cmd.split("||", 1)[1]
+            executed, fallback = cmd.split("||", 1)
+            assert executed.strip() == "/fake/bin/claudlobby brief --bot alex --boot"
+            assert "--startup-wait" not in executed
             assert "unavailable" in fallback
             # the fallback text names the door for the READER (bare name)
-            assert "claudlobby brief --bot alex" in fallback
+            assert "claudlobby brief --bot alex --startup-wait 120;" in fallback
+            assert "Bash tool timeout of 180000 ms" in fallback
 
     def test_explicit_timeout_composed(self, paths, monkeypatch):
         settings = self._armed_settings(paths, monkeypatch)
@@ -183,8 +186,9 @@ class TestKnobArmed:
             )
             # the fallback text is a reader instruction — it must teach a
             # door that resolves, or every failure line points at #1197
-            fallback = cmd.split("||", 1)[1]
-            assert "claudlobby --fleet eng-overlay brief --bot alex" in fallback
+            executed, fallback = cmd.split("||", 1)
+            assert "--startup-wait" not in executed
+            assert "claudlobby --fleet eng-overlay brief --bot alex --startup-wait 120;" in fallback
 
     def test_root_mode_composes_no_fleet_flag(self, paths, monkeypatch):
         # The overlay pin's missing twin: root mode resolves at the root by
