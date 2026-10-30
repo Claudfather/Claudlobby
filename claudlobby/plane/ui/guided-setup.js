@@ -85,17 +85,18 @@ export function createGuidedSetup({client, storage, storageKey,
     if (!value || value.version !== 1 || !pending || !['generation','plan_id','request_id'].every(k => value[k] === pending[k])
         || !['unknown','prepared','activating','rolling_back','rolled_back','active'].includes(value.state)) throw new Error();
     note = value.state === 'active'
-      ? 'Team started. Check connection for its dashboard. Provider and repository access have not been tested here.'
+      ? 'Launch recorded. Check connection to view your team. Bots may still be starting or waiting for local approval.'
       : value.state === 'activating' || value.state === 'prepared'
       ? 'Still checking. Inspect the original setup receipt; this never repeats or resumes setup.'
       : 'Setup needs attention. Keep the original identifiers and inspect this setup; do not launch again.';
   }
   function render() {
     if (!mount) return;
-    const {area, status, declaration, controls, details, summary} = mount;
+    const {area, status, declaration, authority, controls, details, summary} = mount;
     area.disabled = !active() || busy || !!pending;
     status.textContent = note || (active() ? 'First-team setup requires an explicit local approval on this computer.' : 'Connect this computer before setup.');
     declaration.textContent = context ? `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
+    authority.textContent = context ? `Local approval covers ${context.repository} and release ${context.release_id}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '';
     summary.textContent = plan ? `Goal: ${planGoal}. Plan changes ${plan.changes?.length || 0} generated files; ${plan.effects?.restart_bots?.length || 0} bots require starting or restarting. Review the plan before launch.` : '';
     details.textContent = plan ? JSON.stringify({conflicting_identifiers:conflicts,plan_id:plan.plan_id,release_id:plan.release_id,release_seal:plan.release_seal,changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at},null,2) : pending || conflicts.length ? JSON.stringify({pending,conflicting_identifiers:conflicts},null,2) : '';
     for (const [operation,button] of Object.entries(controls)) button.disabled = !active() || busy
@@ -106,6 +107,7 @@ export function createGuidedSetup({client, storage, storageKey,
   function mountPanel({document,element}) {
     const heading = document.createElement('strong'); heading.textContent = 'Create the first team'; element.append(heading);
     const declaration = document.createElement('p'); element.append(declaration);
+    const authority = document.createElement('p'); element.append(authority);
     const area = document.createElement('textarea'); area.maxLength = 2000; area.value = goal;
     area.setAttribute('aria-label','Approved repository goal'); area.addEventListener('input',() => { goal = area.value; changed(); }); element.append(area);
     const controls = {};
@@ -117,7 +119,7 @@ export function createGuidedSetup({client, storage, storageKey,
     const disclosure = document.createElement('details'), title = document.createElement('summary'); title.textContent = 'Plan changes and recovery identifiers'; disclosure.append(title);
     const details = document.createElement('pre'); disclosure.append(details); element.append(disclosure);
     const status = document.createElement('p'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); element.append(status);
-    mount = {area,status,declaration,details,controls,summary}; render();
+    mount = {area,status,declaration,authority,details,controls,summary}; render();
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending) { goal = value; if (mount) mount.area.value = value; changed(); } },
