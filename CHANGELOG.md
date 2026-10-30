@@ -23,10 +23,11 @@ No shipped integration declares `requires:` yet, so no bot's composition changes
 The composer adds a bot's explicit `integrations:` list to the integrations
 auto-paired with its `mcp:` servers, but the env check of `config validate` read
 the explicit list alone once one was set, so it skipped the env contract of each
-auto-paired integration doc on such a bot. It now reads the composer's set, and
-so do `host credentials reconcile` and the credentials check of `host doctor`,
-which share that reader. The docs that said an explicit list overrides
-auto-pairing now say that it adds to it.
+auto-paired integration doc on such a bot. It now reads the composer's set, as
+do the credential declarations that `host credentials reconcile` and the
+credentials check of `host doctor` count, which come from the same reader. The
+docs that said an explicit list overrides auto-pairing now say that it adds to
+it.
 
 ### Fixed — an empty `fleet.yaml` is named, with its size, instead of "configuration is invalid" (#2267)
 

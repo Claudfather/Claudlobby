@@ -1075,3 +1075,23 @@ def test_an_unknown_name_an_integration_requires_is_an_error(fleet_dir):
         "protocol 'no-such-protocol'" in e and "library/protocols/" in e for e in broken
     )
     assert not [e for e in report.errors if "integrations/sprocket.md" in e]
+
+
+def test_the_registry_keyframe_and_freshbox_see_what_an_integration_brings(fleet_dir):
+    # The readers beside compose: the keyframe (what `bot show` prints) records
+    # the required skills and protocol as equipment, and freshbox traces the
+    # required skill's grants instead of reading them as orphaned.
+    _equip_sprocket(fleet_dir)
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+    bot = fleet.bots["lead"]
+    assert "gadget" not in bot.skills and "gadget-incidents" not in bot.protocols
+
+    eq = bot_payload(paths, fleet, bot, None)["equipment"]
+    assert {"gadget", "widget"} <= set(eq["skills"])
+    assert "gadget-incidents" in eq["protocols"]
+    assert "sprocket" in eq["integrations"]
+
+    orphans = [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_grant"]
+    assert not any("gadget-tool" in f.detail for f in orphans), orphans
+    assert not any("Skill(gadget" in f.detail for f in orphans), orphans

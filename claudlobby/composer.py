@@ -3090,9 +3090,9 @@ def compose_settings_local(
 
     # Layer 5: Skill patterns (auto-derived from the EFFECTIVE skill set —
     # declared, plus every requires.skills entry of the bot's effective
-    # protocols, spec §10 — computed once and shared with layer 5b so a
-    # required skill is granted exactly like a declared one, never only
-    # linked (cycle-1 B8)).
+    # protocols and integrations, spec §10 — computed once and shared with
+    # layer 5b so a required skill is granted exactly like a declared one,
+    # never only linked (cycle-1 B8)).
     effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
 

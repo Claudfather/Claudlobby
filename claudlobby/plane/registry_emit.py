@@ -372,8 +372,9 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         # EFFECTIVE sets, through the composer's own resolvers (one
         # definition): the composer auto-pairs an integration for every MCP
         # with a matching integrations/<name>.md and adds the available
-        # default protocols at compose time, and a protocol's requires.skills
-        # brings a skill along with it (spec §10) — none of which the
+        # default protocols at compose time, and a protocol's or an
+        # integration's requires: brings skills (and, for an integration,
+        # protocols) along with it (spec §10) — none of which the
         # DECLARED lists carry, so a keyframe of bot.integrations/bot.protocols/
         # bot.skills read every auto-paired integration, default protocol and
         # required skill as "unused" in the inventory while composed into the

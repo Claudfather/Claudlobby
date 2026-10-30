@@ -765,9 +765,10 @@ def _validate_bots(
         #   dir/        — folder expansion (skills/dir/**)
         #
         # Checked against the EFFECTIVE set (declared plus every requires.skills
-        # entry of the bot's effective protocols, spec §10) — never bot.skills
-        # alone — so a protocol requiring a skill that has since gone missing is
-        # reported here too, not only in the grant loop further down.
+        # entry of the bot's effective protocols and integrations, spec §10) —
+        # never bot.skills alone — so a protocol or integration requiring a skill
+        # that has since gone missing is reported here too, not only in the
+        # grant loop further down.
         from .composer import resolve_effective_skills
 
         effective_skills = resolve_effective_skills(
