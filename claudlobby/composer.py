@@ -1472,9 +1472,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # A bot with no declared prompt begins through the universal fleet-ops
         # skill, whose exact grants cover context show and brief. Two forms,
         # because the brief can arrive two ways:
-        #   - brief.on_start armed: the bot's own SessionStart hook already
-        #     injected its brief, so the prompt points at what is already in
-        #     context rather than naming a read the bot must run itself.
+        #   - brief.on_start armed: reuse the hook's usable payload, with one
+        #     bounded normal read only when that payload did not arrive.
         #   - otherwise: ask for the canonical brief read after context show.
         # NOTE: no backticks around the command. bot.conf is fully `source`d
         # (claudlobby/_runtime_scripts/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
@@ -1492,7 +1491,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         if _boot_brief_armed(bot):
             default = (
                 preface + "Then read the fleet-brief you were given at session "
-                "start. If it shows open rows of "
+                "start. Reuse a usable injected brief even if individual sections "
+                "are unavailable. Only if no usable boot payload arrived or the "
+                "hook printed fleet-brief unavailable (rc ...), run "
+                "claudlobby --json brief --startup-wait 120 once with a Bash tool "
+                "timeout of 180000 ms. If that read refuses, report its error and "
+                "stop; do not activate or resend anything. If the brief shows open rows of "
                 "yours, continue them and report; if anything is blocked, "
                 "say so. Otherwise idle and await messages."
             )
@@ -1503,7 +1507,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             # characters, not the glyph (measured via a real
             # private composition).
             default = (
-                preface + "Then run claudlobby --json brief and act on what it "
+                preface + "Then run claudlobby --json brief --startup-wait 120 "
+                "once with a Bash tool timeout of 180000 ms. Act on what it "
                 "shows: continue your own open rows, report anything "
                 "blocked, then idle and await messages."
             )
@@ -2426,7 +2431,8 @@ def _with_brief_boot_hook(
     fleet_arg = f" --fleet {fleet}" if fleet else ""
     fallback = (
         f'echo "fleet-brief unavailable (rc $?) — '
-        f'claudlobby{fleet_arg} brief --bot {bot_id}"'
+        f'claudlobby{fleet_arg} brief --bot {bot_id} --startup-wait 120; '
+        f'use a Bash tool timeout of 180000 ms for this one read"'
     )
     cmd = f"{exe}{fleet_arg} brief --bot {bot_id} --boot || {fallback}"
     out = {k: list(v) for k, v in hooks.items()}
