@@ -2414,15 +2414,36 @@ def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> Non
                 )
 
 
+# The ``requires.<kind>`` keys the composer reads, per library kind:
+# resolve_effective_skills reads ``skills`` from protocols and integrations,
+# and resolve_effective_protocols reads ``protocols`` from integrations.
+_REQUIRES_READ = {
+    "protocols": ("skills",),
+    "integrations": ("skills", "protocols"),
+}
+
+
+def _requirement_resolvable(paths: Paths, kind: str, name: str) -> bool:
+    """Whether a ``requires.<kind>`` entry names an item some library holds."""
+    if kind == "skills":
+        if name.endswith("/"):
+            return bool(paths.expand_skill_folder(name.rstrip("/")))
+        return paths.find_library_dir("skills", name) is not None
+    if name.endswith("/"):
+        return bool(paths.expand_library_folder(kind, name.rstrip("/")))
+    return paths.find_library_file(kind, name, ".md") is not None
+
+
 def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
     """Fail loud on a malformed or unresolvable ``requires:`` entry (spec §10).
 
-    v1 scope is protocols -> skills: a protocol's ``requires.skills`` naming a
-    skill absent from the library is an error. Library-wide and scanned ONCE
+    The scope is what the composer reads (``_REQUIRES_READ``): protocols ->
+    skills, and integrations -> skills and protocols. An entry naming an item
+    absent from the library is an error. Library-wide and scanned ONCE
     PER FILE — never once per equipping bot — the same "one defect, one error"
     rule :func:`_validate_env_contracts` states in its docstring
-    (`validator.py:383-396`): the defect is a property of the protocol FILE,
-    so an unequipped protocol with a broken requirement is still caught, and a
+    (`validator.py:383-396`): the defect is a property of the library FILE,
+    so an unequipped item with a broken requirement is still caught, and a
     fleet where several bots equip it gets one message, not several.
 
     Also reports a non-string entry (``requires: {skills: [3]}``) — one error
@@ -2436,51 +2457,52 @@ def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
 
     roots = [paths.base_library, paths.overlay_library]
     seen: set[Path] = set()
-    for root in roots:
-        if root is None or not root.is_dir():
-            continue
-        protocols_dir = root / "protocols"
-        if not protocols_dir.is_dir():
-            continue
-        for md in sorted(protocols_dir.rglob("*.md")):
-            if md.name.startswith("README"):
+    for kind, read_keys in _REQUIRES_READ.items():
+        for root in roots:
+            if root is None or not root.is_dir():
                 continue
-            resolved = md.resolve()
-            if resolved in seen:
+            kind_dir = root / kind
+            if not kind_dir.is_dir():
                 continue
-            seen.add(resolved)
-            try:
-                rel = md.relative_to(root)
-            except ValueError:
-                rel = md
+            for md in sorted(kind_dir.rglob("*.md")):
+                if md.name.startswith("README"):
+                    continue
+                resolved = md.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                try:
+                    rel = md.relative_to(root)
+                except ValueError:
+                    rel = md
 
-            try:
-                raw_fm, _ = parse_frontmatter(md.read_text(encoding="utf-8"))
-            except OSError:
-                raw_fm = {}
-            raw_requires = raw_fm.get("requires") if isinstance(raw_fm, dict) else None
-            if isinstance(raw_requires, dict) and any(
-                isinstance(v, list) and any(not isinstance(x, str) for x in v)
-                for v in raw_requires.values()
-            ):
-                report.errors.append(
-                    f"protocol '{rel}' requires: block holds a non-string "
-                    "entry — every name in a requires.<kind> list must be a "
-                    "string; the non-string entry was dropped"
+                try:
+                    raw_fm, _ = parse_frontmatter(md.read_text(encoding="utf-8"))
+                except OSError:
+                    raw_fm = {}
+                raw_requires = (
+                    raw_fm.get("requires") if isinstance(raw_fm, dict) else None
                 )
-
-            requires = library_requires(md)
-            for skill in requires.get("skills", []):
-                if skill.endswith("/"):
-                    resolvable = bool(paths.expand_skill_folder(skill.rstrip("/")))
-                else:
-                    resolvable = paths.find_library_dir("skills", skill) is not None
-                if not resolvable:
+                if isinstance(raw_requires, dict) and any(
+                    isinstance(v, list) and any(not isinstance(x, str) for x in v)
+                    for v in raw_requires.values()
+                ):
                     report.errors.append(
-                        f"protocol '{rel}' requires skill '{skill}', which is "
-                        "not in any library/skills/ — the requirement cannot "
-                        "be satisfied"
+                        f"{kind[:-1]} '{rel}' requires: block holds a non-string "
+                        "entry — every name in a requires.<kind> list must be a "
+                        "string; the non-string entry was dropped"
                     )
+
+                requires = library_requires(md)
+                for read_key in read_keys:
+                    for name in requires.get(read_key, []):
+                        if not _requirement_resolvable(paths, read_key, name):
+                            report.errors.append(
+                                f"{kind[:-1]} '{rel}' requires {read_key[:-1]} "
+                                f"'{name}', which is not in any "
+                                f"library/{read_key}/ — the requirement cannot "
+                                "be satisfied"
+                            )
 
 
 # Literal placeholder tokens shipped in fleet.yaml.seed (three of them). Reaching

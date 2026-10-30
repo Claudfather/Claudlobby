@@ -93,7 +93,7 @@ fleet:
       agent_cli: <agent_cli>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
-      integrations: [<list>]            # auto-paired with mcp; explicit overrides
+      integrations: [<list>]            # auto-paired with mcp; an explicit list adds to it
       guardrails: [<list>]
       protocols: [<list>]
       resources: [<list>]
@@ -552,7 +552,9 @@ mcp:
 
 This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
-`integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
+`integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). An explicit `integrations:` list adds to the auto-paired docs; it never replaces them.
+
+An integration can also bring skills and protocols, through `requires:` in its frontmatter ([library/integrations/README.md](../library/integrations/README.md)). A bot that equips the integration composes with them as if it had declared them, and loses them when the integration goes, unless it declares them itself.
 
 ### `bots.<name>.heavy_slot` / `fleet.defaults.heavy_slot`
 
