@@ -34,6 +34,9 @@ def register_subparsers(sub) -> None:
     pb.add_argument("--json", action="store_true", help="One schema-1 result containing a schema-2 brief")
     pb.add_argument("--usage-since", metavar="DURATION",
                     help="Include bounded viewer transcript usage for up to 7d (for example 24h)")
+    pb.add_argument("--startup-wait", type=int, metavar="SECONDS",
+                    help="Wait 1–300 seconds for this selected late startup to become active; "
+                         "read the brief once afterward (not available with --boot)")
     pb.add_argument(
         "--boot",
         action="store_true",

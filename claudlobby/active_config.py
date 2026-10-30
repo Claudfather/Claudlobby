@@ -47,17 +47,20 @@ def context_from_plan(plan: ConfigPlan, fleet: str, *, bot: str | None = None,
     return Context(paths, config, defaults, bot)
 
 
-def load_active_context(root: Path, fleet: str | None, *, bot: str | None = None,
-                        package: PackageResources | None = None) -> Context:
-    """Load recorded active scope; runtime availability remains unobserved."""
-    package = package if package is not None else get_resources()
+def _selected_activation(root: Path):
+    """Observe the matching selected journal; this grants no admission."""
     selected = read_selection(root)
     if selected is None:
         raise ActivationError("host has no active configuration")
     record = read_activation(root, selected["activation_id"])
-    if (record.status != "active" or record.body["intent"]["plan_id"] != selected["plan_id"]
+    if (record.body["intent"]["plan_id"] != selected["plan_id"]
             or record.body["intent"]["release_id"] != selected["release_id"]):
         raise ActivationError("selected configuration activation is incomplete")
+    return selected, record
+
+
+def _plan_for_selection(root: Path, selected: dict, package: PackageResources) -> ConfigPlan:
+    """Validate one selected package and frozen plan without authoring fallback."""
     from .releases import read_release
     release = read_release(root, selected["release_id"], verify_files=False)
     if release.native_path != package.native or release.inputs.artifact_id != package.artifact_id:
@@ -65,11 +68,33 @@ def load_active_context(root: Path, fleet: str | None, *, bot: str | None = None
     plan = read_plan(root, selected["plan_id"])
     if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
         raise ActivationError("active configuration and selected release differ")
+    return plan
+
+
+def _selected_plan(root: Path, package: PackageResources):
+    """Observe sealed selection inputs; this grants no operational admission."""
+    selected, record = _selected_activation(root)
+    return selected, record, _plan_for_selection(root, selected, package)
+
+
+def _selected_context(plan: ConfigPlan, fleet: str | None, *, bot: str | None,
+                      package: PackageResources) -> Context:
     if fleet is None:
         if len(plan.fleets) != 1:
             raise PlanError("select --fleet from the active fleets")
         fleet = plan.fleets[0]
     return context_from_plan(plan, fleet, bot=bot, package=package)
+
+
+def load_active_context(root: Path, fleet: str | None, *, bot: str | None = None,
+                        package: PackageResources | None = None) -> Context:
+    """Load recorded active scope; runtime availability remains unobserved."""
+    package = package if package is not None else get_resources()
+    selected, record = _selected_activation(root)
+    if record.status != "active":
+        raise ActivationError("selected configuration activation is incomplete")
+    plan = _plan_for_selection(root, selected, package)
+    return _selected_context(plan, fleet, bot=bot, package=package)
 
 
 def resolve_active_context(*, root: Path | None = None, fleet: str | None = None,

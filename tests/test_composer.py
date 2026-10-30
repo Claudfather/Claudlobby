@@ -3710,6 +3710,8 @@ class TestDefaultStartupPromptIgnition:
         assert "CLAUDE.md and invoke /fleet-ops" not in line
         assert line.index("/fleet-ops") < line.index("claudlobby --json context show")
         assert line.index("claudlobby --json context show") < line.index("claudlobby --json brief")
+        assert "claudlobby --json brief --startup-wait 120 once" in line
+        assert "Bash tool timeout of 180000 ms" in line
         assert "report its error and stop" in line
         assert line != 'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
         # bot.conf is fully `source`d (load_bot_conf), and json.dumps() does
@@ -3732,8 +3734,13 @@ class TestDefaultStartupPromptIgnition:
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
         line = self._startup_prompt_line(conf)
         assert line.index("/fleet-ops") < line.index("claudlobby --json context show")
-        assert "claudlobby --json brief" not in line
         assert "fleet-brief you were given at session start" in line
+        assert "Reuse a usable injected brief even if individual sections are unavailable" in line
+        assert "Only if no usable boot payload arrived or the hook printed fleet-brief unavailable (rc ...)" in line
+        assert "claudlobby --json brief --startup-wait 120 once" in line
+        assert "Bash tool timeout of 180000 ms" in line
+        assert "If that read refuses, report its error and stop" in line
+        assert "do not activate or resend anything" in line
 
     def test_default_startup_prompt_uses_existing_fleet_ops_read_grants(
         self, tmp_path
