@@ -185,12 +185,12 @@ def _setup_seed_tree(tmp_path: Path) -> Paths:
         (skill_dir / "SKILL.md").write_text(
             f"---\ntitle: {s}\ndescription: Skill\n---\n\n# {s}\n\nSkill.\n"
         )
-    # The real `status` skill, not a stub, so its real `tool_grants` are what
-    # a composed claudfather is granted.
-    shutil.copytree(
-        REPO_ROOT / "library" / "skills" / "status",
-        root / "library" / "skills" / "status",
-    )
+    # Preserve real status grants and the universal fleet-ops operating guide.
+    for skill in ("status", "fleet-ops"):
+        shutil.copytree(
+            REPO_ROOT / "library" / "skills" / skill,
+            root / "library" / "skills" / skill,
+        )
 
     # Lesson stubs
     tg_lessons_dir = root / "library" / "lessons" / "telegram"

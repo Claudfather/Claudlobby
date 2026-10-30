@@ -56,10 +56,10 @@ from .loader import (
     iter_guardrail_permissions,
     iter_library_requires,
     iter_skill_grants,
+    load_library_item,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
-    parse_frontmatter,
 )
 from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
 from .mcp_grammar import grammar
@@ -1482,8 +1482,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # here would run as a real command substitution at every boot,
         # not render as text.
         preface = (
-            "Welcome back. Read your CLAUDE.md and the fleet-ops guide supplied "
-            "at session start. If that guide is unavailable, invoke /fleet-ops; "
+            "Welcome back. Read your CLAUDE.md, including its automatically supplied "
+            "fleet-ops section. If that section is unavailable, invoke /fleet-ops; "
             "reconsult /fleet-ops when needed. "
             "Run claudlobby --json context show to confirm your generated "
             "fleet and bot. If a read refuses, report its error and stop; "
@@ -1690,20 +1690,17 @@ def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Pat
     return linked
 
 
-FLEET_OPS_ORIENTATION_FILE = ".claude/fleet-ops-orientation.md"
-
-
 def compose_fleet_ops_orientation(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
-    """Freeze the same effective guide that the skill linker equips, without grants."""
+    """Load the effective guide as library prose, without frontmatter or grants."""
     skills = resolve_effective_skills(bot, fleet, paths,
                                       is_manager=bot.bot_id in fleet.manager_bots())
     source = resolve_skill_sources(paths, skills, _log.warning).get("fleet-ops")
     if source is None:
         raise ValueError("the universal fleet-ops skill is unavailable")
-    _, body = parse_frontmatter((source / "SKILL.md").read_text())
-    if not body.strip():
+    item = load_library_item(source / "SKILL.md")
+    if item is None or not item.body.strip():
         raise ValueError("the universal fleet-ops guide is empty")
-    return body
+    return item.body
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -2299,6 +2296,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         privilege_runners=privilege_runners,
+        fleet_ops_body=compose_fleet_ops_orientation(bot, fleet, paths),
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
@@ -2349,18 +2347,6 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
                 group["matcher"] = matcher
             groups.append(group)
         out[event] = groups
-    return out
-
-
-def _with_fleet_ops_orientation_hook(hooks, bot_dir: Path):
-    """Supply static context on every SessionStart; never query activation or Plane."""
-    guide = shlex.quote(str(bot_dir / FLEET_OPS_ORIENTATION_FILE))
-    fallback = "fleet-ops orientation unavailable; invoke /fleet-ops before fleet operations."
-    out = {event: list(entries) for event, entries in hooks.items()}
-    out.setdefault("SessionStart", []).append({
-        "command": f"/bin/cat {guide} || printf '%s\\n' {shlex.quote(fallback)}",
-        "timeout": 5,
-    })
     return out
 
 
@@ -3198,7 +3184,7 @@ def compose_settings_local(
     # No claim env is composed: F1 is STRUCTURAL — the single capture prompt is
     # claimed by clauDNA's hook detecting the engine's `hook pre-compact` entry,
     # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
-    bot_hooks = _with_fleet_ops_orientation_hook(bot.hooks, bot_dir)
+    bot_hooks = bot.hooks
     if bot.brief_on_start:
         exe, why = _brief_cli_probe()
         if exe is None:
@@ -3386,7 +3372,6 @@ def render_bot_files(
     mcp = compose_mcp_json(bot, paths)
     files: dict[str, RenderedFile | None] = {
         "CLAUDE.md": RenderedFile(compose_claude_md(bot, fleet, paths)),
-        FLEET_OPS_ORIENTATION_FILE: RenderedFile(compose_fleet_ops_orientation(bot, fleet, paths)),
         ".mcp.json": RenderedFile(json.dumps(mcp, indent=2) + "\n"),
         "bot.conf": RenderedFile(compose_bot_conf(bot, fleet, paths, cascade=cascade)),
         ".claude/settings.local.json": RenderedFile(json.dumps(

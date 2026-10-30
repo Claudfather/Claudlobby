@@ -8,6 +8,7 @@
     fleet              — FleetConfig
     title_label        — string, derived from first expertise file's frontmatter
     expertise_body     — string, concatenated expertise file bodies
+    fleet_ops_body     — string, effective fleet-ops guide without frontmatter
     voice              — None or { name, body }
     teams              — list of TeamConfig (only if bot is a manager)
     projects           — list of ProjectConfig (managers only; empty otherwise)
@@ -38,8 +39,8 @@
 {% endif -%}
 {{ expertise_body }}
 
-For fleet tasks and recorded messages, consult `/fleet-ops` and use the
-`claudlobby` CLI with the generated bot and fleet context.
+The fleet-ops guide is supplied below for fleet tasks and recorded messages.
+Reconsult `/fleet-ops` when needed; use the `claudlobby` CLI with the generated context.
 
 {%- if fleet.mission %}
 
@@ -285,4 +286,6 @@ meeting its project's declared tier.
 {{ render_section('Protocols', protocols) -}}
 {{ render_section('Guardrails', guardrails) -}}
 {{ render_section('Lessons', lessons) -}}
-{{ render_section('Post-actions', post_actions) -}}
+{{ render_section('Post-actions', post_actions) }}
+
+{{ fleet_ops_body }}
