@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed — the re-stage hints, a doc line and a switch row name commands that run (#2575)
+### Fixed — the re-stage hints, two doc lines and a switch row name commands that run (#2575)
 
 `claudlobby brief` and `claudlobby checkin` end two of their refusals (the active
 selection is unavailable; the fleet's bots or manager changed after activation)
@@ -17,15 +17,17 @@ it requires, so a reader who typed it saw only "command syntax". The hints now
 print `claudlobby --root ROOT config plan --release RELEASE_ID`, say that `host
 releases` lists the IDs, and send the reader on to `host activate` with the
 reviewed plan. `documentation/validating-bot-changes.md` showed `bot remove`
-without the `--root` it requires; it gives `--root` and `--fleet` now. The
+without the `--root` it requires, and `documentation/fleet-memory-planning.md`
+named it with no flags; both show `--root` and `--fleet` now. The
 `mcp-direct-launch` row of the switch tables, generated into
 `documentation/fleet-yaml-schema.md` and `documentation/system-yaml-schema.md`,
 put `--fleet` in front of `host cache warm, then config plan, config diff
-PLAN_ID`; each command in the row now carries its own flags, and the two tables
-are regenerated. `tests/test_restage_hints.py` runs the command each hint
-prints, and `tests/test_cold_start_contract.py` also fails on a switch row that
-passes `--fleet` or `--seed` to staging or activation, and on a doc that shows
-`bot remove` without `--root` and `--fleet`.
+PLAN_ID`; each command in the row now carries its own `--root`, `--fleet` stays
+with `host cache warm`, which takes it, and the two tables are regenerated.
+`tests/test_restage_hints.py` runs the command each hint prints, and
+`tests/test_cold_start_contract.py` also fails on a switch row that passes
+`--fleet` or `--seed` to staging or activation, and on a documented command
+that runs `bot remove` without `--root` and `--fleet`.
 
 ### Fixed — an empty `fleet.yaml` is named, with its size, instead of "configuration is invalid" (#2267)
 

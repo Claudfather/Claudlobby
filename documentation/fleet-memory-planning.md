@@ -137,7 +137,8 @@ the private check's policy, not flags to pass to `host job run`.
    the declared bot while retaining its identity and directory; keepalive
    cannot restart it. Use `bot start BOT` when ready to bring it back.
    For permanent retirement, omit the bot from authored configuration,
-   activate that plan, then use `bot remove BOT`. Do not use a raw
+   activate that plan, then run
+   `claudlobby --root ROOT --fleet FLEET bot remove BOT`. Do not use a raw
    `systemctl --user stop` as a substitute for de-enrollment.
 3. If all bots are active, defer new dispatches until at least one completes.
 4. Consider scaling to a host with more RAM if alerts are frequent.
