@@ -3705,6 +3705,9 @@ class TestDefaultStartupPromptIgnition:
         bot = self._bot()
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
         line = self._startup_prompt_line(conf)
+        assert "automatically supplied fleet-ops section" in line
+        assert "If that section is unavailable, invoke /fleet-ops" in line
+        assert "CLAUDE.md and invoke /fleet-ops" not in line
         assert line.index("/fleet-ops") < line.index("claudlobby --json context show")
         assert line.index("claudlobby --json context show") < line.index("claudlobby --json brief")
         assert "report its error and stop" in line

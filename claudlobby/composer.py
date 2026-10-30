@@ -56,6 +56,7 @@ from .loader import (
     iter_guardrail_permissions,
     iter_library_requires,
     iter_skill_grants,
+    load_library_item,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -1481,7 +1482,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # here would run as a real command substitution at every boot,
         # not render as text.
         preface = (
-            "Welcome back. Read your CLAUDE.md and invoke /fleet-ops. "
+            "Welcome back. Read your CLAUDE.md, including its automatically supplied "
+            "fleet-ops section. If that section is unavailable, invoke /fleet-ops; "
+            "reconsult /fleet-ops when needed. "
             "Run claudlobby --json context show to confirm your generated "
             "fleet and bot. If a read refuses, report its error and stop; "
             "do not guess context from environment variables. "
@@ -1685,6 +1688,19 @@ def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Pat
                 continue
             _add(src.name, src)
     return linked
+
+
+def compose_fleet_ops_orientation(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
+    """Load the effective guide as library prose, without frontmatter or grants."""
+    skills = resolve_effective_skills(bot, fleet, paths,
+                                      is_manager=bot.bot_id in fleet.manager_bots())
+    source = resolve_skill_sources(paths, skills, _log.warning).get("fleet-ops")
+    if source is None:
+        raise ValueError("the universal fleet-ops skill is unavailable")
+    item = load_library_item(source / "SKILL.md")
+    if item is None or not item.body.strip():
+        raise ValueError("the universal fleet-ops guide is empty")
+    return item.body
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -2280,6 +2296,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         privilege_runners=privilege_runners,
+        fleet_ops_body=compose_fleet_ops_orientation(bot, fleet, paths),
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )

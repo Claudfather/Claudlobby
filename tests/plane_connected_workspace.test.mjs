@@ -797,7 +797,8 @@ test('goal preview and explicit exact-plan launch retain UUID before lost respon
   h.api.dispose();
   const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
   assert.deepEqual(resumed.snapshot().pending,h.pending);assert.equal(h.calls.length,3);
-  await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');assert.match(resumed.snapshot().note,/Team started/);
+  await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');
+  assert.equal(resumed.snapshot().note,'Launch recorded. Check connection to view your team. Bots may still be starting or waiting for local approval.');
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
 });
 test('changed connection fences held preview, preserves goal and never launches',async()=>{
@@ -813,6 +814,12 @@ test('setup panel retains disclosure/focus and refuses launch without durable id
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
   assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
+  const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
+  assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.release_id));
+  assert.match(authority.textContent,/starts native services.*configured provider accounts/);
+  assert.match(authority.textContent,/Local folder, tool and account approvals may still be needed/);
+  assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
+  assert.ok(panel.children.some(e=>e.textContent.includes('Goal: Improve checkout tests.')));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
@@ -857,10 +864,12 @@ test('failed setup approval refresh disables new work but keeps the goal and ori
   const button=title=>panel.children.find(e=>e.tagName==='BUTTON'&&e.textContent===title);
   await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
   const plan=h.api.snapshot().plan,check=h.client.setupContext;
+  const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
   assert.equal(button('Launch this exact plan').disabled,false);
   h.client.setupContext=async()=>{throw new Error('approval revoked');};
   assert.equal(await h.api.run('context'),false);
   assert.equal(h.api.snapshot().context,null);assert.equal(h.api.snapshot().plan,plan);
+  assert.equal(authority.textContent,'');
   assert.equal(h.api.snapshot().goal,'Improve tests');
   assert.equal(button('Preview team').disabled,true);assert.equal(button('Launch this exact plan').disabled,true);
   const before=h.calls.length;
