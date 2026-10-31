@@ -569,6 +569,16 @@ class Paths:
                     collected[leaf] = sub
         return dict(sorted(collected.items()))
 
+    def skill_partials(self) -> dict[str, Path]:
+        """Shared skill partials, file name -> path: every flat ``_<name>.md``
+        at the top of a skills search dir. Overlay wins on collisions."""
+        out: dict[str, Path] = {}
+        for d in self.library_search_dirs("skills"):
+            for p in sorted(d.glob("_*.md")):
+                if p.is_file() and p.name not in out:
+                    out[p.name] = p
+        return out
+
     def find_voice_file(self, rel_path: str) -> Path | None:
         """Voice file lookup. `rel_path` is relative to library/voices/ (e.g. 'erlich-bachman.md').
 

@@ -627,6 +627,21 @@ def test_validate_names_the_file_that_reads_env_only_when_the_switch_is_on(host)
     ]
 
 
+def test_validate_names_a_shared_partial_that_reads_env(host):
+    """Every bot's copy of its skills holds the shared partials (#2608), so the
+    scan of what a bot is told reads them too."""
+    from claudlobby.validator import validate
+
+    root, home, fleet, paths = host
+    partial = paths.fleet_dir / "library" / "skills" / "_setup-steps.md"
+    partial.parent.mkdir(parents=True)
+    partial.write_text("```bash\nsource ~/.env\npython3 x.py\n```\n")
+    hits = [
+        w for k, w in validate(fleet, paths).categorized() if k == "isolation-env-read"
+    ]
+    assert len(hits) == 1 and f"{partial}:2 " in hits[0]
+
+
 def test_freshbox_reports_each_missing_class_by_name(host):
     from claudlobby.freshbox import _isolation_findings
 
