@@ -86,9 +86,11 @@ Build the candidate wheel and its offline, SHA-256-locked dependency wheelhouse 
   --interpreter "$WORK/bootstrap/bin/python"
 ```
 
-The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml.seed` outside the data root, put the matching token in `$DATA/local/seed/.env`, then activate it through that **sealed CLI**:
+The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml.seed` outside the data root, put the matching token in `$DATA/local/seed/.env`, then activate it through that **sealed CLI**. Units go in the one directory the runtime reads them from; activation refuses any other:
 
 ```bash
+USER_UNIT_DIR="$HOME/.config/systemd/user"   # on macOS: "$HOME/Library/LaunchAgents"
+mkdir -p "$USER_UNIT_DIR"
 "$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
   --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"
 "$RELEASE_CLI" --root "$DATA" host doctor
@@ -194,7 +196,7 @@ and `data/` remain mutable and are preserved during composition.
 |------|-------|
 | macOS (Mac mini) | launchd via `<bot>.plist`. `claudlobby/_runtime_scripts/creds-check.sh` ships with a launchd install pattern. |
 | Linux (Raspberry Pi 5, Debian, Ubuntu) | systemd user services via `<bot>.service`. Set `CLAUDLOBBY_ROOT=$HOME/claudlobby` in the unit's Environment. |
-| Linux (root systemd) | Same as user systemd; install to `/etc/systemd/system/` instead of `~/.config/systemd/user/`. |
+| Linux (root systemd) | Not supported: bots run as systemd user services, and activation installs their units only into `~/.config/systemd/user/`. |
 
 **GitHub identity.** By default bots use a shared `GITHUB_PAT`. To give a fleet its own
 **GitHub App identity** (short-lived installation tokens, branch protection that binds the

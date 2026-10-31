@@ -53,7 +53,9 @@ def register_host_owner(hosts):
     allow.add_argument("--target-fleet", required=True)
     allow.add_argument("--repository", required=True, metavar="OWNER/REPO")
     allow.add_argument("--release", required=True)
-    allow.add_argument("--install-directory", required=True, type=Path)
+    allow.add_argument("--install-directory", required=True, type=Path,
+                       help="The one native user-unit directory the runtime reads: $HOME/.config/systemd/user "
+                            "on Linux, $HOME/Library/LaunchAgents on macOS")
     allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
     allow.set_defaults(func=_dispatch, public_command="host.owner.allow-setup", owner_action="allow-setup")
     for action in ("setup-status", "revoke-setup"):

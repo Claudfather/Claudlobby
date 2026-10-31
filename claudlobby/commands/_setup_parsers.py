@@ -31,7 +31,10 @@ def register_fleet_setup(children):
     parser.add_argument("--goal", metavar="TEXT", help="Explicit approved goal for --template")
     parser.add_argument("--plan-only", action="store_true",
                         help="Prepare a frozen configuration plan without activation or supervision changes")
-    parser.add_argument("--install-directory", metavar="PATH", help="Required when activating (without --plan-only)")
+    parser.add_argument("--install-directory", metavar="PATH",
+                        help="Required when activating (without --plan-only): the one native user-unit directory "
+                             "the runtime reads, $HOME/.config/systemd/user on Linux, $HOME/Library/LaunchAgents "
+                             "on macOS")
     parser.add_argument("--replace-config", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.set_defaults(func=_dispatch, public_command="fleet.setup")

@@ -73,10 +73,12 @@ def _assembly_failure(root: Path, exc: Exception) -> CommandFailure:
 def _host_setup(args) -> CommandOutput:
     if args.fleet is not None or args.seed:
         raise CommandFailure("invalid_argument", "invalid argument: host setup rejects --fleet and --seed")
+    from ..activation import _require_runtime_directory
+    from ..activation_state import ActivationRefusal
     from ..release_install import assemble_release
     from ..releases import ReleaseError
     from ..resources import get_resources
-    from ..supervision_inventory import Adapter, InventoryError, _catalog
+    from ..supervision_inventory import Adapter, InventoryError, _catalog, runtime_unit_directory
 
     try:
         package = get_resources()
@@ -96,12 +98,20 @@ def _host_setup(args) -> CommandOutput:
     if release.inputs.artifact_id != package.artifact_id:
         raise CommandFailure("release_mismatch", "release mismatch: wheel differs from this installed setup command",
                              release_id=release.release_id)
+    # Without --json these lines are all a reader sees, so they name the directory.
+    runtime = runtime_unit_directory(manager)
+    lines = [f"Release {release.release_id} assembled. Run {release.cli_path} --root {root} --fleet F fleet setup "
+             f"--config FILE --install-directory {runtime}."]
+    try:
+        _require_runtime_directory(manager, runtime, directories)
+    except ActivationRefusal as exc:
+        lines.append(f"Activation will refuse this host: {exc}.")
     return CommandOutput(
         {"root": str(root), "release_id": release.release_id, "cli": str(release.cli_path),
          "manager": manager, "domain": domain, "install_directories": [str(p) for p in directories],
          "selection": "unchanged"},
         release.release_id,
-        (f"Release {release.release_id} assembled. Run {release.cli_path} --root {root} --fleet F fleet setup --config FILE --install-directory PATH.",),
+        tuple(lines),
     )
 
 
