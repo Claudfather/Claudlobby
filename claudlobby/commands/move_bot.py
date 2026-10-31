@@ -199,6 +199,23 @@ def source_wip(directory):
             raise CommandFailure("conflict", f"source project has stashed or unknown WIP: {repo}")
 
 
+def _install_directory(manager, directories):
+    """Where the moved bot's new unit goes: the one directory the runtime reads
+    (#2610), not the source unit's own, which on a host set up before #2610 is
+    one activation refuses. A directory activation would refuse is refused here,
+    before the move stops the bot."""
+    from ..activation import _require_runtime_directory
+    from ..activation_state import ActivationRefusal
+    from ..supervision_inventory import runtime_unit_directory
+
+    directory = runtime_unit_directory(manager)
+    try:
+        _require_runtime_directory(manager, directory, directories)
+    except ActivationRefusal as exc:
+        raise CommandFailure("conflict", f"bot move refused before any change: {exc}") from exc
+    return directory
+
+
 def preflight(args):
     from ..active_config import context_from_plan
     from ..activation_enrollment import selected_bot_entry
@@ -276,10 +293,10 @@ def preflight(args):
         from .releases import _executing_release
         if _executing_release(root) != release.release_id:
             raise CommandFailure("release_mismatch", "run bot move with the selected sealed release CLI")
-    manager, *_ = _catalog(Adapter(package).read("svc_inventory_catalog"))
+    manager, _, directories, _, _ = _catalog(Adapter(package).read("svc_inventory_catalog"))
     entry = selected_bot_entry(root, source.fleet.name, args.bot, manager)
     move = Move(root, source, target, source_dir, target_dir,
-                release.release_id, Path(entry["installed"]).parent, external,
+                release.release_id, _install_directory(manager, directories), external,
                 entry["installed"], entry["target"], selected["plan_id"], move_inputs,
                 access_input)
     if getattr(args, "apply", False):
