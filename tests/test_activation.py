@@ -885,7 +885,7 @@ def test_bootstrap_refuses_a_listed_directory_the_runtime_does_not_read_and_the_
     host.search_path = [control, runtime]  # systemd 252's order
     with pytest.raises(state.ActivationRefusal) as refused:
         activation.bootstrap_activation(root, "cold", plan.plan_id, control, adapter=host)
-    assert str(runtime) in str(refused.value)
+    assert str(runtime) in str(refused.value) and str(control) not in str(refused.value)
     assert not list((root / "state/activations").glob("*/activation.json"))
     assert not control.exists() and not list(runtime.iterdir())
     assert host.starts == [] and not [name for name, _ in host.calls if name.startswith("svc_activation_")]
@@ -917,7 +917,7 @@ def test_upgrade_refuses_a_listed_directory_the_runtime_does_not_read_and_change
     calls_before = len(host.calls)
     with pytest.raises(state.ActivationRefusal) as refused:
         activation.upgrade_activation(root, "upgrade", candidate.plan_id, control, adapter=host)
-    assert str(runtime) in str(refused.value)
+    assert str(runtime) in str(refused.value) and str(control) not in str(refused.value)
     assert state.read_selection(root) == selection and not (root / "state/activations/upgrade").exists()
     assert not control.exists() and sorted(runtime.iterdir()) == installed_units and host.starts == starts
     assert not [name for name, _ in host.calls[calls_before:] if name.startswith("svc_activation_")]

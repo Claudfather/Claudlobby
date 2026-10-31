@@ -197,7 +197,6 @@ def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_aut
 
 
 def test_local_cli_refuses_a_listed_directory_the_runtime_does_not_read_and_records_no_grant(setup_authority,monkeypatch,capsys):
-    import json
     from claudlobby.__main__ import main
     from claudlobby import supervision_inventory
     from tests.test_host_owner import terminal
@@ -206,12 +205,12 @@ def test_local_cli_refuses_a_listed_directory_the_runtime_does_not_read_and_reco
     for directory in (runtime,control): directory.mkdir(parents=True)
     # systemd 252 lists user.control first; a unit there loads, but the runtime reads only the next (#2610).
     monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{control}\ndirectory\t{runtime}\n'))
-    flags=['--root',str(access.root),'--json','host','owner','allow-setup','--template',grant.template,'--target-fleet',grant.fleet,
+    flags=['--root',str(access.root),'host','owner','allow-setup','--template',grant.template,'--target-fleet',grant.fleet,
         '--repository',grant.repository,'--release',grant.release_id,'--install-directory',str(control)]
     terminal(monkeypatch,iter([]))  # no approval is asked for a directory that is refused
-    assert main(flags)==2
-    error=json.loads(capsys.readouterr().out)['error']
-    assert error['code']=='invalid_argument' and str(runtime) in error['message']
+    assert main(flags)==2  # invalid_argument
+    refusal=capsys.readouterr().err
+    assert refusal.startswith('invalid argument:') and str(runtime) in refusal and str(control) not in refusal
     assert store.local() is None
     # The directory the refusal names is accepted from the same catalog.
     terminal(monkeypatch,iter(['ALLOW-SETUP']))
