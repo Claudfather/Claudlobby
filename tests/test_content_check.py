@@ -432,7 +432,8 @@ def test_nothing_from_the_pull_request_is_checked_out_or_run():
     runs = [str(s.get("run", "")) for s in steps + action["runs"]["steps"]]
     verbs = r"\bgit\s+(?:checkout|switch|worktree|reset|merge|pull|apply|am|cherry-pick|submodule)\b"
     assert not [r for r in runs if re.search(verbs, r)], runs
-    assert [r for r in runs if "refs/pull/${PR}/head:refs/content-check/head" in r]
+    assert [r for r in runs if '"+${HEAD_SHA}:refs/content-check/head"' in r]
+    assert not [r for r in runs if "refs/pull/" in r]  # refs/pull/N/head can be missing when a run starts (#2581)
     assert [r for r in runs if r.startswith('python3 "$GITHUB_ACTION_PATH/content_check.py"')]
 
 
@@ -670,12 +671,16 @@ def test_the_workflow_and_the_action_keep_exactly_their_reviewed_shape():
         },
         "runs": {"using": "composite", "steps": [
             {"name": "Fetch the pull request as data", "shell": "bash",
-             "env": {"PR": "${{ github.event.pull_request.number }}"},
-             "run": 'if [ -z "$PR" ]; then\n'
+             "env": {"HEAD_SHA": "${{ github.event.pull_request.head.sha }}"},
+             "run": 'if [ -z "$HEAD_SHA" ]; then\n'
                     '  echo "::error::content-check runs on pull_request_target: no pull request in this event"\n'
                     "  exit 2\n"
                     "fi\n"
-                    'git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/content-check/head"\n'},
+                    'git fetch --no-tags --quiet origin "+${HEAD_SHA}:refs/content-check/head" || {\n'
+                    '  echo "::error::content-check could not fetch the head commit ${HEAD_SHA},'
+                    ' so it checked nothing: re-run this job"\n'
+                    "  exit 1\n"
+                    "}\n"},
             {"name": "Check the added lines", "shell": "bash",
              "env": {"CONTENT_CHECK_TERMS": "${{ inputs.private-terms }}",
                      "PRIVATE_LAYER": "${{ " + SAME_REPO + " && 'on' || 'off' }}",
@@ -728,14 +733,22 @@ class ActionRun(NamedTuple):
     err: str
     summary: str
     inputs: dict  # what the action received from the workflow's `with:`
+    head: str  # the sha the event names as the pull request's head
 
 
-def _run_the_action(tmp_path, head_files, head_repo, actor="maintainer", secret=None) -> ActionRun:
+def _run_the_action(tmp_path, head_files, head_repo, actor="maintainer", secret=None, *, pull_ref="head",
+                    head_branch=False) -> ActionRun:
     """One pull_request_target event, run as the runner runs this repository's
     workflow: a scratch origin publishes the head as refs/pull/7/head, the
     checkout step's ref is checked out, and the action's own run texts run in
     order with their env evaluated against the event. The base already holds a
-    hit, which a correctly wired check never reads."""
+    hit, which a correctly wired check never reads.
+
+    The origin can be shaped otherwise. `pull_ref` is what it publishes as
+    refs/pull/7/head: "head", nothing, or the files of a later commit on top of
+    the head, for a head that moved after the event. `head_branch` also
+    publishes the head on a branch, where a pull request from this repository
+    has it before the pull request exists."""
     import yaml
 
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -744,14 +757,23 @@ def _run_the_action(tmp_path, head_files, head_repo, actor="maintainer", secret=
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True, env=env)
     src.mkdir()
     g, _ = _scratch_repo(src)
-    (src / "a.md").write_text(PLANTED["email"] + "\n")
-    base = _commit(g, env, "base")
-    for name, text in head_files.items():
-        (src / name).parent.mkdir(parents=True, exist_ok=True)
-        (src / name).write_text(text)
-    head = _commit(g, env, "the pull request")
-    subprocess.run([*g, "push", "-q", str(origin), f"{base}:refs/heads/main", f"{head}:refs/pull/7/head"],
-                   check=True, env=env)
+
+    def commit(files, message):
+        for name, text in files.items():
+            (src / name).parent.mkdir(parents=True, exist_ok=True)
+            (src / name).write_text(text)
+        return _commit(g, env, message)
+
+    base = commit({"a.md": PLANTED["email"] + "\n"}, "base")
+    head = commit(head_files, "the pull request")
+    pushes = [f"{base}:refs/heads/main"]
+    if head_branch:
+        pushes.append(f"{head}:refs/heads/feature")
+    if pull_ref == "head":
+        pushes.append(f"{head}:refs/pull/7/head")
+    elif pull_ref is not None:
+        pushes.append(f"{commit(pull_ref, 'the head moves on')}:refs/pull/7/head")
+    subprocess.run([*g, "push", "-q", str(origin), *pushes], check=True, env=env)
     ctx = {
         "github": {"actor": actor, "event": {"pull_request": {
             "number": 7,
@@ -782,7 +804,7 @@ def _run_the_action(tmp_path, head_files, head_repo, actor="maintainer", secret=
         out, err = out + p.stdout, err + p.stderr
         if p.returncode:
             break
-    return ActionRun(p.returncode, out, err, summary.read_text(), inputs)
+    return ActionRun(p.returncode, out, err, summary.read_text(), inputs, head)
 
 
 def test_end_to_end_a_write_access_run_checks_both_layers(tmp_path):
@@ -813,3 +835,32 @@ def test_end_to_end_a_fork_s_own_allowlist_cannot_silence_its_hit(tmp_path):
     r = _run_the_action(tmp_path, head, head_repo=2002, actor="outsider", secret=INVENTED)
     assert r.rc == 1 and "b.json:1: uuid" in r.out, (r.out, r.err)
     assert "an entry takes effect only once merged" in r.out
+
+
+def test_end_to_end_a_pull_request_from_a_branch_here_is_read_before_its_pull_ref_exists(tmp_path):
+    """The run of a just-opened pull request from a branch in this repository
+    can find refs/pull/N/head missing (#2581). The head is on its branch
+    already: it is fetched by its sha, and layer 2 reads it."""
+    r = _run_the_action(tmp_path, {"b.md": "ok\n" + INVENTED_TEXT + "\n"}, head_repo=1001, secret=INVENTED,
+                        pull_ref=None, head_branch=True)
+    assert r.rc == 1 and "b.md:2: private term #1" in r.out, (r.out, r.err)
+
+
+def test_end_to_end_a_head_the_origin_cannot_serve_fails_the_check_and_says_it_checked_nothing(tmp_path):
+    """A head this repository cannot serve fails the job with a line that names
+    the head and says to re-run the job. The checker never runs, so the failure
+    cannot read as a pass."""
+    head = {"b.json": PLANTED["uuid"] + "\n"}
+    r = _run_the_action(tmp_path, head, head_repo=2002, pull_ref=None)
+    said = (f"::error::content-check could not fetch the head commit {r.head}, "
+            "so it checked nothing: re-run this job")
+    assert r.rc == 1 and said in r.out.splitlines(), (r.out, r.err)
+    assert cc.PRIVATE_OFF not in r.out and r.summary == ""  # the checker, which writes both, never ran
+
+
+def test_end_to_end_the_commit_the_result_is_attached_to_is_the_one_read(tmp_path):
+    """refs/pull/N/head follows every push, but a run's result belongs to the
+    commit its event names. Here the ref has moved on to a commit that drops
+    the hit; the event's own head is the one read, so the hit stands."""
+    r = _run_the_action(tmp_path, {"b.json": PLANTED["uuid"] + "\n"}, head_repo=2002, pull_ref={"b.json": "ok\n"})
+    assert r.rc == 1 and "b.json:1: uuid" in r.out, (r.out, r.err)
