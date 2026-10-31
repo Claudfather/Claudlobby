@@ -696,6 +696,8 @@ Control which Claude Code tools a bot may use. Two sub-fields:
 - `deny: [Write, Edit, NotebookEdit]` — generates permission deny rules like `Write(**)` in `settings.local.json`. The bot cannot call these tools.
 - `allow: [Agent, Bash, Read]` — generates permission allow rules. Useful when combined with auto-derived permissions from expertise profiles.
 
+Naming a skill's or integration's `ask_grants` rule under `allow`, in exact text, is how a fleet grants it: the compositor drops that rule from `permissions.ask`, so the call runs without a prompt. This works from `defaults:` or on the bot. A broader allow rule, or another library item's `tool_grants`, does not drop an ask rule (see Auto-derived permissions below).
+
 Deny wins over allow at the same layer. The validator warns if denied tools conflict with the bot's expertise (e.g., denying `Write` for a `software-engineering` bot).
 
 ### `bots.<name>.observability`
@@ -1006,10 +1008,13 @@ The compositor auto-derives permission entries in `settings.local.json` from sev
 | **MCP permission contracts** | `library/mcp/<name>.json` `_permissions_contract.tools` field lists tool names → generates `mcp__<server>__<tool>` allow patterns. |
 | **Channel plugins** | Bots with a Telegram handle get allow rules for `mcp__plugin_telegram_telegram__*` tools. |
 | **Skills** | Each skill generates `Skill(<name>)` and `Skill(<name>:*)` allow patterns, plus any `tool_grants` (Bash/MCP/bare tools) the skill's own frontmatter declares. |
+| **Skill and integration ask and deny rules** | A skill's or integration's frontmatter `ask_grants` generate `permissions.ask` rules, and its `deny_grants` are appended to the deny list. `permissions.ask` is written only when a rule survives, so a bot with none keeps the same file. |
 | **Claudron session loop** | When `claudron_session_loop` resolves true, a narrow allowlist of `claudron` CLI verb grants (never a `Bash(claudron *)` wildcard). |
 | **Base tools** | `Read`, `Grep`, `Glob` are always allowed when an allow list is non-empty. |
 
 Layering order (later layers win on conflict): guardrails → expertise → MCP contracts → channels → skills → fleet defaults → bot-level. Bot-level deny always wins. (Sibling-bot directory isolation is a separate, always-on deny layer beneath all of these — see `permissions-model.md`.)
+
+Ask rules do not follow that order. An ask rule prompts in every permission mode, auto included, and wins over an allow rule that also matches; the fleet drops one by naming the same rule, in exact text, under `tool_permissions.allow` (see above). An ask rule that carries an absolute path is held to the same anchoring rule as an allow grant (see `external_paths`). A `deny_grants` rule is a deny: a matching call is refused in every permission mode and no allow rule overrides it. A rule matches the command's text, so it stops the plain form of a call and not every way of making it; do not present one as the only gate on a change.
 
 ### `isolation` — shared-config isolation (opt-in, #1665)
 

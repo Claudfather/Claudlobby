@@ -1055,6 +1055,22 @@ def _validate_bots(
                 report, bot_name, "skill", name, grants, allow_side=True
             )
             report.errors.extend(_inert_path_errors(bot_name, "skill", name, grants))
+        # ask_grants and deny_grants (#2476) follow the same grammar and path
+        # rules. A bare 'Bash' is legitimate in either (ask about, or refuse,
+        # every shell command), so the allow-side warning stays off.
+        for key in ("ask_grants", "deny_grants"):
+            declared = [
+                ("integration", name, rules)
+                for name, rules in iter_integration_grants(
+                    paths, resolve_effective_integrations(bot, paths), key=key
+                )
+            ] + [
+                ("skill", name, rules)
+                for name, rules in iter_skill_grants(paths, effective_skills, key=key)
+            ]
+            for kind, name, rules in declared:
+                _warn_grant_shapes(report, bot_name, kind, name, rules, allow_side=False)
+                report.errors.extend(_inert_path_errors(bot_name, kind, name, rules))
         for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
             if gperms is None:
                 continue

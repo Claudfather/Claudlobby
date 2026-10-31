@@ -1313,6 +1313,103 @@ class TestSkillGuardrailGrantValidation:
         assert any("malformed" in w and "bad grant!" in w for w in report.warnings)
 
 
+class TestAskAndDenyGrantValidation:
+    """Skills and integrations declare ask_grants and deny_grants beside tool_grants (#2476).
+
+    Both lists are held to the F3(a) grammar and to the single-slash path rule, as
+    tool_grants are. A bare 'Bash' is not flagged in either: asking about, or
+    refusing, every shell command is legitimate where granting it is over-broad."""
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "1:a")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "2:b")
+
+    def _write_source(self, fleet_dir, kind, name, grants_yaml):
+        """Write a skill or an integration whose frontmatter holds ``grants_yaml``."""
+        if kind == "skill":
+            d = fleet_dir / "library" / "skills" / name
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\n{grants_yaml}---\n\n# {name}\n"
+            )
+        else:
+            (fleet_dir / "library" / "integrations" / f"{name}.md").write_text(
+                f"---\ntitle: {name}\n{grants_yaml}---\n\n# {name}\n"
+            )
+
+    def _equip_worker(self, fleet_dir, kind, names):
+        """Equip worker-1 with skills or integrations ``names``, in one call: a second
+        call would add a second ``skills:`` or ``integrations:`` key."""
+        field = "skills" if kind == "skill" else "integrations"
+        manifest = fleet_dir / "fleet.yaml"
+        before = manifest.read_text()
+        after = before.replace(
+            "expertise: [software-engineering]",
+            f"expertise: [software-engineering]\n      {field}: [{names}]",
+        )
+        assert after != before, "replace() no-opped: the fixture's worker stanza moved"
+        manifest.write_text(after)
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    def test_a_malformed_grant_warns_naming_its_source_and_rule(
+        self, fleet_dir, monkeypatch, kind, key
+    ):
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, kind, "badgrants", f'{key}:\n  - "rm -rf /"\n')
+        self._equip_worker(fleet_dir, kind, "badgrants")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        named = [
+            (slug, w)
+            for slug, w in report.categorized()
+            if f"{kind} 'badgrants'" in w
+        ]
+        assert [slug for slug, _w in named] == ["grant-malformed"], report.warnings
+        assert "bot 'worker-1'" in named[0][1] and "grant 'rm -rf /'" in named[0][1]
+
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    def test_a_bare_bash_in_ask_or_deny_grants_is_not_flagged_as_broad(
+        self, fleet_dir, monkeypatch, key
+    ):
+        # Control: the same bare 'Bash' as a tool_grant is the grant the warning is for.
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, "skill", "loud", 'tool_grants:\n  - "Bash"\n')
+        self._write_source(fleet_dir, "skill", "quiet", f'{key}:\n  - "Bash"\n')
+        self._equip_worker(fleet_dir, "skill", "loud, quiet")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        grant_warnings = [
+            (slug, w) for slug, w in report.categorized() if slug.startswith("grant-")
+        ]
+        assert any(
+            slug == "grant-broad" and "skill 'loud'" in w for slug, w in grant_warnings
+        ), report.warnings
+        assert not any("'quiet'" in w for _slug, w in grant_warnings), grant_warnings
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    def test_a_single_slash_path_rule_is_an_error(
+        self, fleet_dir, monkeypatch, kind, key
+    ):
+        # A single leading slash anchors at the settings source, so the rule never matches (#1312).
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, kind, "inert", f'{key}:\n  - "Read(/abs/x)"\n')
+        self._write_source(
+            fleet_dir, kind, "anchored", f'{key}:\n  - "Read(//abs/y)"\n'
+        )
+        self._equip_worker(fleet_dir, kind, "inert, anchored")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        refused = [e for e in report.errors if "can never match" in e]
+        assert len(refused) == 1, report.errors
+        assert refused[0].startswith(
+            f"bot 'worker-1': {kind} 'inert' rule 'Read(/abs/x)' can never match"
+        )
+        assert "Use 'Read(//abs/x)' for an absolute path." in refused[0]
+
+
 class TestClaudronDoor:
     """The door a vault-wired bot actually walks through is the CLI (phase L1).
 

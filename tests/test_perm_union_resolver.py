@@ -17,14 +17,18 @@ is gated on #628 P7.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from claudlobby.composer import (
     _resolve_guardrail_permissions,
     _resolve_skill_grants,
     compose_settings_local,
 )
-from claudlobby.config import BotConfig, FleetConfig
+from claudlobby.config import BotConfig, FleetConfig, McpEntry, ToolPermissionsConfig
+from claudlobby.path_audit import ExternalDecl
 
 
 def _setup(tmp_path: Path):
@@ -46,6 +50,27 @@ def _write_guardrail(root: Path, name: str, fm: str = "") -> None:
     path = root / "library" / "guardrails" / f"{name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"---\ntitle: {name}\n{fm}---\n\n# {name}\n\nbody\n")
+
+
+def _write_integration(root: Path, name: str, fm: str = "") -> None:
+    path = root / "library" / "integrations" / f"{name}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\ntitle: {name}\n{fm}---\n\n# {name}\n\nbody\n")
+
+
+def _write_mcp_fragment(root: Path, name: str, contract: dict) -> None:
+    path = root / "library" / "mcp" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    server = {"command": "npx", "args": ["-y", f"{name}-mcp"]}
+    path.write_text(json.dumps({"_permissions_contract": contract, name: server}))
+
+
+def _grants(**lists: list[str]) -> str:
+    """Frontmatter listing rules under ``tool_grants`` / ``ask_grants`` / ``deny_grants``."""
+    return "".join(
+        f"{key}:\n" + "".join(f'  - "{rule}"\n' for rule in rules)
+        for key, rules in lists.items()
+    )
 
 
 def _bot(bot_id: str = "w", **kw) -> BotConfig:
@@ -254,3 +279,203 @@ class TestComposeWiresNewLayers:
         import claudlobby.composer as composer
 
         assert hasattr(composer, "_resolve_mcp_permissions")
+
+
+# ── ask_grants and deny_grants (#2476) ────────────────────────────────
+
+
+class TestComposeAskAndDenyGrants:
+    """A skill or an integration lists ``ask_grants`` and ``deny_grants`` beside ``tool_grants``.
+
+    An ask rule lands in ``permissions.ask``, where it prompts in every permission
+    mode and no allow rule outranks it. The fleet drops one by naming the same
+    string, exactly, under ``tool_permissions.allow``. A deny rule is appended to
+    ``permissions.deny`` and nothing removes it.
+    """
+
+    READ = "Bash(probe.sh status *)"
+    ASK = "Bash(probe.sh write *)"
+    DENY = "Bash(probe.sh raw *)"
+
+    @staticmethod
+    def _compose(paths, **bot_kw):
+        bot = _bot("solo", **bot_kw)
+        return compose_settings_local(bot, _single_bot_fleet(bot), paths)["permissions"]
+
+    def test_skill_ask_grants_land_in_ask_and_not_in_allow(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_skill(
+            root, "probe", _grants(tool_grants=[self.READ], ask_grants=[self.ASK])
+        )
+        permissions = self._compose(paths, skills=["probe"])
+        assert permissions["ask"] == [self.ASK]
+        assert self.READ in permissions["allow"]
+        assert self.ASK not in permissions["allow"]
+
+    def test_a_fleet_allow_naming_the_ask_rule_exactly_grants_it(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "probe", _grants(ask_grants=[self.ASK]))
+        permissions = self._compose(
+            paths,
+            skills=["probe"],
+            tool_permissions=ToolPermissionsConfig(allow=[self.ASK]),
+        )
+        assert "ask" not in permissions
+        assert permissions["allow"].count(self.ASK) == 1
+
+    def test_a_broader_fleet_allow_leaves_the_rule_asked(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "probe", _grants(ask_grants=[self.ASK]))
+        permissions = self._compose(
+            paths,
+            skills=["probe"],
+            tool_permissions=ToolPermissionsConfig(allow=["Bash(probe.sh *)"]),
+        )
+        assert permissions["ask"] == [self.ASK]
+        assert "Bash(probe.sh *)" in permissions["allow"]  # the broader rule is live
+        assert self.ASK not in permissions["allow"]
+
+    def test_another_skills_tool_grant_of_the_rule_leaves_it_asked(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "asker", _grants(ask_grants=[self.ASK]))
+        _write_skill(root, "granter", _grants(tool_grants=[self.ASK]))
+        permissions = self._compose(paths, skills=["asker", "granter"])
+        assert permissions["ask"] == [self.ASK]
+        assert self.ASK in permissions["allow"]  # in both lists; Claude Code asks
+
+    def test_skill_deny_grants_land_in_deny_and_in_no_other_list(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_skill(
+            root,
+            "probe",
+            _grants(
+                tool_grants=[self.READ], ask_grants=[self.ASK], deny_grants=[self.DENY]
+            ),
+        )
+        permissions = self._compose(paths, skills=["probe"])
+        assert permissions["deny"].count(self.DENY) == 1
+        assert self.ASK not in permissions["deny"]
+        assert permissions["ask"] == [self.ASK]
+        assert self.DENY not in permissions["allow"]
+
+    def test_a_fleet_allow_naming_a_denied_rule_does_not_remove_it(self, tmp_path):
+        # Both are emitted; Claude Code lets the deny win at run time.
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "probe", _grants(deny_grants=[self.DENY]))
+        permissions = self._compose(
+            paths,
+            skills=["probe"],
+            tool_permissions=ToolPermissionsConfig(allow=[self.DENY]),
+        )
+        assert permissions["deny"].count(self.DENY) == 1
+        assert self.DENY in permissions["allow"]
+
+    def test_an_integrations_ask_and_deny_grants_land_in_ask_and_deny(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_integration(
+            root, "probe-cli", _grants(ask_grants=[self.ASK], deny_grants=[self.DENY])
+        )
+        permissions = self._compose(paths, integrations=["probe-cli"])
+        assert permissions["ask"] == [self.ASK]
+        assert permissions["deny"].count(self.DENY) == 1
+        assert self.ASK not in permissions["deny"]
+        assert self.DENY not in permissions["allow"]
+
+    def test_an_integrations_mcp_ask_and_deny_rules_name_each_instance(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_integration(
+            root,
+            "ledger",
+            _grants(
+                ask_grants=["mcp__ledger__post_entry", "Bash(ledger-cli post *)"],
+                deny_grants=["mcp__ledger__delete_entry"],
+            ),
+        )
+        permissions = self._compose(
+            paths, mcp=[McpEntry(name="ledger", instances=["prod", "staging"])]
+        )
+        # An mcp rule becomes one rule per server instance; any other rule stays as written.
+        assert permissions["ask"] == [
+            "mcp__ledger-prod__post_entry",
+            "mcp__ledger-staging__post_entry",
+            "Bash(ledger-cli post *)",
+        ]
+        assert [r for r in permissions["deny"] if r.startswith("mcp__ledger")] == [
+            "mcp__ledger-prod__delete_entry",
+            "mcp__ledger-staging__delete_entry",
+        ]
+
+    def test_the_read_only_contract_does_not_refuse_ask_or_deny_rules_for_writes(
+        self, tmp_path
+    ):
+        reads, writes = ["get_entry", "list_entries"], ["delete_entry", "post_entry"]
+        contract = {"tools": reads + writes, "read_only_tools": reads}
+        mirror = [f"mcp__ledger__{tool}" for tool in reads]
+        server = [McpEntry(name="ledger", instances=["prod"])]
+
+        root, paths = _setup(tmp_path / "ask-and-deny")
+        _write_mcp_fragment(root, "ledger", contract)
+        _write_integration(
+            root,
+            "ledger",
+            _grants(
+                tool_grants=mirror,
+                ask_grants=["mcp__ledger__post_entry"],
+                deny_grants=["mcp__ledger__delete_entry"],
+            ),
+        )
+        permissions = self._compose(paths, mcp=server)
+        assert permissions["ask"] == ["mcp__ledger-prod__post_entry"]
+        assert "mcp__ledger-prod__delete_entry" in permissions["deny"]
+        # The writes are named to ask about and to refuse, and are still not allowed.
+        assert [p for p in permissions["allow"] if p.startswith("mcp__ledger")] == [
+            "mcp__ledger-prod__get_entry",
+            "mcp__ledger-prod__list_entries",
+        ]
+
+        # Control: the contract is in force in this fixture. The same write tool
+        # named as a tool_grant is refused.
+        root, paths = _setup(tmp_path / "tool-grant")
+        _write_mcp_fragment(root, "ledger", contract)
+        _write_integration(
+            root,
+            "ledger",
+            _grants(tool_grants=[*mirror, "mcp__ledger__post_entry"]),
+        )
+        with pytest.raises(ValueError, match="post_entry"):
+            self._compose(paths, mcp=server)
+
+    def test_ask_sits_between_deny_and_allow_and_only_when_a_rule_survives(
+        self, tmp_path
+    ):
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "plain", _grants(tool_grants=[self.READ]))
+        _write_skill(
+            root, "asking", _grants(tool_grants=[self.READ], ask_grants=[self.ASK])
+        )
+        assert list(self._compose(paths, skills=["plain"])) == ["deny", "allow"]
+        assert list(self._compose(paths, skills=["asking"])) == ["deny", "ask", "allow"]
+        # A fleet grant that leaves no ask rule leaves no ask key either.
+        granted = self._compose(
+            paths,
+            skills=["asking"],
+            tool_permissions=ToolPermissionsConfig(allow=[self.ASK]),
+        )
+        assert list(granted) == ["deny", "allow"]
+
+    def test_an_ask_rule_with_a_raw_absolute_path_is_refused(self, tmp_path):
+        # The same L1 guard as an allow grant (#702), through the same error.
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "pathy", _grants(ask_grants=["Read(/Users/x/secret)"]))
+        with pytest.raises(ValueError, match="grant path: /Users/x/secret"):
+            self._compose(paths, skills=["pathy"])
+
+    def test_an_ask_rule_with_a_declared_absolute_path_is_kept(self, tmp_path):
+        root, paths = _setup(tmp_path)
+        _write_skill(root, "pathy", _grants(ask_grants=["Bash(/opt/tool/bin *)"]))
+        permissions = self._compose(
+            paths,
+            skills=["pathy"],
+            external_paths=[ExternalDecl(path="/opt/tool/**", purpose="tool tree")],
+        )
+        assert permissions["ask"] == ["Bash(/opt/tool/bin *)"]

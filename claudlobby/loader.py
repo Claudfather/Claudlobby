@@ -312,11 +312,13 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
     )
 
 
-def _read_tool_grants(md_path: Path) -> list[str]:
+def _read_tool_grants(md_path: Path, key: str = "tool_grants") -> list[str]:
     """Read the additive ``tool_grants`` list from a markdown file's frontmatter.
 
     Shared by skills (``<skill>/SKILL.md``) and integrations (``<name>.md``). Returns
     ``[]`` when the file, its frontmatter, or the ``tool_grants`` list is absent.
+    ``key`` reads a sibling rule list the same way (#2476): ``ask_grants``, rules
+    that always prompt, or ``deny_grants``, rules that always refuse.
     """
     if not md_path.is_file():
         return []
@@ -324,7 +326,7 @@ def _read_tool_grants(md_path: Path) -> list[str]:
         fm, _ = parse_frontmatter(md_path.read_text())
     except OSError:
         return []
-    grants = fm.get("tool_grants")
+    grants = fm.get(key)
     return list(grants) if isinstance(grants, list) else []
 
 
@@ -361,9 +363,9 @@ def library_requires(md_path: Path) -> dict[str, list[str]]:
     }
 
 
-def _read_skill_grants(skill_dir: Path) -> list[str]:
-    """Read a skill's ``tool_grants`` from its ``SKILL.md`` marker (never sibling files)."""
-    return _read_tool_grants(skill_dir / "SKILL.md")
+def _read_skill_grants(skill_dir: Path, key: str = "tool_grants") -> list[str]:
+    """Read a skill's ``tool_grants`` (or ``key``) from its ``SKILL.md`` marker (never sibling files)."""
+    return _read_tool_grants(skill_dir / "SKILL.md", key)
 
 
 def integration_tool_grants(paths, name: str) -> list[str]:
@@ -391,12 +393,15 @@ def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
     return _parse_expertise_permissions(fm)
 
 
-def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]:
+def iter_skill_grants(
+    paths, equipped: list[str], key: str = "tool_grants"
+) -> list[tuple[str, list[str]]]:
     """Resolve equipped skill entries to ``(display_name, tool_grants)`` pairs.
 
     Entry forms mirror the skill loader: ``name`` / ``dir/name`` (a single skill) and
     ``dir/`` (folder-expansion — every skill dir beneath it). Folder-expanded members
-    are each resolved so their grant contracts are not silently skipped.
+    are each resolved so their grant contracts are not silently skipped. ``key``
+    reads ``ask_grants`` or ``deny_grants`` instead (#2476).
     """
     out: list[tuple[str, list[str]]] = []
     for entry in equipped:
@@ -404,10 +409,10 @@ def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]
             base = entry.rstrip("/")
             for leaf, skill_dir in paths.expand_skill_folder(base).items():
                 name = f"{base}/{leaf}" if base else leaf
-                out.append((name, _read_skill_grants(skill_dir)))
+                out.append((name, _read_skill_grants(skill_dir, key)))
         else:
             skill_dir = paths.find_library_dir("skills", entry)
-            grants = _read_skill_grants(skill_dir) if skill_dir is not None else []
+            grants = _read_skill_grants(skill_dir, key) if skill_dir is not None else []
             out.append((entry, grants))
     return out
 
@@ -485,11 +490,14 @@ def iter_guardrail_permissions(
     return out
 
 
-def iter_integration_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]:
+def iter_integration_grants(
+    paths, equipped: list[str], key: str = "tool_grants"
+) -> list[tuple[str, list[str]]]:
     """Resolve equipped integration entries to ``(display_name, tool_grants)`` pairs.
 
     Handles ``name`` / ``dir/name`` (a single integration) and ``dir/`` (folder-expansion
     — every ``.md`` beneath it), so grant contracts in expanded folders are validated too.
+    ``key`` reads ``ask_grants`` or ``deny_grants`` instead (#2476).
     """
     out: list[tuple[str, list[str]]] = []
     for entry in equipped:
@@ -499,10 +507,10 @@ def iter_integration_grants(paths, equipped: list[str]) -> list[tuple[str, list[
                 "integrations", base
             ).items():
                 name = f"{base}/{rel_key}" if base else rel_key
-                out.append((name, _read_tool_grants(ipath)))
+                out.append((name, _read_tool_grants(ipath, key)))
         else:
             ipath = paths.find_library_file("integrations", entry, ".md")
-            grants = _read_tool_grants(ipath) if ipath is not None else []
+            grants = _read_tool_grants(ipath, key) if ipath is not None else []
             out.append((entry, grants))
     return out
 

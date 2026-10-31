@@ -109,6 +109,87 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     assert "line " in json.loads(captured.out)["error"]["hint"]
 
 
+_ASKED = "Bash(echo SECRET-orientation-ask)"
+_ASKED_DIGEST = hashlib.sha256(_ASKED.encode()).hexdigest()
+
+
+def _stage_skill_asking(case, *rules):
+    """Rewrite the staged skill so that it declares ``rules`` as ask_grants (#2476)."""
+    asks = ("ask_grants:\n" + "".join(f'  - "{rule}"\n' for rule in rules)) if rules else ""
+    _write(case.root / "library/skills/stage-skill/SKILL.md",
+           f"---\nname: stage-skill\n{asks}---\n# Stage skill\nUse the attached instructions.\n")
+
+
+def _worker_composed(case, capsys):
+    """Compose the worker's settings as the first test does, then read its `bot capabilities`."""
+    loaded = context.load_context(case.paths)
+    worker = loaded.fleet.bots["primary-worker"]
+    rendered = composer.render_bot_files(worker, loaded.fleet, case.paths,
+                                         boot_delay_s=0, cascade={})
+    _write(case.paths.bot_runtime("primary-worker") / ".claude/settings.local.json",
+           rendered[".claude/settings.local.json"].content)
+    return _call(capsys, case.root, "bot", "capabilities",
+                 "primary-worker")["bot"]["permissions"]["composed"]
+
+
+def test_capabilities_lists_the_composed_ask_rules_as_digests_beside_allow_and_deny(
+        staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+    _stage_skill_asking(case, _ASKED)
+
+    composed = _worker_composed(case, capsys)
+
+    assert composed["ask"] == [{"tool": "Bash", "sha256": _ASKED_DIGEST}]
+    assert _ASKED_DIGEST not in [item["sha256"] for item in composed["allow"]]
+    assert "SECRET-orientation" not in json.dumps(composed)  # the arguments stay withheld
+
+    # The text view counts the ask rules and names their tools, as it does the deny rules.
+    assert main(["--root", str(case.root), "bot", "capabilities", "primary-worker"]) == 0
+    text = capsys.readouterr().out
+    assert f"allow rules, 1 ask rules, {len(composed['deny'])} deny rules." in text
+    assert "Composed ask tools: Bash" in text
+    assert "SECRET-orientation" not in text
+
+
+def test_capabilities_ask_is_empty_when_the_settings_hold_no_ask_key(staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+
+    composed = _worker_composed(case, capsys)
+
+    settings = json.loads((case.paths.bot_runtime("primary-worker")
+                           / ".claude/settings.local.json").read_text())
+    assert "ask" not in settings["permissions"]
+    assert composed["ask"] == []
+    assert composed["allow"] and composed["deny"]  # a composed file, not an absent one
+
+
+def test_capabilities_does_not_flag_a_fleet_grant_of_a_rule_a_skill_asks_about(
+        staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+    doc = yaml.safe_load(case.paths.fleet_yaml.read_text())
+    doc["fleet"]["bots"]["primary-worker"]["tool_permissions"]["allow"].append(_ASKED)
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(doc))
+
+    def finding_kinds(composed):
+        return [item["kind"] for item in composed["provenance_findings"]
+                if item["rule"]["sha256"] == _ASKED_DIGEST]
+
+    # No skill asks about the rule: the fleet's grant is drift, as before.
+    _stage_skill_asking(case)
+    composed = _worker_composed(case, capsys)
+    assert finding_kinds(composed) == ["unsourced_grant"]
+    # A skill asks about it: the fleet's grant is how it is granted. The rule is
+    # allowed, no longer asked, and nothing is flagged.
+    _stage_skill_asking(case, _ASKED)
+    composed = _worker_composed(case, capsys)
+    assert finding_kinds(composed) == []
+    assert composed["ask"] == []
+    assert _ASKED_DIGEST in [item["sha256"] for item in composed["allow"]]
+
+
 def test_generated_context_defaults_are_explicit_and_never_replace_bad_identity(staging_case, monkeypatch, capsys):
     case = staging_case
     monkeypatch.setattr(context, "get_resources", lambda: case.package)

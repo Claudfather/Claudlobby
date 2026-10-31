@@ -27,7 +27,7 @@ An explicit `integrations:` list adds to auto-pairing; it never replaces it. A b
 
 ## Frontmatter fields
 
-Every real integration file has YAML frontmatter with a `title:` matching its H1 (see the worked example below) — none of the 16 shipped files skip this. Two more fields show up in practice:
+Every real integration file has YAML frontmatter with a `title:` matching its H1 (see the worked example below) — none of the 16 shipped files skip this. The permission rule lists `tool_grants:`, `ask_grants:` and `deny_grants:` are described under Grant contract below. Two more fields show up in practice:
 
 - **`type: mcp|cli`** — labels which of the two flavors above the file is. Present on 12 of 16 files; the 4 that omit it (`github.md`, `homeassistant.md`, `notion.md`, `shopify.md`) fit one flavor just as clearly. Nothing in `composer.py`/`validator.py` reads this field — it's documentation-only, applied inconsistently even as that. Add it for clarity, but don't rely on it being enforced.
 - **`env_contract:`** — a real, code-consumed map of environment variables this integration needs, e.g. (`snowflake.md`):
@@ -71,6 +71,8 @@ tool_grants:
 ```
 
 Each entry is one of three shapes (the grant grammar): an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare CamelCase tool name. For an MCP-paired integration the prefix is rewritten per instance (`gws` + instance `personal` → `mcp__gws-personal__*`); a connector-backed grant (`mcp__claude_ai_*`, no wire fragment) is emitted literally. The compositor validates each entry's shape and warns on a malformed grant or an over-broad bare `Bash`. Validation is folder-aware: a `dir/` folder-expansion equip resolves every member integration's contract, so a malformed grant nested in an expanded folder is not silently skipped.
+
+An integration may also declare `ask_grants:` and `deny_grants:` beside `tool_grants:`, in the same grammar and validated the same way (a bare `Bash` is not flagged in either list); `library/skills/README.md` has the longer contract. `ask_grants` are composed into `permissions.ask`: Claude Code asks before running a matching call in every permission mode, auto included, even where an allow rule also matches, and the fleet grants one by naming the same rule, in exact text, under `tool_permissions.allow`, which drops it from `permissions.ask` (for an `mcp__` rule, the per-instance name it is composed under). `deny_grants` are appended to `permissions.deny`: a matching call is refused in every permission mode, and no allow rule overrides it. An `mcp__<name>__` rule in either list is rewritten per server instance exactly as a `tool_grants` entry is, and the read-only contract (`documentation/decisions/permissions-model.md`, "Read-Only MCP Contracts") does not apply to these lists: asking about or refusing a write tool is what they are for. A rule matches the command's text, so it stops the plain form of a call and not every way of making it; do not present one as the only gate on a change.
 
 ## Requirements (`requires:`)
 

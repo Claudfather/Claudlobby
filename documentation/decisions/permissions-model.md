@@ -17,7 +17,7 @@ Sources: Claude Code official documentation, `~/.claude/settings.json` reference
 
 ## Permission Pattern Syntax
 
-Claude Code supports these pattern formats in `permissions.allow` and `permissions.deny`:
+Claude Code supports these pattern formats in `permissions.allow`, `permissions.ask` and `permissions.deny`:
 
 ### Plain tool names
 
@@ -147,6 +147,8 @@ Same syntax as Bash: `PowerShell(Get-ChildItem *)`, `PowerShell(Remove-Item *)`.
 4. If nothing matches → user is prompted (interactive) or denied (headless)
 
 **Deny always wins.** There is no way to override a deny rule with an allow rule at the same scope. This is the key design constraint for the compositor: put broad allows at the base, and let deny rules carve out restrictions.
+
+The compositor composes a skill's or integration's `ask_grants` into `permissions.ask`, so a matching call prompts in every permission mode, auto included, even where an allow rule also matches. The fleet drops one by naming the same rule, in exact text, under `tool_permissions.allow`; a broader allow rule, or another library item's `tool_grants`, does not. A skill's or integration's `deny_grants` are appended to `permissions.deny`: a matching call is refused in every permission mode, and no allow rule overrides it.
 
 ---
 
@@ -361,6 +363,9 @@ For OS-level isolation, `sandbox.filesystem.denyRead`/`denyWrite` paths (merged 
     "deny": [
       "Read(<sibling_dir>/**)"
     ],
+    "ask": [
+      "<rule>"
+    ],
     "allow": [
       "<tool>(**)"
     ]
@@ -369,6 +374,8 @@ For OS-level isolation, `sandbox.filesystem.denyRead`/`denyWrite` paths (merged 
   "hooks": { ... }
 }
 ```
+
+`ask` is written only when a rule survives, so a bot with none keeps the same file. It holds the `ask_grants` of the bot's skills and integrations, less any rule the fleet names in exact text under `tool_permissions.allow`; the same skills' and integrations' `deny_grants` are appended to `deny`.
 
 **Issue with current pattern format:** The compositor appends `(**)` to tool names from `bot.tools.allow/deny`:
 
@@ -530,3 +537,5 @@ Same 22 tools, namespaced under `mcp__gws-work__`.
 6. **Not separately verified** — sandbox path merge behavior is a Claude Code platform fact, not compositor-specific; treat as still accurate.
 
 7. **Shipped.** Sibling isolation emits a `Read` and an `Edit` rule per sibling (#873), both `//`-anchored (#1312). There is no `Write` rule, because Claude Code never consults one and `Edit` covers every file-editing tool. Layer 0b (#1665, opt-in) extends the named paths past bot dirs; see Path-Scoped Patterns.
+
+8. **Shipped.** Skills and integrations may declare `ask_grants` and `deny_grants` beside `tool_grants` (#2476). `ask_grants` compose into `permissions.ask`, so a matching call prompts in every permission mode, auto included, and the ask rule wins over an allow rule that also matches; the fleet grants one by naming the same rule, in exact text, under `tool_permissions.allow`, and the compositor then drops it from `permissions.ask`. `deny_grants` are appended to `permissions.deny`. A rule matches the command's text, so it stops the plain form of a call and not every way of making it (another client, an absolute path, `bash <script>`); do not present one as the only gate on a change.
