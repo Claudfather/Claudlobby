@@ -224,6 +224,13 @@ def test_every_switch_carries_both_directions():
         assert s.env or s.job or s.scope == sw.FLEET_JOB or s.config, s.key
 
 
+def test_the_registry_scan_row_offers_no_off_value():
+    """#2611: activation refuses PLANE_EMIT_ENABLED=0, because its identity
+    bindings join to the scan, so the row names that refusal instead."""
+    row = sw.by_key("registry-scan")
+    assert not row.disarm.startswith(f"{row.env}=0") and "activation refuses" in row.disarm
+
+
 def test_the_target_workflow_doors_are_the_reaction_chain():
     """Scoped narrowly on purpose: status's header names these and nothing
     else. A header that listed every off switch would be scrolled past, which

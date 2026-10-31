@@ -303,7 +303,7 @@ def test_preview_discloses_host_scope_without_effect(tmp_path, monkeypatch):
     assert result.data["changed"] is False
 
 
-def _preflight_fixture(tmp_path, monkeypatch):
+def _preflight_fixture(tmp_path, monkeypatch, *, registry_preflight=False):
     from claudlobby import activation_enrollment, activation_state, active_config
     from claudlobby import config_plan, context, releases, supervision_inventory
     from claudlobby.commands import _helpers
@@ -375,6 +375,17 @@ WORKER, OTHER = "    worker: {expertise: [build]}\n", "    other: {expertise: [r
 def _fleet_yaml(name, manager, *bots, extra=""):
     return (f"fleet:\n  name: {name}\n  manager: {manager}\n  system_defaults: false\n{extra}"
             "  bots:\n" + "".join(bots))
+
+
+def test_preflight_refuses_an_exported_registry_scan_opt_out_before_any_effect(tmp_path, monkeypatch):
+    """#2611: apply_move stops its bot before it activates, so the activation's
+    registry-scan refusal is asked in the preflight, before anything is stopped."""
+    args, _, _ = _preflight_fixture(tmp_path, monkeypatch, registry_preflight=True)
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+    with pytest.raises(CommandFailure, match="bot move refused before it stops anything: "
+                       "PLANE_EMIT_ENABLED=0 in this command's environment"):
+        move_bot.preflight(args)
 
 
 def test_preview_preflight_reads_frozen_manifest_paths_not_source_records(tmp_path, monkeypatch):

@@ -992,6 +992,10 @@ def test_activation_scan_refuses_before_any_emit(activation_scan, monkeypatch, s
     else:
         monkeypatch.setattr(registry, "assemble_entities", lambda *a: (
             (entities, False) if stop == "incomplete" else ([], True)))
+    # Activation asks the same question before its record (#2611): it can answer
+    # then exactly the stops that read no recorded state.
+    static = stop in ("disabled", "process-opt-out", "tier-opt-out", "unreachable")
+    assert (registry.activation_scan_refusal(paths, fleet) is not None) is static
     with pytest.raises(registry.RegistryScanError) as caught:
         registry.run_generate_scan(paths, fleet, require_commit=True)
     assert not calls
@@ -1001,6 +1005,30 @@ def test_activation_scan_refuses_before_any_emit(activation_scan, monkeypatch, s
         assert not (paths.root / "state/plane/plane.db").exists()
     assert caught.value.summary["recording"] == "not_attempted"
     assert caught.value.summary["attempted_chunks"] == 0
+
+
+def test_activation_scan_refusal_reads_the_winning_tier_through_the_shipped_resolver(tmp_path, monkeypatch):
+    """#2611: the question activation asks before its record resolves the tier
+    cascade the scan resolves, through the runtime's own resolver. Only the
+    winning tier's exact 0 refuses, and the refusal names that file."""
+    from claudlobby.plane import registry_emit as registry
+    root = _fleet_root(tmp_path, armed=False)  # the root tier says 0
+    fleet_dir = root / "local" / "test-fleet"
+    fleet_dir.mkdir(parents=True)
+    (fleet_dir / "fleet.yaml").write_text((root / "fleet.yaml").read_text())
+    fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+    paths = Paths(root=root, package=source_package(), fleet_dir=fleet_dir)
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
+    opted_out = "PLANE_EMIT_ENABLED=0 in {} opts fleet test-fleet out of the registry scan"
+    assert registry.activation_scan_refusal(paths, fleet).startswith(opted_out.format(root / ".env"))
+    (fleet_dir / ".env").write_text("PLANE_EMIT_ENABLED=1\n")  # the fleet tier wins
+    assert registry.activation_scan_refusal(paths, fleet) is None
+    (root / ".env").unlink()
+    (fleet_dir / ".env").write_text("PLANE_EMIT_ENABLED=0\n")
+    assert registry.activation_scan_refusal(paths, fleet).startswith(opted_out.format(fleet_dir / ".env"))
+    (fleet_dir / ".env").unlink()
+    assert registry.activation_scan_refusal(paths, fleet) is None
 
 
 @pytest.mark.parametrize("failure", ["spooled", "staged", "exception", "short-list"])
