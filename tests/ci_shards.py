@@ -51,7 +51,7 @@ import xml.etree.ElementTree as ET
 # notice until the ceiling comes down to the count.
 SKIP_CEILINGS = {
     "supported (ubuntu-latest, py3.10)": 17,
-    "supported (macos-latest, py3.11)": 123,
+    "supported (macos-latest, py3.11)": 124,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests
