@@ -232,6 +232,38 @@ class TestValidate:
         report = validate(fleet, paths)
         assert any("GITHUB_PAT" in w for w in report.warnings)
 
+    def test_an_explicit_integrations_list_keeps_the_auto_paired_doc_contract(
+        self, fleet_dir, monkeypatch
+    ):
+        # An explicit integrations: list adds to auto-pairing (the composer's
+        # union), so validate still checks the env contract of the doc paired
+        # with the bot's mcp server. Only that doc declares the var here.
+        monkeypatch.delenv("SPROCKET_API_KEY", raising=False)
+        library = fleet_dir / "library"
+        (library / "mcp" / "sprocket.json").write_text(
+            json.dumps({"sprocket": {"command": "sprocket-mcp", "args": []}})
+        )
+        (library / "integrations" / "sprocket.md").write_text(
+            "---\ntitle: Sprocket\nenv_contract:\n  SPROCKET_API_KEY:\n"
+            "    description: Sprocket API key\n    default_tier: bot\n"
+            "    secret: true\n---\n\n# Sprocket\n\nUse the sprocket server.\n"
+        )
+        (library / "integrations" / "gadget.md").write_text(
+            "---\ntitle: Gadget\n---\n\n# Gadget\n\nUse the gadget CLI.\n"
+        )
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [orchestration]",
+            "expertise: [orchestration]\n      mcp: [sprocket]\n      integrations: [gadget]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any(
+            "integration/sprocket" in w and "SPROCKET_API_KEY" in w
+            for w in report.warnings
+        ), report.warnings
+
     def test_env_has_value_is_value_based(self):
         # The shared predicate behind all three "requires VAR but it's not set"
         # warnings (MCP / tool / token_env): absent AND empty both count as

@@ -23,7 +23,7 @@ For each external service a bot interacts with, an optional `<service>.md` doc t
 
 **CLI-based:** not auto-paired. List `integrations: [vercel, railway]` explicitly in the bot's stanza.
 
-To override auto-pairing, list `integrations: [...]` explicitly.
+An explicit `integrations:` list adds to auto-pairing; it never replaces it. A bot with `mcp: [github]` and `integrations: [vercel]` gets both docs.
 
 ## Frontmatter fields
 
@@ -71,6 +71,21 @@ tool_grants:
 ```
 
 Each entry is one of three shapes (the grant grammar): an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare CamelCase tool name. For an MCP-paired integration the prefix is rewritten per instance (`gws` + instance `personal` → `mcp__gws-personal__*`); a connector-backed grant (`mcp__claude_ai_*`, no wire fragment) is emitted literally. The compositor validates each entry's shape and warns on a malformed grant or an over-broad bare `Bash`. Validation is folder-aware: a `dir/` folder-expansion equip resolves every member integration's contract, so a malformed grant nested in an expanded folder is not silently skipped.
+
+## Requirements (`requires:`)
+
+An integration can bring the skills and protocols it needs, so that one entry equips all of them:
+
+```yaml
+---
+title: Gadget
+requires:
+  skills: [gadget]
+  protocols: [gadget-incidents]
+---
+```
+
+A bot that equips the integration, by listing it under `integrations:` or through auto-pairing, composes as if it had declared those skills and protocols itself: each skill is linked under `.claude/skills/` and granted in `settings.local.json`, and each protocol becomes a section of `CLAUDE.md`. The skills a required protocol requires in turn come too. A name the bot already declares is not added twice. Deleting the integration removes what it brought, except what the bot declares itself. A required name that no library holds is a `config validate` error, reported once for the file however many bots equip the integration, and even when none does.
 
 ## Example
 

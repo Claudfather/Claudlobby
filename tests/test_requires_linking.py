@@ -944,3 +944,154 @@ def test_resolve_skill_grants_takes_a_plain_list(fleet_dir):
     _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
     paths = _paths(fleet_dir)
     assert _resolve_skill_grants(["gadget"], paths) == ["Bash(gadget-tool *)"]
+
+
+# ---------------------------------------------------------------------------
+# Integrations (#2476): an integration's ``requires:`` brings skills and
+# protocols, and deleting the integration takes them away again
+# ---------------------------------------------------------------------------
+
+
+def _write_integration(
+    root: Path,
+    name: str,
+    *,
+    title: str,
+    requires_skills: list[str] | None = None,
+    requires_protocols: list[str] | None = None,
+) -> Path:
+    """A minimal integration doc under library/integrations/, optionally
+    declaring ``requires: {skills: [...], protocols: [...]}``."""
+    fm = f"title: {title}\n"
+    if requires_skills is not None or requires_protocols is not None:
+        fm += "requires:\n"
+        if requires_skills is not None:
+            fm += "  skills: [" + ", ".join(requires_skills) + "]\n"
+        if requires_protocols is not None:
+            fm += "  protocols: [" + ", ".join(requires_protocols) + "]\n"
+    p = root / "library" / "integrations" / f"{name}.md"
+    p.write_text(f"---\n{fm}---\n\n# {title}\n\nIntegration body.\n")
+    return p
+
+
+def _equip_sprocket(fleet_dir: Path) -> None:
+    """The ``sprocket`` integration requires the ``gadget`` skill and the
+    ``gadget-incidents`` protocol, which in turn requires the ``widget`` skill.
+    The lead declares the integration and nothing else. The fixture's stub
+    template is dropped, so compose renders the package's real one."""
+    _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
+    _write_skill(fleet_dir, "widget")
+    _write_protocol(fleet_dir, "gadget-incidents", requires_skills=["widget"])
+    _write_integration(
+        fleet_dir, "sprocket", title="Sprocket Service",
+        requires_skills=["gadget"], requires_protocols=["gadget-incidents"],
+    )
+    _equip(fleet_dir, "lead", integrations=["sprocket"])
+    _no_skill_defaults(fleet_dir)
+    (fleet_dir / "templates" / "claude.md.j2").unlink()
+
+
+def _compose_lead(fleet_dir: Path) -> tuple[Path, list[str], str]:
+    """Compose the lead for real; return its directory, allow rules and CLAUDE.md."""
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+    compose_bot(fleet.bots["lead"], fleet, paths, log=lambda m: None)
+    bot_dir = paths.bot_runtime("lead")
+    settings = json.loads((bot_dir / ".claude" / "settings.local.json").read_text())
+    return bot_dir, settings["permissions"]["allow"], (bot_dir / "CLAUDE.md").read_text()
+
+
+# What the sprocket integration brings into the lead's composed files.
+_SPROCKET_SKILLS = ("gadget", "widget")
+_SPROCKET_RULES = (
+    "Skill(gadget)", "Skill(gadget:*)", "Bash(gadget-tool *)",
+    "Skill(widget)", "Skill(widget:*)",
+)
+_SPROCKET_SECTIONS = ("## Integrations", "### Sprocket Service", "### gadget-incidents")
+
+
+def test_an_integration_brings_its_required_skill_and_protocol(fleet_dir):
+    _equip_sprocket(fleet_dir)
+
+    bot_dir, allow, claude_md = _compose_lead(fleet_dir)
+
+    for skill in _SPROCKET_SKILLS:
+        link = bot_dir / ".claude" / "skills" / skill
+        assert link.is_symlink(), skill
+        assert link.resolve() == (fleet_dir / "library" / "skills" / skill).resolve()
+    for rule in _SPROCKET_RULES:
+        assert rule in allow, rule
+    for heading in _SPROCKET_SECTIONS:
+        assert heading in claude_md, heading
+
+
+def test_removing_the_integration_removes_what_it_brought(fleet_dir):
+    # Delete the integrations: line and compose the same bot again: no skill
+    # link, allow rule or CLAUDE.md section the integration brought is left.
+    _equip_sprocket(fleet_dir)
+    bot_dir, allow, claude_md = _compose_lead(fleet_dir)
+    assert all((bot_dir / ".claude" / "skills" / s).is_symlink() for s in _SPROCKET_SKILLS)
+    assert all(rule in allow for rule in _SPROCKET_RULES)
+    assert all(heading in claude_md for heading in _SPROCKET_SECTIONS)
+    text = (fleet_dir / "fleet.yaml").read_text()
+    line = "      integrations: [sprocket]\n"
+    assert text.count(line) == 1
+    (fleet_dir / "fleet.yaml").write_text(text.replace(line, "", 1))
+
+    bot_dir, allow, claude_md = _compose_lead(fleet_dir)
+
+    for skill in _SPROCKET_SKILLS:
+        link = bot_dir / ".claude" / "skills" / skill
+        assert not link.exists() and not link.is_symlink(), skill
+    for rule in _SPROCKET_RULES:
+        assert rule not in allow, rule
+    for heading in _SPROCKET_SECTIONS:
+        assert heading not in claude_md, heading
+    # The second compose ran and kept what the bot still equips.
+    assert "Skill(fleet-ops)" in allow
+    assert "### Report-Back Protocol" in claude_md
+
+
+def test_an_unknown_name_an_integration_requires_is_an_error(fleet_dir):
+    _write_skill(fleet_dir, "gadget")
+    _write_protocol(fleet_dir, "gadget-incidents")
+    _write_integration(
+        fleet_dir, "sprocket", title="Sprocket Service",
+        requires_skills=["gadget"], requires_protocols=["gadget-incidents"],
+    )
+    _write_integration(
+        fleet_dir, "broken-sprocket", title="Broken Sprocket",
+        requires_skills=["no-such-skill"], requires_protocols=["no-such-protocol"],
+    )
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+
+    report = validate(fleet, _paths(fleet_dir))
+
+    # Library-wide: no bot equips either integration.
+    broken = [e for e in report.errors if "broken-sprocket" in e]
+    assert len(broken) == 2, broken
+    assert any("skill 'no-such-skill'" in e and "library/skills/" in e for e in broken)
+    assert any(
+        "protocol 'no-such-protocol'" in e and "library/protocols/" in e for e in broken
+    )
+    assert not [e for e in report.errors if "integrations/sprocket.md" in e]
+
+
+def test_the_registry_keyframe_and_freshbox_see_what_an_integration_brings(fleet_dir):
+    # The readers beside compose: the keyframe (what `bot show` prints) records
+    # the required skills and protocol as equipment, and freshbox traces the
+    # required skill's grants instead of reading them as orphaned.
+    _equip_sprocket(fleet_dir)
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+    bot = fleet.bots["lead"]
+    assert "gadget" not in bot.skills and "gadget-incidents" not in bot.protocols
+
+    eq = bot_payload(paths, fleet, bot, None)["equipment"]
+    assert {"gadget", "widget"} <= set(eq["skills"])
+    assert "gadget-incidents" in eq["protocols"]
+    assert "sprocket" in eq["integrations"]
+
+    orphans = [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_grant"]
+    assert not any("gadget-tool" in f.detail for f in orphans), orphans
+    assert not any("Skill(gadget" in f.detail for f in orphans), orphans
