@@ -31,6 +31,8 @@ argument-hint: "[24h|7d|since <ISO>]"
 # Status
 ```
 
+The compositor also reads three optional lists of permission rules from this frontmatter: `tool_grants:`, `ask_grants:` and `deny_grants:` (see Grant contract below).
+
 **Open the description with when to use the skill.** Claude Code lists every installed skill to the model by its description, so the description is what gets a skill invoked without someone pointing at it. Say the situation first, in a sentence that opens with `Use when` (or `Use before`, `Use to`, `You MUST use this before`), then what the skill does. `tests/test_skill_descriptions.py` fails any skill here whose description does not open with one (#2330).
 
 The H1 is a human-cased version of `name` (`status` → `# Status`, `fleet-pulse` → `# Fleet Pulse`), but unlike every other library category it is **not** stripped or demoted — `composer.py::link_skills` only creates a filesystem symlink into the bot's `.claude/skills/`; it never reads or parses `SKILL.md` content, so it never passes through `load_library_item`/`_demote_headings`. Claude Code reads the file natively at invocation time, H1 and all.
@@ -51,6 +53,13 @@ tool_grants:
 ```
 
 Each entry is one of three shapes (the grant grammar): an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare CamelCase tool name. The compositor validates each entry's shape and warns on a malformed grant or an over-broad bare `Bash` (declare a scoped `Bash(<cmd> *)` instead). For a multi-file skill the contract lives on `SKILL.md` only — sibling files in the folder are ignored.
+
+Two more lists in the same frontmatter, `ask_grants:` and `deny_grants:`, take Claude Code permission rules: the three shapes above, or a tool name with its specifier in parentheses, such as `Read(//srv/x/**)`. They are read more strictly than `tool_grants`, because each of their rules restricts and a rule dropped on the way fails open: a value that is not a list (a string, a mapping, an empty key), an entry that is not a string, and an entry that is not a rule are errors that name the skill, and no bot that equips it composes until the list is fixed. A path rule with a single leading slash is an error too, and a bare `Bash` is not flagged in either list.
+
+- **`ask_grants:`** — composed into `permissions.ask` in the bot's `.claude/settings.local.json`. Claude Code asks before running a matching call in every permission mode, auto included, and an ask rule wins over an allow rule that also matches. Use it for a verb that must stay a person's decision until the fleet grants it. The fleet grants one by naming the same rule, in exact text, under `tool_permissions.allow` (fleet defaults or the bot); the compositor then drops it from `permissions.ask`, so the call runs without a prompt. A broader allow rule, or another library item's `tool_grants`, does not drop it. `permissions.ask` is written only when a rule survives, so a bot with none keeps the same file. An ask rule that carries an absolute path is held to the same anchoring rule as an allow grant.
+- **`deny_grants:`** — appended to `permissions.deny`. A matching call is refused in every permission mode, and no allow rule overrides it. Use it to stop a hand-written route around a skill's helper: `gitguardian/SKILL.md` denies `Bash(curl *gitguardian.com*)` and `Bash(wget *gitguardian.com*)`.
+
+A rule matches the command's text, so it stops the plain form of a call and not every way of making it (another client, an absolute path, `bash <script>`). Do not present one as the only gate on a change.
 
 ## Shared partials (leading underscore)
 
@@ -81,7 +90,7 @@ Two things `tools/` does for free that a skill-dir helper owns itself:
 
 **Execute bit.** `tools/` chmods its rendered output 0755; a skill is *symlinked*, so the helper runs at whatever mode git recorded — checked in 100644 it cannot run on a fresh clone. Verify with `git ls-files -s library/skills/<name>/`, fix with `git update-index --chmod=+x <path>`, and pin it in a test so the next author does not have to remember.
 
-**Audit surface.** `claudlobby config validate --runtime` audits rendered `tools/`; a skill-dir helper sits outside that sweep. If `SKILL.md` declares `tool_grants` for the helper, scope them (`Bash(<cmd> *)`, never bare `Bash`) and re-run `claudlobby --fleet <f> config validate --runtime` to confirm no `orphan_grant` or over-grant finding.
+**Audit surface.** `claudlobby config validate --runtime` audits rendered `tools/`; a skill-dir helper sits outside that sweep. If `SKILL.md` declares `tool_grants` for the helper, scope them (`Bash(<cmd> *)`, never bare `Bash`) and re-run `claudlobby --fleet <f> config validate --runtime` to confirm no `orphan_grant` or over-grant finding. If the helper is the intended route to a service, the skill can also declare `deny_grants` that refuse a hand-written call around it, as `gitguardian` does (see Grant contract above).
 
 The parse gate you get for free either way: `tests/test_bash_parse.py` runs `bash -n` over `claudlobby/_runtime_scripts/` **and** every `library/**/*.sh`. Just mind the bash 3.2 rule from the root CLAUDE.md — no apostrophes in comments inside `$( )`, because macOS `/bin/bash` does not strip them and one corrupts quoting for the rest of the file.
 

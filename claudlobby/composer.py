@@ -522,19 +522,49 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
         if not tool_grants:
             continue
         _assert_read_only_grants(name, tool_grants, paths)
-        entry = next((e for e in bot.mcp if e.name == name), None)
-        if entry is None:
-            grants.extend(tool_grants)
-            continue
-        prefix = f"mcp__{name}__"
-        for grant in tool_grants:
-            if grant.startswith(prefix):
-                rest = grant[len(prefix) :]
-                for instance in entry.instances:
-                    grants.append(f"mcp__{entry.output_name(instance)}__{rest}")
-            else:
-                grants.append(grant)
+        grants.extend(_instance_rules(bot, name, tool_grants))
     return grants
+
+
+def _instance_rules(bot: BotConfig, name: str, rules: list[str]) -> list[str]:
+    """``rules`` with each ``mcp__<name>__`` prefix rewritten per instance.
+
+    Applies when a ``bot.mcp`` entry shares the integration's name (``default`` ->
+    ``mcp__<name>__``; named -> ``mcp__<name>-<instance>__``); every other rule,
+    and every rule of an integration with no such entry, is kept as written.
+    """
+    entry = next((e for e in bot.mcp if e.name == name), None)
+    if entry is None:
+        return list(rules)
+    prefix = f"mcp__{name}__"
+    out: list[str] = []
+    for rule in rules:
+        if rule.startswith(prefix):
+            rest = rule[len(prefix) :]
+            for instance in entry.instances:
+                out.append(f"mcp__{entry.output_name(instance)}__{rest}")
+        else:
+            out.append(rule)
+    return out
+
+
+def _resolve_integration_rules(bot: BotConfig, paths: Paths, key: str) -> list[str]:
+    """The ``ask_grants`` or ``deny_grants`` (``key``) of the bot's effective integrations.
+
+    #2476. An ``mcp__<name>__`` rule is rewritten per instance, as a grant is in
+    :func:`_resolve_integration_grants`, so it names the server the bot runs: a
+    rule left naming another server would never match, and an ask or deny that
+    never matches fails open. The read-only contract does not apply: asking about
+    or refusing a write tool is what these lists are for.
+    """
+    from .loader import iter_integration_grants
+
+    rules: list[str] = []
+    for name, declared in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths), key=key
+    ):
+        rules.extend(_instance_rules(bot, name, declared))
+    return rules
 
 
 # ----------------------------------------------------------------------
@@ -2700,7 +2730,9 @@ def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     return patterns
 
 
-def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
+def _resolve_skill_grants(
+    skills: list[str], paths: Paths, key: str = "tool_grants"
+) -> list[str]:
     """Additive ``tool_grants`` declared by the resolved skill list (F2/F6).
 
     :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
@@ -2711,11 +2743,12 @@ def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
     ``tool_grants`` path; de-duplication against the allow list happens in
     :func:`compose_settings_local`. Takes the EFFECTIVE skill list
     (:func:`resolve_effective_skills`), never ``bot.skills`` directly — same
-    reason as :func:`_resolve_skill_permissions`.
+    reason as :func:`_resolve_skill_permissions`. ``key`` reads the skills'
+    ``ask_grants`` or ``deny_grants`` instead (#2476).
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, skills)
+        for _name, grants in iter_skill_grants(paths, skills, key=key)
         for grant in grants
     ]
 
@@ -3124,6 +3157,25 @@ def compose_settings_local(
     bot_deny_plain = set(bot.tool_permissions.deny)
     allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
 
+    # Ask and deny rules that skills and integrations declare (#2476). An ask
+    # rule prompts in every permission mode, auto included, even where an allow
+    # rule also matches, so no library grant can allow what a source asks about.
+    # The fleet grants an asked rule by naming it, exactly, under
+    # tool_permissions.allow, which drops it from the ask list. A list that would
+    # not compose as written raises ValueError naming its source
+    # (loader._read_tool_grants), so no rule of it reaches the settings.
+    fleet_allow = set(bot.tool_permissions.allow)
+    ask_patterns: list[str] = []
+    _append_unique(
+        ask_patterns, _resolve_skill_grants(effective_skills, paths, key="ask_grants")
+    )
+    _append_unique(ask_patterns, _resolve_integration_rules(bot, paths, "ask_grants"))
+    ask_patterns = [p for p in ask_patterns if p not in fleet_allow]
+    _append_unique(
+        deny_patterns, _resolve_skill_grants(effective_skills, paths, key="deny_grants")
+    )
+    _append_unique(deny_patterns, _resolve_integration_rules(bot, paths, "deny_grants"))
+
     # Ensure base tools are present whenever allow list is non-empty
     # (settings.local.json allow REPLACES global — without these, bots lose basic access)
     if allow_patterns:
@@ -3134,7 +3186,9 @@ def compose_settings_local(
     # L1 source guard (#702) — an ALLOW grant carrying an absolute path must
     # anchor it (${FLEET_ROOT}/…) or declare it (external_paths), same as any
     # other source value: granting access to a raw absolute is the self-containment
-    # violation (it dangles the moment the fleet runs elsewhere). Deny grants are
+    # violation (it dangles the moment the fleet runs elsewhere). An ASK rule is
+    # held to the same line (#2476): one that dangles stops matching, and the
+    # command it gated then runs unasked, by the classifier in auto. Deny grants are
     # restrictions, not wiring-to-a-path, so they are not classified — which also
     # sidesteps the composer-derived sibling-isolation denies above (a resolved
     # absolute the composer emits, never a source). No composer-derived allow layer
@@ -3150,7 +3204,7 @@ def compose_settings_local(
     )
 
     grant_findings: list[SourceFinding] = []
-    for grant in allow_patterns:
+    for grant in allow_patterns + ask_patterns:
         for denied in classify_grant_paths(grant, bot.external_paths):
             grant_findings.append(
                 SourceFinding(
@@ -3164,15 +3218,17 @@ def compose_settings_local(
     if grant_findings:
         raise source_findings_error(bot.bot_id, grant_findings)
 
+    # Keys in evaluation order: deny, then ask, then allow. ``ask`` is written
+    # only when a rule survives, so a bot with none keeps the old file shape.
+    permissions: dict = {}
     if deny_patterns:
-        permissions: dict = {"deny": deny_patterns}
-        if allow_patterns:
-            permissions["allow"] = allow_patterns
+        permissions["deny"] = deny_patterns
+    if ask_patterns:
+        permissions["ask"] = ask_patterns
+    if allow_patterns:
+        permissions["allow"] = allow_patterns
+    if permissions:
         settings["permissions"] = permissions
-    elif allow_patterns:
-        settings["permissions"] = {
-            "allow": allow_patterns,
-        }
 
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox_cfg: dict = {}

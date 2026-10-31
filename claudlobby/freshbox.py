@@ -33,6 +33,7 @@ from .composer import (
     _resolve_fleet_ops_grants,
     _resolve_guardrail_permissions,
     _resolve_integration_grants,
+    _resolve_integration_rules,
     _resolve_mcp_permissions,
     _resolve_skill_grants,
     _resolve_skill_permissions,
@@ -88,6 +89,20 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
     return sourced
 
 
+def _sourced_ask_rules(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str]:
+    """Every ask rule the bot's equipped skills and integrations declare (#2476).
+
+    Taken before the fleet's ``tool_permissions.allow`` drops the ones it grants,
+    so :func:`classify_grants` can tell a fleet grant of an asked rule, the
+    designed way to grant one, from an override no source declares.
+    """
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    asked = set(_resolve_skill_grants(effective_skills, paths, key="ask_grants"))
+    return asked | set(_resolve_integration_rules(bot, paths, "ask_grants"))
+
+
 # Grant finding vocabulary — kind → (severity, allow-list detail suffix). One
 # home for both, so severity and detail can't drift apart. (missing_tier_a has a
 # dynamic per-key detail and lives in _tier_a_findings.)
@@ -114,6 +129,7 @@ def classify_grants(
     sourced: set[str],
     base: set[str],
     override: set[str],
+    asked: frozenset[str] | set[str] = frozenset(),
 ) -> list[tuple[str, str, str]]:
     """Classify each grant against its provenance — the pure, testable core.
 
@@ -124,6 +140,10 @@ def classify_grants(
         fleet ``tool_permissions.allow`` override (drift signal — no source contract).
       - ``under_grant`` (fail): a source-declared grant that is not denied yet
         never reached the allow list (the bot would rely on the retired global).
+
+    An allow entry the fleet override grants that an equipped source declares as
+    an ask rule (``asked``, #2476) gets no finding: that override is how a fleet
+    grants an asked rule.
     """
     results: list[tuple[str, str, str]] = []
     allow_set = set(allow)
@@ -131,6 +151,8 @@ def classify_grants(
 
     for grant in allow:
         if grant in sourced or grant in base:
+            continue
+        if grant in override and grant in asked:
             continue
         kind = "unsourced_grant" if grant in override else "orphan_grant"
         results.append((kind, _GRANT_KINDS[kind][0], grant))
@@ -678,6 +700,7 @@ def audit_bot(
         sourced=_sourced_grants(bot, fleet, paths),
         base=set(BASE_TOOLS),
         override=set(bot.tool_permissions.allow),
+        asked=_sourced_ask_rules(bot, fleet, paths),
     )
     findings = [
         Finding(bot.bot_id, kind, sev, f"{grant} {_GRANT_KINDS[kind][1]}")

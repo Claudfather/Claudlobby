@@ -1055,6 +1055,25 @@ def _validate_bots(
                 report, bot_name, "skill", name, grants, allow_side=True
             )
             report.errors.extend(_inert_path_errors(bot_name, "skill", name, grants))
+        # ask_grants and deny_grants (#2476). The reader refuses a list that would
+        # not compose as written, naming its source, and compose_settings_local
+        # above meets the same refusal, so each is reported once. A list that reads
+        # is held to the path rule tool_grants are; a bare 'Bash' is legitimate in
+        # either (ask about, or refuse, every shell command) and is not flagged.
+        for key in ("ask_grants", "deny_grants"):
+            for kind, iterate, equipped in (
+                ("integration", iter_integration_grants, resolve_effective_integrations(bot, paths)),
+                ("skill", iter_skill_grants, effective_skills),
+            ):
+                try:
+                    declared = iterate(paths, equipped, key=key)
+                except ValueError as exc:
+                    refusal = f"bot '{bot_name}': {exc}"
+                    if refusal not in report.errors:
+                        report.errors.append(refusal)
+                    continue
+                for name, rules in declared:
+                    report.errors.extend(_inert_path_errors(bot_name, kind, name, rules))
         for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
             if gperms is None:
                 continue
