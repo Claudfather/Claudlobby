@@ -181,9 +181,10 @@ def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_aut
     from claudlobby import supervision_inventory
     from tests.test_host_owner import terminal
     store,access,grant,reader,clock,_=setup_authority
-    monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{grant.install_directory}\n'))
+    runtime=Path.home()/'.config/systemd/user'; runtime.mkdir(parents=True)  # the one directory the runtime reads (#2610)
+    monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{runtime}\n'))
     flags=['--root',str(access.root),'host','owner','allow-setup','--template',grant.template,'--target-fleet',grant.fleet,
-        '--repository',grant.repository,'--release',grant.release_id,'--install-directory',grant.install_directory]
+        '--repository',grant.repository,'--release',grant.release_id,'--install-directory',str(runtime)]
     terminal(monkeypatch,iter(['NO']))
     assert main(flags)!=0
     assert store.local() is None
@@ -193,6 +194,28 @@ def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_aut
     terminal(monkeypatch,iter(['REVOKE-SETUP']))
     assert main(['--root',str(access.root),'host','owner','revoke-setup'])==0
     assert store.local() is None
+
+
+def test_local_cli_refuses_a_listed_directory_the_runtime_does_not_read_and_records_no_grant(setup_authority,monkeypatch,capsys):
+    from claudlobby.__main__ import main
+    from claudlobby import supervision_inventory
+    from tests.test_host_owner import terminal
+    store,access,grant,*_=setup_authority
+    runtime=Path.home()/'.config/systemd/user'; control=Path.home()/'.config/systemd/user.control'
+    for directory in (runtime,control): directory.mkdir(parents=True)
+    # systemd 252 lists user.control first; a unit there loads, but the runtime reads only the next (#2610).
+    monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{control}\ndirectory\t{runtime}\n'))
+    flags=['--root',str(access.root),'host','owner','allow-setup','--template',grant.template,'--target-fleet',grant.fleet,
+        '--repository',grant.repository,'--release',grant.release_id,'--install-directory',str(control)]
+    terminal(monkeypatch,iter([]))  # no approval is asked for a directory that is refused
+    assert main(flags)==2  # invalid_argument
+    refusal=capsys.readouterr().err
+    assert refusal.startswith('invalid argument:') and str(runtime) in refusal and str(control) not in refusal
+    assert store.local() is None
+    # The directory the refusal names is accepted from the same catalog.
+    terminal(monkeypatch,iter(['ALLOW-SETUP']))
+    assert main(flags[:-1]+[str(runtime)])==0
+    assert store.local().repository==grant.repository
 
 
 @pytest.mark.parametrize('malformed',["CREATE TABLE setup_metadata(singleton INTEGER,version INTEGER)",

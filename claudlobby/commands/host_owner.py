@@ -335,9 +335,13 @@ def dispatch(args):
                         raise CommandFailure("release_mismatch", "setup approval requires this release's sealed CLI")
                     release = _release(paths.root, args.release)
                     # Native search-path observation only; no enrollment or start.
-                    from ..supervision_inventory import Adapter, _catalog
-                    _, _, directories, _, _ = _catalog(Adapter(paths.package).read("svc_inventory_catalog"))
+                    from ..supervision_inventory import Adapter, _catalog, runtime_unit_directory
+                    manager, _, directories, _, _ = _catalog(Adapter(paths.package).read("svc_inventory_catalog"))
                     directory = args.install_directory
+                    runtime = runtime_unit_directory(manager)
+                    if directory != runtime:
+                        raise CommandFailure("invalid_argument", f"invalid argument: --install-directory must be {runtime}, "
+                                             "the one directory the runtime reads units from")
                     if directory not in directories:
                         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
                     grant = setup.candidate(_active_owner(store).principal, template=args.template,
