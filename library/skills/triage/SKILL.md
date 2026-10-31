@@ -22,7 +22,7 @@ Surface untracked work items from unstructured inputs and move them into Notion 
 | Source | MCP Tool | Enrichment |
 |--------|----------|------------|
 | Email | Gmail MCP | Order # → Shopify lookup |
-| Sent mail | Gmail MCP | Inbound email → reply check only, never a source of items |
+| Sent mail | Gmail MCP, search `in:sent` (drafts stay out) | Inbound email → reply check only, never a source of items |
 | Slack alerts | Slack MCP | Error → repo/file context |
 | Meeting notes | Granola MCP | Action items → calendar/tasks |
 
@@ -34,11 +34,12 @@ An inbound email is answered when sent mail has a message dated after it, in its
   `after:YYYY/MM/DD` is only a pre-filter, and a same-day message sent before the email arrived
   does not count
 - An answered email is not proposed as a task; list it under "Answered, waiting on them", one line each
-  with the date of the reply, so the user can see and correct the call
+  with the date and subject of the reply and "same thread" or "same sender only", so the user can see
+  and correct the call
 - If sent mail cannot be checked (tool error, no access), present the email with a note that sent mail
-  was not checked, never as plainly needing action. When the tool gives only a date, a sent message in
-  another thread on the email's own day cannot be ordered against the email, so it does not count; if
-  it is the only candidate reply, present the email with a note that a same-day sent message may
+  was not checked, never as plainly needing action. When the tool gives only a date, sent messages in
+  another thread on the email's own day cannot be ordered against the email, so they do not count; if
+  they are the only candidates, present the email with a note that a same-day sent message may
   already answer it
 
 ## Rules
