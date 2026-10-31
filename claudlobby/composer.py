@@ -2172,10 +2172,10 @@ def composed_text_sources(
 ) -> list[tuple[Path, str]]:
     """``(source file, text)`` for everything a bot is TOLD: the expertise,
     voice and library items its CLAUDE.md composes, the charter a manager
-    composes, and every markdown file of every skill it is linked (the text a
-    skill hands the model). Scripts are left out on purpose: the model runs a
-    script, it does not retype its lines, and a deny rule never gates what a
-    script does itself."""
+    composes, every markdown file of every skill it is linked and the shared
+    partials beside those skills (the text a skill hands the model). Scripts
+    are left out on purpose: the model runs a script, it does not retype its
+    lines, and a deny rule never gates what a script does itself."""
     ctx = _bot_template_context(bot, fleet, paths)
     is_manager = bot.bot_id in fleet.manager_bots()
     out: list[tuple[Path, str]] = []
@@ -2209,6 +2209,8 @@ def composed_text_sources(
     for src in resolve_skill_sources(paths, skills, lambda _msg: None).values():
         for md in sorted(src.rglob("*.md")):
             _add_file(md)
+    for partial in paths.skill_partials().values():
+        _add_file(partial)
     return out
 
 
