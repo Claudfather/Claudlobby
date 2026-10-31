@@ -1316,9 +1316,12 @@ class TestSkillGuardrailGrantValidation:
 class TestAskAndDenyGrantValidation:
     """Skills and integrations declare ask_grants and deny_grants beside tool_grants (#2476).
 
-    Both lists are held to the F3(a) grammar and to the single-slash path rule, as
-    tool_grants are. A bare 'Bash' is not flagged in either: asking about, or
-    refusing, every shell command is legitimate where granting it is over-broad."""
+    Each entry in either list is one Claude Code permission rule. A rule there
+    restricts, so one dropped on the way fails open: a list that would not compose
+    as written is an error naming its source, from validate and from the composer
+    alike. Both lists are held to the single-slash path rule tool_grants are. A
+    bare 'Bash' is not flagged in either: asking about, or refusing, every shell
+    command is legitimate where granting it is over-broad."""
 
     def _env(self, monkeypatch):
         monkeypatch.setenv("GITHUB_PAT", "ghp_test")
@@ -1351,23 +1354,110 @@ class TestAskAndDenyGrantValidation:
         assert after != before, "replace() no-opped: the fixture's worker stanza moved"
         manifest.write_text(after)
 
+    def _refused(self, fleet_dir, kind, name, frontmatter):
+        """Equip worker-1 with one source holding ``frontmatter``; return the errors
+        that name it, its warnings, and the composer's refusal of the bot."""
+        from claudlobby.composer import compose_settings_local
+
+        self._write_source(fleet_dir, kind, name, frontmatter)
+        self._equip_worker(fleet_dir, kind, name)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        with pytest.raises(ValueError) as refusal:
+            compose_settings_local(fleet.bots["worker-1"], fleet, paths)
+        return (
+            [e for e in report.errors if f"{kind} '{name}'" in e],
+            [w for w in report.warnings if f"{kind} '{name}'" in w],
+            str(refusal.value),
+        )
+
     @pytest.mark.parametrize("kind", ["skill", "integration"])
     @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
-    def test_a_malformed_grant_warns_naming_its_source_and_rule(
-        self, fleet_dir, monkeypatch, kind, key
+    @pytest.mark.parametrize(
+        "tail, shape",
+        [(': "Bash(curl *)"\n', "a string"), (":\n  Bash: x\n", "a mapping"), (":\n", "empty")],
+        ids=["string", "mapping", "empty-key"],
+    )
+    def test_a_value_that_is_not_a_list_is_an_error_naming_its_source(
+        self, fleet_dir, monkeypatch, kind, key, tail, shape
     ):
+        # Read as an empty list, such a value composed no rule at all, without a
+        # word: for a deny list that fails open.
         self._env(monkeypatch)
-        self._write_source(fleet_dir, kind, "badgrants", f'{key}:\n  - "rm -rf /"\n')
-        self._equip_worker(fleet_dir, kind, "badgrants")
+        errors, warnings, refusal = self._refused(
+            fleet_dir, kind, "notalist", f"{key}{tail}"
+        )
+        said = f"{kind} 'notalist' {key} is {shape}, not a list"
+        assert len(errors) == 1 and errors[0].startswith(f"bot 'worker-1': {said}"), errors
+        assert warnings == []
+        assert refusal.startswith(said), refusal
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    @pytest.mark.parametrize(
+        "entry, shown",
+        [
+            ("3", "3"),
+            ('["Bash(curl *)"]', "['Bash(curl *)']"),
+            ('"rm -rf /"', "'rm -rf /'"),
+            ('"  Bash(curl *)"', "'  Bash(curl *)'"),
+        ],
+        ids=["number", "nested-list", "not-a-rule", "leading-spaces"],
+    )
+    def test_an_entry_that_is_not_a_rule_is_an_error_naming_its_source(
+        self, fleet_dir, monkeypatch, kind, key, entry, shown
+    ):
+        # Such a deny entry was warned about and still written into
+        # permissions.deny; such an ask entry stopped validate and generate with a
+        # bare TypeError. The whole list is refused, its good rule with it.
+        self._env(monkeypatch)
+        errors, warnings, refusal = self._refused(
+            fleet_dir, kind, "badgrants", f'{key}:\n  - "Bash(wget *)"\n  - {entry}\n'
+        )
+        said = f"{kind} 'badgrants' {key} holds {shown}, which is not a permission rule"
+        assert len(errors) == 1 and errors[0].startswith(f"bot 'worker-1': {said}"), errors
+        assert warnings == []
+        assert refusal.startswith(said), refusal
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    def test_tool_grants_keep_the_lenient_read_and_the_rule_lists_take_any_rule(
+        self, fleet_dir, monkeypatch, kind
+    ):
+        # Controls for the two tests above. A tool_grants value that is not a list
+        # still reads as empty, and a malformed grant still warns: a grant dropped
+        # there only withholds a tool. A rule outside the tool_grants grammar, such
+        # as a path or a domain rule, composes into a deny list, and an empty list
+        # is no error.
+        from claudlobby.composer import compose_settings_local
+
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, kind, "loose", 'tool_grants: "Bash(curl *)"\n')
+        self._write_source(fleet_dir, kind, "odd", 'tool_grants:\n  - "bad grant!"\n')
+        self._write_source(
+            fleet_dir,
+            kind,
+            "wide",
+            'deny_grants:\n  - "Read(//srv/x/**)"\n  - "WebFetch(domain:example.com)"\n'
+            "ask_grants: []\n",
+        )
+        self._equip_worker(fleet_dir, kind, "loose, odd, wide")
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        report = validate(fleet, _make_paths(fleet_dir))
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        names = [f"{kind} '{name}'" for name in ("loose", "odd", "wide")]
+        assert not [e for e in report.errors if any(n in e for n in names)], report.errors
         named = [
             (slug, w)
             for slug, w in report.categorized()
-            if f"{kind} 'badgrants'" in w
+            if slug.startswith("grant-") and any(n in w for n in names)
         ]
-        assert [slug for slug, _w in named] == ["grant-malformed"], report.warnings
-        assert "bot 'worker-1'" in named[0][1] and "grant 'rm -rf /'" in named[0][1]
+        assert [slug for slug, _w in named] == ["grant-malformed"], named
+        assert f"{kind} 'odd'" in named[0][1]
+        permissions = compose_settings_local(fleet.bots["worker-1"], fleet, paths)["permissions"]
+        assert "Read(//srv/x/**)" in permissions["deny"]
+        assert "WebFetch(domain:example.com)" in permissions["deny"]
+        assert "ask" not in permissions
 
     @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
     def test_a_bare_bash_in_ask_or_deny_grants_is_not_flagged_as_broad(
