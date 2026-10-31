@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — triage says why an email counts as answered, names its sent-mail search, and keeps its note for several same-day candidates (#2599)
+
+The triage skill listed an email it counted as answered under "Answered, waiting
+on them" with only the date of the reply, so a reply in the same thread read the
+same as an unrelated message to the same sender. Each line now carries the
+reply's date and subject and says "same thread" or "same sender only". The
+`Sent mail` row names the search, `in:sent`, which also keeps drafts out. For
+mail tools that give only a date, the note about a same-day sent message was
+attached "if it is the only candidate reply", which fits one such message and
+not two; the sentence now reads "if they are the only candidates", so one or
+several same-day sent messages in other threads keep the note.
+
 ### Fixed — content-check reads a just-opened pull request (#2581)
 
 content-check fetched a pull request's head through `refs/pull/N/head`, and a
