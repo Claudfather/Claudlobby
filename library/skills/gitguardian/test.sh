@@ -191,7 +191,7 @@ else no "status: HTTP 200 without a list (rc=$rc): $out"; fi
 answer eu 1 200 '[]'
 WITH=(GITGUARDIAN_API_URL=https://api.eu1.gitguardian.com/)
 run eu status
-if [ "$rc" -eq 0 ] && [ "$(cat "$T/log/url.1")" = "https://api.eu1.gitguardian.com/v1/incidents/secrets?per_page=1" ]; then
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/log/url.1")" = "https://api.eu1.gitguardian.com/v1/incidents/secrets?per_page=1" ] && token_kept; then
   ok "status: GITGUARDIAN_API_URL picks the EU host"
 else no "status: EU host (rc=$rc): $out"; fi
 
