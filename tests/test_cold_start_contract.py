@@ -269,3 +269,51 @@ def test_no_doc_passes_fleet_or_seed_to_staging_or_activation():
         + "\nUse the sealed CLI with --root on every command and no --fleet "
         "(library/protocols/canary-rollout.md)."
     )
+
+
+# --- The switch tables, and `bot remove` (#2575) -------------------------------------
+
+# fleet-yaml-schema.md and system-yaml-schema.md carry the switch tables as prose that
+# claudlobby/switches.py generates, outside the code spans the rule above reads, so this
+# one reads the registry. A command is the text from one `claudlobby` to the next: the
+# --fleet of `host cache warm` must not stand in front of the verbs that follow it. The
+# package is imported inside the test, so a broken import fails this test alone.
+_PROGRAM = re.compile(r"(?=\bclaudlobby\s)")
+
+
+def test_no_switch_line_passes_fleet_or_seed_to_staging_or_activation():
+    from claudlobby import switches
+
+    offenders = [
+        f"{row.key} ({name}): {command.strip()}"
+        for row in switches.SWITCHES
+        for name, line in (("arm", row.arm), ("disarm", row.disarm))
+        for command in _PROGRAM.split(line)
+        if _HOST_WIDE.search(command) and _FLEET_OR_SEED.search(command)
+    ]
+    assert not offenders, (
+        "these switch lines pass --fleet or --seed to a host-wide command, which refuses it:\n  "
+        + "\n  ".join(offenders)
+        + "\nGive each command its own `claudlobby --root <data-root>` and its own flags."
+    )
+
+
+# `bot remove` refuses without an explicit --root and --fleet ("bot remove requires
+# explicit --root and --fleet", claudlobby/commands/bot_remove.py). A span that starts
+# with the verb names it; one with anything before the verb shows a command to run.
+_BOT_REMOVE = re.compile(r"\S.*\bbot\s+remove\b")
+_ROOT = re.compile(r"(?<![\w-])--root(?![\w-])")
+_FLEET = re.compile(r"(?<![\w-])--fleet(?![\w-])")
+
+
+def test_no_doc_shows_bot_remove_without_root_and_fleet():
+    offenders = [
+        f"{doc.relative_to(REPO_ROOT)}:{line}: {command.strip()}"
+        for doc in _command_docs()
+        for line, command in _commands(doc.read_text())
+        if _BOT_REMOVE.search(command) and not (_ROOT.search(command) and _FLEET.search(command))
+    ]
+    assert not offenders, (
+        "these show `bot remove` without both --root and --fleet, which it requires:\n  "
+        + "\n  ".join(offenders)
+    )

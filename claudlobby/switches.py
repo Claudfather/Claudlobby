@@ -643,7 +643,8 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=COMPOSE_BOT,
         config="mcp_direct_launch",
         compose_steps=("claudlobby --root <data-root> --fleet <fleet> host cache warm,"
-                       " then config plan, config diff PLAN_ID, and claudlobby"
+                       " then claudlobby --root <data-root> config plan --release RELEASE_ID,"
+                       " claudlobby --root <data-root> config diff PLAN_ID, and claudlobby"
                        " --root <data-root> host activate PLAN_ID"
                        " --install-directory <native-user-unit-dir>"),
         takes_effect=("it takes effect when that bot next restarts: .mcp.json is"
