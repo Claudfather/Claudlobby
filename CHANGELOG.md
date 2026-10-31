@@ -18,6 +18,52 @@ opened. A run that cannot fetch it says that it checked nothing and should be
 re-run. The pull request is still read only as git objects: nothing from it is
 checked out or run.
 
+### Added — an integration can bring the skills and protocols it needs with `requires:` (#2476)
+
+An integration's frontmatter may now declare
+`requires: {skills: [...], protocols: [...]}`, as a protocol's could already
+declare `requires.skills`. Every bot that equips the integration, by listing it
+under `integrations:` or through auto-pairing with `mcp:`, composes with those
+skills, linked and granted, and those protocols, and with the skills a required
+protocol requires in turn. Deleting the integration removes them again, except
+what the bot declares itself. `config validate` reports a required name that no
+library holds as an error, once for the file rather than once per equipping bot.
+No shipped integration declares `requires:` yet, so no bot's composition changes.
+
+### Fixed — `config validate` checks an auto-paired integration's env contract on a bot with an explicit `integrations:` list (#2476)
+
+The composer adds a bot's explicit `integrations:` list to the integrations
+auto-paired with its `mcp:` servers, but the env check of `config validate` read
+the explicit list alone once one was set, so it skipped the env contract of each
+auto-paired integration doc on such a bot. It now reads the composer's set, as
+do the credential declarations that `host credentials reconcile` and the
+credentials check of `host doctor` count, which come from the same reader. The
+docs that said an explicit list overrides auto-pairing now say that it adds to
+it.
+
+### Fixed — the re-stage hints, two doc lines and a switch row name commands that run (#2575)
+
+`claudlobby brief` and `claudlobby checkin` end two of their refusals (the active
+selection is unavailable; the fleet's bots or manager changed after activation)
+with the command that re-stages the host. They printed `--root ROOT --fleet FLEET
+config plan`. `config plan` covers the whole host, so it refuses `--fleet` ("host
+preparation rejects --fleet and --seed"), and the line left out the `--release`
+it requires, so a reader who typed it saw only "command syntax". The hints now
+print `claudlobby --root ROOT config plan --release RELEASE_ID`, say that `host
+releases` lists the IDs, and send the reader on to `host activate` with the
+reviewed plan. `documentation/validating-bot-changes.md` showed `bot remove`
+without the `--root` it requires, and `documentation/fleet-memory-planning.md`
+named it with no flags; both show `--root` and `--fleet` now. The
+`mcp-direct-launch` row of the switch tables, generated into
+`documentation/fleet-yaml-schema.md` and `documentation/system-yaml-schema.md`,
+put `--fleet` in front of `host cache warm, then config plan, config diff
+PLAN_ID`; each command in the row now carries its own `--root`, `--fleet` stays
+with `host cache warm`, which takes it, and the two tables are regenerated.
+`tests/test_restage_hints.py` runs the command each hint prints, and
+`tests/test_cold_start_contract.py` also fails on a switch row that passes
+`--fleet` or `--seed` to staging or activation, and on a documented command
+that runs `bot remove` without `--root` and `--fleet`.
+
 ### Fixed — an empty `fleet.yaml` is named, with its size, instead of "configuration is invalid" (#2267)
 
 `config validate`, `fleet status` and `context show` refused an empty `fleet.yaml`

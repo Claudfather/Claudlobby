@@ -331,8 +331,9 @@ def _read_tool_grants(md_path: Path) -> list[str]:
 def library_requires(md_path: Path) -> dict[str, list[str]]:
     """Read the generic ``requires.<entity_type>: [names]`` block (spec §10).
 
-    v1 CONSUMER is protocols -> skills, but the schema is deliberately generic
-    so protocols -> guardrails or skills -> mcp follow without a format change.
+    The consumers are protocols -> skills and integrations -> skills and
+    protocols, and the schema is deliberately generic so protocols ->
+    guardrails or skills -> mcp follow without a format change.
     Returns ``{}`` when the file, its frontmatter, or the block is absent, and
     drops a non-list value rather than raising: a malformed block is
     ``validate``'s to report (the ``_read_tool_grants`` posture, one door over).

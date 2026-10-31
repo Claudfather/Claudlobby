@@ -206,12 +206,13 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
         for cv in iter_operator_contract_vars(contract, entry):
             out.append(cv._replace(origin=f"mcp/{entry.name}"))
 
-    # --- Integration doc contracts (auto-pair fallback matches composer) ---
-    integration_names = bot.integrations or [
-        e.name
-        for e in bot.mcp
-        if paths.find_library_file("integrations", e.name, ".md") is not None
-    ]
+    # --- Integration doc contracts ---
+    # The composer's own effective set: the explicit list plus every
+    # auto-paired name, so validate checks the contracts compose stubs.
+    # Imported here because the composer imports this module.
+    from .composer import resolve_effective_integrations
+
+    integration_names = resolve_effective_integrations(bot, paths)
     seen_int: set[str] = set()
     for int_name in integration_names:
         if int_name in seen_int:

@@ -2006,7 +2006,8 @@ def resolve_effective_protocols(
 ) -> list[str]:
     """The protocols a bot is ACTUALLY composed with: the declared list plus
     the system defaults that are available to this fleet (manager-role
-    defaults only for a manager), then the fleet-fit exclusions applied to
+    defaults only for a manager) and the ``requires.protocols`` entries of
+    its effective integrations, then the fleet-fit exclusions applied to
     the FINAL list. ONE definition: the compose path and the plane's
     registry keyframe both call this, so what the registry records is what
     the bot runs with — a keyframe of the declared-only list read every
@@ -2032,6 +2033,16 @@ def resolve_effective_protocols(
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
+    # An integration brings the protocols its ``requires.protocols`` names, so
+    # one ``integrations:`` line equips them and deleting the line removes
+    # them. They join before the exclusions, which apply to them as they do
+    # to a declared protocol.
+    for _name, requires in iter_library_requires(
+        paths, "integrations", resolve_effective_integrations(bot, paths)
+    ):
+        for required in requires.get("protocols", []):
+            if required not in protocol_names:
+                protocol_names.append(required)
     return defaults.resolve_exclusions(protocol_names, facts)
 
 
@@ -2071,7 +2082,8 @@ def resolve_effective_skills(
     ``fleet-ops`` guide, ``briefing`` when it equips a ``briefing:`` stanza,
     the registry's skill defaults for the bot's roles (``status`` for every
     manager, #2010) unless the fleet or the bot switched them off, and every
-    ``requires.skills`` entry of its EFFECTIVE protocols (spec §10).
+    ``requires.skills`` entry of its EFFECTIVE protocols and integrations
+    (spec §10).
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -2111,7 +2123,11 @@ def resolve_effective_skills(
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )
-    for _name, requires in iter_library_requires(paths, "protocols", protocol_names):
+    integration_names = resolve_effective_integrations(bot, paths)
+    for _name, requires in (
+        *iter_library_requires(paths, "protocols", protocol_names),
+        *iter_library_requires(paths, "integrations", integration_names),
+    ):
         for required in requires.get("skills", []):
             if required not in skills:
                 skills.append(required)
@@ -3074,9 +3090,9 @@ def compose_settings_local(
 
     # Layer 5: Skill patterns (auto-derived from the EFFECTIVE skill set —
     # declared, plus every requires.skills entry of the bot's effective
-    # protocols, spec §10 — computed once and shared with layer 5b so a
-    # required skill is granted exactly like a declared one, never only
-    # linked (cycle-1 B8)).
+    # protocols and integrations, spec §10 — computed once and shared with
+    # layer 5b so a required skill is granted exactly like a declared one,
+    # never only linked (cycle-1 B8)).
     effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
 
