@@ -1,0 +1,26 @@
+[
+  {
+    "id": 201,
+    "status": "TRIGGERED",
+    "validity": "valid",
+    "severity": "critical",
+    "occurrences_count": 2,
+    "secret_hash": "fixture-secret-hash-201",
+    "hmsl_hash": "fixture-hmsl-hash-201",
+    "gitguardian_url": "https://dashboard.gitguardian.com/workspace/1/incidents/201",
+    "detector": {"name": "generic_high_entropy_secret", "display_name": "Generic High Entropy Secret"},
+    "occurrences": null
+  },
+  {
+    "id": 202,
+    "status": "TRIGGERED",
+    "validity": "no_checker",
+    "severity": "low",
+    "occurrences_count": 1,
+    "secret_hash": "fixture-secret-hash-202",
+    "hmsl_hash": "fixture-hmsl-hash-202",
+    "gitguardian_url": "https://dashboard.gitguardian.com/workspace/1/incidents/202",
+    "detector": {"name": "fixture_detector", "display_name": "A name\nwith a line break"},
+    "occurrences": null
+  }
+]

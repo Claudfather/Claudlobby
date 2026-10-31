@@ -1,0 +1,14 @@
+[
+  {
+    "id": 203,
+    "status": "TRIGGERED",
+    "validity": "invalid",
+    "severity": "medium",
+    "occurrences_count": 1,
+    "secret_hash": "fixture-secret-hash-203",
+    "hmsl_hash": "fixture-hmsl-hash-203",
+    "gitguardian_url": "https://dashboard.gitguardian.com/workspace/1/incidents/203",
+    "detector": {"name": "github_access_token", "display_name": "GitHub Access Token"},
+    "occurrences": null
+  }
+]

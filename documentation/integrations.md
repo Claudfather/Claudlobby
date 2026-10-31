@@ -400,6 +400,18 @@ Warehouse queries and schema exploration.
 
 **Setup:** RSA key-pair auth via a 7-var env-contract — `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_PRIVATE_KEY` — no dbt or `profiles.yml` involved. **READ ONLY by default:** SELECT queries only, unless a human explicitly approves DDL/DML. See [library/integrations/snowflake.md](../library/integrations/snowflake.md).
 
+## Security
+
+### GitGuardian
+
+Secret incidents: the secrets GitGuardian detected in the repositories it monitors. One entry equips a bot, through GitGuardian's REST API rather than an MCP server:
+
+```yaml
+integrations: [gitguardian]   # library/integrations/gitguardian.md: brings the gitguardian skill and the secret-incidents protocol
+```
+
+**Setup:** set `GITGUARDIAN_API_KEY` in the equipped bot's own `.env` (the bot tier, so no other bot holds it): a personal access token with the `incidents:read` scope only. An EU workspace also sets `GITGUARDIAN_API_URL=https://api.eu1.gitguardian.com`. The skill's helper sends only GET requests on the incident routes, whatever the token's scopes: the bot lists and triages incidents, and the operator closes them in GitGuardian's dashboard. Removing the entry leaves the token's line in the bot's `.env`, so delete that line and revoke the token too. See [library/integrations/gitguardian.md](../library/integrations/gitguardian.md).
+
 ## Integration Patterns
 
 ### Lean Bots (1-2 MCP servers)

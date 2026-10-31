@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `integrations: [gitguardian]` equips a bot to read and triage GitGuardian's secret incidents (#2476)
+
+The new `gitguardian` integration declares `GITGUARDIAN_API_KEY` (secret, bot
+tier) and brings the new `gitguardian` skill and `secret-incidents` protocol
+with `requires:`. The skill's helper sends only GET requests, on the incident
+list and incident routes, to GitGuardian's US or EU API host, and refuses every
+write before a request, whatever the token's scopes. The token reaches curl on
+stdin, never an argument or a file, and no answer prints it or a response body.
+`status` says in one word whether the token may list incidents. `triage` prints
+evidence words and a class for one incident (live, false positive, or one for
+the operator) and never the secret, its path, commit or hash: it reads the
+matched lines from a local checkout and takes them as the secret only when the
+incident's HasMySecretLeaked hash confirms it. The protocol keeps every change
+with the operator, and sends live findings by direct message only. No shipped
+bot equips it.
+
 ### Fixed — content-check reads a just-opened pull request (#2581)
 
 content-check fetched a pull request's head through `refs/pull/N/head`, and a
