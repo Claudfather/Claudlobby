@@ -332,6 +332,7 @@ def _onboarding_docs() -> list[Path]:
     docs = [README, *sorted((REPO_ROOT / "documentation").rglob("*.md"))]
     for top in (".claude/skills", ".agents/skills"):
         docs += sorted((REPO_ROOT / top).glob("*/SKILL.md"))
+    docs += sorted((REPO_ROOT / "library/skills").rglob("*.md"))
     return docs + sorted((REPO_ROOT / "examples").rglob("README.md"))
 
 

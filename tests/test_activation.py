@@ -876,6 +876,24 @@ def test_require_runtime_directory_names_the_one_directory_for_each_native_manag
         activation._require_runtime_directory("FreeBSD", systemd, [systemd])
 
 
+def test_the_off_path_refusal_names_what_moves_systemds_search_path_on_linux_only(monkeypatch):
+    """#2610's review: systemd-analyze derives its path from the caller's environment, so on Linux a runtime
+    directory that is off it is a fact about that environment. launchd's list is literal: no variable is blamed."""
+    home = Path.home()
+    systemd, agents = home / ".config/systemd/user", home / "Library/LaunchAgents"
+    system_agents = Path("/Library/LaunchAgents")
+    values = {"XDG_CONFIG_HOME": "/xdg-config-sentinel", "SYSTEMD_UNIT_PATH": "/unit-path-sentinel"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(state.ActivationRefusal, match="is not on the native search path") as linux:
+        activation._require_runtime_directory("Linux", systemd, [Path("/etc/systemd/user")])
+    assert str(systemd) in str(linux.value) and all(name in str(linux.value) for name in values)
+    assert not any(value in str(linux.value) for value in values.values())  # the variables are named, never their values
+    with pytest.raises(state.ActivationRefusal, match="is not on the native search path") as darwin:
+        activation._require_runtime_directory("Darwin", agents, [system_agents])
+    assert str(agents) in str(darwin.value) and not any(name in str(darwin.value) for name in values)
+
+
 def test_bootstrap_refuses_a_listed_directory_the_runtime_does_not_read_and_the_rerun_succeeds(cold):
     """#2610: systemd lists ~/.config/systemd/user.control first. A unit there loads, but keepalive and
     svc_is_registered read only ~/.config/systemd/user, so activation names that one and changes nothing."""
@@ -934,7 +952,89 @@ def test_bootstrap_refuses_when_the_runtime_directory_is_not_on_the_native_searc
     with pytest.raises(state.ActivationRefusal, match="is not on the native search path") as refused:
         activation.bootstrap_activation(root, "cold", plan.plan_id, runtime, adapter=host)
     assert str(runtime) in str(refused.value)
+    assert "XDG_CONFIG_HOME" in str(refused.value) and "SYSTEMD_UNIT_PATH" in str(refused.value)
     assert not list((root / "state/activations").glob("*/activation.json")) and host.starts == []
+
+
+@pytest.mark.parametrize("flow", ["bootstrap", "upgrade"])
+@pytest.mark.parametrize("case", ["listed-but-not-read", "off-the-path"])
+def test_a_directory_activation_refuses_is_refused_before_it_waits_for_the_lock(cold, tmp_path, case, flow):
+    """#2610's review: the check sat under the lock, which waits up to ACTIVATION_WAIT_S for running jobs, so a
+    wrong directory was refused only after that wait. Held exclusively, the lock refuses a second taker at once,
+    so a refusal that names the directory came from a check that ran before the lock."""
+    root, release, source_plan, host = cold
+    runtime, control = Path.home() / ".config/systemd/user", Path.home() / ".config/systemd/user.control"
+    xdg = tmp_path / "xdg-config/systemd"
+    if flow == "bootstrap":
+        plan, activate, activation_id = source_plan, activation.bootstrap_activation, "cold"
+    else:
+        activation.bootstrap_activation(root, "cold", source_plan.plan_id, runtime, adapter=host)
+        builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
+                                    effects={"units": source_plan.effects["units"]})
+        for item in source_plan.effects["units"]:
+            builder.file(Path(item["source"]), source_plan.blob(item["sha256"]), mode=item["mode"])
+        plan, activate, activation_id = builder.seal(), activation.upgrade_activation, "upgrade"
+    host.search_path, directory = (([control, runtime], control) if case == "listed-but-not-read" else
+                                   ([xdg / "user.control", xdg / "user"], runtime))
+    with state.locked_activation(root):
+        with pytest.raises(state.ActivationRefusal) as refused:
+            activate(root, activation_id, plan.plan_id, directory, adapter=host)
+        # The control: a directory the runtime reads meets the lock itself, which refuses as another activation.
+        host.search_path = [control, runtime]
+        with pytest.raises(state.ActivationError, match="another host activation holds the lock") as busy:
+            activate(root, activation_id, plan.plan_id, runtime, adapter=host)
+    assert not isinstance(busy.value, state.ActivationRefusal)
+    message = str(refused.value)
+    if case == "listed-but-not-read":
+        assert f"must be {runtime}," in message and str(control) not in message
+    else:
+        assert str(runtime) in message and "XDG_CONFIG_HOME" in message and "SYSTEMD_UNIT_PATH" in message
+    assert not (root / "state/activations" / activation_id / "activation.json").exists()
+
+
+def test_fleet_setup_refuses_a_listed_directory_and_the_rerun_with_the_runtime_directory_succeeds(
+        cold, monkeypatch, capsys, tmp_path):
+    """#2610's review: a refused directory leaves the copied declaration and no activation record. The same
+    command with the directory the refusal names, the same --config and no extra flag, then activates."""
+    from claudlobby import resources
+    from claudlobby.__main__ import main
+    from claudlobby.command_result import CommandOutput
+    from claudlobby.commands import _setup_parsers, releases
+
+    root, release, plan, host = cold
+    runtime, control = Path.home() / ".config/systemd/user", Path.home() / ".config/systemd/user.control"
+    host.search_path = [control, runtime]  # systemd 252's order
+    for name in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE"):
+        monkeypatch.delenv(name, raising=False)  # fleet setup refuses a generated bot's shell
+    monkeypatch.setattr(resources, "selected_cli", lambda: release.cli_path)
+    # Real staging needs a composed host: the cold plan stands in for it, as team_setup's stage does.
+    monkeypatch.setattr(releases, "_config_plan",
+                        lambda _args, _root: CommandOutput(releases._plan_data(plan), release.release_id))
+    real = activation.bootstrap_activation
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *a: real(*a, adapter=host))
+    monkeypatch.setattr(_setup_parsers, "uuid4", lambda: "cold")  # the fake host reads the activation "cold"
+    authored = tmp_path / "authored.yaml"
+    authored.write_text("fleet:\n  name: example\n")
+
+    def fleet_setup(directory, *flags):
+        return main([*flags, "--root", str(root), "--fleet", "example", "fleet", "setup",
+                     "--config", str(authored), "--install-directory", str(directory)])
+
+    assert fleet_setup(control) == 4  # conflict
+    out, err = capsys.readouterr()
+    assert out == "" and err.splitlines() == [
+        f"conflict: activation refused: the install directory must be {runtime}, the one directory the runtime "
+        "reads units from; no activation record was created",
+        "no activation record was created; correct the refusal and rerun the same command"]
+    assert not list((root / "state/activations").glob("*/activation.json"))
+    assert not control.exists() and not list(runtime.iterdir())
+    assert host.starts == [] and not [name for name, _ in host.calls if name.startswith("svc_activation_")]
+    assert (root / "local/example/fleet.yaml").read_bytes() == authored.read_bytes()  # kept: activation is never undone
+    assert fleet_setup(runtime, "--json") == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["ok"] is True and body["data"]["config_copied"] is False
+    assert body["data"]["recorded_activation"]["status"] == "active"
+    assert (runtime / "claudlobby-keepalive.service").is_file() and not control.exists()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the systemd branch of svc_is_registered")

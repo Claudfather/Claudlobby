@@ -218,6 +218,26 @@ def test_local_cli_refuses_a_listed_directory_the_runtime_does_not_read_and_reco
     assert store.local().repository==grant.repository
 
 
+def test_local_cli_says_why_a_runtime_directory_missing_from_the_search_path_is_refused(setup_authority,monkeypatch,capsys):
+    """#2610's review: with XDG_CONFIG_HOME set, systemd's whole list moves and ~/.config/systemd/user leaves it. The
+    refusal is activation's own, naming the directory and the variables, and asks for no approval."""
+    from claudlobby.__main__ import main
+    from claudlobby import supervision_inventory
+    from tests.test_host_owner import terminal
+    store,access,grant,*_=setup_authority
+    runtime=Path.home()/'.config/systemd/user'; xdg=Path.home()/'xdg-config/systemd'
+    runtime.mkdir(parents=True)
+    monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{xdg}/user.control\ndirectory\t{xdg}/user\n'))
+    flags=['--root',str(access.root),'host','owner','allow-setup','--template',grant.template,'--target-fleet',grant.fleet,
+        '--repository',grant.repository,'--release',grant.release_id,'--install-directory',str(runtime)]
+    answers=iter(['ALLOW-SETUP']); shown=terminal(monkeypatch,answers)
+    assert main(flags)==2  # invalid_argument
+    refusal=capsys.readouterr().err
+    assert refusal.startswith('invalid argument:') and str(runtime) in refusal
+    assert 'XDG_CONFIG_HOME' in refusal and 'SYSTEMD_UNIT_PATH' in refusal
+    assert store.local() is None and shown.getvalue()=='' and next(answers)=='ALLOW-SETUP'  # no prompt shown, no answer taken
+
+
 @pytest.mark.parametrize('malformed',["CREATE TABLE setup_metadata(singleton INTEGER,version INTEGER)",
     "CREATE VIEW setup_metadata AS SELECT 1 AS singleton,1 AS version",
     "CREATE TABLE setup_metadata(wrong INTEGER)"])
