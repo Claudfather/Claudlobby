@@ -1,0 +1,34 @@
+{
+  "id": 101,
+  "status": "TRIGGERED",
+  "validity": "no_checker",
+  "severity": "high",
+  "occurrences_count": 1,
+  "secret_hash": "fixture-secret-hash-101",
+  "hmsl_hash": "fixture-hmsl-hash-101",
+  "gitguardian_url": "https://dashboard.gitguardian.com/workspace/1/incidents/101",
+  "detector": {"name": "github_access_token", "display_name": "GitHub Access Token"},
+  "occurrences": [
+    {
+      "id": 1001,
+      "incident_id": 101,
+      "kind": "realtime",
+      "sha": "set by test.sh",
+      "filepath": "set by test.sh",
+      "change_type": "addition",
+      "presence": "present",
+      "source": {"type": "github", "full_name": "example/fixture-repo", "url": "https://example.invalid/fixture-repo"},
+      "matches": [
+        {
+          "name": "apikey",
+          "indice_start": 37,
+          "indice_end": 37,
+          "pre_line_start": null,
+          "pre_line_end": null,
+          "post_line_start": 1,
+          "post_line_end": 1
+        }
+      ]
+    }
+  ]
+}
