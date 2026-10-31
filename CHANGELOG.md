@@ -22,6 +22,16 @@ incident's HasMySecretLeaked hash confirms it. The protocol keeps every change
 with the operator, and sends live findings by direct message only. No shipped
 bot equips it.
 
+### Added — the two Gmail integration docs say how each backend's search treats drafts (#2607)
+
+`library/integrations/gws.md` and `library/integrations/gmail.md` each gain a
+line on drafts in search. The self-hosted server's search tool describes its
+results as including drafts unless the query excludes them (`workspace-mcp`
+v2.3.0), and Google's reference for the native connector's `search_threads`
+says drafts are excluded by default. Both references list `in:sent`, so by
+them a query with that term returns no drafts on either backend. Each line
+quotes the reference it relies on.
+
 ### Changed — triage says why an email counts as answered, names its sent-mail search, and keeps its note for several same-day candidates (#2599)
 
 The triage skill listed an email it counted as answered under "Answered, waiting
