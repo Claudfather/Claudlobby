@@ -3159,7 +3159,9 @@ def compose_settings_local(
     # rule prompts in every permission mode, auto included, even where an allow
     # rule also matches, so no library grant can allow what a source asks about.
     # The fleet grants an asked rule by naming it, exactly, under
-    # tool_permissions.allow, which drops it from the ask list.
+    # tool_permissions.allow, which drops it from the ask list. A list that would
+    # not compose as written raises ValueError naming its source
+    # (loader._read_tool_grants), so no rule of it reaches the settings.
     fleet_allow = set(bot.tool_permissions.allow)
     ask_patterns: list[str] = []
     _append_unique(
