@@ -41,7 +41,8 @@ pass here and still send a reader to a 404 after the next Claudron move. A URL n
 revision than the ref is listed and not checked, since the checkout holds one revision.
 
 **What it skips, and says so.** Files that quote a path as it was, not as it is: everything under
-``documentation/plans/``, any file whose name holds an ISO date, ``CHANGELOG.md``,
+``documentation/plans/``, any file whose name holds an ISO date, ``CHANGELOG.md`` and the fragments
+in ``changelog.d/`` that a roll-up moves into it,
 ``tests/fixtures/``, ``.test_durations``, and this check's own module and test. The output counts
 the skipped files by rule, and the files that are not UTF-8 text. A run that finds no reference at
 all fails: a gate that reads nothing has not passed.
@@ -181,7 +182,7 @@ def skipped(path: str) -> str | None:
         return "plan"
     if _DATED.search(path.rsplit("/", 1)[-1]):
         return "dated"
-    if path == "CHANGELOG.md":
+    if path == "CHANGELOG.md" or path.startswith("changelog.d/"):
         return "changelog"
     if path.startswith("tests/fixtures/"):
         return "fixture"
