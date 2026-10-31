@@ -304,7 +304,7 @@ def test_preview_discloses_host_scope_without_effect(tmp_path, monkeypatch):
 
 
 def _preflight_fixture(tmp_path, monkeypatch, *, registry_preflight=False):
-    from claudlobby import activation_enrollment, activation_state, active_config
+    from claudlobby import activation, activation_enrollment, activation_state, active_config
     from claudlobby import config_plan, context, releases, supervision_inventory
     from claudlobby.commands import _helpers
     from claudlobby.commands import host
@@ -363,6 +363,10 @@ def _preflight_fixture(tmp_path, monkeypatch, *, registry_preflight=False):
     monkeypatch.setattr(supervision_inventory, "_catalog", lambda *_: ("Linux", "", (), set(), {}))
     monkeypatch.setattr(activation_enrollment, "selected_bot_entry", lambda *_: {"installed": str(root / "units/worker.service"),
                                     "target": "worker.service"})
+    if not registry_preflight:
+        # The suite's own silencer (PLANE_EMIT_DISABLED=1) is a value the
+        # registry-scan refusal names, as it would in an operator's shell.
+        monkeypatch.setattr(activation, "registry_scan_refusal", lambda _contexts: None)
     args = Namespace(root=str(root), bot="worker", to="target", from_fleet="source",
                      apply=False, cleanup_source=False, force=False)
     return args, host_input, (source_dir / "fleet.yaml", target_dir / "fleet.yaml")

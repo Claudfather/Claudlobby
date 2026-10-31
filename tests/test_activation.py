@@ -635,6 +635,11 @@ def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False, registry_pr
     # The scan owner separately proves assembly/commit semantics; this authored
     # output fixture checks ordering and the real operation-context SQL reader.
     monkeypatch.setattr(activation, "_registry_scan", host.registry_scan)
+    if not registry_preflight:
+        # The suite's own silencer (PLANE_EMIT_DISABLED=1) is a value this
+        # refusal names, as it would in an operator's shell; it is faked with
+        # the scan it guards.
+        monkeypatch.setattr(activation, "registry_scan_refusal", lambda _contexts: None)
     return root, release, plan, host
 
 

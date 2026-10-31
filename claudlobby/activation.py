@@ -139,6 +139,27 @@ def _registry_scan(context):
     return run_generate_scan(context.paths, context.fleet, require_commit=True)
 
 
+def registry_scan_refusal(contexts) -> str | None:
+    """Every reason the registry scan would refuse for these fleets, or None.
+
+    The scan runs in the bots start phase, after every unit was paused, but its
+    silenced and opted-out refusals are reads (activation_scan_refusal in
+    plane/registry_emit.py), so callers ask before they record, pause or stop
+    anything. One answer names every fleet, so one edit and one new plan clear
+    them all; a reason the fleets share, such as an exported value, appears once.
+    """
+    from .plane.registry_emit import activation_scan_refusal
+    reasons = (activation_scan_refusal(context.paths, context.fleet) for context in contexts)
+    return "; ".join(dict.fromkeys(reason for reason in reasons if reason)) or None
+
+
+def _preflight_registry_scan(contexts) -> None:
+    """Refuse, before any record or pause, an activation whose registry scan would refuse."""
+    reason = registry_scan_refusal(contexts)
+    if reason:
+        raise ActivationRefusal(reason)
+
+
 def _registry_ready(plan, declarations, package) -> list[dict]:
     from .operation_context import OperationContextError, bind_task_context
     # Re-read exact reviewed declarations, never a nearby/local discovery scan.
@@ -273,7 +294,8 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
                 starts[str(declaration.source)] = (declaration, item, start)
                 if item["phase"] == "bots" and os.path.lexists(declaration.working_directory):
                     raise ActivationError("bootstrap refuses pre-existing bot runtime directories")
-        rank, _ = _roster(plan, declarations, package)
+        rank, contexts = _roster(plan, declarations, package)
+        _preflight_registry_scan(contexts)
         from .plane.owner_service import preflight as owner_service_preflight
         owner_service_preflight(starts)
         if sum(item["phase"] == "ingest" and item["enroll"] for _, item in declarations) != 1:
@@ -1181,6 +1203,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                               if unit.installed and unit.target not in candidate_targets
                               and not is_unit_template(unit.target))
         rank, contexts = _roster(plan, candidates, package)
+        _preflight_registry_scan(contexts)
         # Standing handoff refusals (manager coverage, stopped or uninstalled
         # assignees, retired owners, unparsable sections) must not wait for a
         # quiesced fleet. This live read proves only those conditions; the

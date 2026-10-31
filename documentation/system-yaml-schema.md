@@ -171,7 +171,7 @@ leftover flag without anyone maintaining a list.
 | `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
-| `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `registry-scan` | **on** | composition | fleet .env | none — activation refuses PLANE_EMIT_ENABLED=0 in the fleet-tier .env before it stops any bot |
 | `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
 | `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
@@ -577,7 +577,8 @@ used throughout the codebase, and it's worth keeping them distinct:
    says exactly `0`, and say so loudly when it does. No opt-in self-gate
    remains among the composed hooks. clauDNA's model-spending `CLAUDNA_*` gates
    are composed from `bots.<name>.claudna`. `PLANE_EMIT_ENABLED` still
-   reaches only the generate-time registry scan, now as an opt-out;
+   reaches only the registry scan, which activation requires: a `0` makes
+   activation refuse before it records or stops anything;
    `PLANE_EMIT_DISABLED=1` is the one silencer for every runtime door.
    Remember the carrier split: a **timer** unit sources no `.env`, so the
    composer stamps the tier's resolved value as an `Environment=` line — which
