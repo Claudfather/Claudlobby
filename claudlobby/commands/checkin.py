@@ -103,8 +103,8 @@ def _scope(args):
     if destination.paths.seed:
         raise CommandFailure("conflict", "seed configuration has no active check-in selection")
     root = shlex.quote(str(destination.paths.root))
-    restage = (f"run claudlobby --root {root} --fleet {shlex.quote(destination.fleet.name)} "
-               "config plan, then host activate the reviewed plan")
+    restage = (f"run claudlobby --root {root} config plan --release RELEASE_ID "
+               "(host releases lists the IDs), then host activate the reviewed plan")
     selected = read_selection(destination.paths.root)
     if selected is None:
         raise CommandFailure("conflict", "active check-in selection is unavailable",
