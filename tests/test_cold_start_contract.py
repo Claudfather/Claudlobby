@@ -317,3 +317,34 @@ def test_no_doc_shows_bot_remove_without_root_and_fleet():
         "these show `bot remove` without both --root and --fleet, which it requires:\n  "
         + "\n  ".join(offenders)
     )
+
+
+# --- The unit directory is chosen by name, never by position (#2610) -----------------
+# `host setup` returns the native manager's whole search path in the manager's own order.
+# On Linux systemd's first entry is ~/.config/systemd/user.control, which it keeps for
+# configuration made through its D-Bus API: a unit there loads, but keepalive and
+# svc_is_registered read only ~/.config/systemd/user. A guide that takes the first
+# entry installs into the one directory the runtime never reads.
+_FIRST_LISTED = re.compile(r"install_directories[\"')\]]*\[0\]")
+
+
+def _onboarding_docs() -> list[Path]:
+    docs = [README, *sorted((REPO_ROOT / "documentation").rglob("*.md"))]
+    for top in (".claude/skills", ".agents/skills"):
+        docs += sorted((REPO_ROOT / top).glob("*/SKILL.md"))
+    return docs + sorted((REPO_ROOT / "examples").rglob("README.md"))
+
+
+def test_no_onboarding_doc_takes_the_first_directory_host_setup_lists():
+    offenders = [
+        f"{doc.relative_to(REPO_ROOT)}:{number}: {line.strip()}"
+        for doc in _onboarding_docs()
+        for number, line in enumerate(doc.read_text().splitlines(), 1)
+        if _FIRST_LISTED.search(line)
+    ]
+    assert not offenders, (
+        "these pick `data.install_directories[0]`, which on Linux is ~/.config/systemd/user.control:\n  "
+        + "\n  ".join(offenders)
+        + "\nSelect the directory the runtime reads by name and require it in the list "
+        "(documentation/getting-started.md)."
+    )

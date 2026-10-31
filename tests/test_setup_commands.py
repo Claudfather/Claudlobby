@@ -1,5 +1,9 @@
 """Cold setup commands delegate effects to the sealed release and activation owners."""
 
+import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -333,6 +337,69 @@ def test_host_setup_checks_native_prerequisites_and_assembles_without_selection(
         setup.dispatch(SimpleNamespace(public_command="host.setup", root=str(root), fleet=None,
                                        seed=False, wheel="wheel", dependency_lock="lock",
                                        wheelhouse="wheelhouse", interpreter="python"))
+
+
+def _host_setup_data(tmp_path, monkeypatch, catalog):
+    """What `host setup` returns over a fake native manager that prints CATALOG."""
+    from claudlobby import release_install, resources, supervision_inventory
+
+    root = tmp_path / "new-data"
+    monkeypatch.setattr(resources, "get_resources", lambda: SimpleNamespace(artifact_id="artifact"))
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _: SimpleNamespace(read=lambda _: catalog))
+    monkeypatch.setattr(setup.shutil, "which", lambda _: "/fixture/bin")
+    monkeypatch.setattr(release_install, "assemble_release", lambda *_: SimpleNamespace(
+        release_id="r-" + "a" * 64, cli_path=root / "state/releases/cli",
+        inputs=SimpleNamespace(artifact_id="artifact")))
+    return setup.dispatch(SimpleNamespace(public_command="host.setup", root=str(root), fleet=None,
+                                          seed=False, wheel="wheel", dependency_lock="lock",
+                                          wheelhouse="wheelhouse", interpreter="python")).data
+
+
+_SELECTION = re.compile(r"USER_UNIT_DIR=\$\(python3\.11 -c \\\n\s*'([^']+)'")
+
+
+def _documented_selection(doc):
+    """The Python a guide has the reader run to choose USER_UNIT_DIR, as the reader pastes it."""
+    found = _SELECTION.findall((Path(__file__).resolve().parent.parent / doc).read_text())
+    assert len(found) == 1, f"{doc} has {len(found)} USER_UNIT_DIR=$(python3.11 -c '...') selections, not 1"
+    return found[0]
+
+
+@pytest.mark.parametrize("doc", ["documentation/getting-started.md", "documentation/first-team-setup.md"])
+def test_documented_unit_directory_is_the_one_the_runtime_reads_whatever_host_setup_lists_first(
+        doc, tmp_path, monkeypatch):
+    """#2610: on Linux `host setup` lists systemd's whole search path in its own order, and its first
+    entry is ~/.config/systemd/user.control, which the runtime never reads."""
+    selection, home, run = _documented_selection(doc), Path.home(), tmp_path / "run"
+
+    def chosen(catalog):
+        data = _host_setup_data(tmp_path, monkeypatch, catalog)
+        listing = tmp_path / "host-setup.json"
+        listing.write_text(json.dumps({"ok": True, "data": data}))
+        return data, subprocess.run([sys.executable, "-c", selection, str(listing), str(home)],
+                                    capture_output=True, text=True, timeout=60)
+
+    systemd = [home / ".config/systemd/user.control", run / "systemd/user.control", run / "systemd/transient",
+               run / "systemd/generator.early", home / ".config/systemd/user", Path("/etc/xdg/systemd/user"),
+               Path("/etc/systemd/user"), run / "systemd/user", Path("/run/systemd/user"),
+               run / "systemd/generator", home / ".local/share/systemd/user",
+               Path("/usr/local/share/systemd/user"), Path("/usr/share/systemd/user"),
+               Path("/usr/local/lib/systemd/user"), Path("/usr/lib/systemd/user"), run / "systemd/generator.late"]
+    data, result = chosen("manager\tLinux\n" + "".join(f"directory\t{p}\n" for p in systemd))
+    assert data["install_directories"] == [str(p) for p in systemd]
+    assert data["install_directories"][0] == str(home / ".config/systemd/user.control")
+    assert (result.returncode, result.stdout) == (0, f"{home}/.config/systemd/user\n"), result.stderr
+
+    launchd = [home / "Library/LaunchAgents", Path("/Library/LaunchAgents"), Path("/System/Library/LaunchAgents")]
+    data, result = chosen("manager\tDarwin\ndomain\tgui/501\n" + "".join(f"directory\t{p}\n" for p in launchd)
+                          + "PID\tStatus\tLabel\n")
+    assert data["manager"] == "Darwin"
+    assert (result.returncode, result.stdout) == (0, f"{home}/Library/LaunchAgents\n"), result.stderr
+
+    # With XDG_CONFIG_HOME set, systemd's whole list moves and the runtime's directory is not on it.
+    xdg = tmp_path / "xdg-config/systemd"
+    _, result = chosen(f"manager\tLinux\ndirectory\t{xdg}/user.control\ndirectory\t{xdg}/user\n")
+    assert result.returncode != 0 and result.stdout == ""
 
 
 def test_host_setup_names_assembly_cause_and_retained_directory_without_subprocess_output(tmp_path, monkeypatch):
