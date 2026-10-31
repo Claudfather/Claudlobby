@@ -635,6 +635,7 @@ class TestScan:
             ("documentation/architecture/system-map-2026-07-30.md", "dated"),
             ("documentation/baselines/naked-bot-2026-09-30.json", "dated"),
             ("CHANGELOG.md", "changelog"),
+            ("changelog.d/fix-1234-short-name.md", "changelog"),
             ("tests/fixtures/claudron_v090/README.md", "fixture"),
             (".test_durations", "data"),
             ("claudlobby/claudron_refs.py", "own"),
@@ -645,6 +646,7 @@ class TestScan:
             ("documentation/decisions/index-md-convention.md", None),
             ("documentation/plans.md", None),
             ("documentation/runbooks/plans/x.md", None),
+            ("tests/changelog.d/x.md", None),
         ],
     )
     def test_dated_records_and_logs_are_skipped_the_rest_is_read(self, path, rule):
