@@ -28,6 +28,9 @@
 # (--config -), written by the printf builtin, so it is on no argv and in no
 # file. No answer prints the token or a response body: each outcome is a fixed
 # sentence, and triage (triage.py) prints evidence words only.
+
+# Trace off first: under bash -x or SHELLOPTS=xtrace it would print the token.
+set +x
 set -euo pipefail
 
 GG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -155,8 +158,9 @@ gg_get() {
   local url=$1 out
   gg_allowed "$url" || return 7
   GG_CURL=0
+  # -q first: curl reads no ~/.curlrc, so a flag in it cannot join this call.
   out=$(printf 'header = "Authorization: Token %s"\n' "$GITGUARDIAN_API_KEY" |
-    curl --config - --silent --proto =https --max-redirs 0 \
+    curl -q --config - --silent --proto =https --max-redirs 0 \
       --connect-timeout 10 --max-time 30 \
       --dump-header - --write-out '\n%{http_code}' --url "$url" 2>/dev/null) || GG_CURL=$?
   GG_CODE=${out##*$'\n'}

@@ -64,4 +64,4 @@ The `tool_grants` above allow the read commands in the form shown, so they run w
 
 - Never print, echo or pass on `GITGUARDIAN_API_KEY`. The helper is its only reader.
 - Never reach GitGuardian another way: no hand-written `curl`, no other client.
-- Never copy a repository, path, line, commit or hash from GitGuardian into a report, a message or a doc: incident numbers and class words only.
+- Never copy a repository, path, line, commit or hash from GitGuardian into a report, a message or a doc: incident numbers and class words only. Only the operator's direct message may also carry each incident's dashboard link.

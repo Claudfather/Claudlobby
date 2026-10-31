@@ -9,7 +9,7 @@ GitGuardian records each secret it detects as an incident. You read incidents th
 
 **On every step:**
 1. **No secret in your hands.** Reach GitGuardian only through `.claude/skills/gitguardian/gitguardian_api.sh`, never with a hand-written `curl` or another client. Never open a detected secret's lines yourself, and never print the token.
-2. **Nothing exploitable leaves the session.** Reports, messages, issues and docs carry incident numbers and class words only: no repository, path, line, commit, hash or value.
+2. **Nothing exploitable leaves the session.** Reports, messages, issues and docs carry incident numbers and class words only: no repository, path, line, commit, hash or value. Only the operator's direct message may also carry each incident's dashboard link.
 3. **Readiness first.** Start each pass with `status`. Any answer but `reachable` is a block: report it with that word, and never retry with another token.
 4. **No changes.** The helper refuses every write. The operator closes, resolves and reopens incidents in GitGuardian's dashboard.
 
