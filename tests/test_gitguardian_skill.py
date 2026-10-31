@@ -159,6 +159,9 @@ def test_no_write_or_value_route_appears(path):
 
 
 def test_one_curl_call_and_it_sets_no_method_and_sends_no_body():
+    """The argument list only. curl also reads a config on stdin, which could
+    set a method or a second URL; test.sh's token_kept requires that config to
+    be the one header line."""
     text = SCRIPT.read_text()
     sites = [m.start() for m in re.finditer(r"\bcurl\s+-q\s+--", text)]
     assert len(sites) == 1, f"expected one curl call, starting with -q, found {len(sites)}"
@@ -278,6 +281,12 @@ def test_the_cap_on_hashes_ends_a_search_with_note_budget(monkeypatch, capsys):
     tail = "ours=no path_class=source occurrences=1/1"
     assert triage(cap) == f"{stem} placeholder=cannot_check {tail} note=budget\n"
     assert triage(cap + 1) == f"{stem} placeholder=no {tail}\n"
+
+
+def test_the_shipped_cap_is_1500_hashes():
+    """MAX_HASHES as shipped. The test above lowers it and sees the search stop
+    there, so the search reads it; this pins the value it reads."""
+    assert _load_triage().MAX_HASHES == 1500
 
 
 @pytest.mark.parametrize(

@@ -93,17 +93,20 @@ run() {
 calls() { cat "$T/log/calls" 2>/dev/null || echo 0; }
 
 # token_kept: each request got the token on stdin, as its header line, and no
-# argv, stdout or stderr holds it. A run that made no request fails it, so it
-# cannot pass vacuously.
+# argv, stdout or stderr holds it. That line is the whole of stdin, byte for
+# byte: curl reads stdin as config, so a line more, such as request = or url =,
+# would change the call while argv_is still passes. A run that made no request
+# fails it, so it cannot pass vacuously.
 token_kept() {
-  local n i
+  local n i want
   n=$(calls)
   [ "$n" -ge 1 ] || return 1
   [[ $out != *"$TOKEN"* && $err != *"$TOKEN"* ]] || return 1
+  want=$(printf 'header = "Authorization: Token %s"\n' "$TOKEN"; printf x)
   i=1
   while [ "$i" -le "$n" ]; do
     [[ $(cat "$T/log/argv.$i") != *"$TOKEN"* ]] || return 1
-    [[ $(cat "$T/log/stdin.$i") == *"header = \"Authorization: Token $TOKEN\""* ]] || return 1
+    [ "$(cat "$T/log/stdin.$i"; printf x)" = "$want" ] || return 1
     i=$((i + 1))
   done
   return 0
@@ -188,7 +191,7 @@ else no "status: HTTP 200 without a list (rc=$rc): $out"; fi
 answer eu 1 200 '[]'
 WITH=(GITGUARDIAN_API_URL=https://api.eu1.gitguardian.com/)
 run eu status
-if [ "$rc" -eq 0 ] && [ "$(cat "$T/log/url.1")" = "https://api.eu1.gitguardian.com/v1/incidents/secrets?per_page=1" ]; then
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/log/url.1")" = "https://api.eu1.gitguardian.com/v1/incidents/secrets?per_page=1" ] && token_kept; then
   ok "status: GITGUARDIAN_API_URL picks the EU host"
 else no "status: EU host (rc=$rc): $out"; fi
 

@@ -145,13 +145,13 @@ def _file_at(checkouts: list[Path], sha: str, rev: str, path: str) -> tuple[str,
 
 def _find(text: str, first: int, last: int, length: int, target: str, budget: list[int]) -> tuple[str | None, str]:
     """The substring on the file's lines FIRST..LAST whose hash is TARGET and
-    whose length in the patch is LENGTH, or None and why there is none."""
+    whose length in the stored content is LENGTH, or None and the reason."""
     lines = text.split("\n")
     if not 1 <= first <= last <= len(lines):
         return None, "no_match"
     breaks = last - first
-    # In the patch, each line the secret runs on to starts with a +, - or space
-    # that the file does not hold.
+    # The stored content looks like a patch, where each line the secret runs on
+    # to starts with a +, - or space that the file does not hold.
     width = length - breaks
     head = lines[first - 1]
     if len(head) > MAX_LINE:

@@ -279,7 +279,11 @@ Files in `runtime/bots/<name>/` are composed from a configuration plan. Hand-edi
 
 ### Every PR body: a Rollout check
 
-CI's `rollout-check / Rollout check` fails a PR whose body has no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its four lines into the body and fill each in: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md` or `CHANGELOG.md` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
+CI's `rollout-check / Rollout check` fails a PR whose body has no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its four lines into the body and fill each in: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md`, `CHANGELOG.md` or `changelog.d/**` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` or `changelog.d/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
+
+### Changelog
+
+Entries go in `changelog.d/<head branch, each / as ->.md`, never in `CHANGELOG.md`.
 
 ## Key Commands
 
