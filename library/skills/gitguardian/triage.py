@@ -14,11 +14,12 @@ repository or hash:
 - class: live (validity valid, or ours names a variable), false_positive (a
   placeholder that is not valid), or needs_operator (anything else).
 
-Where the secret's bytes come from. An occurrence's indice_start and indice_end
-count characters in the patch GitGuardian stored, not in the file (the API
-reference says so of the occurrence content route), so they give the secret's
-length but not its column. Its post_line_* (pre_line_* for a deletion) are the
-file's lines, counted from 1. So the bytes come from a local checkout holding
+Where the secret's bytes come from. The API reference calls the matches of the
+occurrence content route character offsets inside the stored content, which
+looks like a patch; triage uses only the difference of an occurrence's
+indice_start and indice_end, as the secret's length, never its column. An
+occurrence's post_line_* (pre_line_* for a deletion) are the file's lines,
+counted from 1. So the bytes come from a local checkout holding
 the commit (git cat-file): the substring of that length, on those lines, whose
 HasMySecretLeaked hash equals the incident's hmsl_hash. With no checkout holding
 the commit, or no such substring, placeholder reads cannot_check and note=
@@ -72,6 +73,16 @@ def hmsl(secret: str) -> str:
     return hashlib.scrypt(
         secret.encode("utf-8"), salt=PEPPER, n=2048, r=8, p=1, dklen=32
     ).hex()
+
+
+def _session_hash(value: str) -> str | None:
+    """The hash of a session variable's VALUE, or None for one that cannot be
+    encoded: a byte that is not UTF-8 reads as a lone surrogate, and no secret
+    GitGuardian read from git holds one."""
+    try:
+        return hmsl(value)
+    except UnicodeEncodeError:
+        return None
 
 
 def is_placeholder(value: str) -> bool:
@@ -245,7 +256,7 @@ def _triage(argv: list[str]) -> int:
         for name, value in os.environ.items():
             if value and not is_placeholder(value):
                 held.setdefault(value, []).append(name if _NAME.fullmatch(name) else "unnamed")
-        names = sorted({n for value, ns in held.items() if hmsl(value) == target for n in ns})
+        names = sorted({n for value, ns in held.items() if _session_hash(value) == target for n in ns})
         several = any(isinstance(o.get("matches"), list) and len(o["matches"]) > 1 for o in occurrences)
         if names:
             ours = ",".join(names)

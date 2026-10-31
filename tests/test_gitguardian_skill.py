@@ -25,6 +25,7 @@ real token out of it.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -58,6 +59,9 @@ DENY_RULES = ("Bash(curl *gitguardian.com*)", "Bash(wget *gitguardian.com*)")
 needs_jq = pytest.mark.skipif(
     shutil.which("jq") is None,
     reason="jq not installed — the helper parses every answer with it",
+)
+needs_scrypt = pytest.mark.skipif(
+    not hasattr(hashlib, "scrypt"), reason="this Python has no hashlib.scrypt"
 )
 
 
@@ -97,10 +101,22 @@ def test_skill_suite_passes_hermetically(hermetic_run):
         "gg_get refuses /v1/incidents/secrets/101/ignore before any request",
         "gg_get sends a listed route",
         "incidents: a next link to a write route is refused before a second request",
-        "triage: a placeholder in a fixture reads false_positive",
-        "triage: a value this session holds reads live and names its variable",
-        "triage: bytes the hash does not confirm are never read as the secret",
-        "triage: no output names a secret, path, commit, repository or hash",
+        pytest.param(
+            "triage: a placeholder in a fixture reads false_positive",
+            marks=needs_scrypt,
+        ),
+        pytest.param(
+            "triage: a value this session holds reads live and names its variable",
+            marks=needs_scrypt,
+        ),
+        pytest.param(
+            "triage: bytes the hash does not confirm are never read as the secret",
+            marks=needs_scrypt,
+        ),
+        pytest.param(
+            "triage: no output names a secret, path, commit, repository or hash",
+            marks=needs_scrypt,
+        ),
     ],
     ids=[
         "reachable", "insufficient-scope", "write-verb", "write-route", "listed-route",
@@ -111,7 +127,8 @@ def test_skill_suite_passes_hermetically(hermetic_run):
 def test_the_load_bearing_checks_ran(hermetic_run, check):
     """The suite skips its triage block where python3 has no hashlib.scrypt,
     and a skip prints no failure, so 0 failed alone could hide one. Each of
-    these must have run and passed."""
+    these must have run and passed; the triage ones skip, as the hash test
+    does, where this Python has no scrypt."""
     assert f"ok   - {check}" in hermetic_run.stdout, hermetic_run.stdout
 
 
@@ -143,8 +160,8 @@ def test_no_write_or_value_route_appears(path):
 
 def test_one_curl_call_and_it_sets_no_method_and_sends_no_body():
     text = SCRIPT.read_text()
-    sites = [m.start() for m in re.finditer(r"\bcurl\s+--", text)]
-    assert len(sites) == 1, f"expected one curl call, found {len(sites)}"
+    sites = [m.start() for m in re.finditer(r"\bcurl\s+-q\s+--", text)]
+    assert len(sites) == 1, f"expected one curl call, starting with -q, found {len(sites)}"
     call = text[sites[0]:text.index('--url "$url"', sites[0])]
     assert "--config -" in call and "--proto =https" in call, call
     flags = re.findall(
@@ -164,7 +181,7 @@ def _load_triage():
     return module
 
 
-@pytest.mark.skipif(not hasattr(hashlib, "scrypt"), reason="this Python has no hashlib.scrypt")
+@needs_scrypt
 def test_the_hash_is_the_one_gitguardian_publishes():
     """triage.py takes a candidate as the secret only when its hash equals the
     incident's hmsl_hash, so one wrong parameter would make every check read
@@ -214,6 +231,53 @@ def test_an_unexpected_error_prints_a_fixed_line(monkeypatch, capsys):
     assert module.main([]) == 6
     out = capsys.readouterr().out
     assert out == "unknown: triage.py stopped on RuntimeError, and printed nothing it read.\n"
+
+
+@needs_scrypt
+def test_the_cap_on_hashes_ends_a_search_with_note_budget(monkeypatch, capsys):
+    """MAX_HASHES bounds the hashes one triage spends on candidates. Lower it to
+    CAP and put the secret where it takes CAP + 1 hashes to reach: triage stops
+    with note=budget. With CAP + 1 the same incident finds the secret, so the
+    cap alone decided the first answer. The file read is replaced, so no git
+    runs, and the environment is empty, so no session value is hashed."""
+    module = _load_triage()
+    cap = 3
+    secret = "".join(("q1w2", "e3r4", "t5y6"))
+    match = {
+        "indice_start": cap,
+        "indice_end": cap + len(secret),
+        "post_line_start": 1,
+        "post_line_end": 1,
+    }
+    occurrence = {
+        "sha": "0" * 40,
+        "filepath": "src/app.py",
+        "change_type": "addition",
+        "matches": [match],
+    }
+    incident = {
+        "id": 101,
+        "validity": "no_checker",
+        "hmsl_hash": module.hmsl(secret),
+        "occurrences_count": 1,
+        "occurrences": [occurrence],
+    }
+    # The secret starts after CAP other positions on its line.
+    monkeypatch.setattr(module, "_file_at", lambda *args: ("ok", "a" * cap + secret + "\n"))
+    monkeypatch.setattr(module, "os", types.SimpleNamespace(environ={}))
+
+    def triage(max_hashes: int) -> str:
+        monkeypatch.setattr(module, "MAX_HASHES", max_hashes)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(incident)))
+        rc = module.main(["checkout"])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        return out
+
+    stem = "triage: incident=101 class=needs_operator validity=no_checker"
+    tail = "ours=no path_class=source occurrences=1/1"
+    assert triage(cap) == f"{stem} placeholder=cannot_check {tail} note=budget\n"
+    assert triage(cap + 1) == f"{stem} placeholder=no {tail}\n"
 
 
 @pytest.mark.parametrize(

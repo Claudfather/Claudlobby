@@ -73,19 +73,22 @@ fail_at() {
 }
 
 # run CASE ARGS...: the helper with the stand-in and the token, against the
-# answers of CASE, plus any NAME=VALUE in WITH. Sets out, err and rc; the log of
-# its requests is $T/log.
+# answers of CASE, plus any NAME=VALUE in WITH, and started by the words in VIA
+# (bash -x, say) when there are any. Sets out, err and rc; the log of its
+# requests is $T/log.
 WITH=()
+VIA=()
 run() {
   local case=$1
   shift
   rm -rf "$T/log"
   mkdir -p "$T/log" "$T/answers/$case"
   out=$(env GG_LOG="$T/log" GG_ANSWERS="$T/answers/$case" PATH="$T/bin:$PATH" \
-    GITGUARDIAN_API_KEY="$TOKEN" ${WITH[@]+"${WITH[@]}"} "$SH" "$@" 2>"$T/err")
+    GITGUARDIAN_API_KEY="$TOKEN" ${WITH[@]+"${WITH[@]}"} ${VIA[@]+"${VIA[@]}"} "$SH" "$@" 2>"$T/err")
   rc=$?
   err=$(cat "$T/err")
   WITH=()
+  VIA=()
 }
 calls() { cat "$T/log/calls" 2>/dev/null || echo 0; }
 
@@ -104,6 +107,18 @@ token_kept() {
     i=$((i + 1))
   done
   return 0
+}
+
+# argv_is N URL: request N gave curl exactly these arguments, in this order, as
+# the stand-in recorded them, one to a line: -q first (curl reads no ~/.curlrc
+# only then), the fixed flags, and --url with URL last. Nothing may be added.
+argv_is() {
+  local got want
+  got=$(cat "$T/log/argv.$1" 2>/dev/null; printf x)
+  want=$(printf '%s\n' -q --config - --silent --proto =https --max-redirs 0 \
+    --connect-timeout 10 --max-time 30 --dump-header - \
+    --write-out '\n%{http_code}' --url "$2"; printf x)
+  [ "$got" = "$want" ]
 }
 
 # --- status: readiness, in one request ---
@@ -139,6 +154,12 @@ if [[ $argv == *$'\n--config\n-\n'* && $argv == *$'\n--proto\n=https\n'* ]] \
    && [[ $argv != *$'\n-X\n'* && $argv != *$'\n--request\n'* && $argv != *$'\n-d\n'* ]] \
    && [[ $argv != *$'\n--data'* && $argv != *$'\n--json\n'* && $argv != *$'\n-F\n'* ]]; then
   ok "status: curl reads its header from --config -, https only, with no method or body flag"
+else no "status: curl argv:$argv"; fi
+
+#    and the whole argv is pinned, for the checks above name only the flags a
+#    write would use: -q, the fixed flags, --url and the URL, and nothing more
+if argv_is 1 "https://api.gitguardian.com/v1/incidents/secrets?per_page=1"; then
+  ok "status: curl gets -q first, the fixed flags and the URL, and no flag more"
 else no "status: curl argv:$argv"; fi
 
 # 4. every other answer: its word and exit, a fixed sentence, never the body
@@ -185,6 +206,24 @@ run none status
 if [ "$rc" -eq 7 ] && [[ $out == refused:* ]] && [ "$(calls)" -eq 0 ] && [[ $out != *"$TOKEN"* ]]; then
   ok "status: a key holding a space is refused with no request"
 else no "status: a key holding a space (rc=$rc): $out"; fi
+
+# 7. a shell trace must not print the token: bash -x, or SHELLOPTS=xtrace in the
+#    environment, traces the line that writes the header unless the helper turns
+#    tracing off first. A trace on stderr shows tracing was on, and the word
+#    shows the run still ran, so neither check passes by running nothing.
+answer trace 1 200 '[]'
+VIA=(bash -x)
+run trace status
+if [ "$rc" -eq 0 ] && [[ $out == reachable:* ]] && [ -n "$err" ] && token_kept; then
+  ok "status: under bash -x the trace prints no token, and the run reads reachable"
+else no "status: bash -x (rc=$rc, ${#err} bytes of trace): $out"; fi
+
+WITH=(SHELLOPTS=xtrace)
+VIA=(bash)
+run trace status
+if [ "$rc" -eq 0 ] && [[ $out == reachable:* ]] && [ -n "$err" ] && token_kept; then
+  ok "status: an exported SHELLOPTS=xtrace prints no token, and the run reads reachable"
+else no "status: SHELLOPTS=xtrace (rc=$rc, ${#err} bytes of trace): $out"; fi
 
 # --- writes: refused before any request, whatever the token's scopes ---
 
@@ -254,6 +293,12 @@ if [ "$rc" -eq 0 ] && [ "$(calls)" -eq 3 ] \
    && [[ $out == *"open incidents: 4" ]] && [ "$lines" -eq 5 ] && token_kept; then
   ok "incidents: TRIGGERED then ASSIGNED, following the next link to the last page"
 else no "incidents: pages (rc=$rc, $(calls) requests, $lines lines): $out"; fi
+
+if argv_is 1 "https://api.gitguardian.com/v1/incidents/secrets?status=TRIGGERED&per_page=100" \
+   && argv_is 2 "https://api.gitguardian.com/v1/incidents/secrets?cursor=cD0x&per_page=100" \
+   && argv_is 3 "https://api.gitguardian.com/v1/incidents/secrets?status=ASSIGNED&per_page=100"; then
+  ok "incidents: each of the three requests gets -q first, the fixed flags and its URL, and no flag more"
+else no "incidents: curl argv: $(tr '\n' ' ' < "$T/log/argv.1")"; fi
 
 if [[ $out == *"detector=A name with a line break"* && $out != *fixture-secret-hash* && $out != *fixture-hmsl-hash* ]]; then
   ok "incidents: a line break in a field stays on its line, and no hash is printed"
@@ -371,6 +416,14 @@ print(hashlib.scrypt(sys.stdin.buffer.read(), salt=hashlib.sha256(b"GitGuardian"
   WITH=(GG_TEST_OURS="$OURS")
   verdict ours "class=live validity=invalid placeholder=no ours=GG_TEST_OURS path_class=docs occurrences=1/1" \
     "a value this session holds reads live and names its variable" --checkout "$REPO"
+
+  # In the C locale Python reads a byte that is not UTF-8 as a lone surrogate,
+  # which cannot be hashed. Triage skips that value, the verdict stays the one
+  # above, and the variable that does hold the secret, set after it, is still read.
+  incident badenv invalid "$OURS" docs/setup.md 3
+  WITH=(GG_TEST_BAD=$'\xff' GG_TEST_OURS="$OURS" LC_ALL=C)
+  verdict badenv "class=live validity=invalid placeholder=no ours=GG_TEST_OURS path_class=docs occurrences=1/1" \
+    "a session value that is not UTF-8 is skipped, and the others are still read" --checkout "$REPO"
 
   incident review unknown "$KEY" src/app.py 2
   verdict review "class=needs_operator validity=unknown placeholder=no ours=no path_class=source occurrences=1/1" \
