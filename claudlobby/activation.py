@@ -668,7 +668,7 @@ def _require_preserved_handoff(bot_dir, *, not_before=None):
     try:
         _fresh_self_handoff(bot_dir, not_before=not_before)
     except BotLifecycleError as exc:
-        raise ActivationRefusal("preserve-state activation requires a fresh verified session handoff; "
+        raise ActivationRefusal("activation requires a fresh verified session handoff; "
                                 "inspect the live session and saved handoff, then retry the same activation "
                                 "with --resume; existing handoff attempts are never resent") from exc
 
@@ -679,7 +679,7 @@ def _bot_label(unit):
 
 
 def _handoff_request_time(unit, handed_off, old_bots):
-    """Time a preserved handoff request on the clock that stamps its handoff file (#2528).
+    """Time a handoff request on the clock that stamps its handoff file (#2528).
 
     A refusal names the bot and its handoff directory, and the bots this activation has
     already handed off (``handed_off``, their targets), whose handoffs a retry keeps (#2547).
@@ -696,7 +696,7 @@ def _handoff_request_time(unit, handed_off, old_bots):
                    "and does not request them again, and refuses if one is more than "
                    f"{_HANDOFF_FRESH_S} s old when it stops the sessions" if names
                    else "no bot has been handed off in this activation")
-        raise ActivationRefusal(f"preserve-state activation cannot time its handoff request to {_bot_label(unit)} "
+        raise ActivationRefusal(f"activation cannot time its handoff request to {_bot_label(unit)} "
                                 f"in that bot's handoff directory {bot_dir / '.claude'}, so no handoff was "
                                 "requested from it; inspect that directory, then retry the same activation "
                                 f"with --resume; {earlier}") from exc
@@ -746,10 +746,8 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
         if not isinstance(effects, dict):
             raise ActivationError("legacy bot handoff has an unknown effect; inspect its session before repair")
         unknown = [target for target, result in effects.items() if result is None]
-        if unknown and not preserve:
-            raise ActivationError("legacy bot handoff has an unknown effect; inspect its session before repair")
         for target in unknown:
-            requested = handoff_request_started_ns(record, target) if preserve else None
+            requested = handoff_request_started_ns(record, target)
             if requested is None or target not in old_bots:
                 raise ActivationRefusal("bot handoff has no bound capture witness; inspect its live session "
                                         "before operator recovery; an unknown handoff is never resent")
@@ -772,42 +770,47 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
                 continue
             if preserve and not restart:
                 raise ActivationRefusal("preserved stopped bot acquired a live private server before handoff")
-            requested = _handoff_request_time(unit, handed_off, old_bots) if preserve else None
+            requested = _handoff_request_time(unit, handed_off, old_bots)
             store.record_handoff(activation_id, target=target, result=None,
-                                 **({"request_started_ns": requested} if preserve else {}))
+                                 request_started_ns=requested)
             result = adapter.call("svc_activation_handoff", unit.declaration.working_directory,
                                   unit.declaration.source.stem, _original_bot_tmpdir(unit),
-                                  *(("explicit",) if preserve else ()), timeout=45)
-            if preserve:
-                marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
-                if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
-                    raise ActivationRefusal("preserved bot handoff did not produce a verified save; "
-                                            "inspect its live session and saved handoff, then retry the same activation "
-                                            "with --resume; existing handoff attempts are never resent")
-                _require_preserved_handoff(unit.declaration.working_directory,
-                    not_before=requested if marker == ["handoff-saved"] else None)
-            elif result.returncode:
-                raise ActivationError("legacy bot handoff did not complete")
+                                  "explicit", timeout=45)
+            marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+            if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
+                raise ActivationRefusal("bot handoff did not produce a verified save; "
+                                        "inspect its live session and saved handoff, then retry the same activation "
+                                        "with --resume; existing handoff attempts are never resent")
+            _require_preserved_handoff(unit.declaration.working_directory,
+                not_before=requested if marker == ["handoff-saved"] else None)
             store.record_handoff(activation_id, target=target, result="handed_off")
             handed_off.append(target)
         store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
-            {"old_bots": sorted(sockets), "handoff": (
-                "explicit-save-and-fresh-capture-verified-or-stopped" if preserve else
-                "existing-door-attempted-or-private-server-absent")}))
+            {"old_bots": sorted(sockets), "handoff":
+                "explicit-save-and-fresh-capture-verified-or-stopped"}))
     if "sessions_quiesced" not in completed:
-        if preserve:
-            pending_pause = read_activation(root, activation_id).body["pending"] == "sessions_quiesced"
-            for target, unit in old_bots.items():
-                if record.body["intent"]["bot_states"][target]["disposition"] == "restart":
-                    if pending_pause:
-                        try:
-                            assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
-                                             target=target, socket_path=sockets[target])
-                        except RuntimeEvidenceError:
-                            pass  # A target still awaiting its stop needs a fresh capture.
-                        else:
-                            continue  # Its first stop was fenced by the durable begin below.
-                    _require_preserved_handoff(unit.declaration.working_directory)
+        record = read_activation(root, activation_id)
+        effects = record.body.get("handoff_effects") or {}
+        pending_pause = read_activation(root, activation_id).body["pending"] == "sessions_quiesced"
+        for target, unit in old_bots.items():
+            if pending_pause:
+                try:
+                    assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
+                                     target=target, socket_path=sockets[target])
+                except RuntimeEvidenceError:
+                    pass  # A target still awaiting its stop needs handoff evidence.
+                else:
+                    continue  # Its first stop was fenced by the durable begin below.
+            effect = effects.get(target)
+            if effect not in {"handed_off", "server_absent"}:
+                raise ActivationRefusal("bot has no completed handoff evidence before native pause; "
+                                        "inspect its live session before operator recovery; an unknown handoff is never resent")
+            restart = preserve and record.body["intent"]["bot_states"][target]["disposition"] == "restart"
+            if effect == "handed_off" or restart:
+                if effect == "handed_off" and handoff_request_started_ns(record, target) is None:
+                    raise ActivationRefusal("bot handoff has no bound capture witness; inspect its live session "
+                                            "before operator recovery; an old handoff is never resent")
+                _require_preserved_handoff(unit.declaration.working_directory)
         store.begin(activation_id, "sessions_quiesced")
         # An older record has no witness; any server it left running refuses.
         effects = read_activation(root, activation_id).body.get("handoff_effects") or {}

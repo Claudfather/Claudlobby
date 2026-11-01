@@ -2233,8 +2233,11 @@ def preserved_handoff_case(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("marker", ["handoff-saved", "handoff-skipped:recent"])
-def test_preserved_activation_requires_explicit_marker_and_verified_capture(preserved_handoff_case, marker):
+@pytest.mark.parametrize("preserve", [True, False])
+def test_preserved_activation_requires_explicit_marker_and_verified_capture(preserved_handoff_case, marker, preserve):
     case = preserved_handoff_case
+    if not preserve:
+        case.body["intent"].pop("preserve_bot_state")
     _preserve_capture(case.bot_dir, kind="shell-below")
     case.outcome[1] = marker
     if marker == "handoff-saved":
@@ -2254,9 +2257,12 @@ def test_preserved_activation_requires_explicit_marker_and_verified_capture(pres
     ("handoff-skipped:recent", 0, "reference-only"),
     ("handoff-saved", 0, "stale-capture"),
 ])
+@pytest.mark.parametrize("preserve", [True, False])
 def test_preserved_activation_refuses_unverified_handoff_and_never_resends_unknown(
-        preserved_handoff_case, marker, rc, kind):
+        preserved_handoff_case, marker, rc, kind, preserve):
     case = preserved_handoff_case
+    if not preserve:
+        case.body["intent"].pop("preserve_bot_state")
     _preserve_capture(case.bot_dir, kind=kind)
     case.outcome[:] = [rc, marker]
     with pytest.raises(state.ActivationRefusal, match="inspect.*session.*handoff"):
@@ -2446,7 +2452,7 @@ def test_preserved_handoff_refusal_names_the_bot_and_the_bots_already_handed_off
     the directory, and says the first bot was handed off and that a retry keeps its handoff."""
     case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
     assert _refused_while_unwritable(case, "bravo") == (
-        "preserve-state activation cannot time its handoff request to example/bravo in that bot's handoff "
+        "activation cannot time its handoff request to example/bravo in that bot's handoff "
         f"directory {case.dirs['bravo'] / '.claude'}, so no handoff was requested from it; inspect that "
         "directory, then retry the same activation with --resume; already handed off in this activation: "
         "example/alpha; a retry keeps those handoffs and does not request them again, and refuses if one is "
@@ -2564,19 +2570,35 @@ def test_witnessed_running_bot_now_absent_requires_saved_capture(preserved_hando
     assert case.calls == []
 
 
-def test_default_activation_keeps_best_effort_handoff_semantics(preserved_handoff_case):
+def test_default_activation_refuses_best_effort_timeout_without_stopping(preserved_handoff_case):
     case = preserved_handoff_case
     case.body["intent"].pop("preserve_bot_state")
+    _preserve_capture(case.bot_dir)
     case.outcome[:] = [0, "Handoff timed out after 30s"]
-    with pytest.raises(case.BotPauseReached):
+    with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
         case.run()
-    assert case.body["handoff_effects"][case.target] == "handed_off"
-    assert len(case.calls[0][1]) == 3
+    assert case.body["handoff_effects"][case.target] is None
+    assert case.calls[0][1][-1] == "explicit"
+    assert "sessions_quiesced" not in case.steps
+
+
+def test_old_default_completed_handoff_without_witness_refuses_before_stop(preserved_handoff_case):
+    case = preserved_handoff_case
+    case.body["intent"].pop("preserve_bot_state")
+    case.body["completed"].append("sessions_handed_off")
+    case.body["handoff_effects"][case.target] = "handed_off"
+    _preserve_capture(case.bot_dir)
+    with pytest.raises(state.ActivationRefusal, match="no bound capture witness"):
+        case.run()
+    assert case.steps == [] and case.calls == []
 
 
 @pytest.mark.parametrize("kind", ["reference-only", "stale-capture", "pre-attempt"])
-def test_preserved_unknown_handoff_stays_held_without_request_bound_capture(preserved_handoff_case, kind):
+@pytest.mark.parametrize("preserve", [True, False])
+def test_preserved_unknown_handoff_stays_held_without_request_bound_capture(preserved_handoff_case, kind, preserve):
     case = preserved_handoff_case
+    if not preserve:
+        case.body["intent"].pop("preserve_bot_state")
     _preserve_capture(case.bot_dir)
     case.outcome[:] = [3, "handoff-timeout"]
     with pytest.raises(state.ActivationRefusal):
@@ -2589,7 +2611,7 @@ def test_preserved_unknown_handoff_stays_held_without_request_bound_capture(pres
     assert "sessions_quiesced" not in case.steps
 
 
-@pytest.mark.parametrize("preserve,witness", [(False, True), (True, False)])
+@pytest.mark.parametrize("preserve,witness", [(False, False), (True, False)])
 def test_unbound_unknown_handoff_remains_nonresumable(preserved_handoff_case, preserve, witness):
     case = preserved_handoff_case
     case.body["handoff_effects"][case.target] = None
@@ -2605,10 +2627,14 @@ def test_unbound_unknown_handoff_remains_nonresumable(preserved_handoff_case, pr
     assert case.calls == []
 
 
-def test_delayed_known_handoff_rechecks_fresh_capture_before_native_pause(preserved_handoff_case):
+@pytest.mark.parametrize("preserve", [True, False])
+def test_delayed_known_handoff_rechecks_fresh_capture_before_native_pause(preserved_handoff_case, preserve):
     case = preserved_handoff_case
+    if not preserve:
+        case.body["intent"].pop("preserve_bot_state")
     case.body["completed"].append("sessions_handed_off")
     case.body["handoff_effects"][case.target] = "handed_off"
+    case.body["handoff_requests"] = {case.target: {"started_at_ns": 1}}
     _preserve_capture(case.bot_dir, kind="stale-capture")
     with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
         case.run()
@@ -2616,12 +2642,16 @@ def test_delayed_known_handoff_rechecks_fresh_capture_before_native_pause(preser
 
 
 @pytest.mark.parametrize("quiet,fresh", [(True, False), (False, False), (False, True)])
+@pytest.mark.parametrize("preserve", [True, False])
 def test_interrupted_bot_pause_reuses_capture_only_for_verified_quiet_target(
-        preserved_handoff_case, monkeypatch, quiet, fresh):
+        preserved_handoff_case, monkeypatch, quiet, fresh, preserve):
     case = preserved_handoff_case
+    if not preserve:
+        case.body["intent"].pop("preserve_bot_state")
     case.body["completed"].append("sessions_handed_off")
     case.body["pending"] = "sessions_quiesced"
     case.body["handoff_effects"][case.target] = "handed_off"
+    case.body["handoff_requests"] = {case.target: {"started_at_ns": 1}}
     _preserve_capture(case.bot_dir, kind="capture" if fresh else "stale-capture")
     observations = []
     def observed(_adapter, **kwargs):
@@ -2699,3 +2729,41 @@ def test_first_activation_owner_hook_errors_keep_activation_contract(cold, monke
     with pytest.raises(state.ActivationError, match="explicit recovery"):
         activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert not host.starts
+
+
+def test_ordinary_handoff_stop_reloads_persisted_effect_and_rechecks_capture(preserved_handoff_case, monkeypatch):
+    from copy import deepcopy
+    case = preserved_handoff_case
+    case.body["intent"].pop("preserve_bot_state")
+    _preserve_capture(case.bot_dir)
+    # The real store returns new record snapshots rather than mutating a cached body.
+    monkeypatch.setattr(activation, "read_activation", lambda *_: SimpleNamespace(
+        body=deepcopy(case.body), status="activating"))
+    verify = activation._require_preserved_handoff
+    verified = []
+    def check(path, **kwargs):
+        verify(path, **kwargs)
+        verified.append(path)
+        _preserve_capture(path, kind="stale-capture")
+    monkeypatch.setattr(activation, "_require_preserved_handoff", check)
+    case.on_call[0] = lambda: _preserve_capture(case.bot_dir)
+    with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+        case.run()
+    assert len(verified) == 1 and len(case.calls) == 1
+    assert case.body["handoff_effects"][case.target] == "handed_off"
+    assert "sessions_quiesced" not in case.steps
+
+
+@pytest.mark.parametrize("effects", [None, {}, {"unrelated": "handed_off"}])
+def test_ordinary_completed_handoff_without_target_evidence_refuses_before_native_pause(
+        preserved_handoff_case, effects):
+    case = preserved_handoff_case
+    case.body["intent"].pop("preserve_bot_state")
+    case.body["completed"].append("sessions_handed_off")
+    if effects is None:
+        del case.body["handoff_effects"]
+    else:
+        case.body["handoff_effects"] = effects
+    with pytest.raises(state.ActivationRefusal, match="no completed handoff evidence"):
+        case.run()
+    assert case.steps == [] and case.calls == []

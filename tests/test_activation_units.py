@@ -178,7 +178,7 @@ def _prepare_upgrade_abort(store, inventory, phases, plan, adapter):
     store.complete("cutover", "producers_paused", evidence_digest=paused.digest)
     store.arm_handoff_evidence("cutover")
     store.begin("cutover", "sessions_handed_off")
-    store.record_handoff("cutover", target="member.service", result=None)
+    store.record_handoff("cutover", target="member.service", result=None, request_started_ns=1)
     database = inventory.data_root / "state/plane/plane.db"
     database.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(database) as conn:
@@ -484,16 +484,29 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(
         activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
     monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
     # One old bot's exact private server; only the native stop owner ends it.
+    from tests.test_activation import _preserve_capture
+    bot_dir = next(u.declaration.working_directory for u in inventory.units
+                   if u.declaration.scope == "bot")
+    if interrupt != "unknown":
+        _preserve_capture(bot_dir)
     live = {"member.service": True}
     recorded = adapter.call
 
     def call(function, *args, timeout=None):
+        if function == "svc_activation_quiet":
+            assert timeout == 30
+            return subprocess.CompletedProcess([function, *args],
+                3 if live["member.service"] else 0, "inactive\tno-cgroup-witness\n", "")
         if function not in ("svc_activation_handoff", "svc_activation_stop_private_server"):
             return recorded(function, *args, timeout=timeout)
         adapter.calls.append((function, args[1]))
         if function == "svc_activation_stop_private_server":
             live["member.service"] = False
-        return subprocess.CompletedProcess([function, *args], 0, "", "")
+        if function == "svc_activation_handoff":
+            assert args[-1] == "explicit"
+            _preserve_capture(bot_dir)
+        return subprocess.CompletedProcess([function, *args], 0,
+            "handoff-saved\n" if function == "svc_activation_handoff" else "", "")
 
     adapter.call = call
     monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda _unit: "/private-fixture-tmux")
@@ -522,7 +535,7 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(
             store.complete("cutover", "producers_paused", evidence_digest=producers.digest)
             store.arm_handoff_evidence("cutover")
             store.begin("cutover", "sessions_handed_off")
-            store.record_handoff("cutover", target="member.service", result=None)
+            store.record_handoff("cutover", target="member.service", result=None, request_started_ns=1)
             if interrupt != "unknown":
                 store.record_handoff("cutover", target="member.service", result="handed_off")
         if interrupt in ("sessions", "ingest"):
@@ -536,8 +549,8 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(
     before = len(adapter.calls)
     if interrupt == "unknown":
         # The handoff keystrokes may or may not have reached the session.
-        assert activation.resumable_running_step(state.read_activation(root, "cutover")) is None
-        with pytest.raises(state.ActivationError, match="lacks a durable handoff"):
+        assert activation.resumable_running_step(state.read_activation(root, "cutover")) == "sessions_handed_off"
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
             activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
         assert adapter.calls[before:] == [] and live["member.service"]
         assert state.read_activation(root, "cutover").body["pending"] == "sessions_handed_off"

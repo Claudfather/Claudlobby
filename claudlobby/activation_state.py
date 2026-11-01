@@ -165,12 +165,14 @@ _RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 
 
 def handoff_request_started_ns(record: ActivationRecord, target: str) -> int | None:
-    """A preserve-only request witness can admit proof reconciliation, never a resend."""
+    """An exact request witness can admit proof reconciliation, never a resend."""
     intent = record.body["intent"]
     states, requests = intent.get("bot_states"), record.body.get("handoff_requests")
-    if (intent.get("preserve_bot_state") is not True or not isinstance(states, dict)
-            or not isinstance(states.get(target), dict)
-            or states[target].get("disposition") != "restart" or not isinstance(requests, dict)):
+    if not isinstance(requests, dict):
+        return None
+    if intent.get("preserve_bot_state") is True and (
+            not isinstance(states, dict) or not isinstance(states.get(target), dict)
+            or states[target].get("disposition") != "restart"):
         return None
     request = requests.get(target)
     if (not isinstance(request, dict) or set(request) != {"started_at_ns"}
@@ -427,7 +429,7 @@ class ActivationStore:
 
     def record_handoff(self, activation_id: str, *, target: str, result: str | None,
                        request_started_ns: int | None = None) -> ActivationRecord:
-        """Fence one old bot's handoff; a preserve request also binds late capture proof."""
+        """Fence one old bot's handoff; each request also binds late capture proof."""
         self.assert_locked()
         record = read_activation(self.root, activation_id)
         effects = record.body.get("handoff_effects")
@@ -438,16 +440,16 @@ class ActivationStore:
                 or record.body["pending"] != "sessions_handed_off"
                 or not target or not admitted):
             raise ActivationError("session handoff evidence is not the admitted effect")
-        if result is None and record.body["intent"].get("preserve_bot_state") is True:
+        if result is None:
             requests = record.body.setdefault("handoff_requests", {})
             if (not isinstance(requests, dict) or target in requests
                     or type(request_started_ns) is not int or request_started_ns <= 0):
-                raise ActivationError("preserved handoff requires one immutable request witness")
+                raise ActivationError("handoff requires one immutable request witness")
             requests[target] = {"started_at_ns": request_started_ns}
             if handoff_request_started_ns(record, target) is None:
-                raise ActivationError("preserved handoff request differs from the restart intent")
+                raise ActivationError("handoff request differs from the admitted intent")
         elif request_started_ns is not None:
-            raise ActivationError("handoff request witness is admitted only with a preserved send intent")
+            raise ActivationError("handoff request witness is admitted only with a send intent")
         effects[target] = result
         return self._save(record)
 
