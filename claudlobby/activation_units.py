@@ -387,8 +387,24 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
     if (phase not in PHASES or record.body["pending"] != _PAUSE_STEPS[phase]
             or "adoption_abort" in record.body or "upgrade_abort" in record.body):
         raise ActivationError("unit pause phase is not the admitted activation step")
-    pause = load_unit_pause(store, activation_id)
     adapter = adapter or Adapter()
+    pause = _park_phase(store, activation_id, phase, adapter)
+    identifier = journal_id(activation_id, phase)
+    scheduled = _scheduled_services(pause.enrollment, pause.phases)
+    for unit in pause.units(phase):
+        if is_unit_template(unit["target"]):
+            continue  # parked above; no instance can start without its file
+        timer_service = pause.enrollment["manager"] == "Linux" and unit["target"] in scheduled
+        _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
+              _native_saved(unit, scheduled, allow_failed=timer_service), str(os.getpid()),
+              *(("timer-owned",) if timer_service else ()), timeout=_PAUSE_TIMEOUT)
+    _darwin_check(adapter, pause.enrollment)
+    return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
+                             tuple(unit["target"] for unit in pause.units(phase)), "paused")
+
+
+def _park_phase(store, activation_id, phase, adapter):
+    pause = load_unit_pause(store, activation_id)
     _check_empty(pause.enrollment, adapter)
     for unit in pause.enrollment["units"]:
         _check_source(unit["generated"])
@@ -411,16 +427,41 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
                 raise ActivationError(f"native enrollment changed before parking: {unit['target']}")
     identifier = journal_id(activation_id, phase)
     apply_config(store.root, identifier)  # sole filesystem writer; resumes partial swaps
-    for unit in pause.units(phase):
-        if is_unit_template(unit["target"]):
-            continue  # parked above; no instance can start without its file
-        timer_service = pause.enrollment["manager"] == "Linux" and unit["target"] in scheduled
-        _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
-              _native_saved(unit, scheduled, allow_failed=timer_service), str(os.getpid()),
-              *(("timer-owned",) if timer_service else ()), timeout=_PAUSE_TIMEOUT)
-    _darwin_check(adapter, pause.enrollment)
-    return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
-                             tuple(unit["target"] for unit in pause.units(phase)), "paused")
+    return pause
+
+
+def park_bot_phase(store: ActivationStore, activation_id: str, *, adapter=None):
+    """Park once before per-bot capture; native jobs remain owned until individually paused."""
+    record = _record(store, activation_id)
+    if (record.body["intent"].get("quiesce_mode") != "per-bot-v1"
+            or record.body["pending"] != "sessions_handed_off"
+            or "upgrade_abort" in record.body or "adoption_abort" in record.body):
+        raise ActivationError("per-bot parking is not admitted")
+    return _park_phase(store, activation_id, "bots", adapter or Adapter())
+
+
+def pause_bot(store: ActivationStore, activation_id: str, *, target: str, adapter=None) -> UnitPhaseEvidence:
+    """Converge one frozen native bot stop after its immutable capture/stop intent."""
+    record = _record(store, activation_id)
+    pause = load_unit_pause(store, activation_id)
+    row = next((row for row in pause.units("bots") if row["target"] == target), None)
+    witness = record.body.get("bot_quiescence", {}).get(target)
+    identifier = journal_id(activation_id, "bots")
+    if (record.body["intent"].get("quiesce_mode") != "per-bot-v1"
+            or record.body["pending"] != "sessions_handed_off"
+            or "upgrade_abort" in record.body or "adoption_abort" in record.body
+            or row is None or not isinstance(witness, dict) or witness.get("result") is not None
+            or witness.get("unit_sha256") != _digest(row)
+            or read_config_install(store.root, identifier).status != "applied"):
+        raise ActivationError("per-bot native pause lacks its parked exact stop intent")
+    adapter = adapter or Adapter()
+    _check_source(row["generated"])
+    _call(adapter, "svc_activation_assert_external", _file(row), target, str(os.getpid()))
+    _darwin_check(adapter, pause.enrollment, {target})
+    _call(adapter, "svc_activation_pause", _file(row), target,
+          _native_saved(row, set()), str(os.getpid()), timeout=_PAUSE_TIMEOUT)
+    _darwin_check(adapter, pause.enrollment, {target})
+    return UnitPhaseEvidence("bots", identifier, pause.plan("bots").plan_id, (target,), "paused")
 
 
 def _producer_restored(saved: str, observed: str, *, scheduled: bool, allow_failed: bool = False) -> bool:

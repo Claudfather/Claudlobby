@@ -1065,7 +1065,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    config_dir = account_dir(bot, fleet)
+    config_dir = str(account_settings_path(bot, fleet, paths).parent)
 
     bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
