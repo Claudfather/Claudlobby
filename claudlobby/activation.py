@@ -678,7 +678,7 @@ def _bot_label(unit):
     return f"{unit.declaration.fleet}/{unit.declaration.bot}"
 
 
-def _handoff_request_time(unit, handed_off, old_bots):
+def _handoff_request_time(unit, handed_off, old_bots, *, per_bot=False):
     """Time a handoff request on the clock that stamps its handoff file (#2528).
 
     A refusal names the bot and its handoff directory, and the bots this activation has
@@ -696,10 +696,126 @@ def _handoff_request_time(unit, handed_off, old_bots):
                    "and does not request them again, and refuses if one is more than "
                    f"{_HANDOFF_FRESH_S} s old when it stops the sessions" if names
                    else "no bot has been handed off in this activation")
+        if names and per_bot:
+            earlier = (f"already handed off in this activation: {', '.join(names)}; a retry keeps those handoffs "
+                       "and does not request them again; completed quiet stops keep their verified capture, "
+                       "and any still-live target requires a fresh capture before stopping")
         raise ActivationRefusal(f"activation cannot time its handoff request to {_bot_label(unit)} "
                                 f"in that bot's handoff directory {bot_dir / '.claude'}, so no handoff was "
                                 "requested from it; inspect that directory, then retry the same activation "
                                 f"with --resume; {earlier}") from exc
+
+
+def _capture_digest(bot_dir):
+    from .bot_operations import BotLifecycleError, _owned_handoff_dir
+    try:
+        path = _owned_handoff_dir(bot_dir) / "session.md"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise OSError("not an owned capture")
+            return hashlib.sha256(stream.read()).hexdigest()
+    except (OSError, BotLifecycleError) as exc:
+        raise ActivationRefusal("bot capture changed or cannot be verified before quiescence") from exc
+
+
+def _quiesce_one_bot(root, store, activation_id, pause, unit, socket_path, adapter):
+    """An observed quiet stop retains its bound capture; live stops still require freshness."""
+    target, bot_dir = unit.target, unit.declaration.working_directory
+    record = read_activation(root, activation_id)
+    row = next(row for row in pause.units("bots") if row["target"] == target)
+    prior = record.body.get("bot_quiescence", {}).get(target)
+    effect = record.body["handoff_effects"][target]
+    restart = (record.body["intent"].get("preserve_bot_state") is True
+               and record.body["intent"]["bot_states"][target]["disposition"] == "restart")
+    capture = _capture_digest(bot_dir) if effect == "handed_off" or restart else None
+    witness = {"unit_sha256": _digest(row), "socket": str(socket_path), "capture_sha256": capture}
+    if prior is not None:
+        if {key: value for key, value in prior.items() if key != "result"} != witness:
+            raise ActivationRefusal("bot capture changed or its exact stop witness differs")
+        try:
+            quiet = assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
+                                      target=target, socket_path=socket_path)
+        except RuntimeEvidenceError:
+            if prior["result"] is not None:
+                raise ActivationRefusal("completed bot stop is no longer quiet; inspect before recovery")
+        else:
+            if prior["result"] is None:
+                store.record_bot_quiescence(activation_id, target=target, witness=witness, result=quiet.digest)
+            return
+    # A stop may not begin, or resume against a live target, on an expired capture.
+    if effect == "handed_off" or restart:
+        _require_preserved_handoff(bot_dir)
+    observed, present = _legacy_bot_socket(unit, require_for_active=False)
+    if observed != socket_path or present and effect != "handed_off":
+        raise ActivationRefusal("unexpected private bot server before per-bot pause")
+    if prior is None:
+        store.record_bot_quiescence(activation_id, target=target, witness=witness)
+    units.pause_bot(store, activation_id, target=target, adapter=adapter)
+    observed, present = _legacy_bot_socket(unit, require_for_active=False)
+    if observed != socket_path or present and effect != "handed_off":
+        raise ActivationRefusal("unexpected private bot server after per-bot pause")
+    if present:
+        _require_preserved_handoff(bot_dir)
+        response = adapter.call("svc_activation_stop_private_server", bot_dir,
+                                unit.declaration.source.stem, _original_bot_tmpdir(unit))
+        if response.returncode:
+            raise ActivationError("legacy private bot server did not stop")
+    quiet = assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
+                              target=target, socket_path=socket_path)
+    if capture is not None and _capture_digest(bot_dir) != capture:
+        raise ActivationRefusal("bot capture changed during its stop; inspect before recovery")
+    store.record_bot_quiescence(activation_id, target=target, witness=witness, result=quiet.digest)
+
+
+def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, adapter):
+    record = read_activation(root, activation_id)
+    if record.body["pending"] is None:
+        store.arm_handoff_evidence(activation_id)
+    store.begin(activation_id, "sessions_handed_off")
+    # The same phase journal parks all bot files before the first capture, preventing
+    # native re-enrollment while each existing process is handed off and paused.
+    units.park_bot_phase(store, activation_id, adapter=adapter)
+    for target, unit in old_bots.items():
+        record = read_activation(root, activation_id)
+        effects = record.body.get("handoff_effects")
+        if not isinstance(effects, dict) or set(effects) - set(old_bots):
+            raise ActivationRefusal("bot handoff has unknown target evidence; inspect before recovery")
+        bot_dir = unit.declaration.working_directory
+        if target in effects and effects[target] is None:
+            requested = handoff_request_started_ns(record, target)
+            if requested is None:
+                raise ActivationRefusal("bot handoff has no bound capture witness; an unknown handoff is never resent")
+            _require_preserved_handoff(bot_dir, not_before=requested)
+            store.record_handoff(activation_id, target=target, result="handed_off")
+        elif target not in effects:
+            _, present = _legacy_bot_socket(unit)
+            preserve = record.body["intent"].get("preserve_bot_state") is True
+            restart = preserve and record.body["intent"]["bot_states"][target]["disposition"] == "restart"
+            if not present:
+                if restart:
+                    _require_preserved_handoff(bot_dir)
+                store.record_handoff(activation_id, target=target, result="server_absent")
+            else:
+                if preserve and not restart:
+                    raise ActivationRefusal("preserved stopped bot acquired a live private server before handoff")
+                handed_off = [t for t, value in effects.items() if value == "handed_off"]
+                requested = _handoff_request_time(unit, handed_off, old_bots, per_bot=True)
+                store.record_handoff(activation_id, target=target, result=None, request_started_ns=requested)
+                result = adapter.call("svc_activation_handoff", bot_dir, unit.declaration.source.stem,
+                                      _original_bot_tmpdir(unit), "explicit", timeout=45)
+                marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+                if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
+                    raise ActivationRefusal("bot handoff did not produce a verified save; inspect before recovery; "
+                                            "an unknown handoff is never resent")
+                _require_preserved_handoff(bot_dir, not_before=requested if marker == ["handoff-saved"] else None)
+                store.record_handoff(activation_id, target=target, result="handed_off")
+        elif effects[target] not in {"handed_off", "server_absent"}:
+            raise ActivationRefusal("bot has unknown handoff evidence; inspect before recovery")
+        _quiesce_one_bot(root, store, activation_id, pause, unit, sockets[target], adapter)
+    store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest({
+        "mode": "per-bot-v1", "bots": read_activation(root, activation_id).body.get("bot_quiescence", {})}))
 
 
 def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
@@ -737,7 +853,12 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
         store.complete(activation_id, "producers_paused", evidence_digest=evidence.digest)
     sockets = {target: _legacy_bot_socket(unit, require_for_active=False)[0]
                for target, unit in old_bots.items()}
-    if "sessions_handed_off" not in completed:
+    if record.body["intent"].get("quiesce_mode") not in (None, "per-bot-v1"):
+        raise ActivationError("unsupported capture/quiesce mode")
+    per_bot = record.body["intent"].get("quiesce_mode") == "per-bot-v1"
+    if per_bot and "sessions_handed_off" not in completed:
+        _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, adapter)
+    if not per_bot and "sessions_handed_off" not in completed:
         if read_activation(root, activation_id).body["pending"] is None:
             store.arm_handoff_evidence(activation_id)
         store.begin(activation_id, "sessions_handed_off")
@@ -788,7 +909,21 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
         store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
             {"old_bots": sorted(sockets), "handoff":
                 "explicit-save-and-fresh-capture-verified-or-stopped"}))
-    if "sessions_quiesced" not in completed:
+    if per_bot and "sessions_quiesced" not in completed:
+        record = read_activation(root, activation_id)
+        stops = record.body.get("bot_quiescence", {})
+        if set(stops) != set(old_bots) or any(row.get("result") is None for row in stops.values()):
+            raise ActivationRefusal("per-bot quiescence is incomplete; inspect before recovery")
+        for target, unit in old_bots.items():
+            row = next(row for row in pause.units("bots") if row["target"] == target)
+            capture = stops[target]["capture_sha256"]
+            if (stops[target]["unit_sha256"] != _digest(row) or stops[target]["socket"] != str(sockets[target])
+                    or capture is not None and capture != _capture_digest(unit.declaration.working_directory)):
+                raise ActivationRefusal("bot capture changed or its exact stop witness differs")
+        _legacy_quiet(adapter, pause, "bots", sockets)
+        store.begin(activation_id, "sessions_quiesced")
+        store.complete(activation_id, "sessions_quiesced", evidence_digest=_digest(stops))
+    if not per_bot and "sessions_quiesced" not in completed:
         record = read_activation(root, activation_id)
         effects = record.body.get("handoff_effects") or {}
         pending_pause = read_activation(root, activation_id).body["pending"] == "sessions_quiesced"
@@ -1063,7 +1198,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                       recovery_release_id=recovery.release_id, forward_recovery=forward_recovery,
                       source_release_id=source.release_id if source else None,
                       enrollment_digest=inventory.digest, legacy_source=legacy_source,
-                      install_directory=install_directory, bot_states=bot_states)
+                      install_directory=install_directory, bot_states=bot_states,
+                      quiesce_mode="per-bot-v1")
         pause = _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, adapter)
         sockets = _quiesce_running(root, store, activation_id, pause, inventory.units, adapter)
         return _finish_running_activation(

@@ -1147,3 +1147,51 @@ def test_darwin_override_and_effective_binding_drift_refuse_before_park_or_resto
         restored = units.restore_phase(store, "cutover", "producers", adapter=adapter)
         assert restored.operation == "restored"
         inventory.check_files()
+
+
+
+def test_per_bot_parking_keeps_native_bot_live_until_its_exact_stop_intent(enrollment):
+    inventory, phases, plan, adapter, _foreign, _wants = enrollment
+    inventory = replace(inventory, units=tuple(replace(unit, properties=tuple({
+        **dict(unit.properties), "UnitFileState": "enabled", "ActiveState": "active"}.items()))
+        if unit.target == "member.service" else unit for unit in inventory.units))
+    adapter = RecordedAdapter(inventory)
+    with state.locked_activation(inventory.data_root) as store:
+        kwargs = dict(recovery_release_id=plan.release_id, enrollment_digest=inventory.digest,
+                      install_directory=inventory.data_root, quiesce_mode="per-bot-v1")
+        record = store.prepare("cutover", plan, **kwargs)
+        assert record.body["intent"]["quiesce_mode"] == "per-bot-v1"
+        with pytest.raises(state.ActivationError, match="different intent"):
+            store.prepare("cutover", plan, **{**kwargs, "quiesce_mode": None})
+        pause = units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
+        store.begin("cutover", "producers_paused")
+        proof = units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        store.complete("cutover", "producers_paused", evidence_digest=proof.digest)
+        store.arm_handoff_evidence("cutover")
+        store.begin("cutover", "sessions_handed_off")
+        original = adapter.states["member.service"]
+        units.park_bot_phase(store, "cutover", adapter=adapter)
+        assert adapter.states["member.service"] == original
+        row = pause.units("bots")[0]
+        assert not Path(row["installed"][0]["path"]).exists()
+        with pytest.raises(state.ActivationError, match="stop intent"):
+            units.pause_bot(store, "cutover", target="member.service", adapter=adapter)
+        store.record_handoff("cutover", target="member.service", result="server_absent")
+        witness = {"unit_sha256": units._digest(row), "socket": str(inventory.data_root / "private.sock"),
+                   "capture_sha256": None}
+        for changed in ({**witness, "unit_sha256": "0" * 64}, {**witness, "socket": "relative"}):
+            with pytest.raises(state.ActivationError, match="exact effect"):
+                store.record_bot_quiescence("cutover", target="member.service", witness=changed)
+        store.record_bot_quiescence("cutover", target="member.service", witness=witness)
+        proof = units.pause_bot(store, "cutover", target="member.service", adapter=adapter)
+        assert proof.targets == ("member.service",)
+        assert adapter.states["member.service"] == "masked-runtime masked inactive"
+        assert adapter.states["collector.service"] == adapter.original["collector.service"]
+        # Same parking writer resumes after a stop; it does not restore or recapture the bot.
+        units.park_bot_phase(store, "cutover", adapter=adapter)
+        store.record_bot_quiescence("cutover", target="member.service", witness=witness, result="2" * 64)
+        with pytest.raises(state.ActivationError, match="witness changed"):
+            store.record_bot_quiescence("cutover", target="member.service", witness=witness, result="3" * 64)
+        with pytest.raises(state.ActivationError, match="stop intent"):
+            units.pause_bot(store, "cutover", target="member.service", adapter=adapter)
+        assert state.resumable_running_step(state.read_activation(inventory.data_root, "cutover")) == "sessions_handed_off"

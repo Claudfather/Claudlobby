@@ -191,6 +191,8 @@ def resumable_running_step(record: ActivationRecord) -> str | None:
             or not isinstance(record.body["intent"].get("install_directory"), str)
             or len(completed) >= len(STEPS)):
         return None
+    if record.body["intent"].get("quiesce_mode") not in (None, "per-bot-v1"):
+        return None
     step = STEPS[len(completed)]
     bootstrap = (record.body["previous_selection"] is None
                  and record.body["intent"].get("source_kind") != "legacy-unsealed")
@@ -252,7 +254,8 @@ class ActivationStore:
                 legacy_source: bool = False,
                 install_directory: Path | None = None,
                 bot_states: dict | None = None,
-                forward_recovery: bool = False) -> ActivationRecord:
+                forward_recovery: bool = False,
+                quiesce_mode: str | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -274,6 +277,10 @@ class ActivationStore:
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if quiesce_mode is not None:
+            if quiesce_mode != "per-bot-v1" or install_directory is None:
+                raise ActivationError("unsupported capture/quiesce mode")
+            intent["quiesce_mode"] = quiesce_mode
         if type(forward_recovery) is not bool:
             raise ActivationError("forward recovery must be an explicit boolean")
         if forward_recovery:
@@ -451,6 +458,40 @@ class ActivationStore:
         elif request_started_ns is not None:
             raise ActivationError("handoff request witness is admitted only with a send intent")
         effects[target] = result
+        return self._save(record)
+
+    def record_bot_quiescence(self, activation_id: str, *, target: str,
+                              witness: dict, result: str | None = None) -> ActivationRecord:
+        """Fence an exact captured bot before its first native stop, then retain quiet proof."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        from .activation_units import load_unit_pause
+        rows = {row["target"]: row for row in load_unit_pause(self, activation_id).units("bots")}
+        capture = witness.get("capture_sha256")
+        if (record.status != "activating" or record.body["pending"] != "sessions_handed_off"
+                or record.body["intent"].get("quiesce_mode") != "per-bot-v1"
+                or "upgrade_abort" in record.body or "adoption_abort" in record.body
+                or target not in rows or witness.get("unit_sha256") != _digest(rows[target])
+                or set(witness) != {"unit_sha256", "socket", "capture_sha256"}
+                or not isinstance(witness["socket"], str) or not Path(witness["socket"]).is_absolute()
+                or (capture is not None and (not isinstance(capture, str) or not re.fullmatch(r"[0-9a-f]{64}", capture)))
+                or (result is not None and (not isinstance(result, str) or not re.fullmatch(r"[0-9a-f]{64}", result)))):
+            raise ActivationError("bot quiescence is not the admitted exact effect")
+        effect = record.body.get("handoff_effects", {}).get(target)
+        restart = (record.body["intent"].get("preserve_bot_state") is True
+                   and record.body["intent"]["bot_states"].get(target, {}).get("disposition") == "restart")
+        if (effect not in {"handed_off", "server_absent"} or restart and capture is None
+                or effect == "handed_off" and (capture is None or handoff_request_started_ns(record, target) is None)):
+            raise ActivationError("bot stop has no bound completed capture")
+        effects = record.body.setdefault("bot_quiescence", {})
+        prior = effects.get(target)
+        if prior is None:
+            if result is not None:
+                raise ActivationError("bot quiet result preceded its stop intent")
+        elif ({key: value for key, value in prior.items() if key != "result"} != witness
+              or prior["result"] is not None and prior["result"] != result):
+            raise ActivationError("bot quiescence witness changed")
+        effects[target] = {**witness, "result": result}
         return self._save(record)
 
     def record_start_phase(self, activation_id: str, *, phase: str,
@@ -655,7 +696,7 @@ class ActivationStore:
                 or body["completed"] != ["producers_paused"]
                 or set(body["evidence"]) != {"producers_paused"}
                 or body.get("start_effects") or body.get("start_phases")
-                or "identity_bindings" in body or "adoption_abort" in body):
+                or "identity_bindings" in body or "adoption_abort" in body or body.get("bot_quiescence")):
             raise ActivationRefusal("early upgrade abort requires the unchanged source before bot/ingest quiescence")
         if terminal:
             if (record.status != "rolled_back" or body["pending"] is not None
