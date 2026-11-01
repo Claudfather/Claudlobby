@@ -117,7 +117,7 @@ tool_grants:
 
 # Fleet operations
 
-Automatic startup uses the shared [bootstrap envelope](bootstrap.md) when its resume command positively resolves to a model-callable Skill. The envelope names that exact slash Skill as a separate word after prose and invokes it with separate name and arguments. Claude Code retains permission ownership. If invocation or restore fails, requests permission or is refused, stop and report; do not continue startup or reproduce the Skill another way. After successful restore, continue the authored startup instructions in the same turn. A submitted envelope is not proof that either step completed.
+Automatic startup uses the shared [bootstrap envelope](bootstrap.md) when its resume command positively resolves to a model-callable Skill. The envelope names that exact slash Skill as a separate word after prose and invokes it with separate name and arguments. Claude Code retains permission ownership. If invocation is unavailable, requests permission, is refused, or fails to establish restored context, stop and report; do not continue startup or reproduce the Skill another way. Preserve nonfatal repository-scan caveats; require actual restored context before continuing the authored startup instructions in the same turn. A submitted envelope is not proof that either step completed.
 
 Before a new mutation, run this granted standalone command once to mint its
 request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
