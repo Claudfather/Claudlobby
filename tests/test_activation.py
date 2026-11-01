@@ -59,6 +59,10 @@ class NativeHost:
         self.fail_bot = None
         self.dead, self.quiet_unknown = set(), False
         self.ready_kind = "bridge-ready"
+        self.bootstrap_sends = []
+        self.bootstrap_outcome = "submitted"
+        self.bootstrap_text = "restore saved context then perform startup"
+        self.recipient_generation = "1"
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
 
     def read(self, function, *args):
@@ -100,6 +104,29 @@ class NativeHost:
             else:
                 self.ready.append(bot)
                 output = self.ready_kind
+        elif function == "svc_activation_bot_recipient":
+            bot = Path(args[1]).name
+            output = f"private-{bot}\t{bot}\t100-{self.recipient_generation}"
+        elif function == "svc_activation_bootstrap_payload":
+            output = json.dumps({"mode": "skill-bootstrap", "disposition": "available",
+                                 "payloads": [self.bootstrap_text]})
+        elif function == "svc_activation_bootstrap_send":
+            bot = Path(args[1]).name
+            record = state.read_activation(self.root, "cold")
+            assert record.status == "active"
+            effect = next(e for e in record.body["start_effects"].values()
+                          if e["phase"] == "bots" and e["target"].endswith(f".{bot}.service"))
+            assert effect["bootstrap"]["result"] is None  # durable intent precedes the first key
+            identity = admission.RuntimeIdentity(self.release.cli_path, self.release.native_path,
+                                                  self.release.inputs.artifact_id)
+            with admission.mutation_admission(self.root, identity=identity):
+                pass  # The just-started model may call its CLI while submission is recorded.
+            from claudlobby.bot_operations import _operation_lock, BotLifecycleError
+            with pytest.raises(BotLifecycleError, match="another bot lifecycle"):
+                with _operation_lock(self.root):
+                    pytest.fail("bootstrap result recording lost its lifecycle owner")
+            self.bootstrap_sends.append(bot)
+            output = self.bootstrap_outcome
         elif function == "svc_activation_quiet":
             if self.quiet_unknown:
                 rc = 3
@@ -756,6 +783,8 @@ def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(col
                            "com.example.worker.service", "claudlobby-keepalive.timer"]
     assert host.ready == ["manager", "worker", "manager", "worker"]
     assert host.registry == ["example"]
+    assert host.bootstrap_sends == ["manager", "worker"]
+    assert state.startup_status(record) == "submitted"
     assert "claudlobby-keepalive.service" not in host.starts
     assert (host.directory / "claudlobby-keepalive.service").is_file()
     assert {p.name for p in (host.directory / "default.target.wants").iterdir()} == set(host.starts[:3])
@@ -1590,7 +1619,8 @@ def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold, mon
     assert host.starts == starts + [_WORKER_UNIT, "claudlobby-keepalive.timer"]
     assert resumed.body["start_repairs"] == archived
     assert resumed.body["start_effects"][source]["result"] is not None
-    assert all(resumed.body["start_effects"][s] == e for s, e in others.items() if e["phase"] != "producers")
+    assert all({key: value for key, value in resumed.body["start_effects"][s].items()
+                if key != "bootstrap"} == e for s, e in others.items() if e["phase"] != "producers")
 
 
 def test_start_repair_interruption_keeps_history(cold, monkeypatch):
@@ -2974,3 +3004,60 @@ def test_per_bot_capture_digest_uses_owned_nofollow_regular_file(tmp_path, node)
             os.mkfifo(capture)
     with pytest.raises(state.ActivationRefusal, match="capture changed"):
         activation._capture_digest(bot_dir)
+
+
+@pytest.mark.parametrize("boundary", ["before-send", "after-send"])
+def test_postactive_unknown_attempt_never_replays_or_jumps_a_predecessor(cold, monkeypatch, boundary):
+    root, release, plan, host = cold
+    original = activation.record_bootstrap
+    def interrupted(*args, **kwargs):
+        if (boundary == "after-send" and kwargs.get("result") is not None):
+            raise OSError("fixture result persistence interruption")
+        result = original(*args, **kwargs)
+        if boundary == "before-send":
+            raise OSError("fixture intent persisted before interruption")
+        return result
+    monkeypatch.setattr(activation, "record_bootstrap", interrupted)
+    with pytest.raises(OSError, match="fixture"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold")
+    assert record.status == "active" and state.startup_status(record) == "unknown"
+    assert host.bootstrap_sends == ([] if boundary == "before-send" else ["manager"])
+    frozen = record.body["start_effects"]
+    monkeypatch.setattr(activation, "record_bootstrap", original)
+    with pytest.raises(state.ActivationError, match="unresolved"):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert state.read_activation(root, "cold").body["start_effects"] == frozen
+    assert host.bootstrap_sends == ([] if boundary == "before-send" else ["manager"])
+
+
+def test_postactive_submitted_attempts_are_skipped_on_same_id_continuation(cold):
+    root, release, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    before = list(host.starts), list(host.bootstrap_sends)
+    record = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert state.startup_status(record) == "submitted"
+    assert (host.starts, host.bootstrap_sends) == before
+
+
+@pytest.mark.parametrize("drift", ["recipient", "publication", "selection", "payload"])
+def test_postactive_drift_before_first_intent_refuses_without_send(cold, monkeypatch, drift):
+    root, release, plan, host = cold
+    release_owner = activation._release_bootstraps
+    monkeypatch.setattr(activation, "_release_bootstraps", lambda *args: state.read_activation(root, "cold"))
+    record = activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert record.status == "active" and state.startup_status(record) == "pending"
+    monkeypatch.setattr(activation, "_release_bootstraps", release_owner)
+    if drift == "recipient":
+        host.recipient_generation = "2"
+    elif drift == "publication":
+        (host.directory / "com.example.manager.service").write_text("changed publication")
+    elif drift == "selection":
+        selected = state.read_selection(root)
+        state._write(root / "state/selected-release.json", {**selected, "activation_id": "foreign"})
+    else:
+        host.bootstrap_text = "changed payload"
+    with pytest.raises(state.ActivationError):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert host.bootstrap_sends == []
+    assert all("bootstrap" not in e for e in state.read_activation(root, "cold").body["start_effects"].values())

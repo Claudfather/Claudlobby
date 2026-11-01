@@ -21,13 +21,21 @@ native_admission() {
     fi
     # No creation/truncation: the coordinator is the sole lock-file owner.
     exec 9<"$_NATIVE_ADMISSION_ROOT/state/activation.lock" || return 7
-    local admission_rc
-    if "$_NATIVE_ADMISSION_PYTHON" -I -B -m claudlobby.runtime_admission acquire \
+    local admission_rc decision
+    decision=$(mktemp "${TMPDIR:-/tmp}/claudlobby-admission.XXXXXXXX") || { exec 9<&-; return 7; }
+    if "$_NATIVE_ADMISSION_PYTHON" -I -B -m claudlobby.runtime_admission acquire-startup \
         9 "$_NATIVE_ADMISSION_PID" "$_NATIVE_ADMISSION_ROOT" "$operation" "$BOT_DIR" \
-        "$CLAUDLOBBY_RELEASE_ID" "$CLAUDLOBBY_CLI" "$LIB_DIR" "$CLAUDLOBBY_ARTIFACT_ID"; then
-        :
+        "$CLAUDLOBBY_RELEASE_ID" "$CLAUDLOBBY_CLI" "$LIB_DIR" "$CLAUDLOBBY_ARTIFACT_ID" > "$decision"; then
+        _NATIVE_ADMISSION_STARTUP=""
+        IFS= read -r _NATIVE_ADMISSION_STARTUP < "$decision" || true
+        rm -f "$decision"
+        case "$_NATIVE_ADMISSION_STARTUP" in
+            shared|activation|activation-held) readonly _NATIVE_ADMISSION_STARTUP ;;
+            *) exec 9<&-; return 7 ;;
+        esac
     else
         admission_rc=$?
+        rm -f "$decision"
         exec 9<&-
         return "$admission_rc"
     fi

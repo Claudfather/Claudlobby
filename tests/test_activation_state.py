@@ -9,9 +9,9 @@ from tests.test_config_plan import proposal
 from tests.test_releases import installed
 
 
-def _prepare(store, plan, name="candidate"):
+def _prepare(store, plan, name="candidate", **kwargs):
     return store.prepare(name, plan, recovery_release_id=plan.release_id,
-                         enrollment_digest="1" * 64)
+                         enrollment_digest="1" * 64, **kwargs)
 
 
 def _advance(store, name, steps):
@@ -265,3 +265,17 @@ def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, reque
             assert a.read_activation(builder.root, "upgrade") == record
             saved = store.record_handoff("upgrade", target=target, result="handed_off")
             assert saved.body["handoff_requests"] == record.body["handoff_requests"]
+
+
+def test_activation_startup_mode_is_frozen_and_old_records_keep_ordinary_startup(proposal):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        record = _prepare(store, plan, startup_mode=a.STARTUP_MODE)
+        assert record.body["intent"]["startup_mode"] == a.STARTUP_MODE
+        assert a.startup_status(record) == "pending"
+        assert _prepare(store, plan, startup_mode=a.STARTUP_MODE) == record
+        with pytest.raises(a.ActivationError, match="different intent"):
+            _prepare(store, plan)
+        with pytest.raises(a.ActivationError, match="unsupported.*startup mode"):
+            _prepare(store, plan, startup_mode="future")

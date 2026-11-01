@@ -379,7 +379,7 @@ def _receive(stream: socket.socket, deadline: float) -> dict:
     return value
 
 
-def _request_start(root: Path, request: dict, timeout: float) -> None:
+def _request_start(root: Path, request: dict, timeout: float) -> str:
     endpoint = root / "state/activation-start.sock"
     try:
         info = endpoint.lstat()
@@ -391,8 +391,9 @@ def _request_start(root: Path, request: dict, timeout: float) -> None:
             stream.connect(str(endpoint))
             stream.sendall(json.dumps(request).encode() + b"\n")
             reply = _receive(stream, deadline)
-            if reply != {"admitted": request}:
+            if reply not in ({"admitted": request}, {"admitted": request, "startup": "held-v1"}):
                 raise ActivationError("activation start scope does not admit this operation")
+            return "activation-held" if reply.get("startup") == "held-v1" else "activation"
     except (OSError, ValueError) as exc:
         raise ActivationError("activation start authorization unavailable; host remains paused") from exc
 
@@ -418,8 +419,7 @@ def admit_native(root: Path, fd: int, *, owner_pid: int, operation: str,
     except BlockingIOError as exc:
         if operation == "keepalive":
             raise WatchdogActivationPause("host activation is running; watchdog remains paused") from exc
-        _request_start(root, request, timeout)
-        return "activation"
+        return _request_start(root, request, timeout)
     try:
         _native_lock(root, fd, owner_pid)
         _selected_active(root, identity, expected_release)
@@ -709,7 +709,13 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
                             continue
                         if abort_producer:
                             store.record_upgrade_resident_grant(activation_id, unit=target.unit, pid=reported_pid)
-                        connection.sendall(json.dumps({"admitted": received}).encode() + b"\n")
+                        reply = {"admitted": received}
+                        if received.get("operation") == "start-bot":
+                            from .activation_state import STARTUP_MODE
+                            record = read_activation(store.root, activation_id)
+                            if record.body["intent"].get("startup_mode") == STARTUP_MODE:
+                                reply["startup"] = "held-v1"
+                        connection.sendall(json.dumps(reply).encode() + b"\n")
                         admitted.set()
                         if target and target.phase == "bots" and continuation_pid is None:
                             continuation_pid = peer_pid or reported_pid
@@ -748,7 +754,7 @@ def _native_main() -> int:
             print(f"native admission: {exc}; inspect claudlobby host releases", file=sys.stderr)
             return 7
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("acquire", "release"))
+    parser.add_argument("action", choices=("acquire", "acquire-startup", "release"))
     parser.add_argument("fd", type=int)
     parser.add_argument("owner_pid", type=int)
     parser.add_argument("root", type=Path)
@@ -764,9 +770,11 @@ def _native_main() -> int:
             identity = RuntimeIdentity.current()
             if identity != RuntimeIdentity(Path(cli), Path(native), artifact):
                 raise ActivationError("native executable differs from composed context")
-            admit_native(args.root, args.fd, owner_pid=args.owner_pid,
+            result = admit_native(args.root, args.fd, owner_pid=args.owner_pid,
                          operation=operation, bot_dir=Path(bot) if bot else None,
                          expected_release=expected, identity=identity)
+            if args.action == "acquire-startup":
+                print(result)
         return 0
     except WatchdogActivationPause as exc:
         print(f"native admission: {exc}", file=sys.stderr)

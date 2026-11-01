@@ -36,6 +36,7 @@ STEPS = (
 # The candidate start steps. A host reset strands any of them with every
 # started candidate dead; ``host repair-after-reset`` reopens them all.
 START_STEPS = STEPS[STEPS.index("ingest_started"):]
+STARTUP_MODE = "post-active-v1"
 ROLLBACK_STEPS = (
     "producers_paused", "sessions_quiesced", "ingest_quiesced",
     "compatibility_verified", "candidate_units_removed", "configuration_restored",
@@ -124,6 +125,17 @@ class ActivationRecord:
         return self.body["status"]
 
 
+def startup_status(record: ActivationRecord) -> str:
+    """Native active and submitted startup are separate facts; no payload disclosure."""
+    if record.body["intent"].get("startup_mode") != STARTUP_MODE:
+        return "legacy"
+    rows = [effect.get("bootstrap") for effect in record.body.get("start_effects", {}).values()
+            if effect["phase"] == "bots"]
+    if any(row is not None and row.get("result") != "submitted" for row in rows):
+        return "unknown" if any(row is not None and row.get("result") in (None, "unknown") for row in rows) else "refused"
+    return "pending" if any(row is None for row in rows) or record.status != "active" else "submitted"
+
+
 def read_activation(root: Path, activation_id: str) -> ActivationRecord:
     path = _record_path(root, activation_id)
     try:
@@ -153,6 +165,41 @@ def read_selection(root: Path) -> dict | None:
             or result["schema"] != 1):
         raise ActivationError("invalid release selection")
     return result
+
+
+def record_bootstrap(root, activation_id, source, attempt, *, assert_owned, result=None):
+    """Narrow active-record writer; never takes activation EX or its pending lock.
+
+    The selected-active SH/lifecycle EX owner must remain live through this
+    write. An intent without a conclusive result is permanently uncertain.
+    Native result and every other start row remain unchanged.
+    """
+    assert_owned()
+    record = read_activation(root, activation_id)
+    effect = record.body.get("start_effects", {}).get(source)
+    if (record.status != "active" or record.body["intent"].get("startup_mode") != STARTUP_MODE
+            or set(attempt) != {"attempt_id", "native_digest", "recipient", "publication", "payload", "payload_sha256"}
+            or effect is None or effect["phase"] != "bots" or effect["result"] is None
+            or attempt.get("native_digest") != effect["result"]["digest"]
+            or attempt.get("recipient") != effect["result"]["details"].get("recipient")
+            or attempt.get("publication") != effect["sha256"]
+            or attempt.get("payload") != effect.get("startup_payload")
+            or attempt.get("payload_sha256") != _digest(attempt.get("payload"))
+            or attempt.get("attempt_id") != "b-" + _digest([activation_id, source,
+                attempt.get("native_digest"), attempt.get("payload_sha256"), attempt.get("recipient")])
+            or result not in (None, "submitted", "not-sent", "unknown")):
+        raise ActivationError("bootstrap attempt differs from its admitted native start")
+    prior = effect.get("bootstrap")
+    if prior is None:
+        if result is not None:
+            raise ActivationError("bootstrap result preceded its intent")
+    elif ({k: v for k, v in prior.items() if k != "result"} != attempt
+          or prior["result"] is not None or result is None):
+        raise ActivationError("bootstrap attempt is immutable or already uncertain")
+    effect["bootstrap"] = {**attempt, "result": result}
+    assert_owned()
+    _write(_record_path(root, activation_id), {"record": record.body, "sha256": _digest(record.body)})
+    return read_activation(root, activation_id)
 
 
 _RESUMABLE_RUNNING_STEPS = frozenset({
@@ -255,7 +302,8 @@ class ActivationStore:
                 install_directory: Path | None = None,
                 bot_states: dict | None = None,
                 forward_recovery: bool = False,
-                quiesce_mode: str | None = None) -> ActivationRecord:
+                quiesce_mode: str | None = None,
+                startup_mode: str | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -277,6 +325,10 @@ class ActivationStore:
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if startup_mode is not None:
+            if startup_mode != STARTUP_MODE:
+                raise ActivationError("unsupported activation startup mode")
+            intent["startup_mode"] = startup_mode
         if quiesce_mode is not None:
             if quiesce_mode != "per-bot-v1" or install_directory is None:
                 raise ActivationError("unsupported capture/quiesce mode")
@@ -397,7 +449,8 @@ class ActivationStore:
         return self._save(record)
 
     def record_start_intent(self, activation_id: str, *, phase: str, source: str,
-                            target: str, sha256: str, fence: dict | None) -> ActivationRecord:
+                            target: str, sha256: str, fence: dict | None,
+                            startup_rank: int | None = None) -> ActivationRecord:
         """Durably fence one exact native start before invoking the native owner."""
         self.assert_locked()
         record = read_activation(self.root, activation_id)
@@ -418,6 +471,10 @@ class ActivationStore:
             raise ActivationError("native bot start lacks exact readiness fence")
         record.body["start_effects"][source] = {"phase": phase, "target": target,
             "sha256": sha256, "fence": fence, "result": None}
+        if phase == "bots" and record.body["intent"].get("startup_mode") == STARTUP_MODE:
+            if type(startup_rank) is not int or startup_rank < 0:
+                raise ActivationError("held bot start requires its recorded rank")
+            record.body["start_effects"][source]["startup_rank"] = startup_rank
         return self._save(record)
 
     def arm_handoff_evidence(self, activation_id: str) -> ActivationRecord:
@@ -544,6 +601,19 @@ class ActivationStore:
                 or _digest({"operation": "started", "target": target, "details": details}) != digest):
             raise ActivationError("native start result differs from its durable intent")
         effect["result"] = {"details": details, "digest": digest}
+        return self._save(record)
+
+    def record_startup_payload(self, activation_id: str, *, source: str, payload: dict) -> ActivationRecord:
+        """Freeze startup preparation before the bot phase completes, without send intent."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        effect = record.body.get("start_effects", {}).get(source)
+        if (record.status != "activating" or record.body["pending"] != "bots_started"
+                or record.body["intent"].get("startup_mode") != STARTUP_MODE
+                or effect is None or effect["phase"] != "bots" or effect["result"] is None
+                or effect.get("startup_payload", payload) != payload):
+            raise ActivationError("held startup preparation changed or is not admitted")
+        effect["startup_payload"] = payload
         return self._save(record)
 
     def archive_failed_bot_start(self, activation_id: str, *, source: str, target: str,

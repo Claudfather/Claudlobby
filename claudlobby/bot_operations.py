@@ -474,9 +474,36 @@ def _operation_lock(root: Path):
         except BlockingIOError as exc:
             raise BotLifecycleError("another bot lifecycle operation is running on this host",
                                     busy=True) from exc
-        yield
+        yield fd
     finally:
         os.close(fd)
+
+
+@contextmanager
+def bootstrap_operation(root: Path, *, identity, release_id, activation_id):
+    """Selected-active SH then lifecycle EX, retained through startup recording."""
+    from .runtime_admission import _selected_active
+    with mutation_admission(root, identity=identity, expected_release=release_id):
+        with _operation_lock(root) as fd:
+            held, pid = True, os.getpid()
+            info = os.fstat(fd)
+
+            def assert_owned():
+                if not held or pid != os.getpid():
+                    raise ActivationError("bootstrap operation ownership expired")
+                actual = os.fstat(fd)
+                linked = (root / "state/bot-lifecycle.lock").lstat()
+                if ((info.st_dev, info.st_ino) != (actual.st_dev, actual.st_ino)
+                        or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)
+                        or read_selection(root)["activation_id"] != activation_id):
+                    raise ActivationError("bootstrap operation ownership changed")
+                _selected_active(root, identity, release_id)
+
+            try:
+                assert_owned()
+                yield assert_owned
+            finally:
+                held = False
 
 
 def _selected_unit(root, plan, release, package, adapter, fleet, bot):

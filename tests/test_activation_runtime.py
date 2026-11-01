@@ -433,3 +433,66 @@ def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_
     assert observed.details["socket_state"] == "refused"
     assert observed.details["coverage"] == "named-unit-and-supplied-witnesses-only"
     assert path.exists()  # observation never unlinks a socket
+
+
+@pytest.mark.parametrize("actual, expected", [("100-1", "submitted"), ("100-2", "not-sent"),
+                                               ("100-1", "unknown")])
+def test_bound_bootstrap_compares_instance_inside_recipient_lock(tmp_path, actual, expected):
+    from tests.conftest import constructed_env
+    trace = tmp_path / "keys"
+    script = r'''
+set -euo pipefail
+. "$1/supervisor.sh"
+. "$1/lib-common.sh"
+CLAUDLOBBY_ROOT="$2"
+_svc_bootstrap_context() { :; }
+tmux_socket_for_bot() { printf private; }
+tmux_session_name() { printf worker; }
+bot_tmux() { printf '%s' "$ACTUAL"; }
+_pane_send_verified_locked() {
+    [ "$PANE_READY_TICKS" = "$_PANE_READY_TICKS_BOOT" ] || return 91
+    printf '%s\n' "$3" >> "$TRACE"
+    if [ "$INTERRUPT" = 1 ]; then exit 143; fi
+}
+svc_activation_bootstrap_send "$2" /bot private worker 100-1 'one bootstrap'
+'''
+    result = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+        env=constructed_env(ACTUAL=actual, TRACE=str(trace), INTERRUPT="1" if expected == "unknown" else "0"),
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+    assert (trace.read_text() if trace.exists() else "") == ("one bootstrap\n" if expected in {"submitted", "unknown"} else "")
+
+
+@pytest.mark.parametrize("failure", ["busy", "unavailable"])
+def test_managed_replacement_requires_canonical_recipient_lock_and_preserves_report(tmp_path, failure):
+    import fcntl
+    from tests.conftest import constructed_env
+    lock_dir = tmp_path / "state/pane-send"
+    lock_dir.mkdir(parents=True)
+    lock = lock_dir / "private--worker.lock"
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    trace = tmp_path / "spawn"
+    script = r'''
+set -euo pipefail
+. "$1/lib-common.sh"
+CLAUDLOBBY_ROOT="$2"; _OS=Darwin; PANE_SEND_LOCK_WAIT_S=0
+bot_tmux() { printf '%s\n' "$2" >> "$TRACE"; }
+if [ "${FAIL_LOCK:-0}" = 1 ]; then python3() { return 1; }; fi
+if bot_session_spawn private worker cmd; then printf '%s' "$BOT_SUBREAPER_REPORT"; else exit $?; fi
+'''
+    try:
+        if failure == "busy":
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        refused = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+            env=constructed_env(TRACE=str(trace), FAIL_LOCK="1" if failure == "unavailable" else "0"),
+            capture_output=True, text=True, timeout=5)
+        assert refused.returncode == 75 and not trace.exists()
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        accepted = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+            env=constructed_env(TRACE=str(trace)), capture_output=True, text=True, timeout=5)
+        assert accepted.returncode == 0, accepted.stderr
+        assert trace.read_text().splitlines() == ["kill-session", "new-session"]
+        assert accepted.stdout == "not used: Darwin has no child subreaper"
+    finally:
+        os.close(fd)

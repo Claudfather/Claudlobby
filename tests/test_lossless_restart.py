@@ -288,8 +288,9 @@ class TestSessionResumeCapability:
         assert out == "provider-absent:someplugin", "the skip must name the reason"
 
     @pytest.mark.parametrize("provider, injected", [(None, False), ("someplugin", True)])
+    @pytest.mark.parametrize("held", [False, True])
     def test_startup_resume_capability_has_no_errtrap_and_sends_only_when_available(
-            self, tmp_path, provider, injected):
+            self, tmp_path, provider, injected, held):
         # Exercise the real startup branch under macOS Bash 3.2 errtrace.
         # Guarding the assignment with an outer if still fired ERR inside it.
         source = START_BOT.read_text()
@@ -314,7 +315,7 @@ STARTUP_PROMPT=""
 boot_send_settled() { :; }
 BOT_DIR="$3"; LOG="$6"; TMUX_SOCKET=x; TMUX_SESSION=x
 _PANE_READY_TICKS_BOOT=1
-''' + branch
+''' + ('_NATIVE_ADMISSION_STARTUP=activation-held\n' if held else '') + branch
         result = subprocess.run(
             ["/bin/bash", "-c", script, "_", str(LIB_COMMON), str(session),
              str(bot), str(sends), str(errors), str(log)],
@@ -323,8 +324,8 @@ _PANE_READY_TICKS_BOOT=1
         )
         assert result.returncode == 0, result.stderr
         assert not errors.exists(), errors.read_text() if errors.exists() else ""
-        assert sends.exists() is injected
-        assert ("RESUME — injecting" if injected else "RESUME SKIP") in log.read_text()
+        assert sends.exists() is (injected and not held)
+        assert ("STARTUP held" if held else "RESUME — injecting" if injected else "RESUME SKIP") in log.read_text()
 
     def test_empty_command_disables_injection(self, tmp_path):
         cfg = self._plugin_home(tmp_path, "someplugin")

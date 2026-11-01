@@ -37,6 +37,8 @@ Parse `$ARGUMENTS`:
    - Start a new session via `start-bot.sh`
    - The new session submits resume and authored startup in one fleet bootstrap when the configured command positively resolves to a model-callable Skill. Native commands and unproven custom overrides retain literal command injection before startup. Resume remains capability-gated (also age-gated: it resumes only from a checkpoint fresher than ~24h, else clean-starts), then follows the bot's `STARTUP_PROMPT`. Submission does not prove completion. Resume no longer depends on `STARTUP_PROMPT` carrying it. If no resume capability is installed, `start-bot.sh` logs a `RESUME SKIP` line naming the reason and starts clean — so the handoff you captured is still on disk for a human or a later session, it simply is not replayed automatically.
 
+During coordinated activation, new activation records hold the launcher’s automatic bootstrap until native activation is active. The activation owner then submits the recorded attempt; an unknown submission requires inspection and is never replayed automatically. Ordinary restarts retain immediate injection.
+
 ## Rules
 
 - Always capture the handoff BEFORE the restart. Never skip it — but "never skip it" binds you to *producing the artifact*, not to invoking any particular skill. If no session-handoff skill is installed, write `<cwd>/.claude/session.md` yourself and continue; a missing skill is never a reason to skip the handoff, and never a reason to abort the restart. Do not route it through `pre-stop-handoff.sh` from inside the session.

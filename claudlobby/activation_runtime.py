@@ -19,7 +19,7 @@ import socket
 import stat
 import subprocess
 
-from .activation_state import ActivationError, ActivationStore
+from .activation_state import STARTUP_MODE, ActivationError, ActivationStore, read_activation
 from .releases import read_release
 from .runtime_admission import RuntimeIdentity, UnitStart, activation_start, parse_unit_argv
 from .supervision_inventory import Adapter
@@ -218,15 +218,16 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
                 raise RuntimeEvidenceError("start", target, "published launch definition is invalid") from exc
         if immediate and not admitted.wait():
             raise RuntimeEvidenceError("start", target, "native unit admission was not observed")
+        held = read_activation(store.root, activation_id).body["intent"].get("startup_mode") == STARTUP_MODE
         result = observe_started_unit(store, installed_file=file, target=target, unit=unit,
                                       sha256=sha256, adapter=adapter,
-                                      fence=fence_details, readiness=readiness)
+                                      fence=fence_details, readiness=readiness, startup_held=held)
     return result
 
 
 def observe_started_unit(store: ActivationStore, *, installed_file: Path, target: str,
                          unit: UnitStart, sha256: str, adapter: Adapter,
-                         fence: dict | None, readiness=None) -> RuntimeEvidence:
+                         fence: dict | None, readiness=None, startup_held=False) -> RuntimeEvidence:
     """Recheck a previously issued exact start without another native start/send."""
     store.assert_locked()
     file = Path(installed_file)
@@ -250,6 +251,8 @@ def observe_started_unit(store: ActivationStore, *, installed_file: Path, target
         if ready not in BOT_READY_KINDS:
             raise RuntimeEvidenceError("readiness", target, "bot readiness evidence unavailable")
         details["readiness"] = {"kind": ready, **fence}
+        if startup_held:
+            details["recipient"] = bot_recipient(adapter, store.root, Path(unit.command[1]), target)
     elif fence is not None:
         raise RuntimeEvidenceError("start", target, "non-bot start has a bot fence")
     if readiness is not None:
@@ -269,3 +272,38 @@ def observe_started_unit(store: ActivationStore, *, installed_file: Path, target
         raise RuntimeEvidenceError("start", target, "native started-state evidence unavailable")
     details["native"] = observed
     return RuntimeEvidence("started", target, details)
+
+
+def bot_recipient(adapter, root, bot_dir, target) -> dict:
+    """Observe the private recipient; delivery rechecks it under recipient EX."""
+    value = _call(adapter, "svc_activation_bot_recipient", target, root, bot_dir).split("\t")
+    if (len(value) != 3 or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", v) for v in value[:2])
+            or not re.fullmatch(r"[0-9]+-[0-9]+", value[2])):
+        raise RuntimeEvidenceError("recipient", target, "exact session instance is unavailable")
+    return dict(zip(("socket", "session", "instance"), value))
+
+
+def bootstrap_payload(adapter, root, bot_dir, target) -> dict:
+    try:
+        raw = _call(adapter, "svc_activation_bootstrap_payload", target, root, bot_dir)
+        value = json.loads(raw)
+        if (len(raw.encode()) > 65536 or set(value) != {"mode", "disposition", "payloads"}
+                or value["mode"] not in {"skill-bootstrap", "literal-compatibility", "clean"}
+                or not isinstance(value["disposition"], str) or not isinstance(value["payloads"], list)
+                or len(value["payloads"]) > 2 or any(not isinstance(v, str) or not v or "\0" in v
+                                                    for v in value["payloads"])):
+            raise ValueError()
+        return value
+    except (ValueError, TypeError) as exc:
+        raise RuntimeEvidenceError("bootstrap", target, "startup payload is unavailable") from exc
+
+
+def submit_bootstrap(adapter, root, bot_dir, target, recipient, payload) -> str:
+    """One bounded canonical attempt; any unrecognized outcome remains unknown."""
+    try:
+        outcome = _call(adapter, "svc_activation_bootstrap_send", target, root, bot_dir,
+                        recipient["socket"], recipient["session"], recipient["instance"],
+                        *payload["payloads"], timeout=180)
+    except RuntimeEvidenceError:
+        return "unknown"
+    return outcome if outcome in {"submitted", "not-sent", "unknown"} else "unknown"

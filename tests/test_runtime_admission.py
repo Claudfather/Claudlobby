@@ -102,8 +102,8 @@ def test_native_watchdog_pause_has_distinct_exit(monkeypatch, capsys):
     assert "watchdog remains paused" in capsys.readouterr().err
 
 
-def _starting(store, plan, operation="start-bot"):
-    _prepare(store, plan)
+def _starting(store, plan, operation="start-bot", startup_mode=None):
+    _prepare(store, plan, startup_mode=startup_mode)
     _advance(store, "candidate", a.STEPS[:a.STEPS.index("selection_switched")])
     store.begin("candidate", "selection_switched")
     store.select("candidate")
@@ -239,3 +239,24 @@ def test_stalled_or_dead_start_responder_cannot_license_effects(proposal):
             listener.close()
             os.close(fd)
     assert effects == []
+
+
+@pytest.mark.parametrize("startup_mode, expected", [(None, "activation"), (a.STARTUP_MODE, "activation-held")])
+def test_native_hold_decision_comes_only_from_the_recorded_exact_start_scope(proposal, startup_mode, expected):
+    builder, _, settings = proposal
+    plan = builder.seal()
+    identity = _identity(builder)
+    with a.locked_activation(builder.root) as store:
+        _starting(store, plan, startup_mode=startup_mode)
+        fd = os.open(builder.root / "state/activation.lock", os.O_RDONLY)
+        try:
+            with activation_start(store, "candidate", operation="start-bot", bot_dir=settings.parent,
+                                  identity=identity):
+                assert admit_native(builder.root, fd, owner_pid=os.getppid(), operation="start-bot",
+                                    bot_dir=settings.parent, expected_release=plan.release_id,
+                                    identity=identity) == expected
+            with pytest.raises(WatchdogActivationPause):
+                admit_native(builder.root, fd, owner_pid=os.getppid(), operation="keepalive",
+                             bot_dir=settings.parent, expected_release=plan.release_id, identity=identity)
+        finally:
+            os.close(fd)

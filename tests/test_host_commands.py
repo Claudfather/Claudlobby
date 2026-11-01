@@ -905,3 +905,35 @@ def test_forward_recovery_activation_reports_target_forward_only(candidate, monk
     assert calls == [{"forward_recovery": True}]
     assert result["data"]["recovery_mode"] == result["data"]["recorded_activation"]["recovery_mode"] == (
         "target-forward-only")
+
+
+def test_host_status_and_resume_distinguish_native_active_from_pending_startup(candidate, monkeypatch, capsys):
+    root, release, plan, directory = candidate
+    with state.locked_activation(root) as store:
+        store.prepare("held", plan, recovery_release_id=release.release_id,
+                      enrollment_digest="1" * 64, startup_mode=state.STARTUP_MODE,
+                      install_directory=directory)
+        for step in state.STEPS:
+            store.begin("held", step)
+            if step == "selection_switched":
+                store.select("held")
+            else:
+                store.complete("held", step, evidence_digest="2" * 64)
+    # This partial fixture has one pending bot; no model payload belongs in status.
+    record = state.read_activation(root, "held")
+    record.body["start_effects"] = {"/unit": {"phase": "bots", "result": None}}
+    state._write(root / "state/activations/held/activation.json",
+                 {"record": record.body, "sha256": state._digest(record.body)})
+    status = call(capsys, ["--root", str(root), "--json", "host", "status"])
+    assert status["data"]["recorded_status"] == "active"
+    assert status["data"]["startup_release"] == "pending"
+    calls = []
+    def resume(*args, **kwargs):
+        calls.append(args)
+        raise state.ActivationError("unresolved startup requires inspection")
+    monkeypatch.setattr(activation, "resume_activation", resume)
+    result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                          "--install-directory", str(directory), "--resume", "held"], 4)
+    assert len(calls) == 1
+    assert result["data"]["recorded_activation"]["startup_release"] == "pending"
+    assert "native activation is active" in result["error"]["message"]
