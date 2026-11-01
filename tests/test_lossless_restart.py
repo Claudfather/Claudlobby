@@ -129,7 +129,13 @@ emit_fleet_event() { :; }
         if mode in {"plugin", "local"}:
             assert len(payloads) == 1
             assert payloads[0].startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1")
-            call = json.loads(payloads[0].split("\n\n")[2])
+            slash_name = "/provider:session" if mode == "plugin" else "/restore"
+            assert "\n\n" + slash_name + "\n\n" in payloads[0]
+            call = json.loads(next(line for line in payloads[0].splitlines()
+                                   if line.startswith('{"skill":')))
+            assert "stop and report" in payloads[0]
+            assert "Do not continue to startup" in payloads[0]
+            assert "do not reproduce the Skill by another route" in payloads[0]
             assert call == {"skill": "provider:session" if mode == "plugin" else "restore",
                             "args": "resume --auto --note 'keep spaces'" if mode == "plugin" else "resume --auto"}
             assert "FLEET_STARTUP_INSTRUCTIONS_BEGIN\n" + startup + "\nFLEET_STARTUP_INSTRUCTIONS_END" in payloads[0]

@@ -4438,12 +4438,14 @@ try:
         raise ValueError()
     template = (bot / ".claude/skills/fleet-ops/bootstrap.md").read_text()
     if (not template.startswith("FLEET_STARTUP_BOOTSTRAP_V1\n")
+            or template.count("{{RESUME_SLASH_NAME}}") != 1
             or template.count("{{RESUME_SKILL_CALL}}") != 1
             or template.count("{{STARTUP_PROMPT}}") != 1):
         raise ValueError()
-    values = {"RESUME_SKILL_CALL": json.dumps({"skill": name, "args": args.lstrip()}, ensure_ascii=False),
+    values = {"RESUME_SLASH_NAME": first,
+              "RESUME_SKILL_CALL": json.dumps({"skill": name, "args": args.lstrip()}, ensure_ascii=False),
               "STARTUP_PROMPT": startup}
-    print(re.sub(r"{{(RESUME_SKILL_CALL|STARTUP_PROMPT)}}", lambda match: values[match[1]], template), end="")
+    print(re.sub(r"{{(RESUME_SLASH_NAME|RESUME_SKILL_CALL|STARTUP_PROMPT)}}", lambda match: values[match[1]], template), end="")
 except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError, yaml.YAMLError):
     sys.exit(1)
 BOOTSTRAP_PY
