@@ -742,6 +742,12 @@ def _quiesce_one_bot(root, store, activation_id, pause, unit, socket_path, adapt
                 raise ActivationRefusal("completed bot stop is no longer quiet; inspect before recovery")
         else:
             if prior["result"] is None:
+                # Quiet alone does not prove an interrupted native pause disarmed the job.
+                units.pause_bot(store, activation_id, target=target, adapter=adapter)
+                quiet = assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
+                                         target=target, socket_path=socket_path)
+                if capture is not None and _capture_digest(bot_dir) != capture:
+                    raise ActivationRefusal("bot capture changed during its stop; inspect before recovery")
                 store.record_bot_quiescence(activation_id, target=target, witness=witness, result=quiet.digest)
             return
     # A stop may not begin, or resume against a live target, on an expired capture.

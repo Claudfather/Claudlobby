@@ -2878,13 +2878,53 @@ def test_per_bot_interrupted_stop_reconciles_quiet_but_requires_fresh_capture_if
         with pytest.raises(case.BotPauseReached):
             case.run()
         assert case.calls == ["alpha", "bravo"]
-        assert case.events.count("pause:example.alpha.plist") == 1
+        assert case.events.count("pause:example.alpha.plist") == 2
     else:
         with pytest.raises(state.ActivationRefusal, match="fresh"):
             case.run()
         assert case.calls == ["alpha"]
         assert case.events.count("pause:example.alpha.plist") == 1
 
+
+
+@pytest.mark.parametrize("outcome", ["quiet", "pause-refused", "became-live", "capture-changed"])
+def test_per_bot_quiet_interrupted_intent_still_converges_native_pause(per_bot_case, monkeypatch, outcome):
+    case = per_bot_case
+    alpha = "example.alpha.plist"
+    attempts, native_armed = [], [True]
+    original = activation.units.pause_bot
+    def pause(*args, target, **kwargs):
+        if target != alpha:
+            return original(*args, target=target, **kwargs)
+        attempts.append(target)
+        if len(attempts) == 1:
+            raise InterruptedError("after stop intent, before native pause")
+        if outcome == "pause-refused":
+            raise state.ActivationError("native pause refused")
+        result = original(*args, target=target, **kwargs)
+        native_armed[0] = False
+        if outcome == "became-live":
+            case.live[alpha] = True
+        elif outcome == "capture-changed":
+            capture = case.dirs["alpha"] / ".claude/session.md"
+            capture.write_text(capture.read_text() + "changed during pause\n")
+        return result
+    monkeypatch.setattr(activation.units, "pause_bot", pause)
+    with pytest.raises(InterruptedError):
+        case.run()
+    assert case.body["bot_quiescence"][alpha]["result"] is None
+    assert native_armed[0]
+    # The process exits independently, while the native job is still armed.
+    case.live[alpha] = False
+    case.advance_clock()
+    error = {"quiet": case.BotPauseReached, "pause-refused": state.ActivationError,
+             "became-live": activation.RuntimeEvidenceError, "capture-changed": state.ActivationRefusal}[outcome]
+    with pytest.raises(error):
+        case.run()
+    assert attempts == [alpha, alpha]
+    assert native_armed[0] == (outcome == "pause-refused")
+    assert case.calls == (["alpha", "bravo"] if outcome == "quiet" else ["alpha"])
+    assert (case.body["bot_quiescence"][alpha]["result"] is not None) == (outcome == "quiet")
 
 def test_per_bot_completed_quiet_stop_rejects_changed_capture(per_bot_case):
     case = per_bot_case
