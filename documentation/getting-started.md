@@ -8,13 +8,35 @@ The [Telegram seed/direct-CLI path](#3-author-the-first-fleet) is an explicit op
 
 ## Prerequisites
 
-- A working CPython accepted by the candidate wheel that can create a virtual environment (step 1 probes this by creating a disposable one), `git` for a source build, and enough disk for a copied Python environment and dependency wheels. Debian, Ubuntu and Raspberry Pi OS ship `venv` without `ensurepip` unless the `python3-venv` package is installed; `import venv` alone is not proof.
+- CPython 3.11 for the supplied `py311` bundles; an explicitly chosen source build requires CPython 3.10 or newer, subject to the candidate wheel and dependency compatibility. Prove the executable and a created virtual environment with the shared check below, `git` for a source build, and enough disk for a copied Python environment and dependency wheels. Debian, Ubuntu and Raspberry Pi OS ship `venv` without `ensurepip` unless the `python3-venv` package is installed; `import venv` alone is not proof.
 - `tmux`, `jq` and the installed `claude` executable on `PATH`. Provider sign-in is a separate gate before owner/team continuation or optional seed activation; release assembly does not verify it. Bot startup uses `jq` to pre-accept consent and seed trust, so `host setup` refuses without it.
 - A working **user** manager: launchd in the current macOS user domain, or `systemctl --user` on Linux. For unattended Linux boots, enable user lingering using your host's normal administrative procedure. `host setup` observes the manager; it does not install packages, enable lingering, or change system settings.
 - **A user to run the bots as.** Every bot runs as the user who runs `host setup` and `fleet setup`, and inherits that user's `sudo` rules and groups. Read the README's [Safety model](../README.md#safety-model) before you choose it: on Raspberry Pi OS the first user's `sudo` asks for no password, so every bot would have root.
 - Only for the optional seed's Telegram bot, install the Telegram channel plugin (`claude plugin install telegram@claude-plugins-official`), obtain a token from BotFather, and know your Telegram user and group IDs. A fleet without Telegram may author a different manifest.
 
 The copied interpreter still uses the host's standard library and system libraries. A wheelhouse prepared for another platform or Python version may be unusable here.
+
+### Prove the Python executable once
+
+Choose the installed interpreter explicitly: `python3.11` for a supplied bundle, or an operator-selected compatible CPython for a source build. A command alias can report the right version yet create a broken virtual environment. Resolve that command to its real executable, check the version, then actually run the created environment's interpreter and stdlib imports. This check installs no system packages; if it fails, inspect the error before choosing another interpreter. Do not assume a reinstall is needed.
+
+```bash
+PYTHON_CANDIDATE="$(command -v python3.11)"  # or the operator's exact installed executable
+PYTHON=""
+PROBE="$(mktemp -d)"
+if RESOLVED_PYTHON=$("$PYTHON_CANDIDATE" -I -c \
+  'from pathlib import Path; import sys; assert sys.implementation.name == "cpython" and sys.version_info >= (3, 10), "CPython 3.10 or newer required"; print(Path(sys.executable).resolve(strict=True))') &&
+  "$RESOLVED_PYTHON" -I -c 'import plistlib, ssl' &&
+  "$RESOLVED_PYTHON" -I -m venv "$PROBE/venv" &&
+  "$PROBE/venv/bin/python" -I -c 'import encodings, plistlib, ssl, sys; assert sys.prefix != sys.base_prefix; print("python ok")'; then
+  PYTHON="$RESOLVED_PYTHON"
+else
+  printf '%s\n' 'Python prerequisite failed; stop and inspect this interpreter.'
+fi
+rm -rf "$PROBE"
+```
+
+Continue only if this prints `python ok` and leaves `PYTHON` set. Keep that proven absolute executable for both bundle and source-build commands below; do not switch back to an alias or an unverified `python3`. If you choose a different interpreter, repeat this same check. Bundle installation additionally requires its exact CPython 3.11 minor version, checked before launching the installer.
 
 ### Optional Telegram channel approval on managed Claude Code accounts
 
@@ -26,17 +48,18 @@ Approval does not change the separate `channelsEnabled` master policy. If the ch
 
 The [release-bundle workflow](../.github/workflows/release-bundle.yml) can produce separate **Linux aarch64** and **macOS arm64** installers for CPython 3.11 when dispatched for an exact revision. A workflow artifact is not a promise of a currently published installer or a tested website setup release. From a source you trust, obtain the `claudlobby-installer-<revision>-<platform>-py311` artifact and unzip GitHub's download to get `claudlobby-install.pyz`. Compare its SHA-256 with the workflow's independently displayed installer checksum before running it. Checksums detect changed bytes, not an authentic publisher. This command does not download or select releases. These artifacts do not support Intel Macs or every Pi OS/libc; the companion unpacked bundle contains `built-on.txt` and the wheel tags for checking host compatibility.
 
-With a working host `python3.11` and the prerequisites above, the first command is:
+After the shared Python check above, use the operator-provided exact installer path. Do not search download or protected directories for it. If no trusted bundle was supplied, stop here and explicitly choose the source-build alternative instead of guessing a download. The bundle command first verifies CPython 3.11:
 
 ```bash
 WORK="$HOME/.local/share/claudlobby-build"   # authoring/output only, not the temporary install
 DATA="$HOME/.local/share/claudlobby-data"
-mkdir -p "$WORK"
-python3.11 -I /absolute/claudlobby-install.pyz --root "$DATA" --json > "$WORK/host-setup.json" &&
-RELEASE_CLI=$(python3.11 -c \
+"$PYTHON" -I -c 'import sys; assert sys.version_info[:2] == (3, 11), "This bundle requires CPython 3.11"' &&
+mkdir -p "$WORK" &&
+"$PYTHON" -I /absolute/claudlobby-install.pyz --root "$DATA" --json > "$WORK/host-setup.json" &&
+RELEASE_CLI=$("$PYTHON" -I -c \
   'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
   "$WORK/host-setup.json") &&
-USER_UNIT_DIR=$(python3.11 -c \
+USER_UNIT_DIR=$("$PYTHON" -I -c \
   'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["install_directories"][0])' \
   "$WORK/host-setup.json") &&
 "$RELEASE_CLI" --help
@@ -56,14 +79,7 @@ The following numbered sections are **source-build-only**; bundle users do not r
 
 Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory **and commit** first: `git init --quiet && git add --all && git commit -m 'Record release source'`. Configure a local Git author if needed; no remote is required. An uncommitted export can build a wheel, but release assembly refuses its missing source revision. There is no automatic hosted download/latest-release selection or installed lock-generation command; this section constructs local inputs explicitly. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
 
-Choose the host CPython and prove it can create a disposable virtual environment. Stop unless this prints `python ok`:
-
-```bash
-PYTHON="$(command -v python3)"                 # choose a working host CPython
-PROBE="$(mktemp -d)"
-"$PYTHON" -c 'import plistlib, ssl' && "$PYTHON" -m venv "$PROBE/venv" && echo 'python ok'
-rm -rf "$PROBE"
-```
+Use the absolute `PYTHON` already proven by the shared prerequisite check above. A source build accepts CPython 3.10 or newer only when the candidate wheel and downloaded dependencies support it; it does not inherit the supplied bundle's `py311` compatibility. Do not silently select the host's default `python3`.
 
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
@@ -136,7 +152,7 @@ else
   WHEEL="$1"
   "$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup \
     --wheel "$WHEEL" --dependency-lock "$WORK/dependency.lock" \
-    --wheelhouse "$WORK/wheelhouse" --interpreter "$WORK/bootstrap/bin/python" \
+    --wheelhouse "$WORK/wheelhouse" --interpreter "$PYTHON" \
     --json > "$WORK/host-setup.json" &&
   RELEASE_CLI=$("$WORK/bootstrap/bin/python" -c \
     'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \

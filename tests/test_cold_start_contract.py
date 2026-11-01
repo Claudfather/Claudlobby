@@ -108,8 +108,20 @@ class TestDocumentedInstallPath:
         assert not [ln for ln in lines if re.search(r"\bexit\b", ln)]
         assert not [ln for ln in lines if re.search(r"\bimport [\w, ]*\bvenv\b", ln)]
         assert any(re.search(r'-m venv "\$PROBE/', ln) for ln in lines)
+        assert '"$PROBE/venv/bin/python" -I -c' in GETTING_STARTED.read_text()
         text = GETTING_STARTED.read_text()
         assert "python3-venv" in text and "`jq`" in text
+        assert "Path(sys.executable).resolve(strict=True)" in text
+        assert "sys.version_info >= (3, 10)" in text
+        assert "sys.version_info[:2] == (3, 11)" in text
+        assert "import encodings, plistlib, ssl, sys" in text
+        assert '--interpreter "$PYTHON"' in text
+        assert 'PYTHON="$(command -v python3)"' not in text
+        skill = SETUP_SKILL.read_text()
+        assert "#prove-the-python-executable-once" in skill
+        assert "exact operator-provided bundle path" in skill
+        assert "Do not search Downloads or protected directories" in skill
+        assert "obtain that explicit choice before building" in skill
 
     def test_every_entry_point_agrees_on_the_first_run_template(self):
         """Browser first-team is the default; the seed remains an operator option.
