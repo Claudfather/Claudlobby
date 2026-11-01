@@ -74,27 +74,16 @@ To tighten it further: keep each fleet's Telegram group to people you would give
 
 ## Quick start
 
-Existing checkout-based hosts must follow the [conversion prerequisite](documentation/existing-host-release-conversion.md) before pulling this release. The cold-host sequence below does not retire an old source-pulling timer.
+**Start with [First-team setup](documentation/first-team-setup.md)** for the website-to-team path: prepare one computer, connect its private owner endpoint to your workspace, then preview and launch a lead, engineer and reviewer for an approved repository and goal. No Telegram bot is required.
 
-**You need:** a working Python interpreter, `tmux`, a running user manager (launchd or systemd user), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, and the Telegram channel plugin if your fleet declares Telegram. `host setup` checks the native manager and required executables; it does not install them.
+1. Check the guide's noncredential native prerequisites. Obtain a trusted exact compatible release with the `plane-ui` dependencies, using an available bundle or the explicitly chosen source-build alternative. Do not guess an installer download.
+2. Assemble that release with `host setup` using [Getting started](documentation/getting-started.md). Assembly starts no bots. Return to First-team setup after assembly; do not activate the optional seed.
+3. After assembly, establish provider/repository access, native identity and matching website setup publication. Missing access or publication blocks continuation, not candidate assembly. Pair the computer locally, approve the workspace and exact setup scope, then review the browser's frozen plan. Launch once only when ready for native services and agreed provider usage. Keep the original receipt if a response is lost.
+4. Check the connection to view the team. A recorded launch is not proof that bots finished starting or passed local native approval. Message/task access requires its separate local action grants; merges and deployments require separate permission.
 
-Build the candidate wheel and its offline, SHA-256-locked dependency wheelhouse as shown in [Getting started](documentation/getting-started.md). Install that wheel into a temporary bootstrap venv, then use its CLI to assemble a sealed release under an **absolute data root outside the checkout**:
+The guide uses existing release assembly, owner/workspace approval and recorded activation. It does not install system packages, Claude Code, Tailscale ingress or repository credentials. The supervised first-team trial has completed launch, task/review and browser feedback; unattended newcomer setup and the changed cold-host instructions still require validation.
 
-```bash
-"$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup --wheel "$WHEEL" \
-  --dependency-lock "$WORK/dependency.lock" --wheelhouse "$WORK/wheelhouse" \
-  --interpreter "$WORK/bootstrap/bin/python"
-```
-
-The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml.seed` outside the data root, put the matching token in `$DATA/local/seed/.env`, then activate it through that **sealed CLI**:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
-  --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"
-"$RELEASE_CLI" --root "$DATA" host doctor
-```
-
-`fleet setup` places the authored file at `$DATA/local/seed/fleet.yaml`, stages the whole host, and uses the existing activation owner to start it. A different existing fleet file requires `--replace-config`. The sealed release keeps its own interpreter and packaged library/native scripts; generated bot files and persistent state live under the data root. See [Getting started](documentation/getting-started.md) for the complete commands, prerequisites, and paths for macOS and Linux.
+**Operator alternatives:** the [source-build assembly path](documentation/getting-started.md#1-prepare-the-release-inputs-source-build-alternative) returns to the same browser guide. The optional [Telegram seed/direct-CLI path](documentation/getting-started.md#3-author-the-first-fleet) uses `fleet.yaml.seed` and `fleet setup` only when explicitly chosen. Existing checkout-based hosts must first follow the [conversion prerequisite](documentation/existing-host-release-conversion.md); a fresh setup does not retire their old source-pulling timers.
 
 ## Architecture
 
