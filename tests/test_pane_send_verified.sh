@@ -375,15 +375,20 @@ r=$(env -u PANE_READY_TICKS bash -c '
     printf "%s\n" "$(pane_await_input_box sock nosuchsession)"' _ "$LIB_DIR")
 assert_eq "unarmed: the wait is off inside the function, not just in the env" "unwaited" "$r"
 
-# And the arming is SCOPED. A bare `export` would outlive the two cold-boot sends
-# and hand the 45s budget to bridge_bringup_verify's failure alert, which targets
-# the MANAGER pane through bot_tmux_send — a 45s block plus a recovery poll inside
-# ExecStart, for an alert about this bot being unreachable. Assert the property
-# (per-call prefix, no process-wide export) rather than one literal line, so a
-# requote or rename does not redden a behaviourally identical change.
-r=$(grep -cE '^[[:space:]]*PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"[[:space:]]*\\?$' \
+# The launcher passes its boot budget into the shared injection owner. The
+# owner must scope that value to the pane send, preserving the caller value.
+r=$(grep -cF 'startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"' \
     "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
-assert_eq "start-bot arms the wait per call, once for each cold-boot send" "2" "$r"
+assert_eq "start-bot passes its boot budget to the shared injector" "1" "$r"
+r=$(bash -c '
+    . "$1/lib-common.sh"
+    pane_send_verified() { printf "%s/" "$PANE_READY_TICKS"; }
+    inject_stamp() { printf stamp; }
+    boot_send_settled() { :; }
+    PANE_READY_TICKS=200
+    _startup_send unused sock session unused 37 startup STARTUP payload
+    printf "%s" "$PANE_READY_TICKS"' _ "$LIB_DIR")
+assert_eq "shared startup send arms the wait per call and preserves inherited value" "37/200" "$r"
 r=$(grep -cE '^[[:space:]]*export[[:space:]]+PANE_READY_TICKS' "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
 assert_eq "start-bot never exports it process-wide (it would leak past the sends)" "0" "$r"
 
@@ -1224,10 +1229,17 @@ assert_eq "rc 4: a held resume does not abort the following startup" "rc=0" "$r"
 r=$(grep -c 'STARTUP — NOT SENT: the input box already held text' "$blog" || true)
 assert_eq "rc 4: the startup log distinguishes no new input" "1" "$r"
 assert_eq "both withheld and refused boot sends are logged" "2" "$(wc -l < "$blog" | tr -d ' ')"
-# Both boot sends go through it: the property, not one literal line.
-r=$(grep -cE '^[[:space:]]*boot_send_settled (RESUME|STARTUP) "\$_send_rc" "\$LOG"$' \
-    "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
-assert_eq "start-bot settles both of its boot sends" "2" "$r"
+# The shared send owner passes the actual send status to the settlement owner.
+# A withheld Enter must be recorded as NOT SUBMITTED, without aborting startup.
+r=$(bash -c '
+    . "$1/lib-common.sh"
+    pane_send_verified() { return 3; }
+    inject_stamp() { printf stamp; }
+    _startup_send unused sock session "$2" 37 bootstrap BOOTSTRAP payload
+    printf "rc=%s" "$?"' _ "$LIB_DIR" "$TMPD/shared-startup.log")
+assert_eq "shared startup send settles a withheld Enter without aborting" "rc=0" "$r"
+r=$(grep -c 'BOOTSTRAP — NOT SUBMITTED' "$TMPD/shared-startup.log" || true)
+assert_eq "shared startup send preserves the actual send outcome in its log" "1" "$r"
 
 echo "=== fresh occupied input refuses every new payload, including while busy ==="
 for held in input-stuck-literal.txt input-stuck-wrapped.txt input-stuck-collapsed-paste.txt input-typed-busy.txt; do
