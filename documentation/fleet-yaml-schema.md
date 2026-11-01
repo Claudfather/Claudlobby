@@ -1008,6 +1008,7 @@ The compositor auto-derives permission entries in `settings.local.json` from sev
 | **MCP permission contracts** | `library/mcp/<name>.json` `_permissions_contract.tools` field lists tool names → generates `mcp__<server>__<tool>` allow patterns. |
 | **Channel plugins** | Bots with a Telegram handle get allow rules for `mcp__plugin_telegram_telegram__*` tools. |
 | **Skills** | Each skill generates `Skill(<name>)` and `Skill(<name>:*)` allow patterns, plus any `tool_grants` (Bash/MCP/bare tools) the skill's own frontmatter declares. |
+| **Configured session resume** | The built-in resume default or `bots.<name>.env.SESSION_RESUME_COMMAND` naming a selected plugin Skill or equipped local Skill derives only `Skill(name)`. This grants the whole Skill (all its modes), not just resume arguments or underlying tools. Empty/native/opaque entries derive no new grant. Runtime-only `.env` overrides require explicit `tool_permissions.allow` for a different Skill; deny/ask policy remains authoritative. |
 | **Skill and integration ask and deny rules** | A skill's or integration's frontmatter `ask_grants` generate `permissions.ask` rules, and its `deny_grants` are appended to the deny list. `permissions.ask` is written only when a rule survives, so a bot with none keeps the same file. |
 | **Claudron session loop** | When `claudron_session_loop` resolves true, a narrow allowlist of `claudron` CLI verb grants (never a `Bash(claudron *)` wildcard). |
 | **Base tools** | `Read`, `Grep`, `Glob` are always allowed when an allow list is non-empty. |

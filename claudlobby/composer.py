@@ -38,6 +38,7 @@ from .context import native_environment
 from .resources import selected_cli
 from .config import (
     GITHUB_APP_ENV_VARS,
+    DEFAULT_SESSION_RESUME_COMMAND,
     BotConfig,
     FleetConfig,
     load_fleet,
@@ -1400,6 +1401,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     if bot.claudna.harvest is not None:
         lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
 
+    # Default only when absent: inherited values and later .env tiers keep
+    # their existing precedence, including explicit-empty resume disabling.
+    # An authored bot.env assignment below retains its existing literal form.
+    if "SESSION_RESUME_COMMAND" not in bot.env:
+        lines.append('export SESSION_RESUME_COMMAND="${SESSION_RESUME_COMMAND-'
+                     + _configured_resume_command(bot) + '}"')
+
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.
@@ -2715,6 +2723,33 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
+def _configured_resume_command(bot: BotConfig) -> str:
+    """Authored command, not runtime discovery; preserve explicit empty."""
+    return bot.env.get("SESSION_RESUME_COMMAND", DEFAULT_SESSION_RESUME_COMMAND)
+
+
+def _resolve_resume_permission(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                               effective_skills: list[str]) -> list[str]:
+    """Grant only the configured entry's whole Skill invocation.
+
+    Equipment is authored here; installed/callable proof remains the runtime
+    capability owner's job. No .env/account reads or native permission matcher.
+    A runtime-only override needs its own explicit tool_permissions.allow.
+    """
+    first = _configured_resume_command(bot).partition(" ")[0]
+    if not re.fullmatch(r"/[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?", first):
+        return []
+    name = first[1:]
+    if ":" in name:
+        plugin = name.split(":", 1)[0]
+        selected = set(fleet.plugins.required) | set(_channel_plugins(bot.channels))
+        if not any(ref.split("@", 1)[0] == plugin for ref in selected):
+            return []
+    elif name not in resolve_skill_sources(paths, effective_skills, _log.warning):
+        return []
+    return [f"Skill({name})"]
+
+
 def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     """Auto-derive Skill() permission patterns from a resolved skill list.
 
@@ -3130,6 +3165,7 @@ def compose_settings_local(
     # never only linked (cycle-1 B8)).
     effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
+    _append_unique(allow_patterns, _resolve_resume_permission(bot, fleet, paths, effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the

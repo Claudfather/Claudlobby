@@ -496,9 +496,8 @@ count_send_retries() {
 # window between send-keys and Enter (the #1109 hypothesis knob);
 # PANE_READY_TICKS governs the pre-send box wait, forwarded so an arming change
 # in start-bot.sh starts honoring it with no sampler change — but INERT today:
-# start-bot.sh arms its own value at both pane_send_verified call sites
-# (start-bot.sh:371,381 as of #1109), so a forwarded override cannot reach the
-# injection path. knob_disclosure says so in the output. PANE_SEND_SHOWN_TICKS
+# start-bot.sh passes its own value through startup_inject to _startup_send
+# so a forwarded override cannot reach the injection path. knob_disclosure says so in the output. PANE_SEND_SHOWN_TICKS
 # (#1236) bounds the wait for the box to show the payload before the Enter, the
 # step a boot strand is now decided in, and PANE_SEND_ENTER_TRIES how many
 # Enters a payload still in the box after it gets.

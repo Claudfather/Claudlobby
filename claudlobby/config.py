@@ -866,6 +866,12 @@ DEFAULT_MARKETPLACES: dict[str, dict] = {
     },
 }
 
+# The authored resume default for newly composed bots. bot.conf uses a
+# presence-based fallback so inherited/.env overrides (including empty) retain
+# their precedence. lib-common keeps its fallback for old generated configs.
+DEFAULT_SESSION_RESUME_COMMAND = "/claudna:session resume --auto"
+
+
 DEFAULT_PLUGINS: list[str] = [
     "claudna@Claudfather",
     "superpowers@claude-plugins-official",

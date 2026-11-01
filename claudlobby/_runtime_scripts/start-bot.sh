@@ -537,75 +537,11 @@ esac
 # this bot being unreachable. A one-shot assignment prefix is scoped to the single
 # command and does not persist afterwards.
 
-# Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
-# intentional, crash, or weekly bounce — injects a session-resume command as a
-# first keystroke so the bot picks up its last handoff. Sent BARE — no 'set +H;'
-# prefix, unlike the STARTUP_PROMPT prose send below (see pane_send_verified for
-# why a slash command must reach the pane untouched). Sent first so it settles
-# before STARTUP_PROMPT and the two never collide.
-#
-# TWO independent gates, and they fail in opposite directions on purpose:
-#
-#   AGE       resume only from a checkpoint fresher than RESUME_MAX_AGE_S; a
-#             stale one (a bot that crashed days ago) clean-starts rather than
-#             replaying dead state.
-#   CAPABILITY (#1163) inject only when the configured command can actually
-#             resolve. This used to be a hardcoded plugin-qualified command sent
-#             unconditionally, so a fleet running `plugins.include_defaults:
-#             false` fired an unresolvable keystroke into EVERY pane on EVERY
-#             boot — including bots that never equipped `restart`. There is no
-#             agent at that instant to exercise judgement; the keystroke either
-#             resolves or it does not.
-#
-# A skipped resume is LOUD — a distinct log line naming the reason, plus a fleet
-# event, because the whole defect class here is a degradation nobody sees.
-_SESSION_MD="$BOT_DIR/.claude/session.md"
-_RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
-# `-` not `:-` deliberately: an explicitly EMPTY SESSION_RESUME_COMMAND is a
-# fleet saying "no resume injection", and must not fall back to the default.
-_RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
-if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    # Bash 3.2 can fire ERR inside a command substitution even when the
-    # assignment is an if condition. Capture the status verdict with its
-    # expected negative guarded inside, then decide by the explicit values.
-    _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR" || true)"
-    case "$_resume_status" in
-    available|unverifiable)
-        echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
-        # #1265: stamp the send instant. Written before the call and again
-        # after, so a send that never returns leaves state=sending on disk.
-        _inject_t0="$(inject_stamp "$BOT_DIR" resume sending)"
-        _send_rc=0
-        PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD" || _send_rc=$?
-        inject_stamp "$BOT_DIR" resume "done" "$_send_rc" "$_inject_t0" >/dev/null
-        boot_send_settled RESUME "$_send_rc" "$LOG"
-        ;;
-    *)
-        echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
-        emit_fleet_event "resume_skipped" "startup" \
-            "{\"reason\":\"$_resume_status\",\"handoff\":\"$_SESSION_MD\"}" || true
-        ;;
-    esac
-elif [ -f "$_SESSION_MD" ]; then
-    echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
-fi
-
-if [ -n "${STARTUP_PROMPT:-}" ]; then
-    # Prose, so it keeps the 'set +H; ' history-expansion guard the resume send
-    # above must omit. The TUI's input buffer can race on cold start, leaving the
-    # prompt typed but unsubmitted; pane_send_verified owns the catch.
-    # #1265: the injection instant, stamped at the actual send. The service
-    # rung is not a proxy for it — measured on the 2026-09-07 boot every rung
-    # fired to the second while the session appeared 36-168s later, so all of
-    # the variance lives here and nothing recorded it.
-    _inject_t0="$(inject_stamp "$BOT_DIR" startup sending)"
-    _send_rc=0
-    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT" || _send_rc=$?
-    inject_stamp "$BOT_DIR" startup "done" "$_send_rc" "$_inject_t0" >/dev/null
-    boot_send_settled STARTUP "$_send_rc" "$LOG"
-fi
+# Resume prior context and authored startup through the shared injection owner.
+# Positively resolved Skills use one enclosing fleet bootstrap; literal custom
+# commands retain the compatibility behavior. This proves submission, not that
+# the model completed resume. Activation-time release is a separate contract.
+startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
 [ -x "$LIB_DIR/fleet-state-update.sh" ] && "$LIB_DIR/fleet-state-update.sh" "$BOT_NAME" "idle" || true
