@@ -676,8 +676,9 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
     This pins the FULL composed permissions.allow LITERALLY instead: no
     protocol in scope declares `requires:` (report-back, the only one this
     fleet composes by default, does not), so every entry below must trace to
-    the two declared skills or the universal fleet-ops skill and its role
-    grants. `channels: []` suppresses the default Telegram plugin grants."""
+    the two declared skills, the universal fleet-ops skill and its role
+    grants, or the configured default resume Skill. `channels: []` suppresses
+    the default Telegram plugin grants."""
     _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
     _write_skill(fleet_dir, "widget", tool_grants=["Bash(widget-tool *)"])
     _equip(fleet_dir, "lead", skills=["gadget", "widget"], channels=[])
@@ -700,6 +701,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Skill(widget:*)",
         "Skill(fleet-ops)",
         "Skill(fleet-ops:*)",
+        "Skill(claudna:session)",  # configured default resume invocation only
         "Bash(gadget-tool *)",
         "Bash(widget-tool *)",
         "Bash(python3 -I -c 'import uuid; print(uuid.uuid4())')",
