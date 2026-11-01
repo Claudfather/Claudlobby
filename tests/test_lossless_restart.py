@@ -20,6 +20,10 @@ without this wrapper the logic would be untested in CI.
 from __future__ import annotations
 
 import subprocess
+import json
+import os
+import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,6 +57,100 @@ def _session_md(tmp_path: Path, name: str, last_updated: str | None) -> Path:
             f"---\ncwd: /x\nlast_updated: {last_updated}\nschema_version: 2\n---\n"
         )
     return f
+
+
+class TestStartupBootstrap:
+    """Exercise the launcher's actual injection block, with an inert sender."""
+
+    @pytest.mark.parametrize("mode", ["plugin", "local", "cache-only", "disabled-skill",
+                                      "disabled-plugin", "ambiguous", "native", "opaque",
+                                      "empty", "stale", "missing", "absent"])
+    def test_skill_bootstrap_and_literal_compatibility(self, tmp_path, mode):
+        bot, account = tmp_path / "bot", tmp_path / "selected account"
+        skills = bot / ".claude/skills"
+        (skills / "fleet-ops").mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "library/skills/fleet-ops/bootstrap.md", skills / "fleet-ops/bootstrap.md")
+        install = account / "plugins/cache/market/provider/1.0.0"
+        (install / ".claude-plugin").mkdir(parents=True)
+        (install / ".claude-plugin/plugin.json").write_text('{"name":"provider"}')
+        skill = install / "skills/session"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: session\n" + (
+            "disable-model-invocation: true\n" if mode == "disabled-skill" else "") + "argument-hint: '[handoff|resume] [--auto]'\n---\nResume.\n")
+        # Shape grounded in installed clauDNA 0.34.7: registry v2 user entry,
+        # plugin.json name, skills/session/SKILL.md name and argument-hint.
+        # Provider/path identifiers are synthetic; see startup-one-prompt receipt.
+        entries = [{"scope": "user", "version": "1.0.0", "installPath": str(install)}]
+        if mode == "ambiguous":
+            other = install.parent / "2.0.0"
+            shutil.copytree(install, other)
+            entries.append({"scope": "user", "installPath": str(other)})
+        if mode != "cache-only":
+            (account / "plugins/installed_plugins.json").write_text(json.dumps({
+                "version": 2, "plugins": {"provider@market": entries}}))
+        (bot / ".claude/settings.local.json").write_text(json.dumps({
+            "enabledPlugins": {"provider@market": mode != "disabled-plugin"}}))
+        command = "/provider:session resume --auto --note 'keep spaces'"
+        if mode == "local":
+            local = skills / "restore"
+            local.mkdir()
+            (local / "SKILL.md").write_text("---\nname: restore\n---\nResume.\n")
+            command = "/restore resume --auto"
+        elif mode == "native": command = "/compact"
+        elif mode == "opaque": command = "Restore my custom context"
+        elif mode == "empty": command = ""
+        elif mode == "absent": command = "/absent:session resume --auto"
+        if mode != "missing":
+            stamp = datetime.now(timezone.utc) - timedelta(hours=25 if mode == "stale" else 1)
+            _session_md(bot / ".claude", "session.md", _iso(stamp))
+        startup = "Authored startup: preserve $literal, `text`, ! and\nsecond line."
+        sends, log, errors = (tmp_path / name for name in ("sends", "startup.log", "errors"))
+        source = START_BOT.read_text()
+        block = "# Resume prior context" + source.split("# Resume prior context", 1)[1].split("# Mark bot as idle", 1)[0]
+        script = '''
+. "$1"
+set -Eeuo pipefail
+trap 'printf "ERR\\n" >> "$ERRORS"' ERR
+pane_send_verified() { printf '%s\\0' "$3" >> "$SENDS"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { :; }
+''' + block
+        env = {**os.environ, "BOT_DIR": str(bot), "CLAUDE_CONFIG_DIR": str(account),
+               "SESSION_RESUME_COMMAND": command, "STARTUP_PROMPT": startup,
+               "_NATIVE_ADMISSION_PYTHON": sys.executable, "TMUX_SOCKET": "private",
+               "TMUX_SESSION": "worker", "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1",
+               "SENDS": str(sends), "ERRORS": str(errors)}
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert not errors.exists()
+        payloads = sends.read_bytes().decode().rstrip("\0").split("\0")
+        if mode in {"plugin", "local"}:
+            assert len(payloads) == 1
+            assert payloads[0].startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1")
+            call = json.loads(payloads[0].split("\n\n")[2])
+            assert call == {"skill": "provider:session" if mode == "plugin" else "restore",
+                            "args": "resume --auto --note 'keep spaces'" if mode == "plugin" else "resume --auto"}
+            assert "FLEET_STARTUP_INSTRUCTIONS_BEGIN\n" + startup + "\nFLEET_STARTUP_INSTRUCTIONS_END" in payloads[0]
+        elif mode in {"empty", "stale", "missing", "absent"}:
+            assert payloads == ["set +H; " + startup]
+        else:
+            assert payloads == [command, "set +H; " + startup]
+
+
+    @pytest.mark.parametrize("complete", [True, False])
+    def test_boot_classifier_requires_authored_instructions_in_bootstrap(self, tmp_path, complete):
+        prompt = 'Read "my brief" then act.'
+        text = "set +H; FLEET_STARTUP_BOOTSTRAP_V1\nFLEET_STARTUP_INSTRUCTIONS_BEGIN\n"
+        text += (prompt if complete else "different instructions") + "\nFLEET_STARTUP_INSTRUCTIONS_END"
+        (tmp_path / "session.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": "2026-10-01T00:01:00Z",
+            "message": {"role": "user", "content": text}}, separators=(",", ":")) + "\n")
+        output, rc = _run('if boot_start_class "$2" "$3" "$4"; then :; fi', str(tmp_path),
+                          "2026-10-01T00:00:00Z", prompt)
+        assert rc == 0
+        assert output.split("\t")[0] == ("payload" if complete else "partial")
 
 
 class TestIsoToEpoch:
@@ -189,11 +287,11 @@ class TestSessionResumeCapability:
         # Exercise the real startup branch under macOS Bash 3.2 errtrace.
         # Guarding the assignment with an outer if still fired ERR inside it.
         source = START_BOT.read_text()
-        start = 'if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then'
-        branch = start + source.split(start, 1)[1].split('if [ -n ', 1)[0]
-        session = _session_md(tmp_path, "session.md", _iso(datetime.now(timezone.utc)))
+        start = "# Resume prior context"
+        branch = start + source.split(start, 1)[1].split("# Mark bot as idle", 1)[0]
         bot = tmp_path / "bot"
-        bot.mkdir()
+        (bot / ".claude").mkdir(parents=True)
+        session = _session_md(bot / ".claude", "session.md", _iso(datetime.now(timezone.utc)))
         cfg = self._plugin_home(tmp_path, provider)
         sends, errors, log = (tmp_path / name for name in ("sends", "errors", "boot.log"))
         script = '''
@@ -205,7 +303,9 @@ pane_send_verified() { printf "send\\n" >> "$SEND_MARKER"; }
 inject_stamp() { printf stamp; }
 emit_fleet_event() { :; }
 _SESSION_MD="$2"; _RESUME_MAX_AGE_S=86400
-_RESUME_CMD="/someplugin:session resume --auto"
+SESSION_RESUME_COMMAND="/someplugin:session resume --auto"
+STARTUP_PROMPT=""
+boot_send_settled() { :; }
 BOT_DIR="$3"; LOG="$6"; TMUX_SOCKET=x; TMUX_SESSION=x
 _PANE_READY_TICKS_BOOT=1
 ''' + branch

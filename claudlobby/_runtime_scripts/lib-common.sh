@@ -4308,12 +4308,18 @@ _SESSION_HANDOFF_COMMAND_DEFAULT='/claudna:session handoff --auto'
 # Both layouts are checked because the cache is keyed by MARKETPLACE and the
 # plugin lives under it (measured: cache/Claudfather/claudna), while the
 # unpacked skills live under marketplaces/.
-_plugin_installed() {
-    local p="${1:?}" base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins" d
+_session_plugin_paths() {
+    local p="${1:?}" base="${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}/plugins" d found=1
     for d in "$base"/cache/*/"$p" "$base"/marketplaces/*/"$p" "$base"/cache/"$p" ; do
-        [ -d "$d" ] && return 0
+        if [ -d "$d" ]; then printf '%s\n' "$d"; found=0; fi
     done
-    return 1
+    return "$found"
+}
+
+_plugin_installed() {
+    local paths
+    paths="$(_session_plugin_paths "$1" || true)"
+    [ -n "$paths" ]
 }
 
 # session_command_status <command> [bot_dir] — echo one status token. Serves
@@ -4328,43 +4334,159 @@ _plugin_installed() {
 # should have costs the session its context, SILENTLY — which is the failure
 # #1163 opened with. So only a positive finding of absence suppresses the send;
 # "I could not tell" sends and says so.
-session_command_status() {
-    local cmd="${1-}" bot_dir="${2-}" first plugin skill
-    if [ -z "$cmd" ]; then printf 'no-command'; return 1; fi
-    # Only the FIRST token can carry a plugin qualifier; checking the whole
-    # string would read a colon in a later argument as one.
-    first="${cmd%% *}"
-    case "$first" in
+# One resolution owner. The scalar compatibility door below preserves the old
+# verdicts; bootstrap consumes the same selected account and discovered paths.
+_session_command_resolve() {
+    local cmd="${1-}" bot_dir="${2-}" plugin skill
+    _SESSION_COMMAND_ACCOUNT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    _SESSION_COMMAND_FIRST="${cmd%% *}"
+    _SESSION_COMMAND_ARGS="${cmd#"$_SESSION_COMMAND_FIRST"}"
+    _SESSION_COMMAND_PATHS=""
+    _SESSION_COMMAND_LOCAL=""
+    _SESSION_COMMAND_STATUS=unverifiable
+    if [ -z "$cmd" ]; then _SESSION_COMMAND_STATUS=no-command; return 1; fi
+    case "$_SESSION_COMMAND_FIRST" in
         /*:*)
-            plugin="${first#/}"; plugin="${plugin%%:*}"
-            if _plugin_installed "$plugin"; then printf 'available'; return 0; fi
-            printf 'provider-absent:%s' "$plugin"; return 1 ;;
-        /*)
-            # A BARE /word. This branch checks the bot's skills dir and then
-            # does NOT suppress on a miss, which looks asymmetric against the
-            # plugin branch above and is deliberate — do not "fix" it by
-            # symmetrizing the two.
-            #
-            # The difference is what a negative MEANS on each path. A
-            # plugin-qualified command names a plugin, and a plugin absent from
-            # the cache is a POSITIVE finding of absence. A bare /word does not
-            # name a plugin, and the namespace includes Claude Code's own
-            # NATIVE commands — /compact, /clear and friends — which have no
-            # filesystem representation anywhere, so a miss here is ambiguous
-            # rather than a finding. Treating it as absence would silently
-            # refuse to send every native command a fleet ever configured.
-            #
-            # So the lookup is worth doing (a hit is a real positive, and
-            # upgrades the status from unverifiable to available) while the
-            # miss stays unverifiable and still sends, per the fail-open rule
-            # above.
-            skill="${first#/}"
-            if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
-                printf 'available'; return 0
+            plugin="${_SESSION_COMMAND_FIRST#/}"; plugin="${plugin%%:*}"
+            _SESSION_COMMAND_PATHS="$(_session_plugin_paths "$plugin" "$_SESSION_COMMAND_ACCOUNT" || true)"
+            if [ -n "$_SESSION_COMMAND_PATHS" ]; then
+                _SESSION_COMMAND_STATUS=available; return 0
             fi
-            printf 'unverifiable'; return 0 ;;
-        *)  printf 'unverifiable'; return 0 ;;
+            _SESSION_COMMAND_STATUS="provider-absent:$plugin"; return 1 ;;
+        /*)
+            skill="${_SESSION_COMMAND_FIRST#/}"
+            if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
+                _SESSION_COMMAND_LOCAL="$bot_dir/.claude/skills/$skill"
+                _SESSION_COMMAND_STATUS=available
+            fi ;;
     esac
+    return 0
+}
+
+session_command_status() {
+    local rc=0
+    _session_command_resolve "$@" || rc=$?
+    printf '%s' "$_SESSION_COMMAND_STATUS"
+    return "$rc"
+}
+
+# Render only a positively callable installed Skill. Unavailable, ambiguous or
+# unreadable proof keeps the literal compatibility path; never guesses a Skill.
+# Inputs come from _session_command_resolve, not another account/path search.
+_startup_bootstrap_payload() {
+    local bot_dir="$1" startup="$2" python="${_NATIVE_ADMISSION_PYTHON:-}"
+    [ "$_SESSION_COMMAND_STATUS" = available ] && [ -x "$python" ] || return 1
+    "$python" -I -B - "$bot_dir" "$startup" "$_SESSION_COMMAND_ACCOUNT" \
+        "$_SESSION_COMMAND_FIRST" "$_SESSION_COMMAND_ARGS" "$_SESSION_COMMAND_PATHS" \
+        "$_SESSION_COMMAND_LOCAL" <<'BOOTSTRAP_PY'
+import json
+from pathlib import Path
+import re
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(1)
+
+bot, startup, account, first, args, roots, local = sys.argv[1:]
+bot, account = Path(bot), Path(account)
+try:
+    if not re.fullmatch(r"/[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?", first):
+        raise ValueError()
+    name = first[1:]
+    if local:
+        candidates = [Path(local) / "SKILL.md"]
+        skill = name
+    else:
+        plugin, skill = name.split(":", 1)
+        discovered = [Path(path).resolve() for path in roots.splitlines()]
+        registry = json.loads((account / "plugins/installed_plugins.json").read_text())["plugins"]
+        enabled = {}
+        for settings in (account / "settings.json", bot / ".claude/settings.json", bot / ".claude/settings.local.json"):
+            if settings.exists():
+                values = json.loads(settings.read_text()).get("enabledPlugins", {})
+                if not isinstance(values, dict):
+                    raise ValueError()
+                enabled.update(values)
+        candidates = []
+        for ref, entries in registry.items():
+            if ref.split("@", 1)[0] != plugin or enabled.get(ref) is not True:
+                continue
+            for entry in entries:
+                scope = entry.get("scope")
+                if scope != "user" and not (scope in ("project", "local") and entry.get("projectPath") == str(bot)):
+                    continue
+                install = Path(entry["installPath"])
+                if not install.is_absolute():
+                    raise ValueError()
+                install = install.resolve()
+                if not any(install == root or root in install.parents for root in discovered):
+                    raise ValueError()
+                manifest = json.loads((install / ".claude-plugin/plugin.json").read_text())
+                if manifest.get("name") != plugin:
+                    raise ValueError()
+                candidates.append(install / "skills" / skill / "SKILL.md")
+    if len(set(candidates)) != 1:
+        raise ValueError()
+    lines = candidates[0].read_text().splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError()
+    end = lines.index("---", 1)
+    metadata = yaml.safe_load("\n".join(lines[1:end]))
+    if (not isinstance(metadata, dict) or metadata.get("name") != skill
+            or metadata.get("disable-model-invocation", False) is not False):
+        raise ValueError()
+    template = (bot / ".claude/skills/fleet-ops/bootstrap.md").read_text()
+    if (not template.startswith("FLEET_STARTUP_BOOTSTRAP_V1\n")
+            or template.count("{{RESUME_SKILL_CALL}}") != 1
+            or template.count("{{STARTUP_PROMPT}}") != 1):
+        raise ValueError()
+    values = {"RESUME_SKILL_CALL": json.dumps({"skill": name, "args": args.lstrip()}, ensure_ascii=False),
+              "STARTUP_PROMPT": startup}
+    print(re.sub(r"{{(RESUME_SKILL_CALL|STARTUP_PROMPT)}}", lambda match: values[match[1]], template), end="")
+except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError, yaml.YAMLError):
+    sys.exit(1)
+BOOTSTRAP_PY
+}
+
+_startup_send() {
+    local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5" kind="$6" label="$7" text="$8"
+    local started rc=0
+    started="$(inject_stamp "$bot_dir" "$kind" sending)"
+    PANE_READY_TICKS="$ticks" pane_send_verified "$socket" "$session" "$text" || rc=$?
+    inject_stamp "$bot_dir" "$kind" done "$rc" "$started" >/dev/null
+    boot_send_settled "$label" "$rc" "$log"
+}
+
+# Canonical automatic injection. A proven Skill plus authored startup is one
+# fleet-owned prompt; opaque/native commands retain their literal semantics.
+# Success is submission evidence only, never completed resume or business work.
+startup_inject() {
+    local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5"
+    local checkpoint="$bot_dir/.claude/session.md" startup="${STARTUP_PROMPT:-}" payload
+    local max_age="${RESUME_MAX_AGE_S:-86400}" command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
+    if should_resume_session "$checkpoint" "$max_age"; then
+        if _session_command_resolve "$command" "$bot_dir"; then
+            if payload="$(_startup_bootstrap_payload "$bot_dir" "$startup" || true)" && [ -n "$payload" ]; then
+                printf '%s STARTUP mode=skill-bootstrap — one resume/startup submission\n' "$(ts_iso)" >> "$log"
+                _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup BOOTSTRAP "set +H; $payload"
+                return
+            fi
+            printf '%s RESUME — injecting resume command [%s; literal-compatibility]: %s\n' \
+                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
+            _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
+        else
+            printf '%s RESUME SKIP — fresh checkpoint present but no resume capability [%s]; starting clean, handoff left at %s\n' \
+                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$checkpoint" >> "$log"
+            emit_fleet_event resume_skipped startup \
+                "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$checkpoint\"}" || true
+        fi
+    elif [ -f "$checkpoint" ]; then
+        printf '%s RESUME SKIP — checkpoint older than %ss, clean-starting\n' "$(ts_iso)" "$max_age" >> "$log"
+    fi
+    if [ -n "$startup" ]; then
+        _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup STARTUP "set +H; $startup"
+    fi
 }
 
 should_resume_session() {
@@ -4872,7 +4994,7 @@ _bots_from_manifest() {
 # of the self-started count, so it cannot inflate the headline — the one
 # direction a measurement must not fail in.
 boot_start_class() {
-    local tdir="$1" boot_cmp="$2" prompt="${3:-}" f first="" prose="" esc=""
+    local tdir="$1" boot_cmp="$2" prompt="${3:-}" f first="" prose="" esc="" wrapped=""
     for f in "$tdir"/*.jsonl; do
         [ -f "$f" ] || continue
         first="$(printf '%s\n%s\n' "$first" "$(awk -v boot="$boot_cmp" '
@@ -4902,10 +5024,12 @@ boot_start_class() {
         # The record holds the prompt JSON-encoded, so the needle is escaped the
         # same way before a fixed-string search. Backslash first, or the escaping
         # of the quotes is itself re-escaped.
-        esc="$(printf '%s' "$prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        esc="$(json_escape "$prompt")"
+        wrapped="FLEET_STARTUP_INSTRUCTIONS_BEGIN\\n${esc}\\nFLEET_STARTUP_INSTRUCTIONS_END"
         for f in "$tdir"/*.jsonl; do
             [ -f "$f" ] || continue
-            prose="$(printf '%s\n%s\n' "$prose" "$(grep -F "set +H; $esc" "$f" 2>/dev/null \
+            prose="$(printf '%s\n%s\n' "$prose" "$({ grep -F "set +H; $esc" "$f" 2>/dev/null; \
+                    grep -F 'set +H; FLEET_STARTUP_BOOTSTRAP_V1' "$f" 2>/dev/null | grep -F "$wrapped" || true; } \
                 | grep '"type":"user"' \
                 | grep -o '"timestamp":"[^"]*"' | sed 's/.*:"//; s/"$//' \
                 | awk -v boot="$boot_cmp" '$0 > boot')" | grep -v '^$' | sort | head -1)"

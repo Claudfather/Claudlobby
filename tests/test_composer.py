@@ -3727,6 +3727,19 @@ class TestDefaultStartupPromptIgnition:
     def _startup_prompt_line(self, conf: str) -> str:
         return [l for l in conf.splitlines() if l.startswith("STARTUP_PROMPT=")][0]
 
+    def test_fleet_ops_links_shared_bootstrap_without_changing_authored_prompt(self, tmp_path):
+        from claudlobby.composer import link_skills, resolve_effective_skills
+        bot = self._bot(startup_prompt="Keep my authored instructions.")
+        paths = self._paths(tmp_path)
+        fleet = self._fleet(bot)
+        link_skills(bot, paths, lambda *_: None,
+                    skills=resolve_effective_skills(bot, fleet, paths, is_manager=True))
+        template = paths.bot_runtime(bot.bot_id) / ".claude/skills/fleet-ops/bootstrap.md"
+        assert template.read_text().startswith("FLEET_STARTUP_BOOTSTRAP_V1\n")
+        assert '{{STARTUP_PROMPT}}' in template.read_text()
+        assert self._startup_prompt_line(compose_bot_conf(bot, fleet, paths)) == (
+            'STARTUP_PROMPT="Keep my authored instructions."')
+
     def test_default_startup_prompt_names_the_brief_door_and_an_action(self, tmp_path):
         bot = self._bot()
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))

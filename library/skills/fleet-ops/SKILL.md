@@ -117,6 +117,8 @@ tool_grants:
 
 # Fleet operations
 
+Automatic startup uses the shared [bootstrap envelope](bootstrap.md) when its resume command positively resolves to a model-callable Skill. The envelope invokes that Skill with separate name and arguments, then continues the authored startup instructions in the same turn. A submitted envelope is not proof that either step completed.
+
 Before a new mutation, run this granted standalone command once to mint its
 request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
 lowercase form the CLI requires. `-I` keeps the current directory off the import
