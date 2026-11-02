@@ -122,6 +122,7 @@ fleet:
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
+      skill_overrides: {<skill>: "<state>"}  # OPTIONAL — settings.local skillOverrides, merged per skill (default: {auto-mode-setup: "off"})
       remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
@@ -250,6 +251,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `claudna-harvest` | **off** — model spend (summaries) and draft-note writes through claudron capture | door | fleet.yaml bots.<bot> → activated composition | bots.<bot>.claudna.harvest: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, host activate PLAN_ID (recorded when the bot's next session opens: bot.conf is read at session start); widen to defaults.claudna.harvest once it has run clean |
+| `claudna-precompact-reflect` | **off** — it blocks: clauDNA's PreCompact hook refuses every other compaction until /claudna:capture runs, and nobody at a bot's pane runs it (#941) | door | fleet.yaml bots.<bot> → activated composition | bots.<bot>.claudna.precompact_reflect: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, host activate PLAN_ID (from the bot's next session: bot.conf is read at session start); widen to defaults.claudna.precompact_reflect once it has run clean |
 | `claudna-session-summary` | **off** — model spend (one Haiku call per sealed segment, in the background of the bot's session) | door | fleet.yaml bots.<bot> → activated composition | bots.<bot>.claudna.session_summary: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, host activate PLAN_ID (recorded when the bot's next session opens: bot.conf is read at session start); widen to defaults.claudna.session_summary once it has run clean |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
@@ -908,6 +910,25 @@ the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
 
+### `bots.<name>.skill_overrides`
+
+Mapping of skill name to one of Claude Code's `skillOverrides` states: `"on"`, `"name-only"`,
+`"user-invocable-only"` or `"off"`. Composed into `settings.local.json` as `skillOverrides`. It
+merges per skill: the built-in default, then `defaults.skill_overrides`, then the bot's own, so
+naming one skill keeps the default for the others. Quote each state: YAML reads a bare `on` or
+`off` as a boolean, which is refused.
+
+The built-in default is `{auto-mode-setup: "off"}` (#1388). Once auto mode has blocked several
+actions, Claude Code ends a turn on a dialog, "Teach auto mode about your environment?", offering
+to run `/auto-mode-setup`. No one at a bot's pane answers it, and an accepted draft would be
+written to `~/.claude/settings.json`, which every bot running as that user shares. `"off"`
+removes both the command and the offer. To turn them back on for a fleet:
+
+```yaml
+defaults:
+  skill_overrides: {auto-mode-setup: "on"}
+```
+
 ### `bots.<name>.agent_cli`
 
 String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_AGENT_CLI`, which names the rule the bot's session uid is derived with (#2145 §2.2; the doors that record the caller's session read it from #2145 P1 Half B). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). An explicit `null` reads as `claude`; any other value outside the set fails to parse. Can be set in `defaults:`.
@@ -1218,6 +1239,7 @@ silently re-arms the original bug.
 claudna:
   session_summary: true  # OPTIONAL strict bool; one background model call per sealed segment
   harvest: false        # OPTIONAL strict bool; summaries + unverified draft notes through claudron
+  precompact_reflect: false  # OPTIONAL strict bool; clauDNA's capture prompt before a compaction
 ```
 
 Bot fields override defaults field by field; null inherits. Unknown keys and string
@@ -1226,6 +1248,11 @@ booleans are refused. `harvest: true` implies summaries; combining it with expli
 `$BOT_DIR/data/claudna`; `CLAUDNA_SESSION_SUMMARY` is always composed (`0` unless
 summaries or harvest is armed), so unarmed bots export with reason `disabled`.
 `CLAUDNA_HARVEST` is composed when harvest is explicitly set.
+`CLAUDNA_PRECOMPACT_REFLECT` is always composed, `0` unless `precompact_reflect` arms it:
+clauDNA's PreCompact hook otherwise refuses every other compaction until `/claudna:capture`
+runs, and no one at a bot's pane runs it (#941). A vault-wired bot whose session loop
+composes Claudron's own `hook pre-compact` entry still meets that hook's prompt on its first
+compaction in a session; this knob does not reach it.
 
 Harvest needs **Claudron >= 0.8.0 on the host first (PR 6a)**. The current install
 pin is older: `config validate` warns `claudna-harvest-pin` until that separate bump.

@@ -1400,6 +1400,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append(f"export CLAUDNA_SESSION_SUMMARY={1 if (bot.claudna.session_summary or bot.claudna.harvest) else 0}")
     if bot.claudna.harvest is not None:
         lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
+    # #941: clauDNA's PreCompact hook refuses every other compaction until
+    # /claudna:capture runs, and nobody at a bot's pane runs it. Its own default
+    # is on, so compose 0 unless the fleet arms it.
+    lines.append(f"export CLAUDNA_PRECOMPACT_REFLECT={1 if bot.claudna.precompact_reflect else 0}")
 
     # Default only when absent: inherited values and later .env tiers keep
     # their existing precedence, including explicit-empty resume disabling.
@@ -3370,6 +3374,14 @@ def compose_settings_local(
     settings["skipDangerousModePermissionPrompt"] = (
         bot.skip_dangerous_mode_permission_prompt
     )
+
+    # #1388: once auto mode has blocked several actions, Claude Code ends a turn
+    # on "Teach auto mode about your environment?", which nobody at a bot's pane
+    # answers, and an accepted draft would land in the host-shared
+    # ~/.claude/settings.json. "off" removes /auto-mode-setup and that offer.
+    # fleet.yaml-overridable per skill, under defaults: or per bot.
+    if bot.skill_overrides:
+        settings["skillOverrides"] = dict(bot.skill_overrides)
 
     return settings
 

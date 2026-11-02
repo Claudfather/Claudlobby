@@ -879,7 +879,8 @@ def _validate_bots(
         except ResolverUnavailable:
             claudna_tiers = {}
             shared.add("claudna-env", "authored .env tiers could not be resolved; claudna: override coverage is unknown", bot_name)
-        for key in ("CLAUDNA_STATE_DIR", "CLAUDNA_SESSION_SUMMARY", "CLAUDNA_HARVEST"):
+        for key in ("CLAUDNA_STATE_DIR", "CLAUDNA_SESSION_SUMMARY", "CLAUDNA_HARVEST",
+                    "CLAUDNA_PRECOMPACT_REFLECT"):
             resolution = claudna_tiers.get(key)
             if resolution is not None:
                 finding = (f"{key} assigned in {resolution.tier} tier ({resolution.path}) is overridden "

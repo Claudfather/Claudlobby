@@ -271,6 +271,14 @@ SWITCHES: tuple[Switch, ...] = (
            compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
            takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
            takes_effect_off="no harvest from the bot's next session on"),
+    Switch(key="claudna-precompact-reflect", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.precompact_reflect",
+           why_opt_in="it blocks: clauDNA's PreCompact hook refuses every other compaction until"
+                      " /claudna:capture runs, and nobody at a bot's pane runs it (#941)",
+           what="let clauDNA's PreCompact hook ask this bot for a capture before it compacts",
+           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           takes_effect="from the bot's next session: bot.conf is read at session start",
+           takes_effect_off="from the bot's next session, compactions pass without the prompt"),
     Switch(
         key="task-recheck",
         scope=FLEET_JOB,

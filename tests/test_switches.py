@@ -97,6 +97,10 @@ def test_exactly_the_categories_that_ship_off():
     visible test edit and an argued reason, never a silent registry entry."""
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert opt_in == {"update-siblings", "claudna-session-summary", "claudna-harvest", "code-audit-sweep",
+                      # blocks: clauDNA's capture prompt refuses every other
+                      # compaction, and nobody at a bot's pane runs the
+                      # capture it asks for (#941). Not a cost category.
+                      "claudna-precompact-reflect",
                       # Explicit private write-capable serving; owner grants
                       # and native endpoint configuration remain separate.
                       "plane-owner",
@@ -1006,7 +1010,7 @@ def test_doctor_switches_markdown_prints_every_block(tmp_path):
 
 
 def test_claudna_switch_carriers_and_export_enrollment(tmp_path):
-    for key in ("claudna-session-summary", "claudna-harvest"):
+    for key in ("claudna-session-summary", "claudna-harvest", "claudna-precompact-reflect"):
         row = sw.by_key(key)
         assert (row.scope, row.polarity, row.carrier) == (
             sw.DOOR,

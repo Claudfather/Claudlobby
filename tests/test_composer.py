@@ -626,6 +626,25 @@ class TestComposeSettingsLocal:
         assert result["skipAutoPermissionPrompt"] is False
         assert result["skipDangerousModePermissionPrompt"] is False
 
+    def test_auto_mode_setup_off_by_default_and_overridable(self, tmp_path):
+        """#1388: a bot built with no override still composes the offer off, so
+        no unattended bot ends a turn on "Teach auto mode about your
+        environment?"; a per-bot state flows through as written."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
+        assert compose_settings_local(bot, fleet, paths)["skillOverrides"] == {
+            "auto-mode-setup": "off"
+        }
+        bot = BotConfig(
+            bot_id="solo", name="solo", expertise=["eng"],
+            skill_overrides={"auto-mode-setup": "on"},
+        )
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
+        assert compose_settings_local(bot, fleet, paths)["skillOverrides"] == {
+            "auto-mode-setup": "on"
+        }
+
     def test_skip_prompts_independent_of_cli_flag(self, tmp_path):
         """The settings.local skip-flags are a distinct knob from the
         --dangerously-skip-permissions CLI flag: the flag still composes into
@@ -6126,6 +6145,24 @@ def test_claudna_summary_is_always_composed(tmp_path, summary, harvest, value):
     assert text.index("BOT_DIR=") < text.index("CLAUDNA_STATE_DIR=")
     if harvest is not None:
         assert f"export CLAUDNA_HARVEST={int(harvest)}" in text
+
+
+@pytest.mark.parametrize("reflect, value", [(None, 0), (False, 0), (True, 1)])
+def test_claudna_precompact_reflect_is_always_composed(tmp_path, reflect, value):
+    """#941: clauDNA's capture prompt refuses every other compaction, and the
+    framework sends a bot's compactions, so it composes off unless armed."""
+    from claudlobby.config import ClaudnaConfig
+
+    bot = BotConfig(
+        bot_id="b", name="b", expertise=["x"],
+        claudna=ClaudnaConfig(precompact_reflect=reflect),
+    )
+    fleet = FleetConfig(
+        name="canary", service_prefix="com.canary", manager="b", bots={"b": bot}
+    )
+    text = compose_bot_conf(bot, fleet, _make_paths(tmp_path))
+    assert text.count("export CLAUDNA_PRECOMPACT_REFLECT=") == 1
+    assert f"export CLAUDNA_PRECOMPACT_REFLECT={value}" in text
 
 
 def test_no_retired_hook_is_composed(tmp_path):

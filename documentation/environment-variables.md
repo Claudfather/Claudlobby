@@ -197,6 +197,7 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 | `CLAUDNA_STATE_DIR` | composed, always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
 | `CLAUDNA_SESSION_SUMMARY` | composed, always: `0` unless `bots.<name>.claudna.session_summary` / `harvest` or `defaults.claudna.*` arms it | One summary per sealed segment; unarmed bots export `skipped: disabled` |
 | `CLAUDNA_HARVEST` | `bots.<name>.claudna.harvest` / `defaults.claudna.harvest` | Summaries plus draft vault capture; needs Claudron >= 0.8.0 on the host first (PR 6a) |
+| `CLAUDNA_PRECOMPACT_REFLECT` | composed, always: `0` unless `bots.<name>.claudna.precompact_reflect` / `defaults.claudna.precompact_reflect` arms it | clauDNA's PreCompact capture prompt, which refuses every other compaction until `/claudna:capture` runs (#941) |
 | `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | Exports the version hint; does not pin plugin installation |
 | `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `documentation/specs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |

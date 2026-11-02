@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from types import MappingProxyType
 
 # Shell-identifier pattern — the SSOT for anything that becomes a shell variable
 # name (bot.env keys, model-strategy tiers, briefing slot -> BRIEFING_SECTIONS_<SLOT>).
@@ -97,6 +98,16 @@ KNOWN_TOOL_TYPES: frozenset[str] = frozenset({"script"})
 VALID_PERMISSION_MODES: frozenset[str] = frozenset(
     {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
 )
+
+# ── Skill overrides (settings.local.json) ────────────────────────
+# Claude Code's skillOverrides states; a skill absent from the map reads as
+# "on". BotConfig.skill_overrides starts from the default below (#1388): "off"
+# removes /auto-mode-setup and the end-of-turn offer to run it, which an
+# unattended bot never answers.
+SKILL_OVERRIDE_STATES: frozenset[str] = frozenset(
+    {"on", "name-only", "user-invocable-only", "off"}
+)
+DEFAULT_SKILL_OVERRIDES = MappingProxyType({"auto-mode-setup": "off"})
 
 # ── Headless env vars (bot.conf) ─────────────────────────────────
 # Two sets, split by effect on Claude Code's --remote-control: HEADLESS_TRIM
