@@ -2,9 +2,10 @@
 
 Ordinary mutations and one-shots hold the shared host lock through completion;
 resident startup hands its tracked PID across exec before releasing that lock.
-The coordinator requires the exclusive side to quiesce admitted processes. No
-lock/state provisioning, application import, supervisor, or migration occurs
-here. Read-only diagnosis and activation itself do not use this door.
+The coordinator requires the exclusive side to quiesce admitted processes.
+Exact waited timer services share one private cohort mutex; no other lock/state
+provisioning, application import, supervisor, or migration occurs here.
+Read-only diagnosis and activation itself do not use this door.
 """
 
 from __future__ import annotations
@@ -528,21 +529,54 @@ def _scheduled_candidate(target: UnitStart) -> dict | None:
         and item["admission"]["argv"] == list(target.argv) for d, item in units) else None
 
 
-def _await_scheduled(target: UnitStart, fd: int, selected: dict) -> None:
-    """Poll the existing SH lock; no body runs, nothing is recorded or resent."""
-    deadline = time.monotonic() + _SCHEDULED_WAIT
-    while True:
-        time.sleep(0.5)
-        try:
-            _take_shared(target.root, fd)
-        except BlockingIOError:
+def _cohort_lock(root: Path) -> int:
+    path = root / "state/activation-scheduled.lock"
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        _check_cohort_lock(root, fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _check_cohort_lock(root: Path, fd: int) -> None:
+    path = root / "state/activation-scheduled.lock"
+    info, linked = os.fstat(fd), path.lstat()
+    if (path.parent.resolve() != path.parent or not stat.S_ISREG(linked.st_mode)
+            or linked.st_uid != os.getuid() or linked.st_mode & 0o077 or linked.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)):
+        raise ActivationError("scheduled producer cohort lock was replaced or is not private; no job ran")
+
+
+def _await_scheduled(target: UnitStart, fd: int, selected: dict, *, deadline: float) -> int:
+    """Serialize actual activation waiters within their original admission budget.
+
+    Cohort EX then pending-ordered host SH span the body. Ordinary timer ticks
+    do not take the cohort lock, and nested CLI admission remains shared.
+    """
+    cohort = _cohort_lock(target.root)
+    try:
+        while True:
             if time.monotonic() >= deadline:
                 raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
-            continue
-        _native_lock(target.root, fd, os.getppid())
-        if read_selection(target.root) != selected:
-            raise ActivationError("selected activation changed while the scheduled producer waited; no job ran")
-        return
+            _check_cohort_lock(target.root, cohort)
+            try:
+                fcntl.flock(cohort, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _take_shared(target.root, fd)
+            except BlockingIOError:
+                time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+                continue
+            _native_lock(target.root, fd, os.getppid())
+            if read_selection(target.root) != selected:
+                raise ActivationError("selected activation changed while the scheduled producer waited; no job ran")
+            if time.monotonic() >= deadline:
+                raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
+            result, cohort = cohort, None  # transfer this open description to run_unit
+            return result
+    finally:
+        if cohort is not None:
+            os.close(cohort)
 
 
 def _unit_started() -> str:
@@ -585,16 +619,18 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
         raise ActivationError("unit environment differs from its bound release context")
     fd = os.open(target.root / "state/activation.lock", os.O_RDONLY | os.O_NOFOLLOW)
     finished = False
+    cohort = None
     try:
         _native_lock(target.root, fd, os.getppid())
         try:
             _take_shared(target.root, fd)
         except BlockingIOError:
+            deadline = time.monotonic() + _SCHEDULED_WAIT
             selected = _scheduled_candidate(target)
             if selected is None:
                 _request_start(target.root, {**_unit_request(target, identity), "pid": os.getpid()}, 2.0)
             else:
-                _await_scheduled(target, fd, selected)
+                cohort = _await_scheduled(target, fd, selected, deadline=deadline)
                 _selected_active(target.root, identity, target.release_id)
         else:
             _selected_active(target.root, identity, target.release_id)
@@ -610,12 +646,16 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
             execer(target.command[0], target.command, env)
             raise ActivationError("native unit exec unexpectedly returned")
         env[UNIT_STARTED_ENV] = started
-        result = runner(target.command, env=env, pass_fds=(fd,), check=False)
+        result = runner(target.command, env=env, pass_fds=(fd,) if cohort is None else (fd, cohort), check=False)
         finished = True
         return result.returncode
     finally:
         if finished:
             fcntl.flock(fd, fcntl.LOCK_UN)
+            if cohort is not None:
+                fcntl.flock(cohort, fcntl.LOCK_UN)
+        if cohort is not None:
+            os.close(cohort)
         os.close(fd)
 
 
