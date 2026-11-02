@@ -8,6 +8,9 @@ tool_grants:
   - "Bash(.claude/skills/gitguardian/gitguardian_api.sh incident *)"
   - "Bash(.claude/skills/gitguardian/gitguardian_api.sh triage *)"
   - "Bash(.claude/skills/gitguardian/gitguardian_api.sh help *)"
+deny_grants:
+  - "Bash(curl *gitguardian.com*)"
+  - "Bash(wget *gitguardian.com*)"
 ---
 
 # GitGuardian
@@ -58,6 +61,7 @@ For `placeholder`, triage reads the secret's lines from a local checkout that ho
 The `tool_grants` above allow the read commands in the form shown, so they run without a prompt. The helper has no write: `ignore`, `resolve` and `reopen` print `refused` and send nothing, and the operator makes every change in GitGuardian's dashboard.
 
 - **Run it from the bot directory.** The grants name a path relative to it.
+- **Direct calls are refused.** The `deny_grants` above refuse a hand-written `curl` or `wget` call to `gitguardian.com` in every permission mode. Use the helper.
 - **Write values out.** Claude Code allows a command that contains a `$VARIABLE` only through an exact-text rule, so write an incident number or a `--checkout` path literally.
 
 ## Never

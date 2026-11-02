@@ -1,0 +1,3 @@
+### Fixed — a bot's copy of a skill holds the shared partial the skill links (#2608)
+
+Fourteen skills link `../_telegram-formatting.md`, a shared partial at the top of `library/skills/`. Staging copied only each skill's own directory, so that link named nothing in any bot's copy. Staging now copies every shared partial (a flat `_<name>.md` at the top of `library/skills/`) to the top of each bot's `.claude/skills/`, beside the copied skills, so the same link resolves there as it does in `library/skills/`. The skill's text is unchanged. The `~/.env` scan of what a bot is told now reads the partials too.

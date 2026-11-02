@@ -312,11 +312,33 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
     )
 
 
-def _read_tool_grants(md_path: Path) -> list[str]:
+#: The two rule lists a skill or an integration declares beside ``tool_grants``
+#: (#2476). Each of their rules restricts, so they are read strictly (see
+#: :func:`_read_tool_grants`).
+_RULE_LISTS = ("ask_grants", "deny_grants")
+
+#: One Claude Code permission rule, the form each entry of those lists takes: an
+#: ``mcp__`` glob, a bare tool name, or a tool name with its specifier in
+#: parentheses (``Bash(curl *)``, ``Read(//srv/x/**)``), with nothing around it.
+_RULE_RE = re.compile(r"mcp__[^*]*\*?|[A-Z][A-Za-z0-9]*(?:\(.+\))?")
+
+
+def _read_tool_grants(
+    md_path: Path, key: str = "tool_grants", source: str = ""
+) -> list[str]:
     """Read the additive ``tool_grants`` list from a markdown file's frontmatter.
 
     Shared by skills (``<skill>/SKILL.md``) and integrations (``<name>.md``). Returns
     ``[]`` when the file, its frontmatter, or the ``tool_grants`` list is absent.
+    ``key`` reads a sibling rule list the same way (#2476): ``ask_grants``, rules
+    that always prompt, or ``deny_grants``, rules that always refuse.
+
+    Those two are read strictly. A rule dropped from either fails open, a deny that
+    never refuses or an ask that never prompts, so a value that is not a list, an
+    entry that is not a string and an entry that is not a permission rule each
+    raise ``ValueError``, opened by ``source`` (``skill 'name'``) to name the item.
+    ``tool_grants`` stays lenient, read as ``[]`` when it is not a list: a grant
+    dropped there withholds a tool, and ``validate`` reports its shape.
     """
     if not md_path.is_file():
         return []
@@ -324,8 +346,36 @@ def _read_tool_grants(md_path: Path) -> list[str]:
         fm, _ = parse_frontmatter(md_path.read_text())
     except OSError:
         return []
-    grants = fm.get("tool_grants")
+    grants = fm.get(key)
+    if key in _RULE_LISTS and key in fm:
+        return _rule_list(grants, f"{source} {key}".lstrip())
     return list(grants) if isinstance(grants, list) else []
+
+
+def _rule_list(value: object, where: str) -> list[str]:
+    """``value`` when it is a list of permission rules; else ``ValueError`` saying why not."""
+    if not isinstance(value, list):
+        if value is None:
+            shape = "empty"
+        elif isinstance(value, str):
+            shape = "a string"
+        elif isinstance(value, dict):
+            shape = "a mapping"
+        else:
+            shape = f"of type {type(value).__name__}"
+        raise ValueError(
+            f"{where} is {shape}, not a list, so no rule in it would compose: "
+            "write each rule as a list item"
+        )
+    bad = [rule for rule in value if not (isinstance(rule, str) and _RULE_RE.fullmatch(rule))]
+    if bad:
+        verb = "is not a permission rule" if len(bad) == 1 else "are not permission rules"
+        raise ValueError(
+            f"{where} holds {', '.join(map(repr, bad))}, which {verb}: each entry is "
+            "one mcp__ glob, tool name, or tool name with its specifier in "
+            "parentheses, such as Bash(curl *), with nothing around it"
+        )
+    return list(value)
 
 
 def library_requires(md_path: Path) -> dict[str, list[str]]:
@@ -361,9 +411,11 @@ def library_requires(md_path: Path) -> dict[str, list[str]]:
     }
 
 
-def _read_skill_grants(skill_dir: Path) -> list[str]:
-    """Read a skill's ``tool_grants`` from its ``SKILL.md`` marker (never sibling files)."""
-    return _read_tool_grants(skill_dir / "SKILL.md")
+def _read_skill_grants(
+    skill_dir: Path, key: str = "tool_grants", source: str = ""
+) -> list[str]:
+    """Read a skill's ``tool_grants`` (or ``key``) from its ``SKILL.md`` marker (never sibling files)."""
+    return _read_tool_grants(skill_dir / "SKILL.md", key, source)
 
 
 def integration_tool_grants(paths, name: str) -> list[str]:
@@ -391,12 +443,16 @@ def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
     return _parse_expertise_permissions(fm)
 
 
-def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]:
+def iter_skill_grants(
+    paths, equipped: list[str], key: str = "tool_grants"
+) -> list[tuple[str, list[str]]]:
     """Resolve equipped skill entries to ``(display_name, tool_grants)`` pairs.
 
     Entry forms mirror the skill loader: ``name`` / ``dir/name`` (a single skill) and
     ``dir/`` (folder-expansion — every skill dir beneath it). Folder-expanded members
-    are each resolved so their grant contracts are not silently skipped.
+    are each resolved so their grant contracts are not silently skipped. ``key``
+    reads ``ask_grants`` or ``deny_grants`` instead (#2476); a list of those that
+    would not compose as written raises ``ValueError`` naming the skill.
     """
     out: list[tuple[str, list[str]]] = []
     for entry in equipped:
@@ -404,10 +460,14 @@ def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]
             base = entry.rstrip("/")
             for leaf, skill_dir in paths.expand_skill_folder(base).items():
                 name = f"{base}/{leaf}" if base else leaf
-                out.append((name, _read_skill_grants(skill_dir)))
+                out.append((name, _read_skill_grants(skill_dir, key, f"skill '{name}'")))
         else:
             skill_dir = paths.find_library_dir("skills", entry)
-            grants = _read_skill_grants(skill_dir) if skill_dir is not None else []
+            grants = (
+                _read_skill_grants(skill_dir, key, f"skill '{entry}'")
+                if skill_dir is not None
+                else []
+            )
             out.append((entry, grants))
     return out
 
@@ -485,11 +545,15 @@ def iter_guardrail_permissions(
     return out
 
 
-def iter_integration_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]:
+def iter_integration_grants(
+    paths, equipped: list[str], key: str = "tool_grants"
+) -> list[tuple[str, list[str]]]:
     """Resolve equipped integration entries to ``(display_name, tool_grants)`` pairs.
 
     Handles ``name`` / ``dir/name`` (a single integration) and ``dir/`` (folder-expansion
     — every ``.md`` beneath it), so grant contracts in expanded folders are validated too.
+    ``key`` reads ``ask_grants`` or ``deny_grants`` instead (#2476); a list of those
+    that would not compose as written raises ``ValueError`` naming the integration.
     """
     out: list[tuple[str, list[str]]] = []
     for entry in equipped:
@@ -499,10 +563,14 @@ def iter_integration_grants(paths, equipped: list[str]) -> list[tuple[str, list[
                 "integrations", base
             ).items():
                 name = f"{base}/{rel_key}" if base else rel_key
-                out.append((name, _read_tool_grants(ipath)))
+                out.append((name, _read_tool_grants(ipath, key, f"integration '{name}'")))
         else:
             ipath = paths.find_library_file("integrations", entry, ".md")
-            grants = _read_tool_grants(ipath) if ipath is not None else []
+            grants = (
+                _read_tool_grants(ipath, key, f"integration '{entry}'")
+                if ipath is not None
+                else []
+            )
             out.append((entry, grants))
     return out
 

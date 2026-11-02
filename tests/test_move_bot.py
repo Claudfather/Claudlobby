@@ -305,8 +305,8 @@ def test_preview_discloses_host_scope_without_effect(tmp_path, monkeypatch):
     assert result.data["changed"] is False
 
 
-def _preflight_fixture(tmp_path, monkeypatch):
-    from claudlobby import activation_enrollment, activation_state, active_config
+def _preflight_fixture(tmp_path, monkeypatch, *, registry_preflight=False):
+    from claudlobby import activation, activation_enrollment, activation_state, active_config
     from claudlobby import config_plan, context, releases, supervision_inventory
     from claudlobby.commands import _helpers
     from claudlobby.commands import host
@@ -367,6 +367,10 @@ def _preflight_fixture(tmp_path, monkeypatch):
         "Linux", "", (Path.home() / ".config/systemd/user",), set(), {}))
     monkeypatch.setattr(activation_enrollment, "selected_bot_entry", lambda *_: {"installed": str(root / "units/worker.service"),
                                     "target": "worker.service"})
+    if not registry_preflight:
+        # The suite's own silencer (PLANE_EMIT_DISABLED=1) is a value the
+        # registry-scan refusal names, as it would in an operator's shell.
+        monkeypatch.setattr(activation, "registry_scan_refusal", lambda _contexts: None)
     args = Namespace(root=str(root), bot="worker", to="target", from_fleet="source",
                      apply=False, cleanup_source=False, force=False)
     return args, host_input, (source_dir / "fleet.yaml", target_dir / "fleet.yaml")
@@ -379,6 +383,17 @@ WORKER, OTHER = "    worker: {expertise: [build]}\n", "    other: {expertise: [r
 def _fleet_yaml(name, manager, *bots, extra=""):
     return (f"fleet:\n  name: {name}\n  manager: {manager}\n  system_defaults: false\n{extra}"
             "  bots:\n" + "".join(bots))
+
+
+def test_preflight_refuses_an_exported_registry_scan_opt_out_before_any_effect(tmp_path, monkeypatch):
+    """#2611: apply_move stops its bot before it activates, so the activation's
+    registry-scan refusal is asked in the preflight, before anything is stopped."""
+    args, _, _ = _preflight_fixture(tmp_path, monkeypatch, registry_preflight=True)
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+    with pytest.raises(CommandFailure, match="bot move refused before it stops anything: "
+                       "PLANE_EMIT_ENABLED=0 in this command's environment"):
+        move_bot.preflight(args)
 
 
 def test_preview_preflight_reads_frozen_manifest_paths_not_source_records(tmp_path, monkeypatch):

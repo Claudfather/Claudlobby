@@ -108,23 +108,41 @@ class TestDocumentedInstallPath:
         assert not [ln for ln in lines if re.search(r"\bexit\b", ln)]
         assert not [ln for ln in lines if re.search(r"\bimport [\w, ]*\bvenv\b", ln)]
         assert any(re.search(r'-m venv "\$PROBE/', ln) for ln in lines)
+        assert '"$PROBE/venv/bin/python" -I -c' in GETTING_STARTED.read_text()
         text = GETTING_STARTED.read_text()
         assert "python3-venv" in text and "`jq`" in text
+        assert "Path(sys.executable).resolve(strict=True)" in text
+        assert "sys.version_info >= (3, 10)" in text
+        assert "sys.version_info[:2] == (3, 11)" in text
+        assert "import encodings, plistlib, ssl, sys" in text
+        assert '--interpreter "$PYTHON"' in text
+        assert 'PYTHON="$(command -v python3)"' not in text
+        skill = SETUP_SKILL.read_text()
+        assert "#prove-the-python-executable-once" in skill
+        assert "exact operator-provided bundle path" in skill
+        assert "Do not search Downloads or protected directories" in skill
+        assert "obtain that explicit choice before building" in skill
 
     def test_every_entry_point_agrees_on_the_first_run_template(self):
-        """The three onboarding entry points must name the same template.
+        """Browser first-team is the default; the seed remains an operator option.
 
-        They disagreed: README and getting-started both said fleet.yaml.example
-        (a ~600-line multi-bot manifest) while the /setup skill said
-        fleet.yaml.seed (one bot). A newcomer following the README therefore got
-        the hardest possible starting point, and the guided and manual paths
-        diverged at step one.
-
-        The skill is included deliberately — the docs agreed with *each other*
-        the whole time, so a docs-only comparison would have stayed green.
+        Keep every entry point linked to the same browser guide while preserving
+        the explicitly chosen seed's installed-package copy contract below.
         """
         for source in (README, GETTING_STARTED, SETUP_SKILL):
-            assert "fleet.yaml.seed" in source.read_text(), source
+            text = source.read_text()
+            assert "first-team-setup.md" in text, source
+            assert "fleet.yaml.seed" in text and "operator" in text.lower(), source
+        skill = SETUP_SKILL.read_text()
+        assert "default `/setup` route" in skill
+        assert "Do not infer a request for the Telegram seed" in skill
+        walkthrough = GETTING_STARTED.read_text()
+        assert "Browser route: assembly is complete." in walkthrough
+        assert walkthrough.index("Browser route: assembly is complete.") < walkthrough.index("## 3. Author the first fleet")
+        first_team = (REPO_ROOT / "documentation" / "first-team-setup.md").read_text()
+        assert "RELEASE_ID=$(jq -er" in first_team
+        assert "USER_UNIT_DIR=$(jq -er" in first_team
+        assert "python3.11 -c" not in first_team
         # The executable copy uses the installed package path, including when
         # the operator is still in the source checkout after building it.
         walkthrough = GETTING_STARTED.read_text()

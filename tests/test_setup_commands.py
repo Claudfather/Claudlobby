@@ -1,7 +1,9 @@
 """Cold setup commands delegate effects to the sealed release and activation owners."""
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -376,17 +378,21 @@ def _host_setup_output(tmp_path, monkeypatch, catalog):
                                           wheelhouse="wheelhouse", interpreter="python"))
 
 
-_SELECTION = re.compile(r"USER_UNIT_DIR=\$\(python3\.11 -c \\\n\s*'([^']+)'")
+_SELECTION = re.compile(r"^(USER_UNIT_DIR=\$\(.*?\))(?: &&)?$", re.M | re.S)
 
 
 def _documented_selection(doc):
-    """The Python a guide has the reader run to choose USER_UNIT_DIR, as the reader pastes it."""
+    """The command a guide has the reader run to choose USER_UNIT_DIR, as the reader pastes it."""
     found = _SELECTION.findall((Path(__file__).resolve().parent.parent / doc).read_text())
-    assert len(found) == 1, f"{doc} has {len(found)} USER_UNIT_DIR=$(python3.11 -c '...') selections, not 1"
+    assert len(found) == 1, f"{doc} has {len(found)} USER_UNIT_DIR=$(...) selections, not 1"
     return found[0]
 
 
-@pytest.mark.parametrize("doc", ["documentation/getting-started.md", "documentation/first-team-setup.md"])
+@pytest.mark.parametrize("doc", [
+    "documentation/getting-started.md",
+    pytest.param("documentation/first-team-setup.md", marks=pytest.mark.skipif(
+        shutil.which("jq") is None, reason="the first-team guide selects with jq")),
+])
 def test_documented_unit_directory_is_the_one_the_runtime_reads_whatever_host_setup_lists_first(
         doc, tmp_path, monkeypatch):
     """#2610: on Linux `host setup` lists systemd's whole search path in its own order, and its first
@@ -395,9 +401,9 @@ def test_documented_unit_directory_is_the_one_the_runtime_reads_whatever_host_se
 
     def chosen(catalog):
         data = _host_setup_data(tmp_path, monkeypatch, catalog)
-        listing = tmp_path / "host-setup.json"
-        listing.write_text(json.dumps({"ok": True, "data": data}))
-        return data, subprocess.run([sys.executable, "-c", selection, str(listing), str(home)],
+        (tmp_path / "host-setup.json").write_text(json.dumps({"ok": True, "data": data}))
+        env = {"PATH": os.environ["PATH"], "HOME": str(home), "WORK": str(tmp_path), "PYTHON": sys.executable}
+        return data, subprocess.run(["bash", "-c", selection + ' && printf "%s\\n" "$USER_UNIT_DIR"'], env=env,
                                     capture_output=True, text=True, timeout=60)
 
     systemd = [home / ".config/systemd/user.control", run / "systemd/user.control", run / "systemd/transient",

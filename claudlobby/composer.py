@@ -38,6 +38,7 @@ from .context import native_environment
 from .resources import selected_cli
 from .config import (
     GITHUB_APP_ENV_VARS,
+    DEFAULT_SESSION_RESUME_COMMAND,
     BotConfig,
     FleetConfig,
     load_fleet,
@@ -522,19 +523,49 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
         if not tool_grants:
             continue
         _assert_read_only_grants(name, tool_grants, paths)
-        entry = next((e for e in bot.mcp if e.name == name), None)
-        if entry is None:
-            grants.extend(tool_grants)
-            continue
-        prefix = f"mcp__{name}__"
-        for grant in tool_grants:
-            if grant.startswith(prefix):
-                rest = grant[len(prefix) :]
-                for instance in entry.instances:
-                    grants.append(f"mcp__{entry.output_name(instance)}__{rest}")
-            else:
-                grants.append(grant)
+        grants.extend(_instance_rules(bot, name, tool_grants))
     return grants
+
+
+def _instance_rules(bot: BotConfig, name: str, rules: list[str]) -> list[str]:
+    """``rules`` with each ``mcp__<name>__`` prefix rewritten per instance.
+
+    Applies when a ``bot.mcp`` entry shares the integration's name (``default`` ->
+    ``mcp__<name>__``; named -> ``mcp__<name>-<instance>__``); every other rule,
+    and every rule of an integration with no such entry, is kept as written.
+    """
+    entry = next((e for e in bot.mcp if e.name == name), None)
+    if entry is None:
+        return list(rules)
+    prefix = f"mcp__{name}__"
+    out: list[str] = []
+    for rule in rules:
+        if rule.startswith(prefix):
+            rest = rule[len(prefix) :]
+            for instance in entry.instances:
+                out.append(f"mcp__{entry.output_name(instance)}__{rest}")
+        else:
+            out.append(rule)
+    return out
+
+
+def _resolve_integration_rules(bot: BotConfig, paths: Paths, key: str) -> list[str]:
+    """The ``ask_grants`` or ``deny_grants`` (``key``) of the bot's effective integrations.
+
+    #2476. An ``mcp__<name>__`` rule is rewritten per instance, as a grant is in
+    :func:`_resolve_integration_grants`, so it names the server the bot runs: a
+    rule left naming another server would never match, and an ask or deny that
+    never matches fails open. The read-only contract does not apply: asking about
+    or refusing a write tool is what these lists are for.
+    """
+    from .loader import iter_integration_grants
+
+    rules: list[str] = []
+    for name, declared in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths), key=key
+    ):
+        rules.extend(_instance_rules(bot, name, declared))
+    return rules
 
 
 # ----------------------------------------------------------------------
@@ -1035,7 +1066,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    config_dir = account_dir(bot, fleet)
+    config_dir = str(account_settings_path(bot, fleet, paths).parent)
 
     bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
@@ -1369,6 +1400,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append(f"export CLAUDNA_SESSION_SUMMARY={1 if (bot.claudna.session_summary or bot.claudna.harvest) else 0}")
     if bot.claudna.harvest is not None:
         lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
+    # #941: clauDNA's PreCompact hook refuses every other compaction until
+    # /claudna:capture runs, and nobody at a bot's pane runs it. Its own default
+    # is on, so compose 0 unless the fleet arms it.
+    lines.append(f"export CLAUDNA_PRECOMPACT_REFLECT={1 if bot.claudna.precompact_reflect else 0}")
+
+    # Default only when absent: inherited values and later .env tiers keep
+    # their existing precedence, including explicit-empty resume disabling.
+    # An authored bot.env assignment below retains its existing literal form.
+    if "SESSION_RESUME_COMMAND" not in bot.env:
+        lines.append('export SESSION_RESUME_COMMAND="${SESSION_RESUME_COMMAND-'
+                     + _configured_resume_command(bot) + '}"')
 
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
@@ -2172,10 +2214,10 @@ def composed_text_sources(
 ) -> list[tuple[Path, str]]:
     """``(source file, text)`` for everything a bot is TOLD: the expertise,
     voice and library items its CLAUDE.md composes, the charter a manager
-    composes, and every markdown file of every skill it is linked (the text a
-    skill hands the model). Scripts are left out on purpose: the model runs a
-    script, it does not retype its lines, and a deny rule never gates what a
-    script does itself."""
+    composes, every markdown file of every skill it is linked and the shared
+    partials beside those skills (the text a skill hands the model). Scripts
+    are left out on purpose: the model runs a script, it does not retype its
+    lines, and a deny rule never gates what a script does itself."""
     ctx = _bot_template_context(bot, fleet, paths)
     is_manager = bot.bot_id in fleet.manager_bots()
     out: list[tuple[Path, str]] = []
@@ -2209,6 +2251,8 @@ def composed_text_sources(
     for src in resolve_skill_sources(paths, skills, lambda _msg: None).values():
         for md in sorted(src.rglob("*.md")):
             _add_file(md)
+    for partial in paths.skill_partials().values():
+        _add_file(partial)
     return out
 
 
@@ -2683,6 +2727,33 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
+def _configured_resume_command(bot: BotConfig) -> str:
+    """Authored command, not runtime discovery; preserve explicit empty."""
+    return bot.env.get("SESSION_RESUME_COMMAND", DEFAULT_SESSION_RESUME_COMMAND)
+
+
+def _resolve_resume_permission(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                               effective_skills: list[str]) -> list[str]:
+    """Grant only the configured entry's whole Skill invocation.
+
+    Equipment is authored here; installed/callable proof remains the runtime
+    capability owner's job. No .env/account reads or native permission matcher.
+    A runtime-only override needs its own explicit tool_permissions.allow.
+    """
+    first = _configured_resume_command(bot).partition(" ")[0]
+    if not re.fullmatch(r"/[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?", first):
+        return []
+    name = first[1:]
+    if ":" in name:
+        plugin = name.split(":", 1)[0]
+        selected = set(fleet.plugins.required) | set(_channel_plugins(bot.channels))
+        if not any(ref.split("@", 1)[0] == plugin for ref in selected):
+            return []
+    elif name not in resolve_skill_sources(paths, effective_skills, _log.warning):
+        return []
+    return [f"Skill({name})"]
+
+
 def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     """Auto-derive Skill() permission patterns from a resolved skill list.
 
@@ -2698,7 +2769,9 @@ def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     return patterns
 
 
-def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
+def _resolve_skill_grants(
+    skills: list[str], paths: Paths, key: str = "tool_grants"
+) -> list[str]:
     """Additive ``tool_grants`` declared by the resolved skill list (F2/F6).
 
     :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
@@ -2709,11 +2782,12 @@ def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
     ``tool_grants`` path; de-duplication against the allow list happens in
     :func:`compose_settings_local`. Takes the EFFECTIVE skill list
     (:func:`resolve_effective_skills`), never ``bot.skills`` directly — same
-    reason as :func:`_resolve_skill_permissions`.
+    reason as :func:`_resolve_skill_permissions`. ``key`` reads the skills'
+    ``ask_grants`` or ``deny_grants`` instead (#2476).
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, skills)
+        for _name, grants in iter_skill_grants(paths, skills, key=key)
         for grant in grants
     ]
 
@@ -3095,6 +3169,7 @@ def compose_settings_local(
     # never only linked (cycle-1 B8)).
     effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
+    _append_unique(allow_patterns, _resolve_resume_permission(bot, fleet, paths, effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
@@ -3122,6 +3197,25 @@ def compose_settings_local(
     bot_deny_plain = set(bot.tool_permissions.deny)
     allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
 
+    # Ask and deny rules that skills and integrations declare (#2476). An ask
+    # rule prompts in every permission mode, auto included, even where an allow
+    # rule also matches, so no library grant can allow what a source asks about.
+    # The fleet grants an asked rule by naming it, exactly, under
+    # tool_permissions.allow, which drops it from the ask list. A list that would
+    # not compose as written raises ValueError naming its source
+    # (loader._read_tool_grants), so no rule of it reaches the settings.
+    fleet_allow = set(bot.tool_permissions.allow)
+    ask_patterns: list[str] = []
+    _append_unique(
+        ask_patterns, _resolve_skill_grants(effective_skills, paths, key="ask_grants")
+    )
+    _append_unique(ask_patterns, _resolve_integration_rules(bot, paths, "ask_grants"))
+    ask_patterns = [p for p in ask_patterns if p not in fleet_allow]
+    _append_unique(
+        deny_patterns, _resolve_skill_grants(effective_skills, paths, key="deny_grants")
+    )
+    _append_unique(deny_patterns, _resolve_integration_rules(bot, paths, "deny_grants"))
+
     # Ensure base tools are present whenever allow list is non-empty
     # (settings.local.json allow REPLACES global — without these, bots lose basic access)
     if allow_patterns:
@@ -3132,7 +3226,9 @@ def compose_settings_local(
     # L1 source guard (#702) — an ALLOW grant carrying an absolute path must
     # anchor it (${FLEET_ROOT}/…) or declare it (external_paths), same as any
     # other source value: granting access to a raw absolute is the self-containment
-    # violation (it dangles the moment the fleet runs elsewhere). Deny grants are
+    # violation (it dangles the moment the fleet runs elsewhere). An ASK rule is
+    # held to the same line (#2476): one that dangles stops matching, and the
+    # command it gated then runs unasked, by the classifier in auto. Deny grants are
     # restrictions, not wiring-to-a-path, so they are not classified — which also
     # sidesteps the composer-derived sibling-isolation denies above (a resolved
     # absolute the composer emits, never a source). No composer-derived allow layer
@@ -3148,7 +3244,7 @@ def compose_settings_local(
     )
 
     grant_findings: list[SourceFinding] = []
-    for grant in allow_patterns:
+    for grant in allow_patterns + ask_patterns:
         for denied in classify_grant_paths(grant, bot.external_paths):
             grant_findings.append(
                 SourceFinding(
@@ -3162,15 +3258,17 @@ def compose_settings_local(
     if grant_findings:
         raise source_findings_error(bot.bot_id, grant_findings)
 
+    # Keys in evaluation order: deny, then ask, then allow. ``ask`` is written
+    # only when a rule survives, so a bot with none keeps the old file shape.
+    permissions: dict = {}
     if deny_patterns:
-        permissions: dict = {"deny": deny_patterns}
-        if allow_patterns:
-            permissions["allow"] = allow_patterns
+        permissions["deny"] = deny_patterns
+    if ask_patterns:
+        permissions["ask"] = ask_patterns
+    if allow_patterns:
+        permissions["allow"] = allow_patterns
+    if permissions:
         settings["permissions"] = permissions
-    elif allow_patterns:
-        settings["permissions"] = {
-            "allow": allow_patterns,
-        }
 
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox_cfg: dict = {}
@@ -3276,6 +3374,14 @@ def compose_settings_local(
     settings["skipDangerousModePermissionPrompt"] = (
         bot.skip_dangerous_mode_permission_prompt
     )
+
+    # #1388: once auto mode has blocked several actions, Claude Code ends a turn
+    # on "Teach auto mode about your environment?", which nobody at a bot's pane
+    # answers, and an accepted draft would land in the host-shared
+    # ~/.claude/settings.json. "off" removes /auto-mode-setup and that offer.
+    # fleet.yaml-overridable per skill, under defaults: or per bot.
+    if bot.skill_overrides:
+        settings["skillOverrides"] = dict(bot.skill_overrides)
 
     return settings
 

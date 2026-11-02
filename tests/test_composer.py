@@ -7,6 +7,7 @@ import os
 import re
 import plistlib
 import subprocess
+import shlex
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
@@ -24,7 +25,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
-from tests.conftest import _write_exec, call_script_fn, git_isolation_env, install_real_template
+from tests.conftest import _write_exec, call_script_fn, constructed_env, git_isolation_env, install_real_template
 from claudlobby.composer import (
     _BOOT_STAGGER_SECONDS,
     _compose_hooks,
@@ -624,6 +625,25 @@ class TestComposeSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         assert result["skipAutoPermissionPrompt"] is False
         assert result["skipDangerousModePermissionPrompt"] is False
+
+    def test_auto_mode_setup_off_by_default_and_overridable(self, tmp_path):
+        """#1388: a bot built with no override still composes the offer off, so
+        no unattended bot ends a turn on "Teach auto mode about your
+        environment?"; a per-bot state flows through as written."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
+        assert compose_settings_local(bot, fleet, paths)["skillOverrides"] == {
+            "auto-mode-setup": "off"
+        }
+        bot = BotConfig(
+            bot_id="solo", name="solo", expertise=["eng"],
+            skill_overrides={"auto-mode-setup": "on"},
+        )
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
+        assert compose_settings_local(bot, fleet, paths)["skillOverrides"] == {
+            "auto-mode-setup": "on"
+        }
 
     def test_skip_prompts_independent_of_cli_flag(self, tmp_path):
         """The settings.local skip-flags are a distinct knob from the
@@ -1697,6 +1717,59 @@ class TestChannelSkillInSettingsLocal:
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
         return Paths(root=root, fleet_dir=root, package=source_package())
+
+    @pytest.mark.parametrize("command, plugins, expected", [
+        (None, ["claudna@Claudfather"], "claudna:session"),
+        (None, [], None),
+        ("/alternate:restore resume --auto", ["alternate@market"], "alternate:restore"),
+        ("/alternate:restore resume --auto", [], None),
+        ("", ["claudna@Claudfather"], None),
+        ("/compact", ["claudna@Claudfather"], None),
+        ("custom literal context restore", ["claudna@Claudfather"], None),
+        ("/unlinked resume", [], None),
+        ("/alternate:restore) injected", ["alternate@market"], None),
+    ])
+    def test_resume_grant_follows_only_authored_selected_skill(self, tmp_path, command, plugins, expected):
+        from claudlobby.config import PluginsConfig
+        paths = self._make_paths_with_runtime(tmp_path)
+        env = {} if command is None else {"SESSION_RESUME_COMMAND": command}
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[], env=env)
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot},
+                            plugins=PluginsConfig(required=plugins))
+        allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+        provider_grants = [grant for grant in allow if grant.startswith(("Skill(claudna:", "Skill(alternate:"))]
+        assert provider_grants == ([f"Skill({expected})"] if expected else [])
+        assert "Skill" not in allow
+        assert not any("session handoff" in grant or "restore *" in grant for grant in allow)
+
+    @pytest.mark.parametrize("policy", ["exact-deny", "tool-deny", "ask", "local"])
+    def test_resume_autoallow_retains_native_deny_ask_and_local_equipment(self, tmp_path, policy):
+        from claudlobby.config import PluginsConfig
+        paths = self._make_paths_with_runtime(tmp_path)
+        skill = paths.root / "library/skills/restore"
+        skill.mkdir(parents=True)
+        rule = "Skill(claudna:session)"
+        (skill / "SKILL.md").write_text("---\nname: restore\ndescription: Restore context.\n" + (
+            "ask_grants: ['Skill(claudna:session)']\n" if policy == "ask" else "") + "---\nRestore.\n")
+        deny = [rule] if policy == "exact-deny" else ["Skill"] if policy == "tool-deny" else []
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[], skills=["restore"],
+                        env={"SESSION_RESUME_COMMAND": "/restore resume"} if policy == "local" else {},
+                        tool_permissions=ToolPermissionsConfig(deny=deny))
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot},
+                            plugins=PluginsConfig(required=["claudna@Claudfather"]))
+        permissions = compose_settings_local(bot, fleet, paths)["permissions"]
+        if policy == "exact-deny":
+            assert rule in permissions["deny"]
+            assert rule not in permissions["allow"]
+        elif policy == "tool-deny":
+            assert "Skill" in permissions["deny"]
+            assert rule in permissions["allow"]  # native deny wins; no local matcher
+        elif policy == "ask":
+            assert permissions["ask"] == [rule]
+            assert rule in permissions["allow"]  # ask precedence is unchanged
+        else:
+            assert permissions["allow"].count("Skill(restore)") == 1
+            assert rule not in permissions["allow"]
 
     def test_telegram_tools_in_allow(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -3155,6 +3228,32 @@ class TestPluginsSettingsLocal:
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
 
+    @pytest.mark.parametrize("spelling", ["tilde", "absolute"])
+    def test_named_account_runtime_path_matches_settings_with_spaced_home(self, tmp_path, monkeypatch, spelling):
+        import shlex
+        from claudlobby.composer import account_settings_path
+        from claudlobby.config import PluginsConfig
+
+        home = tmp_path / "private home"
+        selected = home / ".claude"
+        selected.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        (selected / "settings.json").write_text(json.dumps({"enabledPlugins": {
+            "selected@market": False, "telegram@claude-plugins-official": True}}))
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], account="native", channels=[])
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot},
+            accounts={"default": str(home / "unselected"),
+                      "native": "~/.claude" if spelling == "tilde" else str(selected)},
+            plugins=PluginsConfig(required=["selected@market"], include_defaults=False,
+                                  startup_policy="verify-existing"))
+        conf = compose_bot_conf(bot, fleet, paths)
+        assignment = next(line for line in conf.splitlines() if line.startswith("CLAUDE_CONFIG_DIR="))
+        assert shlex.split(assignment.partition("=")[2]) == [str(selected)]
+        assert account_settings_path(bot, fleet, paths) == selected / "settings.json"
+        assert compose_settings_local(bot, fleet, paths)["enabledPlugins"] == {
+            "selected@market": True, "telegram@claude-plugins-official": False}
+
     def test_unselected_account_plugins_are_explicitly_disabled(self, tmp_path):
         from claudlobby.config import PluginsConfig
 
@@ -3700,6 +3799,49 @@ class TestDefaultStartupPromptIgnition:
 
     def _startup_prompt_line(self, conf: str) -> str:
         return [l for l in conf.splitlines() if l.startswith("STARTUP_PROMPT=")][0]
+
+    def test_fleet_ops_links_shared_bootstrap_without_changing_authored_prompt(self, tmp_path):
+        from claudlobby.composer import link_skills, resolve_effective_skills
+        bot = self._bot(startup_prompt="Keep my authored instructions.")
+        paths = self._paths(tmp_path)
+        fleet = self._fleet(bot)
+        link_skills(bot, paths, lambda *_: None,
+                    skills=resolve_effective_skills(bot, fleet, paths, is_manager=True))
+        template = paths.bot_runtime(bot.bot_id) / ".claude/skills/fleet-ops/bootstrap.md"
+        assert template.read_text().startswith("FLEET_STARTUP_BOOTSTRAP_V1\n")
+        assert '{{STARTUP_PROMPT}}' in template.read_text()
+        assert self._startup_prompt_line(compose_bot_conf(bot, fleet, paths)) == (
+            'STARTUP_PROMPT="Keep my authored instructions."')
+
+    @pytest.mark.parametrize("value", [None, "", "/external:restore --auto"])
+    @pytest.mark.parametrize("order", ["inherited", "env-before-conf", "env-after-conf"])
+    def test_resume_default_preserves_existing_runtime_precedence(self, tmp_path, value, order):
+        bot = self._bot(channels=[])
+        paths = self._paths(tmp_path)
+        conf = compose_bot_conf(bot, self._fleet(bot), paths, cascade={})
+        assert 'SESSION_RESUME_COMMAND' in conf
+        file = tmp_path / "bot.conf"
+        file.write_text(conf)
+        tier = tmp_path / "tier.env"
+        tier.write_text("" if value is None else "export SESSION_RESUME_COMMAND=" + shlex.quote(value) + "\n")
+        child_env = constructed_env()
+        if order == "inherited" and value is not None:
+            child_env["SESSION_RESUME_COMMAND"] = value
+        code = ('source "$2"; source "$1"' if order == "env-before-conf" else
+                'source "$1"; source "$2"' if order == "env-after-conf" else 'source "$1"')
+        result = subprocess.run(["/bin/bash", "-c", code + '; printf "%s" "$SESSION_RESUME_COMMAND"',
+                                 "_", str(file), str(tier)], env=child_env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ("/claudna:session resume --auto" if value is None else value)
+
+    @pytest.mark.parametrize("command", ["", "/alternate:restore --auto", "custom literal"])
+    def test_authored_resume_command_retains_literal_bot_conf_assignment(self, tmp_path, command):
+        bot = self._bot(env={"SESSION_RESUME_COMMAND": command})
+        conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path), cascade={})
+        lines = [line for line in conf.splitlines() if line.startswith("export SESSION_RESUME_COMMAND=")]
+        assert len(lines) == 1
+        assert shlex.split(lines[0].split("=", 1)[1]) == [command]
+        assert "${SESSION_RESUME_COMMAND-" not in conf
 
     def test_default_startup_prompt_names_the_brief_door_and_an_action(self, tmp_path):
         bot = self._bot()
@@ -6003,6 +6145,24 @@ def test_claudna_summary_is_always_composed(tmp_path, summary, harvest, value):
     assert text.index("BOT_DIR=") < text.index("CLAUDNA_STATE_DIR=")
     if harvest is not None:
         assert f"export CLAUDNA_HARVEST={int(harvest)}" in text
+
+
+@pytest.mark.parametrize("reflect, value", [(None, 0), (False, 0), (True, 1)])
+def test_claudna_precompact_reflect_is_always_composed(tmp_path, reflect, value):
+    """#941: clauDNA's capture prompt refuses every other compaction, and the
+    framework sends a bot's compactions, so it composes off unless armed."""
+    from claudlobby.config import ClaudnaConfig
+
+    bot = BotConfig(
+        bot_id="b", name="b", expertise=["x"],
+        claudna=ClaudnaConfig(precompact_reflect=reflect),
+    )
+    fleet = FleetConfig(
+        name="canary", service_prefix="com.canary", manager="b", bots={"b": bot}
+    )
+    text = compose_bot_conf(bot, fleet, _make_paths(tmp_path))
+    assert text.count("export CLAUDNA_PRECOMPACT_REFLECT=") == 1
+    assert f"export CLAUDNA_PRECOMPACT_REFLECT={value}" in text
 
 
 def test_no_retired_hook_is_composed(tmp_path):

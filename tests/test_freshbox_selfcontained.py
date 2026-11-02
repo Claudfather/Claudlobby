@@ -17,12 +17,14 @@ from pathlib import Path
 from claudlobby.config import (
     BotConfig,
     FleetConfig,
+    McpEntry,
     PluginsConfig,
     TelegramConfig,
     ToolPermissionsConfig,
 )
 from claudlobby.freshbox import (
     Finding,
+    _sourced_ask_rules,
     audit_bot,
     audit_fleet,
     classify_grants,
@@ -116,6 +118,156 @@ def test_allow_entry_tracing_to_nothing_is_orphan():
     )
     flagged = {(kind, grant) for kind, _sev, grant in results}
     assert ("orphan_grant", "SomethingWeird") in flagged
+
+
+# ── #2476: a fleet grants a rule a skill asks about by naming it ──────────────
+
+_ASKED = "Bash(probe.sh write *)"
+
+
+def test_a_fleet_granted_asked_rule_is_no_finding():
+    """The fleet's ``tool_permissions.allow`` naming a rule an equipped source
+    asks about is how the fleet grants it, so that override has a source."""
+    results = classify_grants(
+        allow=["Read", _ASKED],
+        deny=[],
+        sourced={"Read"},
+        base={"Read", "Grep", "Glob"},
+        override={_ASKED},
+        asked={_ASKED},
+    )
+    assert results == []
+
+
+def test_the_same_fleet_grant_without_a_matching_ask_source_is_still_unsourced():
+    """Control for the test above: only an ask rule naming the same string excuses
+    the override, whether ``asked`` is omitted, empty or names another rule."""
+    for kwargs in ({}, {"asked": set()}, {"asked": {"Bash(probe.sh read *)"}}):
+        results = classify_grants(
+            allow=["Read", _ASKED],
+            deny=[],
+            sourced={"Read"},
+            base={"Read", "Grep", "Glob"},
+            override={_ASKED},
+            **kwargs,
+        )
+        flagged = {(kind, grant) for kind, _sev, grant in results}
+        assert flagged == {("unsourced_grant", _ASKED)}, kwargs
+
+
+def test_an_asked_rule_does_not_excuse_an_allow_entry_the_fleet_did_not_grant():
+    """``asked`` excuses a fleet override and nothing else: an allow entry with no
+    source and no override is an orphan, asked about or not."""
+    results = classify_grants(
+        allow=["Read", _ASKED],
+        deny=[],
+        sourced={"Read"},
+        base={"Read", "Grep", "Glob"},
+        override=set(),
+        asked={_ASKED},
+    )
+    flagged = {(kind, grant) for kind, _sev, grant in results}
+    assert flagged == {("orphan_grant", _ASKED)}
+
+
+def test_an_asked_rule_missing_from_allow_is_not_an_under_grant():
+    """An ask rule is a prompt, not a grant, so allow need not hold it."""
+    results = classify_grants(
+        allow=["Read"],
+        deny=[],
+        sourced={"Read"},
+        base={"Read", "Grep", "Glob"},
+        override=set(),
+        asked={_ASKED},
+    )
+    assert results == []
+    # Control: the same rule declared as a grant that never reached allow is the
+    # under-grant, so this fixture does detect one.
+    control = classify_grants(
+        allow=["Read"],
+        deny=[],
+        sourced={"Read", _ASKED},
+        base={"Read", "Grep", "Glob"},
+        override=set(),
+    )
+    assert {(kind, grant) for kind, _sev, grant in control} == {
+        ("under_grant", _ASKED)
+    }
+
+
+def test_sourced_ask_rules_are_the_ask_lists_of_skills_and_integrations(tmp_path):
+    """Not the tool_grants or deny_grants beside them. An integration's mcp rule
+    names each server instance, as the composed ask list does."""
+    root = tmp_path / "claudlobby"
+    _build_library(root)
+    skill = root / "library" / "skills" / "probe"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: probe\n"
+        'tool_grants:\n  - "Bash(probe.sh status *)"\n'
+        f'ask_grants:\n  - "{_ASKED}"\n'
+        'deny_grants:\n  - "Bash(probe.sh raw *)"\n'
+        "---\n\n# probe\n\nbody\n"
+    )
+    integ = root / "library" / "integrations"
+    integ.mkdir(parents=True)
+    (integ / "ledger.md").write_text(
+        "---\ntitle: ledger\n"
+        'ask_grants:\n  - "mcp__ledger__post_entry"\n'
+        'deny_grants:\n  - "mcp__ledger__delete_entry"\n'
+        "---\n\n# ledger\n"
+    )
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    bot = BotConfig(
+        bot_id="w",
+        name="w",
+        expertise=["eng"],
+        skills=["probe"],
+        mcp=[McpEntry(name="ledger", instances=["prod"])],
+    )
+
+    asked = _sourced_ask_rules(bot, _fleet({"w": bot}, manager="w"), paths)
+
+    assert {_ASKED, "mcp__ledger-prod__post_entry"} <= asked
+    assert not asked & {
+        "Bash(probe.sh status *)",
+        "Bash(probe.sh raw *)",
+        "mcp__ledger__post_entry",
+        "mcp__ledger-prod__delete_entry",
+    }
+
+
+def test_audit_bot_accepts_a_fleet_grant_of_a_rule_a_skill_asks_about(tmp_path):
+    """``audit_bot`` hands ``classify_grants`` the bot's ask rules, so the fleet's
+    grant of one is no drift; with no skill asking about it, the same grant is."""
+    root = tmp_path / "claudlobby"
+    _build_library(root)
+    skill = root / "library" / "skills" / "probe"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f'---\nname: probe\nask_grants:\n  - "{_ASKED}"\n---\n\n# probe\n\nbody\n'
+    )
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    granted = BotConfig(
+        bot_id="w",
+        name="w",
+        expertise=["eng"],
+        skills=["probe"],
+        tool_permissions=ToolPermissionsConfig(allow=[_ASKED]),
+    )
+    findings = audit_bot(granted, _fleet({"w": granted}, manager="w"), paths)
+    assert not [f for f in findings if _ASKED in f.detail], findings
+
+    unasked = BotConfig(
+        bot_id="w",
+        name="w",
+        expertise=["eng"],
+        tool_permissions=ToolPermissionsConfig(allow=[_ASKED]),
+    )
+    findings = audit_bot(unasked, _fleet({"w": unasked}, manager="w"), paths)
+    assert [(f.kind, f.severity) for f in findings if _ASKED in f.detail] == [
+        ("unsourced_grant", "warn")
+    ]
 
 
 def test_enabledplugins_absent_is_flagged_missing_tier_a(tmp_path):

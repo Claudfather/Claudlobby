@@ -19,10 +19,12 @@ import yaml
 from . import defaults as _defaults
 
 from .known_values import (
+    DEFAULT_SKILL_OVERRIDES,
     KNOWN_EFFORTS,
     KNOWN_AGENT_CLIS,
     PROJECT_KEYS,
     SHELL_IDENT_RE,
+    SKILL_OVERRIDE_STATES,
     VALID_PERMISSION_MODES,
     closest_match,
 )
@@ -685,10 +687,13 @@ class IsolationConfig:
 
 @dataclass(frozen=True)
 class ClaudnaConfig:
-    """Model-spending session knobs; None inherits clauDNA's bot default (off)."""
+    """clauDNA session knobs; None composes the bot default, which is off for all
+    three: summaries and harvest spend model calls, and the capture prompt
+    refuses every other compaction until a capture nobody runs (#941)."""
 
     session_summary: bool | None = None
     harvest: bool | None = None
+    precompact_reflect: bool | None = None
 
 
 @dataclass
@@ -762,6 +767,12 @@ class BotConfig:
     # settings.local.json preferredNotifChannel
     preferred_notif_channel: str = "notifications_disabled"
     prefers_reduced_motion: bool = True  # settings.local.json prefersReducedMotion
+    # settings.local.json skillOverrides: skill name -> SKILL_OVERRIDE_STATES,
+    # merged per skill (built-in, fleet defaults, bot). The built-in turns
+    # /auto-mode-setup and its end-of-turn offer off (#1388).
+    skill_overrides: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_SKILL_OVERRIDES)
+    )
     extra_flags: list[str] = field(default_factory=list)  # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
@@ -865,6 +876,12 @@ DEFAULT_MARKETPLACES: dict[str, dict] = {
         "source": {"source": "github", "repo": "anthropics/claude-plugins-official"}
     },
 }
+
+# The authored resume default for newly composed bots. bot.conf uses a
+# presence-based fallback so inherited/.env overrides (including empty) retain
+# their precedence. lib-common keeps its fallback for old generated configs.
+DEFAULT_SESSION_RESUME_COMMAND = "/claudna:session resume --auto"
+
 
 DEFAULT_PLUGINS: list[str] = [
     "claudna@Claudfather",
@@ -1816,6 +1833,27 @@ def _parse_strict_mapping(raw: Any, where: str, fields: dict[str, Callable[[str,
     return {k: parse(f"{where}.{k}", raw[k]) for k, parse in fields.items() if raw.get(k) is not None}
 
 
+def _parse_skill_overrides(defaults_raw: Any, bot_raw: Any, name: str) -> dict[str, str]:
+    """``skill_overrides``, merged per skill: built-in, then fleet ``defaults:``,
+    then the bot, so a fleet that sets one skill keeps the default for the rest."""
+    merged = dict(DEFAULT_SKILL_OVERRIDES)
+    states = ", ".join(sorted(SKILL_OVERRIDE_STATES))
+    for where, layer in (("defaults.skill_overrides", defaults_raw),
+                         (f"bots.{name}.skill_overrides", bot_raw)):
+        if layer is None:
+            continue
+        if not isinstance(layer, dict):
+            raise ValueError(f"'{where}' must be a mapping of skill name to one of: {states}")
+        for skill, state in layer.items():
+            if not isinstance(skill, str) or not skill:
+                raise ValueError(f"'{where}': a skill name must be a non-empty string, not {skill!r}")
+            if isinstance(state, bool) or state is None:
+                raise ValueError(f"'{where}.{skill}': YAML read {state!r}, not a state; quote "
+                                 f"one of: {states} (a bare on or off reads as a boolean)")
+            merged[skill] = _parse_enum(f"{where}.{skill}", state, SKILL_OVERRIDE_STATES)
+    return merged
+
+
 def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, fields: dict):
     """Bot over defaults over built-in, independently for each field."""
     return cls(**{**_parse_strict_mapping(defaults_raw, f"defaults.{key}", fields),
@@ -1825,6 +1863,7 @@ def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, 
 _CLAUDNA_FIELDS = {
     "session_summary": lambda where, v: _strict_bool(f"'{where}'", v),
     "harvest": lambda where, v: _strict_bool(f"'{where}'", v),
+    "precompact_reflect": lambda where, v: _strict_bool(f"'{where}'", v),
 }
 _STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS}
 
@@ -1938,6 +1977,9 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "preferred_notif_channel", "notifications_disabled"
         ),
         prefers_reduced_motion=_bool("prefers_reduced_motion", True),
+        skill_overrides=_parse_skill_overrides(
+            defaults.get("skill_overrides"), raw.get("skill_overrides"), name
+        ),
         # Presence-based via `.get` defaults (not `x or default`): an explicit
         # `channels: []` must win over the fleet default — the documented way
         # to make a bot channel-less, e.g. to pair with RC-killing env (see the

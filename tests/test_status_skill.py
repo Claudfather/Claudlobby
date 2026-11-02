@@ -111,15 +111,6 @@ def test_no_jinja_placeholders_because_skills_are_symlinked_not_rendered(
     assert "{{" not in path.read_text(), f"{path.name}: Jinja placeholder will not be substituted"
 
 
-def test_shared_partial_link_resolves_from_the_skill_directory() -> None:
-    """library/skills/README.md cites status/SKILL.md as THE example of the relative
-    `../_telegram-formatting.md` link working through the symlink. If the link breaks,
-    the README's worked example silently becomes false."""
-    text = STATUS.read_text()
-    for rel in re.findall(r"\]\((\.\./[^)]+)\)", text):
-        assert (STATUS.parent / rel).resolve().is_file(), f"dangling partial link: {rel}"
-
-
 def test_tool_grants_are_wellformed() -> None:
     """A malformed grant line is exactly what the original test citation would miss."""
     block = STATUS.read_text().split("---", 2)[1]

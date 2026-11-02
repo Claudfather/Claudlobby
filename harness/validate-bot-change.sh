@@ -5221,6 +5221,11 @@ harness_check "#2145 session_summary reader renders ok and disabled with stable 
 SE_CONF="$SE_ROOT/runtime/bots/lead/bot.conf"
 r=no; grep -qF 'export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"' "$SE_CONF" && grep -qF 'export CLAUDNA_SESSION_SUMMARY=0' "$SE_CONF" && r=yes
 harness_check "#2145 unarmed composition exports its own root and explicit summary off" "$r"
+r=no; grep -qx 'export CLAUDNA_PRECOMPACT_REFLECT=0' "$SE_CONF" && r=yes
+harness_check "#941 unarmed composition turns clauDNA's capture prompt off" "$r"
+r=no; "$VAL_PY" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])).get("skillOverrides") != {"auto-mode-setup": "off"})' \
+    "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
+harness_check "#1388 composed settings turn /auto-mode-setup and its offer off" "$r"
 r=yes
 for _se_retired in SESSION_""DIGEST transcript-""digest plane-session-""start; do
     grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true

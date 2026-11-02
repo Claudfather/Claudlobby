@@ -173,7 +173,7 @@ def _rule(grant):
 
 
 def _permissions(context, bot, settings_path):
-    from ..freshbox import BASE_TOOLS, _sourced_grants, classify_grants
+    from ..freshbox import BASE_TOOLS, _sourced_ask_rules, _sourced_grants, classify_grants
 
     declared = {"allow": [_rule(value) for value in bot.tool_permissions.allow],
                 "deny": [_rule(value) for value in bot.tool_permissions.deny]}
@@ -186,8 +186,9 @@ def _permissions(context, bot, settings_path):
         settings = json.loads(settings_path.read_text())
         permissions = settings.get("permissions", {})
         allow, deny = permissions.get("allow", []), permissions.get("deny", [])
+        ask = permissions.get("ask", [])
         if any(not isinstance(values, list) or not all(isinstance(v, str) for v in values)
-               for values in (allow, deny)):
+               for values in (allow, deny, ask)):
             raise ValueError("invalid permission list")
     except FileNotFoundError:
         return result
@@ -197,11 +198,13 @@ def _permissions(context, bot, settings_path):
     sourced = _sourced_grants(bot, context.fleet, context.paths)
     result["composed"] = {"state": "present", "source": str(settings_path),
                           "allow": [_rule(value) for value in allow],
+                          "ask": [_rule(value) for value in ask],
                           "deny": [_rule(value) for value in deny],
                           "provenance_findings": [
                               {"kind": kind, "severity": severity, "rule": _rule(grant)}
                               for kind, severity, grant in classify_grants(
-                                  allow, deny, sourced, set(BASE_TOOLS), set(bot.tool_permissions.allow))]}
+                                  allow, deny, sourced, set(BASE_TOOLS), set(bot.tool_permissions.allow),
+                                  asked=_sourced_ask_rules(bot, context.fleet, context.paths))]}
     return result
 
 
@@ -282,9 +285,12 @@ def dispatch(args) -> CommandOutput:
         if command == "bot.capabilities":
             composed = data["bot"]["permissions"]["composed"]
             lines.append(f"Composed permission settings: {composed['state']}; "
-                         f"{len(composed.get('allow', []))} allow rules, {len(composed.get('deny', []))} deny rules.")
-            if composed.get("deny"):
-                lines.append("Composed deny tools: " + ", ".join(sorted({rule["tool"] for rule in composed["deny"]})))
+                         f"{len(composed.get('allow', []))} allow rules, {len(composed.get('ask', []))} ask rules, "
+                         f"{len(composed.get('deny', []))} deny rules.")
+            for key in ("ask", "deny"):
+                if composed.get(key):
+                    lines.append(f"Composed {key} tools: "
+                                 + ", ".join(sorted({rule["tool"] for rule in composed[key]})))
     else:
         projects = fleet.projects
         if command == "project.show":

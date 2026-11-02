@@ -54,6 +54,7 @@ PROTOCOL = REPO_DIR / "library" / "protocols" / "secret-incidents.md"
 HELPER = ".claude/skills/gitguardian/gitguardian_api.sh"
 READ_VERBS = ("status", "incidents", "incident", "triage", "help")
 WRITE_VERBS = ("ignore", "resolve", "reopen")
+DENY_RULES = ("Bash(curl *gitguardian.com*)", "Bash(wget *gitguardian.com*)")
 
 needs_jq = pytest.mark.skipif(
     shutil.which("jq") is None,
@@ -370,8 +371,8 @@ def _skill_grants() -> list[str]:
 def test_the_reads_are_granted_and_the_writes_are_not():
     """Each grant names the helper by its path from the bot directory, with no
     variable (tests/test_printify_skill.py says why). The helper refuses the
-    write verbs; leaving them ungranted also keeps a bot from running them
-    unasked."""
+    write verbs, and none is granted. Ungranted is no gate in auto mode, where
+    a classifier decides, so the refusal is the helper's own."""
     grants = _skill_grants()
     for grant in grants:
         assert grant.startswith(f"Bash({HELPER} ") and "$" not in grant, grant
@@ -394,6 +395,22 @@ def test_every_call_the_skill_documents_is_a_granted_read():
     for call in calls:
         assert call.split()[1] in READ_VERBS, call
         assert any(_grant_allows(g, call) for g in grants), call
+
+
+def test_direct_calls_to_the_api_hosts_are_denied():
+    """The skill refuses a hand-written curl or wget call to GitGuardian, so the
+    helper stays the way in (#2476). A deny rule matches the command's text, so
+    the helper's own commands, which name no such host, must not match one."""
+    meta, _ = parse_frontmatter((SKILL_DIR / "SKILL.md").read_text())
+    denials = meta["deny_grants"]
+    assert denials == list(DENY_RULES)
+    for command in (
+        "curl -s https://api.gitguardian.com/v1/incidents/secrets",
+        "wget -qO- https://api.eu1.gitguardian.com/v1/incidents/secrets",
+    ):
+        assert any(_grant_allows(rule, command) for rule in denials), command
+    for command in (f"{HELPER} status", f"{HELPER} triage 101"):
+        assert not any(_grant_allows(rule, command) for rule in denials), command
 
 
 def test_fixtures_are_synthetic():
@@ -425,35 +442,41 @@ def _equip(fleet_dir: Path) -> None:
     (fleet_dir / "fleet.yaml").write_text(text.replace(marker, marker + LINE, 1))
 
 
-def _compose_lead(fleet_dir: Path) -> tuple[Path, list[str], str]:
+def _compose_lead(fleet_dir: Path) -> tuple[Path, dict, str]:
     """Compose the lead from the shipped library and template."""
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = make_paths(fleet_dir)
     compose_bot(fleet.bots["lead"], fleet, paths, log=lambda m: None)
     bot_dir = paths.bot_runtime("lead")
     settings = json.loads((bot_dir / ".claude" / "settings.local.json").read_text())
-    return bot_dir, settings["permissions"]["allow"], (bot_dir / "CLAUDE.md").read_text()
+    return bot_dir, settings["permissions"], (bot_dir / "CLAUDE.md").read_text()
 
 
 def test_one_integrations_line_equips_the_skill_and_the_protocol(fleet_dir):
     (fleet_dir / "templates" / "claude.md.j2").unlink()
     _equip(fleet_dir)
 
-    bot_dir, allow, claude_md = _compose_lead(fleet_dir)
+    bot_dir, permissions, claude_md = _compose_lead(fleet_dir)
+    allow = permissions["allow"]
 
     link = bot_dir / ".claude" / "skills" / "gitguardian"
     assert link.is_symlink() and link.resolve() == SKILL_DIR.resolve()
     assert "Skill(gitguardian)" in allow
     assert f"Bash({HELPER} status *)" in allow
+    for rule in DENY_RULES:
+        assert rule in permissions["deny"], rule
+    assert "ask" not in permissions  # the skill asks about nothing: the helper has no write
     for heading in SECTIONS:
         assert heading in claude_md, heading
 
     text = (fleet_dir / "fleet.yaml").read_text()
     (fleet_dir / "fleet.yaml").write_text(text.replace(LINE, "", 1))
-    bot_dir, allow, claude_md = _compose_lead(fleet_dir)
+    bot_dir, permissions, claude_md = _compose_lead(fleet_dir)
+    allow = permissions["allow"]
 
     assert not link.exists() and not link.is_symlink()
     assert not [rule for rule in allow if "gitguardian" in rule], allow
+    assert not set(DENY_RULES) & set(permissions["deny"]), permissions["deny"]
     for heading in SECTIONS:
         assert heading not in claude_md, heading
     assert "Skill(fleet-ops)" in allow  # the second compose ran

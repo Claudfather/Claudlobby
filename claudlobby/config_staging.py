@@ -105,6 +105,11 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
     for leaf, source in sources.items():
         builder.input(source)
         frozen.update({f"{leaf}/{name}": item for name, item in _snapshot(source).items()})
+    # Each shared partial sits beside the copied skills, as in library/skills/,
+    # so a skill's ../_<name>.md link resolves in the bot's copy too.
+    for name, partial in paths.skill_partials().items():
+        content, _digest = builder.input_snapshot(partial)
+        frozen[name] = (content, partial.stat().st_mode & 0o777)
     builder.tree(directory / ".claude/skills", frozen)
 
     mounts = directory / "mounts"

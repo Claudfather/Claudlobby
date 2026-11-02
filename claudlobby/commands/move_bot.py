@@ -217,6 +217,7 @@ def _install_directory(manager, directories):
 
 
 def preflight(args):
+    from ..activation import registry_scan_refusal
     from ..active_config import context_from_plan
     from ..activation_enrollment import selected_bot_entry
     from ..activation_state import read_selection
@@ -280,6 +281,11 @@ def preflight(args):
             raise CommandFailure("conflict", "authored fleet validation failed")
     move_inputs, access_input = selected_inputs_fresh(plan, source, target, candidates,
                                                       args.bot, package)
+    # apply_move stops the bot before it activates, so the activation's own
+    # registry-scan refusal is asked here, before anything is stopped.
+    refusal = registry_scan_refusal(candidates)
+    if refusal:
+        raise CommandFailure("conflict", f"bot move refused before it stops anything: {refusal}")
 
     source_dir = source.paths.bot_runtime(args.bot)
     target_dir = target.paths.bot_runtime(args.bot)

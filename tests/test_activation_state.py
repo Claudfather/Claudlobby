@@ -233,7 +233,8 @@ def test_forward_recovery_keeps_no_effect_cancel_and_early_upgrade_abort(proposa
 
 
 @pytest.mark.parametrize("request_ns", [None, True, -1, 0, "123", 1234567890])
-def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, request_ns):
+@pytest.mark.parametrize("preserve", [True, False])
+def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, request_ns, preserve):
     builder, _, _ = proposal
     plan = builder.seal()
     target = "example.worker"
@@ -245,7 +246,7 @@ def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, reque
         _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
         store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
             enrollment_digest="1" * 64, install_directory=builder.root,
-            bot_states={target: {"disposition": "restart"}})
+            bot_states={target: {"disposition": "restart"}} if preserve else None)
         _advance(store, "upgrade", ("producers_paused",))
         store.begin("upgrade", "sessions_handed_off")
         before = a.read_activation(builder.root, "upgrade")

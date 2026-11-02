@@ -65,7 +65,9 @@ consumer DERIVES from it:
     everything the rule puts on. An explicit ``0`` is honoured and is said
     LOUDLY by the door itself, so an off switch is visible in the logs of the
     host it is off on — a silent no-op is how a disarmed door reads as a
-    broken one.
+    broken one. The exception is a row marked ``off_refused``: activation
+    needs it on and refuses its ``0`` before it stops any bot, and the row's
+    disarm line says so.
 ``opt-in``
     OFF unless the env var resolves to exactly ``"1"`` (or, for a pure enroll
     knob, until the manifest arms it). Reserved for the four categories above.
@@ -174,6 +176,9 @@ class Switch:
     #: loop), never merely a slower or quieter one.
     target_workflow: bool = False
     why_opt_in: str = ""  #: which of the four categories keeps it off
+    #: an opt-out whose off value activation REFUSES, before it stops any bot:
+    #: its disarm line names that refusal instead of offering the value
+    off_refused: bool = False
     #: COMPOSE_BOT only: what to run after setting the key, and when what it
     #: composes takes effect. The defaults are the deny-rule shape #1665 set;
     #: a key whose file is read at SESSION START (#1604's .mcp.json) must say
@@ -215,7 +220,9 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
             return (f"unset {var} — recording by default",
                     f"{var}=1 in {where} — the ruled harness exemption;"
                     " silences EVERY door at once")
-        return f"unset {var} — on by default", f"{var}=0 in {where}"
+        disarm = (f"none — activation refuses {var}=0 in {where} before it stops any bot"
+                  if sw.off_refused else f"{var}=0 in {where}")
+        return f"unset {var} — on by default", disarm
     if sw.carrier == COMPOSE_BOT:
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml on an independent canary root with ONE armed bot first, then"
@@ -264,6 +271,14 @@ SWITCHES: tuple[Switch, ...] = (
            compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
            takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
            takes_effect_off="no harvest from the bot's next session on"),
+    Switch(key="claudna-precompact-reflect", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.precompact_reflect",
+           why_opt_in="it blocks: clauDNA's PreCompact hook refuses every other compaction until"
+                      " /claudna:capture runs, and nobody at a bot's pane runs it (#941)",
+           what="let clauDNA's PreCompact hook ask this bot for a capture before it compacts",
+           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           takes_effect="from the bot's next session: bot.conf is read at session start",
+           takes_effect_off="from the bot's next session, compactions pass without the prompt"),
     Switch(
         key="task-recheck",
         scope=FLEET_JOB,
@@ -418,6 +433,9 @@ SWITCHES: tuple[Switch, ...] = (
         plane=True,
         what="one registry keyframe scan per activated configuration — what the fleet IS, "
              "so every metric sample has something to join to",
+        # Activation's identity bindings join to the scan's keyframes, so it
+        # refuses the off value (plane/registry_emit.activation_scan_refusal).
+        off_refused=True,
     ),
     # ---------------- other doors, on --------------------------------------
     Switch(
