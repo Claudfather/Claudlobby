@@ -84,10 +84,12 @@ def test_a_one_shot_learns_when_its_unit_started(proposal):
 
     def producer(*args, **kwargs):
         stamps.append(kwargs["env"][r.UNIT_STARTED_ENV])
+        assert len(kwargs["pass_fds"]) == 1  # ordinary ticks do not join the cohort
         return SimpleNamespace(returncode=0)
 
     _active(plan)
     assert r.run_unit(argv, identity=identity, environment=env, runner=producer) == 0
+    assert not (builder.root / "state/activation-scheduled.lock").exists()
     pid, started = stamps[0].split()
     assert int(pid) == os.getpid() and float(started) <= time.monotonic()
 
@@ -118,6 +120,9 @@ def test_due_timer_service_waits_for_its_verified_candidate_then_runs_once(propo
     effects, outcomes = [], []
 
     def producer(*args, **kwargs):
+        assert len(kwargs["pass_fds"]) == 2
+        with r.mutation_admission(builder.root, identity=identity):
+            pass  # a scheduled body can call the selected CLI under SH
         effects.append("ran")
         return SimpleNamespace(returncode=0)
 
@@ -171,6 +176,65 @@ def test_due_timer_service_waits_for_its_verified_candidate_then_runs_once(propo
         with pytest.raises(a.ActivationError, match="authorization unavailable"):
             r.run_unit(argv, identity=identity, environment=env, runner=producer)
     assert effects == ["ran"]
+
+
+@pytest.mark.parametrize("change", [None, "deadline", "pending", "selection"])
+def test_waited_cohort_serializes_bodies_with_original_budget_and_final_checks(proposal, change):
+    import fcntl
+    import threading
+    builder, _, _ = proposal
+    plan = builder.seal(); _active(plan)
+    identity = _identity(builder)
+    target = r.parse_unit_argv(r.wrap_unit_argv(_environment(read_release(builder.root, plan.release_id)),
+        unit="claudlobby-maintenance", phase="producers", mode="oneshot", argv=["/bin/true"]))
+    selected = a.read_selection(builder.root)
+    first_body, finish, second_done = threading.Event(), threading.Event(), threading.Event()
+    bodies, errors = [], []
+    def tick(first):
+        fd = os.open(builder.root / "state/activation.lock", os.O_RDONLY)
+        cohort = None
+        try:
+            deadline = time.monotonic() + (0.15 if change in {"deadline", "pending"} and not first else 5)
+            cohort = r._await_scheduled(target, fd, selected, deadline=deadline)
+            with r.mutation_admission(builder.root, identity=identity): pass
+            bodies.append(first)
+            if first:
+                first_body.set()
+                assert finish.wait(5)
+        except BaseException as exc:
+            errors.append(str(exc))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            if cohort is not None: os.close(cohort)
+            os.close(fd)
+            if not first: second_done.set()
+    first = threading.Thread(target=tick, args=(True,)); first.start()
+    second = threading.Thread(target=tick, args=(False,))
+    pending = None
+    try:
+        assert first_body.wait(5)
+        if change == "pending":
+            pending = os.open(builder.root / "state/activation-pending.lock", os.O_RDONLY)
+            fcntl.flock(pending, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif change == "selection":
+            a._write(builder.root / "state/selected-release.json", {**selected, "activation_id": "changed"})
+        second.start()
+        if change == "pending":
+            finish.set()  # after cohort release, the pending marker must still refuse host SH
+        if change in {"deadline", "pending"}:
+            assert second_done.wait(5)
+        else:
+            time.sleep(0.1)
+        assert bodies == [True]
+    finally:
+        finish.set(); first.join(5)
+        if second.ident is not None: second.join(5)
+        if pending is not None: os.close(pending)
+    assert not first.is_alive() and not second.is_alive()
+    assert bodies == ([True, False] if change is None else [True])
+    assert errors == ([] if change is None else [
+        "selected activation changed while the scheduled producer waited; no job ran" if change == "selection"
+        else "scheduled producer was not admitted before its wait ended; no job ran"])
 
 
 def test_resident_exec_retains_supervised_pid_without_lifetime_shared_lock(proposal, tmp_path):

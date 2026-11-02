@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import atexit
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -181,7 +182,8 @@ def _handoff_clock_ns(bot_dir: Path) -> int:
     return stamp
 
 
-def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
+def _handoff_capture(bot_dir: Path, *, not_before: int | None = None,
+                     witness: dict | None = None) -> tuple[float, datetime]:
     """The owned handoff file's mtime and its session capture's last_updated.
 
     The session capture's own frontmatter decides. Under the activation's
@@ -196,7 +198,14 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[f
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
                 raise BotLifecycleError("self restart requires an owned handoff file")
-            head = stream.read(8192)
+            content = stream.read() if witness is not None else stream.read(8192)
+            head = content[:8192]
+            if witness is not None:
+                after, linked = os.fstat(stream.fileno()), path.lstat()
+                keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                if any(getattr(info, key) != getattr(other, key)
+                       for other in (after, linked) for key in keys):
+                    raise ValueError("handoff changed during capture read")
         try:
             head = _strip_envelope(head, bot_dir, path)
         except ActivationError as exc:
@@ -229,6 +238,9 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[f
             raise ValueError("handoff predates its request")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
+    if witness is not None:
+        witness.update(sha256=hashlib.sha256(content).hexdigest(), mtime_ns=info.st_mtime_ns,
+                       last_updated=stamp.timestamp())
     return info.st_mtime, stamp
 
 
@@ -474,9 +486,36 @@ def _operation_lock(root: Path):
         except BlockingIOError as exc:
             raise BotLifecycleError("another bot lifecycle operation is running on this host",
                                     busy=True) from exc
-        yield
+        yield fd
     finally:
         os.close(fd)
+
+
+@contextmanager
+def bootstrap_operation(root: Path, *, identity, release_id, activation_id):
+    """Selected-active SH then lifecycle EX, retained through startup recording."""
+    from .runtime_admission import _selected_active
+    with mutation_admission(root, identity=identity, expected_release=release_id):
+        with _operation_lock(root) as fd:
+            held, pid = True, os.getpid()
+            info = os.fstat(fd)
+
+            def assert_owned():
+                if not held or pid != os.getpid():
+                    raise ActivationError("bootstrap operation ownership expired")
+                actual = os.fstat(fd)
+                linked = (root / "state/bot-lifecycle.lock").lstat()
+                if ((info.st_dev, info.st_ino) != (actual.st_dev, actual.st_ino)
+                        or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)
+                        or read_selection(root)["activation_id"] != activation_id):
+                    raise ActivationError("bootstrap operation ownership changed")
+                _selected_active(root, identity, release_id)
+
+            try:
+                assert_owned()
+                yield assert_owned
+            finally:
+                held = False
 
 
 def _selected_unit(root, plan, release, package, adapter, fleet, bot):

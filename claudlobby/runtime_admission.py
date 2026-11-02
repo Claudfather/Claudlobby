@@ -2,9 +2,10 @@
 
 Ordinary mutations and one-shots hold the shared host lock through completion;
 resident startup hands its tracked PID across exec before releasing that lock.
-The coordinator requires the exclusive side to quiesce admitted processes. No
-lock/state provisioning, application import, supervisor, or migration occurs
-here. Read-only diagnosis and activation itself do not use this door.
+The coordinator requires the exclusive side to quiesce admitted processes.
+Exact waited timer services share one private cohort mutex; no other lock/state
+provisioning, application import, supervisor, or migration occurs here.
+Read-only diagnosis and activation itself do not use this door.
 """
 
 from __future__ import annotations
@@ -379,7 +380,7 @@ def _receive(stream: socket.socket, deadline: float) -> dict:
     return value
 
 
-def _request_start(root: Path, request: dict, timeout: float) -> None:
+def _request_start(root: Path, request: dict, timeout: float) -> str:
     endpoint = root / "state/activation-start.sock"
     try:
         info = endpoint.lstat()
@@ -391,8 +392,9 @@ def _request_start(root: Path, request: dict, timeout: float) -> None:
             stream.connect(str(endpoint))
             stream.sendall(json.dumps(request).encode() + b"\n")
             reply = _receive(stream, deadline)
-            if reply != {"admitted": request}:
+            if reply not in ({"admitted": request}, {"admitted": request, "startup": "held-v1"}):
                 raise ActivationError("activation start scope does not admit this operation")
+            return "activation-held" if reply.get("startup") == "held-v1" else "activation"
     except (OSError, ValueError) as exc:
         raise ActivationError("activation start authorization unavailable; host remains paused") from exc
 
@@ -418,8 +420,7 @@ def admit_native(root: Path, fd: int, *, owner_pid: int, operation: str,
     except BlockingIOError as exc:
         if operation == "keepalive":
             raise WatchdogActivationPause("host activation is running; watchdog remains paused") from exc
-        _request_start(root, request, timeout)
-        return "activation"
+        return _request_start(root, request, timeout)
     try:
         _native_lock(root, fd, owner_pid)
         _selected_active(root, identity, expected_release)
@@ -528,21 +529,54 @@ def _scheduled_candidate(target: UnitStart) -> dict | None:
         and item["admission"]["argv"] == list(target.argv) for d, item in units) else None
 
 
-def _await_scheduled(target: UnitStart, fd: int, selected: dict) -> None:
-    """Poll the existing SH lock; no body runs, nothing is recorded or resent."""
-    deadline = time.monotonic() + _SCHEDULED_WAIT
-    while True:
-        time.sleep(0.5)
-        try:
-            _take_shared(target.root, fd)
-        except BlockingIOError:
+def _cohort_lock(root: Path) -> int:
+    path = root / "state/activation-scheduled.lock"
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        _check_cohort_lock(root, fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _check_cohort_lock(root: Path, fd: int) -> None:
+    path = root / "state/activation-scheduled.lock"
+    info, linked = os.fstat(fd), path.lstat()
+    if (path.parent.resolve() != path.parent or not stat.S_ISREG(linked.st_mode)
+            or linked.st_uid != os.getuid() or linked.st_mode & 0o077 or linked.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)):
+        raise ActivationError("scheduled producer cohort lock was replaced or is not private; no job ran")
+
+
+def _await_scheduled(target: UnitStart, fd: int, selected: dict, *, deadline: float) -> int:
+    """Serialize actual activation waiters within their original admission budget.
+
+    Cohort EX then pending-ordered host SH span the body. Ordinary timer ticks
+    do not take the cohort lock, and nested CLI admission remains shared.
+    """
+    cohort = _cohort_lock(target.root)
+    try:
+        while True:
             if time.monotonic() >= deadline:
                 raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
-            continue
-        _native_lock(target.root, fd, os.getppid())
-        if read_selection(target.root) != selected:
-            raise ActivationError("selected activation changed while the scheduled producer waited; no job ran")
-        return
+            _check_cohort_lock(target.root, cohort)
+            try:
+                fcntl.flock(cohort, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _take_shared(target.root, fd)
+            except BlockingIOError:
+                time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+                continue
+            _native_lock(target.root, fd, os.getppid())
+            if read_selection(target.root) != selected:
+                raise ActivationError("selected activation changed while the scheduled producer waited; no job ran")
+            if time.monotonic() >= deadline:
+                raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
+            result, cohort = cohort, None  # transfer this open description to run_unit
+            return result
+    finally:
+        if cohort is not None:
+            os.close(cohort)
 
 
 def _unit_started() -> str:
@@ -585,16 +619,18 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
         raise ActivationError("unit environment differs from its bound release context")
     fd = os.open(target.root / "state/activation.lock", os.O_RDONLY | os.O_NOFOLLOW)
     finished = False
+    cohort = None
     try:
         _native_lock(target.root, fd, os.getppid())
         try:
             _take_shared(target.root, fd)
         except BlockingIOError:
+            deadline = time.monotonic() + _SCHEDULED_WAIT
             selected = _scheduled_candidate(target)
             if selected is None:
                 _request_start(target.root, {**_unit_request(target, identity), "pid": os.getpid()}, 2.0)
             else:
-                _await_scheduled(target, fd, selected)
+                cohort = _await_scheduled(target, fd, selected, deadline=deadline)
                 _selected_active(target.root, identity, target.release_id)
         else:
             _selected_active(target.root, identity, target.release_id)
@@ -610,12 +646,16 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
             execer(target.command[0], target.command, env)
             raise ActivationError("native unit exec unexpectedly returned")
         env[UNIT_STARTED_ENV] = started
-        result = runner(target.command, env=env, pass_fds=(fd,), check=False)
+        result = runner(target.command, env=env, pass_fds=(fd,) if cohort is None else (fd, cohort), check=False)
         finished = True
         return result.returncode
     finally:
         if finished:
             fcntl.flock(fd, fcntl.LOCK_UN)
+            if cohort is not None:
+                fcntl.flock(cohort, fcntl.LOCK_UN)
+        if cohort is not None:
+            os.close(cohort)
         os.close(fd)
 
 
@@ -709,7 +749,13 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
                             continue
                         if abort_producer:
                             store.record_upgrade_resident_grant(activation_id, unit=target.unit, pid=reported_pid)
-                        connection.sendall(json.dumps({"admitted": received}).encode() + b"\n")
+                        reply = {"admitted": received}
+                        if received.get("operation") == "start-bot":
+                            from .activation_state import STARTUP_MODE
+                            record = read_activation(store.root, activation_id)
+                            if record.body["intent"].get("startup_mode") == STARTUP_MODE:
+                                reply["startup"] = "held-v1"
+                        connection.sendall(json.dumps(reply).encode() + b"\n")
                         admitted.set()
                         if target and target.phase == "bots" and continuation_pid is None:
                             continuation_pid = peer_pid or reported_pid
@@ -748,7 +794,7 @@ def _native_main() -> int:
             print(f"native admission: {exc}; inspect claudlobby host releases", file=sys.stderr)
             return 7
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("acquire", "release"))
+    parser.add_argument("action", choices=("acquire", "acquire-startup", "release"))
     parser.add_argument("fd", type=int)
     parser.add_argument("owner_pid", type=int)
     parser.add_argument("root", type=Path)
@@ -764,9 +810,11 @@ def _native_main() -> int:
             identity = RuntimeIdentity.current()
             if identity != RuntimeIdentity(Path(cli), Path(native), artifact):
                 raise ActivationError("native executable differs from composed context")
-            admit_native(args.root, args.fd, owner_pid=args.owner_pid,
+            result = admit_native(args.root, args.fd, owner_pid=args.owner_pid,
                          operation=operation, bot_dir=Path(bot) if bot else None,
                          expected_release=expected, identity=identity)
+            if args.action == "acquire-startup":
+                print(result)
         return 0
     except WatchdogActivationPause as exc:
         print(f"native admission: {exc}", file=sys.stderr)

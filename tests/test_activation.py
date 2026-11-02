@@ -59,6 +59,11 @@ class NativeHost:
         self.fail_bot = None
         self.dead, self.quiet_unknown = set(), False
         self.ready_kind = "bridge-ready"
+        self.bootstrap_sends = []
+        self.bootstrap_outcome = "submitted"
+        self.bootstrap_input = "input-ready"
+        self.bootstrap_text = "restore saved context then perform startup"
+        self.recipient_generation = "1"
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
 
     def read(self, function, *args):
@@ -100,6 +105,37 @@ class NativeHost:
             else:
                 self.ready.append(bot)
                 output = self.ready_kind
+        elif function == "svc_activation_bot_recipient":
+            bot = Path(args[1]).name
+            output = f"private-{bot}\t{bot}\t100-{self.recipient_generation}"
+        elif function == "svc_activation_bootstrap_payload":
+            output = json.dumps({"mode": "skill-bootstrap", "disposition": "available",
+                                 "payloads": [self.bootstrap_text]})
+        elif function == "svc_activation_bootstrap_input_ready":
+            record = state.read_activation(self.root, "cold")
+            assert record.status == "active"
+            effect = next(e for e in record.body["start_effects"].values()
+                          if e["phase"] == "bots" and e["target"].endswith(f".{Path(args[1]).name}.service"))
+            assert "bootstrap" not in effect
+            assert dict(zip(("socket", "session", "instance"), args[2:])) == effect["result"]["details"]["recipient"]
+            output = self.bootstrap_input
+        elif function == "svc_activation_bootstrap_send":
+            bot = Path(args[1]).name
+            record = state.read_activation(self.root, "cold")
+            assert record.status == "active"
+            effect = next(e for e in record.body["start_effects"].values()
+                          if e["phase"] == "bots" and e["target"].endswith(f".{bot}.service"))
+            assert effect["bootstrap"]["result"] is None  # durable intent precedes the first key
+            identity = admission.RuntimeIdentity(self.release.cli_path, self.release.native_path,
+                                                  self.release.inputs.artifact_id)
+            with admission.mutation_admission(self.root, identity=identity):
+                pass  # The just-started model may call its CLI while submission is recorded.
+            from claudlobby.bot_operations import _operation_lock, BotLifecycleError
+            with pytest.raises(BotLifecycleError, match="another bot lifecycle"):
+                with _operation_lock(self.root):
+                    pytest.fail("bootstrap result recording lost its lifecycle owner")
+            self.bootstrap_sends.append(bot)
+            output = self.bootstrap_outcome
         elif function == "svc_activation_quiet":
             if self.quiet_unknown:
                 rc = 3
@@ -770,6 +806,8 @@ def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(col
                            "com.example.worker.service", "claudlobby-keepalive.timer"]
     assert host.ready == ["manager", "worker", "manager", "worker"]
     assert host.registry == ["example"]
+    assert host.bootstrap_sends == ["manager", "worker"]
+    assert state.startup_status(record) == "submitted"
     assert "claudlobby-keepalive.service" not in host.starts
     assert (host.directory / "claudlobby-keepalive.service").is_file()
     assert {p.name for p in (host.directory / "default.target.wants").iterdir()} == set(host.starts[:3])
@@ -1679,7 +1717,8 @@ def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold, mon
     assert host.starts == starts + [_WORKER_UNIT, "claudlobby-keepalive.timer"]
     assert resumed.body["start_repairs"] == archived
     assert resumed.body["start_effects"][source]["result"] is not None
-    assert all(resumed.body["start_effects"][s] == e for s, e in others.items() if e["phase"] != "producers")
+    assert all({key: value for key, value in resumed.body["start_effects"][s].items()
+                if key != "bootstrap"} == e for s, e in others.items() if e["phase"] != "producers")
 
 
 def test_start_repair_interruption_keeps_history(cold, monkeypatch):
@@ -3063,3 +3102,200 @@ def test_per_bot_capture_digest_uses_owned_nofollow_regular_file(tmp_path, node)
             os.mkfifo(capture)
     with pytest.raises(state.ActivationRefusal, match="capture changed"):
         activation._capture_digest(bot_dir)
+
+
+def test_postactive_blocked_input_stays_pending_until_explicit_same_id_resume(cold):
+    root, release, plan, host = cold
+    host.bootstrap_input = "not-ready"
+    with pytest.raises(activation.RuntimeEvidenceError, match="input readiness"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    blocked = state.read_activation(root, "cold")
+    assert blocked.status == "active" and state.startup_status(blocked) == "pending"
+    assert host.bootstrap_sends == []
+    assert all("bootstrap" not in e for e in blocked.body["start_effects"].values())
+    native_effects, native_starts = blocked.body["start_effects"], list(host.starts)
+    host.bootstrap_input = "input-ready"  # Explicit native approval made input usable.
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert state.startup_status(resumed) == "submitted"
+    assert host.starts == native_starts
+    assert host.bootstrap_sends == ["manager", "worker"]
+    assert {key: {k: v for k, v in row.items() if k != "bootstrap"}
+            for key, row in resumed.body["start_effects"].items()} == native_effects
+
+
+@pytest.mark.parametrize("boundary", ["before-send", "after-send"])
+def test_postactive_unknown_attempt_never_replays_or_jumps_a_predecessor(cold, monkeypatch, boundary):
+    root, release, plan, host = cold
+    original = activation.record_bootstrap
+    def interrupted(*args, **kwargs):
+        if (boundary == "after-send" and kwargs.get("result") is not None):
+            raise OSError("fixture result persistence interruption")
+        result = original(*args, **kwargs)
+        if boundary == "before-send":
+            raise OSError("fixture intent persisted before interruption")
+        return result
+    monkeypatch.setattr(activation, "record_bootstrap", interrupted)
+    with pytest.raises(OSError, match="fixture"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold")
+    assert record.status == "active" and state.startup_status(record) == "unknown"
+    assert host.bootstrap_sends == ([] if boundary == "before-send" else ["manager"])
+    frozen = record.body["start_effects"]
+    monkeypatch.setattr(activation, "record_bootstrap", original)
+    with pytest.raises(state.ActivationError, match="unresolved"):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert state.read_activation(root, "cold").body["start_effects"] == frozen
+    assert host.bootstrap_sends == ([] if boundary == "before-send" else ["manager"])
+
+
+def test_postactive_submitted_attempts_are_skipped_on_same_id_continuation(cold):
+    root, release, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    before = list(host.starts), list(host.bootstrap_sends)
+    record = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert state.startup_status(record) == "submitted"
+    assert (host.starts, host.bootstrap_sends) == before
+
+
+@pytest.mark.parametrize("drift", ["recipient", "publication", "selection", "payload"])
+def test_postactive_drift_before_first_intent_refuses_without_send(cold, monkeypatch, drift):
+    root, release, plan, host = cold
+    release_owner = activation._release_bootstraps
+    monkeypatch.setattr(activation, "_release_bootstraps", lambda *args: state.read_activation(root, "cold"))
+    record = activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert record.status == "active" and state.startup_status(record) == "pending"
+    monkeypatch.setattr(activation, "_release_bootstraps", release_owner)
+    if drift == "recipient":
+        host.recipient_generation = "2"
+    elif drift == "publication":
+        (host.directory / "com.example.manager.service").write_text("changed publication")
+    elif drift == "selection":
+        selected = state.read_selection(root)
+        state._write(root / "state/selected-release.json", {**selected, "activation_id": "foreign"})
+    else:
+        host.bootstrap_text = "changed payload"
+    with pytest.raises(state.ActivationError):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert host.bootstrap_sends == []
+    assert all("bootstrap" not in e for e in state.read_activation(root, "cold").body["start_effects"].values())
+
+
+@pytest.fixture
+def expired_requested_checkpoint(per_bot_case, monkeypatch, tmp_path):
+    """The existing per-bot case, with a late completed capture and no native receipt."""
+    from datetime import datetime, timedelta, timezone
+    from types import MethodType
+    case = per_bot_case
+    case.units = case.units[:1]
+    case.live.pop("example.bravo.plist")  # The inherited quiet closure must observe the same one-bot case.
+    target = case.units[0].target
+    now = datetime.now(timezone.utc)
+    requested = int((now - timedelta(seconds=1200)).timestamp() * 1_000_000_000)
+    _preserve_capture(case.dirs["alpha"], now=now - timedelta(seconds=600))
+    case.body["pending"] = "sessions_handed_off"
+    case.body["handoff_effects"] = {target: None}
+    case.body["handoff_requests"] = {target: {"started_at_ns": requested}}
+    case.store.root = tmp_path
+    case.store.assert_locked = lambda: None
+    monkeypatch.setattr(state, "read_activation", lambda root, identity: activation.read_activation(root, identity))
+    def save(record):
+        case.body.clear()
+        case.body.update(record.body)
+        return record
+    case.store._save = save
+    if hasattr(state.ActivationStore, "archive_expired_handoff"):
+        case.store.archive_expired_handoff = MethodType(state.ActivationStore.archive_expired_handoff, case.store)
+    recipient = {"socket": "worker", "session": "worker", "instance": "123-456"}
+    monkeypatch.setattr(activation, "bot_recipient", lambda *_: dict(recipient))
+    ready = []
+    monkeypatch.setattr(activation, "require_bootstrap_input_ready", lambda *_: ready.append("ready"))
+    case.target, case.original_request, case.ready = target, requested, ready
+    case.file = case.dirs["alpha"] / ".claude/session.md"
+    case.original_digest = __import__("hashlib").sha256(case.file.read_bytes()).hexdigest()
+    return case
+
+
+@pytest.mark.parametrize("outcome", ["handoff-saved", "handoff-timeout"])
+def test_per_bot_resume_archives_only_completed_expired_request_then_sends_once(expired_requested_checkpoint, outcome):
+    case = expired_requested_checkpoint
+    case.outcome[0] = outcome
+    if outcome == "handoff-saved":
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+    else:
+        with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+            case.run()
+    history = case.body["handoff_history"]
+    assert len(history) == 1 and history[0]["native_result"] is None
+    assert history[0]["request"] == {"started_at_ns": case.original_request}
+    assert history[0]["capture"]["sha256"] == case.original_digest
+    assert history[0]["reason"] == "requested_checkpoint_expired"
+    assert case.body["handoff_requests"][case.target]["started_at_ns"] > case.original_request
+    assert case.calls == ["alpha"] and case.ready == ["ready", "ready"]
+    if outcome == "handoff-timeout":
+        # The old completed capture predates the NEW request: it cannot license another send.
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+            case.run()
+        assert case.calls == ["alpha"] and case.body["handoff_history"] == history
+        assert not case.body["bot_quiescence"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "predates", "recent-write", "quiescence", "blocked", "changed"])
+def test_per_bot_expiry_refuses_missing_completion_or_changed_native_evidence(
+        expired_requested_checkpoint, monkeypatch, failure):
+    case = expired_requested_checkpoint
+    if failure == "missing":
+        case.file.unlink()
+    elif failure == "predates":
+        case.body["handoff_requests"][case.target]["started_at_ns"] = case.file.stat().st_mtime_ns + 2_000_000_000
+    elif failure == "recent-write":
+        os.utime(case.file, None)
+    elif failure == "quiescence":
+        case.body["bot_quiescence"][case.target] = {"result": None}
+    elif failure == "blocked":
+        def blocked(*_):
+            raise activation.RuntimeEvidenceError("bootstrap", case.target, "native input readiness unavailable")
+        monkeypatch.setattr(activation, "require_bootstrap_input_ready", blocked)
+    else:
+        def changed(*_):
+            case.file.write_bytes(case.file.read_bytes() + b"changed after readiness\n")
+        monkeypatch.setattr(activation, "require_bootstrap_input_ready", changed)
+    with pytest.raises((state.ActivationRefusal, activation.RuntimeEvidenceError)):
+        case.run()
+    assert case.calls == [] and "handoff_history" not in case.body
+    assert case.body["handoff_effects"] == {case.target: None}
+
+
+@pytest.mark.parametrize("continuation", ["ready", "blocked", "replaced", "absent"])
+def test_per_bot_interruption_after_archive_rechecks_recipient_before_new_intent(
+        expired_requested_checkpoint, monkeypatch, continuation):
+    case = expired_requested_checkpoint
+    archive = case.store.archive_expired_handoff
+    def interrupt(*args, **kwargs):
+        archive(*args, **kwargs)
+        raise InterruptedError("after archive before new intent")
+    case.store.archive_expired_handoff = interrupt
+    with pytest.raises(InterruptedError, match="after archive"):
+        case.run()
+    case.store.archive_expired_handoff = archive
+    assert not case.body["handoff_effects"] and not case.body["handoff_requests"] and case.calls == []
+    if continuation == "blocked":
+        def blocked(*_):
+            raise activation.RuntimeEvidenceError("bootstrap", case.target, "native input readiness unavailable")
+        monkeypatch.setattr(activation, "require_bootstrap_input_ready", blocked)
+    elif continuation == "replaced":
+        monkeypatch.setattr(activation, "bot_recipient", lambda *_: {
+            "socket": "worker", "session": "worker", "instance": "789-999"})
+    elif continuation == "absent":
+        case.body["intent"].pop("preserve_bot_state")  # Ordinary mode must not take server_absent either.
+        case.live[case.target] = False
+        # The last readiness observation succeeded; the server then disappeared.
+    if continuation == "ready":
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+        assert case.calls == ["alpha"]
+    else:
+        with pytest.raises((state.ActivationRefusal, activation.RuntimeEvidenceError)):
+            case.run()
+        assert case.calls == [] and not case.body["handoff_effects"] and not case.body["handoff_requests"]
+    assert len(case.body["handoff_history"]) == 1

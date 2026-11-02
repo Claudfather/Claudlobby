@@ -4,6 +4,8 @@ import hashlib
 import os
 from pathlib import Path
 import plistlib
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -433,3 +435,143 @@ def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_
     assert observed.details["socket_state"] == "refused"
     assert observed.details["coverage"] == "named-unit-and-supplied-witnesses-only"
     assert path.exists()  # observation never unlinks a socket
+
+
+@pytest.mark.parametrize("actual, expected", [("100-1", "submitted"), ("100-2", "not-sent"),
+                                               ("100-1", "unknown")])
+def test_bound_bootstrap_compares_instance_inside_recipient_lock(tmp_path, actual, expected):
+    from tests.conftest import constructed_env
+    trace = tmp_path / "keys"
+    script = r'''
+set -euo pipefail
+. "$1/supervisor.sh"
+. "$1/lib-common.sh"
+CLAUDLOBBY_ROOT="$2"
+_svc_bootstrap_context() { :; }
+tmux_socket_for_bot() { printf private; }
+tmux_session_name() { printf worker; }
+bot_tmux() { printf '%s' "$ACTUAL"; }
+_pane_send_verified_locked() {
+    [ "$PANE_READY_TICKS" = "$_PANE_READY_TICKS_BOOT" ] || return 91
+    printf '%s\n' "$3" >> "$TRACE"
+    if [ "$INTERRUPT" = 1 ]; then exit 143; fi
+}
+svc_activation_bootstrap_send "$2" /bot private worker 100-1 'one bootstrap'
+'''
+    result = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+        env=constructed_env(ACTUAL=actual, TRACE=str(trace), INTERRUPT="1" if expected == "unknown" else "0"),
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+    assert (trace.read_text() if trace.exists() else "") == ("one bootstrap\n" if expected in {"submitted", "unknown"} else "")
+
+
+@pytest.mark.parametrize("frame,actual", [
+    ("idle-chevron", "100-1"), ("workspace-trust", "100-1"),
+    ("menu-option", "100-1"), ("input-stuck-literal", "100-1"),
+    ("busy-spinner", "100-1"), ("unknown-output", "100-1"),
+    ("predraw-empty", "100-1"), ("idle-permission", "100-1"),
+    ("capture-failed", "100-1"), ("idle-chevron", "100-2"),
+])
+def test_bootstrap_input_readiness_is_positive_read_only_and_session_bound(tmp_path, frame, actual):
+    from tests.conftest import constructed_env
+    # workspace-trust is the real cold-canary capture, with its path sanitized.
+    fixture = Path(__file__).parent / "fixtures/pane-states" / f"{frame}.txt"
+    trace = tmp_path / "tmux"
+    script = r'''
+set -euo pipefail
+. "$1/lib-common.sh"
+CLAUDLOBBY_ROOT="$2"
+_svc_bootstrap_context() { :; }
+tmux_socket_for_bot() { printf private; }
+tmux_session_name() { printf worker; }
+_PANE_READY_TICKS_BOOT=1; PANE_READY_POLL_S=0
+bot_tmux() {
+    printf '%s\n' "$*" >> "$TRACE"
+    case "$2" in
+        display-message) printf '%s' "$ACTUAL" ;;
+        capture-pane) cat "$FRAME" ;;
+        *) exit 91 ;;
+    esac
+}
+svc_activation_bootstrap_input_ready "$2" /bot private worker 100-1
+'''
+    result = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+        env=constructed_env(ACTUAL=actual, TRACE=trace, FRAME=fixture),
+        capture_output=True, text=True, timeout=5)
+    ready = frame == "idle-chevron" and actual == "100-1"
+    assert result.returncode == (0 if ready else 3), result.stderr
+    assert result.stdout.strip() == ("input-ready" if ready else "")
+    assert all(line.split()[1] in {"display-message", "capture-pane"}
+               for line in trace.read_text().splitlines())
+
+
+def test_bootstrap_recipient_and_bound_send_resolve_a_real_tmux_pane(tmp_path):
+    from tests.conftest import constructed_env
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        pytest.skip("tmux is not installed")
+    bot = tmp_path / "worker"
+    bot.mkdir()
+    bot.joinpath("bot.conf").write_text(
+        f"CLAUDLOBBY_ROOT={shlex.quote(str(tmp_path))}\n"
+        f"BOT_DIR={shlex.quote(str(bot))}\nTMUX_SOCKET=private\n")
+    trace = tmp_path / "keys"
+    env = constructed_env(TMUX_TMPDIR=tmp_path, TRACE=trace)
+    command = [tmux, "-L", "private"]
+    try:
+        subprocess.run([*command, "-f", "/dev/null", "new-session", "-d", "-s", "worker",
+                        "/bin/cat"], env=env, check=True, capture_output=True, timeout=5)
+        # Native Linux capture: display-message with =worker returned rc 0 and
+        # "-"; =worker: returned the same populated identity as list-panes.
+        instance = subprocess.run([*command, "list-panes", "-t", "=worker:", "-F",
+                                   "#{session_created}-#{pane_pid}"], env=env,
+                                  check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        script = r'''
+set -euo pipefail
+. "$1/lib-common.sh"
+_pane_send_verified_locked() { printf '%s\n' "$3" >> "$TRACE"; }
+svc_activation_bot_recipient "$2" "$3"
+svc_activation_bootstrap_send "$2" "$3" private worker "$4" 'one bootstrap'
+'''
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path),
+                                 str(bot), instance], env=env, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [f"private\tworker\t{instance}", "submitted"]
+        assert trace.read_text() == "one bootstrap\n"
+    finally:
+        subprocess.run([*command, "kill-server"], env=env, capture_output=True, timeout=5)
+
+
+@pytest.mark.parametrize("failure", ["busy", "unavailable"])
+def test_managed_replacement_requires_canonical_recipient_lock_and_preserves_report(tmp_path, failure):
+    import fcntl
+    from tests.conftest import constructed_env
+    lock_dir = tmp_path / "state/pane-send"
+    lock_dir.mkdir(parents=True)
+    lock = lock_dir / "private--worker.lock"
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    trace = tmp_path / "spawn"
+    script = r'''
+set -euo pipefail
+. "$1/lib-common.sh"
+CLAUDLOBBY_ROOT="$2"; _OS=Darwin; PANE_SEND_LOCK_WAIT_S=0
+bot_tmux() { printf '%s\n' "$2" >> "$TRACE"; }
+if [ "${FAIL_LOCK:-0}" = 1 ]; then python3() { return 1; }; fi
+if bot_session_spawn private worker cmd; then printf '%s' "$BOT_SUBREAPER_REPORT"; else exit $?; fi
+'''
+    try:
+        if failure == "busy":
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        refused = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+            env=constructed_env(TRACE=str(trace), FAIL_LOCK="1" if failure == "unavailable" else "0"),
+            capture_output=True, text=True, timeout=5)
+        assert refused.returncode == 75 and not trace.exists()
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        accepted = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+            env=constructed_env(TRACE=str(trace)), capture_output=True, text=True, timeout=5)
+        assert accepted.returncode == 0, accepted.stderr
+        assert trace.read_text().splitlines() == ["kill-session", "new-session"]
+        assert accepted.stdout == "not used: Darwin has no child subreaper"
+    finally:
+        os.close(fd)

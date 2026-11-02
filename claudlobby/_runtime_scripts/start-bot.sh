@@ -189,9 +189,6 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
     exit 1
 }
 
-# Kill any prior session — expected to fail on first boot or after clean shutdown
-bot_tmux "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-
 SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 
 # Build claude command. CLAUDE_FLAGS comes from bot.conf (composed by
@@ -541,7 +538,11 @@ esac
 # Positively resolved Skills use one enclosing fleet bootstrap; literal custom
 # commands retain the compatibility behavior. This proves submission, not that
 # the model completed resume. Activation-time release is a separate contract.
-startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+if [ "${_NATIVE_ADMISSION_STARTUP:-}" = activation-held ]; then
+    printf '%s STARTUP held — exact activation start; release follows recorded active\n' "$(ts_iso)" >> "$LOG"
+else
+    startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
 [ -x "$LIB_DIR/fleet-state-update.sh" ] && "$LIB_DIR/fleet-state-update.sh" "$BOT_NAME" "idle" || true

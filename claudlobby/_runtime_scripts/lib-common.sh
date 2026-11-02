@@ -2198,6 +2198,24 @@ bot_tmux() {
 # and a Linux session that did not get its subreaper records
 # bot_subreaper_unavailable.
 bot_session_spawn() {
+    local report_file rc=0
+    report_file=$(safe_mktemp) || return 3
+    _PANE_SEND_LOCK_REQUIRED=1 _pane_with_send_lock replacement "${PANE_SEND_LOCK_WAIT_S:-}" "$1" "$2" \
+        _bot_session_replace_locked "$report_file" "$@" || rc=$?
+    BOT_SUBREAPER_REPORT=$(cat "$report_file")
+    rm -f "$report_file"
+    return "$rc"
+}
+
+_bot_session_replace_locked() {
+    local report_file="$1" rc=0; shift
+    bot_tmux "$1" kill-session -t "$2" 2>/dev/null || true
+    _bot_session_spawn_locked "$@" || rc=$?
+    printf '%s' "${BOT_SUBREAPER_REPORT:-unavailable}" > "$report_file"
+    return "$rc"
+}
+
+_bot_session_spawn_locked() {
     local socket="${1?Usage: bot_session_spawn <socket> <session> <command>}"
     local session="${2?}" command="${3?}" report="" rc=0
     local why="no private socket or release interpreter"
@@ -3494,6 +3512,10 @@ _pane_with_send_lock() {
             why="the lock helper failed (rc $rc)"
             exec 9>&-
         fi
+        if [ "${_PANE_SEND_LOCK_REQUIRED:-0}" = 1 ]; then
+            printf 'pane_send: required recipient lock unavailable for %s; no callback run\n' "$what" >&2
+            exit 75
+        fi
         _pane_send_lock_unavailable "$what" "$socket" "$session" "$why"
         "$@" || exit $?
         exit 0
@@ -4463,31 +4485,52 @@ _startup_send() {
 # Canonical automatic injection. A proven Skill plus authored startup is one
 # fleet-owned prompt; opaque/native commands retain their literal semantics.
 # Success is submission evidence only, never completed resume or business work.
-startup_inject() {
-    local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5"
-    local checkpoint="$bot_dir/.claude/session.md" startup="${STARTUP_PROMPT:-}" payload
+_startup_prepare() {
+    local bot_dir="$1" checkpoint="$1/.claude/session.md" startup="${STARTUP_PROMPT:-}" payload
     local max_age="${RESUME_MAX_AGE_S:-86400}" command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
+    _STARTUP_PRIMARY=""; _STARTUP_SECONDARY=""; _STARTUP_MODE=clean
+    _STARTUP_DISPOSITION=no-checkpoint
     if should_resume_session "$checkpoint" "$max_age"; then
         if _session_command_resolve "$command" "$bot_dir"; then
+            _STARTUP_DISPOSITION="$_SESSION_COMMAND_STATUS"
             if payload="$(_startup_bootstrap_payload "$bot_dir" "$startup" || true)" && [ -n "$payload" ]; then
-                printf '%s STARTUP mode=skill-bootstrap — one resume/startup submission\n' "$(ts_iso)" >> "$log"
-                _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup BOOTSTRAP "set +H; $payload"
+                _STARTUP_MODE=skill-bootstrap
+                _STARTUP_PRIMARY="set +H; $payload"
                 return
             fi
-            printf '%s RESUME — injecting resume command [%s; literal-compatibility]: %s\n' \
-                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
-            _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
+            _STARTUP_MODE=literal-compatibility
+            _STARTUP_PRIMARY="$command"
         else
-            printf '%s RESUME SKIP — fresh checkpoint present but no resume capability [%s]; starting clean, handoff left at %s\n' \
-                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$checkpoint" >> "$log"
-            emit_fleet_event resume_skipped startup \
-                "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$checkpoint\"}" || true
+            _STARTUP_DISPOSITION="$_SESSION_COMMAND_STATUS"
         fi
     elif [ -f "$checkpoint" ]; then
-        printf '%s RESUME SKIP — checkpoint older than %ss, clean-starting\n' "$(ts_iso)" "$max_age" >> "$log"
+        _STARTUP_DISPOSITION=stale
     fi
-    if [ -n "$startup" ]; then
-        _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup STARTUP "set +H; $startup"
+    if [ -n "$startup" ]; then _STARTUP_SECONDARY="set +H; $startup"; fi
+}
+
+startup_inject() {
+    local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5"
+    _startup_prepare "$bot_dir"
+    case "$_STARTUP_DISPOSITION" in
+        no-command|provider-absent:*)
+            printf '%s RESUME SKIP — fresh checkpoint but no resume capability [%s]\n' "$(ts_iso)" "$_STARTUP_DISPOSITION" >> "$log"
+            emit_fleet_event resume_skipped startup \
+                "{\"reason\":\"$_STARTUP_DISPOSITION\",\"handoff\":\"$bot_dir/.claude/session.md\"}" || true ;;
+        stale) printf '%s RESUME SKIP — checkpoint stale, clean-starting\n' "$(ts_iso)" >> "$log" ;;
+    esac
+    printf '%s STARTUP mode=%s resume=%s — submission only\n' "$(ts_iso)" "$_STARTUP_MODE" "$_STARTUP_DISPOSITION" >> "$log"
+    if [ -n "$_STARTUP_PRIMARY" ]; then
+        if [ "$_STARTUP_MODE" = skill-bootstrap ]; then
+            _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup BOOTSTRAP "$_STARTUP_PRIMARY"
+            return
+        fi
+        printf '%s RESUME — injecting resume command [%s; literal-compatibility]: %s\n' \
+            "$(ts_iso)" "$_STARTUP_DISPOSITION" "$_STARTUP_PRIMARY" >> "$log"
+        _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$_STARTUP_PRIMARY"
+    fi
+    if [ -n "$_STARTUP_SECONDARY" ]; then
+        _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup STARTUP "$_STARTUP_SECONDARY"
     fi
 }
 

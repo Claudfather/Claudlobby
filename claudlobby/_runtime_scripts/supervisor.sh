@@ -1221,6 +1221,88 @@ svc_activation_bot_ready() (
     esac
 )
 
+# Cold, exact bot context only. The launcher reads bot.conf then the env tiers
+# for its automatic injection; use that same order when freezing its payload.
+_svc_bootstrap_context() {
+    local root="$1" bot="$2"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    load_bot_conf "$bot" || return 3
+    [ "$CLAUDLOBBY_ROOT" = "$root" ] && [ "$BOT_DIR" = "$bot" ] || return 3
+    _NATIVE_ADMISSION_PYTHON="${CLAUDLOBBY_NATIVE_PYTHON:-}"
+    source_env_tiered || return 3
+    [ "$CLAUDLOBBY_ROOT" = "$root" ] && [ "$BOT_DIR" = "$bot" ]
+}
+
+svc_activation_bot_recipient() (
+    _svc_bootstrap_context "$1" "$2" || return 3
+    local socket session instance
+    socket=$(tmux_socket_for_bot "$2") || return 3
+    session=$(tmux_session_name "$2") || return 3
+    instance=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || return 3
+    [[ "$instance" =~ ^[0-9]+-[0-9]+$ ]] || return 3
+    printf '%s\t%s\t%s\n' "$socket" "$session" "$instance"
+)
+
+svc_activation_bootstrap_payload() (
+    _svc_bootstrap_context "$1" "$2" || return 3
+    _startup_prepare "$2" || return 3
+    "$_NATIVE_ADMISSION_PYTHON" -I -B -c 'import json,sys; print(json.dumps(dict(mode=sys.argv[1], disposition=sys.argv[2], payloads=[v for v in sys.argv[3:] if v])))' \
+        "$_STARTUP_MODE" "$_STARTUP_DISPOSITION" "$_STARTUP_PRIMARY" "$_STARTUP_SECONDARY"
+)
+
+_svc_bootstrap_input_ready_locked() {
+    local socket="$1" session="$2" expected="$3" actual box pane
+    actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || return 3
+    [ "$actual" = "$expected" ] || return 3
+    box=$(PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" pane_await_input_box "$socket" "=$session:") || return 3
+    [ "$box" = "$_PANE_BOX_DRAWN" ] || return 3
+    pane=$(bot_tmux "$socket" capture-pane -p -t "=$session:") || return 3
+    [ -n "$(pane_input_region "$pane")" ] || return 3
+    if pane_is_held "$pane" || pane_is_menu "$pane" || pane_is_busy "$pane"; then
+        return 3
+    fi
+    actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || return 3
+    [ "$actual" = "$expected" ] || return 3
+    printf 'input-ready\n'
+}
+
+svc_activation_bootstrap_input_ready() (
+    local root="$1" bot="$2" socket="$3" session="$4" instance="$5"
+    _svc_bootstrap_context "$root" "$bot" || return 3
+    [ "$(tmux_socket_for_bot "$bot")" = "$socket" ] && [ "$(tmux_session_name "$bot")" = "$session" ] || return 3
+    # Read only: a blocked pane must leave the first attempt unrecorded.
+    _PANE_SEND_LOCK_REQUIRED=1 _pane_with_send_lock bootstrap 30 "$socket" "$session" \
+        _svc_bootstrap_input_ready_locked "$socket" "$session" "$instance"
+)
+
+_svc_bootstrap_send_locked() {
+    local socket="$1" session="$2" expected="$3" actual text; shift 3
+    actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || {
+        printf 'not-sent\n'; return 0;
+    }
+    if [ "$actual" != "$expected" ]; then printf 'not-sent\n'; return 0; fi
+    for text in "$@"; do
+        [ -n "$text" ] || continue
+        if ! PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" _pane_send_verified_locked "$socket" "$session" "$text"; then
+            printf 'unknown\n'; return 0
+        fi
+    done
+    printf 'submitted\n'
+}
+
+svc_activation_bootstrap_send() (
+    local root="$1" bot="$2" socket="$3" session="$4" instance="$5" rc=0; shift 5
+    _svc_bootstrap_context "$root" "$bot" || return 3
+    [ "$(tmux_socket_for_bot "$bot")" = "$socket" ] && [ "$(tmux_session_name "$bot")" = "$session" ] || return 3
+    _PANE_SEND_LOCK_REQUIRED=1 _pane_with_send_lock bootstrap 30 "$socket" "$session" \
+        _svc_bootstrap_send_locked "$socket" "$session" "$instance" "$@" || rc=$?
+    case "$rc" in
+        0) : ;;
+        75) printf 'not-sent\n' ;;  # strict lock refusal: callback never ran
+        *) printf 'unknown\n' ;;   # callback/subshell may have died after typing
+    esac
+)
+
 # Read-only enrollment observations. Catalog rows are tab-separated; native
 # property output remains native output, parsed strictly by the inventory owner.
 # List both search paths and loaded names: either list alone misses consumers.

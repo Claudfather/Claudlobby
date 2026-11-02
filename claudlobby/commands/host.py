@@ -54,7 +54,7 @@ def _status(args, root):
     state = ("incomplete" if evidence["unfinished_activations"] else
              "indeterminate" if problem else "active" if selected else "unselected")
     from ..activation import resumable_running_step
-    from ..activation_state import read_activation
+    from ..activation_state import read_activation, startup_status
     recovery = []
     if not evidence["activation_errors"]:
         for item in evidence["unfinished_activations"]:
@@ -68,6 +68,13 @@ def _status(args, root):
             recovery.append({"activation_id": item["activation_id"], "supported_step": step,
                              "abort_in_progress": aborting})
     data = _status_data(root, state, evidence, recovery)
+    if selected and not evidence["activation_errors"]:
+        recorded = read_activation(root, selected["activation_id"])
+        data["startup_release"] = startup_status(recorded)
+        if data["startup_release"] in {"pending", "unknown", "refused"}:
+            data["recovery"].append({"activation_id": recorded.activation_id,
+                                     "supported_step": "startup_release", "abort_in_progress": False})
+            data["recovery_supported"] = data["startup_release"] == "pending"
     from ..activation_state import ActivationRefusal
     from ..host_backup import restore_status
     try:
@@ -83,6 +90,8 @@ def _status(args, root):
         raise CommandFailure(problem.code, f"{problem.code}: recorded host state is {state}",
                              data=data, release_id=executing, hint=_hint(root))
     lines = (f"Host recorded state: {state}; running processes are unobserved.",)
+    if data.get("startup_release") not in (None, "legacy"):
+        lines += (f"Automatic startup release: {data['startup_release']}; submission is not completion.",)
     if restored is not None and state == "unselected":
         lines += ("Restored backup is inactive. Review external work and credentials before planning activation; "
                   "owner access must be paired and authorized again.",)
@@ -127,13 +136,14 @@ def _operator_shell(root=None):
 
 
 def _recorded(root, activation_id):
-    from ..activation_state import ActivationError, read_activation
+    from ..activation_state import ActivationError, read_activation, startup_status
     path = root / "state/activations" / activation_id / "activation.json"
     if not path.exists() and not path.is_symlink():
         return None
     try:
         record = read_activation(root, activation_id)
         return {"activation_id": activation_id, "status": record.status,
+                "startup_release": startup_status(record),
                 "pending_step": record.body["pending"], "completed_steps": record.body["completed"],
                 "plan_id": record.body["intent"]["plan_id"], "release_id": record.body["intent"]["release_id"],
                 "recovery_mode": ("target-forward-only" if record.body["intent"].get("forward_recovery") is True
@@ -172,7 +182,7 @@ def _activate(args, root):
             hint=f"use this plan's sealed candidate CLI; inspect claudlobby --root {shlex.quote(str(root))} host releases")
     if getattr(args, "resume", None):
         from ..activation import resumable_running_step
-        from ..activation_state import ActivationError, read_activation
+        from ..activation_state import STARTUP_MODE, ActivationError, read_activation
         try:
             prior = read_activation(root, args.resume)
         except ActivationError as exc:
@@ -182,7 +192,8 @@ def _activate(args, root):
             raise CommandFailure("conflict", "resume ID belongs to a different frozen plan",
                                  data={**data, "recorded_activation": _recorded(root, args.resume)},
                                  release_id=executing, hint=_hint(root))
-        if resumable_running_step(prior) is None:
+        if resumable_running_step(prior) is None and not (
+                prior.status == "active" and prior.body["intent"].get("startup_mode") == STARTUP_MODE):
             raise CommandFailure("conflict", "recorded activation step cannot safely resume; "
                                  "required handoff or start evidence is missing",
                                  data={**data, "recorded_activation": _recorded(root, args.resume)},
@@ -252,6 +263,13 @@ def _activate(args, root):
                                "required handoff or start evidence is missing")
                     hint = ("inspect the exact pending step and repair its native/journal witness "
                             "before retrying the same activation ID")
+            if recorded and recorded.get("status") == "active" and recorded.get("startup_release") in {
+                    "pending", "unknown", "refused"}:
+                message = "conflict: native activation is active; startup release requires inspection"
+                hint = ("inspect native input and resolve any prompt explicitly, then resume this activation "
+                        "with the same plan and install directory; pending first sends have no recorded attempt"
+                        if recorded["startup_release"] == "pending" else
+                        "inspect the recorded bootstrap attempts; unresolved submissions must never be replayed")
             if data["recorded_activation"] is None and lock_busy(str(exc)):
                 message = ("conflict: host activation lock is held; no activation record was created"
                            if str(exc) == ANOTHER_ACTIVATION else
@@ -276,7 +294,8 @@ def _activate(args, root):
                 user_manager_startup="host_prerequisite", upgrade_supported=True, recovery_supported=False)
     data["recovery_mode"] = saved["recovery_mode"]
     return CommandOutput(data, executing,
-        (f"Activation {args.activation_id}: recorded active; release {executing}; plan {plan.plan_id}.",))
+        (f"Activation {args.activation_id}: recorded active; startup {saved['startup_release']}; "
+         f"release {executing}; plan {plan.plan_id}.",))
 
 
 def _abort(args, root):

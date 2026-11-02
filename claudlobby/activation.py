@@ -22,14 +22,15 @@ import sys
 import time
 from types import SimpleNamespace
 
-from .activation_state import (ACTIVATION_WAIT_S, START_STEPS, STEPS, ActivationError, ActivationRecord,
+from .activation_state import (ACTIVATION_WAIT_S, START_STEPS, STEPS, STARTUP_MODE, ActivationError, ActivationRecord,
                                ActivationRefusal, CandidateDisabledOverride, _RUNNING_QUIESCE_STEPS, lock_busy,
                                handoff_request_started_ns, locked_activation, read_activation, read_selection,
-                               resumable_running_step)
+                               resumable_running_step, record_bootstrap)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import (RuntimeEvidence, RuntimeEvidenceError, assert_quiescent,
-                                 observe_started_unit, start_unit)
+                                 observe_started_unit, start_unit, bot_recipient, bootstrap_payload,
+                                 require_bootstrap_input_ready, submit_bootstrap)
 from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .migration_apply import apply_migration, read_migration
@@ -311,7 +312,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
                 raise ActivationError("bootstrap caller is hosted or cannot be proved external; use an operator shell")
         store.prepare(activation_id, plan, recovery_release_id=release.release_id,
                       source_release_id=release.release_id, enrollment_digest=inventory.digest,
-                      install_directory=install_directory)
+                      install_directory=install_directory, startup_mode=STARTUP_MODE)
         _prepare_no_effect_journals(store, activation_id, plan, inventory,
                                     {phase: [] for phase in units.PHASES}, adapter)
         for step, phase in (("producers_paused", "producers"), ("sessions_handed_off", None),
@@ -321,8 +322,9 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
             evidence = (units.pause_phase(store, activation_id, phase, adapter=adapter).digest if phase else
                         _digest({"bootstrap_empty": True, "sessions": [], "handoffs": []}))
             store.complete(activation_id, step, evidence_digest=evidence)
-        return _finish_bootstrap_activation(root, store, activation_id, plan, release,
+        _finish_bootstrap_activation(root, store, activation_id, plan, release,
             declarations, starts, rank, install_directory, adapter, package)
+    return _release_bootstraps(root, activation_id, plan, release, adapter, identity)
 
 
 def _finish_bootstrap_activation(root, store, activation_id, plan, release,
@@ -815,10 +817,28 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
             requested = handoff_request_started_ns(record, target)
             if requested is None:
                 raise ActivationRefusal("bot handoff has no bound capture witness; an unknown handoff is never resent")
-            _require_preserved_handoff(bot_dir, not_before=requested)
-            store.record_handoff(activation_id, target=target, result="handed_off")
-        elif target not in effects:
+            try:
+                _require_preserved_handoff(bot_dir, not_before=requested)
+            except ActivationRefusal:
+                if not _archive_expired_requested_handoff(root, store, activation_id, unit, adapter, requested):
+                    raise
+            else:
+                store.record_handoff(activation_id, target=target, result="handed_off")
+            effects = read_activation(root, activation_id).body["handoff_effects"]
+        if target not in effects:
+            # Also runs after interruption between archive and the new intent.
+            history = read_activation(root, activation_id).body.get("handoff_history", [])
+            archived = next((row for row in reversed(history) if row["target"] == target), None)
+            if archived is not None:
+                recipient = archived["recipient"]
+                if bot_recipient(adapter, root, bot_dir, target) != recipient:
+                    raise ActivationRefusal("native recipient changed after expired checkpoint archival")
+                require_bootstrap_input_ready(adapter, root, bot_dir, target, recipient)
+                if bot_recipient(adapter, root, bot_dir, target) != recipient:
+                    raise ActivationRefusal("native recipient changed before the new handoff request")
             _, present = _legacy_bot_socket(unit)
+            if archived is not None and not present:
+                raise ActivationRefusal("archived checkpoint recipient disappeared before the new handoff request")
             preserve = record.body["intent"].get("preserve_bot_state") is True
             restart = preserve and record.body["intent"]["bot_states"][target]["disposition"] == "restart"
             if not present:
@@ -844,6 +864,35 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
         _quiesce_one_bot(root, store, activation_id, pause, unit, sockets[target], adapter)
     store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest({
         "mode": "per-bot-v1", "bots": read_activation(root, activation_id).body.get("bot_quiescence", {})}))
+
+
+def _archive_expired_requested_handoff(root, store, activation_id, unit, adapter, requested):
+    """Reopen only a completed, expired checkpoint; an unresolved attempt never resends."""
+    from .bot_operations import BotLifecycleError, _HANDOFF_FRESH_S, _handoff_capture
+    bot_dir, target = unit.declaration.working_directory, unit.target
+    if target in read_activation(root, activation_id).body.get("bot_quiescence", {}):
+        return False
+    capture = {}
+    try:
+        mtime, stamp = _handoff_capture(bot_dir, not_before=requested, witness=capture)
+    except BotLifecycleError:
+        return False
+    cutoff = datetime.now(timezone.utc).timestamp() - _HANDOFF_FRESH_S
+    # Both must expire: the existing sender otherwise skips a recently written file.
+    if mtime >= cutoff or stamp.timestamp() >= cutoff:
+        return False
+    recipient = bot_recipient(adapter, root, bot_dir, target)
+    require_bootstrap_input_ready(adapter, root, bot_dir, target, recipient)
+    checked = {}
+    try:
+        _handoff_capture(bot_dir, not_before=requested, witness=checked)
+    except BotLifecycleError as exc:
+        raise ActivationRefusal("requested checkpoint changed before expiry reconciliation") from exc
+    if checked != capture or bot_recipient(adapter, root, bot_dir, target) != recipient:
+        raise ActivationRefusal("requested checkpoint or native recipient changed before expiry reconciliation")
+    store.archive_expired_handoff(activation_id, target=target, request_started_ns=requested,
+                                  capture=capture, recipient=recipient)
+    return True
 
 
 def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
@@ -1228,13 +1277,14 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                       source_release_id=source.release_id if source else None,
                       enrollment_digest=inventory.digest, legacy_source=legacy_source,
                       install_directory=install_directory, bot_states=bot_states,
-                      quiesce_mode="per-bot-v1")
+                      quiesce_mode="per-bot-v1", startup_mode=STARTUP_MODE)
         pause = _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, adapter)
         sockets = _quiesce_running(root, store, activation_id, pause, inventory.units, adapter)
-        return _finish_running_activation(
+        _finish_running_activation(
             root, store, activation_id, plan, release, source, source_plan,
             inventory.units, candidates, starts, rank, contexts, retired_units, sockets,
             install_directory, adapter, package, legacy_source=legacy_source)
+    return _release_bootstraps(root, activation_id, plan, release, adapter, identity)
 
 
 def _finish_running_activation(root, store, activation_id, plan, release, source, source_plan,
@@ -1344,7 +1394,7 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
         if set(prior_effects) - {entry["source"] for entry in startable}:
             raise ActivationError("candidate start receipt names a foreign unit")
         results = []
-        for entry in startable:
+        for startup_rank, entry in enumerate(startable):
             source = entry["source"]
             _, _, unit = starts[source]
             if source not in prior_effects:
@@ -1358,7 +1408,8 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
                     raise ActivationError("candidate start receipt differs from frozen publication")
                 observed = observe_started_unit(store, installed_file=Path(entry["installed"]),
                     target=entry["target"], unit=unit, sha256=entry["after"]["sha256"],
-                    adapter=adapter, fence=fence, readiness=readiness)
+                    adapter=adapter, fence=fence, readiness=readiness,
+                    startup_held=record.body["intent"].get("startup_mode") == STARTUP_MODE)
                 saved = effect["result"]
                 if saved is None:
                     if _oneshot_producer(phase, entry["installed"]):
@@ -1369,7 +1420,8 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
                 else:
                     result = RuntimeEvidence("started", entry["target"], saved["details"])
                     if (result.digest != saved["digest"]
-                            or result.details.get("readiness") != observed.details.get("readiness")):
+                            or result.details.get("readiness") != observed.details.get("readiness")
+                            or result.details.get("recipient") != observed.details.get("recipient")):
                         raise ActivationError("candidate start result digest changed")
             else:
                 if completed:
@@ -1379,9 +1431,18 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
                     adapter=adapter, readiness=readiness,
                     before_start=lambda saved_fence, entry=entry, source=source:
                         store.record_start_intent(activation_id, phase=phase, source=source,
-                            target=entry["target"], sha256=entry["after"]["sha256"], fence=saved_fence))
+                            target=entry["target"], sha256=entry["after"]["sha256"], fence=saved_fence,
+                            startup_rank=startup_rank))
                 store.record_start_result(activation_id, source=source, target=entry["target"],
                                           details=result.details, digest=result.digest)
+            if phase == "bots" and record.body["intent"].get("startup_mode") == STARTUP_MODE:
+                payload = bootstrap_payload(adapter, root, Path(unit.command[1]), entry["target"])
+                frozen = read_activation(root, activation_id).body["start_effects"][source].get("startup_payload")
+                if completed:
+                    if frozen != payload:
+                        raise ActivationError("held startup payload changed after its phase completed")
+                else:
+                    store.record_startup_payload(activation_id, source=source, payload=payload)
             observations[source] = result
             results.append(result.digest)
         enabled = enrollment.verify_candidate_enablement(store, activation_id, phase, adapter=adapter)
@@ -1398,6 +1459,57 @@ def _candidate_startup(root, store, activation_id, plan, release, candidates, st
         else:
             store.complete(activation_id, step, evidence_digest=phase_digest)
     raise ActivationError("candidate startup did not reach producer completion")
+
+
+def _release_bootstraps(root, activation_id, plan, release, adapter, identity):
+    """Release recorded bot order only after leaving activation EX/pending once."""
+    from .bot_operations import bootstrap_operation
+    record = read_activation(root, activation_id)
+    if record.body["intent"].get("startup_mode") != STARTUP_MODE:
+        return record  # Old interrupted activations retain their original launcher behavior.
+    with bootstrap_operation(root, identity=identity, release_id=release.release_id,
+                             activation_id=activation_id) as assert_owned:
+        record = read_activation(root, activation_id)
+        effects = record.body["start_effects"]
+        bots = sorted(((source, row) for source, row in effects.items() if row["phase"] == "bots"),
+                      key=lambda item: item[1]["startup_rank"])
+        for source, effect in bots:
+            prior = effect.get("bootstrap")
+            if prior is not None:
+                if prior["result"] == "submitted":
+                    continue
+                raise ActivationError("startup attempt is unresolved; inspect it before any continuation")
+            installed = Path(record.body["intent"]["install_directory"]) / Path(source).name
+            if (installed.resolve() != installed or not installed.is_file()
+                    or hashlib.sha256(installed.read_bytes()).hexdigest() != effect["sha256"]):
+                raise ActivationError("startup publication changed before delivery")
+            manager = "Darwin" if installed.suffix == ".plist" else "Linux"
+            declarations = {str(d.source): (d, item) for d, item in planned_units(plan, manager)}
+            declaration, item = declarations[source]
+            if item["sha256"] != effect["sha256"]:
+                raise ActivationError("startup source differs from the frozen plan")
+            recipient = effect["result"]["details"].get("recipient")
+            if recipient is None or bot_recipient(adapter, root, declaration.working_directory,
+                                                  effect["target"]) != recipient:
+                raise ActivationError("startup recipient changed before delivery")
+            payload = bootstrap_payload(adapter, root, declaration.working_directory, effect["target"])
+            if payload != effect.get("startup_payload"):
+                raise ActivationError("startup payload changed before delivery")
+            if payload["payloads"]:
+                require_bootstrap_input_ready(adapter, root, declaration.working_directory,
+                                              effect["target"], recipient)
+            payload_digest = _digest(payload)
+            attempt = {"native_digest": effect["result"]["digest"], "recipient": recipient,
+                       "publication": effect["sha256"], "payload": payload, "payload_sha256": payload_digest}
+            attempt["attempt_id"] = "b-" + _digest([activation_id, source, attempt["native_digest"],
+                                                    payload_digest, recipient])
+            record_bootstrap(root, activation_id, source, attempt, assert_owned=assert_owned)
+            outcome = submit_bootstrap(adapter, root, declaration.working_directory,
+                                       effect["target"], recipient, payload)
+            record_bootstrap(root, activation_id, source, attempt, assert_owned=assert_owned, result=outcome)
+            if outcome != "submitted":
+                raise ActivationError("startup submission is unresolved; inspect its recorded attempt")
+        return read_activation(root, activation_id)
 
 
 def _verify_candidate_startup(root, store, activation_id, release, starts,
@@ -1765,6 +1877,14 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("resume adapter differs from the candidate release")
+    prior = read_activation(root, activation_id)
+    if prior.status == "active" and prior.body["intent"].get("startup_mode") == STARTUP_MODE:
+        if (prior.body["intent"]["plan_id"] != plan_id
+                or prior.body["intent"].get("install_directory") != str(install_directory)
+                or preserve_bot_state and prior.body["intent"].get("preserve_bot_state") is not True):
+            raise ActivationError("active startup continuation differs from its frozen intent")
+        _recorded_recovery(root, prior, release, forward_recovery=forward_recovery)
+        return _release_bootstraps(root, activation_id, plan, release, adapter, identity)
     with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         record = read_activation(root, activation_id)
         if (record.body["intent"]["plan_id"] != plan_id
@@ -1879,12 +1999,14 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
         retired = tuple(unit for unit in old_units if unit.installed and unit.target not in targets
                         and not is_unit_template(unit.target))
         if bootstrap:
-            return _finish_bootstrap_activation(root, store, activation_id, plan, release,
+            _finish_bootstrap_activation(root, store, activation_id, plan, release,
                 candidates, starts, rank, install_directory, adapter, package)
-        return _finish_running_activation(
-            root, store, activation_id, plan, release, source, source_plan,
-            old_units, candidates, starts, rank, contexts, retired, sockets,
-            install_directory, adapter, package, legacy_source=legacy_source)
+        else:
+            _finish_running_activation(
+                root, store, activation_id, plan, release, source, source_plan,
+                old_units, candidates, starts, rank, contexts, retired, sockets,
+                install_directory, adapter, package, legacy_source=legacy_source)
+    return _release_bootstraps(root, activation_id, plan, release, adapter, identity)
 
 
 def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
