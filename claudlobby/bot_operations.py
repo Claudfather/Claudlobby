@@ -237,7 +237,7 @@ _HANDOFF_FRESH_S = 300
 
 
 def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
-                        not_before: int | None = None) -> float:
+                        not_before: int | None = None, max_age_s: int = _HANDOFF_FRESH_S) -> float:
     """Require a fresh owned handoff; explicit capture already witnessed its write.
 
     Returns the capture's age in seconds. pre-stop-handoff.sh asks this check
@@ -245,6 +245,8 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
     An optional request time in epoch nanoseconds also binds the verified
     file write and the capture's second-resolution timestamp to that request.
     Take that time with `_handoff_clock_ns`, never time.time_ns() (#2528).
+    Only activation passes max_age_s, its --handoff-max-age for bots that
+    saved and stayed idle (#963); bot handoff and self restart keep 300 s.
     """
     mtime, stamp = _handoff_capture(bot_dir, not_before=not_before)
     age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
@@ -252,7 +254,7 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
     # Explicit capture's changed checksum proves a fresh write, but resume
     # still reads last_updated. Require a recent model timestamp on both
     # paths; tolerate future clock skew observed in the live canary.
-    if not (-30 <= mtime_age <= _HANDOFF_FRESH_S) or age > _HANDOFF_FRESH_S:
+    if not (-30 <= mtime_age <= max_age_s) or age > max_age_s:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from ValueError(
             "handoff is stale")
     return age

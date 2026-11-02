@@ -905,3 +905,30 @@ def test_forward_recovery_activation_reports_target_forward_only(candidate, monk
     assert calls == [{"forward_recovery": True}]
     assert result["data"]["recovery_mode"] == result["data"]["recorded_activation"]["recovery_mode"] == (
         "target-forward-only")
+
+
+def test_handoff_max_age_routes_only_explicit_seconds(candidate, monkeypatch, capsys):
+    """#963: --handoff-max-age reaches the upgrade as handoff_max_age_s, and only when given."""
+    root, _, plan, directory = candidate
+    calls = []
+    monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
+    def upgrade(*args, **kwargs):
+        calls.append(kwargs)
+        raise state.ActivationRefusal("witnessed handoff max age")
+    monkeypatch.setattr(activation, "upgrade_activation", upgrade)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory)]
+    call(capsys, argv + ["--handoff-max-age", "900"], 4)
+    call(capsys, argv, 4)
+    assert calls == [{"handoff_max_age_s": 900}, {}]
+
+
+def test_handoff_max_age_rejects_a_first_activation_before_record(candidate, capsys):
+    """#963: a first activation hands off no running bot, so the setting has nothing to widen."""
+    root, _, plan, directory = candidate
+    before = snapshot(root)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory), "--handoff-max-age", "900"]
+    result = call(capsys, argv, 4)
+    assert "--handoff-max-age requires an activation that hands off running bots" in result["error"]["message"]
+    assert snapshot(root) == before

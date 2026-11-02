@@ -255,7 +255,8 @@ class ActivationStore:
                 install_directory: Path | None = None,
                 bot_states: dict | None = None,
                 forward_recovery: bool = False,
-                quiesce_mode: str | None = None) -> ActivationRecord:
+                quiesce_mode: str | None = None,
+                handoff_max_age_s: int | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -281,6 +282,11 @@ class ActivationStore:
             if quiesce_mode != "per-bot-v1" or install_directory is None:
                 raise ActivationError("unsupported capture/quiesce mode")
             intent["quiesce_mode"] = quiesce_mode
+        if handoff_max_age_s is not None:
+            # The per-bot quiesce alone reads it, on the first run and on every --resume (#963).
+            if type(handoff_max_age_s) is not int or quiesce_mode != "per-bot-v1":
+                raise ActivationError("a handoff max age needs whole seconds and the per-bot quiesce")
+            intent["handoff_max_age_s"] = handoff_max_age_s
         if type(forward_recovery) is not bool:
             raise ActivationError("forward recovery must be an explicit boolean")
         if forward_recovery:
