@@ -817,10 +817,28 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
             requested = handoff_request_started_ns(record, target)
             if requested is None:
                 raise ActivationRefusal("bot handoff has no bound capture witness; an unknown handoff is never resent")
-            _require_preserved_handoff(bot_dir, not_before=requested)
-            store.record_handoff(activation_id, target=target, result="handed_off")
-        elif target not in effects:
+            try:
+                _require_preserved_handoff(bot_dir, not_before=requested)
+            except ActivationRefusal:
+                if not _archive_expired_requested_handoff(root, store, activation_id, unit, adapter, requested):
+                    raise
+            else:
+                store.record_handoff(activation_id, target=target, result="handed_off")
+            effects = read_activation(root, activation_id).body["handoff_effects"]
+        if target not in effects:
+            # Also runs after interruption between archive and the new intent.
+            history = read_activation(root, activation_id).body.get("handoff_history", [])
+            archived = next((row for row in reversed(history) if row["target"] == target), None)
+            if archived is not None:
+                recipient = archived["recipient"]
+                if bot_recipient(adapter, root, bot_dir, target) != recipient:
+                    raise ActivationRefusal("native recipient changed after expired checkpoint archival")
+                require_bootstrap_input_ready(adapter, root, bot_dir, target, recipient)
+                if bot_recipient(adapter, root, bot_dir, target) != recipient:
+                    raise ActivationRefusal("native recipient changed before the new handoff request")
             _, present = _legacy_bot_socket(unit)
+            if archived is not None and not present:
+                raise ActivationRefusal("archived checkpoint recipient disappeared before the new handoff request")
             preserve = record.body["intent"].get("preserve_bot_state") is True
             restart = preserve and record.body["intent"]["bot_states"][target]["disposition"] == "restart"
             if not present:
@@ -846,6 +864,35 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
         _quiesce_one_bot(root, store, activation_id, pause, unit, sockets[target], adapter)
     store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest({
         "mode": "per-bot-v1", "bots": read_activation(root, activation_id).body.get("bot_quiescence", {})}))
+
+
+def _archive_expired_requested_handoff(root, store, activation_id, unit, adapter, requested):
+    """Reopen only a completed, expired checkpoint; an unresolved attempt never resends."""
+    from .bot_operations import BotLifecycleError, _HANDOFF_FRESH_S, _handoff_capture
+    bot_dir, target = unit.declaration.working_directory, unit.target
+    if target in read_activation(root, activation_id).body.get("bot_quiescence", {}):
+        return False
+    capture = {}
+    try:
+        mtime, stamp = _handoff_capture(bot_dir, not_before=requested, witness=capture)
+    except BotLifecycleError:
+        return False
+    cutoff = datetime.now(timezone.utc).timestamp() - _HANDOFF_FRESH_S
+    # Both must expire: the existing sender otherwise skips a recently written file.
+    if mtime >= cutoff or stamp.timestamp() >= cutoff:
+        return False
+    recipient = bot_recipient(adapter, root, bot_dir, target)
+    require_bootstrap_input_ready(adapter, root, bot_dir, target, recipient)
+    checked = {}
+    try:
+        _handoff_capture(bot_dir, not_before=requested, witness=checked)
+    except BotLifecycleError as exc:
+        raise ActivationRefusal("requested checkpoint changed before expiry reconciliation") from exc
+    if checked != capture or bot_recipient(adapter, root, bot_dir, target) != recipient:
+        raise ActivationRefusal("requested checkpoint or native recipient changed before expiry reconciliation")
+    store.archive_expired_handoff(activation_id, target=target, request_started_ns=requested,
+                                  capture=capture, recipient=recipient)
+    return True
 
 
 def _quiesce_running(root, store, activation_id, pause, old_units, adapter):

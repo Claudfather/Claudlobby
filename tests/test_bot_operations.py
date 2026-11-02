@@ -1073,3 +1073,32 @@ def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, c
         data.chmod(0o700)
     again = worker.call("bot", "start", "worker")["data"]
     assert "stop_record_kept" not in again and not (data / ".stopped").exists()
+
+
+
+def test_requested_capture_witness_hashes_the_same_owned_bytes_and_refuses_a_changing_file(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    bot = tmp_path / "bot"
+    directory = bot / ".claude"
+    directory.mkdir(parents=True)
+    capture = directory / "session.md"
+    capture.write_text("---\nlast_updated: 2026-01-01T00:00:00Z\n---\n" + "context\n" * 2000)
+    witness = {}
+    bot_operations._handoff_capture(bot, not_before=1, witness=witness)
+    assert witness == {"sha256": hashlib.sha256(capture.read_bytes()).hexdigest(),
+                       "mtime_ns": capture.stat().st_mtime_ns,
+                       "last_updated": datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()}
+    fstat, calls = os.fstat, []
+    def changing(fd):
+        info = fstat(fd)
+        calls.append(fd)
+        if len(calls) == 2:
+            return SimpleNamespace(**{key: getattr(info, key) + (key == "st_mtime_ns")
+                for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")})
+        return info
+    monkeypatch.setattr(os, "fstat", changing)
+    proof = {}
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+        bot_operations._handoff_capture(bot, not_before=1, witness=proof)
+    assert proof == {}

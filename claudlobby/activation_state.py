@@ -517,6 +517,47 @@ class ActivationStore:
         effects[target] = result
         return self._save(record)
 
+    def archive_expired_handoff(self, activation_id: str, *, target: str,
+                                request_started_ns: int, capture: dict, recipient: dict) -> ActivationRecord:
+        """Retain a verified completed checkpoint before allowing one new request.
+
+        The native outcome stays unknown in history. This is not a completed stop
+        or permission to reuse stale context; ordinary handoff and stop gates follow.
+        """
+        from .bot_operations import _HANDOFF_FRESH_S
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        effects, requests = body.get("handoff_effects", {}), body.get("handoff_requests", {})
+        history = body.get("handoff_history", [])
+        cutoff = time.time() - _HANDOFF_FRESH_S
+        if (record.status != "activating" or body["pending"] != "sessions_handed_off"
+                or body["intent"].get("quiesce_mode") != "per-bot-v1"
+                or "upgrade_abort" in body or "adoption_abort" in body
+                or target in body.get("bot_quiescence", {}) or target not in effects
+                or effects[target] is not None or not isinstance(history, list)
+                or handoff_request_started_ns(record, target) != request_started_ns
+                or type(request_started_ns) is not int or request_started_ns <= 0
+                or not isinstance(capture, dict) or set(capture) != {"sha256", "mtime_ns", "last_updated"}
+                or not isinstance(capture["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", capture["sha256"])
+                or type(capture["mtime_ns"]) is not int
+                or not request_started_ns <= capture["mtime_ns"] <= cutoff * 1_000_000_000
+                or type(capture["last_updated"]) not in (int, float)
+                or not request_started_ns // 1_000_000_000 <= capture["last_updated"] <= cutoff
+                or not isinstance(recipient, dict) or set(recipient) != {"socket", "session", "instance"}
+                or any(not isinstance(recipient[key], str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", recipient[key])
+                       for key in ("socket", "session"))
+                or not isinstance(recipient["instance"], str)
+                or not re.fullmatch(r"[0-9]+-[0-9]+", recipient["instance"])):
+            raise ActivationRefusal("expired handoff is not a verified completed requested checkpoint")
+        history.append({"target": target, "request": requests[target], "native_result": effects[target],
+                        "capture": capture, "recipient": recipient, "reason": "requested_checkpoint_expired"})
+        body["handoff_history"] = history
+        del effects[target]
+        del requests[target]
+        return self._save(record)
+
     def record_bot_quiescence(self, activation_id: str, *, target: str,
                               witness: dict, result: str | None = None) -> ActivationRecord:
         """Fence an exact captured bot before its first native stop, then retain quiet proof."""

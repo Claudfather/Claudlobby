@@ -279,3 +279,47 @@ def test_activation_startup_mode_is_frozen_and_old_records_keep_ordinary_startup
             _prepare(store, plan)
         with pytest.raises(a.ActivationError, match="unsupported.*startup mode"):
             _prepare(store, plan, startup_mode="future")
+
+
+
+@pytest.mark.parametrize("after_write", [False, True], ids=["normal", "interrupted-result"])
+def test_expired_checkpoint_archive_is_one_atomic_write_and_compatible_record_can_resume(proposal, monkeypatch, after_write):
+    import time
+    builder, _, _ = proposal
+    plan = builder.seal()
+    target = "example.worker"
+    requested = time.time_ns() - 1_200_000_000_000
+    recipient = {"socket": "worker", "session": "worker", "instance": "123-456"}
+    capture = {"sha256": "3" * 64, "mtime_ns": requested + 100_000_000_000,
+               "last_updated": requested // 1_000_000_000 + 100}
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan, quiesce_mode="per-bot-v1", install_directory=builder.root)
+        _advance(store, "candidate", ("producers_paused",))
+        store.begin("candidate", "sessions_handed_off")
+        store.record_handoff("candidate", target=target, result=None, request_started_ns=requested)
+        before = a.read_activation(builder.root, "candidate")
+        write, writes = a._write, []
+        def observed_write(path, value):
+            writes.append(path)
+            write(path, value)
+            if after_write:
+                raise OSError("after atomic archive")
+        with monkeypatch.context() as patch:
+            patch.setattr(a, "_write", observed_write)
+            if after_write:
+                with pytest.raises(OSError, match="after atomic archive"):
+                    store.archive_expired_handoff("candidate", target=target, request_started_ns=requested, capture=capture, recipient=recipient)
+            else:
+                store.archive_expired_handoff("candidate", target=target, request_started_ns=requested, capture=capture, recipient=recipient)
+        record = a.read_activation(builder.root, "candidate")
+        assert len(writes) == 1
+        assert record.body["handoff_effects"] == record.body["handoff_requests"] == {}
+        assert record.body["handoff_history"] == [{"target": target, "request": {"started_at_ns": requested},
+            "native_result": None, "capture": capture, "recipient": recipient, "reason": "requested_checkpoint_expired"}]
+        for key in ("status", "intent", "completed", "pending", "evidence", "previous_selection"):
+            assert record.body[key] == before.body[key]
+        assert a.resumable_running_step(record) == "sessions_handed_off"
+        with pytest.raises(a.ActivationRefusal):
+            store.archive_expired_handoff("candidate", target=target, request_started_ns=requested, capture=capture, recipient=recipient)
+        store.record_handoff("candidate", target=target, result=None, request_started_ns=time.time_ns())
+        assert a.read_activation(builder.root, "candidate").body["handoff_history"] == record.body["handoff_history"]

@@ -3178,3 +3178,124 @@ def test_postactive_drift_before_first_intent_refuses_without_send(cold, monkeyp
         activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert host.bootstrap_sends == []
     assert all("bootstrap" not in e for e in state.read_activation(root, "cold").body["start_effects"].values())
+
+
+@pytest.fixture
+def expired_requested_checkpoint(per_bot_case, monkeypatch, tmp_path):
+    """The existing per-bot case, with a late completed capture and no native receipt."""
+    from datetime import datetime, timedelta, timezone
+    from types import MethodType
+    case = per_bot_case
+    case.units = case.units[:1]
+    case.live.pop("example.bravo.plist")  # The inherited quiet closure must observe the same one-bot case.
+    target = case.units[0].target
+    now = datetime.now(timezone.utc)
+    requested = int((now - timedelta(seconds=1200)).timestamp() * 1_000_000_000)
+    _preserve_capture(case.dirs["alpha"], now=now - timedelta(seconds=600))
+    case.body["pending"] = "sessions_handed_off"
+    case.body["handoff_effects"] = {target: None}
+    case.body["handoff_requests"] = {target: {"started_at_ns": requested}}
+    case.store.root = tmp_path
+    case.store.assert_locked = lambda: None
+    monkeypatch.setattr(state, "read_activation", lambda root, identity: activation.read_activation(root, identity))
+    def save(record):
+        case.body.clear()
+        case.body.update(record.body)
+        return record
+    case.store._save = save
+    if hasattr(state.ActivationStore, "archive_expired_handoff"):
+        case.store.archive_expired_handoff = MethodType(state.ActivationStore.archive_expired_handoff, case.store)
+    recipient = {"socket": "worker", "session": "worker", "instance": "123-456"}
+    monkeypatch.setattr(activation, "bot_recipient", lambda *_: dict(recipient))
+    ready = []
+    monkeypatch.setattr(activation, "require_bootstrap_input_ready", lambda *_: ready.append("ready"))
+    case.target, case.original_request, case.ready = target, requested, ready
+    case.file = case.dirs["alpha"] / ".claude/session.md"
+    case.original_digest = __import__("hashlib").sha256(case.file.read_bytes()).hexdigest()
+    return case
+
+
+@pytest.mark.parametrize("outcome", ["handoff-saved", "handoff-timeout"])
+def test_per_bot_resume_archives_only_completed_expired_request_then_sends_once(expired_requested_checkpoint, outcome):
+    case = expired_requested_checkpoint
+    case.outcome[0] = outcome
+    if outcome == "handoff-saved":
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+    else:
+        with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+            case.run()
+    history = case.body["handoff_history"]
+    assert len(history) == 1 and history[0]["native_result"] is None
+    assert history[0]["request"] == {"started_at_ns": case.original_request}
+    assert history[0]["capture"]["sha256"] == case.original_digest
+    assert history[0]["reason"] == "requested_checkpoint_expired"
+    assert case.body["handoff_requests"][case.target]["started_at_ns"] > case.original_request
+    assert case.calls == ["alpha"] and case.ready == ["ready", "ready"]
+    if outcome == "handoff-timeout":
+        # The old completed capture predates the NEW request: it cannot license another send.
+        with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+            case.run()
+        assert case.calls == ["alpha"] and case.body["handoff_history"] == history
+        assert not case.body["bot_quiescence"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "predates", "recent-write", "quiescence", "blocked", "changed"])
+def test_per_bot_expiry_refuses_missing_completion_or_changed_native_evidence(
+        expired_requested_checkpoint, monkeypatch, failure):
+    case = expired_requested_checkpoint
+    if failure == "missing":
+        case.file.unlink()
+    elif failure == "predates":
+        case.body["handoff_requests"][case.target]["started_at_ns"] = case.file.stat().st_mtime_ns + 2_000_000_000
+    elif failure == "recent-write":
+        os.utime(case.file, None)
+    elif failure == "quiescence":
+        case.body["bot_quiescence"][case.target] = {"result": None}
+    elif failure == "blocked":
+        def blocked(*_):
+            raise activation.RuntimeEvidenceError("bootstrap", case.target, "native input readiness unavailable")
+        monkeypatch.setattr(activation, "require_bootstrap_input_ready", blocked)
+    else:
+        def changed(*_):
+            case.file.write_bytes(case.file.read_bytes() + b"changed after readiness\n")
+        monkeypatch.setattr(activation, "require_bootstrap_input_ready", changed)
+    with pytest.raises((state.ActivationRefusal, activation.RuntimeEvidenceError)):
+        case.run()
+    assert case.calls == [] and "handoff_history" not in case.body
+    assert case.body["handoff_effects"] == {case.target: None}
+
+
+@pytest.mark.parametrize("continuation", ["ready", "blocked", "replaced", "absent"])
+def test_per_bot_interruption_after_archive_rechecks_recipient_before_new_intent(
+        expired_requested_checkpoint, monkeypatch, continuation):
+    case = expired_requested_checkpoint
+    archive = case.store.archive_expired_handoff
+    def interrupt(*args, **kwargs):
+        archive(*args, **kwargs)
+        raise InterruptedError("after archive before new intent")
+    case.store.archive_expired_handoff = interrupt
+    with pytest.raises(InterruptedError, match="after archive"):
+        case.run()
+    case.store.archive_expired_handoff = archive
+    assert not case.body["handoff_effects"] and not case.body["handoff_requests"] and case.calls == []
+    if continuation == "blocked":
+        def blocked(*_):
+            raise activation.RuntimeEvidenceError("bootstrap", case.target, "native input readiness unavailable")
+        monkeypatch.setattr(activation, "require_bootstrap_input_ready", blocked)
+    elif continuation == "replaced":
+        monkeypatch.setattr(activation, "bot_recipient", lambda *_: {
+            "socket": "worker", "session": "worker", "instance": "789-999"})
+    elif continuation == "absent":
+        case.body["intent"].pop("preserve_bot_state")  # Ordinary mode must not take server_absent either.
+        case.live[case.target] = False
+        # The last readiness observation succeeded; the server then disappeared.
+    if continuation == "ready":
+        with pytest.raises(case.BotPauseReached):
+            case.run()
+        assert case.calls == ["alpha"]
+    else:
+        with pytest.raises((state.ActivationRefusal, activation.RuntimeEvidenceError)):
+            case.run()
+        assert case.calls == [] and not case.body["handoff_effects"] and not case.body["handoff_requests"]
+    assert len(case.body["handoff_history"]) == 1
