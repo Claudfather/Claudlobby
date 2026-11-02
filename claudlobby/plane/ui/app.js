@@ -774,9 +774,10 @@ function renderHeader(env) {
   }
   const t = env.data.totals;
   const coverage = env.data.coverage;
-  const coverageCopy = coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
+  const coverageCopy = t.overview_retained ? ' · <small class="warn">Refreshing summaries; totals include the last read for pending computers</small>'
+    : coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
-    el.innerHTML = `<span class="dim">${coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
+    el.innerHTML = `<span class="dim">${t.overview_retained ? "no fleet recorded in last summaries" : coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
   const status = env.data.fleets?.length
@@ -810,8 +811,8 @@ function renderHostFacts(env) {
   const el = $("host-facts");
   if (!el) return;
   if (env?.data?.sources) {
-    el.textContent = env.data.sources.map(s => `${s.label}: ${s.state === 'ok' && s.host
-      ? `ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
+    el.textContent = env.data.sources.map(s => `${s.label}: ${(s.state === 'ok' || s.overview_retained) && s.host
+      ? `${s.overview_retained ? 'last summary, refreshing · ' : ''}ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
       : s.connection_state === 'not_connected' ? 'not connected'
       : s.connection_state === 'ready' ? 'team summary unavailable' : s.state}`).join(' | ');
     return;
@@ -900,6 +901,7 @@ function renderOverview(env) {
          data-fleet="${esc(f.alias)}" ${!showHiddenTeams && hidden.has(f.uid) && f.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null) ? 'hidden' : ''}>
       <div class="ov-head"><b>${esc(f.display_label || f.alias)}</b>
         ${dimension ? `<button type="button" class="pill ghost" data-overview-fleet="${esc(f.alias)}" aria-label="Open team ${esc(f.display_label || f.alias)}">Open team</button>` : ''}</div>
+      ${f.overview_retained ? `<div class="ov-line ov-warn">Refreshing · last summary ${esc(f.overview_read_at ? ago(f.overview_read_at) : 'at an unknown time')}</div>` : ''}
       <div class="ov-line ov-status-counts">${esc(fleetStatusCopy(f))}</div>
       <div class="ov-line">${ovNum(f.open, "open", false)} ·
         ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")}</div>
@@ -927,12 +929,12 @@ function renderOverview(env) {
   if (d.sources) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(connectionLabel(s.connection_state))}</span></div>
-      <div class="ov-line">Team summary: ${s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
-      <div class="ov-line">${s.state === 'ok' && s.host
+      <div class="ov-line">Team summary: ${s.overview_retained ? `refreshing; showing the last read ${esc(s.overview_read_at ? ago(s.overview_read_at) : 'at an unknown time')}` : s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
+      <div class="ov-line">${(s.state === 'ok' || s.overview_retained) && s.host
         ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
-      <div class="ov-line">${s.connection_state === 'ready' && s.state !== 'ok'
+      <div class="ov-line">${s.overview_retained ? 'Summary refresh is in progress; activity and tasks refresh independently.' : s.connection_state === 'ready' && s.state !== 'ok'
         ? 'Team summary unavailable; activity and task records remain independent.' : 'Separate source snapshot; recent windows are per source.'}</div>
       ${s.overview_retry_paused ? `<div class="ov-line">Automatic summary retries paused. Timeout recorded ${esc(s.overview_checked_at || 'at an unknown time')}.${s.overview_read_at ? ` Last successful summary ${esc(s.overview_read_at)}.` : ' No successful summary recorded in this connection.'}</div>
         ${typeof interactionApi.retryOverview === 'function' && s.connection_state === 'ready' ? `<button type="button" class="pill ghost" data-overview-retry="${esc(s.key)}" aria-label="Retry summary for ${esc(s.label)}">Retry summary</button>` : ''}` : ''}
@@ -1036,11 +1038,11 @@ let overviewEpoch = 0;
 let overviewDueAt = 0;
 const OVERVIEW_INTERVAL = 60000;
 
-function invalidateOverview() {
+function invalidateOverview(snapshot = null) {
   ++overviewEpoch;
   overviewDueAt = 0;
   clearTimeout(overviewTimer); overviewTimer = null;
-  const env = {state: "unavailable", provenance: null, remediation: sessionPaused
+  const env = !sessionPaused && snapshot?.data?.sources ? snapshot : {state: "unavailable", provenance: null, remediation: sessionPaused
     ? "Team summary is paused until access resumes." : "Team summary is refreshing."};
   renderHeader(env); renderHostFacts(env); renderOverview(env);
 }
@@ -1202,12 +1204,13 @@ function openStream() {
     try {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
-      if (payload.rows.length || payload.coverage_changed || payload.routing_changed) {
+      if (payload.rows.length || payload.coverage_changed || payload.routing_changed || payload.stream_changed) {
         // Learning rooms schedules another board read without retiring the
         // canonical overview that just supplied those same room identities.
         if (payload.coverage_changed || payload.routing_retired) ++generation;
         if (payload.coverage_changed || payload.routing_retired) resetAgentPresence();
-        if (payload.coverage_changed) invalidateOverview();
+        if (payload.coverage_changed || payload.overview_invalidated)
+          invalidateOverview(payload.overview || payload.overview_invalidated);
         scheduleRefresh();
       }
     } catch { /* malformed push — the next board refresh corrects */ }
