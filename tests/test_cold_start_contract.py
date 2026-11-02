@@ -342,8 +342,9 @@ def test_no_doc_shows_bot_remove_without_root_and_fleet():
 # On Linux systemd's first entry is ~/.config/systemd/user.control, which it keeps for
 # configuration made through its D-Bus API: a unit there loads, but keepalive and
 # svc_is_registered read only ~/.config/systemd/user. A guide that takes the first
-# entry installs into the one directory the runtime never reads.
-_FIRST_LISTED = re.compile(r"install_directories[\"')\]]*\[0\]")
+# entry installs into the one directory the runtime never reads. jq's `| .[0]` later
+# on the line is the same pick.
+_FIRST_LISTED = re.compile(r"install_directories\b.*?\[0\]")
 
 
 def _onboarding_docs() -> list[Path]:
