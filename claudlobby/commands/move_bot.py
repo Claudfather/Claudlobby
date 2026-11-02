@@ -212,7 +212,7 @@ def _install_directory(manager, directories):
     try:
         _require_runtime_directory(manager, directory, directories)
     except ActivationRefusal as exc:
-        raise CommandFailure("conflict", f"bot move refused before any change: {exc}") from exc
+        raise CommandFailure("conflict", f"bot move refused before it stops anything: {exc}") from exc
     return directory
 
 

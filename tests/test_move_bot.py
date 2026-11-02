@@ -499,7 +499,7 @@ def test_a_move_is_refused_before_any_change_when_the_runtime_directory_is_off_t
     with pytest.raises(CommandFailure) as refused:
         move_bot.dispatch(args)
     error = refused.value.error
-    assert error.code == "conflict" and error.message.startswith("bot move refused before any change: ")
+    assert error.code == "conflict" and error.message.startswith("bot move refused before it stops anything: ")
     assert str(Path.home() / ".config/systemd/user") in error.message
     assert "XDG_CONFIG_HOME" in error.message and "SYSTEMD_UNIT_PATH" in error.message
 
