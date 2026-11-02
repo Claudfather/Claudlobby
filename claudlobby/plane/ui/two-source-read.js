@@ -24,7 +24,7 @@ export function createWorkspaceReadTransport({ sources }) {
         savedLabel !== undefined && (typeof savedLabel !== 'string' || !savedLabel.trim() || savedLabel.length > 80
           || !savedLabel.isWellFormed() || savedLabel.includes('\0')) ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, overviewSnapshot: null, unsubscribe: null };
+    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, overviewSnapshot: null, overviewPending: null, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
@@ -138,12 +138,14 @@ export function createWorkspaceReadTransport({ sources }) {
     const identity = rows => JSON.stringify(rows.map(f => [f.alias, f.uid]).sort((a,b) => a[0].localeCompare(b[0])));
     const changed = identity(next) !== identity(e.fleets);
     const retired = e.fleets.some(old => !next.some(f => f.alias === old.alias && f.uid === old.uid));
+    const invalidatesOverview = changed && !!e.overviewSnapshot && path === '/api/fleets';
     if (changed) { ++e.routingRevision; e.overviewSnapshot = null; }
     e.fleets = next;
     rooms.clear();
     for (const entry of entries) for (const f of entry.fleets) rooms.set(room(entry, f.alias), { e: entry, raw: f });
     // A channel leg may have combined before this newly learned ownership.
-    if (changed) notify({ routing_changed: true, routing_retired: retired });
+    if (changed) notify({ routing_changed: true, routing_retired: retired,
+      ...(invalidatesOverview ? {overview_invalidated:overviewSnapshot()} : {}) });
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
@@ -193,7 +195,7 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   function overviewSnapshot() {
     return combineOverview(entries.map(e => e.overviewSnapshot?.epoch === e.epoch && admitted(e)
-      ? e.overviewSnapshot.value : failed(e.state)));
+      ? e.overviewPending === null ? e.overviewSnapshot.value : pendingOverview(e) : failed(e.state)));
   }
   // Optional accepted partial snapshots; the Promise still settles with the full read.
   async function jget(input, onUpdate) {
@@ -226,6 +228,7 @@ export function createWorkspaceReadTransport({ sources }) {
     const epochs = chosen.map(e => e.epoch), revisions = chosen.map(e => e.routingRevision);
     const rosterRead = path === '/api/fleets' || path === '/api/overview';
     const tickets = chosen.map(e => rosterRead ? ++e.rosterRequest : null);
+    if (path === '/api/overview') chosen.forEach((e,i) => {e.overviewPending = tickets[i];});
     const values = chosen.map(e => path === '/api/overview' ? pendingOverview(e)
       : failed('checking', 'This source read is still in progress.'));
     const projected = new Map();
@@ -294,6 +297,7 @@ export function createWorkspaceReadTransport({ sources }) {
         }
         if (path === '/api/overview' && values[i].state !== 'ok' && epochs[i] === e.epoch && tickets[i] === e.rosterRequest)
           e.overviewSnapshot = null;
+        if (path === '/api/overview' && e.overviewPending === tickets[i]) e.overviewPending = null;
         progress();
         // Discover routing independently of an unavailable summary. A slow
         // fallback must not hold an already accepted peer's display.
@@ -310,6 +314,9 @@ export function createWorkspaceReadTransport({ sources }) {
     } finally {
       complete = true;
       clearTimeout(progressTimer);
+      if (path === '/api/overview') chosen.forEach((e,i) => {
+        if (e.overviewPending === tickets[i]) e.overviewPending = null;
+      });
     }
   }
     catch { return failed('unavailable', 'This source returned an unsupported read projection.'); }

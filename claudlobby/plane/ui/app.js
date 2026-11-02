@@ -1209,7 +1209,8 @@ function openStream() {
         // canonical overview that just supplied those same room identities.
         if (payload.coverage_changed || payload.routing_retired) ++generation;
         if (payload.coverage_changed || payload.routing_retired) resetAgentPresence();
-        if (payload.coverage_changed) invalidateOverview(payload.overview);
+        if (payload.coverage_changed || payload.overview_invalidated)
+          invalidateOverview(payload.overview || payload.overview_invalidated);
         scheduleRefresh();
       }
     } catch { /* malformed push — the next board refresh corrects */ }

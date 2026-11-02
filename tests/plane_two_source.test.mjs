@@ -85,18 +85,38 @@ test('overview refresh retains only same-admission pending summaries and removes
   next.resolve(roster('team'));await refresh;api.dispose();
 });
 
-test('ordinary stream opens preserve accepted summaries while admission loss immediately clears only its source',async()=>{
-  const {api,a}=await pair(),h=await appHarness(api);h.c.openStream();await h.refresh();
+test('ordinary stream opens preserve summaries and sibling admission loss keeps pending peer summaries labelled',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);h.c.openStream();await h.refresh();
   const accepted=h.overviewPaints.at(-1),count=h.overviewPaints.length;
   a.streams[0].onopen({});
   assert.equal(h.overviewPaints.length,count);
   assert.equal(h.overviewPaints.at(-1),accepted);
+  const held=deferred();b.routes.set('/api/overview',held.promise);
+  let accept;const progress=new Promise(resolve=>{accept=resolve;});
+  const reading=api.jget('/api/overview',accept);await progress;
   a.setStatus('sign_in_required');await a.reader.start();
   const invalidated=h.overviewPaints.at(-1);
   assert.deepEqual(Array.from(invalidated.data.fleets,f=>f.alias),['b / team']);
   assert.equal(invalidated.data.sources[0].host,null);
   assert.equal(invalidated.data.totals.bots,1);
+  assert.equal(invalidated.data.sources[1].state,'checking');
+  assert.equal(invalidated.data.sources[1].overview_retained,true);
+  assert.equal(invalidated.data.totals.overview_retained,true);
+  held.resolve(roster('team'));await reading;
   api.dispose();
+});
+
+test('external roster retirement immediately removes only its overview while canonical overview publication still paints',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);h.c.openStream();await h.refresh();
+  a.routes.set('/api/fleets',ok({fleets:[],default:null}));await api.jget('/api/fleets');
+  const retired=h.overviewPaints.at(-1);
+  assert.deepEqual(Array.from(retired.data.fleets,f=>f.alias),['b / team']);
+  assert.equal(retired.data.sources[0].host,null);assert.equal(retired.data.totals.bots,1);
+  const changed=roster('renamed');a.routes.set('/api/overview',changed);
+  b.routes.set('/api/overview',roster('team'));
+  await h.c.refreshOverview();await h.settle();const refreshed=h.overviewPaints.at(-1);
+  assert.deepEqual(Array.from(refreshed.data.fleets,f=>f.alias),['a / renamed','b / team']);
+  assert.equal(refreshed.data.totals.bots,2);api.dispose();
 });
 
 test('overview deadline pauses only its source leg until explicit retry, preserving other reads and timestamps',async()=>{
