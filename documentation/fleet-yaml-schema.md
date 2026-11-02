@@ -710,7 +710,7 @@ Controls fleet observability thresholds for heartbeat pulses and stuck-detection
 observability:
   pulse_interval: 300           # seconds between heartbeat pulses (default: 300)
   activity_stuck_threshold: 1800  # seconds of no tool-call activity before flagged (default: 1800)
-  dispatch_deadline: 86400      # seconds after manager dispatch before flagged overdue (default: 86400 = 24h; 0 = open-ended)
+  dispatch_deadline: 86400      # default deadline, in seconds, for task assign/reassign without --expected-by (default: 86400 = 24h; 0 = open-ended)
   bridge_heal: true             # enable the keepalive Telegram-bridge auto-heal ladder (default: off)
   bridge_heal_max_attempts: 3   # heal bounce cap before escalation (keepalive default: 3)
   unassigned_check: true        # enable the reported-but-never-re-dispatched watchdog (default: off)
@@ -720,7 +720,9 @@ observability:
 
 `observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby config validate` warns, naming the key.
 
-**dispatch_deadline remains composed for every bot.** The default is 86400 seconds (24 hours), and a fleet override still reaches bot.conf for historical native watchdog rows. Canonical task assign takes an explicit --expected-by timestamp; it does not read this env value to manufacture a deadline. A value of 0 disables the legacy dispatch clock.
+**`dispatch_deadline` is the default deadline for routed work.** When `claudlobby task assign` or `task reassign` runs without `--expected-by`, it reads the fleet manager's resolved `observability.dispatch_deadline` and freezes now plus that many seconds as the assignment's `expected_by`. It does this once per request: a retry with the same `--request-id` keeps the deadline frozen the first time, never today's clock or config. The value is the manager bot's, after the system, fleet `defaults:` and bot tiers merge; a value set only on a worker does not change it. The default is 86400 seconds (24 hours) when no tier sets one.
+
+`0` makes an omitted deadline open-ended, so the assignment never becomes overdue. `--expected-by none` asks for open-ended explicitly, whatever this field says, and `--expected-by <RFC3339>` sets the deadline directly. Because the default applies to every assignment routed without `--expected-by`, setting `0` removes the deadline from all of them. The field is still composed into each bot's `bot.conf` as `OBSERVABILITY_DISPATCH_DEADLINE` (see [environment-variables.md](environment-variables.md#observability)), but no current code reads that variable.
 
 `pulse_interval` also sets the `fleet-pulse` timer's cadence. A whole number of minutes that divides an hour (60, 120, 180, 240, 300, 360, 600, 720, 900, 1200, 1800 or 3600) keeps the pulse anchored in this fleet's slot on the host. Any other value runs it on `OnUnitActiveSec=` with a slot for its first run only, and that slot lasts only until the copies drift back together; on a four-fleet host, 60 s copies did so within minutes to an hour.
 

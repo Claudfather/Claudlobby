@@ -404,14 +404,18 @@ for the emitted env vars and per-field validation. This file supplies the
 platform floor; a fleet's own `defaults.observability` (or a bot's own
 `observability:`) overrides per-field via a shallow merge — declaring one
 field doesn't reset the others. Current floor values: `pulse_interval: 300`,
-`activity_stuck_threshold: 1800`, `dispatch_deadline: 1800`.
+`activity_stuck_threshold: 1800`, `dispatch_deadline: 86400` (seconds; `0` =
+open-ended).
 
-**`dispatch_deadline` in particular carries a long, load-bearing comment in
-the source** recording a specific measured trade (a bimodal completion-time
-distribution across 90 tracked dispatches, and why raising the default would
-trade false alerts for slower detection of a genuinely wedged bot) — read
-`claudlobby/system.yaml` itself before changing that one number; the
-rationale is deliberately kept at the number rather than in an issue thread.
+**`dispatch_deadline` is the default deadline for routed work.** `task assign`
+and `task reassign` without `--expected-by` freeze now plus the fleet manager's
+resolved value, once per request, so a retry keeps that deadline. `0`, or an
+explicit `--expected-by none`, means open-ended. See
+[`fleet-yaml-schema.md`'s `bots.<name>.observability`](fleet-yaml-schema.md#botsnameobservability).
+The note beside the number in `claudlobby/system.yaml` says the same, and asks
+that the default not be lowered merely to quiet false alerts across every fleet.
+If no tier sets the field, including when a fleet turns this tier off with
+`system_defaults: { observability: false }`, the default is still 86400.
 
 ## `defaults.jobs`
 
