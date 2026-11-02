@@ -724,10 +724,8 @@ test(`task action note describes actual capabilities only: ${actions.join(',') |
   const buttons = h.get('task-detail-content').querySelectorAll('[data-kind]');
   for(const button of buttons) assert.equal(button.disabled,!actions.includes(button.dataset.kind));
   assert.equal(note.includes('send an ordinary message'),actions.includes('message'));
-  if(!actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback and nudges are unavailable/);
-  if(actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback goes.*Nudges are unavailable/);
-  if(actions.includes('nudge') && !actions.includes('feedback')) assert.match(note,/nudges go.*Feedback is unavailable/);
-  if(actions.includes('feedback') && actions.includes('nudge')) assert.match(note,/feedback and nudges go/);
+  assert.match(note,actions.includes('feedback') ? /Task feedback goes to this team’s lead/ : /Task feedback is unavailable/);
+  assert.match(note,actions.includes('nudge') ? /Task nudges go to this team’s lead/ : /Nudges are unavailable/);
 });
 
 
@@ -1020,6 +1018,13 @@ test(`feedback context waits for nudge and fences the originating epoch: ${trans
     feedbackContext:room=>{reads.push(['feedback',room]);return room==='web'?ownerFeedback:null;}}));
   h.loop.setRoom('web');await settle();
   assert.deepEqual(reads,[['message','web'],['nudge','web']]);
+  if(transition==='none') {
+    h.open(nudgeTaskId);await settle();
+    assert.match(h.get('task-action-note').textContent,/Checking task feedback access/);
+    assert.doesNotMatch(h.get('task-action-note').textContent,/feedback.*unavailable/);
+    assert.equal(h.get('work-mode').textContent,'CHECKING ACTION ACCESS');
+    assert.match(h.get('work-unavailable').textContent,/Checking task action access/);
+  }
   if(transition==='room')h.loop.setRoom('other');
   if(transition==='session')h.loop.pause();
   await settle();held.resolve(ownerNudge);await settle();
@@ -1129,8 +1134,10 @@ test('nudge and feedback capability refreshes have independent generations and n
   assert.equal(feedbackReads,2);assert.equal(nudgeReads,2);nudge.resolve(ownerNudge);await settle();h.open(nudgeTaskId);await settle();
   let buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
   assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,true);assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,false);
+  assert.match(h.get('task-action-note').textContent,/Checking task feedback access/);
   feedback.resolve(ownerFeedback);await settle();buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
   assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,false);assert.equal(h.get('work-body').value,'Independent message draft');
+  assert.doesNotMatch(h.get('task-action-note').textContent,/Checking task feedback access/);
   assert.equal(h.preparations.length,0);assert.equal(h.sends.length,0);
 });
 for(const loss of ['room','pause'])
@@ -1842,14 +1849,23 @@ test(`composer context close restores visible rail focus after ${loss} loss (rem
 });
 
 const actionDenied = () => Object.assign(new Error('Refused'),{code:'action_not_authorized'});
-test('explicit team action denials explain authority while task history stays readable and controls stay disabled',async()=>{
+for(const feedback of [false,true])
+test(`explicit team action denials describe each action independently: feedback=${feedback}`,async()=>{
   const refuse=()=>{throw actionDenied();};
-  const h=harness(nudgeOptions({interactionContext:refuse,nudgeContext:refuse,feedbackContext:refuse}));
+  const h=harness(nudgeOptions({interactionContext:refuse,nudgeContext:refuse,feedbackContext:feedback?()=>ownerFeedback:refuse}));
   h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
-  assert.match(h.get('work-unavailable').textContent,/not authorized.*Reading remains available.*host owner/);
-  assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
-  assert.match(h.get('task-action-note').textContent,/Task feedback and Nudges are not authorized/);
-  assert.ok(h.get('task-detail-content').querySelectorAll('[data-kind]').every(b=>b.disabled));
+  if(!feedback) {
+    assert.match(h.get('work-unavailable').textContent,/not authorized.*Reading remains available.*host owner/);
+    assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
+    assert.match(h.get('task-action-note').textContent,/Task feedback is not authorized/);
+  } else {
+    assert.match(h.get('task-action-note').textContent,/Task feedback goes to this team’s lead/);
+    assert.doesNotMatch(h.get('task-action-note').textContent,/host owner must approve action access/);
+  }
+  assert.match(h.get('task-action-note').textContent,/Nudges are not authorized/);
+  const buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,!feedback);
+  assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,true);
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
 

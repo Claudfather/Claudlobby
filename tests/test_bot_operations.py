@@ -1073,3 +1073,12 @@ def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, c
         data.chmod(0o700)
     again = worker.call("bot", "start", "worker")["data"]
     assert "stop_record_kept" not in again and not (data / ".stopped").exists()
+
+
+def test_fresh_self_handoff_keeps_300_s_unless_the_activation_passes_a_wider_window(tmp_path):
+    """#963: bot handoff and self restart call the verifier at its 300 s default; only the activation
+    path passes max_age_s."""
+    bot_dir = _handoff_below_envelope(tmp_path, "references_refreshed", 400, 400)
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned session handoff"):
+        bot_operations._fresh_self_handoff(bot_dir)
+    assert 399 <= bot_operations._fresh_self_handoff(bot_dir, max_age_s=900) <= 402
