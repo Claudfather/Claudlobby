@@ -430,7 +430,8 @@ def test_fresh_adoption_admits_only_a_verified_early_abort_prior_record(cold, mo
     else:
         with pytest.raises(state.ActivationError, match=f"existing activation {old} requires explicit repair"):
             adopt()
-        assert host.calls == [] and state.read_selection(root) is None
+        # The only native call is the directory check's catalog read before the lock (#2610).
+        assert host.calls == [("svc_inventory_catalog", ())] and state.read_selection(root) is None
     assert state.read_activation(root, old).body == before
 
 
@@ -2188,12 +2189,15 @@ def test_old_data_and_wrong_executing_interpreter_refuse_before_preparation(cold
         activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert not db_file(root).exists() and not host.starts
     assert not list((root / "state/activations").glob("*/activation.json"))
+    # The only native call is the directory check's catalog read before the lock (#2610).
+    assert host.calls == [("svc_inventory_catalog", ())]
     (queue / "pending.batch").unlink()
     queue.rmdir()
     monkeypatch.setattr(activation.sys, "executable", "/wrong/interpreter")
     with pytest.raises(state.ActivationError, match="sealed candidate interpreter"):
         activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    assert not db_file(root).exists() and host.calls == []
+    # The interpreter is refused before that read: no call was added.
+    assert not db_file(root).exists() and host.calls == [("svc_inventory_catalog", ())]
 
 
 @pytest.mark.parametrize("caller_result", [1, 3], ids=["self-hosted", "unknown-ancestry"])
