@@ -569,12 +569,21 @@ def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause
         assert handoff.read_bytes() == before
 
 
-def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False):
+def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False, registry_preflight=False):
     """The cold host; ``fleet_job`` adds a fleet job whose service names the
-    fleet's failure template, staged through the real manifest reader (#2522)."""
+    fleet's failure template, staged through the real manifest reader (#2522).
+    ``registry_preflight`` keeps activation's registry-scan refusal in force as
+    it runs in an operator's shell: the shipped .env tier resolver is sealed
+    into the candidate, and the suite's own plane silencer is cleared (#2611)."""
     root, inputs, paths, _, directory = installed
     shutil.copytree(Path(__file__).resolve().parents[1] / "claudlobby/plane/migrations",
                     directory / "package/plane/migrations")
+    if registry_preflight:
+        for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+            shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts" / name,
+                         directory / paths.native / name)
+        monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+        monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
     release = seal_release(root, inputs, paths)
     manifest = root / "fleet.yaml"
     manifest.write_text("fleet:\n  name: example\n  manager: manager\n  service_prefix: com.example\n"
@@ -662,6 +671,11 @@ def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False):
     # The scan owner separately proves assembly/commit semantics; this authored
     # output fixture checks ordering and the real operation-context SQL reader.
     monkeypatch.setattr(activation, "_registry_scan", host.registry_scan)
+    if not registry_preflight:
+        # The suite's own silencer (PLANE_EMIT_DISABLED=1) is a value this
+        # refusal names, as it would in an operator's shell; it is faked with
+        # the scan it guards.
+        monkeypatch.setattr(activation, "registry_scan_refusal", lambda _contexts: None)
     return root, release, plan, host
 
 
@@ -1449,6 +1463,81 @@ def test_failed_readiness_keeps_candidate_pending_and_never_starts_producers(col
         assert host.starts == ["claudlobby-plane-daemon.service"]
     else:
         assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service", "com.example.worker.service"]
+
+
+_SHIPPED_REGISTRY_SCAN = activation._registry_scan
+_TIER_REFUSAL = r"PLANE_EMIT_ENABLED=0 in \S+/\.env opts fleet example out of the registry scan"
+
+
+@pytest.mark.parametrize("environment, tier, refusal", [
+    ({}, "PLANE_EMIT_ENABLED=0\n", _TIER_REFUSAL),
+    ({"PLANE_EMIT_ENABLED": "0"}, None,
+     r"PLANE_EMIT_ENABLED=0 in this command's environment opts out of the registry scan"),
+    ({"PLANE_EMIT_DISABLED": "1"}, None,
+     r"PLANE_EMIT_DISABLED=1 in this command's environment silences the registry scan"),
+], ids=["fleet tier", "environment", "silencer"])
+def test_cold_activation_refuses_an_opted_out_registry_scan_before_any_record(
+        installed, monkeypatch, tmp_path, environment, tier, refusal):
+    """#2611: activation needs every fleet's registry scan committed, so a value
+    that turns the scan off is refused while the host is unchanged, by name."""
+    root, _, plan, host = _cold_case(installed, monkeypatch, tmp_path, registry_preflight=True)
+    # The shipped scan, so a refusal left to the bots start phase shows as itself.
+    monkeypatch.setattr(activation, "_registry_scan", _SHIPPED_REGISTRY_SCAN)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    if tier:
+        (root / ".env").write_text(tier)  # this root-declared fleet's own tier
+    with pytest.raises(state.ActivationRefusal, match=refusal):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert not (root / "state/activations/cold").exists()
+    assert state.read_selection(root) is None
+    assert host.starts == []
+
+
+def test_upgrade_refuses_an_opted_out_fleet_tier_before_pausing_a_running_bot(
+        installed, monkeypatch, tmp_path):
+    """#2611: over running bots the refusal comes before the activation record and
+    before any unit is paused, handed off or started; the selected release stays."""
+    root, release, source_plan, host = _cold_case(installed, monkeypatch, tmp_path,
+                                                  registry_preflight=True)
+    # A clean host passes the same preflight over the same real tiers.
+    activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    manifest, projects = root / "fleet.yaml", root / "projects.yaml"
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
+                                effects={"fleet_manifests": {"example": str(manifest)},
+                                         "units": source_plan.effects["units"]})
+    builder.effects["fleet_sources"] = {"example": {
+        "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
+        "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
+    }}
+    for item in source_plan.effects["units"]:
+        builder.file(Path(item["source"]), source_plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+    monkeypatch.setattr(activation, "_registry_scan", _SHIPPED_REGISTRY_SCAN)
+    # The fixture's units report no private tmux directory: a pre-record check
+    # this test is not about, which main would otherwise stop at before pausing.
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_args, **_kwargs: str(host.tmux_dir))
+    (root / ".env").write_text("PLANE_EMIT_ENABLED=0\n")
+    calls = len(host.calls)
+    with pytest.raises(state.ActivationRefusal, match=_TIER_REFUSAL):
+        activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
+    assert not (root / "state/activations/upgrade").exists()
+    assert state.read_selection(root)["activation_id"] == "cold"
+    assert not [function for function, _ in host.calls[calls:] if function in (
+        "svc_activation_assert_external", "svc_activation_handoff", "svc_activation_pause",
+        "svc_activation_quiet", "svc_activation_bot_fence", "svc_activation_start")]
+
+
+def test_the_registry_scan_refusal_names_each_reason_once(monkeypatch):
+    """#2611: one refusal names every fleet that would refuse, so one edit and one
+    new plan clear them all; a reason the fleets share is named once."""
+    from claudlobby.plane import registry_emit
+    reasons = {"alpha": "alpha's tier", "beta": "an exported value", "gamma": None,
+               "delta": "an exported value"}
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", lambda _paths, fleet: reasons[fleet.name])
+    contexts = [SimpleNamespace(paths=None, fleet=SimpleNamespace(name=name)) for name in reasons]
+    assert activation.registry_scan_refusal(contexts) == "alpha's tier; an exported value"
+    assert activation.registry_scan_refusal(contexts[2:3]) is None
 
 
 @pytest.mark.parametrize("failing", ["ingest", "worker"])

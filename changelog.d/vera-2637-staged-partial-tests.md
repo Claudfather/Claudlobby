@@ -1,0 +1,3 @@
+### Changed — the staging and `~/.env` scan tests pin a shared partial's mode, the library's partials and the underscore names (#2637)
+
+A bot's copy of its skills holds each shared partial with the mode of the file it copies, and a test now requires it: an owner-only partial stays owner-only and a runnable one stays runnable. Three cases the code already handles are pinned too: a skill directory whose name starts with an underscore, a skill directory named like a partial (`_name.md`), and a text file beside the partials, which is not staged. The test of the `~/.env` scan puts a partial in the package's library as well as in the fleet's own, so a scan that skipped the library's partials fails it. Tests only; nothing in `claudlobby/` or `library/` changes.

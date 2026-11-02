@@ -509,6 +509,7 @@ def native_owner_gateway(cold, monkeypatch):
     host = NativeHost(root, release, plan, old_host.directory, old_host.package)
     monkeypatch.setattr(activation, '_probe', host.probe)
     monkeypatch.setattr(activation, '_registry_scan', host.registry_scan)
+    monkeypatch.setattr(activation, 'registry_scan_refusal', lambda _contexts: None)
     activation.bootstrap_activation(root, 'cold', plan.plan_id, host.directory, adapter=host)
     result = gateway.__wrapped__((root, host), monkeypatch)
     # Extend the existing manager seam with its real shared ownership reader.
