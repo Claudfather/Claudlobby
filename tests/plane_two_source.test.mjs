@@ -675,10 +675,12 @@ test('source coverage change retires a completed held overview and selection upd
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const highlighted=new Map(),cards=['a / team','b / team'].map(fleet=>({dataset:{fleet},classList:{toggle:(name,on)=>highlighted.set(fleet,on)}}));
-  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',refreshBoards(){},$:id=>id==='overview'?{querySelectorAll:()=>cards}:{hidden:true}});
+  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',refreshBoards(){},$:id=>id==='overview'?{querySelectorAll:selector=>selector==='.ov-card.ov-team'?cards:[]}:{hidden:true}});
   runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('const STATUS_DOT')),h.c);
   const reads=a.calls.length;h.c.pickFleet('b / team');
   assert.equal(highlighted.get('b / team'),true);assert.equal(highlighted.get('a / team'),false);
+  h.c.pickFleet('a / team');
+  assert.equal(highlighted.get('a / team'),true);assert.equal(highlighted.get('b / team'),false);
   assert.equal(a.calls.length,reads,'selection highlight never triggers an expensive read');
   api.dispose();
 });

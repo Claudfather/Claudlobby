@@ -1401,7 +1401,7 @@ function pickFleet(f) {
   savePick(currentFleet);
   renderFleetTabs();
   applyFleetVisibility();
-  for (const card of $("overview")?.querySelectorAll?.(".ov-card.pick") || []) {
+  for (const card of $("overview")?.querySelectorAll?.(".ov-card.ov-team") || []) {
     card.classList.toggle("on", card.dataset.fleet === currentFleet);
   }
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
