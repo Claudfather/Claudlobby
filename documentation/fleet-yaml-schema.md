@@ -263,7 +263,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
-| `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `registry-scan` | **on** | composition | fleet .env | none — activation refuses PLANE_EMIT_ENABLED=0 in the fleet-tier .env before it stops any bot |
 | `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
 | `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |

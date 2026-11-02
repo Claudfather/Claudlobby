@@ -63,7 +63,7 @@ Names are aliases; uids are truth. `bot:<fleet>/<name>` resolves to an actor
 uid (and to a `bot_instance` uid per spawn); `fleet:<name>`, `host:<name>` and
 `session` uids likewise. Resolution mints lazily at ingest, so the first
 message from a bot the registry has not seen creates a PROVISIONAL actor that
-the next `generate` (the registry scan) confirms or tombstones; `plane doctor`
+the next activation's registry scan confirms or tombstones; `plane doctor`
 counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash copy retired with the SessionStart hook (#2145 P3); another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
@@ -759,7 +759,7 @@ program keeps refusing.
 | `claudlobby/_runtime_scripts/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby/_runtime_scripts/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby _session-export-tick` (fleet timer) | one `session_summary` per sealed clauDNA segment on the bot actor: identity, segment volume, journey and block tally when summaries are on; `skipped_reason` otherwise; `data.session_uid` is the F2 uid | `SESSION_EXPORT_ENABLED=0` in fleet-tier `.env`; `PLANE_EMIT_DISABLED=1` |
-| `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the flag's only meaning since the closure |
+| activation (`registry_emit.py`), once per activated configuration | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | nothing: activation needs the scan before it starts a bot, so `PLANE_EMIT_ENABLED=0` in a fleet's `.env` tiers (the tier cascade, not `fleet.yaml env:`), or `PLANE_EMIT_DISABLED=1` in activation's own environment, makes activation refuse before it records or stops anything |
 | `lib/workstream-update.sh`, `claudlobby/_runtime_scripts/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
 | `claudlobby task withdraw` / `task escalate` | Fleet-owned acts on a canonical work item: a withdrawal records a terminal `cancelled` task event, and an escalation records a non-terminal question that remains visible while the work is open. Both accept queued work and use a durable request UUID; historical dispatch display and assignment IDs are not aliases. The granted bot forms use `claudlobby --json task ...`. | No action is claimed if the Plane write fails; a replay with the same request UUID returns the prior result. |
@@ -944,7 +944,7 @@ metric-sample retention.
 | `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
-| `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `registry-scan` | **on** | composition | fleet .env | none — activation refuses PLANE_EMIT_ENABLED=0 in the fleet-tier .env before it stops any bot |
 | `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
