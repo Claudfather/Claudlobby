@@ -132,6 +132,11 @@ def _files(plan, change):
             for name, entry in change.after["files"].items()}
 
 
+def _skills_copy(case, plan, bot="primary-worker"):
+    """The change that stages a bot's copy of its skills."""
+    return _changes(plan)[case.paths.bot_runtime(bot) / ".claude/skills"]
+
+
 
 def test_plan_freezes_the_effective_fleet_ops_body_without_metadata(staging_case):
     case = staging_case
@@ -467,6 +472,58 @@ def test_every_bot_copy_holds_every_shared_partial(staging_case):
         assert staged["_stage-steps.md"] == b"Shared stage steps.\n"
         assert staged["_telegram-formatting.md"] == b"This fleet's own formatting.\n"
         assert "README.md" not in staged
+
+
+def test_a_staged_partial_keeps_the_mode_of_the_file_it_copies(staging_case):
+    """A partial is staged with the mode of its source, as a skill's own files
+    are: in every bot's copy an owner-only partial stays owner-only and a
+    runnable one stays runnable (#2637)."""
+    case = staging_case
+    skills = case.root / "library/skills"
+    _write(skills / "_private-steps.md", "Owner-only steps.\n").chmod(0o600)
+    _write(skills / "_runnable-steps.md", "Runnable steps.\n").chmod(0o755)
+    shipped = case.package.library / "skills/_telegram-formatting.md"
+    want = {"_private-steps.md": 0o600, "_runnable-steps.md": 0o755,
+            shipped.name: shipped.stat().st_mode & 0o777}
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    for bot in ("primary-worker", "primary-manager"):
+        files = _skills_copy(case, plan, bot).after["files"]
+        assert {name: oct(files[name]["mode"]) for name in want} == {
+            name: oct(mode) for name, mode in want.items()}, bot
+
+
+@pytest.mark.parametrize("leaf", ["_hidden", "_dir.md"],
+                         ids=["leading-underscore", "named-like-a-partial"])
+def test_a_skill_directory_with_an_underscore_name_is_staged_as_a_skill(staging_case, leaf):
+    """Only a flat _<name>.md file at the top of a skills library is a shared
+    partial. A skill directory whose name starts with an underscore, even one
+    named like a partial, is staged with its files as any skill is (#2637)."""
+    case = staging_case
+    text = f"---\nname: {leaf}\n---\n# {leaf}\n"
+    _write(case.root / "library/skills" / leaf / "SKILL.md", text)
+    manifest = case.paths.fleet_yaml
+    manifest.write_text(manifest.read_text().replace(
+        "skills: [stage-skill]", f"skills: [stage-skill, {leaf}]"))
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    staged = _files(plan, _skills_copy(case, plan))
+    assert staged[f"{leaf}/SKILL.md"] == text.encode()
+    assert leaf not in staged  # no file of that name beside the skills
+    assert "_telegram-formatting.md" in staged  # the partials are staged beside it
+
+
+def test_a_text_file_beside_the_partials_is_not_staged(staging_case):
+    """A flat file at the top of a skills library is a shared partial only when
+    it is _<name>.md: an _<name>.txt beside the partials is not staged (#2637)."""
+    case = staging_case
+    skills = case.root / "library/skills"
+    _write(skills / "_stage-steps.md", "Shared stage steps.\n")
+    _write(skills / "_notes.txt", "Notes that are not a partial.\n")
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    for bot in ("primary-worker", "primary-manager"):
+        staged = _files(plan, _skills_copy(case, plan, bot))
+        assert staged["_stage-steps.md"] == b"Shared stage steps.\n"
+        assert "_notes.txt" not in staged
+        assert all(re.fullmatch(r"_[^/]+\.md", name) for name in staged if "/" not in name)
 
 
 def test_stage_requires_local_coverage_and_includes_explicit_external_fleet(staging_case, tmp_path):

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -627,19 +628,28 @@ def test_validate_names_the_file_that_reads_env_only_when_the_switch_is_on(host)
     ]
 
 
-def test_validate_names_a_shared_partial_that_reads_env(host):
-    """Every bot's copy of its skills holds the shared partials (#2608), so the
-    scan of what a bot is told reads them too."""
+def test_validate_names_a_shared_partial_that_reads_env(host, tmp_path):
+    """Every bot's copy of its skills holds the shared partials (#2608), the
+    package library's as well as the fleet's own, so the scan of what a bot is
+    told reads both (#2637)."""
     from claudlobby.validator import validate
 
     root, home, fleet, paths = host
+    read = "```bash\nsource ~/.env\npython3 x.py\n```\n"
+    library = tmp_path / "package" / "library"
+    shipped = library / "skills" / "_shipped-steps.md"
+    shipped.parent.mkdir(parents=True)
+    shipped.write_text(read)
+    paths = replace(paths, package=replace(paths.package, library=library))
     partial = paths.fleet_dir / "library" / "skills" / "_setup-steps.md"
     partial.parent.mkdir(parents=True)
-    partial.write_text("```bash\nsource ~/.env\npython3 x.py\n```\n")
+    partial.write_text(read)
     hits = [
         w for k, w in validate(fleet, paths).categorized() if k == "isolation-env-read"
     ]
-    assert len(hits) == 1 and f"{partial}:2 " in hits[0]
+    assert len(hits) == 2
+    assert any(f"{partial}:2 " in hit for hit in hits)
+    assert any(f"{shipped}:2 " in hit for hit in hits)
 
 
 def test_freshbox_reports_each_missing_class_by_name(host):
