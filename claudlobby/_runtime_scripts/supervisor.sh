@@ -846,8 +846,10 @@ EOF
 # server. The coordinator supplies paths/socket from frozen, verified unit
 # ownership; no fleet walk or process-table search occurs.
 svc_activation_handoff() (
-    local bot_dir="$1" expected="$2" tmpdir="$3" mode="${4:-stop}" actual session sessions declared_tmpdir
+    local bot_dir="$1" expected="$2" tmpdir="$3" mode="${4:-stop}" max_age="${5-}" actual session sessions declared_tmpdir
     case "$mode" in stop|explicit) ;; *) return 3 ;; esac
+    # Activation alone passes a fifth argument with the explicit mode: its --handoff-max-age in seconds (#963).
+    case "$mode:$max_age" in *:) ;; explicit:*[!0-9]*) return 3 ;; explicit:*) ;; *) return 3 ;; esac
     [ -d "$bot_dir" ] || return 3
     case "$tmpdir" in /*) ;; *) return 3 ;; esac
     case "$tmpdir" in *$'\n'*|*$'\t'*) return 3 ;; esac
@@ -861,7 +863,7 @@ svc_activation_handoff() (
     sessions=$(bot_tmux "$expected" list-sessions -F '#{session_name}' 2>/dev/null) || return 3
     [ "$sessions" = "$session" ] || return 3
     if [ "$mode" = explicit ]; then
-        "$_SUPERVISOR_LIB_DIR/pre-stop-handoff.sh" "$bot_dir" --explicit
+        "$_SUPERVISOR_LIB_DIR/pre-stop-handoff.sh" "$bot_dir" --explicit ${max_age:+"$max_age"}
     else
         "$_SUPERVISOR_LIB_DIR/pre-stop-handoff.sh" "$bot_dir"
     fi

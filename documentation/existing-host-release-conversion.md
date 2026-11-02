@@ -188,6 +188,16 @@ the live session and allowing its genuine capture to finish, retry the same
 activation with `--resume`: it can verify a fresh capture whose file write and
 capture timestamp follow that request, without sending another handoff. Unbound,
 stale or missing captures remain held; default activation behavior stays unchanged.
+A saved handoff counts while it is under 300 s old, and a handoff is a model turn
+of minutes, so a bot that saved and then stayed idle halts the run. For such bots,
+`host activate --handoff-max-age SECONDS` (300 to 86400) widens that window for
+this activation only: a bot whose saved handoff is younger is not asked for a new
+one, and its capture is verified against the same age when its session stops.
+Widen it no further than the oldest idle bot's save: work a bot did after its last
+save is not in the handoff it resumes from, and a recent handoff cannot be told
+from one the request produced (#963). The activation records the value; `--resume`
+keeps it, and an explicit different value refuses. `bot handoff` and a bot's own
+restart keep 300 s.
 
 Do not run manual unit enrollment, live regeneration or per-bot restarts alongside
 activation. The coordinator pauses old producers, saves handoffs and quiesces

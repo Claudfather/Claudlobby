@@ -116,7 +116,7 @@ Which path runs the handoff depends on *who* is restarting the bot:
 Given a bot directory, the script:
 
 1. Loads the bot's config and resolves its tmux session name and **private socket** (`tmux_socket_for_bot`) — the handoff is sent on the bot's own server, not the default one.
-2. Checks `<bot-dir>/.claude/session.md` (the handoff artifact — written by whatever session-handoff capability is installed, or by the `restart` skill itself when none is). If a handoff was written in the last 5 minutes, it's fresh enough — skip and exit.
+2. Checks `<bot-dir>/.claude/session.md` (the handoff artifact — written by whatever session-handoff capability is installed, or by the `restart` skill itself when none is). If a handoff was written in the last 5 minutes, it's fresh enough — skip and exit. Only an activation widens that window, with `host activate --handoff-max-age`.
 3. Otherwise, if the session is live **and a session-handoff capability resolves**, sends the configured handoff command and waits up to ~30 seconds for a new `session.md` to land. If no such capability is installed it skips the send, says so on stderr (the `ExecStop` journal) and emits `handoff_skipped` — a silent skip here would lose the handoff at the one moment it matters.
 4. Always exits 0. The handoff is best-effort and never blocks the restart: a timed-out or unreachable bot just proceeds to the bounce. (It also cleans up the transient `.tmux-env` secrets file on every exit path.)
 
