@@ -865,6 +865,7 @@ function renderSummary(env) {
 // switch when the host has a fleet dimension.
 const OV_PRESENCE_ORDER = ["working", "idle", "stale", "unknown", "sampling",
                            "down"];
+const overviewDetails = new Set(); // Tab-only presentation, keyed by canonical team UID.
 function ovPresence(p) {
   const c = p.counts || {};
   const parts = OV_PRESENCE_ORDER.filter((s) => c[s] > 0)
@@ -881,6 +882,10 @@ function ovNum(n, word, bad = true) {
 function renderOverview(env) {
   const el = $("overview");
   if (!el) return;
+  for (const details of el.querySelectorAll('[data-team-details]')) {
+    if (details.open) overviewDetails.add(details.dataset.teamDetails);
+    else overviewDetails.delete(details.dataset.teamDetails);
+  }
   if (!env || (env.state !== "ok" && !env.data?.sources)) {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
                               env && env.provenance, env && env.remediation);
@@ -890,18 +895,22 @@ function renderOverview(env) {
   const dimension = fleets.length >= 2;
   const hidden = hiddenTeams();
   const cards = d.fleets.map((f) => `
-    <div class="ov-card ${dimension ? "pick" : ""} ${
+    <div class="ov-card ov-team ${
         dimension && f.alias === currentFleet ? "on" : ""}"
-         data-fleet="${esc(f.alias)}" ${!showHiddenTeams && hidden.has(f.uid) && f.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null) ? 'hidden' : ''} ${dimension ? 'role="button" tabindex="0"' : ""}
-         title="${esc(f.display_label || f.alias)}${dimension ? " — open this room" : ""}">
+         data-fleet="${esc(f.alias)}" ${!showHiddenTeams && hidden.has(f.uid) && f.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null) ? 'hidden' : ''}>
       <div class="ov-head"><b>${esc(f.display_label || f.alias)}</b>
+        ${dimension ? `<button type="button" class="pill ghost" data-overview-fleet="${esc(f.alias)}" aria-label="Open team ${esc(f.display_label || f.alias)}">Open team</button>` : ''}</div>
+      <div class="ov-line ov-status-counts">${esc(fleetStatusCopy(f))}</div>
+      <div class="ov-line">${ovNum(f.open, "open", false)} ·
+        ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")}</div>
+      <details class="ov-team-details"${typeof f.uid === "string" && f.uid ? ` data-team-details="${esc(f.uid)}"${overviewDetails.has(f.uid) ? ' open' : ''}` : ''}>
+        <summary>Team details</summary>
+      <div class="ov-line">
         <span>${f.bots} recorded bot${f.bots === 1 ? "" : "s"}${
           f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed identities)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
-      <div class="ov-line ov-status-counts">${esc(fleetStatusCopy(f))}</div>
       <div class="ov-line">${ovPresence(f.presence)}</div>
-      <div class="ov-line">${ovNum(f.open, "open", false)} ·
-        ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")} ·
+      <div class="ov-line">
         <span title="${esc(f.orphaned_reason || "")}">${
           ovNum(f.orphaned, "orphaned")}</span></div>
       <div class="ov-line">
@@ -913,6 +922,7 @@ function renderOverview(env) {
             : ` · ${ovNum(f.unacked, "unacked")} <small title="${esc(f.acked_at || "")}">acked by ${
                 esc(f.acked_by)} ${esc(ago(f.acked_at))}</small>`}</span> ·
         <span>active ${esc(ago(f.last_activity_at))}</span></div>
+      </details>
     </div>`).join("");
   if (d.sources) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
@@ -993,12 +1003,8 @@ $("task-detail").addEventListener("click", toggleMessageBody);
 $("overview").addEventListener("click", (e) => {
   const retry = e.target.closest("[data-overview-retry]");
   if (retry) { void retryOverviewSummary(retry); return; }
-  const c = e.target.closest(".ov-card.pick");
-  if (c) pickFleet(c.dataset.fleet);
-});
-$("overview").addEventListener("keydown", (e) => {
-  const c = e.target.closest(".ov-card.pick");
-  if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); pickFleet(c.dataset.fleet); }
+  const button = e.target.closest("[data-overview-fleet]");
+  if (button) pickFleet(button.dataset.overviewFleet);
 });
 
 // Debug rail: a ring buffer rendered ONLY while visible (the hidden rail
