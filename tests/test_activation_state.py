@@ -265,3 +265,20 @@ def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, reque
             assert a.read_activation(builder.root, "upgrade") == record
             saved = store.record_handoff("upgrade", target=target, result="handed_off")
             assert saved.body["handoff_requests"] == record.body["handoff_requests"]
+
+
+def test_prepare_records_a_handoff_max_age_only_for_the_per_bot_quiesce(proposal, tmp_path):
+    """#963: the activation's intent carries --handoff-max-age, which --resume reads back; only the
+    per-bot quiesce reads it, and only a whole number of seconds is recorded."""
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        with pytest.raises(a.ActivationError, match="handoff max age"):
+            store.prepare("candidate", plan, recovery_release_id=plan.release_id,
+                          enrollment_digest="1" * 64, handoff_max_age_s=900)
+        with pytest.raises(a.ActivationError, match="handoff max age"):
+            store.prepare("candidate", plan, recovery_release_id=plan.release_id, enrollment_digest="1" * 64,
+                          install_directory=tmp_path.resolve(), quiesce_mode="per-bot-v1", handoff_max_age_s=True)
+        record = store.prepare("candidate", plan, recovery_release_id=plan.release_id, enrollment_digest="1" * 64,
+                               install_directory=tmp_path.resolve(), quiesce_mode="per-bot-v1", handoff_max_age_s=900)
+    assert record.body["intent"]["handoff_max_age_s"] == 900

@@ -274,11 +274,13 @@ def _worker_bot_dir(tmp_path):
     return bot_dir
 
 
-def _pre_stop_handoff(tmp_path, bot_dir, *mode, cli=None):
+def _pre_stop_handoff(tmp_path, bot_dir, *mode, cli=None, native=None):
     script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/pre-stop-handoff.sh"
     env = constructed_env(PATH="/usr/bin:/bin", HOME=tmp_path, TMPDIR=tmp_path, CLAUDLOBBY_ROOT=tmp_path)
     if cli:
         env["CLAUDLOBBY_CLI"] = str(cli)
+    if native:
+        env["CLAUDLOBBY_NATIVE_PYTHON"] = str(native)
     return subprocess.run(["/bin/bash", str(script), str(bot_dir), *mode],
                           env=env, capture_output=True, text=True, timeout=60)
 
@@ -1073,3 +1075,55 @@ def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, c
         data.chmod(0o700)
     again = worker.call("bot", "start", "worker")["data"]
     assert "stop_record_kept" not in again and not (data / ".stopped").exists()
+
+
+@pytest.mark.parametrize("envelope", [pytest.param("references_refreshed", id="below-envelope"),
+                                      pytest.param(None, id="unmarked")])
+@pytest.mark.parametrize("max_age, recent", [pytest.param((), False, id="default-300s"),
+                                             pytest.param(("900",), True, id="max-age-900s")])
+def test_explicit_handoff_max_age_widens_the_recent_check_for_a_400_s_save(
+        tmp_path, test_cli, envelope, max_age, recent):
+    """#963: a save 400 s old is recent only under the wider window activation passes. Recent means
+    the script exits before it would type a handoff into the session."""
+    bot_dir = _handoff_below_envelope(tmp_path, envelope, 400, 400)
+    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", *max_age, cli=test_cli,
+                                 native=Path(test_cli).parent / "python")
+    assert explicit.returncode == 0, explicit.stderr
+    assert explicit.stdout.strip() == ("handoff-skipped:recent" if recent
+                                       else "handoff-skipped:no-session"), explicit.stderr
+
+
+def test_explicit_handoff_reads_the_capture_with_its_own_release_interpreter(tmp_path, test_cli):
+    """#963: during an upgrade a bot's CLAUDLOBBY_CLI still names the release being replaced, whose
+    reader cannot answer this script, so the capture is read with the interpreter the caller's own
+    release passed (CLAUDLOBBY_NATIVE_PYTHON). Control: the replaced reader alone reads nothing recent."""
+    bot_dir = _handoff_below_envelope(tmp_path, "references_refreshed", 10, 0)
+    replaced = tmp_path / "replaced-release/bin"
+    replaced.mkdir(parents=True)
+    for name in ("python", "claudlobby"):
+        (replaced / name).write_text("#!/bin/sh\nexit 1\n")
+        (replaced / name).chmod(0o755)
+    alone = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=replaced / "claudlobby")
+    assert alone.stdout.strip() == "handoff-skipped:no-session", alone.stderr
+    native = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=replaced / "claudlobby",
+                               native=Path(test_cli).parent / "python")
+    assert native.returncode == 0, native.stderr
+    assert native.stdout.strip() == "handoff-skipped:recent", native.stderr
+
+
+@pytest.mark.parametrize("args", [("--explicit", "abc"), ("--explicit", ""), ("", "900"),
+                                  ("--explicit", "900", "extra")])
+def test_pre_stop_handoff_refuses_a_malformed_max_age(tmp_path, args):
+    bot_dir = _worker_bot_dir(tmp_path)
+    result = _pre_stop_handoff(tmp_path, bot_dir, *args)
+    assert result.returncode == 2 and "unsupported mode" in result.stderr
+    assert result.stdout == ""
+
+
+def test_fresh_self_handoff_keeps_300_s_unless_the_activation_passes_a_wider_window(tmp_path):
+    """#963: bot handoff and self restart call the verifier at its 300 s default; only the activation
+    path passes max_age_s."""
+    bot_dir = _handoff_below_envelope(tmp_path, "references_refreshed", 400, 400)
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned session handoff"):
+        bot_operations._fresh_self_handoff(bot_dir)
+    assert 399 <= bot_operations._fresh_self_handoff(bot_dir, max_age_s=900) <= 402
