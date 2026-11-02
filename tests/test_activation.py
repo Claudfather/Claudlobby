@@ -2930,7 +2930,6 @@ def per_bot_case(tmp_path, monkeypatch):
     case.run = lambda: activation._quiesce_running(tmp_path, case.store, "upgrade", pause,
                                                    tuple(case.units), SimpleNamespace(call=call))
     case.events, case.live, case.handoff_args = events, live, []
-    case.advance_clock = lambda: offset.__setitem__(0, 301)
     case.set_clock = lambda seconds: offset.__setitem__(0, seconds)
     return case
 
@@ -2964,7 +2963,7 @@ def test_per_bot_interrupted_stop_reconciles_quiet_but_requires_fresh_capture_if
         case.run()
     case.store.record_bot_quiescence = original
     case.live["example.alpha.plist"] = not quiet
-    case.advance_clock()
+    case.set_clock(301)
     if quiet:
         with pytest.raises(case.BotPauseReached):
             case.run()
@@ -3007,7 +3006,7 @@ def test_per_bot_quiet_interrupted_intent_still_converges_native_pause(per_bot_c
     assert native_armed[0]
     # The process exits independently, while the native job is still armed.
     case.live[alpha] = False
-    case.advance_clock()
+    case.set_clock(301)
     error = {"quiet": case.BotPauseReached, "pause-refused": state.ActivationError,
              "became-live": activation.RuntimeEvidenceError, "capture-changed": state.ActivationRefusal}[outcome]
     with pytest.raises(error):
@@ -3067,44 +3066,50 @@ def test_per_bot_capture_digest_uses_owned_nofollow_regular_file(tmp_path, node)
         activation._capture_digest(bot_dir)
 
 
-def test_per_bot_default_still_refuses_a_400_s_save_and_names_the_setting(per_bot_case):
-    """#963: at the default 300 s, a bot whose saved handoff is 400 s old does not pass, whatever
-    its handoff call answered, and the refusal names the operator setting."""
+@pytest.mark.parametrize("outcome, refused", [
+    pytest.param("handoff-skipped:recent", r"under 300 s old.*--handoff-max-age", id="door-says-recent"),
+    pytest.param("handoff-timeout", r"did not produce a verified save.*--handoff-max-age", id="no-save-in-the-wait"),
+])
+def test_per_bot_default_still_refuses_a_400_s_save_and_names_the_setting(per_bot_case, outcome, refused):
+    """#963: at the default 300 s, a bot whose saved handoff is 400 s old takes the handoff door as
+    before and does not pass on that save, and either refusal names the operator setting."""
     case = per_bot_case
     case.set_clock(400)
-    case.outcome[0] = "handoff-skipped:recent"
-    with pytest.raises(state.ActivationRefusal, match=r"under 300 s old.*--handoff-max-age"):
+    case.outcome[0] = outcome
+    with pytest.raises(state.ActivationRefusal, match=refused):
         case.run()
     assert [args[-1] for args in case.handoff_args] == ["explicit"]
 
 
-def test_per_bot_handoff_timeout_refusal_names_the_setting(per_bot_case):
-    """#963: a bot whose turn did not save inside the script's wait halts the run, and the refusal
-    names the setting that passes a bot which saved and stayed idle."""
-    case = per_bot_case
-    case.set_clock(400)
-    case.outcome[0] = "handoff-timeout"
-    with pytest.raises(state.ActivationRefusal, match=r"did not produce a verified save.*--handoff-max-age"):
-        case.run()
-
-
 def test_per_bot_handoff_max_age_passes_a_400_s_save_with_nothing_typed(per_bot_case):
-    """#963: the recorded --handoff-max-age reaches the handoff script, which skips the 400 s save as
-    recent and types nothing, and the capture verifier, which then accepts it."""
+    """#963: under a recorded --handoff-max-age the activation's own verifier accepts each bot's
+    400 s save, so the handoff door is never asked and nothing is typed into a bot."""
     case = per_bot_case
     case.body["intent"]["handoff_max_age_s"] = 900
     case.set_clock(400)
-    case.outcome[0] = "handoff-skipped:recent"
     with pytest.raises(case.BotPauseReached):
         case.run()
-    assert [args[-2:] for args in case.handoff_args] == [("explicit", "900"), ("explicit", "900")]
+    assert case.handoff_args == [] and case.calls == []
+    assert case.body["handoff_effects"] == {unit.target: "handed_off" for unit in case.units}
     assert all(row["result"] == "2" * 64 for row in case.body["bot_quiescence"].values())
     with pytest.raises(state.ActivationRefusal, match="under 300 s old"):
         activation._require_preserved_handoff(case.dirs["alpha"])
     activation._require_preserved_handoff(case.dirs["alpha"], max_age_s=900)
 
 
-@pytest.mark.parametrize("recorded", [86401, 299, True, "900"])
+def test_per_bot_a_save_older_than_the_widened_window_takes_the_handoff_door(per_bot_case):
+    """#963: a bot whose save is older than the widened window is asked as before, and the refusal
+    for a save not made in the wait states the recorded window."""
+    case = per_bot_case
+    case.body["intent"]["handoff_max_age_s"] = 900
+    case.set_clock(1000)
+    case.outcome[0] = "handoff-timeout"
+    with pytest.raises(state.ActivationRefusal, match="one saved under 900 s before needs no new save"):
+        case.run()
+    assert [args[-1] for args in case.handoff_args] == ["explicit"]
+
+
+@pytest.mark.parametrize("recorded", [72001, 299, True, "900", None])
 def test_per_bot_refuses_an_invalid_recorded_handoff_max_age(per_bot_case, recorded):
     case = per_bot_case
     case.body["intent"]["handoff_max_age_s"] = recorded
@@ -3113,14 +3118,19 @@ def test_per_bot_refuses_an_invalid_recorded_handoff_max_age(per_bot_case, recor
     assert case.calls == []
 
 
-@pytest.mark.parametrize("value", [86401, 299, 0, True, "900"])
+@pytest.mark.parametrize("value", [72001, 299, 0, True, "900"])
 def test_handoff_max_age_outside_its_bounds_refuses_before_any_record(tmp_path, value):
-    """#963: the setting runs from 300 s, every other door's window, to 86400 s, start-bot's default
-    resume limit; anything else refuses before the activation reads its root or plan."""
-    with pytest.raises(state.ActivationRefusal, match=r"--handoff-max-age must be .*300 to 86400"):
+    """#963: the setting runs from 300 s, every other door's window, to 72000 s, 4 h under start-bot's
+    default resume limit; anything else refuses before the activation reads its root or plan."""
+    with pytest.raises(state.ActivationRefusal, match=r"--handoff-max-age must be .*300 to 72000"):
         activation.upgrade_activation(tmp_path / "absent", "upgrade", "p-" + "0" * 64, tmp_path,
                                       handoff_max_age_s=value)
     assert not (tmp_path / "absent").exists()
+
+
+@pytest.mark.parametrize("value", [300, 72000])
+def test_handoff_max_age_accepts_both_of_its_bounds(value):
+    assert activation._checked_handoff_max_age(value, "--handoff-max-age") == value
 
 
 @pytest.mark.parametrize("recorded, explicit, kept", [
@@ -3136,6 +3146,6 @@ def test_resume_keeps_the_recorded_handoff_max_age(recorded, explicit, kept):
     record = SimpleNamespace(body={"intent": {} if recorded is None else {"handoff_max_age_s": recorded}})
     if kept is None:
         with pytest.raises(state.ActivationRefusal, match="resume cannot change the recorded --handoff-max-age"):
-            activation._resume_handoff_max_age(record, explicit)
+            activation._handoff_max_age(record, explicit)
     else:
-        assert activation._resume_handoff_max_age(record, explicit) == kept
+        assert activation._handoff_max_age(record, explicit) == kept

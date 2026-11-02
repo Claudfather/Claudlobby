@@ -284,7 +284,7 @@ class ActivationStore:
             intent["quiesce_mode"] = quiesce_mode
         if handoff_max_age_s is not None:
             # The per-bot quiesce alone reads it, on the first run and on every --resume (#963).
-            if type(handoff_max_age_s) is not int or handoff_max_age_s <= 0 or quiesce_mode != "per-bot-v1":
+            if type(handoff_max_age_s) is not int or quiesce_mode != "per-bot-v1":
                 raise ActivationError("a handoff max age needs whole seconds and the per-bot quiesce")
             intent["handoff_max_age_s"] = handoff_max_age_s
         if type(forward_recovery) is not bool:

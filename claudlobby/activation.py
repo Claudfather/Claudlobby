@@ -692,14 +692,16 @@ def _require_preserved_handoff(bot_dir, *, not_before=None, max_age_s=None):
         _fresh_self_handoff(bot_dir, not_before=not_before, max_age_s=max_age_s)
     except BotLifecycleError as exc:
         raise ActivationRefusal(f"activation requires a fresh verified session handoff, under {max_age_s} s old "
-                                "(the activation's --handoff-max-age, for bots that saved and stayed idle); "
+                                "(set by host activate --handoff-max-age when an activation starts, for bots that "
+                                "saved and stayed idle); "
                                 "inspect the live session and saved handoff, then retry the same activation "
                                 "with --resume; existing handoff attempts are never resent") from exc
 
 
-# The widest window --handoff-max-age may set: start-bot's default resume limit (RESUME_MAX_AGE_S),
-# past which the restarted bot would not resume from the handoff the activation kept for it.
-_HANDOFF_MAX_AGE_LIMIT_S = 86400
+# The widest window --handoff-max-age may set: 4 h under start-bot's default resume limit
+# (RESUME_MAX_AGE_S, 86400 s), so a handoff the activation keeps is still resumed when its bot
+# restarts after the activation's own run.
+_HANDOFF_MAX_AGE_LIMIT_S = 72000
 
 
 def _checked_handoff_max_age(value, what):
@@ -710,21 +712,28 @@ def _checked_handoff_max_age(value, what):
     return value
 
 
-def _handoff_max_age(record):
-    """The handoff window this activation recorded; its first run and every --resume read it."""
+def _handoff_max_age(record, explicit=None):
+    """The handoff window this activation recorded, read by its first run and every --resume;
+    an explicit different value on --resume refuses, as --forward-recovery does."""
     from .bot_operations import _HANDOFF_FRESH_S
-    intent = record.body["intent"]
-    if "handoff_max_age_s" not in intent:
-        return _HANDOFF_FRESH_S
-    return _checked_handoff_max_age(intent["handoff_max_age_s"], "recorded handoff max age")
-
-
-def _resume_handoff_max_age(record, explicit):
-    """--resume keeps the recorded window; an explicit different one refuses, as --forward-recovery does."""
-    recorded = _handoff_max_age(record)
+    recorded = _checked_handoff_max_age(record.body["intent"].get("handoff_max_age_s", _HANDOFF_FRESH_S),
+                                        "recorded handoff max age")
     if explicit is not None and explicit != recorded:
         raise ActivationRefusal(f"resume cannot change the recorded --handoff-max-age ({recorded} s)")
     return recorded
+
+
+def _saved_inside_widened_window(bot_dir, max_age):
+    """Only a window wider than every other door's is judged here, by this release's own verifier;
+    at the default the handoff door decides, as before."""
+    from .bot_operations import _HANDOFF_FRESH_S, BotLifecycleError, _fresh_self_handoff
+    if max_age <= _HANDOFF_FRESH_S:
+        return False
+    try:
+        _fresh_self_handoff(bot_dir, max_age_s=max_age)
+    except BotLifecycleError:
+        return False
+    return True
 
 
 def _bot_label(unit):
@@ -865,19 +874,20 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
                 handed_off = [t for t, value in effects.items() if value == "handed_off"]
                 requested = _handoff_request_time(unit, handed_off, old_bots, per_bot=True)
                 store.record_handoff(activation_id, target=target, result=None, request_started_ns=requested)
-                # Only a widened window rides along, so the script and the verifier judge one age (#963).
-                from .bot_operations import _HANDOFF_FRESH_S
-                window = () if max_age == _HANDOFF_FRESH_S else (str(max_age),)
-                result = adapter.call("svc_activation_handoff", bot_dir, unit.declaration.source.stem,
-                                      _original_bot_tmpdir(unit), "explicit", *window, timeout=45)
-                marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
-                if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
-                    raise ActivationRefusal("bot handoff did not produce a verified save; inspect before recovery; "
-                                            "an unknown handoff is never resent; a handoff saved under "
-                                            f"{max_age} s before is used without a new one (the activation's "
-                                            "--handoff-max-age, for bots that saved and stayed idle)")
-                _require_preserved_handoff(bot_dir, not_before=requested if marker == ["handoff-saved"] else None,
-                                           max_age_s=max_age)
+                # A bot whose saved handoff is inside a widened window is not asked for another,
+                # so nothing is typed into it; any other bot takes the handoff door as before (#963).
+                if not _saved_inside_widened_window(bot_dir, max_age):
+                    result = adapter.call("svc_activation_handoff", bot_dir, unit.declaration.source.stem,
+                                          _original_bot_tmpdir(unit), "explicit", timeout=45)
+                    marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+                    if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
+                        raise ActivationRefusal(
+                            "bot handoff did not produce a verified save; inspect before recovery; an unknown "
+                            f"handoff is never resent; one saved under {max_age} s before needs no new save "
+                            "(set by host activate --handoff-max-age when an activation starts, for bots that "
+                            "saved and stayed idle)")
+                    _require_preserved_handoff(bot_dir, not_before=requested if marker == ["handoff-saved"] else None,
+                                               max_age_s=max_age)
                 store.record_handoff(activation_id, target=target, result="handed_off")
         elif effects[target] not in {"handed_off", "server_absent"}:
             raise ActivationRefusal("bot has unknown handoff evidence; inspect before recovery")
@@ -1819,7 +1829,7 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
         if preserve_bot_state and record.body["intent"].get("preserve_bot_state") is not True:
             raise ActivationRefusal("resume cannot change the recorded bot-state policy")
         recovery = _recorded_recovery(root, record, release, forward_recovery=forward_recovery)
-        _resume_handoff_max_age(record, handoff_max_age_s)
+        _handoff_max_age(record, handoff_max_age_s)
         step = resumable_running_step(record)
         if step is None:
             raise ActivationError("pending activation stage lacks a durable handoff or candidate-start witness; "

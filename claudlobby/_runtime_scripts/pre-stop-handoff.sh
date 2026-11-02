@@ -11,16 +11,9 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir [--explicit [MAX_AGE_S]]}"
+BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
 MODE="${2:-}"
-# Activation alone passes MAX_AGE_S, its --handoff-max-age (#963): a handoff saved
-# that many seconds ago still counts as recent. Every other caller keeps 300.
-MAX_AGE_S="${3-300}"
-case "$#:$MODE" in
-    1:|2:|2:--explicit) ;;
-    3:--explicit) case "$MAX_AGE_S" in ''|*[!0-9]*) echo "pre-stop-handoff.sh: unsupported mode" >&2; exit 2 ;; esac ;;
-    *) echo "pre-stop-handoff.sh: unsupported mode" >&2; exit 2 ;;
-esac
+case "$MODE" in ''|--explicit) ;; *) echo "pre-stop-handoff.sh: unsupported mode" >&2; exit 2 ;; esac
 
 # On the stop path, clean up .tmux-env on ALL exit paths (including early
 # returns and the socket-resolution guard below). It holds resolved secrets
@@ -57,28 +50,21 @@ fi
 # the self-restart check (#2123), not a parse here, reads its own last_updated
 # and its age is printed when it is fresh. No interpreter, a refusal or a
 # timeout (where lib-common has one) is not recent, and the handoff is sent.
-# The reader is the caller's own release, CLAUDLOBBY_NATIVE_PYTHON, which the
-# native adapter always sets: during an upgrade a bot's CLAUDLOBBY_CLI still
-# names the release being replaced, whose reader cannot answer this script (#963).
-# Run without it, by hand, the interpreter beside the bot's CLI reads.
 _capture_recent_age() {
     local python=""
-    case "${CLAUDLOBBY_NATIVE_PYTHON:-}" in /*) python="$CLAUDLOBBY_NATIVE_PYTHON" ;; esac
+    case "${CLAUDLOBBY_CLI:-}" in /*) python="${CLAUDLOBBY_CLI%/*}/python" ;; esac
     if [ ! -x "$python" ]; then
-        case "${CLAUDLOBBY_CLI:-}" in /*) python="${CLAUDLOBBY_CLI%/*}/python" ;; esac
-    fi
-    if [ ! -x "$python" ]; then
-        echo "pre-stop-handoff.sh: no interpreter (CLAUDLOBBY_NATIVE_PYTHON or beside CLAUDLOBBY_CLI) to read the capture; not recent" >&2
+        echo "pre-stop-handoff.sh: no interpreter beside CLAUDLOBBY_CLI to read the capture; not recent" >&2
         return 0
     fi
-    with_timeout 5 "$python" -I -B - "$BOT_DIR" "$MAX_AGE_S" <<'PY'
+    with_timeout 5 "$python" -I -B - "$BOT_DIR" <<'PY'
 import sys
 from pathlib import Path
 
 from claudlobby.bot_operations import BotLifecycleError, _fresh_self_handoff
 
 try:
-    print(max(0, int(_fresh_self_handoff(Path(sys.argv[1]), max_age_s=int(sys.argv[2])))))
+    print(max(0, int(_fresh_self_handoff(Path(sys.argv[1])))))
 except BotLifecycleError:
     pass
 PY
@@ -87,7 +73,7 @@ PY
 _recent_age=""
 if [ -f "$HANDOFF_FILE" ]; then
     AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
-    if [ "$AGE" -lt "$MAX_AGE_S" ]; then
+    if [ "$AGE" -lt 300 ]; then
         if grep -Fq '<!-- claudlobby first-adoption reference refresh begin -->' "$HANDOFF_FILE"; then
             _recent_age="$(_capture_recent_age || true)"
             case "$_recent_age" in *[!0-9]*) _recent_age="" ;; esac

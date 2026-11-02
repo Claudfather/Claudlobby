@@ -206,7 +206,7 @@ def _activate(args, root):
                 raise ActivationRefusal("--preserve-bot-state requires a selected release upgrade")
             options["preserve_bot_state"] = True
         if getattr(args, "handoff_max_age", None) is not None:
-            if activate not in (upgrade_activation, adopt_existing_activation, resume_activation):
+            if activate is bootstrap_activation:
                 from ..activation_state import ActivationRefusal
                 raise ActivationRefusal("--handoff-max-age requires an activation that hands off running bots")
             options["handoff_max_age_s"] = args.handoff_max_age
