@@ -4,6 +4,8 @@ import hashlib
 import os
 from pathlib import Path
 import plistlib
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -462,6 +464,43 @@ svc_activation_bootstrap_send "$2" /bot private worker 100-1 'one bootstrap'
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == expected
     assert (trace.read_text() if trace.exists() else "") == ("one bootstrap\n" if expected in {"submitted", "unknown"} else "")
+
+
+def test_bootstrap_recipient_and_bound_send_resolve_a_real_tmux_pane(tmp_path):
+    from tests.conftest import constructed_env
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        pytest.skip("tmux is not installed")
+    bot = tmp_path / "worker"
+    bot.mkdir()
+    bot.joinpath("bot.conf").write_text(
+        f"CLAUDLOBBY_ROOT={shlex.quote(str(tmp_path))}\n"
+        f"BOT_DIR={shlex.quote(str(bot))}\nTMUX_SOCKET=private\n")
+    trace = tmp_path / "keys"
+    env = constructed_env(TMUX_TMPDIR=tmp_path, TRACE=trace)
+    command = [tmux, "-L", "private"]
+    try:
+        subprocess.run([*command, "-f", "/dev/null", "new-session", "-d", "-s", "worker",
+                        "/bin/cat"], env=env, check=True, capture_output=True, timeout=5)
+        # Native Linux capture: display-message with =worker returned rc 0 and
+        # "-"; =worker: returned the same populated identity as list-panes.
+        instance = subprocess.run([*command, "list-panes", "-t", "=worker:", "-F",
+                                   "#{session_created}-#{pane_pid}"], env=env,
+                                  check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        script = r'''
+set -euo pipefail
+. "$1/lib-common.sh"
+_pane_send_verified_locked() { printf '%s\n' "$3" >> "$TRACE"; }
+svc_activation_bot_recipient "$2" "$3"
+svc_activation_bootstrap_send "$2" "$3" private worker "$4" 'one bootstrap'
+'''
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path),
+                                 str(bot), instance], env=env, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [f"private\tworker\t{instance}", "submitted"]
+        assert trace.read_text() == "one bootstrap\n"
+    finally:
+        subprocess.run([*command, "kill-server"], env=env, capture_output=True, timeout=5)
 
 
 @pytest.mark.parametrize("failure", ["busy", "unavailable"])

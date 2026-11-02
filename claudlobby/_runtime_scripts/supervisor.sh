@@ -1238,7 +1238,7 @@ svc_activation_bot_recipient() (
     local socket session instance
     socket=$(tmux_socket_for_bot "$2") || return 3
     session=$(tmux_session_name "$2") || return 3
-    instance=$(bot_tmux "$socket" display-message -p -t "=$session" '#{session_created}-#{pane_pid}') || return 3
+    instance=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || return 3
     [[ "$instance" =~ ^[0-9]+-[0-9]+$ ]] || return 3
     printf '%s\t%s\t%s\n' "$socket" "$session" "$instance"
 )
@@ -1252,7 +1252,7 @@ svc_activation_bootstrap_payload() (
 
 _svc_bootstrap_send_locked() {
     local socket="$1" session="$2" expected="$3" actual text; shift 3
-    actual=$(bot_tmux "$socket" display-message -p -t "=$session" '#{session_created}-#{pane_pid}') || {
+    actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || {
         printf 'not-sent\n'; return 0;
     }
     if [ "$actual" != "$expected" ]; then printf 'not-sent\n'; return 0; fi
