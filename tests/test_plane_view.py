@@ -1519,10 +1519,12 @@ def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_
 
 def test_ui_reads_in_the_operators_language():
     """Structural (chunk L, #1479 + its fold): the page's RULES, not its
-    identifiers. The header and the machinery rail read the overview envelope
-    and are BLANKED when its source fails (§16); the page keeps no copy of a
+    identifiers. The header and the machinery rail read the overview envelope;
+    scoped invalidation may retain safe sibling snapshots, while an unscoped
+    source failure or paused session clears them (§16). The page keeps no copy of a
     server vocabulary and re-derives no magnitude of its own; the clamp height
     is derived from the one constant that decides a body is long."""
+    import re
     from importlib.resources import files
     ui = files("claudlobby.plane").joinpath("ui")
     html = ui.joinpath("index.html").read_text()
@@ -1530,13 +1532,20 @@ def test_ui_reads_in_the_operators_language():
     assert 'id="age"' not in html and 'id="total"' not in html and 'id="spool"' not in html
     js = ui.joinpath("app.js").read_text()
     # one door for both: the header's totals and the rail's host line come
-    # from the overview envelope, and both clear on a source failure
+    # from the overview envelope. Only an active session may retain a scoped
+    # snapshot; unscoped source failures still clear all three panels.
     assert "renderHeader(ov)" in js and "renderHostFacts(ov)" in js
-    invalidation = js.split("function invalidateOverview() {", 1)[1].split("\n}", 1)[0]
+    invalidator = re.search(r"function invalidateOverview\([^)]*\) \{([\s\S]*?)\n\}", js)
+    assert invalidator is not None
+    invalidation = invalidator.group(1)
+    assert re.search(r"!sessionPaused\s*&&\s*snapshot\?\.data\?\.sources\s*\?\s*snapshot\s*:", invalidation)
     assert 'state: "unavailable"' in invalidation and "provenance: null" in invalidation
     assert all(f"render{panel}(env)" in invalidation for panel in ("Header", "HostFacts", "Overview"))
     source_failure = js.split('es.addEventListener("source", (ev) => {', 1)[1].split("es.onerror", 1)[0]
     assert "invalidateOverview();" in source_failure
+    scoped_failure = js.split('function openStream()', 1)[1].split('es.addEventListener("source"', 1)[0]
+    assert "payload.coverage_changed || payload.overview_invalidated" in scoped_failure
+    assert "invalidateOverview(payload.overview || payload.overview_invalidated)" in scoped_failure
     assert "hostFacts" not in js              # the dead module state is gone
     # no copied vocabulary, no client-side re-derivation (folds F4 + F7)
     assert "TERMINAL_STATUSES" not in js
