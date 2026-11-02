@@ -1,0 +1,1 @@
+Leave startup pending without recording an attempt when native input is blocked by a trust or permission prompt. After explicit approval, the same activation can continue its first send; previously unknown submissions are never replayed.

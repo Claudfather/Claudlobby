@@ -466,6 +466,46 @@ svc_activation_bootstrap_send "$2" /bot private worker 100-1 'one bootstrap'
     assert (trace.read_text() if trace.exists() else "") == ("one bootstrap\n" if expected in {"submitted", "unknown"} else "")
 
 
+@pytest.mark.parametrize("frame,actual", [
+    ("idle-chevron", "100-1"), ("workspace-trust", "100-1"),
+    ("menu-option", "100-1"), ("input-stuck-literal", "100-1"),
+    ("busy-spinner", "100-1"), ("unknown-output", "100-1"),
+    ("predraw-empty", "100-1"), ("idle-permission", "100-1"),
+    ("capture-failed", "100-1"), ("idle-chevron", "100-2"),
+])
+def test_bootstrap_input_readiness_is_positive_read_only_and_session_bound(tmp_path, frame, actual):
+    from tests.conftest import constructed_env
+    # workspace-trust is the real cold-canary capture, with its path sanitized.
+    fixture = Path(__file__).parent / "fixtures/pane-states" / f"{frame}.txt"
+    trace = tmp_path / "tmux"
+    script = r'''
+set -euo pipefail
+. "$1/lib-common.sh"
+CLAUDLOBBY_ROOT="$2"
+_svc_bootstrap_context() { :; }
+tmux_socket_for_bot() { printf private; }
+tmux_session_name() { printf worker; }
+_PANE_READY_TICKS_BOOT=1; PANE_READY_POLL_S=0
+bot_tmux() {
+    printf '%s\n' "$*" >> "$TRACE"
+    case "$2" in
+        display-message) printf '%s' "$ACTUAL" ;;
+        capture-pane) cat "$FRAME" ;;
+        *) exit 91 ;;
+    esac
+}
+svc_activation_bootstrap_input_ready "$2" /bot private worker 100-1
+'''
+    result = subprocess.run(["/bin/bash", "-c", script, "_", str(NATIVE), str(tmp_path)],
+        env=constructed_env(ACTUAL=actual, TRACE=trace, FRAME=fixture),
+        capture_output=True, text=True, timeout=5)
+    ready = frame == "idle-chevron" and actual == "100-1"
+    assert result.returncode == (0 if ready else 3), result.stderr
+    assert result.stdout.strip() == ("input-ready" if ready else "")
+    assert all(line.split()[1] in {"display-message", "capture-pane"}
+               for line in trace.read_text().splitlines())
+
+
 def test_bootstrap_recipient_and_bound_send_resolve_a_real_tmux_pane(tmp_path):
     from tests.conftest import constructed_env
     tmux = shutil.which("tmux")

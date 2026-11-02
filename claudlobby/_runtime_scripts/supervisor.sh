@@ -1250,6 +1250,31 @@ svc_activation_bootstrap_payload() (
         "$_STARTUP_MODE" "$_STARTUP_DISPOSITION" "$_STARTUP_PRIMARY" "$_STARTUP_SECONDARY"
 )
 
+_svc_bootstrap_input_ready_locked() {
+    local socket="$1" session="$2" expected="$3" actual box pane
+    actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || return 3
+    [ "$actual" = "$expected" ] || return 3
+    box=$(PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" pane_await_input_box "$socket" "=$session:") || return 3
+    [ "$box" = "$_PANE_BOX_DRAWN" ] || return 3
+    pane=$(bot_tmux "$socket" capture-pane -p -t "=$session:") || return 3
+    [ -n "$(pane_input_region "$pane")" ] || return 3
+    if pane_is_held "$pane" || pane_is_menu "$pane" || pane_is_busy "$pane"; then
+        return 3
+    fi
+    actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || return 3
+    [ "$actual" = "$expected" ] || return 3
+    printf 'input-ready\n'
+}
+
+svc_activation_bootstrap_input_ready() (
+    local root="$1" bot="$2" socket="$3" session="$4" instance="$5"
+    _svc_bootstrap_context "$root" "$bot" || return 3
+    [ "$(tmux_socket_for_bot "$bot")" = "$socket" ] && [ "$(tmux_session_name "$bot")" = "$session" ] || return 3
+    # Read only: a blocked pane must leave the first attempt unrecorded.
+    _PANE_SEND_LOCK_REQUIRED=1 _pane_with_send_lock bootstrap 30 "$socket" "$session" \
+        _svc_bootstrap_input_ready_locked "$socket" "$session" "$instance"
+)
+
 _svc_bootstrap_send_locked() {
     local socket="$1" session="$2" expected="$3" actual text; shift 3
     actual=$(bot_tmux "$socket" display-message -p -t "=$session:" '#{session_created}-#{pane_pid}') || {

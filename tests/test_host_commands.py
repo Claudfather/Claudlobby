@@ -907,7 +907,8 @@ def test_forward_recovery_activation_reports_target_forward_only(candidate, monk
         "target-forward-only")
 
 
-def test_host_status_and_resume_distinguish_native_active_from_pending_startup(candidate, monkeypatch, capsys):
+@pytest.mark.parametrize("startup", ["pending", "unknown"])
+def test_host_status_and_resume_distinguish_native_active_from_pending_startup(candidate, monkeypatch, capsys, startup):
     root, release, plan, directory = candidate
     with state.locked_activation(root) as store:
         store.prepare("held", plan, recovery_release_id=release.release_id,
@@ -922,11 +923,13 @@ def test_host_status_and_resume_distinguish_native_active_from_pending_startup(c
     # This partial fixture has one pending bot; no model payload belongs in status.
     record = state.read_activation(root, "held")
     record.body["start_effects"] = {"/unit": {"phase": "bots", "result": None}}
+    if startup == "unknown":
+        record.body["start_effects"]["/unit"]["bootstrap"] = {"result": "unknown"}
     state._write(root / "state/activations/held/activation.json",
                  {"record": record.body, "sha256": state._digest(record.body)})
     status = call(capsys, ["--root", str(root), "--json", "host", "status"])
     assert status["data"]["recorded_status"] == "active"
-    assert status["data"]["startup_release"] == "pending"
+    assert status["data"]["startup_release"] == startup
     calls = []
     def resume(*args, **kwargs):
         calls.append(args)
@@ -935,5 +938,10 @@ def test_host_status_and_resume_distinguish_native_active_from_pending_startup(c
     result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
                           "--install-directory", str(directory), "--resume", "held"], 4)
     assert len(calls) == 1
-    assert result["data"]["recorded_activation"]["startup_release"] == "pending"
+    assert result["data"]["recorded_activation"]["startup_release"] == startup
     assert "native activation is active" in result["error"]["message"]
+    if startup == "pending":
+        assert "resolve any prompt explicitly" in result["error"]["hint"]
+        assert "resume this activation" in result["error"]["hint"]
+    else:
+        assert "unresolved submissions must never be replayed" in result["error"]["hint"]

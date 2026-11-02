@@ -266,7 +266,10 @@ def _activate(args, root):
             if recorded and recorded.get("status") == "active" and recorded.get("startup_release") in {
                     "pending", "unknown", "refused"}:
                 message = "conflict: native activation is active; startup release requires inspection"
-                hint = "inspect the recorded bootstrap attempts; unresolved submissions must never be replayed"
+                hint = ("inspect native input and resolve any prompt explicitly, then resume this activation "
+                        "with the same plan and install directory; pending first sends have no recorded attempt"
+                        if recorded["startup_release"] == "pending" else
+                        "inspect the recorded bootstrap attempts; unresolved submissions must never be replayed")
             if data["recorded_activation"] is None and lock_busy(str(exc)):
                 message = ("conflict: host activation lock is held; no activation record was created"
                            if str(exc) == ANOTHER_ACTIVATION else

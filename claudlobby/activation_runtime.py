@@ -298,6 +298,14 @@ def bootstrap_payload(adapter, root, bot_dir, target) -> dict:
         raise RuntimeEvidenceError("bootstrap", target, "startup payload is unavailable") from exc
 
 
+def require_bootstrap_input_ready(adapter, root, bot_dir, target, recipient) -> None:
+    """Read-only first-send gate; refusal creates no uncertain delivery attempt."""
+    ready = _call(adapter, "svc_activation_bootstrap_input_ready", target, root, bot_dir,
+                  recipient["socket"], recipient["session"], recipient["instance"], timeout=180)
+    if ready != "input-ready":
+        raise RuntimeEvidenceError("bootstrap", target, "native input readiness is unavailable")
+
+
 def submit_bootstrap(adapter, root, bot_dir, target, recipient, payload) -> str:
     """One bounded canonical attempt; any unrecognized outcome remains unknown."""
     try:

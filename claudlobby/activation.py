@@ -29,7 +29,8 @@ from .activation_state import (ACTIVATION_WAIT_S, START_STEPS, STEPS, STARTUP_MO
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import (RuntimeEvidence, RuntimeEvidenceError, assert_quiescent,
-                                 observe_started_unit, start_unit, bot_recipient, bootstrap_payload, submit_bootstrap)
+                                 observe_started_unit, start_unit, bot_recipient, bootstrap_payload,
+                                 require_bootstrap_input_ready, submit_bootstrap)
 from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .migration_apply import apply_migration, read_migration
@@ -1424,6 +1425,9 @@ def _release_bootstraps(root, activation_id, plan, release, adapter, identity):
             payload = bootstrap_payload(adapter, root, declaration.working_directory, effect["target"])
             if payload != effect.get("startup_payload"):
                 raise ActivationError("startup payload changed before delivery")
+            if payload["payloads"]:
+                require_bootstrap_input_ready(adapter, root, declaration.working_directory,
+                                              effect["target"], recipient)
             payload_digest = _digest(payload)
             attempt = {"native_digest": effect["result"]["digest"], "recipient": recipient,
                        "publication": effect["sha256"], "payload": payload, "payload_sha256": payload_digest}

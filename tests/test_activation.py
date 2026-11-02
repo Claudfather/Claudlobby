@@ -61,6 +61,7 @@ class NativeHost:
         self.ready_kind = "bridge-ready"
         self.bootstrap_sends = []
         self.bootstrap_outcome = "submitted"
+        self.bootstrap_input = "input-ready"
         self.bootstrap_text = "restore saved context then perform startup"
         self.recipient_generation = "1"
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
@@ -110,6 +111,14 @@ class NativeHost:
         elif function == "svc_activation_bootstrap_payload":
             output = json.dumps({"mode": "skill-bootstrap", "disposition": "available",
                                  "payloads": [self.bootstrap_text]})
+        elif function == "svc_activation_bootstrap_input_ready":
+            record = state.read_activation(self.root, "cold")
+            assert record.status == "active"
+            effect = next(e for e in record.body["start_effects"].values()
+                          if e["phase"] == "bots" and e["target"].endswith(f".{Path(args[1]).name}.service"))
+            assert "bootstrap" not in effect
+            assert dict(zip(("socket", "session", "instance"), args[2:])) == effect["result"]["details"]["recipient"]
+            output = self.bootstrap_input
         elif function == "svc_activation_bootstrap_send":
             bot = Path(args[1]).name
             record = state.read_activation(self.root, "cold")
@@ -3004,6 +3013,25 @@ def test_per_bot_capture_digest_uses_owned_nofollow_regular_file(tmp_path, node)
             os.mkfifo(capture)
     with pytest.raises(state.ActivationRefusal, match="capture changed"):
         activation._capture_digest(bot_dir)
+
+
+def test_postactive_blocked_input_stays_pending_until_explicit_same_id_resume(cold):
+    root, release, plan, host = cold
+    host.bootstrap_input = "not-ready"
+    with pytest.raises(activation.RuntimeEvidenceError, match="input readiness"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    blocked = state.read_activation(root, "cold")
+    assert blocked.status == "active" and state.startup_status(blocked) == "pending"
+    assert host.bootstrap_sends == []
+    assert all("bootstrap" not in e for e in blocked.body["start_effects"].values())
+    native_effects, native_starts = blocked.body["start_effects"], list(host.starts)
+    host.bootstrap_input = "input-ready"  # Explicit native approval made input usable.
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert state.startup_status(resumed) == "submitted"
+    assert host.starts == native_starts
+    assert host.bootstrap_sends == ["manager", "worker"]
+    assert {key: {k: v for k, v in row.items() if k != "bootstrap"}
+            for key, row in resumed.body["start_effects"].items()} == native_effects
 
 
 @pytest.mark.parametrize("boundary", ["before-send", "after-send"])
