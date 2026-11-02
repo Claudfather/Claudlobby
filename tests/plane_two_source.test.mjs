@@ -675,10 +675,12 @@ test('source coverage change retires a completed held overview and selection upd
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const highlighted=new Map(),cards=['a / team','b / team'].map(fleet=>({dataset:{fleet},classList:{toggle:(name,on)=>highlighted.set(fleet,on)}}));
-  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',refreshBoards(){},$:id=>id==='overview'?{querySelectorAll:()=>cards}:{hidden:true}});
+  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',refreshBoards(){},$:id=>id==='overview'?{querySelectorAll:selector=>selector==='.ov-card.ov-team'?cards:[]}:{hidden:true}});
   runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('const STATUS_DOT')),h.c);
   const reads=a.calls.length;h.c.pickFleet('b / team');
   assert.equal(highlighted.get('b / team'),true);assert.equal(highlighted.get('a / team'),false);
+  h.c.pickFleet('a / team');
+  assert.equal(highlighted.get('a / team'),true);assert.equal(highlighted.get('b / team'),false);
   assert.equal(a.calls.length,reads,'selection highlight never triggers an expensive read');
   api.dispose();
 });
@@ -1014,10 +1016,10 @@ test('canonical module graph stays inside its release directory', async () => {
   }
 });
 
-test('overview and team tabs display escaped labels while clicks retain exact stable routing identity',async()=>{
+test('overview details survive refresh by team UID while explicit buttons retain exact routing identity',async()=>{
   const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const key='c-abcdefghijklmnopqrstuvwxy / team',nodes=new Map(['overview','fleet-tabs'].map(k=>[k,{innerHTML:'',querySelectorAll:()=>[]}]));
-  const fleet={alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={hiddenTeams,setTeamHidden,fleetStatusCopy,connectionLabel,showHiddenTeams:false,$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
+  const fleet={uid:'a::'+('fleet_'+'1'.repeat(32)),alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={hiddenTeams,setTeamHidden,fleetStatusCopy,connectionLabel,showHiddenTeams:false,$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
   runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function toggleMessageBody(')),context);
   context.renderOverview(ok({fleets:[fleet],sources:[]}));
   runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),context);context.renderFleetTabs();
@@ -1025,6 +1027,26 @@ test('overview and team tabs display escaped labels while clicks retain exact st
     assert.match(node.innerHTML,/Computer 1 \/ &lt;team&gt;/);assert.ok(node.innerHTML.includes(`data-fleet="${key}"`));
     assert.ok(!node.innerHTML.includes('>'+key));assert.doesNotMatch(node.innerHTML,/<team>/);
   }
+  const overview=nodes.get('overview'),details={dataset:{teamDetails:fleet.uid},open:true};
+  assert.match(overview.innerHTML,/<button[^>]*data-overview-fleet=/);
+  assert.doesNotMatch(overview.innerHTML,/role="button"|tabindex=/);
+  assert.ok(overview.innerHTML.indexOf('ov-status-counts')<overview.innerHTML.indexOf('<details'));
+  assert.ok(overview.innerHTML.indexOf('recorded bot')>overview.innerHTML.indexOf('<summary>Team details'));
+  overview.querySelectorAll=()=>[details];
+  context.renderOverview(ok({fleets:[{...fleet,alias:'renamed team'}],sources:[]}));
+  assert.ok(overview.innerHTML.includes(`data-team-details="${fleet.uid}" open`));
+  overview.querySelectorAll=()=>[];
+  context.renderOverview(ok({fleets:[{...fleet,uid:'b::'+('fleet_'+'1'.repeat(32))}],sources:[]}));
+  assert.doesNotMatch(overview.innerHTML,/<details[^>]* open/,'another source cannot inherit disclosure state');
+  overview.querySelectorAll=()=>[details];details.open=false;
+  context.renderOverview(ok({fleets:[fleet],sources:[]}));
+  assert.doesNotMatch(overview.innerHTML,/<details[^>]* open/);
+  const handlers=new Map(),picks=[];
+  overview.addEventListener=(name,handler)=>handlers.set(name,handler);context.pickFleet=key=>picks.push(key);
+  runInNewContext(app.slice(app.indexOf('$("overview").addEventListener("click"'),app.indexOf('// Debug rail:')),context);
+  handlers.get('click')({target:{closest:selector=>selector==='[data-overview-fleet]'?{dataset:{overviewFleet:key}}:null}});
+  handlers.get('click')({target:{closest:()=>null}}); // Native summary toggle never selects a team.
+  assert.deepEqual(picks,[key]);assert.equal(handlers.has('keydown'),false);
 });
 
 test('recorded actors are separate from sampled running, stopped and unconfirmed states',()=>{
