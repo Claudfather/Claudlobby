@@ -53,6 +53,52 @@ test('accepted source paints before a held peer and rechecks admission before fi
   api.dispose();a.reader.dispose();b.reader.dispose();
 });
 
+test('overview refresh retains only same-admission pending summaries and removes a failed source without hiding its peer',async()=>{
+  const {api,a,b}=await pair();await api.jget('/api/overview');
+  const held=deferred(),heldA=deferred();b.routes.set('/api/overview',held.promise);a.routes.set('/api/overview',heldA.promise);
+  let accept,acceptA;const progress=new Promise(resolve=>{accept=resolve;}),progressA=new Promise(resolve=>{acceptA=resolve;});
+  const reading=api.jget('/api/overview',value=>{accept(value);if(value.data.sources[0].state==='ok')acceptA(value);});
+  const checking=await progress;
+  assert.equal(checking.data.totals.bots,2);assert.equal(checking.data.coverage.reachable,0);
+  assert.ok(checking.data.sources.every(s=>s.state==='checking' && s.overview_retained));
+  heldA.resolve(roster('team'));const partial=await progressA;
+  assert.equal(partial.data.totals.bots,2);
+  assert.equal(partial.data.totals.overview_retained,true);
+  assert.deepEqual(partial.data.coverage,{total:2,reachable:1,partial:true});
+  assert.equal(partial.data.sources[1].state,'checking');
+  assert.equal(partial.data.sources[1].overview_retained,true);
+  assert.equal(partial.data.fleets.find(f=>f.alias==='b / team').overview_retained,true);
+  assert.ok(partial.data.sources[1].overview_read_at);
+  held.resolve({state:'unreadable',provenance:null});const failed=await reading;
+  assert.deepEqual(failed.data.fleets.map(f=>f.alias),['a / team']);
+  assert.equal(failed.data.totals.bots,1);
+  assert.equal(failed.data.sources[1].host,null);
+  assert.equal(failed.data.totals.overview_retained,false);
+  // A later admission cannot inherit even an earlier successful summary.
+  b.setStatus('sign_in_required');await b.reader.start();
+  b.setStatus('ready');await b.reader.start();
+  const next=deferred();b.routes.set('/api/overview',next.promise);
+  let update;const pending=new Promise(resolve=>{update=resolve;});
+  const refresh=api.jget('/api/overview',update),changed=await pending;
+  assert.deepEqual(changed.data.fleets.map(f=>f.alias),['a / team']);
+  assert.equal(changed.data.sources[1].overview_retained,false);
+  next.resolve(roster('team'));await refresh;api.dispose();
+});
+
+test('ordinary stream opens preserve accepted summaries while admission loss immediately clears only its source',async()=>{
+  const {api,a}=await pair(),h=await appHarness(api);h.c.openStream();await h.refresh();
+  const accepted=h.overviewPaints.at(-1),count=h.overviewPaints.length;
+  a.streams[0].onopen({});
+  assert.equal(h.overviewPaints.length,count);
+  assert.equal(h.overviewPaints.at(-1),accepted);
+  a.setStatus('sign_in_required');await a.reader.start();
+  const invalidated=h.overviewPaints.at(-1);
+  assert.deepEqual(Array.from(invalidated.data.fleets,f=>f.alias),['b / team']);
+  assert.equal(invalidated.data.sources[0].host,null);
+  assert.equal(invalidated.data.totals.bots,1);
+  api.dispose();
+});
+
 test('overview deadline pauses only its source leg until explicit retry, preserving other reads and timestamps',async()=>{
   const {api,a,b}=await pair();
   const first=await api.jget('/api/overview'),lastRead=first.data.sources[1].overview_read_at;
@@ -232,15 +278,18 @@ test('source refusal fences held detail without clearing other source, keeps adm
 });
 test('independent native streams preserve local cursors and source errors become scoped refresh, not global source events', async () => {
   const { api, a, b } = await pair(); const events = []; let globalLoss = 0;
+  await api.jget('/api/overview');
   const stream = api.createEventSource('/api/stream'); stream.onmessage = e => events.push(JSON.parse(e.data)); stream.addEventListener('source', () => globalLoss++);
   a.streams[0].onmessage({ data: JSON.stringify({ cursor: 9, rows: [{ ingest_seq: 9 }] }) });
   b.streams[0].onmessage({ data: JSON.stringify({ cursor: 2, rows: [{ ingest_seq: 2 }] }) });
   assert.deepEqual(events.map(e => [e.source,e.cursor]), [['a',9],['b',2]]);
   a.streams[0].listeners.source({ data: JSON.stringify({ state: 'unreadable' }) });
   assert.equal(globalLoss, 0); assert.equal(events.at(-1).coverage_changed, true);
+  assert.deepEqual(events.at(-1).overview.data.fleets.map(f=>f.alias),['b / team']);
+  assert.equal(events.at(-1).overview.data.totals.bots,1);
   let error;stream.onerror=event=>{error=event;};
   a.streams[0].onerror({type:'error'});
-  assert.equal(error.source,'a');assert.equal(events.at(-1).coverage_changed,true);
+  assert.equal(error.source,'a');assert.ok(events.some(e=>e.stream_changed && !e.coverage_changed));
   assert.equal((await api.jget('/api/overview')).data.sources[1].state,'ok');
   stream.close(); assert.ok(a.streams[0].closed && b.streams[0].closed);
 });
@@ -280,6 +329,18 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.match(nodes.get('overview').innerHTML, /&lt;Host A&gt;/);
   assert.match(nodes.get('overview').innerHTML, /Sign in to this source/);
   assert.doesNotMatch(nodes.get('overview').innerHTML, /recorder DOWN/);
+  env.data.sources[1].state='checking';env.data.sources[1].overview_retained=true;
+  env.data.sources[1].overview_read_at='2026-01-01T00:00:00Z';env.data.totals.overview_retained=true;
+  env.data.fleets=[{alias:'b / team',bots:2,presence:{counts:{},live_poll:'ok'},overview_retained:true,overview_read_at:'2026-01-01T00:00:00Z'}];
+  context.renderOverview(env);context.renderHeader(env);context.renderHostFacts(env);
+  assert.match(nodes.get('overview').innerHTML,/Refreshing · last summary/);
+  assert.match(nodes.get('overview').innerHTML,/refreshing; showing the last read/);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/Team summary unavailable; activity/);
+  assert.match(nodes.get('fleet-totals').innerHTML,/totals include the last read for pending computers/);
+  assert.match(nodes.get('host-facts').textContent,/last summary, refreshing/);
+  env.data.sources[1].state='ok';env.data.sources[1].overview_retained=false;
+  env.data.totals.overview_retained=false;env.data.fleets=[];
+  context.renderHeader(env);context.renderHostFacts(env);
   env.data.sources[1].host.daemon_serving=null;context.renderOverview(env);
   assert.match(nodes.get('overview').innerHTML,/recorder unknown/);
   assert.doesNotMatch(nodes.get('overview').innerHTML,/recorder DOWN/);
@@ -477,7 +538,8 @@ test('visible directory coalesces identity pushes but refreshes presence only on
   assert.ok(a.calls.every(x=>!['/api/tasks','/api/overview','/api/summary','/api/grid'].includes(x.url)));
   h.advance(60000);await h.c.refreshBoards();
   assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2);
-  a.streams[0].onopen({});assert.equal(h.c.agentPresence,null);assert.equal(h.c.agentPresenceDue,0);
+  const presence=h.c.agentPresence,due=h.c.agentPresenceDue;
+  a.streams[0].onopen({});assert.equal(h.c.agentPresence,presence);assert.equal(h.c.agentPresenceDue,due);
   h.c.currentView='channel';await h.c.refreshBoards();await h.settle();
   assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2,'Activity never requests presence');
   h.c.currentView='grid';h.c.agentPresence=null;h.c.agentPresenceDue=h.c.Date.now()+60000;
@@ -669,7 +731,8 @@ test('source coverage change retires a completed held overview and selection upd
   h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.openStream();
   await h.c.refreshBoards();await h.settle();
   a.setStatus('sign_in_required');await a.reader.start();
-  assert.equal(h.overviewPaints.at(-1).state,'unavailable');
+  assert.equal(h.overviewPaints.at(-1).state,'ok');
+  assert.deepEqual(Array.from(h.overviewPaints.at(-1).data.fleets,f=>f.alias),['b / team']);
   const before=h.overviewPaints.length;held.resolve();await h.settle();
   assert.equal(h.overviewPaints.length,before,'pre-disconnect aggregate cannot repaint Connected');
   const {runInNewContext}=await import('node:vm');

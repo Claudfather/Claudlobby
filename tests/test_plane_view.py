@@ -1425,7 +1425,7 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
     assert "function renderOverview" in js
     assert js.count("function pickFleet") == 1
     assert "pickFleet(b.dataset.fleet)" in js       # the tab row
-    assert "pickFleet(c.dataset.fleet)" in js       # the strip's cards
+    assert "pickFleet(button.dataset.overviewFleet)" in js  # explicit strip button
     assert "t.cross_fleet" in js and "xfleet" in js
     css = ui.joinpath("style.css").read_text()
     assert ".tag.xfleet" in css and ".ov-card" in css
