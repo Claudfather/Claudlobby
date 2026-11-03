@@ -39,6 +39,15 @@ class SetupGrant:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class RetainedSetupState:
+    state: str
+    grant: SetupGrant | None = None
+    launch_id: str | None = None
+    launch_plan: str | None = None
+    effective_active: bool = False
+
+
 def _snapshot(grant):
     return json.dumps(asdict(grant),sort_keys=True,separators=(",", ":"))
 
@@ -83,7 +92,7 @@ class OwnerSetup:
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,release_id,release_seal,
                 str(directory),str(uuid4()),now,now+GRANT_SECONDS)
 
-    def allow(self, expected):
+    def allow(self, expected, *, expected_retained=None):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
         with self.access._connection(write=True) as conn:
             binding=self.access.workspace()._active_binding(conn,self.access._grant(conn).principal)
@@ -93,6 +102,8 @@ class OwnerSetup:
             if not names & {"setup_metadata","setup_grant","setup_previews"}:
                 for statement in _SCHEMA: conn.execute(statement)
             self._schema(conn)
+            if expected_retained is not None and self._retained_state(conn) != expected_retained:
+                raise AccessDenied("setup_state_changed")
             row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
             if row:
                 retained=self._grant(row)
@@ -109,6 +120,35 @@ class OwnerSetup:
                 # A stale/expired approval has no authority. New terminal
                 # approval explicitly replaces it with a fresh generation.
             conn.execute("INSERT OR REPLACE INTO setup_grant VALUES(1,?,1,NULL,NULL)",(_snapshot(expected),))
+
+    def retained_state(self):
+        """Local observation including withdrawn/expired grants and original launch IDs."""
+        with self.access._connection() as conn:
+            return self._retained_state(conn)
+
+    def _retained_state(self, conn):
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        if not names & {"setup_metadata", "setup_grant", "setup_previews"}:
+            return RetainedSetupState("absent")
+        self._schema(conn)
+        row = conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
+        if row is None:
+            return RetainedSetupState("absent")
+        if row["active"] not in (0, 1) or ((row["launch_id"] is None) != (row["launch_plan"] is None)):
+            raise AccessUnavailable()
+        if row["launch_id"] is not None and (not _uuid(row["launch_id"])
+                or not isinstance(row["launch_plan"], str) or not re.fullmatch(r"p-[0-9a-f]{64}", row["launch_plan"])):
+            raise AccessUnavailable()
+        grant = self._grant(row)
+        now = self.access._now()
+        self.access.workspace()._schema(conn)
+        binding = self.access.workspace()._binding(conn)
+        owner = self.access._grant(conn)
+        state = ("revoked" if row["active"] == 0 else "expired" if now >= grant.expires_at
+                 else "not_yet_valid" if now < grant.created_at
+                 else "stale_binding" if binding is None or self.access.workspace()._state(binding, owner) != "active"
+                 or OwnerConnected._snapshot(binding) != grant.binding_snapshot else "allowed")
+        return RetainedSetupState(state, grant, row["launch_id"], row["launch_plan"], state == "allowed")
 
     def local(self):
         with self.access._connection() as conn:

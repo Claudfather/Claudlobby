@@ -265,3 +265,26 @@ def test_action_registration_and_independent_grant_through_actual_terminal(activ
     assert code == 0, output
     with pytest.raises(AccessDenied, match=capability + "_not_allowed"):
         getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner local console requires POSIX")
+def test_guided_setup_initial_consent_cancellation_over_real_terminal(tmp_path):
+    root = tmp_path / "data"; root.mkdir()
+    directory = tmp_path / "units"; directory.mkdir()
+    bootstrap = """import sys
+from pathlib import Path
+from types import SimpleNamespace
+from claudlobby.commands import releases, host_owner_setup
+from claudlobby.__main__ import main
+releases._executing_release=lambda _: 'r-'+'a'*64
+releases._release=lambda *_: SimpleNamespace(release_id='r-'+'a'*64,seal_sha256='b'*64,cli_path=Path(sys.executable).with_name('claudlobby'))
+host_owner_setup._native_directories=lambda _: (Path(sys.argv[sys.argv.index('--install-directory')+1]),)
+raise SystemExit(main(sys.argv[1:]))
+"""
+    args = ("--origin", "https://host.example.test", "--tailscale", sys.executable,
+        "--workspace-issuer", "https://accounts.example.test", "--workspace-origin", "https://plane.example.test",
+        "--target-fleet", "shop", "--repository", "example-org/shop", "--install-directory", str(directory),
+        "--socket", str(root/"state/owner/owner.sock"))
+    rc, output = _command(root, "setup", [("Native Tailscale control socket", ""), ("Type INITIALIZE", "NO")], args=args, bootstrap=bootstrap)
+    assert rc == 4 and "owner change cancelled" in output
+    assert not (root / "state").exists()

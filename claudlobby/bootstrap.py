@@ -199,7 +199,7 @@ def _run(command: list[str], env: dict[str, str], *, step: str, timeout: int = 3
         raise BundleError(f"offline bootstrap failed at {step}; check host Python/venv and bundle wheel compatibility")
 
 
-def bootstrap(script: Path, root: Path, *, json_output: bool = False) -> int:
+def bootstrap(script: Path, root: Path, *, json_output: bool = False, guided: bool = False) -> int | tuple[Path, dict]:
     if not root.is_absolute() or root.is_symlink():
         raise BundleError("--root must be an explicit absolute, real host data path")
     directory, wheel, checksums = _bundle(script)
@@ -241,11 +241,21 @@ def bootstrap(script: Path, root: Path, *, json_output: bool = False) -> int:
         command = [str(python), "-I", "-B", "-m", "claudlobby", "--root", str(root), "host", "setup",
                    "--wheel", str(inputs / wheel.name), "--dependency-lock", str(inputs / "dependency.lock"),
                    "--wheelhouse", str(inputs / "wheelhouse"), "--interpreter", str(interpreter)]
-        if json_output:
+        if json_output or guided:
             command.append("--json")
-        process = subprocess.Popen(command, env=host_env, start_new_session=True)
+        receipt = tempfile.TemporaryFile() if guided else None
+        process = subprocess.Popen(command, env=host_env, start_new_session=True,
+                                   **({"stdout": receipt} if guided else {}))
         try:
-            return process.wait()
+            result = process.wait()
+            if not guided:
+                return result
+            receipt.seek(0)
+            raw = receipt.read(65537)
+            if result:
+                _guided_failure(raw, result)
+                return result
+            continuation = _guided_target(raw, root)
         finally:
             # The canonical assembler owns already-started local work. Keep
             # its input snapshot alive through a caller interrupt, too.
@@ -255,19 +265,103 @@ def bootstrap(script: Path, root: Path, *, json_output: bool = False) -> int:
                     break
                 except KeyboardInterrupt:
                     continue
+            if receipt is not None:
+                receipt.close()
+    # Assembly snapshots and temporary Python are gone before console serving.
+    # Do not detach: the durable CLI must inherit the original controlling TTY.
+    return continuation, host_env
+
+
+def _guided_failure(raw: bytes, exit_code: int) -> None:
+    """Render only the sealed assembler's canonical safe error, never raw data."""
+    fallback = "offline assembly failed; inspect trusted local inputs and native user setup"
+    try:
+        if len(raw) > 65536:
+            raise ValueError
+        result = json.loads(raw)
+        error = result["error"]
+        exits = {"internal_error": 1, "invalid_argument": 2, "conflict": 4,
+                 "unavailable": 6, "release_mismatch": 7}
+        if (set(result) != {"schema_version", "ok", "command", "request_id", "release_id", "data", "error"}
+                or type(result["schema_version"]) is not int or result["schema_version"] != 1
+                or result["ok"] is not False or result["command"] != "host.setup"
+                or not isinstance(result["data"], dict)
+                or set(error) != {"code", "message", "retryable", "hint"}
+                or exits.get(error["code"]) != exit_code
+                or type(error["retryable"]) is not bool):
+            raise ValueError
+        message, hint = error["message"], error["hint"]
+        if (not isinstance(message, str) or not message or len(message) > 4096 or not message.isprintable()
+                or (hint is not None and (not isinstance(hint, str) or not hint
+                    or len(hint) > 4096 or not hint.isprintable()))):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        print(fallback, file=sys.stderr)
+        return
+    print(message, file=sys.stderr)
+    if hint is not None:
+        print(hint, file=sys.stderr)
+
+
+def _guided_target(raw: bytes, root: Path) -> Path:
+    try:
+        if len(raw) > 65536:
+            raise ValueError
+        result = json.loads(raw)
+        data = result["data"]
+        release_id = data["release_id"]
+        if result["ok"] is not True or not re.fullmatch(r"r-[0-9a-f]{64}", release_id):
+            raise ValueError
+        target = root.resolve() / "state/releases" / release_id / "venv/bin/claudlobby"
+        if (data["root"] != str(root.resolve()) or data["cli"] != str(target)
+                or target.is_symlink() or target.resolve() != target or not target.is_file()
+                or not os.access(target, os.X_OK)):
+            raise ValueError
+        return target
+    except (ValueError, TypeError, KeyError, OSError):
+        raise BundleError("guided setup requires the exact successful sealed assembly result") from None
+
+
+def _continue_guided(command, env):
+    """Keep the guide's controlling TTY and let it drain its own server on Ctrl-C."""
+    process = subprocess.Popen(command, env=env)
+    def terminate(_signal, _frame):
+        if process.poll() is None:
+            process.terminate()
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        while True:
+            try:
+                return process.wait()
+            except KeyboardInterrupt:
+                # The terminal delivered SIGINT to both processes. Never kill
+                # the guide while it is shutting down its foreground server.
+                continue
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--guided", action="store_true", help="Continue assembly in the local interactive first-team guide")
     args = parser.parse_args(argv)
     try:
+        if args.guided and (args.json or not sys.stdin.isatty() or any(key in os.environ for key in (
+                "BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT", "FLEET_NAME",
+                "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT"))):
+            raise BundleError("guided setup requires an interactive operator terminal without bot/fleet selectors or --json")
         if isinstance(__loader__, zipimport.zipimporter) and Path(__file__).name == "__main__.py":
             with tempfile.TemporaryDirectory(prefix="claudlobby-installer-") as temporary:
                 script = _extract_installer(Path(__loader__.archive), Path(temporary).resolve())
-                return bootstrap(script, args.root, json_output=args.json)
-        return bootstrap(Path(__file__).absolute(), args.root, json_output=args.json)
+                result = bootstrap(script, args.root, json_output=args.json, guided=args.guided)
+        else:
+            result = bootstrap(Path(__file__).absolute(), args.root, json_output=args.json, guided=args.guided)
+        if isinstance(result, tuple):
+            continuation, host_env = result
+            return _continue_guided([str(continuation), "--root", str(args.root), "host", "owner", "setup"], host_env)
+        return result
     except (BundleError, OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
         message = str(exc) if isinstance(exc, BundleError) else "bundle is unreadable or malformed; inspect trusted local inputs and host Python"
         if args.json:

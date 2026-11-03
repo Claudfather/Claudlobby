@@ -289,3 +289,17 @@ def test_capacity_refusal_keeps_challenge_and_full_retained_binding_is_checked(c
         conn.execute("UPDATE workspace_bindings SET subject=? WHERE revision=?", ("00000000-0000-4000-8000-000000000004", binding.revision))
     with pytest.raises(AccessDenied):
         admit(store, first.token, binding)
+
+
+def test_preparation_state_is_read_only_and_partial_schema_refuses(local):
+    access, _, owner, _ = local
+    before = access.path.read_bytes()
+    assert access.connected().preparation_state() == "absent"
+    assert access.path.read_bytes() == before
+    access.connected().initialize(expected_owner=owner)
+    assert access.connected().preparation_state() == "ready"
+    with sqlite3.connect(access.path) as conn:
+        conn.execute("DROP TABLE connected_sessions")
+    before = access.path.read_bytes()
+    with pytest.raises(AccessUnavailable): access.connected().preparation_state()
+    assert access.path.read_bytes() == before

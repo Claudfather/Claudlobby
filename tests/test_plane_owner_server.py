@@ -454,7 +454,8 @@ def test_service_handover_refuses_live_foreground_without_changing_it(socket_pat
     preflight(starts)
 
 
-def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monkeypatch):
+@pytest.mark.parametrize("explicit_default", [False, True])
+def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monkeypatch, explicit_default):
     import uvicorn
     from claudlobby.plane.ids import ensure_host_uid
     from claudlobby.plane import owner_server
@@ -466,10 +467,112 @@ def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monke
         server.started = True
         seen.append(Path(sockets[0].getsockname()))
     monkeypatch.setattr(uvicorn.Server, "run", stopped)
-    owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable))
+    owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                       socket_path=root / "state/owner/owner.sock" if explicit_default else None)
     assert seen == [root / "state/owner/owner.sock"]
     assert not seen[0].exists()
     assert {p.name for p in (root / "state/plane").iterdir()} == {"owner-access.db"}
+    with pytest.raises(OwnerServerConfigurationError, match="existing owner-only directory"):
+        owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                           socket_path=root / "custom/owner.sock")
+    assert not (root / "custom").exists()
     with pytest.raises(OwnerServerConfigurationError, match="outside Plane"):
         owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
                            socket_path=root / "state/plane/owner.sock")
+
+
+def test_guided_owner_child_waits_for_real_unix_readiness_and_cleans_owned_socket(tmp_path, socket_path, capfd):
+    from claudlobby.commands.host_owner_setup import _serving
+    from claudlobby.plane.ids import ensure_host_uid
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    command = [sys.executable, "-m", "claudlobby", "--root", str(tmp_path), "host", "owner", "serve",
+        "--socket", str(socket_path), "--origin", "https://plane.example.test", "--tailscale", sys.executable]
+    with _serving(command, socket_path, "https://plane.example.test") as child:
+        assert child.poll() is None
+        assert request(socket_path, "/owner")[0] == 200
+    assert child.poll() is not None and not socket_path.exists()
+    from claudlobby.command_result import CommandFailure
+    failed = command + ["--workspace-issuer", "https://accounts.example.test", "--workspace-origin", "https://browser.example.test"]
+    with pytest.raises(CommandFailure, match="did not become ready"):
+        with _serving(failed, socket_path, "https://plane.example.test"):
+            pytest.fail("uninitialized workspace server was admitted")
+    assert "workspace bootstrap authority unavailable" in capfd.readouterr().err
+    assert not socket_path.exists()
+
+
+def test_guided_owner_shutdown_drains_started_workspace_work_without_kill_deadline(tmp_path, socket_path, monkeypatch):
+    import threading
+    from claudlobby.commands.host_owner_setup import _serving
+    from claudlobby.plane.ids import ensure_host_uid
+    ensure_host_uid(tmp_path / "state")
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    principal = PrincipalRef("tailscale:controlplane.tailscale.com", "1234")
+    pair = access.begin_pairing(principal)
+    owner = access.confirm_pairing(pair.token, expected_principal=principal)
+    access.workspace().initialize(expected_owner=owner)
+    # Exercise the real consumer's started synchronous-work drain, with a
+    # private file effect in place of activation. No native work is launched.
+    script = r'''
+import sys, time
+from pathlib import Path
+from claudlobby.plane import owner_browser, owner_server
+root, path = map(Path, sys.argv[1:])
+original = owner_browser.create_owner_browser_app
+def app(*args, **kwargs):
+    browser = original(*args, **kwargs)
+    def held():
+        (root / "started").touch()
+        deadline = time.monotonic() + 30
+        while not (root / "release").exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("test work was not released")
+            time.sleep(0.01)
+        (root / "finished").touch()
+    async def perform(scope, receive):
+        await browser.workspace_bootstrap._blocking(held)
+        return {"state": "complete"}, 202
+    browser.workspace_bootstrap._perform = perform
+    return browser
+owner_browser.create_owner_browser_app = app
+owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+    socket_path=path, workspace_issuer="https://accounts.example.test",
+    workspace_origin="https://browser.example.test")
+'''
+    command = [sys.executable, "-c", script, str(tmp_path), str(socket_path)]
+    answers = []
+    def work():
+        answers.append(request(socket_path, "/api/owner/workspace/challenge", action=True,
+            headers={"Origin": "https://browser.example.test"})[0])
+    child = None
+    request_thread = None
+    original_wait = None
+    try:
+        with _serving(command, socket_path, "https://plane.example.test") as child:
+            original_wait = child.wait
+            assert os.getpgid(child.pid) == child.pid  # Terminal Ctrl-C cannot signal it directly.
+            request_thread = threading.Thread(target=work)
+            request_thread.start()
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "started").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (tmp_path / "started").exists()
+            waits = []
+            def drain(*args, **kwargs):
+                assert not args and not kwargs, "admitted work must have no kill deadline"
+                waits.append(True)
+                if len(waits) == 1:
+                    raise KeyboardInterrupt  # A repeated operator Ctrl-C cannot abandon drainage.
+                (tmp_path / "release").touch()
+                return original_wait()
+            monkeypatch.setattr(child, "wait", drain)
+        assert len(waits) == 2 and child.returncode == 0
+        assert (tmp_path / "finished").exists() and not socket_path.exists()
+    finally:
+        (tmp_path / "release").touch()
+        if child is not None and child.poll() is None:
+            child.terminate()
+            original_wait(timeout=10)
+        if request_thread is not None:
+            request_thread.join(timeout=10)
+    assert answers and answers[0] in (202, 503)

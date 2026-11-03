@@ -384,3 +384,93 @@ def test_bootstrap_install_failure_identifies_step_without_echoing_output(monkey
     with pytest.raises(bootstrap.BundleError, match='failed at dependency installation') as exc:
         bootstrap._run(['unused'], {}, step='dependency installation')
     assert 'private' not in str(exc.value)
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+def test_guided_bootstrap_cleans_temporary_inputs_before_durable_terminal_handoff(bootstrap_bundle, tmp_path, monkeypatch, packaged):
+    import json
+    bootstrap, script, _, _ = bootstrap_bundle
+    monkeypatch.setattr(bootstrap, "_run", lambda *a, **k: None)
+    root = (tmp_path / "data").resolve()
+    cli = root / "state/releases" / ("r-"+"a"*64) / "venv/bin/claudlobby"
+    cli.parent.mkdir(parents=True); cli.write_text("#!/bin/sh\nexit 0\n"); cli.chmod(0o700)
+    seen = {}
+    original_bundle = bootstrap._bundle
+    def bundle(source):
+        result = original_bundle(source)
+        seen["bundle"] = result[0]
+        return result
+    monkeypatch.setattr(bootstrap, "_bundle", bundle)
+    class Assembly:
+        def __init__(self, argv, *, env, start_new_session, stdout):
+            seen["work"] = Path(argv[0]).parents[2]
+            assert "--json" in argv and start_new_session
+            stdout.write(json.dumps({"ok":True,"data":{"root":str(root),"cli":str(cli),"release_id":"r-"+"a"*64}}).encode())
+            stdout.flush()
+        def wait(self): return 0
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", Assembly)
+    def continue_in_terminal(argv, env):
+        assert not seen["work"].exists()
+        if packaged:
+            assert not seen["bundle"].exists()
+        assert argv == [str(cli), "--root", str(root), "host", "owner", "setup"]
+        assert "PYTHONPATH" not in env and "SECRET_TOKEN" not in env
+        seen["continued"] = True
+        return 0
+    monkeypatch.setattr(bootstrap, "_continue_guided", continue_in_terminal)
+    if packaged:
+        installer = tmp_path / "install.pyz"
+        _installer(script, installer)
+        monkeypatch.setattr(bootstrap, "__loader__", bootstrap.zipimport.zipimporter(str(installer)))
+        monkeypatch.setattr(bootstrap, "__file__", str(installer / "__main__.py"))
+    else:
+        monkeypatch.setattr(bootstrap, "__file__", str(script))
+    monkeypatch.setattr(bootstrap.sys.stdin, "isatty", lambda: True)
+    assert bootstrap.main(["--root", str(root), "--guided"]) == 0
+    assert seen["continued"]
+
+
+def test_guided_bootstrap_requires_terminal_before_bundle_access(bootstrap_bundle, tmp_path, monkeypatch):
+    bootstrap, _, _, _ = bootstrap_bundle
+    monkeypatch.setattr(bootstrap.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(bootstrap, "_bundle", lambda _: pytest.fail("read bundle before terminal guard"))
+    assert bootstrap.main(["--root", str(tmp_path/"data"), "--guided"]) == 2
+
+
+def test_guided_launcher_waits_through_terminal_interrupt_without_killing_guide(monkeypatch):
+    from claudlobby import bootstrap
+    class Guide:
+        waits = 0
+        def wait(self):
+            self.waits += 1
+            if self.waits == 1: raise KeyboardInterrupt
+            return 0
+        def poll(self): return None
+        def terminate(self): pytest.fail("terminated guide during normal Ctrl-C drain")
+    child = Guide()
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", lambda *a, **k: child)
+    assert bootstrap._continue_guided(["sealed-cli"], {}) == 0 and child.waits == 2
+
+
+@pytest.mark.parametrize("failure", ["canonical", "malformed", "oversized"])
+def test_guided_bootstrap_shows_canonical_assembly_failure_without_raw_output(bootstrap_bundle, tmp_path, monkeypatch, capsys, failure):
+    bootstrap, script, _, _ = bootstrap_bundle
+    monkeypatch.setattr(bootstrap, "_run", lambda *a, **k: None)
+    from claudlobby.command_result import CommandResult, CommandError, emit
+    error = CommandError("unavailable", "unavailable: installed package or native user manager",
+                         hint="inspect native user setup")
+    emit(CommandResult(False, "host.setup", None, None, {"ignored": "private data"}, error), json_output=True)
+    canonical = capsys.readouterr().out.encode()  # Actual versioned canonical producer bytes.
+    raw = canonical if failure == "canonical" else b"private raw output" * (5000 if failure == "oversized" else 1)
+    class Assembly:
+        def __init__(self, argv, *, env, start_new_session, stdout):
+            stdout.write(raw); stdout.flush()
+        def wait(self): return 6
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", Assembly)
+    assert bootstrap.bootstrap(script, (tmp_path / "data").resolve(), guided=True) == 6
+    captured = capsys.readouterr()
+    assert not captured.out and "private" not in captured.err
+    if failure == "canonical":
+        assert error.message in captured.err and error.hint in captured.err
+    else:
+        assert "assembly failed" in captured.err
