@@ -673,6 +673,15 @@ def test_head_real_query_closing_native_loss_denies_without_any_body(connected_h
         assert head.status_code == 403 and head.content == b""
 
 
+def test_connected_task_cursor_reaches_canonical_query_but_duplicate_keys_refuse(connected_http):
+    with TestClient(connected_http[0], base_url=HOST) as client:
+        ready = login(client, connected_http)
+        response = client.get(PREFIX + "read/tasks?fleet=data&cursor=malformed", headers=headers(ready["token"]))
+        assert response.status_code == 200 and response.json()["state"] == "invalid"
+        duplicate = client.get(PREFIX + "read/tasks?fleet=data&cursor=a&cursor=b", headers=headers(ready["token"]))
+        assert duplicate.status_code == 400
+
+
 def test_head_stream_uses_actual_bounded_canonical_producer_and_zero_asgi_body(connected_http):
     app, access, _, clock, _ = connected_http
     from tests.test_plane_owner_connected import evidence

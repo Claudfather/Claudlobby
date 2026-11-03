@@ -146,7 +146,7 @@ test(`explicit activity recovery reuses guarded reads and preserves keyboard foc
     syncWorkRoom(){},fleetQuery:()=>'?fleet='+encodeURIComponent(state.currentFleet),channelUrl(){return '/api/channel?limit=120';},refreshOverview(){},
     agentDirectoryVisible:()=>false,
     jget(url){reads.push(url);return url.startsWith('/api/channel')?held:Promise.resolve({state:'ok',data:{}});},
-    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
+    renderFleet(){},renderTasks(){},acceptTaskPoll(v){return v;},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
   const retry=source.slice(source.indexOf('async function retryActivity()'),source.indexOf('async function refreshBoards()'));
   const refresh=source.slice(source.indexOf('async function refreshBoards()'),source.indexOf('function scheduleRefresh()'));
   const view=runInNewContext(`${rendering}\n${retry}\n${refresh}\n({renderChannel,retryActivity,refreshBoards,control:()=>activityRecovery})`,state);
@@ -593,6 +593,27 @@ test('task-specific partial coverage cannot become a clear empty board and prese
   assert.doesNotMatch(nodes.tasks.innerHTML,/st-idle|no other tasks/);
 });
 
+test('older task browsing survives polls, deduplicates qualified rows and refreshes explicitly',async()=>{
+  const nodes=Object.fromEntries(['attention','tasks','attn-count','task-load-older','task-refresh','task-history-count'].map(id=>[id,{innerHTML:'',hidden:false,disabled:false}]));
+  const document={activeElement:null,getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}}};
+  const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
+  const row=(id,title)=>({task_id:id,fleet:'north / web',title,state:'queued',attention:false,current_assignment:null,assignment_count:0});
+  const env=(tasks,cursor,next,window='same')=>({state:'ok',data:{tasks,issue_count:0,truncated:!!next,task_page:{version:1,cursor,next_cursor:next,window}}});
+  const recent=env([row('north::'+wi,'Recent')],null,'older');let calls=0,refreshes=0;
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,loadOlderTasks,acceptTaskPoll,refreshTaskHistory})`,{...panel,document,
+    sessionPaused:false,sessionEpoch:1,currentFleet:'all',fleetQuery:()=>'',refreshBoards(){refreshes++;},
+    async jget(url){calls++;assert.equal(url,'/api/tasks?cursor=older');return env([row('north::'+wi,'Repeated'),row('south::'+wi,'Older peer')],'older',null);}});
+  board.renderTasks(recent);assert.equal(nodes['task-load-older'].hidden,false);
+  await board.loadOlderTasks();assert.equal(calls,1);
+  assert.match(nodes.tasks.innerHTML,/Recent/);assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Repeated/);
+  board.acceptTaskPoll(env([row('north::new','Polled')],null,'newer'),true);
+  assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Polled/);
+  assert.match(nodes['task-history-count'].textContent,/Browsing loaded history/);
+  board.refreshTaskHistory();assert.equal(refreshes,1);assert.doesNotMatch(nodes.tasks.innerHTML,/Older peer/);
+  board.renderTasks(recent);await board.loadOlderTasks();board.acceptTaskPoll(env([row('north::new','New admission')],null,null,'changed'),true);
+  assert.doesNotMatch(nodes.tasks.innerHTML,/Older peer/);assert.match(nodes.tasks.innerHTML,/New admission/);
+});
+
 test('task filters use exact assignees locally, preserve warning/count truth and keep missing selections explicit',()=>{
   const nodes=Object.fromEntries(['attention','tasks','attn-count','task-filter-status','task-filter-assignee','task-filter-reset','task-filter-count'].map(id=>[id,{innerHTML:'',value:'',hidden:false,disabled:false}]));
   const document={activeElement:nodes['task-filter-assignee'],getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}}};
@@ -608,7 +629,7 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assignee.value=board.taskAssigneeKey(row);assignee.onchange();
   assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
   assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);
-  assert.match(nodes['task-filter-count'].textContent,/2 of 3 recorded tasks/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
+  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
   assert.match(nodes.attention.innerHTML,/2\/3 sources|Showing the newest 200/);assert.match(nodes.attention.innerHTML,/task-history issue/);
   status.value='blocked';status.onchange();
   assert.match(nodes.attention.innerHTML,/no matching recorded tasks/);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);

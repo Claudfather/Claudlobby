@@ -1395,7 +1395,7 @@ test('the real stream source callback clears an open conversation through the ch
   const listeners = new Map(), cleared = [];
   const bindings = { createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
     workLoop: h.loop, $: id => h.get(id), renderSummary() {}, renderHeader: value => cleared.push(value),
-    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, resetAgentPresence(){}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
+    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, resetAgentPresence(){}, clearTaskHistory(){}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
   runInNewContext(appSlice('function openStream() {', '$("debug-toggle")'), bindings); bindings.openStream();
   listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
   assert.deepEqual(cleared, [null, null]);
@@ -1414,7 +1414,7 @@ test('a refresh started before stream source loss cannot restore the cleared con
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }, clearTimeout() {},
       createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
       channelUrl: () => '/api/channel', fleetQuery: () => '', syncWorkRoom: () => false, adoptFleets() {},
-      renderChannel: value => painted.push(value), renderTasks() {}, renderFleet() {}, renderSummary() {}, renderHeader() {},
+      renderChannel: value => painted.push(value), renderTasks() {}, acceptTaskPoll(v){return v;}, clearTaskHistory(){}, renderFleet() {}, renderSummary() {}, renderHeader() {},
       renderHostFacts() {}, renderFleetTabs() {}, renderOverview() {}, renderState() {}, pushDebugRow() {} };
     runInNewContext(appSlice('let refreshTimer = null;', '$("debug-toggle")'), bindings); bindings.openStream();
     const board = {state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',title:'task-a'}]}};

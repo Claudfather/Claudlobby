@@ -5,7 +5,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HOST = /^host_[0-9a-f]{32}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
 const READS = { summary: [], overview: [], fleets: [], trust: [],
-  channel: ['fleet', 'limit'], tasks: ['fleet'], identities: ['fleet'],
+  channel: ['fleet', 'limit'], tasks: ['fleet', 'cursor'], identities: ['fleet'],
   inventory: ['fleet'], org: ['fleet'], utilization: ['fleet'], presence: ['fleet'],
   equipment: ['alias'], search: ['q', 'fleet', 'limit'], grid: ['fleet', 'focus'],
   stream: ['cursor', 'once'] };

@@ -19,7 +19,7 @@ READ_SECONDS = 15
 _METHODS = {"challenge": "POST", "issue": "POST", "status": "GET", "renew": "POST", "logout": "POST"}
 _READS = {
     "summary": (), "overview": (), "fleets": (), "channel": ("fleet", "limit"),
-    "tasks": ("fleet",), "identities": ("fleet",), "inventory": ("fleet",),
+    "tasks": ("fleet", "cursor"), "identities": ("fleet",), "inventory": ("fleet",),
     "org": ("fleet",), "utilization": ("fleet",), "equipment": ("alias",),
     "search": ("q", "fleet", "limit"), "grid": ("fleet", "focus"),
     "presence": ("fleet",), "trust": (), "stream": ("cursor", "once"),

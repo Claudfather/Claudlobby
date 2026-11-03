@@ -207,7 +207,7 @@ export function createWorkspaceReadTransport({ sources }) {
     const path = url.pathname, detail = /^\/api\/tasks\/([^/]+)$/.exec(path);
     const roster = ['/api/fleets', '/api/channel', '/api/tasks', '/api/identities', '/api/overview', '/api/summary', '/api/presence'];
     if (!detail && !roster.includes(path)) return failed();
-    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : detail || ['/api/tasks', '/api/identities', '/api/presence'].includes(path) ? ['fleet'] : [];
+    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : path === '/api/tasks' ? ['fleet', 'cursor'] : detail || ['/api/identities', '/api/presence'].includes(path) ? ['fleet'] : [];
     if ([...url.searchParams.keys()].some(k => !allowed.includes(k) || url.searchParams.getAll(k).length !== 1)) return failed('invalid');
     if (path === '/api/channel' && url.searchParams.has('limit') && url.searchParams.get('limit') !== '120') return failed('invalid');
     const selected = url.searchParams.get('fleet');
@@ -225,7 +225,24 @@ export function createWorkspaceReadTransport({ sources }) {
       return { ...result, data: { ...result.data, task: task(owning.e, t) } };
     }
     const chosen = owning ? [owning.e] : entries;
-    const suffix = path === '/api/channel' ? '?limit=120' : '';
+    const taskCursor = path === '/api/tasks' ? url.searchParams.get('cursor') : null;
+    const taskWindow = () => JSON.stringify([selected, chosen.map(e => [e.key, e.host, e.epoch, e.routingRevision, e.state])]);
+    let continuation = null;
+    if (taskCursor !== null) {
+      try {
+        if (taskCursor.length > 65536 || !/^tasks1\.[A-Za-z0-9_-]+$/.test(taskCursor)) throw new Error();
+        const raw = taskCursor.slice(7).replace(/-/g, '+').replace(/_/g, '/');
+        continuation = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0))));
+        if (continuation.window !== taskWindow() || !Array.isArray(continuation.cursors)
+            || continuation.cursors.length !== chosen.length || !continuation.cursors.some(c => c !== null)
+            || continuation.cursors.some(c => c !== null && (typeof c !== 'string' || !c || c.length > 4096))
+            || !Array.isArray(continuation.states) || continuation.states.length !== chosen.length
+            || continuation.states.some(s => typeof s !== 'string' || s.length > 40)
+            || !Array.isArray(continuation.limited) || continuation.limited.length !== chosen.length
+            || continuation.limited.some(v => typeof v !== 'boolean')) throw new Error();
+      } catch { return failed('invalid', 'This task history window changed; refresh tasks.'); }
+    }
+    const requestedTaskWindow = taskWindow();
     const epochs = chosen.map(e => e.epoch), revisions = chosen.map(e => e.routingRevision);
     const rosterRead = path === '/api/fleets' || path === '/api/overview';
     const tickets = chosen.map(e => rosterRead ? ++e.rosterRequest : null);
@@ -236,20 +253,21 @@ export function createWorkspaceReadTransport({ sources }) {
     function combine() {
       // A settled source can lose admission while a peer is still pending.
       chosen.forEach((e, i) => {
-        if (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision
+        if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision
             || rosterRead && tickets[i] !== e.rosterRequest) {
           values[i] = failed(e.state); projected.delete(e);
         }
       });
-      if (owning) return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
+      if (owning && path !== '/api/tasks') return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
       if (path === '/api/overview') return combineOverview(values);
-      const good = entries.flatMap((e, i) => {
+      const good = chosen.flatMap((e, i) => {
         if (!projected.has(e)) return [];
         try { return [{e, v:project(e, path, values[i])}]; }
         catch { values[i] = failed('unavailable'); return []; }
       });
-      const data = { sources: sourceFacts(values, path), coverage: coverage(values),
-        windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
+      const data = { sources: owning ? [{key:owning.e.key,state:values[0].state}] : sourceFacts(values, path),
+        coverage: owning ? {total:1,reachable:values[0].state === 'ok' ? 1 : 0,partial:values[0].state !== 'ok'} : coverage(values),
+        windows: chosen.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
       if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
       if (path === '/api/fleets') data.fleets = data.fleet_choices;
       if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads),
@@ -260,7 +278,19 @@ export function createWorkspaceReadTransport({ sources }) {
         lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
       if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
       if (path === '/api/presence') data.bots = good.flatMap(x => x.v.data.bots);
-      if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
+      if (path === '/api/tasks') {
+        const cursors = chosen.map((e,i) => values[i].state === 'ok' ? values[i].data.task_page?.next_cursor || null : null);
+        const limited = values.map(v => v.state === 'ok' && !!v.data.truncated
+          && (v.data.task_page?.version !== 1 || v.data.task_page?.unavailable === true));
+        const token = cursors.some(c => c !== null) && requestedTaskWindow === taskWindow()
+          ? 'tasks1.' + btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({window:requestedTaskWindow,cursors,
+            states:values.map(v => v.state),limited}))))
+            .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'') : null;
+        Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count'),
+          task_page: {version:1,cursor:taskCursor,next_cursor:token,
+            window:taskWindow() + JSON.stringify(values.map(v => v.state)),
+            unavailable:limited.some(Boolean)} });
+      }
       // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
       return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
         ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
@@ -277,8 +307,25 @@ export function createWorkspaceReadTransport({ sources }) {
     if (path === '/api/overview' && values.some(v => v.overview_retained)) progress();
     try {
       await Promise.all(chosen.map(async (e, i) => {
-        values[i] = await read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''));
-        if (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision) values[i] = failed(e.state);
+        if (continuation && continuation.cursors[i] === null) {
+          values[i] = continuation.states[i] !== 'ok' ? failed(continuation.states[i])
+            : {state:'ok',data:{tasks:[],issues:[],issue_count:0,attention_count:0,truncated:continuation.limited[i],
+              task_page:{version:1,cursor:null,next_cursor:null,unavailable:continuation.limited[i]}}};
+        } else {
+          const query = new URLSearchParams();
+          if (path === '/api/channel') query.set('limit','120');
+          if (owning) query.set('fleet',owning.raw.alias);
+          if (continuation) query.set('cursor',continuation.cursors[i]);
+          values[i] = await read(e, path + (query.size ? '?' + query : ''));
+          if (path === '/api/tasks' && values[i].state === 'ok') {
+            const page = values[i].data?.task_page, expected = continuation?.cursors[i] || null;
+            if (expected !== null && (!page || page.version !== 1 || page.cursor !== expected)
+                || page && (page.version !== 1 || page.cursor !== expected || page.next_cursor !== null
+                  && (typeof page.next_cursor !== 'string' || !page.next_cursor || page.next_cursor.length > 4096)))
+              values[i] = failed('unavailable', 'Task history continuation is unsupported; refresh tasks.');
+          }
+        }
+        if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision) values[i] = failed(e.state);
         if (values[i].state === 'ok') {
           try {
             const label = values[i].data.host?.display_name;
