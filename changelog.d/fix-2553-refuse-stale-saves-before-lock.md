@@ -1,0 +1,5 @@
+### Changed — a new activation refuses before its lock while a running bot's save is too old (#2553)
+
+`claudlobby host activate` now reads each running bot's saved handoff before it takes the activation lock or pauses anything, with the verifier and the window (`--handoff-max-age`, 300 s by default) the run itself checks at each bot's handoff. While any running bot's save is older, missing or unreadable, it refuses (exit 4, no activation record), naming each such bot and its save's age (`stale_saves` in `--json`). Every door is still open then, so the operator can save those bots and run the same command again. Before, the run found such a bot only after it had paused the producers, when no new save could be asked for: on one host that took 72 minutes and 11 invocations to clear.
+
+A `--resume` never makes this check, and a bot stopped through `bot stop` is not counted. A save that ages past the window while the run hands off the other bots still takes the handoff request, and can still refuse the run there.

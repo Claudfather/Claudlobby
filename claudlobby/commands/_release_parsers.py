@@ -218,7 +218,8 @@ def register_release_subparsers(sub):
     activate.add_argument("--handoff-max-age", type=int, metavar="SECONDS",
                           help="Upgrades and adoptions: how old (300 to 72000 s, default 300) a bot's saved handoff "
                                "may be and still count, so a bot that saved and stayed idle is not asked for a new "
-                               "one. Recorded with the activation: --resume keeps it, and an explicit change refuses")
+                               "one. A new run first refuses, before its lock, naming each running bot whose save is "
+                               "older. Recorded with the activation: --resume keeps it, and an explicit change refuses")
     activate.add_argument("--adopt-existing", action="store_true",
                           help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
     activate.add_argument("--resume", metavar="ACTIVATION_ID",

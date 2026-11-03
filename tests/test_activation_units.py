@@ -567,6 +567,77 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(
     assert state.read_selection(root)["activation_id"] == "previous"
 
 
+def test_a_resume_never_makes_the_new_runs_save_check(enrollment, monkeypatch, native_resume_readability):
+    """#2553: the check that refuses a new activation before its lock over a running bot's old save
+    is a new run's only. A --resume, whose doors are already shut, never makes it: a stale save
+    there takes the handoff request as before."""
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = type("Package", (), {"native": release.native_path,
+                                    "artifact_id": release.inputs.artifact_id})()
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+    from tests.test_activation import _preserve_capture
+    bot_dir = next(u.declaration.working_directory for u in inventory.units
+                   if u.declaration.scope == "bot")
+    _preserve_capture(bot_dir, kind="stale-capture")  # a new run would refuse over this save
+    live = {"member.service": True}
+    recorded = adapter.call
+
+    def call(function, *args, timeout=None):
+        if function == "svc_activation_quiet":
+            return subprocess.CompletedProcess([function, *args],
+                3 if live["member.service"] else 0, "inactive\tno-cgroup-witness\n", "")
+        if function not in ("svc_activation_handoff", "svc_activation_stop_private_server"):
+            return recorded(function, *args, timeout=timeout)
+        adapter.calls.append((function, args[1]))
+        if function == "svc_activation_stop_private_server":
+            live["member.service"] = False
+        if function == "svc_activation_handoff":
+            _preserve_capture(bot_dir)
+        return subprocess.CompletedProcess([function, *args], 0,
+            "handoff-saved\n" if function == "svc_activation_handoff" else "", "")
+
+    def new_run_only(*_args, **_kwargs):
+        raise AssertionError("a --resume made the new run's save check")
+
+    adapter.call = call
+    # raising=False: main has no such check, and this test runs there too, unchanged.
+    monkeypatch.setattr(activation, "_stale_saves_before_lock", new_run_only, raising=False)
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda _unit: "/private-fixture-tmux")
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda unit, **_kwargs:
+                        (root / f"{unit.target}.sock", live[unit.target]))
+    monkeypatch.setattr(activation, "_legacy_quiet", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(activation, "_probe", lambda _root: None)
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    monkeypatch.setattr(activation, "_finish_running_activation",
+                        lambda _root, _store, identifier, *_args, **_kwargs: state.read_activation(root, identifier))
+    with state.locked_activation(root) as store:
+        store.prepare("previous", plan, recovery_release_id=release.release_id,
+                      enrollment_digest=inventory.digest)
+        for step in state.STEPS:
+            store.begin("previous", step)
+            if step == "selection_switched":
+                store.select("previous")
+            else:
+                store.complete("previous", step, evidence_digest="a" * 64)
+        _prepare(store, inventory, phases, plan, adapter, install_directory=directory)
+        # Interrupted while it paused the producers: every door is shut.
+        store.begin("cutover", "producers_paused")
+        units.pause_phase(store, "cutover", "producers", adapter=adapter)
+    before = len(adapter.calls)
+    resumed = activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
+    assert resumed.body["handoff_effects"] == {"member.service": "handed_off"}
+    assert [call for call in adapter.calls[before:] if call[0] == "svc_activation_handoff"] == [
+        ("svc_activation_handoff", "member")]
+
+
 @pytest.mark.parametrize("frozen_active", ["active", "failed"])
 def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment, frozen_active):
     inventory, phases, plan, adapter, foreign, wants = enrollment
