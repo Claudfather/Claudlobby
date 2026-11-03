@@ -4418,14 +4418,12 @@ try:
             # recorded for another directory applies when both share a git
             # root, which is not modelled here, so one ahead of the pick
             # leaves the loaded install unknown.
-            entry = None
-            for item in entries:
-                if item.get("scope") in ("user", "managed") or item.get("projectPath") == str(bot):
-                    entry = item
+            for entry in entries:
+                if entry.get("scope") in ("user", "managed") or entry.get("projectPath") == str(bot):
                     break
-                if item.get("projectPath"):
+                if entry.get("projectPath"):
                     raise ValueError()
-            if entry is None:
+            else:
                 continue
             install = Path(entry["installPath"])
             if not install.is_absolute():

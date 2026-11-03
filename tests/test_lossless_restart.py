@@ -65,7 +65,9 @@ class TestStartupBootstrap:
     @pytest.mark.parametrize("mode", ["plugin", "local", "cache-only", "disabled-skill",
                                       "disabled-plugin", "ambiguous", "native", "opaque",
                                       "empty", "stale", "missing", "absent", "stale-local",
-                                      "skill-file-missing", "corrupt", "unreadable",
+                                      "skill-file-missing", "corrupt",
+                                      pytest.param("unreadable", marks=pytest.mark.skipif(
+                                          os.geteuid() == 0, reason="root reads a mode-000 file")),
                                       "managed-first", "foreign-first"])
     def test_skill_bootstrap_and_literal_compatibility(self, tmp_path, mode):
         bot, account = tmp_path / "bot", tmp_path / "selected account"
@@ -91,32 +93,29 @@ class TestStartupBootstrap:
             shutil.copytree(install, mirror)
             plugins["provider@mirror"] = [{"scope": "user", "version": "1.0.0", "installPath": str(mirror)}]
             enabled["provider@mirror"] = True
-        elif mode in {"stale-local", "skill-file-missing"}:
-            # The production shape: a per-directory entry beside the user entry.
-            # Claude Code loads whichever applies FIRST in registry order, so
-            # each case breaks the install it must not read and a wrong choice
-            # flips the verdict.
+        elif mode in {"stale-local", "skill-file-missing", "managed-first"}:
+            # Two entries apply and Claude Code loads the FIRST in registry
+            # order. Each case breaks the install it must not read, so a wrong
+            # choice flips the verdict.
             other = install.parent / "0.9.0"
             shutil.copytree(install, other)
-            local = {"scope": "local", "projectPath": str(bot), "version": "0.9.0", "installPath": str(other)}
+            stale = {"scope": "local", "projectPath": str(bot), "version": "0.9.0", "installPath": str(other)}
+            refusing = "---\nname: session\ndisable-model-invocation: true\n---\nResume.\n"
             if mode == "stale-local":
-                # User entry first: its Skill loads, the later stale one would refuse.
-                (other / "skills/session/SKILL.md").write_text(
-                    "---\nname: session\ndisable-model-invocation: true\n---\nResume.\n")
-                entries.append(local)
-            else:
-                # Local entry first: it loads and has no Skill file, though the
-                # later user entry has one.
+                # The production shape: the user entry first, then a stale entry
+                # for this directory whose Skill would refuse.
+                (other / "skills/session/SKILL.md").write_text(refusing)
+                entries.append(stale)
+            elif mode == "skill-file-missing":
+                # The entry for this directory first: it loads and has no Skill
+                # file, though the later user entry has one.
                 (other / "skills/session/SKILL.md").unlink()
-                entries.insert(0, local)
-        elif mode == "managed-first":
-            # A managed entry applies as a user entry does, so the first one loads.
-            other = install.parent / "0.9.0"
-            shutil.copytree(install, other)
-            (other / "skills/session/SKILL.md").write_text(
-                "---\nname: session\ndisable-model-invocation: true\n---\nResume.\n")
-            entries[:] = [{"scope": "managed", "version": "1.0.0", "installPath": str(install)},
-                          {"scope": "user", "version": "0.9.0", "installPath": str(other)}]
+                entries.insert(0, stale)
+            else:
+                # A managed entry applies as a user entry does.
+                (other / "skills/session/SKILL.md").write_text(refusing)
+                entries[0]["scope"] = "managed"
+                entries.append({"scope": "user", "version": "0.9.0", "installPath": str(other)})
         elif mode == "foreign-first":
             # An entry recorded for another directory can apply through a shared
             # git root, which the script does not model: the loaded install is unknown.
@@ -127,8 +126,6 @@ class TestStartupBootstrap:
             registry.write_text("{not json" if mode == "corrupt" else json.dumps({
                 "version": 2, "plugins": plugins}))
             if mode == "unreadable":
-                if os.geteuid() == 0:
-                    pytest.skip("root reads a mode-000 file")
                 registry.chmod(0)
         (bot / ".claude/settings.local.json").write_text(json.dumps({"enabledPlugins": enabled}))
         command = "/provider:session resume --auto --note 'keep spaces'"
