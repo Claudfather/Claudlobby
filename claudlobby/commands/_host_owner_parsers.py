@@ -29,6 +29,9 @@ def register_host_owner(hosts):
     ):
         route = actions.add_parser(action, help=help_text)
         route.add_argument("--json", action="store_true", help="Structured result (status only)")
+        if action == "initialize-connected":
+            route.add_argument("--prepare-workspace", action="store_true",
+                help="Also prepare optional workspace storage, with both local confirmations")
         if action == "initialize":
             route.add_argument("--before-first-fleet", action="store_true",
                 help="Explicitly prepare host identity and owner authority before first activation")
