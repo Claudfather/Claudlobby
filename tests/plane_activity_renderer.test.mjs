@@ -593,6 +593,40 @@ test('task-specific partial coverage cannot become a clear empty board and prese
   assert.doesNotMatch(nodes.tasks.innerHTML,/st-idle|no other tasks/);
 });
 
+test('task filters use exact assignees locally, preserve warning/count truth and keep missing selections explicit',()=>{
+  const nodes=Object.fromEntries(['attention','tasks','attn-count','task-filter-status','task-filter-assignee','task-filter-reset','task-filter-count'].map(id=>[id,{innerHTML:'',value:'',hidden:false,disabled:false}]));
+  const document={activeElement:nodes['task-filter-assignee'],getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}}};
+  const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,taskAssigneeKey,resetTaskFilters})`,{...panel,document,fleets:[{alias:'north / web',display_label:'Workshop / Web app'}]});
+  const row={task_id:'north::'+wi,fleet:'north / web',title:'North active',state:'active',attention:true,current_assignment:{assignee_uid:'north::actor_1',assignee_short:'Engineer'}};
+  const peer={...row,task_id:'south::'+wi,fleet:'south / web',title:'South active',current_assignment:{assignee_uid:'south::actor_1',assignee_short:'Engineer'}};
+  const complete={...row,task_id:'north::done',title:'North result',state:'completed',attention:false,current_assignment:null,assignment_history:[row.current_assignment]};
+  const env={state:'ok',data:{tasks:[row,peer,complete],issue_count:1,truncated:true,limit:200,coverage:{total:3,reachable:2,partial:true}}};
+  board.renderTasks(env);
+  const assignee=nodes['task-filter-assignee'],status=nodes['task-filter-status'];
+  assert.match(assignee.innerHTML,/Engineer · Workshop \/ Web app/);assert.doesNotMatch(assignee.innerHTML,/>Engineer · north \/ web</);
+  assignee.value=board.taskAssigneeKey(row);assignee.onchange();
+  assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
+  assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);
+  assert.match(nodes['task-filter-count'].textContent,/2 of 3 recorded tasks/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
+  assert.match(nodes.attention.innerHTML,/2\/3 sources|Showing the newest 200/);assert.match(nodes.attention.innerHTML,/task-history issue/);
+  status.value='blocked';status.onchange();
+  assert.match(nodes.attention.innerHTML,/no matching recorded tasks/);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
+  assert.doesNotMatch(nodes.attention.innerHTML,/no tasks need attention/);
+  const selected=assignee.value;env.data.tasks=[peer];board.renderTasks(env);
+  assert.equal(assignee.value,selected);assert.match(assignee.innerHTML,/Selected assignee — not in this snapshot/);
+  assert.equal(status.value,'blocked');assert.equal(document.activeElement,assignee);
+  env.data.tasks=[];board.renderTasks(env);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
+  nodes['task-filter-reset'].onclick();assert.equal(nodes['task-filter-count'].hidden,true);
+  env.data.tasks=[peer];board.renderTasks(env);
+  nodes['task-filter-reset'].onclick();assert.equal(assignee.value,'');assert.equal(status.value,'');assert.match(nodes.attention.innerHTML,/South active/);
+  board.renderTasks({state:'unavailable',remediation:'Task records unavailable'});
+  assert.equal(assignee.disabled,true);assert.equal(status.disabled,true);assert.match(nodes.tasks.innerHTML,/Task records unavailable/);
+  assert.doesNotMatch(nodes.tasks.innerHTML,/no matching recorded tasks|no other tasks/);
+  board.renderTasks(env);assignee.value=board.taskAssigneeKey(peer);assignee.onchange();board.resetTaskFilters();
+  assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
+});
+
 for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])
 test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
   const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};

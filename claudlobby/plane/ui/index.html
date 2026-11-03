@@ -55,6 +55,12 @@
     <div class="scroll" id="search-results" hidden></div>
     <div class="scroll" id="channel"></div>
     <section id="rail-right" hidden>
+      <div class="task-filters" aria-label="Filter recorded tasks">
+        <label>Status <select id="task-filter-status"><option value="">All statuses</option><option value="queued">Queued</option><option value="assigned">Assigned</option><option value="active">Active</option><option value="blocked">Blocked</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label>
+        <label>Assigned or last assigned <select id="task-filter-assignee"><option value="">All assignees</option></select></label>
+        <button id="task-filter-reset" class="pill ghost" type="button" disabled>Reset filters</button>
+        <small id="task-filter-count" hidden></small>
+      </div>
       <div id="rail-attention" aria-label="attention">
         <h2>Needs your decision <span id="attn-count" class="count" hidden></span></h2>
         <div class="scroll" id="attention"></div>
