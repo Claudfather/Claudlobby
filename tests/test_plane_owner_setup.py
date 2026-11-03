@@ -422,3 +422,73 @@ def test_fresh_guide_runs_canonical_consents_then_keeps_foreground_serving(setup
     assert retained.state == "allowed" and retained.launch_id is None
     assert retained.grant.repository == grant.repository and not effects
     assert "Keep this terminal open" in output.getvalue()
+
+
+@pytest.mark.parametrize("platform,xdg,observed,preferred,override", [
+    ("darwin", None, ("mac-system", "mac-user"), "mac-user", None),
+    ("linux", None, ("control", "transient", "linux-system", "linux-user"), "linux-user", None),
+    ("linux", "absolute", ("linux-user", "xdg-user", "linux-system"), "xdg-user", None),
+    ("linux", None, ("control", "transient", "linux-system"), None, None),
+    ("linux", None, ("linux-system",), None, None),
+    ("linux", "absolute", ("linux-user",), None, None),
+    ("linux", "relative", ("linux-user", "linux-system"), None, None),
+    ("linux", None, ("linux-user", "linux-system"), "linux-user", "linux-system"),
+    ("linux", None, ("linux-user",), "linux-user", "linux-system"),
+], ids=["mac-user", "linux-user", "linux-xdg", "no-user-match", "only-system",
+        "xdg-not-observed", "relative-xdg", "explicit-observed", "explicit-unobserved"])
+def test_guide_install_directory_uses_only_observed_persistent_user_default(
+        tmp_path, monkeypatch, platform, xdg, observed, preferred, override):
+    import io
+    import json
+    import sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.command_result import CommandFailure
+
+    home = tmp_path / "home"
+    root = tmp_path / "data"
+    directories = {
+        "mac-user": home / "Library/LaunchAgents",
+        "mac-system": Path("/Library/LaunchAgents"),
+        "linux-user": home / ".config/systemd/user",
+        "xdg-user": tmp_path / "config/systemd/user",
+        "linux-system": Path("/etc/systemd/user"),
+        "control": home / ".config/systemd/user.control",
+        "transient": tmp_path / "run/systemd/transient",
+    }
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    if xdg:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config") if xdg == "absolute" else "relative-config")
+    monkeypatch.setattr(guide.sys, "platform", platform)
+    monkeypatch.setattr(guide, "_native_directories", lambda _: tuple(directories[key] for key in observed))
+    args = SimpleNamespace(origin="https://host.example.test", tailscale=sys.executable,
+        tailscale_socket="", socket=str(root / "state/owner/owner.sock"),
+        workspace_issuer="https://accounts.example.test", workspace_origin="https://plane.example.test",
+        target_fleet="shop", repository="example-org/shop",
+        install_directory=directories[override] if override else None)
+    terminal = io.StringIO()
+    terminal.readline = lambda size=-1: "\n"
+    approval = error = None
+    try:
+        _, approval = guide._configuration(args, SimpleNamespace(root=root), terminal,
+            SimpleNamespace(cli_path=Path(sys.executable), release_id="r-" + "a" * 64))
+    except CommandFailure as exc:
+        error = exc
+    output = terminal.getvalue()
+    if override:
+        if override in observed:
+            assert error is None
+            assert approval.install_directory == directories[override]
+        else:
+            assert error is not None and "not an observed native search path" in str(error)
+    elif preferred:
+        assert "Native installation directory [" + json.dumps(str(directories[preferred])) + "]: " in output
+        assert error is None
+        assert approval.install_directory == directories[preferred]
+        assert "Native installation choices:" not in output
+    else:
+        assert "Native installation directory: " in output
+        assert "Native installation directory [" not in output
+        assert error is not None and "explicit printable configuration" in str(error)
+        assert "Native installation choices:" in output
+    assert not (root / "state").exists()
