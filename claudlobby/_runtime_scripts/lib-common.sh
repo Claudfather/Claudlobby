@@ -4412,11 +4412,19 @@ try:
         for ref, entries in registry.items():
             if ref.split("@", 1)[0] != plugin or enabled.get(ref) is not True:
                 continue
-            # Claude Code loads the FIRST entry that applies to this directory,
-            # in registry order and whatever its scope, and never a later one;
-            # a stale per-directory entry after the user entry is inert (#2666).
-            entry = next((entry for entry in entries if entry.get("scope") == "user"
-                          or (entry.get("scope") in ("project", "local") and entry.get("projectPath") == str(bot))), None)
+            # Claude Code loads the FIRST entry that applies, in registry order
+            # and whatever its scope: a user or managed entry, or one recorded
+            # for this directory. A stale entry after it is inert (#2666). One
+            # recorded for another directory applies when both share a git
+            # root, which is not modelled here, so one ahead of the pick
+            # leaves the loaded install unknown.
+            entry = None
+            for item in entries:
+                if item.get("scope") in ("user", "managed") or item.get("projectPath") == str(bot):
+                    entry = item
+                    break
+                if item.get("projectPath"):
+                    raise ValueError()
             if entry is None:
                 continue
             install = Path(entry["installPath"])

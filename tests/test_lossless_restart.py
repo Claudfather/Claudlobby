@@ -65,7 +65,8 @@ class TestStartupBootstrap:
     @pytest.mark.parametrize("mode", ["plugin", "local", "cache-only", "disabled-skill",
                                       "disabled-plugin", "ambiguous", "native", "opaque",
                                       "empty", "stale", "missing", "absent", "stale-local",
-                                      "skill-file-missing", "corrupt", "unreadable"])
+                                      "skill-file-missing", "corrupt", "unreadable",
+                                      "managed-first", "foreign-first"])
     def test_skill_bootstrap_and_literal_compatibility(self, tmp_path, mode):
         bot, account = tmp_path / "bot", tmp_path / "selected account"
         skills = bot / ".claude/skills"
@@ -108,6 +109,19 @@ class TestStartupBootstrap:
                 # later user entry has one.
                 (other / "skills/session/SKILL.md").unlink()
                 entries.insert(0, local)
+        elif mode == "managed-first":
+            # A managed entry applies as a user entry does, so the first one loads.
+            other = install.parent / "0.9.0"
+            shutil.copytree(install, other)
+            (other / "skills/session/SKILL.md").write_text(
+                "---\nname: session\ndisable-model-invocation: true\n---\nResume.\n")
+            entries[:] = [{"scope": "managed", "version": "1.0.0", "installPath": str(install)},
+                          {"scope": "user", "version": "0.9.0", "installPath": str(other)}]
+        elif mode == "foreign-first":
+            # An entry recorded for another directory can apply through a shared
+            # git root, which the script does not model: the loaded install is unknown.
+            entries.insert(0, {"scope": "local", "projectPath": str(tmp_path / "elsewhere"),
+                               "version": "1.0.0", "installPath": str(install)})
         if mode != "cache-only":
             registry = account / "plugins/installed_plugins.json"
             registry.write_text("{not json" if mode == "corrupt" else json.dumps({
@@ -153,7 +167,7 @@ emit_fleet_event() { :; }
         assert result.returncode == 0, result.stderr
         assert not errors.exists()
         payloads = sends.read_bytes().decode().rstrip("\0").split("\0")
-        bootstrap = mode in {"plugin", "local", "stale-local"}
+        bootstrap = mode in {"plugin", "local", "stale-local", "managed-first"}
         assert ("STARTUP mode=skill-bootstrap" in (log.read_text() if log.exists() else "")) == bootstrap
         if bootstrap:
             assert len(payloads) == 1
