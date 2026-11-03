@@ -1,4 +1,5 @@
 """Selected task reads over disposable Plane roots, including protected admission."""
+import base64
 import hashlib
 import json
 from uuid import uuid4
@@ -69,6 +70,10 @@ def test_older_task_pages_discover_work_without_reducing_the_whole_fleet(tmp_pat
         "payload": {"work_item_id": newest, "title": "Admitted between pages",
                     "created_by": "bot:engineering/mgr"}}])
     before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+    payload["after"][0] = 2 ** 63
+    oversized = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    assert c.get("/api/tasks", params={"fleet": "engineering", "cursor": oversized}).json()["state"] == "invalid"
     seen = {t["task_id"] for t in first["tasks"]}
     while cursor:
         page = c.get("/api/tasks", params={"fleet": "engineering", "cursor": cursor}).json()["data"]

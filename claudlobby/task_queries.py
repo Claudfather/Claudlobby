@@ -170,7 +170,7 @@ def _after(cursor: str | None, scope: dict) -> tuple[int, str] | None:
             raise ValueError
         key = payload["after"]
         if (not isinstance(key, list) or len(key) != 2 or type(key[0]) is not int
-                or key[0] < 1 or not isinstance(key[1], str) or not key[1]):
+                or not 1 <= key[0] <= 2 ** 63 - 1 or not isinstance(key[1], str) or not key[1]):
             raise ValueError
         return key[0], key[1]
     except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
