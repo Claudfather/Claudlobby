@@ -771,9 +771,20 @@ def test_connected_selected_route_allowlist_matches_canonical_query_contract(con
     for suffix, fields in _READS.items():
         route = routes["/api/" + suffix]
         assert "GET" in route.methods
-        assert {p.name for p in route.dependant.query_params} == set(fields), suffix
+        # Exact table counts are an explicit native-only diagnostic. Every
+        # other canonical query field must still match the connected contract.
+        native_only = {"counts"} if suffix == "summary" else set()
+        assert {p.name for p in route.dependant.query_params} == set(fields) | native_only, suffix
+    assert "counts" not in _READS["summary"]
     detail = routes["/api/tasks/{task_id}"]
     assert {p.name for p in detail.dependant.query_params} == {"fleet"}
+    with TestClient(connected_http[0], base_url=HOST) as client:
+        ready = login(client, connected_http)
+        for value in ("true", "false"):
+            result = client.get(PREFIX + "read/summary?counts=" + value,
+                                headers=headers(ready["token"]))
+            assert result.status_code == 400
+            assert result.json()["state"] == "invalid_request"
 
 
 @pytest.mark.parametrize("stopping", [False, True])
