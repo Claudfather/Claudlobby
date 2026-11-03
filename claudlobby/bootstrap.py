@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import shlex
 import signal
 import stat
 import subprocess
@@ -360,7 +361,9 @@ def main(argv: list[str] | None = None) -> int:
             result = bootstrap(Path(__file__).absolute(), args.root, json_output=args.json, guided=args.guided)
         if isinstance(result, tuple):
             continuation, host_env = result
-            return _continue_guided([str(continuation), "--root", str(args.root), "host", "owner", "setup"], host_env)
+            command = [str(continuation), "--root", str(args.root), "host", "owner", "setup"]
+            print("Save this command to resume local setup:\n" + shlex.join(command), flush=True)
+            return _continue_guided(command, host_env)
         return result
     except (BundleError, OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
         message = str(exc) if isinstance(exc, BundleError) else "bundle is unreadable or malformed; inspect trusted local inputs and host Python"
