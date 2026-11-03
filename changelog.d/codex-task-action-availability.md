@@ -1,3 +1,0 @@
-### Fixed — Show each task action's access state
-
-Show feedback and nudge access separately in task details, including pending access checks, so an unavailable nudge does not obscure authorized feedback.

@@ -6,6 +6,127 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — organize the workspace around Rooms and Tasks
+
+Use a compact team sidebar and one conversation or task surface. Keep computer diagnostics, bot lists and record identifiers available on demand. Focus recent room threads by exact bot/participant identity, compose to a selected bot, or talk to a manager only when an explicit granted lead also has message access. Drafts, uncertain receipts and task feedback/nudge remain in the existing composer.
+
+Reveal computer setup and recovery controls once when a connection needs attention, while preserving a later manual collapse during unchanged refreshes.
+
+### Fixed — match team selector labels to refreshing summaries
+
+- Show “Refreshing” on team selector pills while their previously accepted summary is being refreshed, matching the summary cards and totals. Completed failures and pending first summaries continue to show unavailable.
+
+### Fixed — keep team summaries visible during refresh (#2652)
+
+Keep each computer's last accepted team summary visible and labelled while its next read is pending. Failed reads still remove that computer's figures; admission loss immediately removes only its summary, and ordinary stream reconnects no longer clear healthy summaries.
+
+### Changed — team overview puts status and attention first
+
+Team cards show running status and open, attention and overdue counts first. Supporting bot, capture and report details sit behind a Team details disclosure that stays open across refreshes for the same team. An explicit Open team button switches rooms without making the disclosure itself a navigation target.
+
+### Fixed — an activation can keep the handoff a bot saved before it went idle (#963)
+
+An activation stopped each running bot only after a handoff saved in the last 300 s, or one the bot wrote within 30 s of being asked. A handoff is a model turn of minutes, so a bot that had saved and stayed idle halted the run, and each halt needed a `--resume` inside 300 s of that bot's next save. `host activate --handoff-max-age SECONDS` (300 to 72000, default 300) now widens the window for the activation alone: the activation checks each bot's saved handoff with its own verifier, a bot whose handoff is younger is not asked for a new one, and its capture is verified against the same age when its session stops. The activation records the value and `--resume` keeps it. `bot handoff`, a bot's own restart and the handoff script keep 300 s, and with the default the activation runs as before.
+
+### Fixed — Show each task action's access state
+
+Show feedback and nudge access separately in task details, including pending access checks, so an unavailable nudge does not obscure authorized feedback.
+
+### Changed — bots no longer stop on the auto-mode setup offer or on clauDNA's capture prompt (#1388, #941)
+
+Every bot's composed `settings.local.json` now carries `skillOverrides` with
+`auto-mode-setup` set to `"off"`. Once auto mode had blocked several actions,
+Claude Code ended a turn on "Teach auto mode about your environment?", which
+nobody at a bot's pane answers; an accepted draft would also have been written
+to the `~/.claude/settings.json` that every bot running as that user shares.
+`"off"` removes both the offer and the `/auto-mode-setup` command. The new
+`skill_overrides:` mapping takes any skill and one of Claude Code's four
+states, merged per skill, so a fleet that names one skill keeps the default
+for the rest.
+
+Every bot's `bot.conf` now carries `CLAUDNA_PRECOMPACT_REFLECT=0`, so clauDNA's
+PreCompact hook no longer refuses every other compaction while it waits for a
+`/claudna:capture` that nobody runs. A bot reads `bot.conf` at session start,
+so this applies from each bot's next session. `host doctor --switches` lists it
+as `claudna-precompact-reflect`.
+
+A fleet turns either back on under `defaults:`, with
+`skill_overrides: {auto-mode-setup: "on"}` or `claudna: {precompact_reflect: true}`,
+and a bot does the same under its own entry.
+
+### Fixed — activation refuses an opted-out registry scan before it stops any bot (#2611)
+
+The switch tables offered `PLANE_EMIT_ENABLED=0` in a fleet's `.env` tiers as the registry scan's off switch. Activation needs that scan, because the plane's fleet and bot identities join to it, so the value made the next activation refuse in its bots start phase: after every running bot was paused, and with no reason shown. Activation now asks the scan's own refusal before it records or pauses anything, and names the value and the file. The same holds for an exported `PLANE_EMIT_ENABLED=0` or `PLANE_EMIT_DISABLED=1`. The switch tables and the variable reference no longer offer the value as an off switch.
+
+### Changed — the staging and `~/.env` scan tests pin a shared partial's mode, the library's partials and the underscore names (#2637)
+
+A bot's copy of its skills holds each shared partial with the mode of the file it copies, and a test now requires it: an owner-only partial stays owner-only and a runnable one stays runnable. Three cases the code already handles are pinned too: a skill directory whose name starts with an underscore, a skill directory named like a partial (`_name.md`), and a text file beside the partials, which is not staged. The test of the `~/.env` scan puts a partial in the package's library as well as in the fleet's own, so a scan that skipped the library's partials fails it. Tests only; nothing in `claudlobby/` or `library/` changes.
+
+### Fixed — keep callable Skill resume and startup in one turn
+
+Automatic bot startup invokes a positively resolved model-callable resume Skill and the unchanged authored startup instructions in one fleet bootstrap prompt. The exact slash Skill is mentioned separately for message-scoped permission; invocation and restore refusal stop the bootstrap without bypassing native permissions. Explicit-empty resume settings and literal native or unproven custom commands keep their existing semantics. Submission remains distinct from completion; activation-held release and host pacing are separate work.
+
+Configured session Skills receive an exact whole-Skill invocation allow through the existing permission composer; deny/ask rules and underlying-tool permissions stay intact. The composed resume default preserves inherited and .env overrides, including explicit empty values.
+
+The fresh-box permission audit traces the configured resume Skill through the same composition resolver, avoiding a false orphan-grant failure. Startup and briefing tests follow the shared capability and injection owners.
+
+### Fixed — preserve verified checkpoints through host activation
+
+Host activation verifies each live bot's checkpoint and quiesces that bot before requesting the next checkpoint. Interrupted activation retains exact capture and stop witnesses without resending unknown handoffs, and a verified quiet stop can retain its capture without a new freshness deadline. Named Claude account paths now resolve home shorthand consistently in composed startup configuration.
+
+### Docs — guide new users through browser-connected first-team setup (#2598)
+
+README, getting-started and `/setup` now lead to the canonical first-team route, keeping Telegram seed activation an explicit operator choice. The shared Python prerequisite checks the supported version, resolves the real executable and runs a created virtual environment before assembly; setup uses an exact supplied bundle path or an explicitly chosen source build instead of searching private directories.
+
+### Added — skills and integrations can declare `ask_grants` and `deny_grants` (#2476)
+
+A skill's or an integration's frontmatter may now list `ask_grants:` and
+`deny_grants:` beside `tool_grants:`, each entry one Claude Code permission
+rule. A list that would not compose as written, a value that is not a list or
+an entry that is not a rule, is an error that names its source, since a rule
+dropped from either list fails open. An ask rule lands in the composed
+`permissions.ask`: Claude Code asks before a matching call in every permission
+mode, auto included, even where an allow rule also matches. The fleet grants
+one by naming the same rule, exactly, under `tool_permissions.allow`, and the
+composer then drops it from the ask list. A deny rule lands in
+`permissions.deny`, where no allow rule overrides it. On an integration, an
+`mcp__<name>__` rule in either list names each server instance, as its
+`tool_grants` do. The `gitguardian` skill now denies hand-written `curl` and
+`wget` calls to `gitguardian.com`, so its helper stays the way in; it declares
+no ask rule, since the helper has no write. `bot capabilities` lists the
+composed ask rules. `settings.local.json` gains an `ask` list only when a rule
+survives, and no shipped item declares one, so no bot without the
+`gitguardian` skill composes differently.
+
+### Fixed — a bot's copy of a skill holds the shared partial the skill links (#2608)
+
+Fourteen skills link `../_telegram-formatting.md`, a shared partial at the top of `library/skills/`. Staging copied only each skill's own directory, so that link named nothing in any bot's copy. Staging now copies every shared partial (a flat `_<name>.md` at the top of `library/skills/`) to the top of each bot's `.claude/skills/`, beside the copied skills, so the same link resolves there as it does in `library/skills/`. The skill's text is unchanged. The `~/.env` scan of what a bot is told now reads the partials too.
+
+### Fixed — the GitGuardian skill's test compares the config curl reads for the EU host too (#2632)
+
+The check that sets `GITGUARDIAN_API_URL` to the EU host in `test.sh` now calls
+`token_kept`, as 23 other checks do, so the config that `gitguardian_api.sh`
+writes to curl's stdin for that host must be exactly the one header line that
+carries the token. A line written only for that host, such as one that sets a
+method, passed the suite before and now fails that check. The helper itself is
+unchanged.
+
+### Fixed — the GitGuardian skill's tests pin the config text its helper gives curl, and the shipped cap on hashes (#2628)
+
+`test.sh` now requires the config that `gitguardian_api.sh` writes to curl's
+stdin to be exactly the one header line that carries the token, in 24 of its
+62 checks, the ones that call `token_kept`. A line more, such as one that
+sets a method or adds a URL, would
+change the call while its arguments stayed the same, and the suite only looked
+for the header before. A new test pins the shipped `MAX_HASHES` of 1,500; the
+test that lowers the cap shows that the search reads it. Two comments in
+`triage.py` now say the stored content looks like a patch, as its top comment
+does. The helper itself is unchanged.
+
+### Changed — each PR adds its changelog entry as its own file in `changelog.d/`, and a weekly roll-up moves the files into this one (#1714)
+
+Every PR used to add its entry at the top of this file, so each merge left every other open PR that carried one in conflict: on 2026-10-31, 9 of the 15 open PRs into `main` with an entry inserted it at the same line. Now a PR adds `changelog.d/<head branch, each / as ->.md` instead, and once a week `python3 bin/changelog.py assemble` moves the fragments in here, newest merge first. A new check, `Changelog fragment`, refuses a PR that adds no entry unless its description says `Changelog: none — <why>`. It also refuses a fragment named for another branch, and an entry written straight into this file outside a roll-up. The Claudron reference gate skips `changelog.d/`, as it skips this file. `changelog.d/README.md` has the format.
+
 ### Added — `integrations: [gitguardian]` equips a bot to read and triage GitGuardian's secret incidents (#2476)
 
 The new `gitguardian` integration declares `GITGUARDIAN_API_KEY` (secret, bot
