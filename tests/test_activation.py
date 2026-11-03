@@ -2309,7 +2309,12 @@ def preserved_handoff_case(tmp_path, monkeypatch):
         if request_started_ns is not None:
             body.setdefault("handoff_requests", {})[target] = {"started_at_ns": request_started_ns}
         body["handoff_effects"][target] = result
+    def handoff_response(_activation, *, target, marker, returncode):
+        request = body["handoff_requests"][target]
+        assert "native_result" not in request
+        request["native_result"] = {"marker": marker, "returncode": returncode}
     store = SimpleNamespace(begin=begin, complete=complete, record_handoff=handoff,
+                            record_handoff_response=handoff_response,
                             arm_handoff_evidence=lambda *_: None)
     present = [True]
     monkeypatch.setattr(activation, "read_activation", lambda *_: record)
@@ -2366,6 +2371,8 @@ def test_preserved_activation_refuses_unverified_handoff_and_never_resends_unkno
     with pytest.raises(state.ActivationRefusal, match="inspect.*session.*handoff"):
         case.run()
     assert case.body["handoff_effects"][case.target] is None
+    assert case.body["handoff_requests"][case.target]["native_result"] == {
+        "marker": "unrecognized" if marker == "unrecognized" else marker, "returncode": rc}
     assert "sessions_quiesced" not in case.steps
     assert activation.resumable_running_step(case.record) == "sessions_handed_off"
     # A late UI-approved capture reconciles only the original request: no send.
@@ -2510,7 +2517,12 @@ def _preserved_estate(tmp_path, monkeypatch, names):
             body.setdefault("handoff_requests", {})[target] = {"started_at_ns": request_started_ns}
         body["handoff_effects"][target] = result
 
+    def handoff_response(_activation, *, target, marker, returncode):
+        request = body["handoff_requests"][target]
+        assert "native_result" not in request
+        request["native_result"] = {"marker": marker, "returncode": returncode}
     store = SimpleNamespace(begin=begin, complete=complete, record_handoff=handoff,
+                            record_handoff_response=handoff_response,
                             arm_handoff_evidence=lambda *_: None)
     monkeypatch.setattr(activation, "read_activation",
                         lambda *_: SimpleNamespace(body=json.loads(json.dumps(body, sort_keys=True)),
@@ -3326,3 +3338,38 @@ def test_the_check_before_the_lock_leaves_an_unfinished_activation_to_the_run(li
         SimpleNamespace(status="activating") if identifier == "unfinished" else read(root, identifier)))
     with pytest.raises(_LockReached):
         case.upgrade(handoff_max_age_s=900)
+
+
+@pytest.mark.parametrize("flow", ["legacy", "per-bot"])
+@pytest.mark.parametrize("fresh", [True, False])
+def test_recent_skip_receipt_survives_capture_validation_and_resume_never_sends(
+        request, monkeypatch, flow, fresh):
+    case = request.getfixturevalue("per_bot_case" if flow == "per-bot" else "preserved_handoff_case")
+    target = case.units[0].target if flow == "per-bot" else case.target
+    bot_dir = case.dirs["alpha"] if flow == "per-bot" else case.bot_dir
+    _preserve_capture(bot_dir)
+    # The genuine fresh capture predates this activation request, so only an exact
+    # successful recent-skip receipt can remove the post-request write requirement.
+    path = bot_dir / ".claude/session.md"
+    written = time.time() - 2
+    os.utime(path, (written, written))
+    if flow == "per-bot":
+        case.outcome[0] = "handoff-skipped:recent"
+        monkeypatch.setattr(activation, "_quiesce_one_bot", lambda *_: (_ for _ in ()).throw(case.BotPauseReached()))
+    else:
+        case.outcome[:] = [0, "handoff-skipped:recent"]
+    verify = activation._require_preserved_handoff
+    monkeypatch.setattr(activation, "_require_preserved_handoff",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(InterruptedError("capture validation interrupted")))
+    with pytest.raises(InterruptedError):
+        case.run()
+    assert case.body["handoff_effects"][target] is None
+    assert case.body["handoff_requests"][target]["native_result"] == {
+        "marker": "handoff-skipped:recent", "returncode": 0}
+    monkeypatch.setattr(activation, "_require_preserved_handoff", verify)
+    if not fresh:
+        _preserve_capture(bot_dir, kind="stale-capture")
+    with pytest.raises(case.BotPauseReached if fresh else state.ActivationRefusal):
+        case.run()
+    assert len(case.calls) == 1
+    assert case.body["handoff_effects"][target] == ("handed_off" if fresh else None)
