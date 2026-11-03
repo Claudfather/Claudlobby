@@ -28,6 +28,20 @@ def _native_directories(paths):
     return tuple(_catalog(Adapter(paths.package).read("svc_inventory_catalog"))[2])
 
 
+def _default_install_directory(directories):
+    """Offer persistent user units only when the native catalog includes them."""
+    if sys.platform == "darwin":
+        directory = Path.home() / "Library/LaunchAgents"
+    elif sys.platform.startswith("linux"):
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        if not config_home.is_absolute():
+            return None
+        directory = config_home / "systemd/user"
+    else:
+        return None
+    return directory if directory in directories else None
+
+
 def _input(terminal, value, label, default=None, *, optional=False):
     if value is None:
         terminal.write(label + (" [" + json.dumps(str(default), ensure_ascii=True) + "]" if default not in (None, "") else "") + ": ")
@@ -66,7 +80,7 @@ def _configuration(args, paths, terminal, release):
     directories = _native_directories(paths)
     if not directories:
         raise CommandFailure("unavailable", "native user manager has no installation directory; finish native user setup first")
-    default = str(directories[0]) if len(directories) == 1 else None
+    default = _default_install_directory(directories)
     if default is None:
         terminal.write("Native installation choices: " + json.dumps([str(p) for p in directories]) + "\n")
     directory = Path(_input(terminal, args.install_directory, "Native installation directory", default))
