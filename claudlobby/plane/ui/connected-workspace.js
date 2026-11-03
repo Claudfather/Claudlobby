@@ -392,7 +392,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); element.append(row);
-      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle',setupOnly:false});
+      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,buttons,help,access} = controls;
@@ -444,10 +444,16 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           || ['renew','logout'].includes(operation) && !['ready','setup_only','unavailable','renewing','logout'].includes(status.state);
         button.disabled = disabled(operation);
       }
+      if (connection === 'ready') controls.attentionState = null;
+      else if (['setup_only','not_connected','denied','unavailable'].includes(connection)
+          && controls.attentionState !== connection) {
+        controls.attentionState = connection;
+        invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
+      }
     });
   }
-  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}}) {
-    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange}; paused = true; invoke(onPause); changed();
+  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
+    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {

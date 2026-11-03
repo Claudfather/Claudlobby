@@ -349,7 +349,8 @@ test('account recheck preserves the same focused control rather than replacing i
 
 
 test('computer cards offer one primary action and keep first-use setup and diagnostics in a native disclosure',async()=>{
- const h=harness();h.mount();await h.api.checkAccount();await flush();
+ const h=harness(),attention=[];h.mount({onConnectionAttention:event=>attention.push(event)});await h.api.checkAccount();await flush();
+ assert.deepEqual(attention,[{source:sourceA,state:'not_connected'},{source:sourceB,state:'not_connected'}]);
  const row=h.ui.get('owner-session').children[1],actions=row.children[1],primary=actions.children[0],help=row.children.at(-1);
  assert.equal(actions.children.length,1);assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
  assert.equal(help.tagName,'DETAILS');assert.ok(!help.open);
@@ -751,7 +752,9 @@ test('actual host rejection is distinct from a missing computer session',async()
 });
 
 test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
-  const h=harness(),a=refs[0].endpoint_origin;h.mount();
+  const h=harness(),a=refs[0].endpoint_origin,attention=[];
+  let computersOpen=false;
+  h.mount({onConnectionAttention:event=>{attention.push(event);computersOpen=true;}});
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
     setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
@@ -759,11 +762,17 @@ test('setup-only computer stays visible without blocking the other admitted dash
   const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0],help=card.children.at(-1);
   const summary=help.children[0];summary.focus();
   await h.api.act(0,'connect');
+  assert.equal(computersOpen,true);
+  assert.equal(attention.filter(event=>event.source===sourceA&&event.state==='setup_only').length,1);
   assert.equal(help.open,true,'setup-only admission reveals the next setup step');
   assert.match(card.children[2].textContent,/Check setup approval/);
   assert.equal(h.ui.document.activeElement,summary,'revealing setup never moves focus');
   help.open=false;
-  await h.api.act(1,'connect'); await h.api.checkAccount();
+  await h.api.act(1,'connect');
+  const attentionCount=attention.length;computersOpen=false;
+  await h.api.checkAccount();
+  assert.equal(attention.length,attentionCount,'unchanged source state never repeats attention');
+  assert.equal(computersOpen,false,'manual collapse of the outer computer disclosure survives refresh');
   assert.equal(help.open,false,'later connection and account paints preserve manual collapse');
   assert.ok(!h.ui.get('owner-session').children[2].children.at(-1).open,'another computer is not expanded');
   assert.equal(h.ui.document.activeElement,summary);
@@ -782,6 +791,18 @@ test('setup-only computer stays visible without blocking the other admitted dash
   await h.api.act(0,'connect');
   assert.equal(help.open,true,'a new explicit setup-only connection reveals the next step again');
   assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0);
+  const b=refs[1].endpoint_origin;
+  const unavailable=()=>attention.filter(event=>event.source===sourceB&&event.state==='unavailable').length;
+  const beforeUnavailable=unavailable();
+  h.overrides.set(b+'/api/owner/connected/status',()=>reply(503,{}));
+  await h.api.act(1,'check');
+  assert.equal(unavailable(),beforeUnavailable+1);computersOpen=false;
+  await h.api.checkAccount();assert.equal(computersOpen,false);assert.equal(unavailable(),beforeUnavailable+1);
+  h.overrides.delete(b+'/api/owner/connected/status');await h.api.act(1,'check');
+  assert.equal(h.api.snapshot().computers[1].state,'ready');
+  h.overrides.set(b+'/api/owner/connected/status',()=>reply(503,{}));await h.api.act(1,'check');
+  assert.equal(unavailable(),beforeUnavailable+2,'ready resets attention so a later unavailable transition reveals once');
+  assert.equal(computersOpen,true);
   h.api.dispose();
 });
 
