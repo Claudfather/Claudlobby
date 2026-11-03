@@ -878,11 +878,25 @@ def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
     assert body["data"]["daemon_serving"] is False  # probe, not presence
 
 
-def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
+def test_healthz_ok_is_one_envelope_with_summary(tmp_path, monkeypatch):
     _seed_conversation(tmp_path)
-    r = TestClient(create_app(tmp_path, package=source_package())).get("/healthz")
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    r = client.get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
+    assert data["counts"] is None and data["counts_state"] == "not_counted"
+    summary = client.get("/api/summary").json()
+    assert summary["state"] == "ok"
+    assert summary["data"]["counts"] is None and summary["data"]["counts_state"] == "not_counted"
+    assert not any("COUNT(" in query.upper() for query in queries)
     from claudlobby.plane.migrations import SCHEMA_USER_VERSION
     assert data["schema_user_version"] == SCHEMA_USER_VERSION
     assert "counts" in data and "spool_files" in data
@@ -1372,8 +1386,9 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path, monkeypatch):
     assert isinstance(h["ingest_lag_s"], float)
     assert h["rows"] is None and h["rows_reason"] == "not_counted"
     # Exact counts remain available when the operator requests diagnostics.
-    summary = client.get("/api/summary").json()
+    summary = client.get("/api/summary?counts=true").json()
     assert summary["state"] == "ok" and summary["data"]["counts"]["ingest_ledger"] > 0
+    assert summary["data"]["counts_state"] == "counted"
     assert any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
                for query in queries)
     assert h["last_ingest_at"] == ov["provenance"]["last_ingest_at"]

@@ -23,6 +23,13 @@ claudlobby plane view  # use the sealed release CLI with the [plane-ui] extra
 claudlobby plane open  # print/launch the URL (§17's open verb)
 ```
 
+Routine `/api/summary` and `/healthz` reads return recorder state and provenance without
+counting retained history: `counts` is `null` and `counts_state` is `not_counted`, not zero.
+For exact table totals, explicitly request the native `/api/summary?counts=true` diagnostic;
+it returns `counts_state: counted` with the count object when successful. This expensive
+read retains the ordinary query deadline and can time out on large history. The connected
+workspace keeps its lightweight summary route; it does not expose this diagnostic query.
+
 `/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
 db is absent or unreadable — including on a brand-new host where the
 recorder simply has not written yet — so wire monitors accordingly. The

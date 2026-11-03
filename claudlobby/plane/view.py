@@ -1638,7 +1638,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
       let one future-stamped row pin a fleet at "0s ago" forever).
     * `capture` — the recorder's policy through `capture_mode`, the ONE
       rule, as /api/trust reads it.
-    The host row is `_fetch_summary` plus the ingest lag, and `totals` is
+    The host row is recorder state plus ingest lag and latest samples; `totals` is
     those rows summed once for the header — with the disclosures a sum
     swallows (`_totals`)."""
     from datetime import datetime, timedelta, timezone
@@ -1747,7 +1747,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     samples = _host_samples(conn)
     host = {
         **_recorder_state(root),
-        # Exact ledger size is an explicit /api/summary diagnostic; counting
+        # Exact ledger size is an explicit /api/summary?counts=true diagnostic; counting
         # all history on every overview refresh can exhaust the read budget.
         "rows": None, "rows_reason": "not_counted",
         "last_ingest_at": prov.get("last_ingest_at"),
@@ -1884,12 +1884,16 @@ def _recorder_state(root: Path) -> dict:
     }
 
 
-def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
-    counts = {}
-    for t in ("communications", "work_items", "assignments", "workstreams",
-              "events", "identity_registry", "ingest_ledger"):
-        counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-    return {"counts": counts, **_recorder_state(root)}
+def _fetch_summary(conn: sqlite3.Connection, root: Path, *, include_counts: bool = False) -> dict:
+    # Frequent UI and health reads need recorder state, not full history scans.
+    counts = None
+    if include_counts:
+        counts = {}
+        for t in ("communications", "work_items", "assignments", "workstreams",
+                  "events", "identity_registry", "ingest_ledger"):
+            counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+    return {"counts": counts, "counts_state": "counted" if include_counts else "not_counted",
+            **_recorder_state(root)}
 
 
 # --------------------------------------------------------------------------
@@ -2009,8 +2013,9 @@ def create_app(
         return result
 
     @app.get("/api/summary")
-    def summary():
-        return JSONResponse(envelope(lambda c: _fetch_summary(c, root)))
+    def summary(counts: bool = False):
+        return JSONResponse(envelope(lambda c: _fetch_summary(c, root, include_counts=True)
+                                     if counts else _fetch_summary(c, root)))
 
     @app.get("/api/channel")
     def channel(limit: int = 120, fleet: str | None = None):
