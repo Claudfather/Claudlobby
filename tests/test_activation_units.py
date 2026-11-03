@@ -607,8 +607,8 @@ def test_a_resume_never_makes_the_new_runs_save_check(enrollment, monkeypatch, n
         raise AssertionError("a --resume made the new run's save check")
 
     adapter.call = call
-    # raising=False: main has no such check, and this test runs there too, unchanged.
-    monkeypatch.setattr(activation, "_stale_saves_before_lock", new_run_only, raising=False)
+    # Without raising=False: a renamed check fails here rather than leaving the tripwire inert.
+    monkeypatch.setattr(activation, "_check_before_lock", new_run_only)
     monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda _unit: "/private-fixture-tmux")
     monkeypatch.setattr(activation, "_legacy_bot_socket", lambda unit, **_kwargs:
                         (root / f"{unit.target}.sock", live[unit.target]))

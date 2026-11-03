@@ -204,11 +204,40 @@ reads `saved`), then run the same command again (#2553). A bot stopped through
 `bot stop` is not counted, and `--resume` never makes this check. A save that ages
 past the window while the run hands off the other bots takes the handoff request
 as before.
-Widen it no further than the oldest idle bot's save: work a bot did after its last
-save is not in the handoff it resumes from, and a recent handoff cannot be told
-from one the request produced (#963). The activation records the value; `--resume`
-keeps it, and an explicit different value refuses. `bot handoff` and a bot's own
-restart keep 300 s.
+Before that save check, a new activation reads the full enrollment inventory the
+run reads under its lock, which on a real host comes only after the lock wait. An
+issue about one unit that a second full read, 5 s after the first, names in the
+same words persists: the activation refuses there (exit 4, no activation record),
+naming each unit with the inventory's reason (`inventory_before_lock.refusing` in
+`--json`), so correct or remove each unit, then run the same command again
+(#2679). Without the lock a running job can change the catalog while the read
+runs, so an issue about the read as a whole, or one the second read no longer
+names, refuses nothing: one line on stderr says so
+(`inventory_before_lock.unsettled`), and the run reads the inventory again under
+its lock. A full read costs what the run's own read costs, about 85 s for 136
+units on one Raspberry Pi host, and a host with a unit problem reads twice. Where
+the save check cannot judge (for example the bot units cannot be read without the
+lock, a bot's private server cannot be observed, or another activation is
+unfinished), it names no bot and goes on as before, and says so: a
+`save check skipped:` line on stderr and `stale_saves.skipped` in `--json`, so
+stepping aside never reads as every save being fresh. `stale_saves.checked` lists
+the bots whose saves it read.
+Which window to pass: on a real host each save is a model turn of minutes, and
+the run checks every save again at its bot's handoff and stop, after the checks
+above, its lock wait and the bots before it, so 300 s does not hold. Pass the
+seconds from the first save of your save wave until the run has stopped its last
+bot (#2679). For example, 21 bots saved one after another take about 20 minutes
+from the first request to the last save (`bot handoff` waits 30 s per request,
+and on 2026-11-02 the run's consecutive handoff requests were 3 to 9 minutes
+apart, #2553). The checks before the lock then read for about 1.5 minutes, that
+run took about 7 minutes to reach its first handoff, and each bot whose save was
+inside the window then passed in about 10 s. That is at most about 32 minutes from
+the first request to the last stop, so `--handoff-max-age 3600` leaves a margin;
+that host's last run passed 5400.
+Widen it no further than that: work a bot did after its last save is not in the
+handoff it resumes from, and a recent handoff cannot be told from one the request
+produced (#963). The activation records the value; `--resume` keeps it, and an
+explicit different value refuses. `bot handoff` and a bot's own restart keep 300 s.
 
 Do not run manual unit enrollment, live regeneration or per-bot restarts alongside
 activation. The coordinator pauses old producers, saves handoffs and quiesces

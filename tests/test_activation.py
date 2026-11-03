@@ -278,10 +278,14 @@ def test_bootstrap_and_upgrade_wait_for_a_running_job_instead_of_refusing(cold, 
         raise PastTheLock  # the upgrade's first step under the lock
 
     monkeypatch.setattr(activation, "collect_enrollment", enrollment)
+    # The checks before the lock read the inventory too (#2553, #2679); this is the run's own read.
+    monkeypatch.setattr(activation, "_check_before_lock", lambda *_args, **_kwargs: None)
     plan = ConfigPlanBuilder(root, source.release_id, source.seal_sha256, ("example",), effects={}).seal()
     job = _job_holding_the_lock(root, 1.0)
+    started = time.monotonic()
     with pytest.raises(PastTheLock):
         activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    assert time.monotonic() - started >= 0.9  # it waited for the job to let go of the lock
     job.join()
 
 
@@ -361,7 +365,7 @@ def _legacy_handoff_estate(root, installed_bots, *, assigned=True, stopped=(), p
 
 def _adopt_legacy(root, plan, host, monkeypatch, units):
     inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
-                                units=tuple(units))
+                                units=tuple(units), issues=())
     inventory.require_complete = lambda: inventory
     # The frozen units' own declarations: the save check before the lock reads their names (#2553).
     monkeypatch.setattr(activation, "legacy_linux_declarations",
@@ -523,7 +527,7 @@ def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause
                             + _HANDOFF_END + b"\n")
     before = handoff.read_bytes() if appended else None
     inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
-                                units=tuple(units))
+                                units=tuple(units), issues=())
     inventory.require_complete = lambda: inventory
     monkeypatch.setattr(activation, "legacy_linux_declarations",
                         lambda _plan: tuple(unit.declaration for unit in units))
@@ -852,7 +856,9 @@ def test_upgrade_over_an_installed_template_passes_the_inventory_and_candidate_c
     (host.directory / "fleet-unit-failed@.service").write_text(
         "[Unit]\nDescription=raise a fleet alert that %i failed\n[Service]\nType=oneshot\n"
         f"ExecStart={root}/runtime/bots/manager/.cli/bin/claudlobby --root {root} fleet notify\n")
-    with pytest.raises(InventoryError, match="fleet-unit-failed@.service: owned consumer is absent"):
+    # #2679: refused before the lock now, by the issue the run's own inventory read gives.
+    with pytest.raises(activation.UnitProblemsRefusal,
+                       match=r"fleet-unit-failed@\.service \(owned consumer is absent from generated manifest\)"):
         activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
     assert not (root / "state/activations/upgrade").exists()
 
@@ -930,6 +936,8 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
         raise SeenSource
 
     monkeypatch.setattr(activation, "collect_enrollment", enrollment)
+    # The checks before the lock read the inventory too (#2553, #2679); this is the run's own read.
+    monkeypatch.setattr(activation, "_check_before_lock", lambda *_args, **_kwargs: None)
     with pytest.raises(SeenSource):
         activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
     assert len(observed) == 1 and observed[0][0] == root
@@ -1256,7 +1264,7 @@ def test_upgrade_refuses_candidate_persistent_disabled_override_before_pause(col
         return original_call(function, *args, timeout=timeout)
 
     monkeypatch.setattr(host, "call", call)
-    inventory = SimpleNamespace(manager="Darwin", catalog=catalog, units=())
+    inventory = SimpleNamespace(manager="Darwin", catalog=catalog, units=(), issues=())
     inventory.require_complete = lambda: inventory
     monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
     before = state.read_selection(root)
@@ -1294,7 +1302,7 @@ def test_same_release_upgrade_refuses_foreign_candidate_file_before_pause(cold, 
         return original_call(function, *args, timeout=timeout)
 
     monkeypatch.setattr(host, "call", call)
-    inventory = SimpleNamespace(manager="Darwin", catalog=catalog, units=())
+    inventory = SimpleNamespace(manager="Darwin", catalog=catalog, units=(), issues=())
     inventory.require_complete = lambda: inventory
     monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
     selection = state.read_selection(root)
@@ -3168,16 +3176,25 @@ def _files(*bases):
 
 
 @pytest.fixture
-def live_upgrade(cold, monkeypatch):
+def live_upgrade(cold, monkeypatch, capsys):
     """The selected cold host, about to be upgraded over its two running bots (#2553).
 
-    ``live_upgrade(saves, stopped=(), lingering=False)`` gives each bot in ``saves`` a save that
-    many seconds old (None: no save) and a live private server, a listening socket where the
-    run probes it. A bot in ``stopped`` was stopped through ``bot stop``: its unit file is gone
-    and its stop recorded, and its server too unless ``lingering``. Taking the activation lock
-    raises _LockReached, so a run that passes the save check stops there.
+    ``live_upgrade(saves, stopped=(), lingering=False, stray=(), answers=None, drift=False)`` gives
+    each bot in ``saves`` a save that many seconds old (None: no save) and a live private server, a
+    listening socket where the run probes it. A bot in ``stopped`` was stopped through ``bot stop``:
+    its unit file is gone and its stop recorded, and its server too unless ``lingering``. Each name
+    in ``stray`` is an empty unit file in no plan, which systemd reads as masked (#2679).
+    ``answers`` maps a unit to ``f(n)``, the property changes on its nth read (None: no change).
+    With ``drift``, a unit loads while the first read that reads any unit runs, so the catalog
+    that read closes with differs. Taking the activation lock raises _LockReached, so a run that
+    passes the checks before the lock stops there. ``case.reads`` counts each unit's property
+    reads; ``case.cli(*flags)`` runs the real CLI entry over the same host and returns its exit
+    code, its JSON body and its stderr.
     """
+    from collections import Counter
     from datetime import datetime, timedelta, timezone
+    from claudlobby import resources
+    from claudlobby.__main__ import main
     from claudlobby.stop_record import write_stop
     root, release, source_plan, host = cold
     activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
@@ -3188,6 +3205,8 @@ def live_upgrade(cold, monkeypatch):
     candidate = builder.seal()
     # The fixture's units report no private tmux directory; the run reads it from them.
     monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_args, **_kwargs: str(host.tmux_dir))
+    # raising=False: main makes no second inventory read, and these tests run there too.
+    monkeypatch.setattr(activation, "_INVENTORY_RECHECK_S", 0, raising=False)
 
     def lock(*_args, **_kwargs):
         raise _LockReached
@@ -3195,26 +3214,52 @@ def live_upgrade(cold, monkeypatch):
     monkeypatch.setattr(activation, "locked_activation", lock)
     sockets, servers = host.tmux_dir / f"tmux-{os.getuid()}", []
     sockets.mkdir(parents=True, exist_ok=True)
-    disenrolled, native = set(), host.call
+    disenrolled, native, reads = set(), host.call, Counter()
+    faults = {"stray": (), "answers": {}, "drift": False}
+
+    def shown(function, args, properties):
+        return subprocess.CompletedProcess([function, *args], 0,
+                                           "".join(f"{key}={value}\n" for key, value in properties.items()), "")
 
     def call(function, *args, timeout=30):
-        # systemd's own reading of a unit bot stop disenrolled, as on the Pi (#1747): not found,
-        # no fragment, no ExecStart (test_supervision_inventory's de-enrolled-by-stop case).
-        if function == "svc_inventory_properties" and str(args[0]) in disenrolled:
-            host.calls.append((function, (str(args[0]),)))
-            absent = {"Environment": "", "WorkingDirectory": "", "Id": str(args[0]), "Triggers": "",
-                      "TriggeredBy": "", "LoadState": "not-found", "ActiveState": "inactive",
-                      "FragmentPath": "", "DropInPaths": "", "UnitFileState": "", "NeedDaemonReload": "no"}
-            return subprocess.CompletedProcess([function, *args], 0,
-                                               "".join(f"{key}={value}\n" for key, value in absent.items()), "")
-        return native(function, *args, timeout=timeout)
+        if function == "svc_inventory_properties":
+            name = str(args[0])
+            seen, reads[name] = reads[name], reads[name] + 1
+            if name in disenrolled or name in faults["stray"]:
+                host.calls.append((function, (name,)))
+                # systemd's own reading of a unit bot stop disenrolled, as on the Pi (#1747): not
+                # found, no fragment, no ExecStart (test_supervision_inventory's de-enrolled-by-stop
+                # case); and of an empty unit file: masked, with no ExecStart either (#2679).
+                state_of = ({"LoadState": "not-found", "FragmentPath": "", "UnitFileState": ""}
+                            if name in disenrolled else
+                            {"LoadState": "masked", "FragmentPath": str(host.directory / name),
+                             "UnitFileState": "masked"})
+                return shown(function, (name,), {
+                    "Environment": "", "WorkingDirectory": "", "Id": name, "Triggers": "", "TriggeredBy": "",
+                    "ActiveState": "inactive", "DropInPaths": "", "NeedDaemonReload": "no", **state_of})
+            result = native(function, *args, timeout=timeout)
+            change = faults["answers"].get(name, lambda _seen: None)(seen)
+            if change:
+                properties = dict(line.split("=", 1) for line in result.stdout.splitlines())
+                result = shown(function, (name,), {**properties, **change})
+            return result
+        result = native(function, *args, timeout=timeout)
+        if function == "svc_inventory_catalog" and faults["drift"] and sum(reads.values()):
+            # A job's unit loaded while that read ran, as one does without the lock (#2679).
+            faults["drift"] = False
+            result = subprocess.CompletedProcess(result.args, 0,
+                                                 result.stdout + "loaded\tcom.example.passing.service\n", "")
+        return result
 
     monkeypatch.setattr(host, "call", call)
 
     def save(bot, age):
         _preserve_capture(root / "runtime/bots" / bot, now=datetime.now(timezone.utc) - timedelta(seconds=age))
 
-    def make(saves, *, stopped=(), lingering=False):
+    def make(saves, *, stopped=(), lingering=False, stray=(), answers=None, drift=False):
+        faults.update(stray=tuple(stray), answers=dict(answers or {}), drift=drift)
+        for name in stray:
+            (host.directory / name).write_bytes(b"")
         for bot, age in saves.items():
             if age is not None:
                 save(bot, age)
@@ -3232,11 +3277,22 @@ def live_upgrade(cold, monkeypatch):
             server.listen()
             servers.append(server)
         case = SimpleNamespace(root=root, save=save, files=_files(root, host.directory),
-                               calls=len(host.calls), selection=state.read_selection(root))
+                               calls=len(host.calls), selection=state.read_selection(root), reads=reads)
 
         def upgrade(**options):
             return activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory,
                                                  adapter=host, **options)
+
+        def cli(*flags):
+            monkeypatch.setattr(activation, "Adapter", lambda _package: host)
+            monkeypatch.setattr(resources, "selected_cli", lambda: release.cli_path)
+            for name in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE"):
+                monkeypatch.delenv(name, raising=False)
+            capsys.readouterr()
+            code = main(["--root", str(root), "--json", "host", "activate", candidate.plan_id,
+                         "--install-directory", str(host.directory), *flags])
+            output = capsys.readouterr()
+            return code, json.loads(output.out), output.err
 
         def unchanged():
             new = [name for name, _ in host.calls[case.calls:]]
@@ -3247,7 +3303,7 @@ def live_upgrade(cold, monkeypatch):
             assert _files(root, host.directory) == case.files
             return True
 
-        case.upgrade, case.unchanged = upgrade, unchanged
+        case.upgrade, case.cli, case.unchanged = upgrade, cli, unchanged
         return case
 
     yield make
@@ -3296,7 +3352,7 @@ def test_a_new_upgrade_refuses_before_its_lock_naming_each_running_bot_whose_sav
     for bot, age in named.items():
         assert (f"{bot} (no saved handoff)" if age is None else f"{bot} (saved ") in message
     assert not any(bot in message for bot in {"example/worker", "example/manager"} - set(named))
-    assert ("(the default; --handoff-max-age widens it to at most 72000 s)" in message) == (window is None)
+    assert ("(the default; on a real host" in message) == (window is None)
     assert message.endswith("then run this same command again")
 
 
@@ -3314,9 +3370,10 @@ def test_a_bot_stopped_through_bot_stop_is_not_counted_before_the_lock(live_upgr
         case.upgrade(handoff_max_age_s=900, preserve_bot_state=True)
 
 
-def test_the_check_before_the_lock_leaves_an_unfinished_activation_to_the_run(live_upgrade, monkeypatch):
+def test_the_check_before_the_lock_leaves_an_unfinished_activation_to_the_run(live_upgrade, monkeypatch, capsys):
     """#2553: while another activation is unfinished no bot can be asked to save, so the check names
-    no bot and the run takes its lock to refuse that activation there, as before."""
+    no bot and the run takes its lock to refuse that activation there, as before. #2679: it says, on
+    stderr, that it stepped aside and why."""
     case = live_upgrade({"worker": 30, "manager": 1000})
     unfinished = case.root / "state/activations/unfinished/activation.json"
     unfinished.parent.mkdir()
@@ -3324,5 +3381,152 @@ def test_the_check_before_the_lock_leaves_an_unfinished_activation_to_the_run(li
     read = activation.read_activation
     monkeypatch.setattr(activation, "read_activation", lambda root, identifier: (
         SimpleNamespace(status="activating") if identifier == "unfinished" else read(root, identifier)))
+    capsys.readouterr()
     with pytest.raises(_LockReached):
         case.upgrade(handoff_max_age_s=900)
+    assert _lines(capsys.readouterr().err, "save check skipped: ") == [
+        "save check skipped: an unfinished activation holds this host, and no bot can save until it ends; "
+        "the run refuses this one under its lock"]
+
+
+def _lines(err, prefix):
+    """The stderr lines that start with ``prefix``."""
+    return [line for line in err.splitlines() if line.startswith(prefix)]
+
+
+def test_a_save_check_that_cannot_read_the_bot_units_says_so_on_stderr_and_in_json(live_upgrade, monkeypatch):
+    """#2679: a save check that cannot read the bot units names no bot, as before, and says so: one
+    line on stderr and stale_saves.skipped in --json, so stepping aside never reads as every save
+    being fresh. Here a save is stale, so a check that could read would have refused."""
+    case = live_upgrade({"worker": 30, "manager": 1000})
+    collect = activation.collect_enrollment
+
+    def collect_enrollment(*args, only_names=None, **kwargs):
+        if only_names is not None:  # the bot units' own read, which a timer's activity can veto
+            raise InventoryError("selected installed/loaded catalog changed during inventory")
+        return collect(*args, **kwargs)
+
+    monkeypatch.setattr(activation, "collect_enrollment", collect_enrollment)
+    code, body, err = case.cli("--handoff-max-age", "900")
+    saves = body["data"]["stale_saves"]
+    assert saves["skipped"] == ("the bot units could not be read without the lock (selected installed/loaded "
+                                "catalog changed during inventory); the run reads them again under its lock")
+    assert _lines(err, "save check skipped: ") == ["save check skipped: " + saves["skipped"]]
+    assert saves["bots"] == [] and saves["checked"] == [] and saves["max_age_s"] == 900
+    # Naming no bot, the run goes on to its lock: the tripwire here.
+    assert code != 0 and "_LockReached" in err
+    assert case.unchanged()
+
+
+def test_a_bot_whose_server_the_check_cannot_observe_is_said_and_the_others_are_still_judged(
+        live_upgrade, monkeypatch, capsys):
+    """#2679: a running bot whose private server the check cannot observe is left to the run, as
+    before, and said; every other running bot's save is still judged."""
+    case = live_upgrade({"worker": 1000, "manager": 30})
+    probe = activation._legacy_bot_socket
+
+    def socket_of(unit, **kwargs):
+        if unit.declaration.bot == "manager":
+            raise state.ActivationError("fixture: unobservable private server")
+        return probe(unit, **kwargs)
+
+    monkeypatch.setattr(activation, "_legacy_bot_socket", socket_of)
+    capsys.readouterr()
+    with pytest.raises(activation.StaleSavesRefusal) as refused:
+        case.upgrade(handoff_max_age_s=900)
+    saves = refused.value.stale_saves
+    assert [row["bot"] for row in saves["bots"]] == ["example/worker"] and saves["checked"] == ["example/worker"]
+    assert saves["skipped"] == ("example/manager has a private server this read could not observe; "
+                                "the run observes it again under its lock")
+    assert _lines(capsys.readouterr().err, "save check skipped: ") == ["save check skipped: " + saves["skipped"]]
+    assert case.unchanged()
+
+
+@pytest.mark.parametrize("faults, unit, reason", [
+    pytest.param({"stray": ("com.example.stray.service",)}, "com.example.stray.service",
+                 "cannot observe effective definition: missing/unknown native unit properties",
+                 id="empty-unit-file"),
+    pytest.param({"answers": {"com.example.worker.service": lambda _seen: {"DropInPaths": "/override.conf"}}},
+                 "com.example.worker.service", "effective definition is missing, masked, overridden or stale",
+                 id="bot-unit-drop-in"),
+])
+def test_a_unit_problem_two_full_reads_name_the_same_refuses_before_the_lock(live_upgrade, faults, unit, reason):
+    """#2679: a unit problem the run's own inventory read would refuse after its lock wait refuses
+    before the lock when two full reads name it in the same words, naming the unit and its reason;
+    nothing is locked, paused, written or recorded. Every save is fresh, so the save check is not
+    what refuses."""
+    case = live_upgrade({"worker": 30, "manager": 30}, **faults)
+    with pytest.raises(state.ActivationRefusal) as refused:
+        case.upgrade()
+    assert case.unchanged()
+    report = refused.value.inventory_before_lock
+    assert report["reads"] == 2 and case.reads[unit] == 2
+    assert {"unit": unit, "reason": reason} in report["refusing"]
+    message = str(refused.value)
+    assert f"{unit} (" in message and reason in message and "the same on 2 full reads before the lock" in message
+    assert message.endswith("then run this same command again")
+
+
+def test_the_cli_names_each_refusing_unit_and_says_what_to_do(live_upgrade):
+    """#2679: through the CLI, a unit problem found before the lock is exit 4 with no record, its
+    units and reasons are in inventory_before_lock, and the hint says what to do next."""
+    stray = "com.example.stray.service"
+    case = live_upgrade({"worker": 30, "manager": 30}, stray=(stray,))
+    code, body, err = case.cli()
+    assert code == 4 and body["error"]["code"] == "conflict"
+    assert body["error"]["message"].startswith(
+        f"conflict: activation refused: 1 unit refuses the enrollment inventory the run reads under its lock, "
+        f"the same on 2 full reads before the lock: {stray} (")
+    assert body["error"]["hint"] == "correct or remove each unit it names, then rerun the same command"
+    inventory = body["data"]["inventory_before_lock"]
+    assert inventory["reads"] == 2 and {row["unit"] for row in inventory["refusing"]} == {stray}
+    assert body["data"]["stale_saves"]["skipped"] == "the enrollment inventory refused first"
+    assert body["data"]["recorded_activation"] is None and body["data"]["recording"] == "unchanged"
+    assert _lines(err, "save check skipped: ") == []
+    assert case.unchanged()
+
+
+def test_a_unit_problem_the_second_full_read_does_not_name_refuses_nothing_and_saves_are_still_judged(
+        live_upgrade, capsys):
+    """#2679: a unit problem that the second full read no longer names was transient: the check says
+    so on stderr and refuses nothing for it, and still judges every running bot's save, so a stale
+    one still refuses (where the bot units' own read would have stepped aside, #2676)."""
+    worker = "com.example.worker.service"
+    case = live_upgrade({"worker": 30, "manager": 1000},
+                        answers={worker: lambda seen: {"ActiveState": "reloading"} if seen == 0 else None})
+    capsys.readouterr()
+    with pytest.raises(activation.StaleSavesRefusal) as refused:
+        case.upgrade(handoff_max_age_s=900)
+    assert [row["bot"] for row in refused.value.stale_saves["bots"]] == ["example/manager"]
+    assert case.reads[worker] == 3  # two full reads, then the bot units' own
+    assert _lines(capsys.readouterr().err, "inventory before the activation lock unsettled: ") == [
+        f"inventory before the activation lock unsettled: {worker}: unknown or transitional supervisor state; "
+        "it refused nothing for that, and the run reads the inventory again under its lock"]
+    assert case.unchanged()
+
+
+def test_a_catalog_that_changes_during_the_full_read_is_said_and_refuses_nothing(live_upgrade, capsys):
+    """#2679: a catalog that changes while the full read runs, as a running job's unit does without
+    the lock, is about the read, not a unit: no second read, nothing refused, said on stderr, and the
+    run goes on to read the inventory again under its lock."""
+    case = live_upgrade({"worker": 30, "manager": 30}, drift=True)
+    capsys.readouterr()
+    with pytest.raises(_LockReached):
+        case.upgrade()
+    assert case.reads["com.example.worker.service"] == 2  # one full read, then the bot units' own
+    assert _lines(capsys.readouterr().err, "inventory before the activation lock unsettled: ") == [
+        "inventory before the activation lock unsettled: installed/loaded catalog changed during inventory; "
+        "it refused nothing for that, and the run reads the inventory again under its lock"]
+    assert case.unchanged()
+
+
+def test_the_default_window_refusal_says_which_window_a_real_host_passes_and_why(live_upgrade):
+    """#2679: at the default window the refusal says what to pass on a real host, and why: saves
+    take minutes, and the run checks each save again at its bot's handoff and stop."""
+    case = live_upgrade({"worker": 30, "manager": 400})
+    with pytest.raises(activation.StaleSavesRefusal) as refused:
+        case.upgrade()
+    assert ("no saved handoff under 300 s old (the default; on a real host, where each save takes minutes and "
+            "the run checks every save again at its bot's handoff and stop, pass --handoff-max-age with the "
+            "seconds from the first save of your save wave until the run has stopped its last bot, at most "
+            "72000), read before the activation lock: example/manager (saved ") in str(refused.value)

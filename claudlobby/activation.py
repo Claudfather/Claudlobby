@@ -746,10 +746,11 @@ class StaleSavesRefusal(ActivationRefusal):
 
     ``stale_saves`` is what the CLI reports (#2553): the window, and each bot by fleet/bot with
     its save's age in whole seconds, None where no save could be read or its file's time is
-    ahead of this host's clock. The text names only bots, ages and fixed conditions.
+    ahead of this host's clock; with (#2679) the bots whose saves were read and what the read
+    could not judge. The text names only bots, ages and fixed conditions.
     """
 
-    def __init__(self, stale, max_age):
+    def __init__(self, stale, max_age, report=None):
         from .bot_operations import _HANDOFF_FRESH_S, StaleHandoffError
         rows = []
         for label, error in sorted(stale, key=lambda item: item[0]):
@@ -765,10 +766,14 @@ class StaleSavesRefusal(ActivationRefusal):
             else:
                 words = "no saved handoff it can verify"
             rows.append((label, age, words))
-        self.stale_saves = {"max_age_s": max_age,
+        self.stale_saves = {"checked": [], "skipped": None, **(report or {}), "max_age_s": max_age,
                             "bots": [{"bot": label, "age_s": age} for label, age, _ in rows]}
-        window = (f"{max_age} s old (the default; --handoff-max-age widens it to at most "
-                  f"{_HANDOFF_MAX_AGE_LIMIT_S} s)" if max_age == _HANDOFF_FRESH_S else f"{max_age} s old")
+        # A real host cannot meet the default (#2679): each save is a model turn of minutes, and
+        # the run checks every save again at its bot's handoff and stop, after its lock wait.
+        window = (f"{max_age} s old (the default; on a real host, where each save takes minutes and the run "
+                  "checks every save again at its bot's handoff and stop, pass --handoff-max-age with the "
+                  "seconds from the first save of your save wave until the run has stopped its last bot, at "
+                  f"most {_HANDOFF_MAX_AGE_LIMIT_S})" if max_age == _HANDOFF_FRESH_S else f"{max_age} s old")
         count = "1 running bot has" if len(rows) == 1 else f"{len(rows)} running bots have"
         super().__init__(
             f"{count} no saved handoff under {window}, read before the activation lock: "
@@ -778,9 +783,106 @@ class StaleSavesRefusal(ActivationRefusal):
               "then run this same command again")
 
 
-def _stale_saves_before_lock(root, plan, adapter, *, legacy_source, max_age):
-    """Each running bot whose saved handoff this run's own check would not keep, read before the
-    run takes its lock or shuts a door (#2553).
+class UnitProblemsRefusal(ActivationRefusal):
+    """A new activation's refusal, before its lock, of unit problems its own inventory read would
+    refuse after the lock wait (#2679).
+
+    ``inventory_before_lock`` is what the CLI reports: the full reads made and their seconds, and
+    each refusing issue by unit with its reason in the inventory's own words. The text names only
+    units and those words.
+    """
+
+    def __init__(self, report):
+        self.inventory_before_lock = report
+        units = {}
+        for row in report["refusing"]:
+            units.setdefault(row["unit"], []).append(row["reason"])
+        count = "1 unit refuses" if len(units) == 1 else f"{len(units)} units refuse"
+        super().__init__(
+            f"{count} the enrollment inventory the run reads under its lock, the same on "
+            f"{report['reads']} full reads before the lock: "
+            + ", ".join(f"{unit} ({'; '.join(reasons)})" for unit, reasons in units.items())
+            + "; nothing is locked, paused or recorded, and the run's own read under its lock refuses "
+              "the same issues, so correct or remove each unit (or let a host operation that is changing "
+              "it finish), then run this same command again")
+
+
+# The second full inventory read before the lock starts this long after the first ends: an issue
+# about one unit that both reads name in the same words is persistent (#2679).
+_INVENTORY_RECHECK_S = 5.0
+# An inventory issue about one unit reads "<unit>: <reason>". Its reasons are the inventory's own
+# words, except one that wraps a native error, whose text a refusal never shows.
+_ISSUE_UNIT = re.compile(r"[A-Za-z0-9_.@:-]{1,200}\.(?:service|timer|socket|path|target|plist)")
+_ISSUE_WORDS = re.compile(r"[a-z][a-z ,/:-]{0,300}")
+
+
+def _unit_issue(issue):
+    """(unit, reason in product words) for an inventory issue about one unit; None for one about
+    the read as a whole, such as a catalog that changed while it ran (#2679)."""
+    unit, sep, reason = issue.partition(": ")
+    if not sep or not _ISSUE_UNIT.fullmatch(unit):
+        return None
+    return unit, reason if _ISSUE_WORDS.fullmatch(reason) else "a native read failed"
+
+
+def _issue_row(issue):
+    named = _unit_issue(issue)
+    if named:
+        return {"unit": named[0], "reason": named[1]}
+    return {"unit": None, "reason": issue if _ISSUE_WORDS.fullmatch(issue) else "a native read failed"}
+
+
+def _said(exc):
+    """What a read that raised says, in product words only (#2679)."""
+    if not isinstance(exc, InventoryError):
+        return f"a native read failed ({type(exc).__name__})"
+    rows = [_issue_row(issue) for issue in
+            str(exc).removeprefix("incomplete enrollment inventory: ").split("; ") if issue]
+    return "; ".join(f"{row['unit']}: {row['reason']}" if row["unit"] else row["reason"]
+                     for row in rows) or "an empty inventory"
+
+
+def _inventory_issues(root, declarations, adapter, *, legacy_source):
+    """The issues one full read of the run's own enrollment inventory finds, read without the lock."""
+    try:
+        inventory = collect_enrollment(root, declarations, legacy_source=legacy_source, adapter=adapter)
+    except (ActivationError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        return (f"the read could not finish ({_said(exc)})",)
+    return inventory.issues or (() if inventory.units else ("the read found no unit",))
+
+
+def _inventory_before_lock(root, declarations, adapter, *, legacy_source):
+    """Read before the lock the full enrollment inventory the run reads under it (#2679).
+
+    The run reads it once, after its lock wait (minutes on a real host, with every save aging),
+    and refuses at once on any issue. Read here, a unit problem is named while every door is
+    open. Without the lock a running job's unit can change the catalog while the read runs,
+    which the lock's wait prevents, so only an issue about one unit that a second full read,
+    ``_INVENTORY_RECHECK_S`` after the first, names in the same words refuses: one that
+    persists, as the run would refuse it. Any other issue (one the second read no longer names,
+    or one about the read as a whole) is reported as unsettled and left to the run's read.
+    """
+    started = time.monotonic()
+    first = _inventory_issues(root, declarations, adapter, legacy_source=legacy_source)
+    report = {"reads": 1, "seconds": None, "refusing": [], "unsettled": [], "skipped": None}
+    seen, persistent = list(first), []
+    if any(_unit_issue(issue) for issue in first):
+        time.sleep(_INVENTORY_RECHECK_S)
+        second = _inventory_issues(root, declarations, adapter, legacy_source=legacy_source)
+        report["reads"] = 2
+        persistent = sorted({issue for issue in first if _unit_issue(issue)} & set(second))
+        seen += [issue for issue in second if issue not in first]
+    report["seconds"] = round(time.monotonic() - started, 1)
+    if persistent:
+        report["refusing"] = [_issue_row(issue) for issue in persistent]
+        raise UnitProblemsRefusal(report)
+    report["unsettled"] = [_issue_row(issue) for issue in dict.fromkeys(seen)]
+    return report
+
+
+def _saves_before_lock(root, declarations, adapter, *, legacy_source, max_age):
+    """Each running bot whose saved handoff this run's own check would not keep (#2553), with the
+    bots whose saves were read and what this read could not judge (#2679).
 
     The run reaches its handoffs only after it has paused the producers, with every write door
     shut, and a save is a model turn of minutes (#963), so a bot without a save inside the
@@ -788,34 +890,24 @@ def _stale_saves_before_lock(root, plan, adapter, *, legacy_source, max_age):
     is named while the operator can still save it. This reads without the lock what the run
     reads under it, narrowed to the bot units: the same inventory's installed bot units with a
     live private server (``bot stop`` uninstalls a bot's unit), and each one's save, judged by
-    the run's own verifier at the run's window. It names no bot where the run would refuse first
-    on another ground, or where the estate cannot be read here; the run's checks under its lock
-    stay authoritative.
+    the run's own verifier at the run's window. What it cannot read here it names in
+    ``skipped`` and leaves to the run's checks under its lock, which stay authoritative.
     """
     from .bot_operations import BotLifecycleError, _fresh_self_handoff
+    report = {"max_age_s": max_age, "checked": [], "bots": [], "skipped": None}
+    bots = frozenset(declaration.source.name for declaration in declarations if declaration.scope == "bot")
+    if not bots:
+        return [], report
     try:
-        selected = read_selection(root)
-        if (selected is None) != legacy_source:
-            return []
-        for prior in (root / "state/activations").glob("*/activation.json"):
-            # An unfinished activation (which also refuses every save request) and an adoption
-            # over an earlier one are the run's to refuse or admit under its lock.
-            if legacy_source or read_activation(root, prior.parent.name).status not in {"active", "rolled_back"}:
-                return []
-        manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
-        declarations = (current_declarations(read_plan(root, selected["plan_id"]), manager) if not legacy_source
-                        else legacy_linux_declarations(plan) if manager == "Linux"
-                        else _legacy_declarations(plan) if manager == "Darwin" else ())
-        bots = frozenset(declaration.source.name for declaration in declarations if declaration.scope == "bot")
-        if not bots:
-            return []
         # Only the bot units: without the lock, an unrelated timer's activity can veto a read of
         # every unit, and the run's own read waits that out under its lock.
         units = collect_enrollment(root, declarations, legacy_source=legacy_source, adapter=adapter,
                                    only_names=bots).require_complete().units
-    except (ActivationError, OSError, ValueError, subprocess.SubprocessError):
-        return []
-    stale = []
+    except (ActivationError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        report["skipped"] = (f"the bot units could not be read without the lock ({_said(exc)}); "
+                             "the run reads them again under its lock")
+        return [], report
+    stale, unobserved = [], []
     for unit in units:
         if not unit.installed or unit.declaration.scope != "bot":
             continue
@@ -823,12 +915,88 @@ def _stale_saves_before_lock(root, plan, adapter, *, legacy_source, max_age):
             if not _legacy_bot_socket(unit, require_for_active=False)[1]:
                 continue
         except ActivationError:
-            continue  # The run observes this server again under its lock, and refuses it there.
+            unobserved.append(_bot_label(unit))  # The run observes it again under its lock.
+            continue
+        report["checked"].append(_bot_label(unit))
         try:
             _fresh_self_handoff(unit.declaration.working_directory, max_age_s=max_age)
         except BotLifecycleError as exc:
             stale.append((_bot_label(unit), exc))
-    return stale
+    report["checked"].sort()
+    if unobserved:
+        report["skipped"] = (", ".join(sorted(unobserved))
+                             + (" has a private server" if len(unobserved) == 1 else " have private servers")
+                             + " this read could not observe; the run observes "
+                             + ("it" if len(unobserved) == 1 else "each") + " again under its lock")
+    return stale, report
+
+
+def _check_before_lock(root, plan, adapter, *, legacy_source, max_age, report_checks=None):
+    """What a new run checks before it takes its lock or shuts a door, while every door is open.
+
+    First the full enrollment inventory the run reads under its lock (#2679): a unit problem two
+    reads name the same refuses here (UnitProblemsRefusal). Then each running bot's save against
+    the run's window (#2553): a bot whose save the run would not keep refuses here
+    (StaleSavesRefusal). Where a read could not judge, the check says so, one line on stderr and
+    in the report, so a check that stepped aside never reads as one that passed. The run's own
+    checks under its lock stay authoritative. ``report_checks`` receives the report, its
+    ``stale_saves`` and ``inventory_before_lock``, before any refusal is raised.
+    """
+    saves = {"max_age_s": max_age, "checked": [], "bots": [], "skipped": None}
+    inventory = {"reads": 0, "seconds": None, "refusing": [], "unsettled": [], "skipped": None}
+
+    def tell():
+        if report_checks is not None:
+            report_checks({"stale_saves": saves, "inventory_before_lock": inventory})
+
+    reason = declarations = None
+    try:
+        selected = read_selection(root)
+        priors = [prior.parent.name for prior in (root / "state/activations").glob("*/activation.json")]
+        if (selected is None) != legacy_source:
+            reason = "this host's release selection does not fit the activation, which the run refuses under its lock"
+        elif legacy_source and priors:
+            reason = ("an earlier activation record is there, and the run decides under its lock whether this "
+                      "first adoption may go on")
+        elif any(read_activation(root, prior).status not in {"active", "rolled_back"} for prior in priors):
+            reason = ("an unfinished activation holds this host, and no bot can save until it ends; "
+                      "the run refuses this one under its lock")
+        else:
+            manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
+            declarations = (current_declarations(read_plan(root, selected["plan_id"]), manager) if not legacy_source
+                            else legacy_linux_declarations(plan) if manager == "Linux"
+                            else _legacy_declarations(plan) if manager == "Darwin" else ())
+            if not declarations:
+                reason = "no unit declarations were found to read, which the run refuses under its lock"
+    except (ActivationError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        reason = f"the estate could not be read without the lock ({_said(exc)}); the run reads it again under its lock"
+    if reason:
+        saves["skipped"] = inventory["skipped"] = reason
+        print(f"save check skipped: {reason}", file=sys.stderr, flush=True)
+        tell()
+        return
+    try:
+        inventory = _inventory_before_lock(root, declarations, adapter, legacy_source=legacy_source)
+    except UnitProblemsRefusal as refusal:
+        inventory = refusal.inventory_before_lock
+        saves["skipped"] = "the enrollment inventory refused first"
+        tell()
+        raise
+    if inventory["unsettled"]:
+        print("inventory before the activation lock unsettled: "
+              + "; ".join(f"{row['unit']}: {row['reason']}" if row["unit"] else row["reason"]
+                          for row in inventory["unsettled"])
+              + "; it refused nothing for that, and the run reads the inventory again under its lock",
+              file=sys.stderr, flush=True)
+    stale, saves = _saves_before_lock(root, declarations, adapter, legacy_source=legacy_source, max_age=max_age)
+    if saves["skipped"]:
+        print(f"save check skipped: {saves['skipped']}", file=sys.stderr, flush=True)
+    if stale:
+        refusal = StaleSavesRefusal(stale, max_age, saves)
+        saves = refusal.stale_saves
+        tell()
+        raise refusal
+    tell()
 
 
 def _handoff_request_time(unit, handed_off, old_bots, *, per_bot=False):
@@ -1230,7 +1398,7 @@ def _recorded_recovery(root, record, release, *, forward_recovery=None):
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None, preserve_bot_state=False,
-                        forward_recovery=False, handoff_max_age_s=None) -> ActivationRecord:
+                        forward_recovery=False, handoff_max_age_s=None, report_checks=None) -> ActivationRecord:
     """Quiesce an enrolled estate, then install one reviewed sealed candidate.
 
     First adoption has no sealed recovery floor. An upgrade binds the selected
@@ -1261,14 +1429,14 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("activation adapter differs from the candidate release")
-    # A running bot whose save this run would not keep refuses here, by name, before the lock and
-    # every door the run shuts, while the operator can still save it (#2553). A --resume never
-    # comes here: its doors are already shut, so no save could be made.
+    # A unit problem the run's own inventory read would refuse after its lock wait (#2679), and a
+    # running bot whose save this run would not keep (#2553), refuse here, by name, before the lock
+    # and every door the run shuts, while the operator can still act. A --resume never comes here:
+    # its doors are already shut, so no save could be made.
     from .bot_operations import _HANDOFF_FRESH_S
     window = _HANDOFF_FRESH_S if handoff_max_age_s is None else handoff_max_age_s
-    stale = _stale_saves_before_lock(root, plan, adapter, legacy_source=legacy_source, max_age=window)
-    if stale:
-        raise StaleSavesRefusal(stale, window)
+    _check_before_lock(root, plan, adapter, legacy_source=legacy_source, max_age=window,
+                       report_checks=report_checks)
     with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         selected = read_selection(root)
         if legacy_source and selected is not None:
@@ -2044,17 +2212,19 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
 
 def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
                               install_directory: Path, *, adapter: Adapter | None = None,
-                              handoff_max_age_s=None) -> ActivationRecord:
+                              handoff_max_age_s=None, report_checks=None) -> ActivationRecord:
     """First activation of an already running, unsealed native estate."""
     return _running_activation(root, activation_id, plan_id, install_directory,
-                               legacy_source=True, adapter=adapter, handoff_max_age_s=handoff_max_age_s)
+                               legacy_source=True, adapter=adapter, handoff_max_age_s=handoff_max_age_s,
+                               report_checks=report_checks)
 
 
 def upgrade_activation(root: Path, activation_id: str, plan_id: str,
                        install_directory: Path, *, adapter: Adapter | None = None,
                        preserve_bot_state=False, forward_recovery=False,
-                       handoff_max_age_s=None) -> ActivationRecord:
+                       handoff_max_age_s=None, report_checks=None) -> ActivationRecord:
     """Upgrade an active selected release with that seal as the recovery floor."""
     return _running_activation(root, activation_id, plan_id, install_directory,
                                legacy_source=False, adapter=adapter, preserve_bot_state=preserve_bot_state,
-                               forward_recovery=forward_recovery, handoff_max_age_s=handoff_max_age_s)
+                               forward_recovery=forward_recovery, handoff_max_age_s=handoff_max_age_s,
+                               report_checks=report_checks)

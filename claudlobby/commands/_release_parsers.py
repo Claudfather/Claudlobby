@@ -219,7 +219,9 @@ def register_release_subparsers(sub):
                           help="Upgrades and adoptions: how old (300 to 72000 s, default 300) a bot's saved handoff "
                                "may be and still count, so a bot that saved and stayed idle is not asked for a new "
                                "one. A new run first refuses, before its lock, naming each running bot whose save is "
-                               "older. Recorded with the activation: --resume keeps it, and an explicit change refuses")
+                               "older. On a real host pass the seconds from the first save of the save wave until the "
+                               "run has stopped its last bot. Recorded with the activation: --resume keeps it, and an "
+                               "explicit change refuses")
     activate.add_argument("--adopt-existing", action="store_true",
                           help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
     activate.add_argument("--resume", metavar="ACTIVATION_ID",

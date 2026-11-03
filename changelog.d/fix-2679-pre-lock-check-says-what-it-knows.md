@@ -1,0 +1,5 @@
+### Changed — the checks before a new activation's lock say what they know (#2679)
+
+`claudlobby host activate` now reads, before its lock, the full enrollment inventory the run reads under it. An issue about one unit that a second full read, 5 s later, names in the same words refuses there (exit 4, no activation record), naming each unit and the inventory's reason (`inventory_before_lock` in `--json`); before, the run met it only after its lock wait, with every save aging, and reported "activation did not complete". An issue about the read as a whole, such as a catalog a running job changed, or one the second read no longer names, refuses nothing and is said on one stderr line. A healthy host pays one more full read before the lock: about 85 s for 136 units on one Raspberry Pi host.
+
+When the save check before the lock cannot judge, it still names no bot and the run goes on, and it now says so: a `save check skipped:` line on stderr and `stale_saves.skipped` in `--json`, with `stale_saves.checked` listing the bots whose saves it read. At the default window, the refusal and the host conversion guide say which `--handoff-max-age` a real host passes, and why.

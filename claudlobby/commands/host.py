@@ -188,6 +188,7 @@ def _activate(args, root):
                                  data={**data, "recorded_activation": _recorded(root, args.resume)},
                                  release_id=executing,
                                  hint="inspect the pending step and repair its native/journal witness before retrying")
+    checks = {}  # What a new run's checks before its lock read, for --json whatever follows (#2679).
     try:
         from ..activation import adopt_existing_activation, bootstrap_activation, upgrade_activation, resume_activation
         from ..activation_state import read_selection
@@ -210,6 +211,8 @@ def _activate(args, root):
                 from ..activation_state import ActivationRefusal
                 raise ActivationRefusal("--handoff-max-age requires an activation that hands off running bots")
             options["handoff_max_age_s"] = args.handoff_max_age
+        if activate in (upgrade_activation, adopt_existing_activation):
+            options["report_checks"] = checks.update
         record = activate(root, args.activation_id, plan.plan_id, directory, **options)
     except Exception as exc:
         from subprocess import TimeoutExpired
@@ -219,6 +222,7 @@ def _activate(args, root):
         # The owner prepares the record before any pause or effect; no record
         # for this ID means the refusal happened while the host was unchanged.
         data.update(recorded_activation=recorded, recording="unknown" if recorded else "unchanged")
+        data.update(checks)
         hint = _hint(root) if recorded else (
             "no activation record was created; correct the refusal and rerun the same command")
         pending = "inspect its pending step" if recorded else "no activation record was created"
@@ -240,6 +244,10 @@ def _activate(args, root):
                 data["stale_saves"] = exc.stale_saves
                 hint = ("save each bot it names (bot handoff BOT in its fleet, then its --check until it "
                         "reads saved), then rerun the same command")
+            elif getattr(exc, "inventory_before_lock", None) is not None and not recorded:
+                # Read before the lock too, so a unit it names can be corrected with no repair (#2679).
+                data["inventory_before_lock"] = exc.inventory_before_lock
+                hint = "correct or remove each unit it names, then rerun the same command"
         elif isinstance(exc, ActivationError):
             # Native stderr can contain arbitrary text. Disclose only the
             # operation and rc from the product-owned refusal envelope.
@@ -281,6 +289,7 @@ def _activate(args, root):
         raise CommandFailure("conflict", "conflict: activation owner did not confirm active state",
                              data={**data, "recorded_activation": _recorded(root, args.activation_id), "recording": "unknown"},
                              release_id=executing, hint=_hint(root))
+    data.update(checks)
     data.update(recorded_activation=saved, recording="committed",
                 runtime_observation="readiness_checked_during_activation",
                 user_manager_startup="host_prerequisite", upgrade_supported=True, recovery_supported=False)

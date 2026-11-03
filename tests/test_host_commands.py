@@ -225,7 +225,7 @@ def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidat
     assert result["data"]["recovery_mode"] == result["data"]["recorded_activation"]["recovery_mode"] == "target"
     upgrades = []
 
-    def upgrade(selected_root, activation_id, plan_id, install_directory):
+    def upgrade(selected_root, activation_id, plan_id, install_directory, report_checks=None):
         upgrades.append((selected_root, activation_id, plan_id, install_directory))
         with state.locked_activation(root) as store:
             store.prepare(activation_id, plan, recovery_release_id=release.release_id,
@@ -248,7 +248,7 @@ def test_explicit_first_adoption_routes_to_legacy_owner_without_changing_cold_de
     root, release, plan, directory = candidate
     calls = []
 
-    def adopt(selected_root, activation_id, plan_id, install_directory):
+    def adopt(selected_root, activation_id, plan_id, install_directory, report_checks=None):
         calls.append((selected_root, activation_id, plan_id, install_directory))
         with state.locked_activation(root) as store:
             store.prepare(activation_id, plan, recovery_release_id=release.release_id,
@@ -836,6 +836,7 @@ def test_preserve_bot_state_routes_only_explicit_upgrade_option(candidate, monke
     calls = []
     monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
     def upgrade(*args, **kwargs):
+        kwargs.pop("report_checks")  # the checks' reporter rides with every upgrade (#2679)
         calls.append((args, kwargs))
         raise state.ActivationRefusal("witnessed option")
     monkeypatch.setattr(activation, "upgrade_activation", upgrade)
@@ -865,6 +866,7 @@ def test_forward_recovery_routes_only_explicit_mode(candidate, monkeypatch, caps
     calls = []
     monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
     def upgrade(*args, **kwargs):
+        kwargs.pop("report_checks")  # the checks' reporter rides with every upgrade (#2679)
         calls.append(kwargs)
         raise state.ActivationRefusal("witnessed recovery choice")
     monkeypatch.setattr(activation, "upgrade_activation", upgrade)
@@ -889,6 +891,7 @@ def test_forward_recovery_activation_reports_target_forward_only(candidate, monk
     calls = []
 
     def upgrade(selected_root, activation_id, plan_id, install_directory, **options):
+        options.pop("report_checks")  # the checks' reporter rides with every upgrade (#2679)
         calls.append(options)
         with state.locked_activation(root) as store:
             store.prepare(activation_id, plan, recovery_release_id=release.release_id,
@@ -913,6 +916,7 @@ def test_handoff_max_age_routes_only_explicit_seconds(candidate, monkeypatch, ca
     calls = []
     monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
     def upgrade(*args, **kwargs):
+        kwargs.pop("report_checks")  # the checks' reporter rides with every upgrade (#2679)
         calls.append(kwargs)
         raise state.ActivationRefusal("witnessed handoff max age")
     monkeypatch.setattr(activation, "upgrade_activation", upgrade)
@@ -959,7 +963,7 @@ def test_a_refusal_over_old_saves_reports_each_bot_and_its_age_with_the_host_unc
                               "900 s old, read before the activation lock: example/manager (no saved "
                               "handoff), example/worker (saved 1201 s ago); ")
     assert message.endswith("then run this same command again; no activation record was created")
-    assert result["data"]["stale_saves"] == {"max_age_s": 900, "bots": [
+    assert result["data"]["stale_saves"] == {"max_age_s": 900, "checked": [], "skipped": None, "bots": [
         {"bot": "example/manager", "age_s": None}, {"bot": "example/worker", "age_s": 1201}]}
     assert result["data"]["recorded_activation"] is None and result["data"]["recording"] == "unchanged"
     hint = result["error"]["hint"]
