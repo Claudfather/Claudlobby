@@ -123,6 +123,7 @@ fleet:
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
       skill_overrides: {<skill>: "<state>"}  # OPTIONAL — settings.local skillOverrides, merged per skill (default: {auto-mode-setup: "off"})
+      auto_compact_window: auto | <tokens>  # OPTIONAL — settings.local autocompact window, 100000 to 1000000 (default: auto)
       remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
@@ -927,6 +928,34 @@ removes both the command and the offer. To turn them back on for a fleet:
 ```yaml
 defaults:
   skill_overrides: {auto-mode-setup: "on"}
+```
+
+### `bots.<name>.auto_compact_window`
+
+`auto` (the default) or a whole number of tokens from `100000` to `1000000`: the context size
+Claude Code compacts the bot's conversation at by itself. Can be set in `defaults:`; bot-level
+overrides.
+
+- **`auto`** composes `modelSettings` into `settings.local.json`, naming each model Claude Code
+  gives a native 1M window `{"autoCompactWindow": "auto"}`. That is Claude Code's own window, the
+  one it uses with nothing set, so the bot compacts when it did before. What it stops (#1388): on
+  such a model, Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier
+  … Want to autocompact at 400k tokens instead?". No one at a bot's pane answers it, and the
+  answer is kept per account and model in the global config that every bot running as that user
+  shares, so a new account or a new model asks again. A window set in local settings stops the
+  asking.
+- **A number** composes `autoCompactWindow`: the bot compacts as its context nears that many
+  tokens, or its model's own window when that is smaller. It stops the asking too. Claude Code
+  drops a value outside the range without a word, so the parser refuses one.
+
+A window set in user settings (`~/.claude/settings.json`) no longer reaches the bot: with `auto`
+on those models, with a number on any model. Set it here instead. The models are
+`NATIVE_1M_MODELS` in `claudlobby/known_values.py`, from Claude Code 2.1.316's model registry; a
+model Claude Code adds later can ask again until it is added there.
+
+```yaml
+defaults:
+  auto_compact_window: 400000
 ```
 
 ### `bots.<name>.agent_cli`

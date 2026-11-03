@@ -49,7 +49,7 @@ from .config import (
     HOST_OVERRIDE_ENV,
     host_override_path,
 )
-from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
+from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, NATIVE_1M_MODELS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
@@ -3382,6 +3382,19 @@ def compose_settings_local(
     # fleet.yaml-overridable per skill, under defaults: or per bot.
     if bot.skill_overrides:
         settings["skillOverrides"] = dict(bot.skill_overrides)
+
+    # #1388: on a model with a native 1M window, Claude Code can end a turn past
+    # 200k tokens on "Want to autocompact at 400k tokens instead?", which nobody
+    # at a bot's pane answers. The answer is kept per account and model, so a
+    # new one asks again. A window set outside user settings stops the asking.
+    # "auto" names Claude Code's own window for each model it can ask about, the
+    # window it uses with nothing set; a number caps every model's window.
+    if bot.auto_compact_window == "auto":
+        settings["modelSettings"] = {
+            model: {"autoCompactWindow": "auto"} for model in NATIVE_1M_MODELS
+        }
+    else:
+        settings["autoCompactWindow"] = bot.auto_compact_window
 
     return settings
 

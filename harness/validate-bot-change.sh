@@ -5226,6 +5226,9 @@ harness_check "#941 unarmed composition turns clauDNA's capture prompt off" "$r"
 r=no; "$VAL_PY" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])).get("skillOverrides") != {"auto-mode-setup": "off"})' \
     "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
 harness_check "#1388 composed settings turn /auto-mode-setup and its offer off" "$r"
+r=no; "$VAL_PY" -c 'import json, sys; s = json.load(open(sys.argv[1])); m = s.get("modelSettings") or {}; sys.exit(not ("claude-sonnet-5-5" in m and all(v == {"autoCompactWindow": "auto"} for v in m.values()) and "autoCompactWindow" not in s))' \
+    "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
+harness_check "#1388 composed settings keep Claude Code's own autocompact window and block its offer" "$r"
 r=yes
 for _se_retired in SESSION_""DIGEST transcript-""digest plane-session-""start; do
     grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true

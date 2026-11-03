@@ -19,6 +19,8 @@ import yaml
 from . import defaults as _defaults
 
 from .known_values import (
+    AUTO_COMPACT_WINDOW_MAX,
+    AUTO_COMPACT_WINDOW_MIN,
     DEFAULT_SKILL_OVERRIDES,
     KNOWN_EFFORTS,
     KNOWN_AGENT_CLIS,
@@ -773,6 +775,10 @@ class BotConfig:
     skill_overrides: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_SKILL_OVERRIDES)
     )
+    # settings.local.json autocompact window: "auto" keeps Claude Code's own
+    # window and blocks its end-of-turn autocompact offer (#1388); a whole
+    # number of tokens sets the window for every model.
+    auto_compact_window: str | int = "auto"
     extra_flags: list[str] = field(default_factory=list)  # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
@@ -1854,6 +1860,23 @@ def _parse_skill_overrides(defaults_raw: Any, bot_raw: Any, name: str) -> dict[s
     return merged
 
 
+def _parse_auto_compact_window(raw: dict, defaults: dict, name: str) -> str | int:
+    """``auto_compact_window``: "auto", or a whole number of tokens Claude Code
+    accepts (100000 to 1000000). Claude Code drops any other value without a word,
+    which would bring back the offer the default blocks (#1388)."""
+    value, source = _select_bot_scalar(raw, defaults, "auto_compact_window", "auto")
+    if value == "auto":
+        return "auto"
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not AUTO_COMPACT_WINDOW_MIN <= value <= AUTO_COMPACT_WINDOW_MAX):
+        where = ("defaults.auto_compact_window" if source == "fleet.defaults"
+                 else f"bots.{name}.auto_compact_window")
+        raise ValueError(
+            f"'{where}' must be \"auto\" or a whole number of tokens from "
+            f"{AUTO_COMPACT_WINDOW_MIN} to {AUTO_COMPACT_WINDOW_MAX}, not {value!r}")
+    return value
+
+
 def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, fields: dict):
     """Bot over defaults over built-in, independently for each field."""
     return cls(**{**_parse_strict_mapping(defaults_raw, f"defaults.{key}", fields),
@@ -1980,6 +2003,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         skill_overrides=_parse_skill_overrides(
             defaults.get("skill_overrides"), raw.get("skill_overrides"), name
         ),
+        auto_compact_window=_parse_auto_compact_window(raw, defaults, name),
         # Presence-based via `.get` defaults (not `x or default`): an explicit
         # `channels: []` must win over the fleet default — the documented way
         # to make a bot channel-less, e.g. to pair with RC-killing env (see the
@@ -2435,7 +2459,7 @@ _EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
     "account", "model", "effort", "agent_cli", "remote_control", "dangerously_skip_permissions",
     "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
     "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
-    "preferred_notif_channel", "prefers_reduced_motion",
+    "preferred_notif_channel", "prefers_reduced_motion", "auto_compact_window",
 })
 _EXPLAIN_BOT_LOCAL_SCALARS = frozenset({"name", "voice", "reports_to", "startup_prompt"})
 # Inherited scalars whose built-in default follows the bot's role, which

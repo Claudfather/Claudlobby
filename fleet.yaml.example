@@ -65,6 +65,7 @@ fleet:
     spinner_tips_enabled: false              # settings.local spinnerTipsEnabled — silence the "Tip:" lines
     preferred_notif_channel: notifications_disabled  # settings.local preferredNotifChannel — no desktop on a headless bot
     prefers_reduced_motion: true             # settings.local prefersReducedMotion — safe now that keepalive liveness is marker-based
+    # auto_compact_window: auto              # settings.local autocompact window — auto keeps Claude Code's own and stops its end-of-turn offer; or 100000 to 1000000 tokens
     mcp: [github]                             # MCP servers all bots use (bot stanza merges, not replaces)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication, no-merge-own-pr]
     # worker-lifecycle is the ack/report doctrine's canonical owner — several
