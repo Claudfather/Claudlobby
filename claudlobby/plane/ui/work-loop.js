@@ -53,9 +53,19 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <button id="work-check-access" class="pill ghost" type="button" hidden>Check action access</button>
     <details id="work-access-help" class="task-record-details" hidden><summary>Action access help</summary>
       <p id="work-access-room" class="note"></p><p id="work-access-status" class="note"></p>
-      <p class="note">Messages, task nudges and task feedback each need separate, local approval by this computer’s owner for this team.
-        Ask the owner to check the relevant action access. Unavailable access does not prove that approval is missing.
-        This check only reads existing access; it does not approve access, reconnect, send anything or check saved receipts.</p>
+      <p class="note">Reading this team and acting on it are separate permissions. Messages, task nudges and task feedback
+        need local approval by this computer’s owner for this team. Unavailable access does not prove that approval is missing.
+        Check action access only reads existing permissions; it does not approve access, reconnect, send anything or check saved receipts.</p>
+      <p class="note">On hosts that support <code>host owner allow-actions</code>, the owner can approve selected actions together
+        in a local operator terminal. Replace DATA_ROOT, TEAM and human:ALIAS with this computer’s installation, exact team name and local human actor.
+        Keep only the capabilities the owner intends to approve:</p>
+      <p><code>claudlobby --root DATA_ROOT host owner allow-actions --target-fleet TEAM --actor human:ALIAS --capabilities messages nudges feedback --register-actor</code></p>
+      <p class="note">The owner must review the local preview and explicitly confirm ALLOW-ACTIONS. If the actor is new,
+        --register-actor also requires a separate REGISTER confirmation. Permission decisions require their own local approval.
+        Older hosts can use their existing allow-messages, allow-nudges and allow-feedback doors individually.
+        After approval, reconnect in Computers &amp; status if needed, select this team and choose Check action access.</p>
+      <p class="note"><a href="https://github.com/Claudfather/Claudlobby/blob/main/documentation/first-team-setup.md#approve-team-actions-after-launch"
+        target="_blank" rel="noopener noreferrer">Local action approval guide</a></p>
     </details>
     <form id="work-form" hidden>
       <div class="work-target"><label for="work-recipient">To</label>
@@ -120,8 +130,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     $("work-check-access").hidden = !missing.length && document.activeElement !== $("work-check-access");
     $("work-check-access").disabled = !canCheckAccess();
     $("work-check-access").textContent = checkingTaskContexts.size ? "Checking action access…" : "Check action access";
-    $("work-access-help").hidden = contextsByKind.size > 0 && !missing.length;
-    $("work-access-room").textContent = `Current room: ${roomLabel(room || "All teams")}`;
+    $("work-access-help").hidden = !room || room === "all";
+    $("work-access-room").textContent = `Current team: ${roomLabel(room || "All teams")}`;
     $("work-access-status").textContent = !room || room === "all" ? "Choose one team to check its action access."
       : readsPaused ? "Session access is paused. Check your session in Computers & status first."
       : readsUnavailable() ? "Team reads are disconnected or unavailable. This does not prove local approval is missing. Check Computers & status first."

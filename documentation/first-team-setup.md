@@ -113,4 +113,28 @@ Only when ready to start this team, choose **Launch this exact plan** once. The 
 
 Replace `PLAN_ID` with the original retained value. The corresponding read-only journal is `DATA/state/activations/REQUEST_UUID/activation.json`, using that same original UUID. An unknown receipt is not proof that activation did nothing. Use the [existing activation/refusal guidance](getting-started.md#4-activate-and-diagnose) before deciding any repair; a new setup approval does not recover the previous grant's browser journal authority.
 
-An `active` receipt establishes the canonical activation state only. Check the connection for its dashboard and independently inspect `host doctor`, `host status`, actual bot/provider/repository behavior and the [team's task permission policy](../examples/teams/revenue-web-app/README.md). The lead's recurring check-ins can consume provider usage and continue with the browser closed. A recorded launch does not demonstrate useful work, permission enforcement, restart durability or a business result. The completed supervised trial is evidence for that bounded journey; a new installation still needs its own readiness checks, and the revised onboarding route needs cold-host acceptance. Native trust or tool approvals may require you at this computer. Reading the dashboard does not grant messages, task feedback or permission decisions: those use separate local owner approvals.
+An `active` receipt establishes the canonical activation state only. Check the connection for its dashboard and independently inspect `host doctor`, `host status`, actual bot/provider/repository behavior and the [team's task permission policy](../examples/teams/revenue-web-app/README.md). The lead's recurring check-ins can consume provider usage and continue with the browser closed. A recorded launch does not demonstrate useful work, permission enforcement, restart durability or a business result. The completed supervised trial is evidence for that bounded journey; a new installation still needs its own readiness checks, and the revised onboarding route needs cold-host acceptance. Native trust or tool approvals may require you at this computer. Reading the dashboard does not grant messages, task nudges, task feedback or permission decisions: continue with local action approval below.
+
+## Approve team actions after launch
+
+After the team has launched, select it in the operational browser and open **Action access help** beside **Check action access**. The status lists this team's messages, nudges and feedback permissions. Connecting and reading the team does not approve any of those actions. An unavailable check can reflect a connection or session problem; it does not establish that local approval is missing.
+
+Use the same installation and sealed `RELEASE_CLI` in a local operator terminal. Check whether that release supports the combined approval command:
+
+```bash
+"$RELEASE_CLI" --root "$DATA" host owner allow-actions --help
+```
+
+For a release that supports it, replace `TEAM` with the exact launched team name and `human:ALIAS` with the intended local human actor. Choose only the capabilities the owner wants to approve; this example selects all three ordinary actions:
+
+```bash
+"$RELEASE_CLI" --root "$DATA" host owner allow-actions \
+  --target-fleet TEAM --actor human:ALIAS \
+  --capabilities messages nudges feedback --register-actor
+```
+
+Read the displayed owner, team, actor and selected capabilities before typing `ALLOW-ACTIONS`. If the actor is absent, `--register-actor` first requires its own `REGISTER` confirmation; registration alone grants no actions. The selected action grants are saved together, and repeating the same approval preserves matching grants and prepared requests. Approving one team does not approve another team or human actor.
+
+Older releases that lack `allow-actions` can use their existing `host owner allow-messages`, `host owner allow-nudges` and `host owner allow-feedback` doors individually, with the same explicit team and actor and their separate local confirmations. The browser cannot issue these approvals. **Permission decisions remain separate:** `host owner allow-permissions` is the local door for authority over exact task permission requests; the ordinary-action command supplies none of it.
+
+Return to **Computers & status**, reconnect the computer if its session needs renewal, then select the approved team and choose **Check action access**. This reads existing access only. It does not approve actions, send a message or task action, replay a saved request or check its receipt. Inspect any saved request through its original receipt control separately.

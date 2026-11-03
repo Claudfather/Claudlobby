@@ -1938,6 +1938,8 @@ test('explicit action access check reads only missing capabilities once and pres
   assert.equal(check.disabled,true);assert.deepEqual(reads,[['message','web'],['nudge','web'],['nudge','web']]);
   held.resolve(ownerNudge);await settle();
   assert.equal(check.hidden,false);assert.equal(check.disabled,true);assert.equal(h.get('work-body').value,'Keep the worker draft');
+  assert.equal(h.get('work-access-help').hidden,false); // Allowed actions remain inspectable independently of connection.
+  assert.match(h.get('work-access-status').textContent,/Messages: available.*Nudges: available/);
   assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.document.activeElement,check);
   assert.equal(storage.getItem('plane.pending-actions.v1'),pending);
   assert.match(h.get('work-pending').innerHTML,new RegExp(original.request_id));
@@ -1969,7 +1971,11 @@ test('action access help distinguishes authorization, unavailable transport and 
   const h=harness(nudgeOptions({interactionContext:()=>null,nudgeContext:()=>{throw actionDenied();}}));
   h.loop.setRoom('web');await settle();h.update();
   assert.match(h.get('work-access-status').textContent,/Messages: unavailable.*Nudges: not authorized/);
-  assert.match(h.get('work-loop').innerHTML,/separate, local approval/i);
+  const help=h.get('work-loop').innerHTML;
+  assert.match(help,/Reading this team and acting on it are separate permissions/i);
+  assert.match(help,/--root DATA_ROOT host owner allow-actions --target-fleet TEAM --actor human:ALIAS/);
+  assert.match(help,/hosts that support.*allow-actions/i);
+  assert.match(help,/first-team-setup\.md#approve-team-actions-after-launch/);
   assert.doesNotMatch(h.get('work-access-status').textContent,/Messages: not authorized/);
   h.update({state:'disconnected'});assert.equal(h.get('work-check-access').disabled,true);
   assert.match(h.get('work-access-status').textContent,/disconnected.*does not prove.*approval/i);
@@ -1977,6 +1983,7 @@ test('action access help distinguishes authorization, unavailable transport and 
   readonly.loop.setRoom('web');await settle();
   assert.equal(readonly.get('work-check-access').hidden,true);
   assert.match(readonly.get('work-access-status').textContent,/does not support browser actions/i);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
 });
 
 for(const loss of ['room','pause','disconnected'])

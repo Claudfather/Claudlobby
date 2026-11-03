@@ -5,3 +5,5 @@ Tasks opens with the existing message composer collapsed into a compact disclosu
 ### Added — Approve selected team actions together
 
 Add a local `host owner allow-actions` approval for explicitly selected messages, nudges and feedback, with one action confirmation, atomic grant persistence and unchanged generations for matching grants. Permission decisions retain their separate approval door.
+
+Show the selected team's action permissions and a guarded local approval example in Action access help, with a guide for operators continuing after first-team launch. Older hosts retain their individual local approval doors; checking access grants no authority.
