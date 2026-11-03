@@ -741,6 +741,96 @@ def _bot_label(unit):
     return f"{unit.declaration.fleet}/{unit.declaration.bot}"
 
 
+class StaleSavesRefusal(ActivationRefusal):
+    """A new activation's refusal, before its lock, of the running bots whose save it would not keep.
+
+    ``stale_saves`` is what the CLI reports (#2553): the window, and each bot by fleet/bot with
+    its save's age in whole seconds, None where no save could be read or its file's time is
+    ahead of this host's clock. The text names only bots, ages and fixed conditions.
+    """
+
+    def __init__(self, stale, max_age):
+        from .bot_operations import _HANDOFF_FRESH_S, StaleHandoffError
+        rows = []
+        for label, error in sorted(stale, key=lambda item: item[0]):
+            age = None
+            if isinstance(error, StaleHandoffError) and error.mtime_age_s < -30:
+                words = f"its save's file time is {-error.mtime_age_s:.0f} s ahead of this host's clock"
+            elif isinstance(error, StaleHandoffError):
+                # The older of its two ages, the one that put it past the window.
+                age = round(max(error.age_s, error.mtime_age_s))
+                words = f"saved {age} s ago"
+            elif isinstance(error.__cause__, FileNotFoundError):
+                words = "no saved handoff"
+            else:
+                words = "no saved handoff it can verify"
+            rows.append((label, age, words))
+        self.stale_saves = {"max_age_s": max_age,
+                            "bots": [{"bot": label, "age_s": age} for label, age, _ in rows]}
+        window = (f"{max_age} s old (the default; --handoff-max-age widens it to at most "
+                  f"{_HANDOFF_MAX_AGE_LIMIT_S} s)" if max_age == _HANDOFF_FRESH_S else f"{max_age} s old")
+        count = "1 running bot has" if len(rows) == 1 else f"{len(rows)} running bots have"
+        super().__init__(
+            f"{count} no saved handoff under {window}, read before the activation lock: "
+            + ", ".join(f"{label} ({words})" for label, _, words in rows)
+            + "; nothing is locked, paused or recorded and every door is open, so save each one now "
+              "(claudlobby --fleet FLEET bot handoff BOT, then its --check until it reads saved), "
+              "then run this same command again")
+
+
+def _stale_saves_before_lock(root, plan, adapter, *, legacy_source, max_age):
+    """Each running bot whose saved handoff this run's own check would not keep, read before the
+    run takes its lock or shuts a door (#2553).
+
+    The run reaches its handoffs only after it has paused the producers, with every write door
+    shut, and a save is a model turn of minutes (#963), so a bot without a save inside the
+    window refused the run there, where no new save could be asked for. Read first, that bot
+    is named while the operator can still save it. This reads without the lock what the run
+    reads under it, narrowed to the bot units: the same inventory's installed bot units with a
+    live private server (``bot stop`` uninstalls a bot's unit), and each one's save, judged by
+    the run's own verifier at the run's window. It names no bot where the run would refuse first
+    on another ground, or where the estate cannot be read here; the run's checks under its lock
+    stay authoritative.
+    """
+    from .bot_operations import BotLifecycleError, _fresh_self_handoff
+    try:
+        selected = read_selection(root)
+        if (selected is None) != legacy_source:
+            return []
+        for prior in (root / "state/activations").glob("*/activation.json"):
+            # An unfinished activation (which also refuses every save request) and an adoption
+            # over an earlier one are the run's to refuse or admit under its lock.
+            if legacy_source or read_activation(root, prior.parent.name).status not in {"active", "rolled_back"}:
+                return []
+        manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
+        declarations = (current_declarations(read_plan(root, selected["plan_id"]), manager) if not legacy_source
+                        else legacy_linux_declarations(plan) if manager == "Linux"
+                        else _legacy_declarations(plan) if manager == "Darwin" else ())
+        bots = frozenset(declaration.source.name for declaration in declarations if declaration.scope == "bot")
+        if not bots:
+            return []
+        # Only the bot units: without the lock, an unrelated timer's activity can veto a read of
+        # every unit, and the run's own read waits that out under its lock.
+        units = collect_enrollment(root, declarations, legacy_source=legacy_source, adapter=adapter,
+                                   only_names=bots).require_complete().units
+    except (ActivationError, OSError, ValueError, subprocess.SubprocessError):
+        return []
+    stale = []
+    for unit in units:
+        if not unit.installed or unit.declaration.scope != "bot":
+            continue
+        try:
+            if not _legacy_bot_socket(unit, require_for_active=False)[1]:
+                continue
+        except ActivationError:
+            continue  # The run observes this server again under its lock, and refuses it there.
+        try:
+            _fresh_self_handoff(unit.declaration.working_directory, max_age_s=max_age)
+        except BotLifecycleError as exc:
+            stale.append((_bot_label(unit), exc))
+    return stale
+
+
 def _handoff_request_time(unit, handed_off, old_bots, *, per_bot=False):
     """Time a handoff request on the clock that stamps its handoff file (#2528).
 
@@ -1171,6 +1261,14 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("activation adapter differs from the candidate release")
+    # A running bot whose save this run would not keep refuses here, by name, before the lock and
+    # every door the run shuts, while the operator can still save it (#2553). A --resume never
+    # comes here: its doors are already shut, so no save could be made.
+    from .bot_operations import _HANDOFF_FRESH_S
+    window = _HANDOFF_FRESH_S if handoff_max_age_s is None else handoff_max_age_s
+    stale = _stale_saves_before_lock(root, plan, adapter, legacy_source=legacy_source, max_age=window)
+    if stale:
+        raise StaleSavesRefusal(stale, window)
     with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         selected = read_selection(root)
         if legacy_source and selected is not None:

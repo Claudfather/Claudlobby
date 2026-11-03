@@ -193,8 +193,17 @@ of minutes, so a bot that saved and then stayed idle halts the run. For such bot
 `host activate --handoff-max-age SECONDS` (300 to 72000) widens that window for
 this activation only: the activation checks each bot's saved handoff with its own
 verifier, a bot whose handoff is younger is not asked for a new one, and its
-capture is verified against the same age when its session stops. A bot whose save
-is older takes the handoff request as before.
+capture is verified against the same age when its session stops.
+Before a new activation takes its lock or pauses anything, it reads each running
+bot's save the same way, against the same window (300 s without the flag). While
+any running bot's save is older, missing or unreadable, it refuses (exit 4, with
+no activation record), naming each such bot and its save's age (`stale_saves` in
+`--json`). Nothing is locked or paused then, so every door is open: save each bot
+it names (`bot handoff BOT` in its fleet, then `bot handoff BOT --check` until it
+reads `saved`), then run the same command again (#2553). A bot stopped through
+`bot stop` is not counted, and `--resume` never makes this check. A save that ages
+past the window while the run hands off the other bots takes the handoff request
+as before.
 Widen it no further than the oldest idle bot's save: work a bot did after its last
 save is not in the handoff it resumes from, and a recent handoff cannot be told
 from one the request produced (#963). The activation records the value; `--resume`

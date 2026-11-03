@@ -235,6 +235,11 @@ def _activate(args, root):
             code, message = "unavailable", "unavailable: cold-host activation dependency or native access"
         elif isinstance(exc, ActivationRefusal):
             code, message = "conflict", f"conflict: activation refused: {exc}; {pending}"
+            if getattr(exc, "stale_saves", None) is not None and not recorded:
+                # Read before the lock, so every door is open and each bot it names can save now (#2553).
+                data["stale_saves"] = exc.stale_saves
+                hint = ("save each bot it names (bot handoff BOT in its fleet, then its --check until it "
+                        "reads saved), then rerun the same command")
         elif isinstance(exc, ActivationError):
             # Native stderr can contain arbitrary text. Disclose only the
             # operation and rc from the product-owned refusal envelope.

@@ -67,6 +67,19 @@ class BotLifecycleError(RuntimeError):
         super().__init__(reason)
 
 
+class StaleHandoffError(BotLifecycleError):
+    """A saved handoff the verifier read and found too old for its window (#2553).
+
+    It carries the two ages its verdict read, in seconds: ``age_s`` from the
+    capture's own last_updated, and ``mtime_age_s`` from its file's write,
+    which is negative while the file's time is ahead of this host's clock.
+    """
+
+    def __init__(self, *, age_s: float, mtime_age_s: float):
+        self.age_s, self.mtime_age_s = age_s, mtime_age_s
+        super().__init__("self restart requires a fresh owned session handoff")
+
+
 @dataclass(frozen=True)
 class BotLifecycleResult:
     fleet: str
@@ -255,8 +268,7 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
     # still reads last_updated. Require a recent model timestamp on both
     # paths; tolerate future clock skew observed in the live canary.
     if not (-30 <= mtime_age <= max_age_s) or age > max_age_s:
-        raise BotLifecycleError("self restart requires a fresh owned session handoff") from ValueError(
-            "handoff is stale")
+        raise StaleHandoffError(age_s=age, mtime_age_s=mtime_age) from ValueError("handoff is stale")
     return age
 
 

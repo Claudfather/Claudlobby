@@ -346,12 +346,16 @@ def _legacy_handoff_estate(root, installed_bots, *, assigned=True, stopped=(), p
     for bot in (*installed_bots, *stopped):
         directory = root.resolve() / "legacy-runtime" / bot
         directory.mkdir(parents=True)
-        # `bot stop` de-enrolls: the frozen declaration remains with no installed unit.
+        # `bot stop` de-enrolls: the frozen declaration remains with no installed unit. Each names
+        # its unit source and declares no private tmux directory, so no live server is observed
+        # for it before the lock (#2553).
         units.append(SimpleNamespace(target=f"legacy.example.{bot}.service",
                                      installed=() if bot in stopped else (object(),),
                                      properties=(("LoadState", "not-found"),) if bot in stopped else properties,
                                      declaration=SimpleNamespace(scope="bot", fleet="example", bot=bot,
-                                                                 working_directory=directory)))
+                                                                 working_directory=directory,
+                                                                 source=directory / f"legacy.example.{bot}.service",
+                                                                 environment=())))
     return units
 
 
@@ -359,7 +363,9 @@ def _adopt_legacy(root, plan, host, monkeypatch, units):
     inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
                                 units=tuple(units))
     inventory.require_complete = lambda: inventory
-    monkeypatch.setattr(activation, "legacy_linux_declarations", lambda _plan: ("reviewed-legacy",))
+    # The frozen units' own declarations: the save check before the lock reads their names (#2553).
+    monkeypatch.setattr(activation, "legacy_linux_declarations",
+                        lambda _plan: tuple(unit.declaration for unit in units))
     monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
     return lambda: activation.adopt_existing_activation(root, "cutover", plan.plan_id, host.directory,
                                                        adapter=host)
@@ -519,7 +525,8 @@ def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause
     inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
                                 units=tuple(units))
     inventory.require_complete = lambda: inventory
-    monkeypatch.setattr(activation, "legacy_linux_declarations", lambda _plan: ("reviewed-legacy",))
+    monkeypatch.setattr(activation, "legacy_linux_declarations",
+                        lambda _plan: tuple(unit.declaration for unit in units))
     monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
     with pytest.raises(state.ActivationError, match=message):
         activation.adopt_existing_activation(root, "cutover", plan.plan_id, host.directory, adapter=host)
@@ -3149,3 +3156,173 @@ def test_resume_keeps_the_recorded_handoff_max_age(recorded, explicit, kept):
             activation._handoff_max_age(record, explicit)
     else:
         assert activation._handoff_max_age(record, explicit) == kept
+
+
+class _LockReached(Exception):
+    """The run went on past its pre-lock checks to take the activation lock (#2553)."""
+
+
+def _files(*bases):
+    return {path: path.read_bytes() for base in bases for path in sorted(base.rglob("*"))
+            if path.is_file() and not path.is_symlink()}
+
+
+@pytest.fixture
+def live_upgrade(cold, monkeypatch):
+    """The selected cold host, about to be upgraded over its two running bots (#2553).
+
+    ``live_upgrade(saves, stopped=(), lingering=False)`` gives each bot in ``saves`` a save that
+    many seconds old (None: no save) and a live private server, a listening socket where the
+    run probes it. A bot in ``stopped`` was stopped through ``bot stop``: its unit file is gone
+    and its stop recorded, and its server too unless ``lingering``. Taking the activation lock
+    raises _LockReached, so a run that passes the save check stops there.
+    """
+    from datetime import datetime, timedelta, timezone
+    from claudlobby.stop_record import write_stop
+    root, release, source_plan, host = cold
+    activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
+                                effects={"units": source_plan.effects["units"]})
+    for item in source_plan.effects["units"]:
+        builder.file(Path(item["source"]), source_plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+    # The fixture's units report no private tmux directory; the run reads it from them.
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_args, **_kwargs: str(host.tmux_dir))
+
+    def lock(*_args, **_kwargs):
+        raise _LockReached
+
+    monkeypatch.setattr(activation, "locked_activation", lock)
+    sockets, servers = host.tmux_dir / f"tmux-{os.getuid()}", []
+    sockets.mkdir(parents=True, exist_ok=True)
+    disenrolled, native = set(), host.call
+
+    def call(function, *args, timeout=30):
+        # systemd's own reading of a unit bot stop disenrolled, as on the Pi (#1747): not found,
+        # no fragment, no ExecStart (test_supervision_inventory's de-enrolled-by-stop case).
+        if function == "svc_inventory_properties" and str(args[0]) in disenrolled:
+            host.calls.append((function, (str(args[0]),)))
+            absent = {"Environment": "", "WorkingDirectory": "", "Id": str(args[0]), "Triggers": "",
+                      "TriggeredBy": "", "LoadState": "not-found", "ActiveState": "inactive",
+                      "FragmentPath": "", "DropInPaths": "", "UnitFileState": "", "NeedDaemonReload": "no"}
+            return subprocess.CompletedProcess([function, *args], 0,
+                                               "".join(f"{key}={value}\n" for key, value in absent.items()), "")
+        return native(function, *args, timeout=timeout)
+
+    monkeypatch.setattr(host, "call", call)
+
+    def save(bot, age):
+        _preserve_capture(root / "runtime/bots" / bot, now=datetime.now(timezone.utc) - timedelta(seconds=age))
+
+    def make(saves, *, stopped=(), lingering=False):
+        for bot, age in saves.items():
+            if age is not None:
+                save(bot, age)
+            if bot in stopped:
+                unit = f"com.example.{bot}.service"
+                (host.directory / unit).unlink()
+                (host.directory / "default.target.wants" / unit).unlink(missing_ok=True)
+                host.states.pop(unit, None)
+                disenrolled.add(unit)
+                write_stop(root / "runtime/bots" / bot, by="operator", reason=None, request_id="stop-" + bot)
+                if not lingering:
+                    continue
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(sockets / f"com.example.{bot}"))
+            server.listen()
+            servers.append(server)
+        case = SimpleNamespace(root=root, save=save, files=_files(root, host.directory),
+                               calls=len(host.calls), selection=state.read_selection(root))
+
+        def upgrade(**options):
+            return activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory,
+                                                 adapter=host, **options)
+
+        def unchanged():
+            new = [name for name, _ in host.calls[case.calls:]]
+            assert "svc_inventory_catalog" in new  # the check read the estate
+            assert not [name for name in new if name.startswith("svc_activation_")]  # no pause, handoff or start
+            assert not (root / "state/activations/upgrade").exists()
+            assert state.read_selection(root) == case.selection
+            assert _files(root, host.directory) == case.files
+            return True
+
+        case.upgrade, case.unchanged = upgrade, unchanged
+        return case
+
+    yield make
+    for server in servers:
+        server.close()
+
+
+@pytest.mark.parametrize("window, saves", [
+    pytest.param(None, {"worker": 30, "manager": 200}, id="default-window"),
+    pytest.param(900, {"worker": 30, "manager": 800}, id="widened-window"),
+])
+def test_a_new_upgrade_whose_running_bots_saved_inside_the_window_goes_on_to_its_lock(live_upgrade, window, saves):
+    """#2553: with every running bot's save inside the run's window, the check before the lock names
+    no bot and changes nothing, and the run goes on to take its lock."""
+    case = live_upgrade(saves)
+    with pytest.raises(_LockReached):
+        case.upgrade(**({} if window is None else {"handoff_max_age_s": window}))
+    assert case.unchanged()
+
+
+@pytest.mark.parametrize("window, saves, named, options", [
+    pytest.param(None, {"worker": 30, "manager": 400}, {"example/manager": 400}, {}, id="default-window"),
+    pytest.param(900, {"worker": 30, "manager": 1000}, {"example/manager": 1000}, {}, id="widened-window"),
+    pytest.param(900, {"worker": 30, "manager": 1000}, {"example/manager": 1000},
+                 {"forward_recovery": True}, id="forward-recovery"),
+    pytest.param(900, {"worker": 1000, "manager": None}, {"example/manager": None, "example/worker": 1000}, {},
+                 id="two-bots-one-without-a-save"),
+])
+def test_a_new_upgrade_refuses_before_its_lock_naming_each_running_bot_whose_save_is_too_old(
+        live_upgrade, window, saves, named, options):
+    """#2553: a running bot whose save the run would not keep refuses a new upgrade before its lock
+    or any door, naming each such bot and its save's age; nothing is locked, paused or recorded."""
+    case = live_upgrade(saves)
+    if window is not None:
+        options = {**options, "handoff_max_age_s": window}
+    with pytest.raises(activation.StaleSavesRefusal) as refused:
+        case.upgrade(**options)
+    assert case.unchanged()
+    reported = refused.value.stale_saves
+    assert reported["max_age_s"] == (window or 300)
+    assert [row["bot"] for row in reported["bots"]] == sorted(named)
+    for row in reported["bots"]:
+        age = named[row["bot"]]
+        assert row["age_s"] is None if age is None else age <= row["age_s"] <= age + 60
+    message = str(refused.value)
+    for bot, age in named.items():
+        assert (f"{bot} (no saved handoff)" if age is None else f"{bot} (saved ") in message
+    assert not any(bot in message for bot in {"example/worker", "example/manager"} - set(named))
+    assert ("(the default; --handoff-max-age widens it to at most 72000 s)" in message) == (window is None)
+    assert message.endswith("then run this same command again")
+
+
+@pytest.mark.parametrize("lingering", [False, True], ids=["server-gone", "server-lingers"])
+def test_a_bot_stopped_through_bot_stop_is_not_counted_before_the_lock(live_upgrade, lingering):
+    """#2553: the run hands off only installed bot units and bot stop uninstalls a bot's unit, so a
+    stopped bot's old or missing save is not counted, even while its server lingers."""
+    case = live_upgrade({"worker": 1000, "manager": None}, stopped=("manager",), lingering=lingering)
+    with pytest.raises(activation.StaleSavesRefusal) as refused:
+        case.upgrade(handoff_max_age_s=900, preserve_bot_state=True)
+    assert [row["bot"] for row in refused.value.stale_saves["bots"]] == ["example/worker"]
+    assert case.unchanged()
+    case.save("worker", 30)
+    with pytest.raises(_LockReached):
+        case.upgrade(handoff_max_age_s=900, preserve_bot_state=True)
+
+
+def test_the_check_before_the_lock_leaves_an_unfinished_activation_to_the_run(live_upgrade, monkeypatch):
+    """#2553: while another activation is unfinished no bot can be asked to save, so the check names
+    no bot and the run takes its lock to refuse that activation there, as before."""
+    case = live_upgrade({"worker": 30, "manager": 1000})
+    unfinished = case.root / "state/activations/unfinished/activation.json"
+    unfinished.parent.mkdir()
+    unfinished.write_text("{}")
+    read = activation.read_activation
+    monkeypatch.setattr(activation, "read_activation", lambda root, identifier: (
+        SimpleNamespace(status="activating") if identifier == "unfinished" else read(root, identifier)))
+    with pytest.raises(_LockReached):
+        case.upgrade(handoff_max_age_s=900)

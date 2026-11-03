@@ -932,3 +932,36 @@ def test_handoff_max_age_rejects_a_first_activation_before_record(candidate, cap
     result = call(capsys, argv, 4)
     assert "--handoff-max-age requires an activation that hands off running bots" in result["error"]["message"]
     assert snapshot(root) == before
+
+
+def test_a_refusal_over_old_saves_reports_each_bot_and_its_age_with_the_host_unchanged(
+        candidate, monkeypatch, capsys):
+    """#2553: the refusal before the lock exits 4 with no record, carries each bot and its save's age
+    as data, and its hint is the next step: the saves, then the same command."""
+    from claudlobby.bot_operations import BotLifecycleError, StaleHandoffError
+    root, _, plan, directory = candidate
+    missing = BotLifecycleError("self restart requires a fresh owned session handoff")
+    missing.__cause__ = FileNotFoundError()
+    stale = [("example/worker", StaleHandoffError(age_s=1200.4, mtime_age_s=1201.2)),
+             ("example/manager", missing)]
+    monkeypatch.setattr(state, "read_selection", lambda _: {"activation_id": "prior"})
+
+    def upgrade(*_args, **kwargs):
+        raise activation.StaleSavesRefusal(stale, kwargs["handoff_max_age_s"])
+
+    monkeypatch.setattr(activation, "upgrade_activation", upgrade)
+    before = snapshot(root)
+    result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                           "--install-directory", str(directory), "--handoff-max-age", "900"], 4)
+    assert result["error"]["code"] == "conflict"
+    message = result["error"]["message"]
+    assert message.startswith("conflict: activation refused: 2 running bots have no saved handoff under "
+                              "900 s old, read before the activation lock: example/manager (no saved "
+                              "handoff), example/worker (saved 1201 s ago); ")
+    assert message.endswith("then run this same command again; no activation record was created")
+    assert result["data"]["stale_saves"] == {"max_age_s": 900, "bots": [
+        {"bot": "example/manager", "age_s": None}, {"bot": "example/worker", "age_s": 1201}]}
+    assert result["data"]["recorded_activation"] is None and result["data"]["recording"] == "unchanged"
+    hint = result["error"]["hint"]
+    assert "bot handoff BOT" in hint and hint.endswith("then rerun the same command") and "--resume" not in hint
+    assert snapshot(root) == before
