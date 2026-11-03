@@ -597,13 +597,14 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   const nodes=Object.fromEntries(['attention','tasks','attn-count','task-filter-status','task-filter-assignee','task-filter-reset','task-filter-count'].map(id=>[id,{innerHTML:'',value:'',hidden:false,disabled:false}]));
   const document={activeElement:nodes['task-filter-assignee'],getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}}};
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,taskAssigneeKey,resetTaskFilters})`,{...panel,document});
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,taskAssigneeKey,resetTaskFilters})`,{...panel,document,fleets:[{alias:'north / web',display_label:'Workshop / Web app'}]});
   const row={task_id:'north::'+wi,fleet:'north / web',title:'North active',state:'active',attention:true,current_assignment:{assignee_uid:'north::actor_1',assignee_short:'Engineer'}};
   const peer={...row,task_id:'south::'+wi,fleet:'south / web',title:'South active',current_assignment:{assignee_uid:'south::actor_1',assignee_short:'Engineer'}};
   const complete={...row,task_id:'north::done',title:'North result',state:'completed',attention:false,current_assignment:null,assignment_history:[row.current_assignment]};
   const env={state:'ok',data:{tasks:[row,peer,complete],issue_count:1,truncated:true,limit:200,coverage:{total:3,reachable:2,partial:true}}};
   board.renderTasks(env);
   const assignee=nodes['task-filter-assignee'],status=nodes['task-filter-status'];
+  assert.match(assignee.innerHTML,/Engineer · Workshop \/ Web app/);assert.doesNotMatch(assignee.innerHTML,/>Engineer · north \/ web</);
   assignee.value=board.taskAssigneeKey(row);assignee.onchange();
   assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
   assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);

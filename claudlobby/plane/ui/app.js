@@ -641,8 +641,9 @@ function paintTaskFilters(rows, available) {
   const choices = new Map();
   for (const task of rows) {
     const key = taskAssigneeKey(task), actor = task.current_assignment || task.assignment_history?.at(-1);
+    const team = typeof fleets !== "undefined" ? fleets.find(fleet => fleet.alias === task.fleet)?.display_label : null;
     choices.set(key,key === "unassigned" ? "Unassigned" : key === "unknown" ? "Unknown assignee"
-      : `${actor.assignee_short || actor.assignee_alias || actor.assignee_uid} · ${task.fleet || "Team not recorded"}`);
+      : `${actor.assignee_short || actor.assignee_alias || actor.assignee_uid} · ${team || task.fleet || "Team not recorded"}`);
   }
   if (taskFilters.assignee && !choices.has(taskFilters.assignee))
     choices.set(taskFilters.assignee,"Selected assignee — not in this snapshot");
