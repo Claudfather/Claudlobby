@@ -1328,7 +1328,7 @@ class _TwinSampler:
         pass
 
 
-def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
+def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path, monkeypatch):
     """U3: every figure on a fleet card is a plane fact through the door
     that defines it — presence scoped like the panel, the open set through
     OPEN_ASSIGNMENTS_AT_SQL, attention/overdue through ATTENTION_SQL with
@@ -1336,8 +1336,18 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     the ONE rule — and a figure whose source is missing is None with a
     reason, never a zero (orphan-ness needs the bot's directory)."""
     _seed_twins_with_deadlines(tmp_path)
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
     client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     ov = client.get("/api/overview").json()
+    assert not any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+                   for query in queries)
     assert ov["state"] == "ok", ov
     rows = {r["alias"]: r for r in ov["data"]["fleets"]}
     assert sorted(rows) == ["data", "engineering"]
@@ -1359,7 +1369,13 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     h = ov["data"]["host"]
     assert h["daemon_serving"] is False
     assert (h["spool_files"], h["spool_state"]) == (0, "ok")
-    assert isinstance(h["ingest_lag_s"], float) and h["rows"] > 0
+    assert isinstance(h["ingest_lag_s"], float)
+    assert h["rows"] is None and h["rows_reason"] == "not_counted"
+    # Exact counts remain available when the operator requests diagnostics.
+    summary = client.get("/api/summary").json()
+    assert summary["state"] == "ok" and summary["data"]["counts"]["ingest_ledger"] > 0
+    assert any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+               for query in queries)
     assert h["last_ingest_at"] == ov["provenance"]["last_ingest_at"]
 
     # the orphan split once the bots' directories exist: engineering's

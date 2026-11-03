@@ -1747,7 +1747,9 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     samples = _host_samples(conn)
     host = {
         **_recorder_state(root),
-        "rows": conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0],
+        # Exact ledger size is an explicit /api/summary diagnostic; counting
+        # all history on every overview refresh can exhaust the read budget.
+        "rows": None, "rows_reason": "not_counted",
         "last_ingest_at": prov.get("last_ingest_at"),
         # lag from LEDGER time; None (never a zero) when nothing was ingested
         "ingest_lag_s": lag,
