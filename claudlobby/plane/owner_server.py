@@ -221,8 +221,8 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
         raise OwnerServerConfigurationError(str(exc)) from exc
     if not (Path(root) / "state/plane/plane.db").exists():
         fresh_owner_setup(root)
-        if socket_path is None:
-            directory = Path(root) / "state/owner"
+        directory = Path(root) / "state/owner"
+        if socket_path is None or Path(socket_path) == directory / "owner.sock":
             directory.mkdir(mode=0o700, exist_ok=True)
             _private_directory(directory)
             socket_path = directory / "owner.sock"

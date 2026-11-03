@@ -248,10 +248,14 @@ def bootstrap(script: Path, root: Path, *, json_output: bool = False, guided: bo
                                    **({"stdout": receipt} if guided else {}))
         try:
             result = process.wait()
-            if not guided or result:
+            if not guided:
                 return result
             receipt.seek(0)
-            continuation = _guided_target(receipt.read(65537), root)
+            raw = receipt.read(65537)
+            if result:
+                _guided_failure(raw, result)
+                return result
+            continuation = _guided_target(raw, root)
         finally:
             # The canonical assembler owns already-started local work. Keep
             # its input snapshot alive through a caller interrupt, too.
@@ -266,6 +270,37 @@ def bootstrap(script: Path, root: Path, *, json_output: bool = False, guided: bo
     # Assembly snapshots and temporary Python are gone before console serving.
     # Do not detach: the durable CLI must inherit the original controlling TTY.
     return continuation, host_env
+
+
+def _guided_failure(raw: bytes, exit_code: int) -> None:
+    """Render only the sealed assembler's canonical safe error, never raw data."""
+    fallback = "offline assembly failed; inspect trusted local inputs and native user setup"
+    try:
+        if len(raw) > 65536:
+            raise ValueError
+        result = json.loads(raw)
+        error = result["error"]
+        exits = {"internal_error": 1, "invalid_argument": 2, "conflict": 4,
+                 "unavailable": 6, "release_mismatch": 7}
+        if (set(result) != {"schema_version", "ok", "command", "request_id", "release_id", "data", "error"}
+                or type(result["schema_version"]) is not int or result["schema_version"] != 1
+                or result["ok"] is not False or result["command"] != "host.setup"
+                or not isinstance(result["data"], dict)
+                or set(error) != {"code", "message", "retryable", "hint"}
+                or exits.get(error["code"]) != exit_code
+                or type(error["retryable"]) is not bool):
+            raise ValueError
+        message, hint = error["message"], error["hint"]
+        if (not isinstance(message, str) or not message or len(message) > 4096 or not message.isprintable()
+                or (hint is not None and (not isinstance(hint, str) or not hint
+                    or len(hint) > 4096 or not hint.isprintable()))):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        print(fallback, file=sys.stderr)
+        return
+    print(message, file=sys.stderr)
+    if hint is not None:
+        print(hint, file=sys.stderr)
 
 
 def _guided_target(raw: bytes, root: Path) -> Path:

@@ -12,6 +12,7 @@ from pathlib import Path
 import socket
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -101,7 +102,7 @@ def _serving(command, path, origin):
         check_listener_available(path)
     with tempfile.TemporaryFile() as log:
         # Preserve the canonical operator-facing failure; never forward it into JSON.
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, start_new_session=True)
         try:
             deadline = time.monotonic() + 10
             while process.poll() is None and time.monotonic() < deadline:
@@ -112,13 +113,16 @@ def _serving(command, path, origin):
             raise CommandFailure("unavailable", "local owner server did not become ready; inspect serving configuration and private socket")
         finally:
             if process.poll() is None:
+                print("Stopping local owner serving; waiting for already-started work to finish. Keep this terminal open.", file=sys.stderr)
                 process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                raise CommandFailure("unavailable", "local owner server did not drain; inspect the retained local state before continuing")
+            # The canonical app drains admitted synchronous work. Never kill it
+            # on an invented deadline or repeated terminal interrupt.
+            while True:
+                try:
+                    process.wait()
+                    break
+                except KeyboardInterrupt:
+                    continue
 
 
 def _original_launch(state):
@@ -154,7 +158,7 @@ def run(args, paths, store, terminal):
         if selected is None:
             _original_launch(retained)
         status = _status(SimpleNamespace(), paths.root)  # refuses unfinished/indeterminate state
-        if (status.data["state"] != "active" or selected["activation_id"] != retained.launch_id
+        if (status.data["recorded_status"] != "active" or selected["activation_id"] != retained.launch_id
                 or selected["plan_id"] != retained.launch_plan):
             _original_launch(retained)
     elif selected is not None:

@@ -8,3 +8,6 @@ actions; the terminal stays open for the browser's existing plan and launch flow
 Retained setup status now exposes expiry, revocation and original launch IDs so
 interrupted preparation cannot silently replace a launch. Native cold-host and
 public-installer qualification remain separate gates.
+
+Foreground shutdown waits for already-admitted work without a kill deadline;
+canonical assembly/startup refusals remain visible to the local operator.

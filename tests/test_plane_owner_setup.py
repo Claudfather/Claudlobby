@@ -9,6 +9,7 @@ import pytest
 
 from claudlobby.plane.owner_access import OwnerAccess, AccessDenied, AccessUnavailable, VerifiedReader
 from claudlobby.plane.owner_setup import OwnerSetup, SetupEngine
+from claudlobby.activation_state import read_selection as _canonical_read_selection
 from claudlobby.plane.ids import ensure_host_uid
 from tests.test_plane_owner_workspace import OWNER, proposed
 from tests.test_plane_owner_connected import evidence
@@ -311,15 +312,32 @@ def test_guarded_setup_approval_refuses_a_launch_reserved_during_consent(setup_a
     assert access.path.read_bytes() == snapshot
 
 
-def test_guide_retains_matching_approval_and_serves_without_reconsent(setup_authority, monkeypatch):
+@pytest.mark.parametrize("selected", [False, True])
+def test_guide_retains_matching_approval_and_serves_without_reconsent(setup_authority, monkeypatch, selected):
     from contextlib import contextmanager
     import sys
     from claudlobby.commands import host_owner_setup as guide
-    from claudlobby.commands import releases
+    from claudlobby.commands import releases, host
+    from claudlobby.command_result import CommandOutput
     from tests.test_plane_owner_workspace import ISSUER, ORIGIN
     from tests.test_host_owner import terminal
-    store, access, grant, _, _, _ = setup_authority
+    store, access, grant, reader, clock, _ = setup_authority
     store.allow(grant)
+    if selected:
+        import json
+        engine = SetupEngine(access)
+        preview = engine.preview(reader, grant.generation, "Improve checkout tests")
+        selection = {"schema": 1, "activation_id": str(uuid4()), "release_id": grant.release_id,
+                     "plan_id": preview["plan_id"]}
+        store.reserve(reader, grant, selection["plan_id"], selection["activation_id"])
+        (access.root / "state/selected-release.json").write_text(json.dumps(selection))
+        from claudlobby import activation_state
+        monkeypatch.setattr(activation_state, "read_selection", _canonical_read_selection)
+        # Feed retained journal evidence through the real canonical status renderer.
+        evidence = host._status_data(access.root)
+        evidence.update(selection=selection, selected_activation=selection, items=[])
+        monkeypatch.setattr(host, "_host_releases", lambda *_: CommandOutput(evidence, grant.release_id))
+        clock[0] = grant.expires_at  # Serving the original selected launch needs no renewal.
     monkeypatch.setattr(releases, "_release", lambda *_: SimpleNamespace(
         release_id=grant.release_id, seal_sha256=grant.release_seal, cli_path=Path(sys.executable).with_name("claudlobby")))
     monkeypatch.setattr(guide, "_native_directories", lambda _: (Path(grant.install_directory),))

@@ -450,3 +450,27 @@ def test_guided_launcher_waits_through_terminal_interrupt_without_killing_guide(
     child = Guide()
     monkeypatch.setattr(bootstrap.subprocess, "Popen", lambda *a, **k: child)
     assert bootstrap._continue_guided(["sealed-cli"], {}) == 0 and child.waits == 2
+
+
+@pytest.mark.parametrize("failure", ["canonical", "malformed", "oversized"])
+def test_guided_bootstrap_shows_canonical_assembly_failure_without_raw_output(bootstrap_bundle, tmp_path, monkeypatch, capsys, failure):
+    bootstrap, script, _, _ = bootstrap_bundle
+    monkeypatch.setattr(bootstrap, "_run", lambda *a, **k: None)
+    from claudlobby.command_result import CommandResult, CommandError, emit
+    error = CommandError("unavailable", "unavailable: installed package or native user manager",
+                         hint="inspect native user setup")
+    emit(CommandResult(False, "host.setup", None, None, {"ignored": "private data"}, error), json_output=True)
+    canonical = capsys.readouterr().out.encode()  # Actual versioned canonical producer bytes.
+    raw = canonical if failure == "canonical" else b"private raw output" * (5000 if failure == "oversized" else 1)
+    class Assembly:
+        def __init__(self, argv, *, env, start_new_session, stdout):
+            stdout.write(raw); stdout.flush()
+        def wait(self): return 6
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", Assembly)
+    assert bootstrap.bootstrap(script, (tmp_path / "data").resolve(), guided=True) == 6
+    captured = capsys.readouterr()
+    assert not captured.out and "private" not in captured.err
+    if failure == "canonical":
+        assert error.message in captured.err and error.hint in captured.err
+    else:
+        assert "assembly failed" in captured.err
