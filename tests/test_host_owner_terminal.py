@@ -170,6 +170,26 @@ def test_ordinary_message_registration_grant_revoke_through_actual_terminal(acti
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
+def test_selected_actions_register_and_approve_once_through_actual_terminal(active):
+    root, _ = active
+    store = OwnerAccess.initialize(root)
+    principal = PrincipalRef("test-verifier", "human-001")
+    challenge = store.begin_pairing(principal)
+    store.confirm_pairing(challenge.token, expected_principal=principal)
+    code, output = _command(root, "allow-actions", [("Type REGISTER", "REGISTER"),
+        ("Type ALLOW-ACTIONS", "ALLOW-ACTIONS")],
+        args=("--target-fleet", "example", "--actor", "human:terminal-actions", "--register-actor",
+              "--capabilities", "messages", "nudges", "feedback"), bootstrap=_RUNTIME_FIXTURE)
+    assert code == 0, output
+    status = store.local_action_status()
+    assert len(status.message_grants) == len(status.nudge_grants) == len(status.feedback_grants) == 1
+    assert status.permission_grants == ()
+    assert all(grant.actor_alias == "human:terminal-actions" for grant in
+               (*status.message_grants, *status.nudge_grants, *status.feedback_grants))
+    assert output.count("Type REGISTER") == output.count("Type ALLOW-ACTIONS") == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
 def test_terminal_owner_revision_change_before_allow_refuses(active):
     import sqlite3
     from claudlobby.plane.db import db_file

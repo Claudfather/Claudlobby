@@ -34,6 +34,47 @@ async function source(key, n) {
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
 
+test('older task pages keep source cursors separate, qualify duplicate IDs and fence changed admission',async()=>{
+  const {api,a,b}=await pair();
+  const page=(cursor,next,title)=>ok({tasks:[{task_id:wi,fleet:'team',title}],issues:[],issue_count:0,attention_count:0,truncated:!!next,limit:200,task_page:{version:1,cursor,next_cursor:next}});
+  a.routes.set('/api/tasks',page(null,'older-a','A recent'));b.routes.set('/api/tasks',page(null,'older-b','B recent'));
+  a.routes.set('/api/tasks?cursor=older-a',page('older-a',null,'A older'));b.routes.set('/api/tasks?cursor=older-b',page('older-b',null,'B older'));
+  const first=await api.jget('/api/tasks');assert.equal(first.data.task_page.version,1);
+  assert.deepEqual(first.data.tasks.map(t=>t.task_id),['a::'+wi,'b::'+wi]);
+  const older=await api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));
+  assert.deepEqual(older.data.tasks.map(t=>t.title),['A older','B older']);assert.equal(older.data.task_page.next_cursor,null);
+  assert.ok(a.calls.some(c=>c.url==='/api/tasks?cursor=older-a'));assert.ok(!a.calls.some(c=>c.url.includes('older-b')));
+  a.setStatus('sign_in_required');await a.reader.start();
+  const refused=await api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));assert.notEqual(refused.state,'ok');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('old task hosts remain explicitly limited and an ignored cursor cannot replay the newest page',async()=>{
+  const {api,a,b}=await pair();
+  a.routes.set('/api/tasks',ok({tasks:[],truncated:true,limit:200,task_page:{version:1,cursor:null,next_cursor:'a-older'}}));
+  b.routes.set('/api/tasks',ok({tasks:[],truncated:true,limit:200}));
+  const first=await api.jget('/api/tasks');assert.equal(first.data.task_page.unavailable,true);
+  a.routes.set('/api/tasks?cursor=a-older',ok({tasks:[{task_id:wi,fleet:'team',title:'wrong newest replay'}],truncated:true,limit:200}));
+  const next=await api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));
+  assert.deepEqual(next.data.tasks,[]);assert.equal(next.data.coverage.partial,true);
+  assert.equal(next.data.task_page.unavailable,true);assert.ok(!b.calls.some(c=>c.url.includes('cursor=')));
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('a held older task page cannot survive a changed source team registry',async()=>{
+  const {api,a,b}=await pair(),held=deferred();
+  a.routes.set('/api/tasks',ok({tasks:[],truncated:true,task_page:{version:1,cursor:null,next_cursor:'older-a'}}));
+  const first=await api.jget('/api/tasks');
+  a.routes.set('/api/tasks?cursor=older-a',held.promise);
+  const reading=api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));
+  a.routes.set('/api/fleets',ok({fleets:[{alias:'team',uid:'fleet_'+'9'.repeat(32)}]}));await api.jget('/api/fleets');
+  held.resolve(ok({tasks:[{task_id:wi,fleet:'team',title:'retired owner'}],truncated:false,task_page:{version:1,cursor:'older-a',next_cursor:null}}));
+  const result=await reading;
+  assert.deepEqual(result.data.tasks,[]);assert.equal(result.data.coverage.partial,true);
+  assert.notEqual(result.data.task_page.window,first.data.task_page.window);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('accepted source paints before a held peer and rechecks admission before final combination', async () => {
   const {api,a,b}=await pair(), held=deferred();
   b.routes.set('/api/channel?limit=120',held.promise);
@@ -379,6 +420,12 @@ test('renderer shows per-host availability and partial totals without inventing 
   context.renderOverview(env); context.renderHeader(env); context.renderHostFacts(env); context.renderSummary(env);
   assert.match(nodes.get('overview').innerHTML, /&lt;Host A&gt;/);
   assert.match(nodes.get('overview').innerHTML, /Sign in to this source/);
+  assert.match(nodes.get('overview').innerHTML,/12 rows/);
+  env.data.sources[1].host.rows=null;
+  context.renderOverview(env);context.renderHostFacts(env);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/null rows|unknown rows|0 rows/);
+  assert.doesNotMatch(nodes.get('host-facts').textContent,/rows (null|unknown|0)/);
+  env.data.sources[1].host.rows=12;
   assert.doesNotMatch(nodes.get('overview').innerHTML, /recorder DOWN/);
   env.data.sources[1].state='checking';env.data.sources[1].overview_retained=true;
   env.data.sources[1].overview_read_at='2026-01-01T00:00:00Z';env.data.totals.overview_retained=true;
@@ -503,7 +550,7 @@ async function appHarness(api) {
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const paints=[], timers=[], callbacks=[], overviewPaints=[], summaries=[], nodes=new Map();
   let now=Date.now();
-  const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
+  const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},clearTaskHistory(){},acceptTaskPoll(v){c.renderTasks(v);return v;},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
     syncWorkRoom:()=>false,workLoop:{update(){},updateChannel(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},

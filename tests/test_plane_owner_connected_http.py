@@ -673,6 +673,15 @@ def test_head_real_query_closing_native_loss_denies_without_any_body(connected_h
         assert head.status_code == 403 and head.content == b""
 
 
+def test_connected_task_cursor_reaches_canonical_query_but_duplicate_keys_refuse(connected_http):
+    with TestClient(connected_http[0], base_url=HOST) as client:
+        ready = login(client, connected_http)
+        response = client.get(PREFIX + "read/tasks?fleet=data&cursor=malformed", headers=headers(ready["token"]))
+        assert response.status_code == 200 and response.json()["state"] == "invalid"
+        duplicate = client.get(PREFIX + "read/tasks?fleet=data&cursor=a&cursor=b", headers=headers(ready["token"]))
+        assert duplicate.status_code == 400
+
+
 def test_head_stream_uses_actual_bounded_canonical_producer_and_zero_asgi_body(connected_http):
     app, access, _, clock, _ = connected_http
     from tests.test_plane_owner_connected import evidence
@@ -762,9 +771,20 @@ def test_connected_selected_route_allowlist_matches_canonical_query_contract(con
     for suffix, fields in _READS.items():
         route = routes["/api/" + suffix]
         assert "GET" in route.methods
-        assert {p.name for p in route.dependant.query_params} == set(fields), suffix
+        # Exact table counts are an explicit native-only diagnostic. Every
+        # other canonical query field must still match the connected contract.
+        native_only = {"counts"} if suffix == "summary" else set()
+        assert {p.name for p in route.dependant.query_params} == set(fields) | native_only, suffix
+    assert "counts" not in _READS["summary"]
     detail = routes["/api/tasks/{task_id}"]
     assert {p.name for p in detail.dependant.query_params} == {"fleet"}
+    with TestClient(connected_http[0], base_url=HOST) as client:
+        ready = login(client, connected_http)
+        for value in ("true", "false"):
+            result = client.get(PREFIX + "read/summary?counts=" + value,
+                                headers=headers(ready["token"]))
+            assert result.status_code == 400
+            assert result.json()["state"] == "invalid_request"
 
 
 @pytest.mark.parametrize("stopping", [False, True])

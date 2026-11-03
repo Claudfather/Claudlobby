@@ -170,7 +170,7 @@ def _after(cursor: str | None, scope: dict) -> tuple[int, str] | None:
             raise ValueError
         key = payload["after"]
         if (not isinstance(key, list) or len(key) != 2 or type(key[0]) is not int
-                or key[0] < 1 or not isinstance(key[1], str) or not key[1]):
+                or not 1 <= key[0] <= 2 ** 63 - 1 or not isinstance(key[1], str) or not key[1]):
             raise ValueError
         return key[0], key[1]
     except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
@@ -213,6 +213,34 @@ def list_tasks(conn: sqlite3.Connection, *, fleet_uid: str, state: ListState = "
     items = tuple(matches[:limit])
     token = _cursor(scope, _key(items[-1])) if len(matches) > limit else None
     return TaskPage(snapshot.schema_version, fleet_uid, items, token, snapshot.issues)
+
+
+def task_board_candidates(conn: sqlite3.Connection, *, fleet_uid: str | None,
+                          cursor: str | None = None) -> tuple[tuple[tuple[str, str | None], ...], str | None]:
+    """One bounded recent-to-older board page; lifecycle remains the reducer's.
+
+    Continuation follows immutable admission keys, scoped to this host and fleet.
+    It does not freeze lifecycle or authorize reads. The caller owns its snapshot
+    and reduces only these IDs, preserving unresolved rows rather than filtering
+    them with a second lifecycle implementation.
+    """
+    hosts = ",".join(row[0] for row in conn.execute(
+        "SELECT uid FROM identity_registry WHERE kind='host' ORDER BY uid"))
+    scope = {"query": "task-board-v1", "hosts": hosts, "fleet_uid": fleet_uid}
+    after = _after(cursor, scope)
+    clauses, params = [], []
+    if fleet_uid is not None:
+        clauses.append("fleet_uid=?")
+        params.append(fleet_uid)
+    if after is not None:
+        clauses.append("(ingest_seq < ? OR (ingest_seq = ? AND work_item_id < ?))")
+        params.extend((after[0], after[0], after[1]))
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute("SELECT work_item_id, fleet_uid, ingest_seq FROM work_items" + where
+                        + " ORDER BY ingest_seq DESC, work_item_id DESC LIMIT 201", params).fetchall()
+    page = rows[:200]
+    token = _cursor(scope, (page[-1][2], page[-1][0])) if len(rows) > 200 else None
+    return tuple((row[0], row[1]) for row in page), token
 
 
 def list_task_escalations(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskEscalations:

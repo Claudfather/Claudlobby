@@ -48,7 +48,14 @@ export async function jget(url) {
       attention_question:task.attention_question || null,attention_reason:task.attention_reason || [],delivery:task.delivery}})
       :{state:'not_found',remediation:'No synthetic task in this example team.'};
   }
-  if(u.pathname==='/api/tasks') return env({tasks:active.flatMap(tasks),issue_count:0,truncated:false});
+  if(u.pathname==='/api/tasks') {
+    const cursor=u.searchParams.get('cursor'), older='fixture-older:'+encodeURIComponent(selected || 'all');
+    if(cursor !== null && cursor !== older) return {state:'invalid',remediation:'Refresh this example task window.'};
+    const rows=active.flatMap(room=>tasks(room).slice(cursor ? 2 : 0,cursor ? 3 : 2));
+    return env({tasks:rows,issues:[],issue_count:0,attention_count:rows.filter(t=>t.attention).length,
+      limit:active.length*2,truncated:!cursor,
+      task_page:{version:1,cursor,next_cursor:cursor ? null : older,window:JSON.stringify(active)}});
+  }
   if(u.pathname==='/api/channel') {
     const saved=await fetch('/fixture/records').then(r=>r.json());
     return env({threads:[...saved.filter(r=>active.includes(r.scope.fleet)&&r.status!=='rejected').map((r,i)=>({key:r.request_id,work_item_id:r.target.task_id,title:r.kind+' to '+r.target.recipient,latest_seq:10+i,task_events:[],delivered:r.status==='delivered',messages:[{msg_id:r.request_id,message_class:'message',sender_short:'You',recipient_short:r.target.recipient,occurred_at:r.submitted_at,privacy:'full',body:r.body,delivery_state:r.status}]})),...active.flatMap(room=>tasks(room).slice(0,2).map(t=>thread(t)))]});

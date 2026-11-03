@@ -623,6 +623,77 @@ function taskIssueNote(r) {
 }
 
 let taskFilters = {status:"",assignee:""}, taskSnapshot = null;
+let taskHistoryHeld = false, taskHistoryBusy = false, taskHistoryVersion = 0, taskHistoryNotice = "";
+function taskWindowIdentity(env) {
+  return JSON.stringify([env?.data?.task_page?.window || null, env?.data?.coverage || null]);
+}
+function clearTaskHistory(env = {state:"loading"}) {
+  taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
+  taskSnapshot = null;
+  renderTasks(env);
+}
+function refreshTaskHistory() {
+  clearTaskHistory();
+  void refreshBoards();
+}
+function acceptTaskPoll(env, settled = true) {
+  if (taskHistoryHeld) {
+    if (!settled) return taskSnapshot;
+    if (env?.state === "ok" && taskWindowIdentity(env) === taskWindowIdentity(taskSnapshot)) return taskSnapshot;
+    taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
+  }
+  renderTasks(env);
+  return env;
+}
+function paintTaskHistory(env) {
+  const more = $("task-load-older"), refresh = $("task-refresh"), count = $("task-history-count");
+  const data = env?.state === "ok" ? env.data : null;
+  const unsupported = data?.task_page?.unavailable || data?.truncated && data?.task_page?.version !== 1;
+  if (more) {
+    more.hidden = data?.task_page?.version !== 1 || !data?.task_page?.next_cursor;
+    more.disabled = taskHistoryBusy;
+    more.textContent = taskHistoryBusy ? "Loading older work…" : "Load older work";
+    more.onclick = loadOlderTasks;
+  }
+  if (refresh) { refresh.disabled = taskHistoryBusy; refresh.onclick = refreshTaskHistory; }
+  if (count) {
+    count.hidden = !data;
+    count.textContent = data ? `${data.tasks.length} loaded task records. `
+      + (data.coverage?.partial || data.truncated || data.task_page?.unavailable ? "History coverage is incomplete. " : "Reached the oldest recorded work in the selected sources. ")
+      + (unsupported ? "A source needs an update to load older work. " : "")
+      + (taskHistoryHeld ? "Browsing loaded history; Refresh tasks returns to newest records. " : "") + taskHistoryNotice : "";
+  }
+}
+async function loadOlderTasks() {
+  const previous = taskSnapshot, token = previous?.data?.task_page?.next_cursor;
+  if (!token || previous.data.task_page.version !== 1 || taskHistoryBusy
+      || typeof sessionPaused !== "undefined" && sessionPaused) return;
+  taskHistoryHeld = taskHistoryBusy = true; taskHistoryNotice = "";
+  const version = ++taskHistoryVersion, room = currentFleet, session = sessionEpoch;
+  paintTaskHistory(previous);
+  try {
+    const q = fleetQuery();
+    const next = await jget(`/api/tasks${q}${q ? '&' : '?'}cursor=${encodeURIComponent(token)}`);
+    if (version !== taskHistoryVersion || sessionPaused || room !== currentFleet || session !== sessionEpoch) return;
+    if (next?.state !== "ok" || next.data?.task_page?.version !== 1 || next.data.task_page.cursor !== token
+        || taskWindowIdentity(next) !== taskWindowIdentity(previous)) {
+      clearTaskHistory({state:"unavailable",remediation:"Task history changed or could not be continued. Refresh tasks to read current records."});
+      return;
+    }
+    const rows = new Map(previous.data.tasks.map(t => [JSON.stringify([t.fleet,t.task_id]),t]));
+    for (const task of next.data.tasks) {
+      const key = JSON.stringify([task.fleet,task.task_id]);
+      if (!rows.has(key)) rows.set(key,task);
+    }
+    const tasks = [...rows.values()];
+    const issues = [...new Map([...(previous.data.issues || []),...(next.data.issues || [])].map(i => [JSON.stringify(i),i])).values()];
+    renderTasks({...next,data:{...next.data,tasks,issues,
+      issue_count:(previous.data.issue_count || 0) + (next.data.issue_count || 0),
+      issues_truncated:previous.data.issues_truncated || next.data.issues_truncated,
+      issue_scope:"loaded_tasks",attention_count:tasks.filter(t => t.attention).length}});
+  } catch { taskHistoryNotice = "Older work could not be read. Retry or refresh tasks."; }
+  finally { if (version === taskHistoryVersion) { taskHistoryBusy = false; paintTaskHistory(taskSnapshot); } }
+}
 function taskAssigneeKey(task) {
   const assignment = task.current_assignment || task.assignment_history?.at(-1);
   if (!assignment) return "unassigned";
@@ -630,8 +701,10 @@ function taskAssigneeKey(task) {
   return identity ? JSON.stringify([task.fleet || "",identity]) : "unknown";
 }
 function resetTaskFilters() {
+  taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   taskFilters = {status:"",assignee:""}; taskSnapshot = null;
   paintTaskFilters([],false);
+  paintTaskHistory(null);
 }
 function paintTaskFilters(rows, available) {
   const status = $("task-filter-status"), assignee = $("task-filter-assignee"), reset = $("task-filter-reset");
@@ -661,6 +734,7 @@ function paintTaskFilters(rows, available) {
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
   taskSnapshot = env?.state === "ok" ? env : null;
+  paintTaskHistory(env);
   paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
   const focused = document.activeElement;
   const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
@@ -695,12 +769,12 @@ function renderTasks(env) {
   const filterCount = $("task-filter-count");
   if (filterCount) {
     filterCount.hidden = !filtered;
-    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} recorded tasks in this snapshot. Attention count is unfiltered.` : "";
+    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} loaded task records match. Attention count is unfiltered and covers loaded records.` : "";
   }
   const issueCount = env.data.issue_count || 0;
   badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
   badge.textContent = attn.length || "!";
-  badge.title = partial ? "Task attention covers readable sources only." : "";
+  badge.title = partial || env.data.truncated ? "Task attention covers loaded records in readable sources only." : "";
   const card = (r) => {
     const st = TASK_STATUS[r.state] || { label: "state unknown", cls: "s-bad" };
     const a = r.current_assignment;
@@ -731,8 +805,7 @@ function renderTasks(env) {
       + `</div>`;
   };
   const limited = env.data.truncated
-    ? `<div class="card attn"><div class="why">⚠ Showing the newest ${env.data.limit || 200}`
-      + ` tasks. Older work may still need attention.</div></div>` : "";
+    ? `<div class="card attn"><div class="why">⚠ ${taskHistoryHeld ? 'Showing loaded task history' : `Showing the newest ${env.data.limit || 200} tasks`}. Older work may still need attention.</div></div>` : "";
   const issues = issueCount
     ? `<div class="card attn"><div class="why">⚠ ${issueCount} task-history issue(s)`
       + `${env.data.issues_truncated ? " (first 50 shown)" : ""}`
@@ -925,7 +998,7 @@ function renderHostFacts(env) {
   if (!el) return;
   if (env?.data?.sources) {
     el.textContent = env.data.sources.map(s => `${s.label}: ${(s.state === 'ok' || s.overview_retained) && s.host
-      ? `${s.overview_retained ? 'last summary, refreshing · ' : ''}ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
+      ? `${s.overview_retained ? 'last summary, refreshing · ' : ''}ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'}${Number.isSafeInteger(s.host.rows) ? ` · rows ${s.host.rows}` : ''} · spool ${s.host.spool_files}`
       : s.connection_state === 'not_connected' ? 'not connected'
       : s.connection_state === 'ready' ? 'team summary unavailable' : s.state}`).join(' | ');
     return;
@@ -933,7 +1006,7 @@ function renderHostFacts(env) {
   const h = env && env.state === "ok" && env.data ? env.data.host : null;
   el.textContent = h
     ? `host ingest ${h.last_ingest_at ? ago(h.last_ingest_at) : "never"}`
-      + ` · rows ${h.rows} · spool ${h.spool_files}`
+      + `${Number.isSafeInteger(h.rows) ? ` · rows ${h.rows}` : ''} · spool ${h.spool_files}`
     : "host ingest — · rows — · spool —";
 }
 
@@ -1044,7 +1117,7 @@ function renderOverview(env) {
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(connectionLabel(s.connection_state))}</span></div>
       <div class="ov-line">Team summary: ${s.overview_retained ? `refreshing; showing the last read ${esc(s.overview_read_at ? ago(s.overview_read_at) : 'at an unknown time')}` : s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
       <div class="ov-line">${(s.state === 'ok' || s.overview_retained) && s.host
-        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
+        ? `${Number.isSafeInteger(s.host.rows) ? `${s.host.rows} rows · ` : ''}${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
       <div class="ov-line">${s.overview_retained ? 'Summary refresh is in progress; activity and tasks refresh independently.' : s.connection_state === 'ready' && s.state !== 'ok'
@@ -1085,7 +1158,7 @@ function renderOverview(env) {
       <div class="ov-head"><b>host</b>
         <span class="${h.daemon_serving ? "ov-ok" : "ov-bad"}">${
           h.daemon_serving ? "recorder up" : "recorder DOWN"}</span>
-        <small>${h.rows} rows</small></div>
+        ${Number.isSafeInteger(h.rows) ? `<small>${h.rows} rows</small>` : ''}</div>
       <div class="ov-line">${spool} · ${lag}</div>
       <div class="ov-line">${facets}</div>
       ${d.capture_config === "malformed"
@@ -1276,7 +1349,10 @@ async function refreshBoards() {
   };
   const conversation = Promise.all([
     panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
-    panel("/api/tasks" + q, renderTasks),
+    (async () => {
+      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false); });
+      return current() ? acceptTaskPoll(value,true) : value;
+    })(),
   ]).then(([ch, tk]) => {
     // Partial paints never replace the work-loop's paired canonical snapshots.
     if (current()) workLoop.update(tk, ch);
@@ -1318,6 +1394,7 @@ function openStream() {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
       if (payload.rows.length || payload.coverage_changed || payload.routing_changed || payload.stream_changed) {
+        if (payload.coverage_changed || payload.routing_changed || payload.stream_changed) clearTaskHistory();
         // Learning rooms schedules another board read without retiring the
         // canonical overview that just supplied those same room identities.
         if (payload.coverage_changed || payload.routing_retired) ++generation;
@@ -1336,6 +1413,7 @@ function openStream() {
     // they hold came from a source that has stopped answering (§16).
     try {
       const env = JSON.parse(ev.data);
+      clearTaskHistory(env);
       // A refresh already in flight read the source BEFORE this loss: retire
       // it, or its older text repaints what is cleared below. The retired
       // read would have re-armed the safety timer, so the coalesced refetch
@@ -1765,6 +1843,7 @@ function setView(view) {
   const wasDirectory = agentDirectoryVisible();
   if (view !== "fleet") closeEquipment();
   currentView = view;
+  if (workLoop) workLoop.setView(view);
   document.body.classList.toggle("agent-directory-view", agentDirectoryVisible());
   $("channel").hidden = view !== "channel";
   $("rail-right").hidden = view !== "tasks";

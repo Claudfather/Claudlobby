@@ -52,7 +52,7 @@ from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
 from ..task_state import TASK_EMITTER, TaskStateError, read_tasks
 from ..report_payload import decode_report_body
-from ..task_queries import TaskQueryError, task_escalations_from_snapshot
+from ..task_queries import TaskQueryError, task_board_candidates, task_escalations_from_snapshot
 from ..task_permissions import EMITTER as PERMISSION_EMITTER, list_task_permissions
 
 try:  # §14: optional UI features degrade without disabling the core ledger
@@ -959,7 +959,7 @@ def _fetch_task_detail(conn, task_id, fleet, names=None, *, root):
 
 
 def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path,
-                 summary_only: bool = False) -> dict:
+                 summary_only: bool = False, cursor: str | None = None) -> dict:
     """Recent fleet-owned Tasks, with current-assignment evidence kept separate.
 
     The work-item query enforces the 200-card cap before any board projection;
@@ -982,13 +982,11 @@ def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
             return {"tasks": [], "attention_count": 0, "issues": [],
                     "issue_count": 0, "issue_limit": 50, "issue_scope": "fleet",
                     "limit": 200, "truncated": False}
-        where = " WHERE fleet_uid=?" if selected_uid else ""
-        candidates = conn.execute(
-            "SELECT work_item_id, fleet_uid FROM work_items" + where
-            + " ORDER BY ingest_seq DESC LIMIT 201",
-            (selected_uid,) if selected_uid else ()).fetchall()
-        truncated = len(candidates) > 200
-        candidates = candidates[:200]
+        try:
+            candidates, next_cursor = task_board_candidates(conn, fleet_uid=selected_uid, cursor=cursor)
+        except TaskQueryError as exc:
+            raise TaskDetailError("invalid", "Task page no longer matches this host and team; refresh tasks.") from exc
+        truncated = next_cursor is not None
         selected = {row[0] for row in candidates}
         reducer_fleets = {row[1] for row in candidates if row[1]}
         if not reducer_fleets and selected_uid:
@@ -997,7 +995,7 @@ def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
             reducer_fleets.update(fleet_names)
         snapshots = {uid: read_tasks(conn, fleet_uid=uid,
                                     task_ids=tuple(row[0] for row in candidates if row[1] == uid)
-                                    if candidates else None)
+                                    if candidates or cursor else None)
                      for uid in reducer_fleets}
         escalations = {item.task_id: item for snapshot in snapshots.values()
                        for item in task_escalations_from_snapshot(snapshot).items}
@@ -1145,14 +1143,16 @@ def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
                 "issues": rendered_issues[:50], "issue_count": len(rendered_issues),
                 "issue_limit": 50, "issues_truncated": len(rendered_issues) > 50,
                 "issue_scope": "displayed_tasks" if candidates else "fleet",
-                "limit": 200, "truncated": truncated}
+                "limit": 200, "truncated": truncated,
+                "task_page": {"version": 1, "cursor": cursor, "next_cursor": next_cursor}}
     finally:
         if own_snapshot:
             conn.rollback()
 
 
-def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
-    return _query_tasks(conn, fleet, root=root)
+def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path,
+                 cursor: str | None = None) -> dict:
+    return _query_tasks(conn, fleet, root=root, cursor=cursor)
 
 
 def _fetch_task_summary(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
@@ -1545,11 +1545,16 @@ def _host_samples(conn: sqlite3.Connection) -> dict | None:
     """metric -> {value, occurred_at} for the host probe's newest facets;
     None when the probe has never recorded (dormant, or armed on another
     host) — absent is not an empty dashboard."""
-    # Discover subjects through the covering (subject_uid, metric, ingest_seq)
-    # index, including historical subjects absent from today's registry. Seek
-    # only their newest facet instead of sorting all retained host samples.
+    # Jump between subjects through the leading subject_uid index key rather
+    # than scanning every retained sample for DISTINCT. Historical subjects
+    # absent from today's registry remain included; an empty table yields none.
     subjects = [row[0] for row in conn.execute(
-        "SELECT DISTINCT subject_uid FROM metric_samples")]
+        "WITH RECURSIVE subjects(subject_uid) AS ("
+        " SELECT MIN(subject_uid) FROM metric_samples"
+        " UNION ALL SELECT (SELECT MIN(subject_uid) FROM metric_samples"
+        " WHERE subject_uid > subjects.subject_uid)"
+        " FROM subjects WHERE subject_uid IS NOT NULL)"
+        " SELECT subject_uid FROM subjects WHERE subject_uid IS NOT NULL")]
     newest = {}
     for subject in subjects:
         for metric in _HOST_METRICS:
@@ -1633,7 +1638,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
       let one future-stamped row pin a fleet at "0s ago" forever).
     * `capture` — the recorder's policy through `capture_mode`, the ONE
       rule, as /api/trust reads it.
-    The host row is `_fetch_summary` plus the ingest lag, and `totals` is
+    The host row is recorder state plus ingest lag and latest samples; `totals` is
     those rows summed once for the header — with the disclosures a sum
     swallows (`_totals`)."""
     from datetime import datetime, timedelta, timezone
@@ -1742,7 +1747,9 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     samples = _host_samples(conn)
     host = {
         **_recorder_state(root),
-        "rows": conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0],
+        # Exact ledger size is an explicit /api/summary?counts=true diagnostic; counting
+        # all history on every overview refresh can exhaust the read budget.
+        "rows": None, "rows_reason": "not_counted",
         "last_ingest_at": prov.get("last_ingest_at"),
         # lag from LEDGER time; None (never a zero) when nothing was ingested
         "ingest_lag_s": lag,
@@ -1877,12 +1884,16 @@ def _recorder_state(root: Path) -> dict:
     }
 
 
-def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
-    counts = {}
-    for t in ("communications", "work_items", "assignments", "workstreams",
-              "events", "identity_registry", "ingest_ledger"):
-        counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-    return {"counts": counts, **_recorder_state(root)}
+def _fetch_summary(conn: sqlite3.Connection, root: Path, *, include_counts: bool = False) -> dict:
+    # Frequent UI and health reads need recorder state, not full history scans.
+    counts = None
+    if include_counts:
+        counts = {}
+        for t in ("communications", "work_items", "assignments", "workstreams",
+                  "events", "identity_registry", "ingest_ledger"):
+            counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+    return {"counts": counts, "counts_state": "counted" if include_counts else "not_counted",
+            **_recorder_state(root)}
 
 
 # --------------------------------------------------------------------------
@@ -2002,8 +2013,9 @@ def create_app(
         return result
 
     @app.get("/api/summary")
-    def summary():
-        return JSONResponse(envelope(lambda c: _fetch_summary(c, root)))
+    def summary(counts: bool = False):
+        return JSONResponse(envelope(lambda c: _fetch_summary(c, root, include_counts=True)
+                                     if counts else _fetch_summary(c, root)))
 
     @app.get("/api/channel")
     def channel(limit: int = 120, fleet: str | None = None):
@@ -2013,8 +2025,8 @@ def create_app(
             envelope(lambda c: _fetch_channel(c, names, limit, fleet), snapshot=True))
 
     @app.get("/api/tasks")
-    def tasks(fleet: str | None = None):
-        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet, root=root)))
+    def tasks(fleet: str | None = None, cursor: str | None = None):
+        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet, root=root, cursor=cursor)))
 
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str, fleet: str | None = None):

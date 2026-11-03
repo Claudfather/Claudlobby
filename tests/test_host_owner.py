@@ -234,6 +234,113 @@ def allow(store, *extra):
     return call(store, "allow-messages", "--target-fleet", "example", "--actor", "human:local-owner", *extra)
 
 
+def test_allow_actions_is_explicit_atomic_and_preserves_existing_grants(message_owner, monkeypatch):
+    store, _, owner, ctx = message_owner
+    original = store.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                    actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    args = ("--target-fleet", "example", "--actor", ctx.caller.alias,
+            "--capabilities", "messages", "nudges", "feedback")
+    output = terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", *args) == 0
+    first = store.local_action_status()
+    assert first.message_grants == (original,)
+    assert len(first.nudge_grants) == len(first.feedback_grants) == 1
+    assert first.permission_grants == ()
+    assert all(value in output.getvalue() for value in
+               (owner.host_uid, ctx.fleet_uid, ctx.caller.uid, "messages", "nudges", "feedback"))
+    assert output.getvalue().count("Type ALLOW-ACTIONS") == 1
+    terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", *args) == 0
+    assert store.local_action_status() == first
+
+
+def test_allow_actions_conflict_rolls_back_other_selected_capabilities(message_owner, monkeypatch, capsys):
+    store, _, owner, ctx = message_owner
+    retained = store.allow_feedback(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                    actor_uid="actor_" + uuid4().hex, actor_alias="human:another")
+    terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", "--target-fleet", "example", "--actor", ctx.caller.alias,
+                "--capabilities", "messages", "nudges", "feedback") == 4
+    assert "feedback" in capsys.readouterr().err
+    status = store.local_action_status()
+    assert status.message_grants == status.nudge_grants == ()
+    assert status.feedback_grants == (retained,)
+
+
+def test_allow_actions_registers_once_then_requires_selected_action_confirmation(message_owner, monkeypatch):
+    store, _, _, _ = message_owner
+    args = ("--target-fleet", "example", "--actor", "human:new-actions", "--register-actor",
+            "--capabilities", "nudges", "feedback")
+    terminal(monkeypatch, iter([]))
+    assert call(store, "allow-actions", *(arg for arg in args if arg != "--register-actor")) == 4
+    terminal(monkeypatch, iter(["no\n"]))
+    assert call(store, "allow-actions", *args) == 4
+    with sqlite3.connect(db_file(store.root)) as conn:
+        assert not conn.execute("SELECT 1 FROM identity_registry WHERE alias='human:new-actions'").fetchone()
+    output = terminal(monkeypatch, iter(["REGISTER\n", "no\n"]))
+    assert call(store, "allow-actions", *args) == 4
+    assert store.local_action_status().nudge_grants == ()
+    with sqlite3.connect(db_file(store.root)) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='operator_first_seen' "
+                            "AND subject_alias='human:new-actions'").fetchone()[0] == 1
+    assert output.getvalue().count("Type REGISTER") == 1
+    output = terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", *args) == 0
+    status = store.local_action_status()
+    assert status.message_grants == status.permission_grants == ()
+    assert status.nudge_grants[0].actor_alias == status.feedback_grants[0].actor_alias == "human:new-actions"
+    assert "Type REGISTER" not in output.getvalue()
+
+
+@pytest.mark.parametrize("capabilities", [(), ("--capabilities",), ("--capabilities", "permissions"),
+                                          ("--capabilities", "messages", "messages")])
+def test_allow_actions_requires_finite_explicit_unique_selection(message_owner, monkeypatch, capabilities):
+    store, _, _, ctx = message_owner
+    terminal(monkeypatch, iter([]))
+    args = ("--target-fleet", "example", "--actor", ctx.caller.alias, *capabilities)
+    if capabilities == ("--capabilities", "messages", "messages"):
+        assert call(store, "allow-actions", *args) == 2
+    else:
+        with pytest.raises(SystemExit) as exc:
+            call(store, "allow-actions", *args)
+        assert exc.value.code == 2
+    assert store.local_action_status().message_grants == ()
+
+
+@pytest.mark.parametrize("change", ["owner", "actor", "fleet", "release"])
+def test_allow_actions_rechecks_displayed_identity_before_batch(message_owner, monkeypatch, change):
+    store, _, owner, ctx = message_owner
+    terminal(monkeypatch, iter([]))
+    def race(*args):
+        if change == "owner":
+            store.revoke_owner(expected_revision=owner.revision)
+        elif change in {"actor", "fleet"}:
+            with sqlite3.connect(db_file(store.root)) as conn:
+                conn.execute("UPDATE identity_registry SET uid=? WHERE alias=?",
+                             (change + "_" + uuid4().hex, ctx.caller.alias if change == "actor" else "example"))
+        else:
+            (store.root / "state/selected-release.json").unlink()
+    monkeypatch.setattr(host_owner, "_approve", race)
+    assert call(store, "allow-actions", "--target-fleet", "example", "--actor", ctx.caller.alias,
+                "--capabilities", "messages", "nudges") in (4, 7)
+    status = store.local_action_status()
+    assert status.message_grants == status.nudge_grants == ()
+
+
+def test_allow_actions_keeps_local_terminal_and_scope_fences(message_owner, monkeypatch):
+    store, _, _, ctx = message_owner
+    args = ("--target-fleet", "example", "--actor", ctx.caller.alias, "--capabilities", "messages")
+    monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
+    assert call(store, "allow-actions", *args) == 4
+    assert call(store, "allow-actions", *args, "--json") == 2
+    assert main(["--root", str(store.root), "--fleet", "example", "host", "owner", "allow-actions", *args]) == 2
+    for marker in host_owner._GENERATED:
+        with monkeypatch.context() as patch:
+            patch.setenv(marker, "")
+            assert call(store, "allow-actions", *args) == 4
+    assert store.local_action_status().message_grants == ()
+
+
 def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config(message_owner, monkeypatch, capsys):
     store, host, owner, ctx = message_owner
     output = terminal(monkeypatch, iter(["ALLOW\n"]))

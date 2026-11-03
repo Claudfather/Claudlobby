@@ -1,5 +1,7 @@
 """Scoped reads against actual SQL and the shared reducer's storage fixtures."""
 
+import base64
+import json
 import re
 import sqlite3
 
@@ -82,6 +84,12 @@ def test_cursor_continues_admission_order_without_duplicates_or_scope_drift(conn
             list_tasks(conn, **kwargs)
     with pytest.raises(InvalidTaskCursorError):
         list_tasks(conn, fleet_uid="fleet_a", cursor="not a cursor")
+    payload = json.loads(base64.urlsafe_b64decode(first.next_cursor + "=" * (-len(first.next_cursor) % 4)))
+    for oversized in (2 ** 63, 10 ** 100):
+        payload["after"][0] = oversized
+        forged = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        with pytest.raises(InvalidTaskCursorError):
+            list_tasks(conn, fleet_uid="fleet_a", limit=2, cursor=forged)
 
 
 def test_canonical_reads_refuse_wrong_kind_and_display_alias_with_scoped_recovery(conn):

@@ -293,6 +293,17 @@ test('finite route/query roster refuses actions, credential URLs and duplicate k
   assert.equal(h.calls.length, 2); h.api.dispose();
 });
 
+test('task history cursor stays on the admitted direct host read with duplicate keys refused',async()=>{
+  const h=harness();await h.api.connect();
+  assert.equal((await h.api.readHandle.jget('/api/tasks?fleet=data&cursor=opaque-page')).state,'ok');
+  const url=new URL(h.calls.at(-1).url);
+  assert.equal(url.pathname,'/api/owner/connected/read/tasks');
+  assert.equal(url.search,'?fleet=data&cursor=opaque-page');
+  const count=h.calls.length;
+  assert.equal(await h.api.readHandle.jget('/api/tasks?cursor=a&cursor=b'),null);
+  assert.equal(h.calls.length,count);h.api.dispose();
+});
+
 test('read endpoint500 stays local;503 checks current authority without disturbing either admitted host', async () => {
   const a = harness(), b = harness(); await a.api.connect(); await b.api.connect();
   a.overrides.set('read/tasks', () => reply(500, { state: 'unavailable' }));

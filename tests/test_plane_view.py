@@ -878,11 +878,25 @@ def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
     assert body["data"]["daemon_serving"] is False  # probe, not presence
 
 
-def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
+def test_healthz_ok_is_one_envelope_with_summary(tmp_path, monkeypatch):
     _seed_conversation(tmp_path)
-    r = TestClient(create_app(tmp_path, package=source_package())).get("/healthz")
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    r = client.get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
+    assert data["counts"] is None and data["counts_state"] == "not_counted"
+    summary = client.get("/api/summary").json()
+    assert summary["state"] == "ok"
+    assert summary["data"]["counts"] is None and summary["data"]["counts_state"] == "not_counted"
+    assert not any("COUNT(" in query.upper() for query in queries)
     from claudlobby.plane.migrations import SCHEMA_USER_VERSION
     assert data["schema_user_version"] == SCHEMA_USER_VERSION
     assert "counts" in data and "spool_files" in data
@@ -1328,7 +1342,7 @@ class _TwinSampler:
         pass
 
 
-def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
+def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path, monkeypatch):
     """U3: every figure on a fleet card is a plane fact through the door
     that defines it — presence scoped like the panel, the open set through
     OPEN_ASSIGNMENTS_AT_SQL, attention/overdue through ATTENTION_SQL with
@@ -1336,8 +1350,18 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     the ONE rule — and a figure whose source is missing is None with a
     reason, never a zero (orphan-ness needs the bot's directory)."""
     _seed_twins_with_deadlines(tmp_path)
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
     client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     ov = client.get("/api/overview").json()
+    assert not any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+                   for query in queries)
     assert ov["state"] == "ok", ov
     rows = {r["alias"]: r for r in ov["data"]["fleets"]}
     assert sorted(rows) == ["data", "engineering"]
@@ -1359,7 +1383,14 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     h = ov["data"]["host"]
     assert h["daemon_serving"] is False
     assert (h["spool_files"], h["spool_state"]) == (0, "ok")
-    assert isinstance(h["ingest_lag_s"], float) and h["rows"] > 0
+    assert isinstance(h["ingest_lag_s"], float)
+    assert h["rows"] is None and h["rows_reason"] == "not_counted"
+    # Exact counts remain available when the operator requests diagnostics.
+    summary = client.get("/api/summary?counts=true").json()
+    assert summary["state"] == "ok" and summary["data"]["counts"]["ingest_ledger"] > 0
+    assert summary["data"]["counts_state"] == "counted"
+    assert any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+               for query in queries)
     assert h["last_ingest_at"] == ov["provenance"]["last_ingest_at"]
 
     # the orphan split once the bots' directories exist: engineering's
@@ -1727,6 +1758,12 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
 
     initialize_plane(tmp_path)
     _full_capture(tmp_path)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    empty = view._ro_conn(db)
+    try:
+        assert view._host_samples(empty) is None
+    finally:
+        empty.close()
     emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "probe",
         "payload": {"subject_kind": "host", "subject": host,
                     "metric": "host.load", "value": value}}
@@ -1742,6 +1779,8 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
         "VALUES (?,?,'1','2020-01-01','2026-01-01',?,'probe','host',?,'host.load',?)",
         [(1_000_000 + n, f"sample_{n}", host, subject,
           "null" if n == 19_999 else "3") for n in range(20_000)])
+    # Retained samples still count after their subject leaves the registry.
+    conn.execute("DELETE FROM identity_registry WHERE uid=?", (subject,))
     conn.commit()
     conn.close()
     conn = view._ro_conn(db)
@@ -1749,7 +1788,8 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
     def bounded_work():
         nonlocal steps
         steps += 1
-        return int(steps > 200)
+        # Index seeks stay below 10,000 VM steps; DISTINCT walks this history.
+        return int(steps > 10)
     conn.set_progress_handler(bounded_work, 1000)
     try:
         samples = view._host_samples(conn)

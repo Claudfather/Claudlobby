@@ -1016,8 +1016,10 @@ test(`manager shortcut composes only an explicit matching granted lead and never
   const h=harness({interactionContext:()=>message,...(authority==='no-lead'?{}:{nudgeContext:()=>nudge})});
   h.loop.setRoom('web');await settle();
   assert.equal(h.get('work-manager').hidden,authority!=='matching');
+  h.loop.setView('tasks');
   h.get('work-body').value='First recipient draft';h.get('work-body').emit('input');
   h.get('work-manager').onclick();await settle();
+  assert.equal(h.get('work-composer').open,authority==='matching');
   if(authority==='matching') {
     assert.equal(h.get('work-recipient').value,lead.id);assert.equal(h.get('work-form').hidden,false);
     h.get('work-recipient').value=first.id;h.get('work-recipient').onchange();
@@ -1180,9 +1182,11 @@ test('bot selection uses the exact admitted UID and room, keeps recipient drafts
   let contextReads = 0;
   const h = harness({ interactionContext: () => { contextReads++; return inspectionContext; } });
   h.loop.setRoom(inspectedWorker.fleet); await settle();
+  h.loop.setView('tasks');
   const lead = { ...inspectedWorker, uid: inspectionContext.recipients[0].id, alias: 'bot:web/subteam/lead' };
   h.get('work-body').value = 'Draft for the lead'; h.get('work-body').emit('input');
   assert.equal(h.loop.selectMessageRecipient(inspectedWorker), true);
+  assert.equal(h.get('work-composer').open, true);
   assert.equal(h.get('work-recipient').value, inspectedWorker.uid);
   assert.equal(h.get('work-body').value, '');
   h.get('work-body').value = 'Draft for this worker'; h.get('work-body').emit('input');
@@ -1391,7 +1395,7 @@ test('the real stream source callback clears an open conversation through the ch
   const listeners = new Map(), cleared = [];
   const bindings = { createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
     workLoop: h.loop, $: id => h.get(id), renderSummary() {}, renderHeader: value => cleared.push(value),
-    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, resetAgentPresence(){}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
+    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, resetAgentPresence(){}, clearTaskHistory(){}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
   runInNewContext(appSlice('function openStream() {', '$("debug-toggle")'), bindings); bindings.openStream();
   listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
   assert.deepEqual(cleared, [null, null]);
@@ -1410,7 +1414,7 @@ test('a refresh started before stream source loss cannot restore the cleared con
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }, clearTimeout() {},
       createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
       channelUrl: () => '/api/channel', fleetQuery: () => '', syncWorkRoom: () => false, adoptFleets() {},
-      renderChannel: value => painted.push(value), renderTasks() {}, renderFleet() {}, renderSummary() {}, renderHeader() {},
+      renderChannel: value => painted.push(value), renderTasks() {}, acceptTaskPoll(v){return v;}, clearTaskHistory(){}, renderFleet() {}, renderSummary() {}, renderHeader() {},
       renderHostFacts() {}, renderFleetTabs() {}, renderOverview() {}, renderState() {}, pushDebugRow() {} };
     runInNewContext(appSlice('let refreshTimer = null;', '$("debug-toggle")'), bindings); bindings.openStream();
     const board = {state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',title:'task-a'}]}};
@@ -1934,6 +1938,8 @@ test('explicit action access check reads only missing capabilities once and pres
   assert.equal(check.disabled,true);assert.deepEqual(reads,[['message','web'],['nudge','web'],['nudge','web']]);
   held.resolve(ownerNudge);await settle();
   assert.equal(check.hidden,false);assert.equal(check.disabled,true);assert.equal(h.get('work-body').value,'Keep the worker draft');
+  assert.equal(h.get('work-access-help').hidden,false); // Allowed actions remain inspectable independently of connection.
+  assert.match(h.get('work-access-status').textContent,/Messages: available.*Nudges: available/);
   assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.document.activeElement,check);
   assert.equal(storage.getItem('plane.pending-actions.v1'),pending);
   assert.match(h.get('work-pending').innerHTML,new RegExp(original.request_id));
@@ -1965,7 +1971,11 @@ test('action access help distinguishes authorization, unavailable transport and 
   const h=harness(nudgeOptions({interactionContext:()=>null,nudgeContext:()=>{throw actionDenied();}}));
   h.loop.setRoom('web');await settle();h.update();
   assert.match(h.get('work-access-status').textContent,/Messages: unavailable.*Nudges: not authorized/);
-  assert.match(h.get('work-loop').innerHTML,/separate, local approval/i);
+  const help=h.get('work-loop').innerHTML;
+  assert.match(help,/Reading this team and acting on it are separate permissions/i);
+  assert.match(help,/--root DATA_ROOT host owner allow-actions --target-fleet TEAM --actor human:ALIAS/);
+  assert.match(help,/hosts that support.*allow-actions/i);
+  assert.match(help,/first-team-setup\.md#approve-team-actions-after-launch/);
   assert.doesNotMatch(h.get('work-access-status').textContent,/Messages: not authorized/);
   h.update({state:'disconnected'});assert.equal(h.get('work-check-access').disabled,true);
   assert.match(h.get('work-access-status').textContent,/disconnected.*does not prove.*approval/i);
@@ -1973,6 +1983,7 @@ test('action access help distinguishes authorization, unavailable transport and 
   readonly.loop.setRoom('web');await settle();
   assert.equal(readonly.get('work-check-access').hidden,true);
   assert.match(readonly.get('work-access-status').textContent,/does not support browser actions/i);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
 });
 
 for(const loss of ['room','pause','disconnected'])
@@ -2007,4 +2018,52 @@ test('action access check is disabled during context reads, task reads, writes, 
   lookup.resolve(receipt(new ActionState(storage).pending.find(p=>p.request_id==='saved-request')));await checking;
   h.loop.setRoom('all');await settle();assert.equal(h.get('work-check-access').disabled,true);
   const count=reads;h.get('work-check-access').onclick();await settle();assert.equal(reads,count);
+});
+
+test('Tasks view keeps one collapsed composer, its draft and receipt IDs across refresh and manual reopening',async()=>{
+  const storage=store();saved(storage);const h=harness({storage});h.loop.setRoom('web');await settle();h.update();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  h.get('work-body').value='Keep the worker draft';h.get('work-body').emit('input');h.get('work-body').focus();
+  const pending=storage.getItem('plane.pending-actions.v1'),form=h.get('work-form'),composer=h.get('work-composer');
+  const c={currentView:'channel',workLoop:h.loop,agentDirectoryVisible:()=>false,closeEquipment(){},clearInterval(){},gridTimer:null,trustTimer:null,
+    $:id=>h.get(id)||new h.Element(id),document:Object.assign(h.document,{body:{classList:{toggle(){}}},querySelectorAll:()=>[]})};
+  runInNewContext(appSlice('function setView(', 'let trustTimer ='),c);
+  c.setView('tasks');assert.equal(composer.open,false);assert.equal(h.document.activeElement,h.get('work-composer-toggle'));
+  assert.match(h.get('work-composer-label').textContent,/Message/);
+  assert.match(h.get('work-composer-status').textContent,/Draft kept.*1 awaiting confirmation/);
+  h.update();assert.equal(composer.open,false);
+  composer.open=true;h.update();c.setView('tasks');assert.equal(composer.open,true);
+  c.setView('channel');assert.equal(composer.open,true);c.setView('tasks');assert.equal(composer.open,false);
+  assert.equal(h.get('work-form'),form);assert.equal(h.get('work-body').value,'Keep the worker draft');
+  assert.equal(h.get('work-recipient').value,'worker');assert.equal(storage.getItem('plane.pending-actions.v1'),pending);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+for(const action of ['feedback','nudge'])
+test(`task ${action} deliberately reveals the same composer and keeps its frozen selection while collapsed`,async()=>{
+  const h=harness((action==='feedback'?feedbackOptions:nudgeOptions)());h.loop.setView('tasks');
+  await (action==='feedback'?chooseFeedback:chooseNudge)(h);
+  const composer=h.get('work-composer');assert.equal(composer.open,true);assert.equal(h.document.activeElement,h.get('work-body'));
+  h.get('work-body').value='Keep this task draft';h.get('work-body').emit('input');
+  assert.match(h.get('work-composer-label').textContent,action==='feedback'?/Task feedback/:/Ask team lead/);
+  assert.match(h.get('work-composer-status').textContent,/Draft kept/);
+  composer.open=false;h.update();assert.equal(composer.open,false);
+  assert.equal(h.get('work-body').value,'Keep this task draft');assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  composer.open=true;await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.preparations.length,1);assert.equal(h.sends.length,1);assert.equal(h.lookups.length,0);
+  assert.equal(h.sends[0].kind,action);assert.equal(h.sends[0].target.task_id,nudgeTaskId);
+  assert.equal(h.sends[0].target.assignment_id,null);assert.equal(h.sends[0].target.release_id,ownerNudge.release_id);
+});
+
+test('collapsing during a send preserves one request and exposes its unconfirmed outcome without replay',async()=>{
+  const sent=deferred(),h=harness({sendAction:()=>sent.promise});h.loop.setRoom('web');await settle();
+  const submitting=h.submit();await settle();const request=h.sends[0],pending=h.storage.getItem('plane.pending-actions.v1');
+  h.loop.setView('tasks');assert.equal(h.get('work-composer').open,false);
+  assert.match(h.get('work-composer-status').textContent,/Sending.*1 awaiting confirmation/);
+  h.loop.setView('channel');h.get('work-composer').open=false;await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.sends.length,1);assert.equal(h.storage.getItem('plane.pending-actions.v1'),pending);
+  sent.resolve(receipt(request,'recorded'));await submitting;
+  assert.equal(h.get('work-composer').open,false);assert.match(h.get('work-composer-status').textContent,/1 awaiting confirmation/);
+  assert.equal(new ActionState(h.storage).pending[0].request_id,request.request_id);
+  assert.equal(h.get('work-body').value,'Hello');assert.equal(h.lookups.length,0);
 });
