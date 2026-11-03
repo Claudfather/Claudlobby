@@ -707,7 +707,7 @@ function railRow(a) {
   const live = a.last_seen && (Date.now() - Date.parse(a.last_seen)) < 36e5;
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
-    ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
+    ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspection="presence" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
     ${a.kind === "actor" && a.fleet ? `<button class="pill ghost" type="button" data-bot-message="${esc(a.uid)}" aria-label="Message ${esc(a.short)} in ${esc(a.fleet)}" disabled>Message ${esc(a.short)}</button>` : ""}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
@@ -814,7 +814,12 @@ function adoptRoster(next) {
     return !!b && Object.keys(a).every(key => a[key] === b[key]);
   });
   if (!same) { rosterIdentities = next; ++rosterGeneration; }
-  if (!same && typeof closeRoomBot === "function") closeRoomBot();
+  if (!same && typeof roomBotInspection !== "undefined" && roomBotInspection) {
+    const selected = roomBotInspection.identity, replacement = next.get(selected.uid);
+    if (replacement && ["uid","alias","fleet","fleet_uid","provisional"].every(key => replacement[key] === selected[key]))
+      roomBotInspection.roster = rosterGeneration;
+    refreshRoomBot();
+  }
   if (typeof paintConversationFocus === "function") paintConversationFocus();
   if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
   else refreshEquipmentAction();
@@ -2184,7 +2189,11 @@ function closeEquipment() {
 }
 function inspectBot(identity) {
   if (!identity || sessionPaused) return;
-  if (currentView === "channel") { void openRoomBot(identity); return; }
+  if (currentView === "channel" || typeof interactionApi.dispose === "function") {
+    if (activeRoom() !== "all" && activeRoom() !== identity.fleet) pickFleet(identity.fleet);
+    if (currentView !== "channel") setView("channel");
+    void openRoomBot(identity); return;
+  }
   const origin = document.activeElement;
   const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
   if (roomChanged) pickFleet(identity.fleet);

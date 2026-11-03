@@ -922,7 +922,7 @@ function inspectionHarness({room = false} = {}) {
   box = detail();
   const roomButtons=new Map(),roomBox=detail(roomButtons);roomBox.id='room-bot-inspection';
   const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: room?'channel':'fleet',
-    roomBotInspection:null,roomBotEpoch:0,interactionApi:{dispose(){}},activeRoom:()=>state.currentFleet,
+    roomBotInspection:null,roomBotEpoch:0,interactionApi:room?{dispose(){}}:{},activeRoom:()=>state.currentFleet,
     inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity, equipmentFocus: null,
     fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
     inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
@@ -939,6 +939,25 @@ function inspectionHarness({room = false} = {}) {
   state.PRESENCE_WORD={working:'working',idle:'idle',down:'down',stale:'stale',unknown:'unknown',sampling:'sampling…'};
   return { state, reads, selections, buttons, cards, document, roomBox, roomButtons, get box() { return box; }, replaceBox() { box = detail(); } };
 }
+
+test('connected bot inspection from Tasks returns to Rooms presence without equipment reads',()=>{
+  const h=inspectionHarness();h.state.currentView='tasks';h.state.interactionApi={dispose(){}};
+  const inspected=[];h.state.setView=view=>{h.state.currentView=view;};h.state.openRoomBot=identity=>{inspected.push(identity);};
+  h.state.inspectBot(botIdentity);assert.equal(h.state.currentView,'channel');assert.equal(inspected[0],botIdentity);assert.equal(h.reads.length,0);
+});
+
+test('connected cross-team directory inspection selects that room and survives only an unchanged selected identity',async()=>{
+  const h=inspectionHarness({room:true});h.state.currentView='grid';h.state.currentFleet='other';
+  const picks=[];h.state.pickFleet=fleet=>{picks.push(fleet);h.state.currentFleet=fleet;};
+  h.state.setView=view=>{h.state.currentView=view;};
+  h.state.rosterIdentities.set('other',{...botIdentity,uid:'other',fleet:'other'});
+  h.state.inspectBot(botIdentity);assert.deepEqual(picks,[botIdentity.fleet]);assert.equal(h.state.currentView,'channel');
+  runInNewContext(rosterHelpers,h.state);h.state.adoptRoster(new Map([[botIdentity.uid,botIdentity]]));
+  assert.equal(h.roomBox.hidden,false,'narrowing the roster keeps the exact selected bot');
+  h.reads[0].resolve(roomPresence());await flush();assert.match(h.roomBox.innerHTML,/Recorded heartbeat/);
+  h.state.adoptRoster(new Map([[botIdentity.uid,{...botIdentity,alias:'replacement'}]]));
+  assert.equal(h.roomBox.hidden,true,'replaced identity erases the inspector');
+});
 
 const roomPresence=()=>({state:'ok',provenance:{checked_at:'2026-01-01T00:00:00Z'},data:{sampler_available:true,bots:[{alias:botIdentity.alias,live:'up',presence:'idle'}]}});
 test('room bot inspection reads scoped presence, keeps Rooms open and only prepares the existing message composer',async()=>{

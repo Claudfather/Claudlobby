@@ -458,7 +458,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (['channel','tasks','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
+        if ((['channel','tasks','grid'].includes(button.dataset.view)
+            || button.dataset.botInspect && button.dataset.botInspection === 'presence')
+            && !['denied','disposed'].includes(phase)) {
           button.disabled = false; button.title = ''; continue;
         }
         button.disabled = true; button.title = unavailable;
