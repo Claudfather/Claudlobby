@@ -628,6 +628,87 @@ assert_eq "mid-turn: the text and one Enter" "send:text send:Enter" \
 r=$(grep -cE '"event": ?"send_retry"' "$CAPTURE" || true)
 assert_eq "mid-turn: no retry Enter into the queue hint" "0" "$r"
 
+echo "=== #2669: a box taller than the pane shows the payload's end above its rule ==="
+
+# The one-prompt bootstrap is taller than the 80x24 pane start-bot creates.
+# Claude Code draws in the alternate screen, so the top of such a box, prompt
+# line included, is gone, and what stays in view is its last lines, its bottom
+# rule and the footer (measured, claude 2.1.316 at 80x24). These frames have
+# that shape, built from the payload: TALL shows its last 21 lines, PARTIAL an
+# interior window whose end is still unread.
+tall_payload='set +H; FLEET_STARTUP_BOOTSTRAP_V1'
+for i in $(seq 2 29); do
+    tall_payload="$tall_payload"$'\n'"line $i of a startup prompt taller than the pane"
+done
+tall_payload="$tall_payload"$'\n'"FLEET_STARTUP_INSTRUCTIONS_END Z2669"
+RULE=$(printf '\342\224\200%.0s' $(seq 80))
+FOOTER=$(printf '%s\n' "  $(printf '\342\217\265\342\217\265') auto mode on (shift+tab to cycle)" \
+    "                                                    Not logged in")
+tall_frame() {  # <out> <lines of the payload, from the top> <lines shown>
+    { printf '%s\n' "$tall_payload" | head -n "$2" | tail -n "$3" | sed 's/^/  /'
+      printf '%s\n%s\n' "$RULE" "$FOOTER"; } > "$1"
+    printf '%s\n' "$1"
+}
+TALL=$(tall_frame "$TMPD/tall-shown.txt" 30 21)
+PARTIAL=$(tall_frame "$TMPD/tall-partial.txt" 25 21)
+assert_eq "fixture: the tall frame has no prompt line" "" "$(pane_input_region "$(cat "$TALL")")"
+r=$(pane_box_end_shows_payload "$(cat "$TALL")" "$tall_payload" && echo yes || echo no)
+assert_eq "fixture: the tall frame shows the payload's end above its rule" "yes" "$r"
+r=$(pane_box_end_shows_payload "$(cat "$PARTIAL")" "$tall_payload" && echo yes || echo no)
+assert_eq "fixture: the partial frame does not" "no" "$r"
+r=$(pane_box_end_shows_payload "$(cat "$HINT")" "$tall_payload" && echo yes || echo no)
+assert_eq "a frame with a prompt line is pane_input_region's, not the box end's" "no" "$r"
+enters() { grep -c '^send:Enter$' "$ORDER_LOG" || true; }
+
+# (a) The end shows above the rule: one Enter, and the box seen empty after it.
+cap_reset
+r=$(run_send_rc "$tall_payload" "$HINT" "$TALL" "$FIXTURES/input-clean-submit.txt")
+assert_eq "tall box: the Enter follows the frame showing the end" "yes" "$(enter_follows tall-shown.txt)"
+assert_eq "tall box: one Enter, reported submitted (rc 0)" "1 0" "$(enters) ${r#* }"
+
+# (b) An interior window is not the end: no Enter, rc 3, as #1236 (c).
+cap_reset
+r=$(run_send_rc "$tall_payload" "$HINT" "$PARTIAL")
+assert_eq "tall box, end unread: no Enter, no submit (rc 3)" "0 3" "$(enters) ${r#* }"
+r=$(grep -cE '"reason": ?"payload-not-shown"' "$CAPTURE" || true)
+assert_eq "tall box, end unread: recorded as payload-not-shown" "1" "$r"
+
+# (c) The box still shows the end after the Enter: retried, then rc 3, never a
+# submit. Before #2669 the verify read a glyph-less frame as gone.
+cap_reset
+r=$(run_send_rc "$tall_payload" "$HINT" "$TALL")
+assert_eq "tall box held past every Enter: four Enters, no submit (rc 3)" "4 3" "$(enters) ${r#* }"
+r=$(grep -cE '"reason": ?"payload-still-in-box"' "$CAPTURE" || true)
+assert_eq "tall box held past every Enter: recorded as still in the box" "1" "$r"
+
+# (d) Controls: the payload's end in view, but not as a box's last lines. No
+# rule under it (a shell's echo), or other lines between it and the rule (a
+# transcript above a dialog's rule): no Enter.
+grep -vF "$RULE" "$TALL" > "$TMPD/tall-norule.txt"
+{ printf '%s\n' "$tall_payload" | tail -n 17 | sed 's/^/  /'
+  printf '%s\n' "" "$(printf '\342\217\272') Skill(provider:session)" "$RULE" \
+      " Do you want to proceed?" "   Yes" "   No"; } > "$TMPD/tall-notedge.txt"
+for f in tall-norule.txt tall-notedge.txt; do
+    cap_reset
+    r=$(run_send_rc "$tall_payload" "$HINT" "$TMPD/$f")
+    assert_eq "control $f: the end not at a box's bottom edge, no Enter (rc 3)" "0 3" "$(enters) ${r#* }"
+done
+
+# (e) A tall box that already holds text takes no new payload: its end would
+# show the new payload's end, and the Enter would submit both.
+HELD_TALL="$TMPD/tall-held.txt"
+{ for i in $(seq 1 21); do printf '  held line %s of an earlier payload\n' "$i"; done
+  printf '%s\n%s\n' "$RULE" "$FOOTER"; } > "$HELD_TALL"
+r=$(pane_box_end_held "$(cat "$HELD_TALL")" && echo yes || echo no)
+assert_eq "fixture: a tall box holding text reads as held" "yes" "$r"
+r=$(pane_box_end_held "$(cat "$HINT")" && echo yes || echo no)
+assert_eq "fixture: a drawn empty box does not" "no" "$r"
+cap_reset
+r=$(run_send_rc "short payload Z2669" "$HELD_TALL")
+assert_eq "tall box holding text: nothing typed, no Enter (rc 4)" "0 4" "$r"
+r=$(grep -cE '"reason": ?"recipient-input-held"' "$CAPTURE" || true)
+assert_eq "tall box holding text: recorded as recipient-input-held" "1" "$r"
+
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 
 # Two ticks: still stuck on the first capture, cleared by the second. The old

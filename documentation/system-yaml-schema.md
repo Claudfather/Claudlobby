@@ -175,6 +175,7 @@ leftover flag without anyone maintaining a list.
 | `registry-scan` | **on** | composition | fleet .env | none — activation refuses PLANE_EMIT_ENABLED=0 in the fleet-tier .env before it stops any bot |
 | `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
 | `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `startup-bootstrap` | **on** | door | host/root .env | STARTUP_BOOTSTRAP_ENABLED=0 in the host or root .env |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
 <!-- END GENERATED: switches -->

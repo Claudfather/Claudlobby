@@ -68,7 +68,7 @@ class TestStartupBootstrap:
                                       "skill-file-missing", "corrupt",
                                       pytest.param("unreadable", marks=pytest.mark.skipif(
                                           os.geteuid() == 0, reason="root reads a mode-000 file")),
-                                      "managed-first", "foreign-first"])
+                                      "managed-first", "foreign-first", "switch-off", "switch-on"])
     def test_skill_bootstrap_and_literal_compatibility(self, tmp_path, mode):
         bot, account = tmp_path / "bot", tmp_path / "selected account"
         skills = bot / ".claude/skills"
@@ -159,13 +159,21 @@ emit_fleet_event() { :; }
                "_NATIVE_ADMISSION_PYTHON": sys.executable, "TMUX_SOCKET": "private",
                "TMUX_SESSION": "worker", "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1",
                "SENDS": str(sends), "ERRORS": str(errors)}
+        # The startup-bootstrap switch (#2669): an exact 0 keeps the literal
+        # start for a proven Skill; any other value leaves the one prompt on.
+        env.pop("STARTUP_BOOTSTRAP_ENABLED", None)
+        if mode in {"switch-off", "switch-on"}:
+            env["STARTUP_BOOTSTRAP_ENABLED"] = "0" if mode == "switch-off" else "1"
         result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
                                 capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert not errors.exists()
         payloads = sends.read_bytes().decode().rstrip("\0").split("\0")
-        bootstrap = mode in {"plugin", "local", "stale-local", "managed-first"}
+        bootstrap = mode in {"plugin", "local", "stale-local", "managed-first", "switch-on"}
         assert ("STARTUP mode=skill-bootstrap" in (log.read_text() if log.exists() else "")) == bootstrap
+        assert ("startup-bootstrap: OFF here (STARTUP_BOOTSTRAP_ENABLED=0)" in result.stderr) == (mode == "switch-off")
+        if mode == "switch-off":
+            assert "[available; literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0]: " + command in log.read_text()
         if bootstrap:
             assert len(payloads) == 1
             assert payloads[0].startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1")

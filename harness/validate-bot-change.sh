@@ -1685,8 +1685,9 @@ mkdir -p "$RB_PLUGIN_DIR"
 # entry for this bot directory. Claude Code loads the first entry that applies,
 # so the resume Skill is callable and start-bot must take the skill bootstrap.
 # These checks stop at the branch taken: the bootstrap is taller than the 80x24
-# pane start-bot creates, and the stand-in scrolls its prompt line out of view,
-# so the send never sees its box and withholds the Enter.
+# pane start-bot creates, and the stand-in streams its box with no rule under
+# it, so its prompt line scrolls out of view and the send withholds the Enter.
+# The opt-in real-claude runs below (#2669) check the submit.
 for _v2666 in 2.0.0 1.0.0; do
     mkdir -p "$RB_PLUGIN_DIR/$_v2666/.claude-plugin" "$RB_PLUGIN_DIR/$_v2666/skills/session"
     printf '{"name":"claudna"}\n' > "$RB_PLUGIN_DIR/$_v2666/.claude-plugin/plugin.json"
@@ -1706,6 +1707,93 @@ grep -q 'STARTUP mode=skill-bootstrap' "$RB_DIR/logs/startup.log" 2>/dev/null &&
 harness_check "#2666 stale local plugin entry after the user entry -> skill bootstrap on start" "$r"
 grep -q 'literal-compatibility' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
 harness_check "  ...and no literal resume command is injected" "$r"
+# --- #2669: STARTUP_BOOTSTRAP_ENABLED=0 keeps the literal start ---------------
+rm -f "$RB_DIR/logs/startup.log"
+STARTUP_BOOTSTRAP_ENABLED=0 CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh >/dev/null
+grep -q 'literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0\]' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "#2669 STARTUP_BOOTSTRAP_ENABLED=0 -> the literal start, its log line naming the switch" "$r"
+grep -q 'STARTUP mode=skill-bootstrap' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "  ...and no one-prompt bootstrap" "$r"
+# --- #2669: a real claude takes the one-prompt bootstrap at 80x24 -------------
+# Opt-in, VAL_REAL_CLAUDE=<a Claude Code binary>: the stand-in cannot draw a box
+# taller than the pane the way Claude Code does. Each run boots that binary on
+# this throwaway bot through the real start-bot.sh, in the 80x24 pane it
+# creates, at the production send budgets, with a throwaway config past
+# onboarding and trust and no credentials (ANTHROPIC_BASE_URL is a closed port,
+# so nothing is spent), then reads the session transcript.
+# VAL_REAL_CLAUDE_RUNS runs (default 3) expect the bootstrap as ONE user record,
+# whole and unframed; one more, with STARTUP_BOOTSTRAP_ENABLED=0, expects the
+# literal start: the startup prompt as its own record, and no bootstrap.
+_real2669() {  # $1 = run directory name; prints the transcript verdict
+    local cfg="$RB_ROOT/real2669/$1" verdict=absent i
+    rm -rf "$cfg"; mkdir -p "$cfg/config"
+    python3 -I -c '
+import json, sys
+cfg, cwd, version = sys.argv[1:]
+project = {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True,
+           "allowedTools": [], "history": []}
+json.dump({"hasCompletedOnboarding": True, "lastOnboardingVersion": version, "theme": "dark",
+           "cachedGrowthBookFeatures": {"tengu_virtual_pancake": True},
+           "projects": {cwd: project}}, open(cfg + "/.claude.json", "w"))
+' "$cfg/config" "$(cd "$RB_DIR" && pwd -P)" "$CLAUDE_VERSION"
+    printf '#!/bin/bash\nexec env -i PATH="$PATH" HOME="$HOME" TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 CLAUDE_CONFIG_DIR=%q ANTHROPIC_BASE_URL=http://127.0.0.1:9 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q "$@"\n' \
+        "$cfg/config" "$VAL_REAL_CLAUDE" > "$RB_ROOT/bin/claude"
+    rm -f "$RB_DIR/logs/startup.log"
+    ( unset PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_SHOWN_TICKS PANE_SEND_SETTLE_S
+      CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh ) > "$cfg/pane.txt" 2>&1 || true
+    for i in $(seq 1 20); do
+        verdict="$(python3 -I -c '
+import glob, json, sys
+texts = []
+for path in glob.glob(sys.argv[1] + "/projects/*/*.jsonl"):
+    for line in open(path, errors="replace"):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        content = (record.get("message") or {}).get("content")
+        if record.get("type") == "user" and isinstance(content, str):
+            texts.append(content)
+def kind(t):
+    if "FLEET_STARTUP_BOOTSTRAP_V1" in t:
+        whole = t.startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1") and "ZZZ_STARTUPMARK\nFLEET_STARTUP_INSTRUCTIONS_END" in t
+        return "framed" if "<pasted_content" in t else ("bootstrap" if whole else "partial")
+    return "startup" if "ZZZ_STARTUPMARK" in t else "other"
+print(" ".join(kind(t) for t in texts) or "absent")
+' "$cfg/config" 2>/dev/null)" || verdict=unreadable
+        [ "$verdict" = absent ] || break
+        sleep 1
+    done
+    tmux capture-pane -t "$RB_SESSION" -p > "$cfg/pane-end.txt" 2>/dev/null || true
+    tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+    cp "$RB_DIR/logs/startup.log" "$cfg/startup.log" 2>/dev/null || true
+    printf '%s\n' "$verdict"
+}
+if [ -n "${VAL_REAL_CLAUDE:-}" ] && measure_claude_version "$VAL_REAL_CLAUDE"; then
+    cp "$RB_ROOT/bin/claude" "$RB_ROOT/bin/claude.stub"
+    _n2669=0; _ok2669=0
+    while [ "$_n2669" -lt "${VAL_REAL_CLAUDE_RUNS:-3}" ]; do
+        _n2669=$((_n2669 + 1))
+        _v2669="$(_real2669 "run$_n2669")"
+        _s2669=sent
+        grep -q 'STARTUP mode=skill-bootstrap' "$RB_ROOT/real2669/run$_n2669/startup.log" 2>/dev/null || _s2669=no-bootstrap
+        grep -qE 'NOT (SUBMITTED|SENT)' "$RB_ROOT/real2669/run$_n2669/startup.log" 2>/dev/null && _s2669=unsent
+        printf '  real claude %s, 80x24, run %s: transcript [%s], startup.log %s\n' \
+            "$CLAUDE_VERSION" "$_n2669" "$_v2669" "$_s2669"
+        [ "$_v2669" = bootstrap ] && [ "$_s2669" = sent ] && _ok2669=$((_ok2669 + 1))
+    done
+    [ "$_ok2669" = "$_n2669" ] && r=yes || r=no
+    harness_check "#2669 real claude at 80x24: $_ok2669 of $_n2669 bootstraps submitted, one whole record each" "$r"
+    _v2669="$(STARTUP_BOOTSTRAP_ENABLED=0 _real2669 switch-off)"
+    printf '  real claude %s, 80x24, STARTUP_BOOTSTRAP_ENABLED=0: transcript [%s]\n' "$CLAUDE_VERSION" "$_v2669"
+    case " $_v2669 " in *' startup '*) r=yes ;; *) r=no ;; esac
+    case " $_v2669 " in *' bootstrap '*|*' framed '*|*' partial '*) r=no ;; esac
+    grep -q 'literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0\]' "$RB_ROOT/real2669/switch-off/startup.log" 2>/dev/null || r=no
+    harness_check "#2669 real claude, switch off: the literal start, the startup prompt its own record" "$r"
+    mv "$RB_ROOT/bin/claude.stub" "$RB_ROOT/bin/claude"
+else
+    printf '  #2669 real-claude runs skipped: set VAL_REAL_CLAUDE to a Claude Code binary\n'
+fi
 rm -rf "$RB_PLUGIN_DIR/2.0.0" "$RB_PLUGIN_DIR/1.0.0" "$RB_HOME/.claude/plugins/installed_plugins.json" \
     "$RB_DIR/.claude/settings.local.json" "$RB_DIR/.claude/skills/fleet-ops"
 
