@@ -755,12 +755,23 @@ test('setup-only computer stays visible without blocking the other admitted dash
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
     setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
-  await h.api.checkAccount(); await h.api.act(0,'connect'); await h.api.act(1,'connect');
+  await h.api.checkAccount();
+  const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0],help=card.children.at(-1);
+  const summary=help.children[0];summary.focus();
+  await h.api.act(0,'connect');
+  assert.equal(help.open,true,'setup-only admission reveals the next setup step');
+  assert.match(card.children[2].textContent,/Check setup approval/);
+  assert.equal(h.ui.document.activeElement,summary,'revealing setup never moves focus');
+  help.open=false;
+  await h.api.act(1,'connect'); await h.api.checkAccount();
+  assert.equal(help.open,false,'later connection and account paints preserve manual collapse');
+  assert.ok(!h.ui.get('owner-session').children[2].children.at(-1).open,'another computer is not expanded');
+  assert.equal(h.ui.document.activeElement,summary);
+  assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0,'revealing guidance never checks approval or launches setup');
   assert.equal(h.api.snapshot().computers[0].state,'setup_only');
   const fleets=await h.api.jget('/api/fleets');
   assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
-  const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0];
   assert.equal(primary.textContent,'Disconnect');assert.equal(primary.disabled,false);
   h.overrides.set(a+'/api/owner/connected/logout',init=>{assert.equal(init.headers.Authorization,'Bearer '+'A'.repeat(43));return reply(200,{version:1,state:'signed_out'});});
   assert.equal(await h.api.act(0,'logout'),true);
@@ -768,6 +779,9 @@ test('setup-only computer stays visible without blocking the other admitted dash
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');
   assert.equal(h.api.snapshot().computers[1].state,'ready');
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
+  await h.api.act(0,'connect');
+  assert.equal(help.open,true,'a new explicit setup-only connection reveals the next step again');
+  assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0);
   h.api.dispose();
 });
 

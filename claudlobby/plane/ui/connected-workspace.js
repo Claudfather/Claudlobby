@@ -392,7 +392,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); element.append(row);
-      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle'});
+      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle',setupOnly:false});
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,buttons,help,access} = controls;
@@ -410,6 +410,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
         ? 'This connection expires soon. Use Keep connected to continue; active use renews it automatically.'
+        : status.state === 'setup_only' ? 'Choose Check setup approval below to continue setting up your first team.'
         : connection === 'not_connected' ? 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
@@ -419,8 +420,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           ? 'Local approval may have been prepared. Inspect the retained code on this computer; do not prepare it again. Connect only after local approval.'
           : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
       access.hidden = ['ready','setup_only'].includes(status.state);
-      if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
+      // Reveal setup on entry; later paints preserve the chosen disclosure state.
+      if (status.state === 'setup_only' && !controls.setupOnly
+          || approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
+      controls.setupOnly = status.state === 'setup_only';
       const primaryOperation = expired || continuity?.connectRequired ? 'connect' : status.state === 'unavailable' ? 'check'
         : ['ready','setup_only','logout'].includes(status.state) ? 'logout'
         : status.state === 'renewing' ? 'renew' : 'connect';
