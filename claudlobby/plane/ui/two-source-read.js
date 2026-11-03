@@ -24,7 +24,7 @@ export function createWorkspaceReadTransport({ sources }) {
         savedLabel !== undefined && (typeof savedLabel !== 'string' || !savedLabel.trim() || savedLabel.length > 80
           || !savedLabel.isWellFormed() || savedLabel.includes('\0')) ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, unsubscribe: null };
+    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, overviewSnapshot: null, overviewPending: null, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
@@ -41,7 +41,10 @@ export function createWorkspaceReadTransport({ sources }) {
     if (state === 'ok' && (e.host && host !== e.host || entries.some(other => other !== e && other.host === host)))
       state = 'unavailable';
     if (state === 'ok') e.host = host; // Issued by the one authenticated owner admission routine.
-    if (e.readerEpoch !== snapshot.epoch || e.state !== state) { e.epoch++; e.readerEpoch = snapshot.epoch; e.state = state; notify(); }
+    if (e.readerEpoch !== snapshot.epoch || e.state !== state) {
+      e.epoch++; e.overviewSnapshot = null; e.readerEpoch = snapshot.epoch; e.state = state;
+      if (streams.size) notify({coverage_changed:true, overview:overviewSnapshot()});
+    }
   }
   for (const e of entries) { adopt(e, e.reader.snapshot()); e.unsubscribe = e.reader.subscribe(s => adopt(e, s)); }
   const qualified = (e, value) => value == null ? value : `${e.key}::${value}`;
@@ -135,16 +138,19 @@ export function createWorkspaceReadTransport({ sources }) {
     const identity = rows => JSON.stringify(rows.map(f => [f.alias, f.uid]).sort((a,b) => a[0].localeCompare(b[0])));
     const changed = identity(next) !== identity(e.fleets);
     const retired = e.fleets.some(old => !next.some(f => f.alias === old.alias && f.uid === old.uid));
-    if (changed) ++e.routingRevision;
+    const invalidatesOverview = changed && !!e.overviewSnapshot && path === '/api/fleets';
+    if (changed) { ++e.routingRevision; e.overviewSnapshot = null; }
     e.fleets = next;
     rooms.clear();
     for (const entry of entries) for (const f of entry.fleets) rooms.set(room(entry, f.alias), { e: entry, raw: f });
     // A channel leg may have combined before this newly learned ownership.
-    if (changed) notify({ routing_changed: true, routing_retired: retired });
+    if (changed) notify({ routing_changed: true, routing_retired: retired,
+      ...(invalidatesOverview ? {overview_invalidated:overviewSnapshot()} : {}) });
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
       uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state,
+      overview_retained: values[i].state === 'checking' && values[i].overview_retained === true,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       read_state: values[i].state })));
   }
@@ -156,11 +162,41 @@ export function createWorkspaceReadTransport({ sources }) {
     return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       provenance: values[i].provenance, remediation: values[i].remediation,
-      ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null,
+      ...(path === '/api/overview' ? { host: values[i].state === 'ok' || values[i].overview_retained ? values[i].data.host : null,
+        overview_retained:values[i].overview_retained === true,
         overview_retry_paused:values[i].overview_retry_paused === true, overview_checked_at:values[i].overview_checked_at, overview_read_at:values[i].overview_read_at } : {}),
       ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}),
       ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
         recorded_unavailable: values[i].data?.recorded_unavailable === true } : {}) }));
+  }
+  // Only the last accepted summary of this admission may bridge a pending read.
+  // This is presentation data; it never admits routing or action authority.
+  function pendingOverview(e) {
+    const saved = e.overviewSnapshot;
+    return saved && saved.epoch === e.epoch && admitted(e)
+      ? {...saved.value, state:'checking', overview_retained:true}
+      : failed('checking', 'This source read is still in progress.');
+  }
+  function combineOverview(values) {
+    const good = entries.flatMap((e, i) => values[i].state === 'ok' || values[i].overview_retained
+      ? [{e, v:project(e, '/api/overview', values[i])}] : []);
+    const totals = good.map(x => x.v.data.totals);
+    const data = {sources:sourceFacts(values, '/api/overview'), coverage:coverage(values),
+      windows:entries.map((e,i) => ({source:e.key,state:values[i].state,
+        limit:values[i].data?.limit,truncated:values[i].data?.truncated,lineage:values[i].data?.lineage})),
+      fleet_choices:fleetChoices(values), default:null,
+      fleets:good.flatMap(x => x.v.data.fleets.map(f => ({...f,
+        overview_retained:x.v.overview_retained === true, overview_read_at:x.v.overview_read_at}))),
+      totals:Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k,sum(totals,k)]))};
+    data.totals.live_poll = totals.some(t => t.live_poll !== 'ok') ? 'unavailable' : 'ok';
+    data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
+    data.totals.overview_retained = values.some(v => v.overview_retained);
+    return {state:good.length ? 'ok' : 'unavailable', provenance:null, data,
+      ...(!good.length ? {remediation:'No source is currently readable.'} : {})};
+  }
+  function overviewSnapshot() {
+    return combineOverview(entries.map(e => e.overviewSnapshot?.epoch === e.epoch && admitted(e)
+      ? e.overviewPending === null ? e.overviewSnapshot.value : pendingOverview(e) : failed(e.state)));
   }
   // Optional accepted partial snapshots; the Promise still settles with the full read.
   async function jget(input, onUpdate) {
@@ -193,7 +229,9 @@ export function createWorkspaceReadTransport({ sources }) {
     const epochs = chosen.map(e => e.epoch), revisions = chosen.map(e => e.routingRevision);
     const rosterRead = path === '/api/fleets' || path === '/api/overview';
     const tickets = chosen.map(e => rosterRead ? ++e.rosterRequest : null);
-    const values = chosen.map(() => failed('checking', 'This source read is still in progress.'));
+    if (path === '/api/overview') chosen.forEach((e,i) => {e.overviewPending = tickets[i];});
+    const values = chosen.map(e => path === '/api/overview' ? pendingOverview(e)
+      : failed('checking', 'This source read is still in progress.'));
     const projected = new Map();
     function combine() {
       // A settled source can lose admission while a peer is still pending.
@@ -204,6 +242,7 @@ export function createWorkspaceReadTransport({ sources }) {
         }
       });
       if (owning) return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
+      if (path === '/api/overview') return combineOverview(values);
       const good = entries.flatMap((e, i) => {
         if (!projected.has(e)) return [];
         try { return [{e, v:project(e, path, values[i])}]; }
@@ -222,13 +261,6 @@ export function createWorkspaceReadTransport({ sources }) {
       if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
       if (path === '/api/presence') data.bots = good.flatMap(x => x.v.data.bots);
       if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
-      if (path === '/api/overview') {
-        data.fleets = good.flatMap(x => x.v.data.fleets);
-        const totals = good.map(x => x.v.data.totals);
-        data.totals = Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k, sum(totals, k)]));
-        data.totals.live_poll = totals.some(t => t.live_poll !== 'ok') ? 'unavailable' : 'ok';
-        data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
-      }
       // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
       return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
         ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
@@ -242,6 +274,7 @@ export function createWorkspaceReadTransport({ sources }) {
         if (!complete && !disposed) { try { onUpdate(combine()); } catch { /* presentation cannot fail a read */ } }
       }, 0);
     }
+    if (path === '/api/overview' && values.some(v => v.overview_retained)) progress();
     try {
       await Promise.all(chosen.map(async (e, i) => {
         values[i] = await read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''));
@@ -256,12 +289,16 @@ export function createWorkspaceReadTransport({ sources }) {
               // Retain only a projection whose roster publication was accepted.
               e.overviewReadAt = values[i].overview_checked_at;
               values[i] = {...values[i], overview_read_at:e.overviewReadAt};
+              e.overviewSnapshot = {epoch:e.epoch, value:values[i]};
             }
             projected.set(e, value);
           } catch {
             values[i] = failed('unavailable', 'This source returned an unsupported or superseded read projection.');
           }
         }
+        if (path === '/api/overview' && values[i].state !== 'ok' && epochs[i] === e.epoch && tickets[i] === e.rosterRequest)
+          e.overviewSnapshot = null;
+        if (path === '/api/overview' && e.overviewPending === tickets[i]) e.overviewPending = null;
         progress();
         // Discover routing independently of an unavailable summary. A slow
         // fallback must not hold an already accepted peer's display.
@@ -278,6 +315,9 @@ export function createWorkspaceReadTransport({ sources }) {
     } finally {
       complete = true;
       clearTimeout(progressTimer);
+      if (path === '/api/overview') chosen.forEach((e,i) => {
+        if (e.overviewPending === tickets[i]) e.overviewPending = null;
+      });
     }
   }
     catch { return failed('unavailable', 'This source returned an unsupported read projection.'); }
@@ -309,13 +349,13 @@ export function createWorkspaceReadTransport({ sources }) {
         if (!admitted(e)) return;
         try { const payload = JSON.parse(ev.data); facade.onmessage?.({ data: JSON.stringify({ ...payload, source: e.key, rows: payload.rows.map(r => ({ ...r, source: e.key })) }) }); } catch { /* next read refresh corrects malformed push */ }
       };
-      child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };
+      child.onopen = ev => { facade.onopen?.(ev); facade.refresh({stream_changed:true}); };
       child.onerror = () => {
         // A stream interruption is scoped; canonical reads decide coverage.
         facade.onerror?.({type:'error', source:e.key});
-        facade.refresh();
+        facade.refresh({stream_changed:true});
       };
-      child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; notify(); } } catch { /* do not infer recovery */ } });
+      child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; e.overviewSnapshot = null; notify({coverage_changed:true, overview:overviewSnapshot()}); } } catch { /* do not infer recovery */ } });
     }
     streams.add(facade); return facade;
   }
