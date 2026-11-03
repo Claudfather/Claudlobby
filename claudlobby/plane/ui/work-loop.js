@@ -49,6 +49,13 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <p id="work-scope"></p></div><span id="work-mode" class="tag"></span></div>
     <button id="work-manager" class="pill ghost" type="button" hidden>Talk to manager</button>
     <p id="work-unavailable" class="note"></p>
+    <button id="work-check-access" class="pill ghost" type="button" hidden>Check action access</button>
+    <details id="work-access-help" class="task-record-details" hidden><summary>Action access help</summary>
+      <p id="work-access-room" class="note"></p><p id="work-access-status" class="note"></p>
+      <p class="note">Messages, task nudges and task feedback each need separate, local approval by this computer’s owner for this team.
+        Ask the owner to check the relevant action access. Unavailable access does not prove that approval is missing.
+        This check only reads existing access; it does not approve access, reconnect, send anything or check saved receipts.</p>
+    </details>
     <form id="work-form" hidden>
       <div class="work-target"><label for="work-recipient">To</label>
         <select id="work-recipient"></select><span id="work-task"></span>
@@ -82,6 +89,27 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
   const roomLabel = value => api.roomLabel?.(value) || value;
+  const accessReaders = () => typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
+    ? [["message", api.interactionContext], ["nudge", typeof api.prepareAction === "function" ? api.nudgeContext : null],
+      ["feedback", typeof api.prepareAction === "function" ? api.feedbackContext : null]].filter(([, read]) => typeof read === "function") : [];
+  const missingAccess = () => accessReaders().filter(([action]) => !contextsByKind.has(action));
+  const readsUnavailable = () => (channel && channel.state !== "ok") || (board && board.state !== "ok");
+  const canCheckAccess = () => !!room && room !== "all" && !readsPaused && !readsUnavailable()
+    && !sending && !checkingReceipts.size && pendingDetail === null && !checkingTaskContexts.size && missingAccess().length > 0;
+  function paintAccess() {
+    const readers = accessReaders(), missing = missingAccess();
+    $("work-check-access").hidden = !missing.length && document.activeElement !== $("work-check-access");
+    $("work-check-access").disabled = !canCheckAccess();
+    $("work-check-access").textContent = checkingTaskContexts.size ? "Checking action access…" : "Check action access";
+    $("work-access-help").hidden = contextsByKind.size > 0 && !missing.length;
+    $("work-access-room").textContent = `Current room: ${roomLabel(room || "All teams")}`;
+    $("work-access-status").textContent = !room || room === "all" ? "Choose one team to check its action access."
+      : readsPaused ? "Session access is paused. Check your session in Computers & status first."
+      : readsUnavailable() ? "Team reads are disconnected or unavailable. This does not prove local approval is missing. Check Computers & status first."
+      : !readers.length ? "This view does not support browser actions. Reading does not grant action access."
+      : [["message", "Messages"], ["nudge", "Nudges"], ["feedback", "Task feedback"]].map(([action, label]) =>
+        `${label}: ${contextsByKind.has(action) ? "available" : checkingTaskContexts.has(action) ? "checking" : deniedContexts.has(action) ? "not authorized" : readers.some(([key]) => key === action) ? "unavailable" : "not supported in this view"}.`).join(" ");
+  }
   const recipientLabel = request => requestContext(request)?.recipients.find(r => r.id === request.target.recipient)?.label || request.target.recipient;
   function saveDraft() {
     if (!row()) return;
@@ -155,6 +183,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     && (!channel || channel.state === "ok");
   function paint({ restoreDraft = false } = {}) {
     const usable = !!context && !!target;
+    paintAccess();
     $("work-manager").hidden = !managerRecipient();
     $("work-form").hidden = !usable;
     $("work-open-task").hidden = !usable || !target.task_id;
@@ -204,6 +233,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   function closeDetail() {
     permissions.close();
     ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null;
+    paintAccess();
     $("task-detail-content").innerHTML = "";
     if (dialog.open) dialog.close();
     selected = null;
@@ -275,6 +305,33 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     readsPaused = true;
     invalidate("Session access is paused. Actions are disabled until your session is checked again; your draft is kept.");
   }
+  function acceptContext(value, taskKind, error, token, selectedRoom) {
+    if (token !== epoch) return;
+    const action = taskKind || "message";
+    checkingTaskContexts.delete(action);
+    if (error?.code === "action_not_authorized") deniedContexts.add(action);
+    else deniedContexts.delete(action);
+    const valid = selectedRoom !== "all" && (taskKind ? validTaskActionContext(value, taskKind) : validContext(value))
+      && value.room === selectedRoom && value.scope.fleet === selectedRoom
+      && typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
+      && (!taskKind || typeof api.prepareAction === "function");
+    if (valid) {
+      value = retainContext(value);
+      retainedScopes.add(scopeKey(value.scope));
+      for (const action of value.actions) if (taskKind || value.simulation || action === "message") contextsByKind.set(action, value);
+      if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
+      if (kind === "message" && contextsByKind.has("message") && !target) {
+        context = contextsByKind.get("message");
+        const remembered = messageRecipients.get(scopeKey(context.scope));
+        target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+        paint({ restoreDraft: true });
+      }
+      notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
+    } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
+      : checkingTaskContexts.size ? "Checking available actions…" : deniedContexts.size ? "" : "Browser action access is unavailable for this team. Check the task and activity panels for read status.";
+    if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
+    paint(); // An unrelated context result must not replace an authored draft.
+  }
   function setRoom(fleet, {keepDetail = false} = {}) {
     saveDraft();
     if (room === (fleet || "all")) retainPresentation();
@@ -284,53 +341,28 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const token = ++epoch, selectedRoom = fleet || "all";
     ++compositionEpoch; room = selectedRoom; readsPaused = false;
     contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); context = null; target = null; targetTitle = null; kind = "message";
+    if (typeof api.interactionContext === "function") checkingTaskContexts.add("message");
     if (selectedRoom !== "all") for (const action of ["nudge", "feedback"])
       if (typeof taskContextReader(action) === "function") checkingTaskContexts.add(action);
     if (!keepDetail) { board = null; channel = null; closeDetail(); }
     else if (pendingDetail) { ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null; showDetailUnavailable(null); } $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
     notice = "Checking available actions…"; paint();
     if (keepDetail && detailSnapshot) void permissions.show($("task-permissions"),detailSnapshot.task);
-    function accept(value, taskKind, error) {
-      if (token !== epoch) return;
-      const action = taskKind || "message";
-      checkingTaskContexts.delete(action);
-      if (error?.code === "action_not_authorized") deniedContexts.add(action);
-      else deniedContexts.delete(action);
-      const valid = selectedRoom !== "all" && (taskKind ? validTaskActionContext(value, taskKind) : validContext(value))
-        && value.room === selectedRoom && value.scope.fleet === selectedRoom
-        && typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
-        && (!taskKind || typeof api.prepareAction === "function");
-      if (valid) {
-        value = retainContext(value);
-        retainedScopes.add(scopeKey(value.scope));
-        for (const action of value.actions) if (taskKind || value.simulation || action === "message") contextsByKind.set(action, value);
-        if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
-        if (kind === "message" && contextsByKind.has("message") && !target) {
-          context = contextsByKind.get("message");
-          const remembered = messageRecipients.get(scopeKey(context.scope));
-          target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
-          paint({ restoreDraft: true });
-        }
-        notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
-      } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
-        : checkingTaskContexts.size ? "Checking available actions…" : deniedContexts.size ? "" : "Browser action access is unavailable for this team. Check the task and activity panels for read status.";
-      if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
-      paint(); // An unrelated context result must not replace an authored draft.
-    }
     Promise.resolve().then(() => token === epoch ? api.interactionContext?.(selectedRoom) : null)
-      .then(value => accept(value, null)).catch(error => accept(null, null, error));
+      .then(value => acceptContext(value, null, null, token, selectedRoom)).catch(error => acceptContext(null, null, error, token, selectedRoom));
     // Keep one task-context read in flight per room alongside the message read.
     Promise.resolve().then(async () => {
       for (const action of ["nudge", "feedback"]) {
         if (token !== epoch) return;
         const readContext = taskContextReader(action);
         if (typeof readContext !== "function") continue;
-        try { accept(await readContext(selectedRoom), action); }
-        catch (error) { accept(null, action, error); }
+        try { acceptContext(await readContext(selectedRoom), action, null, token, selectedRoom); }
+        catch (error) { acceptContext(null, action, error, token, selectedRoom); }
       }
     });
   }
   function showDetailUnavailable(...block) {
+    paintAccess();
     permissions.close();
     $("task-detail-content").innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock(...block);
   }
@@ -358,6 +390,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     content.innerHTML = '<h2 id="task-detail-title">Task details</h2>' + stateBlock("loading");
     const url = `/api/tasks/${encodeURIComponent(selection.id)}?fleet=${encodeURIComponent(selection.fleet)}`;
     pendingDetail = token;
+    paintAccess();
     Promise.resolve().then(() => token === detailEpoch && selected === selection ? api.jget(url) : null).then(envelope => {
       if (token !== detailEpoch || selected !== selection) return;
       pendingDetail = null;
@@ -437,6 +470,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
   }
   function renderDetail(task, boardOnly, unavailable = null) {
+    paintAccess();
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
@@ -622,6 +656,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // A channel-only read (stream source loss) leaves the board snapshot as read.
   function updateChannel(messages) {
     channel = messages;
+    paintAccess();
     $("work-open-task").disabled = !canOpenComposerTask();
     // Source loss also retires an unfinished detail read. Keep an already
     // displayed lifecycle snapshot, but never admit a held old response.
@@ -664,6 +699,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
     ++detailEpoch; pendingDetail = null;
+    paintAccess();
     $("task-detail-content").innerHTML = "";
     selected = null; detailSnapshot = null; conversation = null;
     if (!openerIdentity) return;
@@ -683,6 +719,27 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
   $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); });
+  $("work-check-access").onclick = async () => {
+    if (!canCheckAccess()) return;
+    const token = epoch, selectedRoom = room, missing = missingAccess();
+    for (const [action] of missing) checkingTaskContexts.add(action);
+    paintAccess();
+    // Recheck only absent capabilities. Existing contexts, composition, task
+    // preconditions, drafts and saved request IDs are not refreshed or rebuilt.
+    for (const [action, read] of missing) {
+      if (token !== epoch || readsPaused || readsUnavailable()) break;
+      try {
+        const value = await read(selectedRoom);
+        if (!readsPaused && !readsUnavailable()) acceptContext(value, action === "message" ? null : action, null, token, selectedRoom);
+      } catch (error) {
+        if (!readsPaused && !readsUnavailable()) acceptContext(null, action === "message" ? null : action, error, token, selectedRoom);
+      }
+    }
+    if (token === epoch) {
+      for (const [action] of missing) checkingTaskContexts.delete(action);
+      paint();
+    }
+  };
   $("work-manager").onclick = () => { const recipient = managerRecipient(); if (recipient) composeMessage(recipient); };
   $("work-recipient").onchange = () => {
     saveDraft(); ++compositionEpoch; target = { ...target, recipient: $("work-recipient").value };
@@ -776,6 +833,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const token = epoch, simulation = requestContext(request).simulation, selection = selectionKey();
     const label = requestLabel(request);
     checkingReceipts.add(request.request_id); button.disabled = true;
+    paintAccess();
     try {
       const status = state.accept(request, await api.actionReceipt(request));
       if (status === "delivered" && retainedComposition && rowKey(request) === rowKey(retainedComposition.row)) retainedComposition = null;

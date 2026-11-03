@@ -1916,3 +1916,95 @@ test('message denial preserves the useful authorized feedback-only path',async()
   const feedback=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback');
   assert.equal(feedback.disabled,false);assert.equal(h.sends.length,0);
 });
+
+test('explicit action access check reads only missing capabilities once and preserves the message draft and receipt',async()=>{
+  let allowed=false;const held=deferred(),reads=[],storage=store(),original=saved(storage);
+  const h=harness(nudgeOptions({storage,roomLabel:()=>'<Current computer> / Team',
+    interactionContext:room=>{reads.push(['message',room]);return {...context,simulation:false,actions:['message']};},
+    nudgeContext:room=>{reads.push(['nudge',room]);if(!allowed)throw actionDenied();return held.promise;}}));
+  h.loop.setRoom('web');await settle();h.update();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  h.get('work-body').value='Keep the worker draft';h.get('work-body').emit('input');h.get('work-body').focus();
+  const pending=storage.getItem('plane.pending-actions.v1'),check=h.get('work-check-access');
+  assert.equal(check.hidden,false);assert.equal(check.disabled,false);
+  assert.equal(h.get('work-access-help').open,false);
+  assert.match(h.get('work-access-room').textContent,/<Current computer> \/ Team/);
+  assert.match(h.get('work-access-status').textContent,/Nudges: not authorized/);
+  allowed=true;check.focus();check.onclick();check.onclick();await settle();
+  assert.equal(check.disabled,true);assert.deepEqual(reads,[['message','web'],['nudge','web'],['nudge','web']]);
+  held.resolve(ownerNudge);await settle();
+  assert.equal(check.hidden,false);assert.equal(check.disabled,true);assert.equal(h.get('work-body').value,'Keep the worker draft');
+  assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.document.activeElement,check);
+  assert.equal(storage.getItem('plane.pending-actions.v1'),pending);
+  assert.match(h.get('work-pending').innerHTML,new RegExp(original.request_id));
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+for(const mode of ['task composer','selected detail'])
+test(`action access check preserves the ${mode} and its exact task target`,async()=>{
+  let allowed=false,feedbackReads=0,detailReads=0;
+  const h=harness(feedbackOptions({feedbackContext:()=>{feedbackReads++;return ownerFeedback;},
+    interactionContext:()=>{if(!allowed)throw actionDenied();return {...context,simulation:false,actions:['message']};},
+    jget:()=>{detailReads++;return ownerDetail();}}));
+  await chooseFeedback(h);h.get('work-body').value='Keep this linked comment';h.get('work-body').emit('input');
+  if(mode==='selected detail'){h.get('work-open-task').onclick();await settle();}
+  const detail=h.get('task-detail-content').innerHTML,focus=h.document.activeElement;
+  allowed=true;h.get('work-check-access').onclick();await settle();
+  assert.equal(h.get('work-body').value,'Keep this linked comment');
+  assert.equal(h.get('work-send').textContent,'Send feedback');assert.equal(h.get('work-task').textContent,'Task: Review the selected task');
+  assert.equal(h.get('task-detail-content').innerHTML,detail);assert.equal(h.get('task-detail').open,mode==='selected detail');
+  assert.equal(detailReads,mode==='selected detail'?2:1);assert.equal(feedbackReads,1);assert.equal(h.document.activeElement,focus);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+  await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.preparations.length,1);assert.equal(h.preparations[0].kind,'feedback');
+  assert.equal(h.preparations[0].target.task_id,nudgeTaskId);assert.equal(h.preparations[0].target.release_id,ownerFeedback.release_id);
+  assert.equal(h.preparations[0].target.assignment_id,null);
+});
+
+test('action access help distinguishes authorization, unavailable transport and disconnected reads',async()=>{
+  const h=harness(nudgeOptions({interactionContext:()=>null,nudgeContext:()=>{throw actionDenied();}}));
+  h.loop.setRoom('web');await settle();h.update();
+  assert.match(h.get('work-access-status').textContent,/Messages: unavailable.*Nudges: not authorized/);
+  assert.match(h.get('work-loop').innerHTML,/separate, local approval/i);
+  assert.doesNotMatch(h.get('work-access-status').textContent,/Messages: not authorized/);
+  h.update({state:'disconnected'});assert.equal(h.get('work-check-access').disabled,true);
+  assert.match(h.get('work-access-status').textContent,/disconnected.*does not prove.*approval/i);
+  const readonly=harness({transport:{interactionContext:undefined,nudgeContext:undefined,feedbackContext:undefined,sendAction:undefined,actionReceipt:undefined}});
+  readonly.loop.setRoom('web');await settle();
+  assert.equal(readonly.get('work-check-access').hidden,true);
+  assert.match(readonly.get('work-access-status').textContent,/does not support browser actions/i);
+});
+
+for(const loss of ['room','pause','disconnected'])
+test(`late access checks are fenced after ${loss} and cannot grant or overwrite drafts`,async()=>{
+  const held=deferred();let checking=false,reads=0;
+  const h=harness({interactionContext:room=>{reads++;if(room==='other')return {...context,room,scope:{...context.scope,fleet:room}};if(checking)return held.promise;throw actionDenied();}});
+  h.loop.setRoom('web');await settle();h.update();checking=true;h.get('work-check-access').onclick();await settle();
+  if(loss==='room'){h.loop.setRoom('other');await settle();h.get('work-body').value='Other team draft';h.get('work-body').emit('input');}
+  else if(loss==='pause')h.loop.pause();
+  else h.update({state:'disconnected'});
+  held.resolve(context);await settle();
+  if(loss==='room')assert.equal(h.get('work-body').value,'Other team draft');
+  else {assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-check-access').disabled,true);}
+  assert.equal(reads,loss==='room'?3:2);assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+test('action access check is disabled during context reads, task reads, writes, receipt reads and all teams',async()=>{
+  const contextRead=deferred(),taskRead=deferred(),write=deferred(),lookup=deferred();let initial=true,reads=0;
+  const storage=store();saved(storage);
+  const h=harness(nudgeOptions({storage,interactionContext:()=>{reads++;return initial?contextRead.promise:{...context,simulation:false,actions:['message']};},
+    nudgeContext:()=>null,jget:()=>taskRead.promise,sendAction:()=>write.promise,actionReceipt:()=>lookup.promise}));
+  h.loop.setRoom('web');h.update();assert.equal(h.get('work-check-access').disabled,true);
+  h.get('work-check-access').onclick();await settle();assert.equal(reads,1);
+  initial=false;contextRead.resolve({...context,simulation:false,actions:['message']});await settle();
+  h.open(nudgeTaskId);await settle();assert.equal(h.get('work-check-access').disabled,true);
+  taskRead.resolve(ownerDetail());await settle();assert.equal(h.get('work-check-access').disabled,false);
+  h.get('task-detail-close').onclick();await settle();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  const sending=h.submit();await settle();assert.equal(h.get('work-check-access').disabled,true);
+  write.resolve(receipt(h.sends[0],'recorded'));await sending;
+  const checking=h.pendingClick('saved-request');await settle();assert.equal(h.get('work-check-access').disabled,true);
+  lookup.resolve(receipt(new ActionState(storage).pending.find(p=>p.request_id==='saved-request')));await checking;
+  h.loop.setRoom('all');await settle();assert.equal(h.get('work-check-access').disabled,true);
+  const count=reads;h.get('work-check-access').onclick();await settle();assert.equal(reads,count);
+});
