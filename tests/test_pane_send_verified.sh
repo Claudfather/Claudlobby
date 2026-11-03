@@ -647,10 +647,9 @@ FOOTER=$(printf '%s\n' "  $(printf '\342\217\265\342\217\265') auto mode on (shi
 tall_frame() {  # <out> <lines of the payload, from the top> <lines shown>
     { printf '%s\n' "$tall_payload" | head -n "$2" | tail -n "$3" | sed 's/^/  /'
       printf '%s\n%s\n' "$RULE" "$FOOTER"; } > "$1"
-    printf '%s\n' "$1"
 }
-TALL=$(tall_frame "$TMPD/tall-shown.txt" 30 21)
-PARTIAL=$(tall_frame "$TMPD/tall-partial.txt" 25 21)
+TALL="$TMPD/tall-shown.txt"; tall_frame "$TALL" 30 21
+PARTIAL="$TMPD/tall-partial.txt"; tall_frame "$PARTIAL" 25 21
 assert_eq "fixture: the tall frame has no prompt line" "" "$(pane_input_region "$(cat "$TALL")")"
 r=$(pane_box_end_shows_payload "$(cat "$TALL")" "$tall_payload" && echo yes || echo no)
 assert_eq "fixture: the tall frame shows the payload's end above its rule" "yes" "$r"
@@ -694,17 +693,15 @@ for f in tall-norule.txt tall-notedge.txt; do
     assert_eq "control $f: the end not at a box's bottom edge, no Enter (rc 3)" "0 3" "$(enters) ${r#* }"
 done
 
-# (e) A tall box that already holds text takes no new payload: its end would
-# show the new payload's end, and the Enter would submit both.
-HELD_TALL="$TMPD/tall-held.txt"
-{ for i in $(seq 1 21); do printf '  held line %s of an earlier payload\n' "$i"; done
-  printf '%s\n%s\n' "$RULE" "$FOOTER"; } > "$HELD_TALL"
-r=$(pane_box_end_held "$(cat "$HELD_TALL")" && echo yes || echo no)
+# (e) A tall box that already holds text, as a withheld bootstrap leaves it,
+# takes no new payload: its end would show the new payload's end, and the Enter
+# would submit both.
+r=$(pane_box_end_held "$(cat "$TALL")" && echo yes || echo no)
 assert_eq "fixture: a tall box holding text reads as held" "yes" "$r"
 r=$(pane_box_end_held "$(cat "$HINT")" && echo yes || echo no)
 assert_eq "fixture: a drawn empty box does not" "no" "$r"
 cap_reset
-r=$(run_send_rc "short payload Z2669" "$HELD_TALL")
+r=$(run_send_rc "short payload Z2669" "$TALL")
 assert_eq "tall box holding text: nothing typed, no Enter (rc 4)" "0 4" "$r"
 r=$(grep -cE '"reason": ?"recipient-input-held"' "$CAPTURE" || true)
 assert_eq "tall box holding text: recorded as recipient-input-held" "1" "$r"

@@ -1721,12 +1721,21 @@ harness_check "  ...and no one-prompt bootstrap" "$r"
 # creates, at the production send budgets, with a throwaway config past
 # onboarding and trust and no credentials (ANTHROPIC_BASE_URL is a closed port,
 # so nothing is spent), then reads the session transcript.
-# VAL_REAL_CLAUDE_RUNS runs (default 3) expect the bootstrap as ONE user record,
-# whole and unframed; one more, with STARTUP_BOOTSTRAP_ENABLED=0, expects the
-# literal start: the startup prompt as its own record, and no bootstrap.
-_real2669() {  # $1 = run directory name; prints the transcript verdict
-    local cfg="$RB_ROOT/real2669/$1" verdict=absent i
-    rm -rf "$cfg"; mkdir -p "$cfg/config"
+# Claude Code draws the box two ways (measured, 2.1.316), and each run line
+# names the one it saw: in the alternate screen (alt=1) the box keeps its
+# prompt line in view and scrolls inside; in the normal screen (alt=0) a box
+# taller than the pane loses it, the #2669 case. A credential-less session
+# took the normal screen with Claude Code's nonessential traffic on and the
+# alternate screen with it off, so odd runs leave it on, as production does,
+# and even runs turn it off.
+# VAL_REAL_CLAUDE_RUNS runs (default 4) expect the bootstrap as ONE user record,
+# whole and unframed, and no NOT SUBMITTED line; one more, with
+# STARTUP_BOOTSTRAP_ENABLED=0, expects the literal start: the startup prompt as
+# its own record, and no bootstrap.
+_real2669() {  # $1 = run number; prints "<transcript verdict> alt=<alternate_on>"
+    local cfg="$RB_ROOT/real2669" quiet="" verdict=absent alt i=0 limit=20
+    rm -rf "$cfg"; mkdir -p "$cfg"
+    [ $(( $1 % 2 )) -eq 0 ] && quiet="CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 "
     python3 -I -c '
 import json, sys
 cfg, cwd, version = sys.argv[1:]
@@ -1735,13 +1744,17 @@ project = {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True
 json.dump({"hasCompletedOnboarding": True, "lastOnboardingVersion": version, "theme": "dark",
            "cachedGrowthBookFeatures": {"tengu_virtual_pancake": True},
            "projects": {cwd: project}}, open(cfg + "/.claude.json", "w"))
-' "$cfg/config" "$(cd "$RB_DIR" && pwd -P)" "$CLAUDE_VERSION"
-    printf '#!/bin/bash\nexec env -i PATH="$PATH" HOME="$HOME" TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 CLAUDE_CONFIG_DIR=%q ANTHROPIC_BASE_URL=http://127.0.0.1:9 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q "$@"\n' \
-        "$cfg/config" "$VAL_REAL_CLAUDE" > "$RB_ROOT/bin/claude"
+' "$cfg" "$(cd "$RB_DIR" && pwd -P)" "$CLAUDE_VERSION"
+    printf '#!/bin/bash\nexec env -i PATH="$PATH" HOME="$HOME" TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 CLAUDE_CONFIG_DIR=%q ANTHROPIC_BASE_URL=http://127.0.0.1:9 DISABLE_AUTOUPDATER=1 %s%q "$@"\n' \
+        "$cfg" "$quiet" "$VAL_REAL_CLAUDE" > "$RB_ROOT/bin/claude"
     rm -f "$RB_DIR/logs/startup.log"
     ( unset PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_SHOWN_TICKS PANE_SEND_SETTLE_S
-      CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh ) > "$cfg/pane.txt" 2>&1 || true
-    for i in $(seq 1 20); do
+      CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh ) >/dev/null 2>&1 || true
+    alt="$(tmux display-message -p -t "$RB_SESSION" '#{alternate_on}' 2>/dev/null)" || alt=""
+    # start-bot returns once its sends settled: a send it did not submit gets
+    # one transcript read, not a wait.
+    grep -qE 'NOT (SUBMITTED|SENT)' "$RB_DIR/logs/startup.log" 2>/dev/null && limit=1
+    while [ "$i" -lt "$limit" ]; do
         verdict="$(python3 -I -c '
 import glob, json, sys
 texts = []
@@ -1751,8 +1764,15 @@ for path in glob.glob(sys.argv[1] + "/projects/*/*.jsonl"):
             record = json.loads(line)
         except ValueError:
             continue
-        content = (record.get("message") or {}).get("content")
-        if record.get("type") == "user" and isinstance(content, str):
+        if record.get("type") == "user":
+            content = (record.get("message") or {}).get("content")
+            if isinstance(content, list):
+                content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+        elif record.get("type") == "attachment" and (record.get("attachment") or {}).get("type") == "queued_command":
+            content = str(record["attachment"].get("prompt"))
+        else:
+            continue
+        if isinstance(content, str) and content:
             texts.append(content)
 def kind(t):
     if "FLEET_STARTUP_BOOTSTRAP_V1" in t:
@@ -1760,35 +1780,38 @@ def kind(t):
         return "framed" if "<pasted_content" in t else ("bootstrap" if whole else "partial")
     return "startup" if "ZZZ_STARTUPMARK" in t else "other"
 print(" ".join(kind(t) for t in texts) or "absent")
-' "$cfg/config" 2>/dev/null)" || verdict=unreadable
-        [ "$verdict" = absent ] || break
-        sleep 1
+' "$cfg" 2>/dev/null)" || verdict=unreadable
+        case " $verdict " in *' bootstrap '*|*' framed '*|*' partial '*|*' startup '*|' unreadable ') break ;; esac
+        i=$((i + 1))
+        [ "$i" -lt "$limit" ] && sleep 1
     done
-    tmux capture-pane -t "$RB_SESSION" -p > "$cfg/pane-end.txt" 2>/dev/null || true
+    tmux capture-pane -t "$RB_SESSION" -p > "$cfg/pane.txt" 2>/dev/null || true
     tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
-    cp "$RB_DIR/logs/startup.log" "$cfg/startup.log" 2>/dev/null || true
-    printf '%s\n' "$verdict"
+    printf '%s alt=%s\n' "$verdict" "${alt:-?}"
 }
 if [ -n "${VAL_REAL_CLAUDE:-}" ] && measure_claude_version "$VAL_REAL_CLAUDE"; then
     cp "$RB_ROOT/bin/claude" "$RB_ROOT/bin/claude.stub"
     _n2669=0; _ok2669=0
-    while [ "$_n2669" -lt "${VAL_REAL_CLAUDE_RUNS:-3}" ]; do
+    while [ "$_n2669" -lt "${VAL_REAL_CLAUDE_RUNS:-4}" ]; do
         _n2669=$((_n2669 + 1))
-        _v2669="$(_real2669 "run$_n2669")"
+        _v2669="$(_real2669 "$_n2669")"
         _s2669=sent
-        grep -q 'STARTUP mode=skill-bootstrap' "$RB_ROOT/real2669/run$_n2669/startup.log" 2>/dev/null || _s2669=no-bootstrap
-        grep -qE 'NOT (SUBMITTED|SENT)' "$RB_ROOT/real2669/run$_n2669/startup.log" 2>/dev/null && _s2669=unsent
+        grep -q 'STARTUP mode=skill-bootstrap' "$RB_DIR/logs/startup.log" 2>/dev/null || _s2669=no-bootstrap
+        grep -qE 'NOT (SUBMITTED|SENT)' "$RB_DIR/logs/startup.log" 2>/dev/null && _s2669=unsent
         printf '  real claude %s, 80x24, run %s: transcript [%s], startup.log %s\n' \
             "$CLAUDE_VERSION" "$_n2669" "$_v2669" "$_s2669"
-        [ "$_v2669" = bootstrap ] && [ "$_s2669" = sent ] && _ok2669=$((_ok2669 + 1))
+        if [ "${_v2669% alt=*}" = bootstrap ] && [ "$_s2669" = sent ]; then
+            _ok2669=$((_ok2669 + 1))
+        else
+            tail -n 8 "$RB_ROOT/real2669/pane.txt" 2>/dev/null | sed 's/^/      | /' || true
+        fi
     done
     [ "$_ok2669" = "$_n2669" ] && r=yes || r=no
     harness_check "#2669 real claude at 80x24: $_ok2669 of $_n2669 bootstraps submitted, one whole record each" "$r"
-    _v2669="$(STARTUP_BOOTSTRAP_ENABLED=0 _real2669 switch-off)"
+    _v2669="$(STARTUP_BOOTSTRAP_ENABLED=0 _real2669 1)"
     printf '  real claude %s, 80x24, STARTUP_BOOTSTRAP_ENABLED=0: transcript [%s]\n' "$CLAUDE_VERSION" "$_v2669"
-    case " $_v2669 " in *' startup '*) r=yes ;; *) r=no ;; esac
-    case " $_v2669 " in *' bootstrap '*|*' framed '*|*' partial '*) r=no ;; esac
-    grep -q 'literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0\]' "$RB_ROOT/real2669/switch-off/startup.log" 2>/dev/null || r=no
+    case " ${_v2669% alt=*} " in *' bootstrap '*|*' framed '*|*' partial '*) r=no ;; *' startup '*) r=yes ;; *) r=no ;; esac
+    grep -q 'literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0\]' "$RB_DIR/logs/startup.log" 2>/dev/null || r=no
     harness_check "#2669 real claude, switch off: the literal start, the startup prompt its own record" "$r"
     mv "$RB_ROOT/bin/claude.stub" "$RB_ROOT/bin/claude"
 else

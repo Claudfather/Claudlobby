@@ -2935,7 +2935,15 @@ pane_input_region() {
 _pane_trace_candidate() {
     local pane="$1" payload="$2" region line stripped floor first="" seen_first=0
     region=$(pane_input_region "$pane")
-    [ -n "$region" ] || { printf 'no-region'; return 0; }
+    if [ -z "$region" ]; then
+        # A box taller than the pane, read as pane_holds_unsubmitted reads it (#2669).
+        if [ -n "$payload" ] && pane_box_end_shows_payload "$pane" "$payload"; then
+            printf 'held'
+        else
+            printf 'no-region'
+        fi
+        return 0
+    fi
     if printf '%s\n' "$region" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER"; then
         printf 'held'; return 0
     fi
@@ -3039,8 +3047,7 @@ EOF
 pane_holds_unsubmitted() {
     local region
     region=$(pane_input_region "$1")
-    # No prompt line in view: a box taller than the pane still holds the
-    # payload while its end shows above the box's rule (#2669).
+    # No prompt line in view: a box taller than the pane (#2669).
     [ -n "$region" ] || { pane_box_end_shows_payload "$1" "$2"; return; }
     pane_shows_payload "$region" "$2"
 }
@@ -3380,8 +3387,7 @@ _pane_await_payload_shown() {
         case "$pane" in *[![:space:]]*) ;; *) continue ;; esac
         region=$(pane_input_region "$pane")
         if [ -z "$region" ]; then
-            # No prompt line in view: a box taller than the pane shows its end
-            # above its rule instead (#2669). Anything else, keep waiting.
+            # No prompt line in view: a box taller than the pane (#2669).
             pane_box_end_shows_payload "$pane" "$text" && return 0
             continue
         fi
@@ -4546,7 +4552,8 @@ startup_inject() {
     local max_age="${RESUME_MAX_AGE_S:-86400}" command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
     if should_resume_session "$checkpoint" "$max_age"; then
         if _session_command_resolve "$command" "$bot_dir"; then
-            if ! switch_is_on STARTUP_BOOTSTRAP_ENABLED startup-bootstrap \
+            if [ "$_SESSION_COMMAND_STATUS" = available ] &&
+                ! switch_is_on STARTUP_BOOTSTRAP_ENABLED startup-bootstrap \
                     "the resume command and the startup prompt go as two literal sends"; then
                 off="; STARTUP_BOOTSTRAP_ENABLED=0"
             elif payload="$(_startup_bootstrap_payload "$bot_dir" "$startup" || true)" && [ -n "$payload" ]; then
