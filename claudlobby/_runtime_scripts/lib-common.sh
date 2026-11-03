@@ -4412,20 +4412,23 @@ try:
         for ref, entries in registry.items():
             if ref.split("@", 1)[0] != plugin or enabled.get(ref) is not True:
                 continue
-            for entry in entries:
-                scope = entry.get("scope")
-                if scope != "user" and not (scope in ("project", "local") and entry.get("projectPath") == str(bot)):
-                    continue
-                install = Path(entry["installPath"])
-                if not install.is_absolute():
-                    raise ValueError()
-                install = install.resolve()
-                if not any(install == root or root in install.parents for root in discovered):
-                    raise ValueError()
-                manifest = json.loads((install / ".claude-plugin/plugin.json").read_text())
-                if manifest.get("name") != plugin:
-                    raise ValueError()
-                candidates.append(install / "skills" / skill / "SKILL.md")
+            # Claude Code loads the FIRST entry that applies to this directory,
+            # in registry order and whatever its scope, and never a later one;
+            # a stale per-directory entry after the user entry is inert (#2666).
+            entry = next((entry for entry in entries if entry.get("scope") == "user"
+                          or (entry.get("scope") in ("project", "local") and entry.get("projectPath") == str(bot))), None)
+            if entry is None:
+                continue
+            install = Path(entry["installPath"])
+            if not install.is_absolute():
+                raise ValueError()
+            install = install.resolve()
+            if not any(install == root or root in install.parents for root in discovered):
+                raise ValueError()
+            manifest = json.loads((install / ".claude-plugin/plugin.json").read_text())
+            if manifest.get("name") != plugin:
+                raise ValueError()
+            candidates.append(install / "skills" / skill / "SKILL.md")
     if len(set(candidates)) != 1:
         raise ValueError()
     lines = candidates[0].read_text().splitlines()

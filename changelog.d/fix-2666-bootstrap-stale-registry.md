@@ -1,0 +1,3 @@
+### Fixed — A stale plugin entry no longer stops the one-prompt start (#2666)
+
+The start script now reads the resume Skill from the install Claude Code actually loads: for each enabled plugin, the first registry entry that applies to the bot (a user entry, or a project or local entry for the bot's directory), in registry order. Before, it required every applicable entry to name the same install, so a bot whose registry still held an old per-directory entry after the user entry fell back to the literal resume command, although Claude Code loaded the current install. Two enabled plugins with the same name, a missing skill file and an unreadable registry still keep the literal start.
