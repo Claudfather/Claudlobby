@@ -622,8 +622,45 @@ function taskIssueNote(r) {
     + ` — inspect ${esc(r.task_id)}</div>`;
 }
 
+let taskFilters = {status:"",assignee:""}, taskSnapshot = null;
+function taskAssigneeKey(task) {
+  const assignment = task.current_assignment || task.assignment_history?.at(-1);
+  if (!assignment) return "unassigned";
+  const identity = assignment.assignee_uid || assignment.assignee_alias;
+  return identity ? JSON.stringify([task.fleet || "",identity]) : "unknown";
+}
+function resetTaskFilters() {
+  taskFilters = {status:"",assignee:""}; taskSnapshot = null;
+  paintTaskFilters([],false);
+}
+function paintTaskFilters(rows, available) {
+  const status = $("task-filter-status"), assignee = $("task-filter-assignee"), reset = $("task-filter-reset");
+  if (!status || !assignee || !reset) return;
+  const count = $("task-filter-count");
+  if (count && (!available || !taskFilters.status && !taskFilters.assignee)) { count.hidden = true; count.textContent = ""; }
+  const choices = new Map();
+  for (const task of rows) {
+    const key = taskAssigneeKey(task), actor = task.current_assignment || task.assignment_history?.at(-1);
+    choices.set(key,key === "unassigned" ? "Unassigned" : key === "unknown" ? "Unknown assignee"
+      : `${actor.assignee_short || actor.assignee_alias || actor.assignee_uid} · ${task.fleet || "Team not recorded"}`);
+  }
+  if (taskFilters.assignee && !choices.has(taskFilters.assignee))
+    choices.set(taskFilters.assignee,"Selected assignee — not in this snapshot");
+  const options = '<option value="">All assignees</option>' + [...choices].sort((a,b)=>a[1].localeCompare(b[1]))
+    .map(([value,label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("");
+  if (assignee.innerHTML !== options) assignee.innerHTML = options;
+  status.value = taskFilters.status; assignee.value = taskFilters.assignee;
+  status.disabled = assignee.disabled = !available;
+  reset.disabled = !available || !taskFilters.status && !taskFilters.assignee;
+  const repaint = () => { if (taskSnapshot) renderTasks(taskSnapshot); };
+  status.onchange = () => { taskFilters.status = status.value; repaint(); };
+  assignee.onchange = () => { taskFilters.assignee = assignee.value; repaint(); };
+  reset.onclick = () => { taskFilters = {status:"",assignee:""}; repaint(); };
+}
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  taskSnapshot = env?.state === "ok" ? env : null;
+  paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
   const focused = document.activeElement;
   const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
   const identity = focusedRail && focused?.dataset?.taskOpen
@@ -642,14 +679,23 @@ function renderTasks(env) {
   const coverage = env?.state === "ok" ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
-                  { idleWhenEmpty: (d) => !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
+                  { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
     restoreFocus();
     return;
   }
   const rows = env.data.tasks;
+  const matches = row => (!taskFilters.status || row.state === taskFilters.status)
+    && (!taskFilters.assignee || taskAssigneeKey(row) === taskFilters.assignee);
+  const filtered = !!taskFilters.status || !!taskFilters.assignee;
   const attn = rows.filter((r) => r.attention);
+  const visible = rows.filter(matches);
+  const filterCount = $("task-filter-count");
+  if (filterCount) {
+    filterCount.hidden = !filtered;
+    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} recorded tasks in this snapshot. Attention count is unfiltered.` : "";
+  }
   const issueCount = env.data.issue_count || 0;
   badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
   badge.textContent = attn.length || "!";
@@ -695,10 +741,11 @@ function renderTasks(env) {
   const coverageNote = partial
     ? `<div class="card attn"><div class="why">Task records are available from ${esc(coverage.reachable)}/${esc(coverage.total)} sources. Attention status is incomplete.</div></div>` : "";
   attEl.innerHTML = coverageNote + (attn.length || issues || limited
-    ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
-  taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
-    || stateBlock("idle", null, null, { label: partial ? "no other tasks in readable sources" : "no other tasks" });
+    ? limited + issues + visible.filter(r => r.attention).map(card).join("")
+      + (filtered && !visible.some(r => r.attention) ? stateBlock("idle",null,null,{label:"no matching recorded tasks in this section"}) : "")
+    : stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
+  taskEl.innerHTML = visible.filter((r) => !r.attention).map(card).join("")
+    || stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no other tasks in readable sources" : "no other tasks" });
   restoreFocus();
 }
 
@@ -1462,6 +1509,7 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f && typeof resetTaskFilters === "function") resetTaskFilters();
   if (currentFleet !== f && typeof closeRoomBot === "function") closeRoomBot();
   if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
   if (currentFleet !== f) { ++generation; closeEquipment(); }
@@ -2020,6 +2068,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onPause() {
         sessionPaused = true;
         if (typeof resetConversationFocus === "function") resetConversationFocus();
+        if (typeof resetTaskFilters === "function") resetTaskFilters();
         activityRecovery?.paint();
         ++sessionEpoch;
         ++generation; ++trustGen;
