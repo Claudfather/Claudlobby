@@ -1,1 +1,0 @@
-Tasks can load older recorded work in bounded pages, preserving each connected host's own continuation and task ownership. Loaded history stays visible during activity updates until refreshed, and incomplete or unsupported source coverage stays explicit.
