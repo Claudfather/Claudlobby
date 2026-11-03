@@ -27,7 +27,7 @@ test('Rooms and Tasks switch existing main panels while keeping the composer mou
   assert.ok(html.indexOf('id="fleet-tabs"')>html.indexOf('id="rail-fleet"'));
   assert.ok(html.indexOf('id="fleet-tabs"')<html.indexOf('id="rail-channel"'));
   assert.match(html,/<details id="computers-details"/);assert.doesNotMatch(html,/workspace-intro/);
-  const nodes=new Map(),c={currentView:'channel',agentDirectoryVisible:()=>false,closeEquipment(){},clearInterval(){},gridTimer:null,trustTimer:null,
+  const nodes=new Map(),c={currentView:'channel',workLoop:null,agentDirectoryVisible:()=>false,closeEquipment(){},clearInterval(){},gridTimer:null,trustTimer:null,
     $:id=>{if(!nodes.has(id))nodes.set(id,{hidden:false,value:''});return nodes.get(id);},document:{body:{classList:{toggle(){}}},querySelectorAll:()=>[]}};
   runInNewContext(source.slice(source.indexOf('function setView('),source.indexOf('let trustTimer =')),c);
   c.setView('tasks');assert.equal(nodes.get('channel').hidden,true);assert.equal(nodes.get('rail-right').hidden,false);

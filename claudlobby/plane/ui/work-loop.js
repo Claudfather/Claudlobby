@@ -44,9 +44,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let detailEpoch = 0, pendingDetail = null, compositionEpoch = 0, detailSnapshot = null, targetTitle = null, composerTask = null;
   let conversation = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
+  let view = "channel";
   let notice = "Choose a team to see its available actions.";
-  root.innerHTML = `<div class="work-loop-head"><div><h2>Message</h2>
-    <p id="work-scope"></p></div><span id="work-mode" class="tag"></span></div>
+  root.innerHTML = `<details id="work-composer" open><summary id="work-composer-toggle"><span id="work-composer-label">Message team</span><span id="work-composer-status"></span></summary>
+    <div class="work-loop-head"><p id="work-scope"></p><span id="work-mode" class="tag"></span></div>
     <button id="work-manager" class="pill ghost" type="button" hidden>Talk to manager</button>
     <p id="work-unavailable" class="note"></p>
     <button id="work-check-access" class="pill ghost" type="button" hidden>Check action access</button>
@@ -74,8 +75,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <p id="work-notice" role="status" aria-live="polite"></p>
     <div id="work-pending"></div>
     <div id="work-recoverable"></div>
-    <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button>`;
+    <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button></details>`;
   const $ = id => document.getElementById(id);
+  $("work-composer").open = true;
   const row = () => context && target ? { ...(context.version === 2 ? { version: 2 } : {}), scope: context.scope, kind, target } : null;
   const requestContext = request => {
     const value = contextsByKind.get(request.kind);
@@ -89,6 +91,23 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
   const roomLabel = value => api.roomLabel?.(value) || value;
+  function paintComposer() {
+    $("work-composer-label").textContent = target?.task_id ? kind === "feedback" ? "Task feedback" : "Ask team lead" : "Message team";
+    const pending = state.pending.filter(visibleRequest).length;
+    $("work-composer-status").textContent = [sending ? "Sending…" : "",
+      $("work-body").value || retainedComposition?.text ? "Draft kept" : "",
+      pending ? `${pending} awaiting confirmation` : "",
+      state.corruptStorage ? "Saved requests need attention" : state.storageError ? "Sending disabled" : ""].filter(Boolean).join(" · ");
+  }
+  function setView(next) {
+    if (view === next) return;
+    view = next;
+    $("work-composer").open = view !== "tasks";
+    // Only presentation changes: the mounted form and its action selection stay
+    // intact. Do not leave keyboard focus inside a newly collapsed composer.
+    if (!$("work-composer").open && root.contains(document.activeElement)) $("work-composer-toggle").focus();
+    paintComposer();
+  }
   const accessReaders = () => typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
     ? [["message", api.interactionContext], ["nudge", typeof api.prepareAction === "function" ? api.nudgeContext : null],
       ["feedback", typeof api.prepareAction === "function" ? api.feedbackContext : null]].filter(([, read]) => typeof read === "function") : [];
@@ -162,7 +181,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     target = { recipient, task_id: null };
     messageRecipients.set(scopeKey(context.scope), recipient);
     opener = null; openerIdentity = null;
-    closeDetail(); notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
+    closeDetail(); notice = ""; $("work-composer").open = true;
+    paint({ restoreDraft: true }); $("work-body").focus();
     return true;
   }
   function pendingRows() {
@@ -228,6 +248,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       : "";
     $("work-clear-saved").hidden = !state.corruptStorage;
     pendingRows();
+    paintComposer();
     onActionsChange();
   }
   function closeDetail() {
@@ -631,7 +652,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         opener = null; openerIdentity = null;
         closeDetail(); notice = context.simulation ? "Example task action. No real bot delivery."
           : kind === "feedback" ? "Send a comment about this task to the lead. This does not approve or change the task." : "This asks the team lead about the selected task. It does not approve or complete work. Refresh and select again if its assignment or release changes.";
-        paint({ restoreDraft: true }); $("work-body").focus();
+        $("work-composer").open = true; paint({ restoreDraft: true }); $("work-body").focus();
       };
     }
     const feedback = capability("feedback"), nudge = capability("nudge");
@@ -718,7 +739,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (focusTarget === rail || focusTarget === $("channel")) focusTarget.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
-  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); });
+  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); paintComposer(); });
   $("work-check-access").onclick = async () => {
     if (!canCheckAccess()) return;
     const token = epoch, selectedRoom = room, missing = missingAccess();
@@ -844,7 +865,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom,
+  return { setRoom, setView,
     refreshActions(source) { if (room.startsWith(source + " / ")) setRoom(room,{keepDetail:true}); },
     update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
 }

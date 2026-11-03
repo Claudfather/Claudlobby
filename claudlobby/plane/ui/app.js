@@ -1765,6 +1765,7 @@ function setView(view) {
   const wasDirectory = agentDirectoryVisible();
   if (view !== "fleet") closeEquipment();
   currentView = view;
+  if (workLoop) workLoop.setView(view);
   document.body.classList.toggle("agent-directory-view", agentDirectoryVisible());
   $("channel").hidden = view !== "channel";
   $("rail-right").hidden = view !== "tasks";
