@@ -65,7 +65,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     paused = true; invoke(mount?.onPause);
     if (mount) {
       // A changed account cannot leave private records in a paused old document.
-      mount.document.querySelector('main')?.replaceChildren();
+      mount.element.replaceChildren(); mount.controls = null;
+      mount.document.querySelector('main')?.replaceChildren(mount.element);
       for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane', 'focus-title'])
         mount.document.getElementById(id)?.replaceChildren();
       const title = mount.document.getElementById('focus-title');
@@ -457,7 +458,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (['channel','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
+        if (['channel','tasks','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
           button.disabled = false; button.title = ''; continue;
         }
         button.disabled = true; button.title = unavailable;

@@ -50,7 +50,7 @@ function dom() {
     click(){if(!this.disabled)this.handlers.click?.();}
   }
   for(const id of ['owner-session','main','fleet','channel','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
-  const nav=['channel','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
+  const nav=['channel','tasks','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
   class Observer {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
 }
@@ -282,15 +282,26 @@ test('incremental reads use the same account and transport fence as final reads'
 });
 
 test('observed account refusal retires clients, fences held private reads and clears all private regions even if callback throws',async()=>{
-  const h=harness();h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
-  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])h.ui.get(name).append(h.ui.document.createElement('b'));
+  for(const refusal of [401,403,409,'generation']) {
+  const h=harness();h.ui.get('main').append(h.ui.get('owner-session'));
+  h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane']) {
+    const privateNode=h.ui.document.createElement('b');privateNode.textContent='private stale content';h.ui.get(name).append(privateNode);
+  }
   const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/read/tasks',()=>held.promise);
-  const old=h.api.jget('/api/tasks');await flush();h.metadataStatus=401;await h.api.checkAccount();
+  const old=h.api.jget('/api/tasks');await flush();
+  if(refusal==='generation')h.metadata={...h.metadata,context_generation:id(99)};else h.metadataStatus=refusal;
+  await h.api.checkAccount();
   held.resolve(reply(200,ok({tasks:[{task_id:wi,title:'late private'}]})));const result=await old;
   assert.equal(result.state,'denied');assert.equal(result.data,undefined);assert.equal(h.api.snapshot().phase,'denied');
-  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])assert.equal(h.ui.get(name).children.length,0);
+  for(const name of ['fleet-totals','presence-strip','task-detail-content','focus-pane'])assert.equal(h.ui.get(name).children.length,0);
+  assert.deepEqual(h.ui.get('main').children,[h.ui.get('owner-session')],'only the safe recovery scaffold remains in the rendered main');
+  const recovery=descendants(h.ui.get('main')).map(node=>node.textContent).join(' ');
+  assert.match(recovery,/Your account or saved computers changed.*open your workspace again/);
+  assert.doesNotMatch(recovery,/private stale content|late private|[ab]\.example\.test/);
   assert.equal(h.ui.get('task-detail').closed,true);assert.equal(h.ui.get('focus-overlay').hidden,true);
   h.metadataStatus=200;assert.equal(await h.api.checkAccount(),false);assert.equal(await h.api.act(0,'connect'),false);h.api.dispose();
+  }
 });
 
 test('metadata total body deadline and disposal reject late responses without issuing hosts',async()=>{
@@ -318,13 +329,18 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
 
 test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
+  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','tasks','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
   const connect=row.children[1].children[0];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[0],connect);
   for(const id of ['fleet','channel']){
     const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
     const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
   }
+  const tasks=h.ui.nav.find(button=>button.dataset.view==='tasks');assert.equal(tasks.disabled,false);
+  h.metadataStatus=503;await h.api.checkAccount();h.ui.observers[0].fn();
+  assert.equal(tasks.disabled,false,'an account-service outage preserves task navigation over retained reads');
+  h.metadataStatus=403;await h.api.checkAccount();h.ui.observers[0].fn();
+  assert.equal(tasks.disabled,true,'account refusal retires task navigation');
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
@@ -394,8 +410,10 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
 
 test('account loss during host staging erases approval code and fences late staged result',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
+ const panel=proposalOf(h.ui.get('owner-session').children[1]);
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
- assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=proposalOf(h.ui.get('owner-session').children[1]);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.ok(!descendants(h.ui.get('owner-session')).includes(panel),'retired source controls are absent from recovery guidance');
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
@@ -449,8 +467,8 @@ test('retirement selectors are pinned to actual canonical HTML',async()=>{
   const html=await read('index.html');
   for(const id of ['view-nav','debug-toggle','fleet-totals','presence-strip','task-detail-content','focus-pane','focus-title','task-detail','focus-overlay','search','fleet'])
     assert.match(html,new RegExp('id="'+id+'"'));
-  const nav=html.match(/<nav id="view-nav">([\s\S]*?)<\/nav>/)[1];
-  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','grid','fleet','trust']);
+  const nav=html.match(/<nav id="view-nav"[^>]*>([\s\S]*?)<\/nav>/)[1];
+  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','tasks','grid','fleet','trust']);
   assert.match(workspaceText,/#view-nav button, #debug-toggle, \[data-bot-inspect\]/);
   assert.match(workspaceText,/'focus-title'/);
 });
