@@ -797,3 +797,15 @@ body.plane-workspace { padding:0 24px 24px; }
   #room-focus small { font-size:10px; }
   .plane-workspace #work-loop { max-height:48dvh; }
 }
+
+.room-bot-inspector { flex-shrink:0; max-height:30dvh; overflow:auto; padding:12px 14px; margin-bottom:10px;
+  border:1px solid var(--edge); border-radius:8px; background:var(--panel); }
+.room-bot-inspector .ed-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.room-bot-inspector dl { display:grid; grid-template-columns:150px minmax(0,1fr); gap:4px 12px; margin:10px 0; font-size:12px; }
+.room-bot-inspector dt { color:var(--dim); }
+.room-bot-inspector dd { margin:0; overflow-wrap:anywhere; }
+.room-bot-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.room-bot-inspector .ed-message { margin:0; }
+@media(max-width:650px) {
+  .room-bot-inspector dl { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+}

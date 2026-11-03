@@ -896,36 +896,38 @@ const botIdentity = { uid: 'actor_' + '4'.repeat(32), alias: 'bot:team/with/slas
   fleet: 'team/with/slash', fleet_uid: 'fleet_' + '5'.repeat(32), provisional: false };
 const equipmentEnvelope = alias => ({ state: 'ok', data: { alias, short: 'Worker', equipment: {}, posture: {},
   changes: [], versions: 1, composed_hashes: {}, org: {} } });
-function inspectionHarness() {
+function inspectionHarness({room = false} = {}) {
   const reads = [], selections = [], buttons = new Map(), cards = [];
   const document = { activeElement: null, body: { isConnected: true } };
   let box;
-  function detail() {
+  function detail(registry = buttons) {
     return { hidden: true, content: '', scrolls: 0,
       set innerHTML(value) {
-        for (const button of buttons.values()) {
+        for (const button of registry.values()) {
           if (document.activeElement === button) document.activeElement = document.body;
           button.isConnected = false;
         }
-        buttons.clear(); this.content = value;
-        for (const name of ['ed-close', 'ed-message', 'ed-message-note']) if (value.includes(name)) {
-          buttons.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
+        registry.clear(); this.content = value;
+        for (const name of ['ed-close', 'ed-message', 'ed-message-note', 'rb-refresh']) if (value.includes(name)) {
+          registry.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
             focus() { this.focusCalls++; document.activeElement = this; },
             matches(selector) { return selector === '.' + name; },
             addEventListener(event, listener) { this[event] = listener; } });
         }
       }, get innerHTML() { return this.content; },
-      querySelector(selector) { return buttons.get(selector) || null; },
-      contains(node) { return !!node && [...buttons.values()].includes(node); },
+      querySelector(selector) { return registry.get(selector) || null; },
+      contains(node) { return !!node && [...registry.values()].includes(node); },
       scrollIntoView() { this.scrolls++; } };
   }
   box = detail();
-  const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: 'fleet',
+  const roomButtons=new Map(),roomBox=detail(roomButtons);roomBox.id='room-bot-inspection';
+  const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: room?'channel':'fleet',
+    roomBotInspection:null,roomBotEpoch:0,interactionApi:{dispose(){}},activeRoom:()=>state.currentFleet,
     inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity, equipmentFocus: null,
     fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
     inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
     EQUIP_ORDER: ['skills'], esc: value => String(value), ago: () => '',
-    document, $: id => id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {} },
+    document, $: id => id === 'room-bot-inspection'?roomBox:id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {} },
     stateBlock: (state, provenance, text) => text || state,
     renderState(node) { node.innerHTML = 'loading'; },
     jget(url) { const pending = deferred(); reads.push({ url, ...pending }); return pending.promise; },
@@ -933,8 +935,64 @@ function inspectionHarness() {
       selectMessageRecipient(identity) { if (!this.canSelectMessageRecipient(identity)) return false; selections.push(identity); return true; } },
   };
   runInNewContext(inspectionHelpers, state);
-  return { state, reads, selections, buttons, cards, document, get box() { return box; }, replaceBox() { box = detail(); } };
+  runInNewContext(inspectionApp.slice(inspectionApp.indexOf('function botPresenceFacts('),inspectionApp.indexOf('function agentDirectoryCard(')),state);
+  state.PRESENCE_WORD={working:'working',idle:'idle',down:'down',stale:'stale',unknown:'unknown',sampling:'sampling…'};
+  return { state, reads, selections, buttons, cards, document, roomBox, roomButtons, get box() { return box; }, replaceBox() { box = detail(); } };
 }
+
+const roomPresence=()=>({state:'ok',provenance:{checked_at:'2026-01-01T00:00:00Z'},data:{sampler_available:true,bots:[{alias:botIdentity.alias,live:'up',presence:'idle'}]}});
+test('room bot inspection reads scoped presence, keeps Rooms open and only prepares the existing message composer',async()=>{
+  const h=inspectionHarness({room:true}),pending=h.state.openRoomBot({...botIdentity,last_seen:'2026-01-01'});
+  assert.equal(h.state.currentView,'channel');assert.equal(h.reads.length,1);
+  assert.equal(h.reads[0].url,'/api/presence?fleet=team%2Fwith%2Fslash');
+  h.reads[0].resolve(roomPresence());await pending;
+  assert.match(h.roomBox.innerHTML,/Live session at check<\/dt><dd>up/);
+  assert.match(h.roomBox.innerHTML,/Recorded heartbeat<\/dt><dd>idle/);
+  assert.match(h.roomBox.innerHTML,/Snapshot only/);assert.equal(h.roomButtons.get('.ed-message').disabled,false);
+  h.roomButtons.get('.ed-message').onclick();assert.equal(h.selections.length,1);assert.equal(h.reads.length,1);
+  assert.equal(h.roomBox.hidden,true);assert.equal(h.roomBox.innerHTML,'');
+});
+test('room inspector keeps all-team context and matches presence only to the exact source-qualified bot',async()=>{
+  const h=inspectionHarness({room:true});h.state.currentFleet='all';
+  const actor={...botIdentity,uid:'one::uid',alias:'one::bot',fleet:'one::team',fleet_uid:'one::team-uid'};
+  h.state.rosterIdentities=new Map([[actor.uid,actor]]);h.state.fleets=[{alias:actor.fleet,uid:actor.fleet_uid}];
+  const pending=h.state.openRoomBot(actor);
+  assert.equal(h.reads[0].url,'/api/presence?fleet=one%3A%3Ateam');
+  h.reads[0].resolve({state:'ok',data:{sources:[{key:'one',state:'ok',sampler_available:true},{key:'two',state:'ok',sampler_available:true}],bots:[{alias:'two::bot',live:'up',presence:'idle'},{alias:'one::bot',live:'down',presence:'down'}]}});await pending;
+  assert.equal(h.state.currentFleet,'all');assert.match(h.roomBox.innerHTML,/Live session at check<\/dt><dd>down/);
+  assert.match(h.roomBox.innerHTML,/Recorded heartbeat<\/dt><dd>down/);
+  h.roomButtons.get('.ed-message').onclick();assert.equal(h.selections[0].uid,actor.uid);
+});
+for(const loss of ['room','session','roster','source','close'])
+test(`room bot inspection erases detail and refuses late responses after ${loss}`,async()=>{
+  const h=inspectionHarness({room:true}),pending=h.state.openRoomBot(botIdentity);
+  if(loss==='room') {h.state.currentFleet='other';h.state.refreshRoomBot();}
+  if(loss==='session') {h.state.sessionPaused=true;h.state.refreshRoomBot();}
+  if(loss==='roster') {runInNewContext(rosterHelpers,h.state);h.state.adoptRoster(new Map());}
+  if(loss==='source') {
+    Object.assign(h.state,{agentPresence:null,agentPresenceDue:0,agentDirectoryVisible:()=>false});
+    runInNewContext(inspectionApp.slice(inspectionApp.indexOf('function resetAgentPresence()'),inspectionApp.indexOf('function botPresenceFacts(')),h.state);h.state.resetAgentPresence();
+  }
+  if(loss==='close')h.roomButtons.get('.ed-close').onclick();
+  assert.equal(h.roomBox.hidden,true);assert.equal(h.roomBox.innerHTML,'');
+  h.reads[0].resolve(roomPresence());await pending;
+  assert.equal(h.roomBox.innerHTML,'');assert.equal(h.selections.length,0);
+});
+test('room inspector preserves unknown evidence and revoked message access without inferring idle',async()=>{
+  const h=inspectionHarness({room:true}),pending=h.state.openRoomBot(botIdentity);
+  h.reads[0].resolve({state:'unavailable'});await pending;
+  assert.match(h.roomBox.innerHTML,/Live session at check<\/dt><dd>unknown/);
+  assert.match(h.roomBox.innerHTML,/Recorded heartbeat<\/dt><dd>unknown/);
+  h.state.workLoop.canSelectMessageRecipient=()=>false;h.state.refreshRoomBot();
+  assert.equal(h.roomButtons.get('.ed-message').disabled,true);
+  h.roomButtons.get('.ed-message').onclick();assert.equal(h.selections.length,0);
+});
+test('a replaced room inspection fences its old controls and cannot overwrite the new snapshot',async()=>{
+  const h=inspectionHarness({room:true}),first=h.state.openRoomBot(botIdentity),old=h.roomButtons.get('.ed-close');
+  const second=h.state.openRoomBot(botIdentity);old.onclick();assert.equal(h.roomBox.hidden,false);
+  h.reads[0].resolve(roomPresence());await first;assert.match(h.roomBox.innerHTML,/Checking/);
+  h.reads[1].resolve(roomPresence());await second;assert.match(h.roomBox.innerHTML,/Recorded heartbeat/);
+});
 
 test('bot roster names are native inspect buttons bound to full server fleet and UID, including twins', () => {
   const opens = [], nodes = [], document = { activeElement: null };
