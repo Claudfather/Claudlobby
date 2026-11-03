@@ -282,3 +282,41 @@ def test_prepare_records_a_handoff_max_age_only_for_the_per_bot_quiesce(proposal
         record = store.prepare("candidate", plan, recovery_release_id=plan.release_id, enrollment_digest="1" * 64,
                                install_directory=tmp_path.resolve(), quiesce_mode="per-bot-v1", handoff_max_age_s=900)
     assert record.body["intent"]["handoff_max_age_s"] == 900
+
+
+@pytest.mark.parametrize("marker,returncode,valid", [
+    ("handoff-skipped:recent", 0, True),
+    ("handoff-saved", 3, True),
+    ("unrecognized", -15, True),
+    ("arbitrary stdout must not enter the journal", 0, False),
+    ("handoff-saved", True, False),
+    ("handoff-saved", 256, False),
+])
+def test_handoff_native_response_is_durable_typed_and_separate_from_completion(
+        proposal, marker, returncode, valid):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    target = "example.worker"
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan)
+        _advance(store, "candidate", ("producers_paused",))
+        store.begin("candidate", "sessions_handed_off")
+        with pytest.raises(a.ActivationError):
+            store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
+        store.record_handoff("candidate", target=target, result=None, request_started_ns=123)
+        before = a.read_activation(builder.root, "candidate")
+        if not valid:
+            with pytest.raises(a.ActivationError):
+                store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
+            assert a.read_activation(builder.root, "candidate") == before
+            return
+        store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
+        recorded = a.read_activation(builder.root, "candidate")
+        assert recorded.body["handoff_effects"] == {target: None}
+        assert recorded.body["handoff_requests"][target] == {
+            "started_at_ns": 123, "native_result": {"marker": marker, "returncode": returncode}}
+        assert a.handoff_request_started_ns(recorded, target) == 123
+        with pytest.raises(a.ActivationError):
+            store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
+        saved = store.record_handoff("candidate", target=target, result="handed_off")
+        assert saved.body["handoff_requests"] == recorded.body["handoff_requests"]

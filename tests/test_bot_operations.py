@@ -283,16 +283,16 @@ def _pre_stop_handoff(tmp_path, bot_dir, *mode, cli=None):
                           env=env, capture_output=True, text=True, timeout=60)
 
 
-def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path):
+def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path, test_cli):
     bot_dir = _worker_bot_dir(tmp_path)
-    (bot_dir / ".claude/session.md").write_text("recent checkpoint\n")
+    _checkpointed(bot_dir, refreshed=datetime.now(timezone.utc), captured=datetime.now(timezone.utc), field=None)
     secret_env = bot_dir / ".tmux-env"
     secret_env.write_text("private launch values\n")
-    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit")
+    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=test_cli)
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() == "handoff-skipped:recent"
     assert secret_env.read_text() == "private launch values\n"
-    stopping = _pre_stop_handoff(tmp_path, bot_dir)
+    stopping = _pre_stop_handoff(tmp_path, bot_dir, cli=test_cli)
     assert stopping.returncode == 0, stopping.stderr
     assert not secret_env.exists()
     # A handoff older than 300 s and no session to send one to: that explicit
@@ -334,15 +334,18 @@ def _handoff_below_envelope(tmp_path, envelope, capture_age, written_age):
     pytest.param("references_refreshed", None, 0, True, False, id="envelope-only"),
     pytest.param("last_updated", None, 0, True, False, id="pre-2094-envelope-only"),
     pytest.param("references_refreshed", 10, 0, False, False, id="no-reader"),
-    pytest.param(None, 400, 0, True, True, id="unmarked-written-now"),
+    pytest.param(None, 400, 0, True, False, id="unmarked-written-now"),
+    pytest.param(None, 306, 243, True, False, id="ordinary-mtime243s-capture306s"),
+    pytest.param(None, 10, 0, True, True, id="ordinary-fresh-capture"),
+    pytest.param(None, 10, 0, False, False, id="ordinary-no-reader"),
     pytest.param(None, 10, 400, True, False, id="unmarked-written-400s-ago"),
 ])
 def test_explicit_handoff_is_recent_by_the_capture_below_the_refresh_envelope(
         tmp_path, test_cli, envelope, capture_age, written_age, with_cli, recent):
     """#2119 item 9(a): below activation's reference refresh, the capture's own
     last_updated decides, read by the self-restart check (#2123), so a handoff
-    is recent when a self restart would accept it. An unmarked handoff is still
-    judged by the file's mtime. A capture that does not parse, or no reader, is
+    is recent when a self restart would accept it. An unmarked handoff uses the same capture verifier.
+    A capture that does not parse, or no reader, is
     not recent."""
     bot_dir = _handoff_below_envelope(tmp_path, envelope, capture_age, written_age)
     explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=test_cli if with_cli else None)

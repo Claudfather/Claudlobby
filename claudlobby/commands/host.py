@@ -311,10 +311,11 @@ def _activate(args, root):
 
 
 def _abort(args, root):
-    """Operator-only early abort of an unsealed first adoption stopped pausing producers.
+    """Operator-only early abort through the adoption or upgrade recovery owner.
 
-    Restores only the original producer pause. It is not general rollback: it
-    never starts bots or ingest, changes selection, or restores SQL.
+    Restores the producer pause and, for upgrades, parked bot unit files before
+    any stop intent. Never controls bot processes or ingest, changes selection,
+    or restores SQL.
     """
     upgrade = args.public_command == "host.abort-upgrade"
     marker = "upgrade_abort" if upgrade else "adoption_abort"

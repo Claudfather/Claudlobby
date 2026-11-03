@@ -22,7 +22,7 @@ import sys
 import time
 from types import SimpleNamespace
 
-from .activation_state import (ACTIVATION_WAIT_S, START_STEPS, STEPS, ActivationError, ActivationRecord,
+from .activation_state import (ACTIVATION_WAIT_S, HANDOFF_NATIVE_MARKERS, START_STEPS, STEPS, ActivationError, ActivationRecord,
                                ActivationRefusal, CandidateDisabledOverride, _RUNNING_QUIESCE_STEPS, lock_busy,
                                handoff_request_started_ns, locked_activation, read_activation, read_selection,
                                resumable_running_step)
@@ -698,6 +698,20 @@ def _require_preserved_handoff(bot_dir, *, not_before=None, max_age_s=None):
                                 "with --resume; existing handoff attempts are never resent") from exc
 
 
+def _record_handoff_response(store, activation_id, target, result):
+    marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+    value = marker[0] if marker and marker[0] in HANDOFF_NATIVE_MARKERS else "unrecognized"
+    store.record_handoff_response(activation_id, target=target, marker=value, returncode=result.returncode)
+    return marker
+
+
+def _capture_request_boundary(record, target, requested):
+    # Only a durable, successful no-send result permits a pre-request capture.
+    # Its age/ownership still pass the ordinary verifier. No native retry follows.
+    response = record.body.get("handoff_requests", {}).get(target, {}).get("native_result")
+    return None if response == {"marker": "handoff-skipped:recent", "returncode": 0} else requested
+
+
 # The widest window --handoff-max-age may set: 4 h under start-bot's default resume limit
 # (RESUME_MAX_AGE_S, 86400 s), so a handoff the activation keeps is still resumed when its bot
 # restarts after the activation's own run.
@@ -948,7 +962,8 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
             requested = handoff_request_started_ns(record, target)
             if requested is None:
                 raise ActivationRefusal("bot handoff has no bound capture witness; an unknown handoff is never resent")
-            _require_preserved_handoff(bot_dir, not_before=requested, max_age_s=max_age)
+            _require_preserved_handoff(bot_dir, not_before=_capture_request_boundary(record, target, requested),
+                                      max_age_s=max_age)
             store.record_handoff(activation_id, target=target, result="handed_off")
         elif target not in effects:
             _, present = _legacy_bot_socket(unit)
@@ -969,7 +984,7 @@ def _capture_quiesce_bots(root, store, activation_id, pause, old_bots, sockets, 
                 if not _saved_inside_widened_window(bot_dir, max_age):
                     result = adapter.call("svc_activation_handoff", bot_dir, unit.declaration.source.stem,
                                           _original_bot_tmpdir(unit), "explicit", timeout=45)
-                    marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+                    marker = _record_handoff_response(store, activation_id, target, result)
                     if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
                         raise ActivationRefusal(
                             "bot handoff did not produce a verified save; inspect before recovery; an unknown "
@@ -1040,7 +1055,8 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
             if requested is None or target not in old_bots:
                 raise ActivationRefusal("bot handoff has no bound capture witness; inspect its live session "
                                         "before operator recovery; an unknown handoff is never resent")
-            _require_preserved_handoff(old_bots[target].declaration.working_directory, not_before=requested)
+            _require_preserved_handoff(old_bots[target].declaration.working_directory,
+                                      not_before=_capture_request_boundary(record, target, requested))
         for target in unknown:
             # Proof of a late save reconciles the recorded attempt without any native call.
             store.record_handoff(activation_id, target=target, result="handed_off")
@@ -1065,7 +1081,7 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
             result = adapter.call("svc_activation_handoff", unit.declaration.working_directory,
                                   unit.declaration.source.stem, _original_bot_tmpdir(unit),
                                   "explicit", timeout=45)
-            marker = result.stdout.strip().splitlines()[-1:] if result.stdout else []
+            marker = _record_handoff_response(store, activation_id, target, result)
             if result.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"]):
                 raise ActivationRefusal("bot handoff did not produce a verified save; "
                                         "inspect its live session and saved handoff, then retry the same activation "

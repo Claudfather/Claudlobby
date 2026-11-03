@@ -539,7 +539,7 @@ def _resident_admitted(store, activation_id, adapter, target, original, installe
 
 def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: str, release,
                         sql_user_version: int, adapter=None) -> UnitPhaseEvidence:
-    """Restore only frozen producers of an upgrade stopped before any bot pause.
+    """Restore frozen unit files/producers before any bot stop intent.
 
     An unselected sealed repair CLI may own this operation. Handoff receipts
     remain history, never permission to resend. ConfigInstall rollback and the
@@ -568,10 +568,25 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
     from .migration_apply import read_migration
     if read_migration(store.root, activation_id) is not None:
         raise ActivationRefusal("activation has a migration journal")
-    for identifier in (activation_id, *(journal_id(activation_id, phase) for phase in ("bots", "ingest"))):
+    for identifier in (activation_id, journal_id(activation_id, "ingest")):
         journal = read_config_install(store.root, identifier)
         if journal.status != "prepared" or any(row != "pending" for row in journal.progress):
             raise ActivationRefusal("configuration or later parking has begun")
+    bot_identifier = journal_id(activation_id, "bots")
+    bot_journal = read_config_install(store.root, bot_identifier)
+    parked_bots = bot_journal.status != "prepared"
+    if parked_bots:
+        allowed = {"rolled_back"} if terminal else {"applied"}
+        if not terminal and "upgrade_abort" in record.body:
+            allowed.update(("rolling_back", "rolled_back"))
+        if (record.body["intent"].get("quiesce_mode") != "per-bot-v1"
+                or bot_journal.status not in allowed
+                or any(row not in {"applied", "reverting", "reverted"} for row in bot_journal.progress)
+                or (bot_journal.status == "applied" and any(row != "applied" for row in bot_journal.progress))
+                or (bot_journal.status == "rolled_back" and any(row != "reverted" for row in bot_journal.progress))):
+            raise ActivationRefusal("bot parking is not applied or its recorded abort restoration")
+    elif any(row != "pending" for row in bot_journal.progress):
+        raise ActivationRefusal("bot parking has unknown progress")
     for phase in (*PHASES, "directories"):
         if (store.root / "state/activations" / activation_enrollment.journal_id(activation_id, phase)).exists():
             raise ActivationRefusal("candidate publication has begun")
@@ -587,23 +602,52 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
 
     def verify_untouched():
         store.check_upgrade_abort(activation_id, sql_user_version=sql_user_version, terminal=terminal)
+        files_parked = False
+        if parked_bots:
+            # ConfigInstall alone interprets its interrupted per-file swaps.
+            # Validate before abort ownership as well as before/after rollback.
+            from .config_install import _check_rows, _load
+            current = read_config_install(store.root, bot_identifier)
+            _check_rows(_load(current.directory))
+            files_parked = current.status != "rolled_back"
         for unit in pause.enrollment["units"]:
             _check_source(unit["generated"])
         for unit in pause.units():
             if unit["target"] in untouched:
-                _check_source(unit["installed"][0])
-                if _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]) != _saved(unit):
+                parked = files_parked and unit["target"] in pause.phases["bots"]
+                if not parked:
+                    _check_source(unit["installed"][0])
+                observation = "svc_inventory_state" if parked else "svc_activation_snapshot"
+                if _call(adapter, observation, _file(unit), unit["target"]) != _saved(unit):
                     raise ActivationRefusal("bot or ingest native state changed before early abort")
         _darwin_check(adapter, pause.enrollment, untouched, original_load=True)
         if record.body["intent"].get("preserve_bot_state") is True:
             from types import SimpleNamespace
-            from .activation import _frozen_unit, _snapshot_bot_states
+            from .activation import _frozen_unit, _legacy_bot_socket, _original_bot_tmpdir, _snapshot_bot_states
             originals = tuple(_frozen_unit(row) for row in pause.enrollment["units"])
             inventory = SimpleNamespace(units=originals, data_root=store.root,
                                         manager=pause.enrollment["manager"])
             candidates = tuple((unit.declaration, {"enroll": True}) for unit in originals
                                if unit.declaration.scope == "bot")
-            if _snapshot_bot_states(inventory, candidates, adapter) != record.body["intent"]["bot_states"]:
+            saved_states = record.body["intent"]["bot_states"]
+            if files_parked:
+                # The frozen installed file is intentionally absent; observe its
+                # native state/private server without pretending it is restored.
+                for original in originals:
+                    if original.declaration.scope != "bot":
+                        continue
+                    saved = saved_states[original.target]
+                    path, present = _legacy_bot_socket(original, require_for_active=False, allow_uninstalled=True)
+                    observed = _call(adapter, "svc_inventory_state", saved["installed_path"], original.target).split()
+                    if (str(path) != saved["socket_path"]
+                            or ("restart" if present else "stopped") != saved["disposition"]
+                            or len(observed) != 3 or observed[1] not in {"loaded", "unloaded", "not-found"}
+                            or observed[2] != saved["native_active"]
+                            or (present and _call(adapter, "svc_bot_session_observe",
+                                original.declaration.working_directory, original.declaration.source.stem,
+                                _original_bot_tmpdir(original), saved["installed_path"], original.target) != "ready")):
+                        raise ActivationRefusal("frozen bot disposition changed before early abort")
+            elif _snapshot_bot_states(inventory, candidates, adapter) != saved_states:
                 raise ActivationRefusal("frozen bot disposition changed before early abort")
         from .plane.db import connect_ro, db_file
         conn = connect_ro(db_file(store.root))
@@ -633,6 +677,11 @@ def abort_early_upgrade(store: ActivationStore, activation_id: str, *, reason: s
     if not terminal:
         store.begin_upgrade_abort(activation_id, reason=reason, release_id=release.release_id,
                                   artifact_id=release.inputs.artifact_id, sql_user_version=sql_user_version)
+        if parked_bots:
+            rollback_config(store.root, bot_identifier)
+            if pause.enrollment["manager"] == "Linux":
+                _call(adapter, "svc_activation_reload")
+            verify_untouched()
         rollback_config(store.root, identifier)
         if pause.enrollment["manager"] == "Linux":
             _call(adapter, "svc_activation_reload")

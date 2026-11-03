@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 
 import pytest
@@ -41,6 +42,7 @@ class RecordedAdapter:
         self.overrides = {}
         self.hidden_masks = set()
         self.binding_changed = False
+        self.sessions = {}
 
     def read(self, function, *args):
         result = self.call(function, *args)
@@ -64,6 +66,10 @@ class RecordedAdapter:
             assert not args
             self.calls.append((function, None))
             return subprocess.CompletedProcess([function], 0, "", "")
+        if function == "svc_bot_session_observe":
+            target = args[4]
+            self.calls.append((function, target))
+            return subprocess.CompletedProcess([function, *args], 0, self.sessions[target], "")
         file, target = Path(args[0]), args[1]
         self.calls.append((function, target))
         rc, output = 0, ""
@@ -161,7 +167,7 @@ def _prepare(store, inventory, phases, plan, adapter, *, install_directory=None)
     return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
 
 
-def _prepare_upgrade_abort(store, inventory, phases, plan, adapter):
+def _prepare_upgrade_abort(store, inventory, phases, plan, adapter, *, per_bot=False, preserve=False):
     """Existing parking fixture with a real selected source and an early upgrade."""
     import sqlite3
     store.prepare("prior", plan, recovery_release_id=plan.release_id, enrollment_digest=inventory.digest)
@@ -171,13 +177,24 @@ def _prepare_upgrade_abort(store, inventory, phases, plan, adapter):
             store.select("prior")
         else:
             store.complete("prior", step, evidence_digest="2" * 64)
-    _prepare(store, inventory, phases, plan, adapter)
+    if per_bot:
+        bot_states = (activation._snapshot_bot_states(inventory, tuple(
+            (unit.declaration, {"enroll": True}) for unit in inventory.units if unit.declaration.scope == "bot"),
+            adapter) if preserve else None)
+        store.prepare("cutover", plan, recovery_release_id=plan.release_id,
+                      enrollment_digest=inventory.digest, install_directory=inventory.data_root,
+                      quiesce_mode="per-bot-v1", bot_states=bot_states)
+        units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
+    else:
+        _prepare(store, inventory, phases, plan, adapter)
     config_install.prepare_config(plan, "cutover")
     store.begin("cutover", "producers_paused")
     paused = units.pause_phase(store, "cutover", "producers", adapter=adapter)
     store.complete("cutover", "producers_paused", evidence_digest=paused.digest)
     store.arm_handoff_evidence("cutover")
     store.begin("cutover", "sessions_handed_off")
+    if per_bot:
+        units.park_bot_phase(store, "cutover", adapter=adapter)
     store.record_handoff("cutover", target="member.service", result=None, request_started_ns=1)
     database = inventory.data_root / "state/plane/plane.db"
     database.parent.mkdir(parents=True, exist_ok=True)
@@ -228,6 +245,131 @@ def test_early_upgrade_abort_restores_producers_retains_unknown_and_reconciles_r
         assert state.read_activation(root, "cutover") == saved
         assert not any(function in {"svc_activation_resume", "svc_activation_handoff", "svc_activation_reload"}
                        for function, _ in adapter.calls)
+
+
+def test_early_upgrade_abort_restores_parked_bot_files_without_bot_control(enrollment):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    bot_file = Path(next(unit for unit in inventory.units if unit.target == "member.service").installed[0].path)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter, per_bot=True)
+        before = state.read_activation(root, "cutover")
+        assert not bot_file.exists() and not bot_file.is_symlink()
+        adapter.calls.clear()
+        units.abort_early_upgrade(store, "cutover", reason="capture unavailable", release=release,
+                                  sql_user_version=12, adapter=adapter)
+        saved = state.read_activation(root, "cutover")
+        assert saved.status == "rolled_back"
+        assert saved.body["handoff_effects"] == before.body["handoff_effects"] == {"member.service": None}
+        assert saved.body["handoff_requests"] == before.body["handoff_requests"]
+        assert all(FileSnapshot.read(Path(unit.installed[0].path)) == unit.installed[0] for unit in inventory.units)
+        assert adapter.states["member.service"] == adapter.original["member.service"]
+        assert config_install.read_config_install(root, units.journal_id("cutover", "bots")).status == "rolled_back"
+        assert not any(function in {"svc_activation_pause", "svc_activation_start", "svc_activation_handoff"}
+                       or (function == "svc_activation_resume" and target == "member.service")
+                       for function, target in adapter.calls)
+        adapter.calls.clear()
+        assert units.abort_early_upgrade(store, "cutover", reason="recheck", release=release,
+                                         sql_user_version=12, adapter=adapter).operation == "rechecked"
+        assert not any(function in {"svc_activation_reload", "svc_activation_resume"} for function, _ in adapter.calls)
+
+
+@pytest.mark.parametrize("drift", ["parked-file", "generated", "bot-native", "ingest-native", "quiescence",
+                                  "unowned-rollback"])
+def test_early_upgrade_abort_parked_bot_refuses_drift_before_abort_ownership(enrollment, drift):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter, per_bot=True)
+        bot = next(row for row in units.load_unit_pause(store, "cutover").units("bots"))
+        if drift == "parked-file":
+            Path(bot["installed"][0]["path"]).write_text("foreign replacement")
+        elif drift == "generated":
+            Path(bot["generated"]["path"]).write_text("foreign source")
+        elif drift.endswith("-native"):
+            adapter.states["member.service" if drift == "bot-native" else "collector.service"] = "enabled loaded activating"
+        elif drift == "unowned-rollback":
+            config_install.rollback_config(root, units.journal_id("cutover", "bots"))
+        else:
+            store.record_handoff("cutover", target="member.service", result="handed_off")
+            store.record_bot_quiescence("cutover", target="member.service", witness={
+                "unit_sha256": units._digest(bot), "socket": str(root / "private.sock"), "capture_sha256": "4" * 64})
+        before = state.read_activation(root, "cutover")
+        adapter.calls.clear()
+        with pytest.raises((state.ActivationError, state.ActivationRefusal, config_install.ConfigInstallError)):
+            units.abort_early_upgrade(store, "cutover", reason="refuse drift", release=release,
+                                      sql_user_version=12, adapter=adapter)
+        assert state.read_activation(root, "cutover") == before
+        assert not any(function in {"svc_activation_reload", "svc_activation_resume", "svc_activation_pause"}
+                       for function, _ in adapter.calls)
+
+
+def test_early_upgrade_abort_resumes_interrupted_bot_file_rollback(enrollment, monkeypatch):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    bot_id = units.journal_id("cutover", "bots")
+    finish = config_install._finish
+    def interrupted(directory, journal, row):
+        if directory.parent.name == bot_id:
+            raise OSError("interrupted exact bot restoration")
+        return finish(directory, journal, row)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter, per_bot=True)
+        monkeypatch.setattr(config_install, "_finish", interrupted)
+        with pytest.raises(OSError, match="interrupted exact bot restoration"):
+            units.abort_early_upgrade(store, "cutover", reason="restore parked files", release=release,
+                                      sql_user_version=12, adapter=adapter)
+        pending = state.read_activation(root, "cutover")
+        assert pending.body["upgrade_abort"]["result"] is None
+        assert config_install.read_config_install(root, bot_id).status == "rolling_back"
+        monkeypatch.setattr(config_install, "_finish", finish)
+        adapter.calls.clear()
+        units.abort_early_upgrade(store, "cutover", reason="resume exact restoration", release=release,
+                                  sql_user_version=12, adapter=adapter)
+        assert state.read_activation(root, "cutover").status == "rolled_back"
+        assert all(FileSnapshot.read(Path(unit.installed[0].path)) == unit.installed[0] for unit in inventory.units)
+        assert not any(function in {"svc_activation_handoff", "svc_activation_pause", "svc_activation_start"}
+                       for function, _ in adapter.calls)
+
+
+@pytest.mark.parametrize("drift", [None, "socket-absent", "session-unknown"])
+def test_early_upgrade_abort_parked_live_bot_preserves_native_disposition(enrollment, monkeypatch, drift):
+    inventory, phases, plan, _, _, _ = enrollment
+    root = inventory.data_root
+    inventory = replace(inventory, units=tuple(replace(unit, properties=tuple({
+        **dict(unit.properties), "ActiveState": "active",
+        "Environment": shlex.join([f"{key}={value}" for key, value in unit.declaration.environment]
+                                  + [f"TMUX_TMPDIR={root / 'tmux'}"])}.items()))
+        if unit.target == "member.service" else unit for unit in inventory.units))
+    adapter = RecordedAdapter(inventory)
+    adapter.sessions["member.service"] = "ready"
+    present = True
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_, **__: (root / "owned.sock", present))
+    release = state.read_release(root, plan.release_id)
+    with state.locked_activation(root) as store:
+        _prepare_upgrade_abort(store, inventory, phases, plan, adapter, per_bot=True, preserve=True)
+        if drift == "socket-absent":
+            present = False
+        elif drift == "session-unknown":
+            adapter.sessions["member.service"] = "unknown"
+        before = state.read_activation(root, "cutover")
+        adapter.calls.clear()
+        if drift:
+            with pytest.raises(state.ActivationRefusal, match="disposition"):
+                units.abort_early_upgrade(store, "cutover", reason="observe live disposition", release=release,
+                                          sql_user_version=12, adapter=adapter)
+            assert state.read_activation(root, "cutover") == before
+        else:
+            units.abort_early_upgrade(store, "cutover", reason="restore live bot definition", release=release,
+                                      sql_user_version=12, adapter=adapter)
+            assert state.read_activation(root, "cutover").status == "rolled_back"
+        assert adapter.states["member.service"] == "disabled loaded active"
+        assert not any(function in {"svc_activation_handoff", "svc_activation_pause", "svc_activation_start"}
+                       or (function == "svc_activation_resume" and target == "member.service")
+                       for function, target in adapter.calls)
 
 
 @pytest.mark.parametrize("drift", ["bot-native", "ingest-native", "producer-native", "installed", "generated",

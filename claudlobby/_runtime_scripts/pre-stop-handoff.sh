@@ -43,13 +43,10 @@ if [ "$MODE" = --explicit ]; then
     fi
 fi
 
-# A handoff written in the last 300 s is recent, with one exception. The
-# activation's reference refresh (#2094) keeps the times of a handoff it
-# rewrites, but one it creates has a new mtime and no capture, so a handoff
-# that names the refresh marker is judged by the capture below the envelope:
-# the self-restart check (#2123), not a parse here, reads its own last_updated
-# and its age is printed when it is fresh. No interpreter, a refusal or a
-# timeout (where lib-common has one) is not recent, and the handoff is sent.
+# The shared capture verifier judges both the file write and last_updated.
+# A recently written file can contain older context, with or without the
+# activation reference envelope. No interpreter, refusal or timeout means
+# not recent; the normal handoff path follows.
 _capture_recent_age() {
     local python=""
     case "${CLAUDLOBBY_CLI:-}" in /*) python="${CLAUDLOBBY_CLI%/*}/python" ;; esac
@@ -74,12 +71,8 @@ _recent_age=""
 if [ -f "$HANDOFF_FILE" ]; then
     AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
     if [ "$AGE" -lt 300 ]; then
-        if grep -Fq '<!-- claudlobby first-adoption reference refresh begin -->' "$HANDOFF_FILE"; then
-            _recent_age="$(_capture_recent_age || true)"
-            case "$_recent_age" in *[!0-9]*) _recent_age="" ;; esac
-        else
-            _recent_age="$AGE"
-        fi
+        _recent_age="$(_capture_recent_age || true)"
+        case "$_recent_age" in *[!0-9]*) _recent_age="" ;; esac
     fi
 fi
 if [ -n "$_recent_age" ]; then

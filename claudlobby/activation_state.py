@@ -163,6 +163,17 @@ _BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
                                     "sessions_quiesced", "ingest_quiesced"})
 _RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 
+HANDOFF_NATIVE_MARKERS = frozenset({
+    "handoff-saved", "handoff-skipped:recent", "handoff-skipped:capability",
+    "handoff-skipped:no-session", "handoff-timeout", "handoff-unavailable", "unrecognized",
+})
+
+
+def _valid_handoff_response(response) -> bool:
+    return (isinstance(response, dict) and set(response) == {"marker", "returncode"}
+            and isinstance(response["marker"], str) and response["marker"] in HANDOFF_NATIVE_MARKERS
+            and type(response["returncode"]) is int and -255 <= response["returncode"] <= 255)
+
 
 def handoff_request_started_ns(record: ActivationRecord, target: str) -> int | None:
     """An exact request witness can admit proof reconciliation, never a resend."""
@@ -175,7 +186,8 @@ def handoff_request_started_ns(record: ActivationRecord, target: str) -> int | N
             or states[target].get("disposition") != "restart"):
         return None
     request = requests.get(target)
-    if (not isinstance(request, dict) or set(request) != {"started_at_ns"}
+    if (not isinstance(request, dict) or set(request) not in ({"started_at_ns"}, {"started_at_ns", "native_result"})
+            or "native_result" in request and not _valid_handoff_response(request["native_result"])
             or type(request["started_at_ns"]) is not int or request["started_at_ns"] <= 0):
         return None
     return request["started_at_ns"]
@@ -464,6 +476,29 @@ class ActivationStore:
         elif request_started_ns is not None:
             raise ActivationError("handoff request witness is admitted only with a send intent")
         effects[target] = result
+        return self._save(record)
+
+    def record_handoff_response(self, activation_id: str, *, target: str,
+                                marker: str, returncode: int) -> ActivationRecord:
+        """Retain the bounded native outcome before validating its capture.
+
+        This is not completion or permission to retry. Missing response evidence
+        remains unknown, including records created by older releases.
+        """
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        response = {"marker": marker, "returncode": returncode}
+        if (record.status != "activating" or "upgrade_abort" in record.body
+                or record.body["pending"] != "sessions_handed_off"
+                or target not in record.body.get("handoff_effects", {})
+                or record.body["handoff_effects"][target] is not None
+                or handoff_request_started_ns(record, target) is None
+                or not _valid_handoff_response(response)):
+            raise ActivationError("handoff native response is not the admitted effect")
+        request = record.body["handoff_requests"][target]
+        if "native_result" in request:
+            raise ActivationError("handoff native response was already recorded")
+        request["native_result"] = response
         return self._save(record)
 
     def record_bot_quiescence(self, activation_id: str, *, target: str,
