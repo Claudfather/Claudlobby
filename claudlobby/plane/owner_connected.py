@@ -70,6 +70,19 @@ class OwnerConnected:
         for table in ("connected_challenges", "connected_sessions"):
             conn.execute(f"SELECT digest,owner_revision,binding_revision,binding_generation,binding_snapshot,created_at,expires_at FROM {table} LIMIT 0")
 
+    def preparation_state(self):
+        """Read optional preparation only; partial schemas refuse without repair."""
+        with self.access._connection() as conn:
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+            workspace = bool(names & {"workspace_metadata", "workspace_challenges", "workspace_bindings"})
+            connected = bool(names & {"connected_metadata", "connected_challenges", "connected_sessions"})
+            if workspace:
+                self.workspace._schema(conn)
+            if connected:
+                self._schema(conn)
+                self.workspace._schema(conn)
+            return "ready" if workspace and connected else "absent"
+
     def initialize(self, *, expected_owner, prepare_workspace=False):
         with self.access._connection(write=True) as conn:
             self.access._expected_owner(conn, expected_owner)

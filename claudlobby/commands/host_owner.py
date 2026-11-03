@@ -302,6 +302,111 @@ def _grant_errors(action):
                              "active configuration and Plane storage") from exc
 
 
+def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
+    from ..plane.owner_setup import OwnerSetup
+    from ..plane.owner_source import fresh_owner_setup
+    from .host import _operator_shell
+    from .releases import _release, _executing_release
+    _operator_shell(paths.root)
+    setup = OwnerSetup(store)
+    fresh_owner_setup(paths.root)
+    if _executing_release(paths.root) != args.release:
+        raise CommandFailure("release_mismatch", "setup approval requires this release's sealed CLI")
+    release = _release(paths.root, args.release)
+    # Native search-path observation only; no enrollment or start.
+    from ..supervision_inventory import Adapter, _catalog
+    _, _, directories, _, _ = _catalog(Adapter(paths.package).read("svc_inventory_catalog"))
+    directory = args.install_directory
+    if directory not in directories:
+        raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
+    grant = setup.candidate(_active_owner(store).principal, template=args.template,
+        fleet=args.target_fleet, repository=args.repository, release_id=args.release,
+        release_seal=release.seal_sha256, install_directory=str(directory))
+    terminal.write("Approve one first-team setup from the bound connected workspace.\n"
+        "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
+        "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
+    terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
+    _approve(terminal, "ALLOW-SETUP")
+    fresh_owner_setup(paths.root)
+    if _release(paths.root, args.release).seal_sha256 != grant.release_seal:
+        raise CommandFailure("conflict", "setup release changed during approval")
+    setup.allow(grant, expected_retained=expected_retained)
+    return CommandOutput({"state": "allowed"}, lines=("One first-team setup approved.",))
+
+
+def _initialize_connected(store, terminal, *, prepare_workspace=False):
+    owner = _active_owner(store)
+    _describe(terminal, owner)
+    if prepare_workspace:
+        terminal.write("Prepare optional local workspace authority and connected read-session storage "
+                       "together in this authority database.\n"
+                       "Both local confirmations are required before storage changes. "
+                       "No binding, session or action grant is issued.\n")
+        _approve(terminal, "INITIALIZE-WORKSPACE")
+    else:
+        terminal.write("Prepare optional connected read-session storage in this authority database.\n"
+                       "Workspace authority must already be initialized. No binding, session or action grant is issued.\n")
+    _approve(terminal, "INITIALIZE-CONNECTED")
+    store.connected().initialize(expected_owner=owner, prepare_workspace=prepare_workspace)
+    line = ("Local workspace authority and connected read-session storage initialized."
+            if prepare_workspace else "Connected read-session storage initialized.")
+    return CommandOutput({"state": "initialized"}, lines=(line,))
+
+
+def _confirm_workspace(store, terminal, owner):
+    workspace = store.workspace()
+    proposal = workspace.inspect(_challenge(terminal, label="workspace approval"))
+    if proposal.owner != owner:
+        raise CommandFailure("conflict", "owner changed; inspect and retry")
+    a = proposal.attestation
+    terminal.write("Previous workspace binding: " + json.dumps({
+        "state": proposal.previous_state,
+        "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
+        ensure_ascii=True) + "\n")
+    terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
+    terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
+        "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
+        ensure_ascii=True) + "\n")
+    terminal.write("Expires: " + datetime.fromtimestamp(proposal.expires_at, timezone.utc).isoformat() + "\n")
+    terminal.write("This binds one workspace locally; it issues no session or fleet action grant.\n")
+    _approve(terminal, "BIND-WORKSPACE")
+    binding = workspace.confirm(expected_proposal=proposal)
+    return CommandOutput({"state": "active", "binding": asdict(binding)},
+                         lines=("Local workspace bound. No connected session was issued.",))
+
+
+def _initialize_first_owner(paths, terminal):
+    from .releases import _executing_release, _release
+    from ..plane.owner_source import fresh_owner_setup
+    release_id = _executing_release(paths.root)
+    if release_id is None:
+        raise CommandFailure("release_mismatch", "fresh owner preparation requires the sealed assembled release CLI")
+    _release(paths.root, release_id)
+    fresh_owner_setup(paths.root, allow_absent=True)
+    terminal.write("Prepare a new host identity and owner authority before its first team.\n"
+                   "This grants no activation, private reads or fleet actions.\n")
+    _approve(terminal, "INITIALIZE")
+    fresh_owner_setup(paths.root, allow_absent=True)
+    from ..plane.ids import ensure_host_uid
+    ensure_host_uid(paths.root / "state")
+    OwnerAccess.initialize(paths.root, before_first_fleet=True)
+    return CommandOutput({"state": "initialized"}, lines=("Pre-activation owner authority is initialized.",))
+
+
+def _confirm_owner(paths, store, terminal):
+    from ..plane.ids import read_host_uid
+    challenge = store.inspect_pairing(_challenge(terminal))
+    terminal.write("Compare this principal with the request shown in your browser:\n")
+    terminal.write(json.dumps(asdict(challenge.principal), ensure_ascii=True) + "\n")
+    terminal.write("Host: " + json.dumps(read_host_uid(paths.root / "state")) + "\n")
+    terminal.write("Expires: " + datetime.fromtimestamp(challenge.expires_at, timezone.utc).isoformat() + "\n")
+    terminal.write("Approval permits private reads across this host's fleets.\n")
+    _approve(terminal, "PAIR")
+    grant = store.confirm_pairing(challenge.token, expected_principal=challenge.principal)
+    return CommandOutput({"state": "paired", "revision": grant.revision},
+                         lines=("Owner paired. Return to your browser and sign in.",))
+
+
 def dispatch(args):
     from ..context import resolve_paths
     from ..paths import InvalidPathSelector
@@ -316,6 +421,10 @@ def dispatch(args):
     try:
         paths = resolve_paths(root=args.root)
         store = OwnerAccess(paths.root)
+        if args.owner_action == "setup":
+            from .host_owner_setup import run, interrupted
+            with _terminal(paths.root) as terminal, interrupted():
+                return run(args, paths, store, terminal)
         if args.owner_action == "serve":
             from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
 
@@ -337,9 +446,9 @@ def dispatch(args):
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "setup-status":
             from ..plane.owner_setup import OwnerSetup
-            grant = OwnerSetup(store).local()
-            return CommandOutput({"grant": asdict(grant) if grant else None},
-                                 lines=("First-team setup approval retained." if grant else "No setup approval.",))
+            state = OwnerSetup(store).retained_state()
+            return CommandOutput(asdict(state), lines=(f"First-team setup approval: {state.state}.",
+                *(() if state.launch_id is None else (f"Original launch: {state.launch_id}; plan {state.launch_plan}.",))))
         if args.owner_action == "workspace-status":
             state, binding = store.workspace().status()
             return CommandOutput({"state": state, "effective_active": state == "active",
@@ -374,29 +483,7 @@ def dispatch(args):
                 _operator_shell(paths.root)
                 setup = OwnerSetup(store)
                 if args.owner_action == "allow-setup":
-                    fresh_owner_setup(paths.root)
-                    if _executing_release(paths.root) != args.release:
-                        raise CommandFailure("release_mismatch", "setup approval requires this release's sealed CLI")
-                    release = _release(paths.root, args.release)
-                    # Native search-path observation only; no enrollment or start.
-                    from ..supervision_inventory import Adapter, _catalog
-                    _, _, directories, _, _ = _catalog(Adapter(paths.package).read("svc_inventory_catalog"))
-                    directory = args.install_directory
-                    if directory not in directories:
-                        raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
-                    grant = setup.candidate(_active_owner(store).principal, template=args.template,
-                        fleet=args.target_fleet, repository=args.repository, release_id=args.release,
-                        release_seal=release.seal_sha256, install_directory=str(directory))
-                    terminal.write("Approve one first-team setup from the bound connected workspace.\n"
-                        "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
-                        "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
-                    terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
-                    _approve(terminal, "ALLOW-SETUP")
-                    fresh_owner_setup(paths.root)
-                    if _release(paths.root, args.release).seal_sha256 != grant.release_seal:
-                        raise CommandFailure("conflict", "setup release changed during approval")
-                    setup.allow(grant)
-                    return CommandOutput({"state": "allowed"}, lines=("One first-team setup approved.",))
+                    return _allow_setup(args, paths, store, terminal)
                 grant = setup.local()
                 if grant is None: raise CommandFailure("not_found", "no retained setup approval")
                 terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
@@ -404,22 +491,7 @@ def dispatch(args):
                 setup.revoke(grant)
                 return CommandOutput({"state": "revoked"}, lines=("Setup approval revoked; started activation is not undone.",))
             if args.owner_action == "initialize-connected":
-                owner = _active_owner(store)
-                _describe(terminal, owner)
-                if args.prepare_workspace:
-                    terminal.write("Prepare optional local workspace authority and connected read-session storage "
-                                   "together in this authority database.\n"
-                                   "Both local confirmations are required before storage changes. "
-                                   "No binding, session or action grant is issued.\n")
-                    _approve(terminal, "INITIALIZE-WORKSPACE")
-                else:
-                    terminal.write("Prepare optional connected read-session storage in this authority database.\n"
-                                   "Workspace authority must already be initialized. No binding, session or action grant is issued.\n")
-                _approve(terminal, "INITIALIZE-CONNECTED")
-                store.connected().initialize(expected_owner=owner, prepare_workspace=args.prepare_workspace)
-                line = ("Local workspace authority and connected read-session storage initialized."
-                        if args.prepare_workspace else "Connected read-session storage initialized.")
-                return CommandOutput({"state": "initialized"}, lines=(line,))
+                return _initialize_connected(store, terminal, prepare_workspace=args.prepare_workspace)
             if args.owner_action == "allow-actions":
                 with _grant_errors("actions"):
                     return _allow_actions(args, paths, store, terminal)
@@ -441,24 +513,7 @@ def dispatch(args):
                     workspace.initialize(expected_owner=owner)
                     return CommandOutput({"state": "initialized"}, lines=("Local workspace authority initialized.",))
                 if args.owner_action == "confirm-workspace":
-                    proposal = workspace.inspect(_challenge(terminal, label="workspace approval"))
-                    if proposal.owner != owner:
-                        raise CommandFailure("conflict", "owner changed; inspect and retry")
-                    a = proposal.attestation
-                    terminal.write("Previous workspace binding: " + json.dumps({
-                        "state": proposal.previous_state,
-                        "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
-                        ensure_ascii=True) + "\n")
-                    terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
-                    terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
-                        "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
-                        ensure_ascii=True) + "\n")
-                    terminal.write("Expires: " + datetime.fromtimestamp(proposal.expires_at, timezone.utc).isoformat() + "\n")
-                    terminal.write("This binds one workspace locally; it issues no session or fleet action grant.\n")
-                    _approve(terminal, "BIND-WORKSPACE")
-                    binding = workspace.confirm(expected_proposal=proposal)
-                    return CommandOutput({"state": "active", "binding": asdict(binding)},
-                                         lines=("Local workspace bound. No connected session was issued.",))
+                    return _confirm_workspace(store, terminal, owner)
                 _, binding = workspace.status()
                 if binding is None or not binding.active:
                     raise CommandFailure("conflict", "no retained active workspace binding to revoke")
@@ -482,21 +537,7 @@ def dispatch(args):
             if args.owner_action == "initialize":
                 before_first = getattr(args, "before_first_fleet", False)
                 if before_first:
-                    from .releases import _executing_release, _release
-                    from ..plane.owner_source import fresh_owner_setup
-                    release_id = _executing_release(paths.root)
-                    if release_id is None:
-                        raise CommandFailure("release_mismatch", "fresh owner preparation requires the sealed assembled release CLI")
-                    _release(paths.root, release_id)
-                    fresh_owner_setup(paths.root, allow_absent=True)
-                    terminal.write("Prepare a new host identity and owner authority before its first team.\n"
-                                   "This grants no activation, private reads or fleet actions.\n")
-                    _approve(terminal, "INITIALIZE")
-                    fresh_owner_setup(paths.root, allow_absent=True)
-                    from ..plane.ids import ensure_host_uid
-                    ensure_host_uid(paths.root / "state")
-                    OwnerAccess.initialize(paths.root, before_first_fleet=True)
-                    return CommandOutput({"state": "initialized"}, lines=("Pre-activation owner authority is initialized.",))
+                    return _initialize_first_owner(paths, terminal)
                 host_uid = read_host_uid(paths.root / "state")
                 terminal.write("Prepare owner access for host " + json.dumps(host_uid) + ".\n"
                                "This does not pair anyone or expose a network service.\n")
@@ -504,16 +545,7 @@ def dispatch(args):
                 OwnerAccess.initialize(paths.root)
                 return CommandOutput({"state": "initialized"}, lines=("Owner authority is initialized.",))
             if args.owner_action == "confirm":
-                challenge = store.inspect_pairing(_challenge(terminal))
-                terminal.write("Compare this principal with the request shown in your browser:\n")
-                terminal.write(json.dumps(asdict(challenge.principal), ensure_ascii=True) + "\n")
-                terminal.write("Host: " + json.dumps(read_host_uid(paths.root / "state")) + "\n")
-                terminal.write("Expires: " + datetime.fromtimestamp(challenge.expires_at, timezone.utc).isoformat() + "\n")
-                terminal.write("Approval permits private reads across this host's fleets.\n")
-                _approve(terminal, "PAIR")
-                grant = store.confirm_pairing(challenge.token, expected_principal=challenge.principal)
-                return CommandOutput({"state": "paired", "revision": grant.revision},
-                                     lines=("Owner paired. Return to your browser and sign in.",))
+                return _confirm_owner(paths, store, terminal)
             if args.owner_action == "revoke":
                 grant = store.current_grant()
                 if grant is None or not grant.active:

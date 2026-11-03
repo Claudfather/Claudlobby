@@ -73,6 +73,13 @@ def register_host_owner(hosts):
         route = actions.add_parser(action, help="Inspect/revoke the retained first-team setup approval")
         route.add_argument("--json", action="store_true")
         route.set_defaults(func=_dispatch, public_command="host.owner." + action, owner_action=action)
+    guided = actions.add_parser("setup", help="Guide fresh local owner preparation and keep its foreground server open")
+    for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
+        guided.add_argument("--" + flag)
+    for flag in ("tailscale", "tailscale-socket", "socket", "install-directory"):
+        guided.add_argument("--" + flag, type=Path)
+    guided.add_argument("--json", action="store_true", help="Not supported for interactive setup")
+    guided.set_defaults(func=_dispatch, public_command="host.owner.setup")
     serve = actions.add_parser("serve", help="Serve owner Plane on a private Unix socket (foreground)")
     serve.add_argument("--json", action="store_true", help="Not supported for the foreground server")
     serve.add_argument("--origin", required=True, help="Exact external HTTPS origin configured in Tailscale Serve")

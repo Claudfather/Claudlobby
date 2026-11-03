@@ -473,3 +473,23 @@ def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monke
     with pytest.raises(OwnerServerConfigurationError, match="outside Plane"):
         owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
                            socket_path=root / "state/plane/owner.sock")
+
+
+def test_guided_owner_child_waits_for_real_unix_readiness_and_cleans_owned_socket(tmp_path, socket_path, capfd):
+    from claudlobby.commands.host_owner_setup import _serving
+    from claudlobby.plane.ids import ensure_host_uid
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    command = [sys.executable, "-m", "claudlobby", "--root", str(tmp_path), "host", "owner", "serve",
+        "--socket", str(socket_path), "--origin", "https://plane.example.test", "--tailscale", sys.executable]
+    with _serving(command, socket_path, "https://plane.example.test") as child:
+        assert child.poll() is None
+        assert request(socket_path, "/owner")[0] == 200
+    assert child.poll() is not None and not socket_path.exists()
+    from claudlobby.command_result import CommandFailure
+    failed = command + ["--workspace-issuer", "https://accounts.example.test", "--workspace-origin", "https://browser.example.test"]
+    with pytest.raises(CommandFailure, match="did not become ready"):
+        with _serving(failed, socket_path, "https://plane.example.test"):
+            pytest.fail("uninitialized workspace server was admitted")
+    assert "workspace bootstrap authority unavailable" in capfd.readouterr().err
+    assert not socket_path.exists()

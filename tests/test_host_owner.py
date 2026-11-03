@@ -89,7 +89,7 @@ def test_status_reports_pairing_then_revocation_without_secret(owner, capsys):
     assert json.loads(capsys.readouterr().out)["data"]["state"] == "revoked"
 
 
-@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source"])
+@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source", "setup"])
 def test_changes_require_terminal_and_reject_json(owner, monkeypatch, action):
     monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
     assert call(owner, action) == 4
@@ -97,7 +97,7 @@ def test_changes_require_terminal_and_reject_json(owner, monkeypatch, action):
     assert owner.current_grant() is None
 
 
-@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source"])
+@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source", "setup"])
 def test_changes_read_unit_ancestry_before_the_terminal(owner, monkeypatch, capsys, action):
     # No selector variables and a terminal on stdin: unit ancestry refuses,
     # before the terminal opens.
@@ -113,6 +113,7 @@ def test_generated_selectors_refuse_before_access(owner, monkeypatch, marker):
     monkeypatch.setenv(marker, "")
     monkeypatch.setattr(OwnerAccess, "current_grant", lambda *a: pytest.fail("read attempted"))
     assert call(owner, "status") == 4
+    assert call(owner, "setup") == 4
 
 
 def test_explicit_host_scope_required(owner, monkeypatch):

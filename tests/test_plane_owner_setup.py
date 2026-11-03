@@ -269,3 +269,138 @@ def test_browser_receipt_authority_expires_and_revokes_but_local_journal_survive
     with pytest.raises(AccessDenied):engine.receipt(reader,grant.generation,plan['plan_id'],uid)
     with pytest.raises(AccessDenied):engine.store.recovery_host(OWNER)
     assert host._recorded(engine.root,uid)==journal
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+def test_retained_local_state_preserves_launch_after_expiry_and_revocation(setup_authority, revoked, monkeypatch, capsys):
+    store, access, grant, reader, clock, _ = setup_authority
+    assert store.retained_state().state == "absent"
+    engine, _, _ = allow(setup_authority)
+    preview = engine.preview(reader, grant.generation, "Improve checkout tests")
+    request = str(uuid4())
+    store.reserve(reader, grant, preview["plan_id"], request)
+    if revoked:
+        store.revoke(grant)
+    clock[0] = grant.expires_at
+    before = access.path.read_bytes()
+    state = store.retained_state()
+    assert state.state == ("revoked" if revoked else "expired")
+    assert not state.effective_active and state.grant == grant
+    assert (state.launch_id, state.launch_plan) == (request, preview["plan_id"])
+    from claudlobby.__main__ import main
+    import json
+    monkeypatch.setattr(OwnerAccess, "_now", lambda _: clock[0])
+    assert main(["--root", str(access.root), "host", "owner", "setup-status", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["state"] == state.state and data["launch_id"] == request
+    assert data["launch_plan"] == preview["plan_id"]
+    assert access.path.read_bytes() == before
+
+
+def test_guarded_setup_approval_refuses_a_launch_reserved_during_consent(setup_authority):
+    store, access, grant, reader, clock, _ = setup_authority
+    engine, _, _ = allow(setup_authority)
+    preview = engine.preview(reader, grant.generation, "Improve checkout tests")
+    before = store.retained_state()
+    store.reserve(reader, grant, preview["plan_id"], str(uuid4()))
+    clock[0] = grant.expires_at
+    candidate = replace(grant, generation=str(uuid4()), created_at=clock[0], expires_at=clock[0]+86400)
+    snapshot = access.path.read_bytes()
+    with pytest.raises(AccessDenied):
+        store.allow(candidate, expected_retained=before)
+    assert access.path.read_bytes() == snapshot
+
+
+def test_guide_retains_matching_approval_and_serves_without_reconsent(setup_authority, monkeypatch):
+    from contextlib import contextmanager
+    import sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.commands import releases
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    from tests.test_host_owner import terminal
+    store, access, grant, _, _, _ = setup_authority
+    store.allow(grant)
+    monkeypatch.setattr(releases, "_release", lambda *_: SimpleNamespace(
+        release_id=grant.release_id, seal_sha256=grant.release_seal, cli_path=Path(sys.executable).with_name("claudlobby")))
+    monkeypatch.setattr(guide, "_native_directories", lambda _: (Path(grant.install_directory),))
+    entered = []
+    @contextmanager
+    def serving(command, path, origin):
+        entered.append(command)
+        class Child:
+            def wait(self): raise KeyboardInterrupt
+        yield Child()
+    monkeypatch.setattr(guide, "_serving", serving)
+    console = terminal(monkeypatch, iter(("\n",)))
+    args = SimpleNamespace(origin="https://host.example.test", tailscale=Path(sys.executable),
+        tailscale_socket=None, socket=access.root/"state/owner/owner.sock", workspace_issuer=ISSUER,
+        workspace_origin=ORIGIN, target_fleet=grant.fleet, repository=grant.repository,
+        install_directory=Path(grant.install_directory))
+    from claudlobby.context import resolve_paths
+    before = access.path.read_bytes()
+    output = guide.run(args, resolve_paths(root=access.root), access, console)
+    assert output.data["state"] == "serving_stopped" and len(entered) == 1
+    assert "Keep this terminal open" in console.getvalue()
+    assert access.path.read_bytes() == before
+    assert store.retained_state().grant == grant
+
+
+def test_guide_refuses_retained_launch_without_replacing_or_starting_server(setup_authority, monkeypatch):
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.command_result import CommandFailure
+    store, access, grant, reader, clock, _ = setup_authority
+    engine, _, _ = allow(setup_authority)
+    preview = engine.preview(reader, grant.generation, "Improve checkout tests")
+    uid = str(uuid4()); store.reserve(reader, grant, preview["plan_id"], uid)
+    clock[0] = grant.expires_at
+    monkeypatch.setattr(guide, "_serving", lambda *_: pytest.fail("started a server"))
+    before = access.path.read_bytes()
+    with pytest.raises(CommandFailure) as caught:
+        guide.run(SimpleNamespace(), SimpleNamespace(root=access.root), access, None)
+    assert caught.value.data["launch_id"] == uid
+    assert access.path.read_bytes() == before
+
+
+def test_fresh_guide_runs_canonical_consents_then_keeps_foreground_serving(setup_authority, monkeypatch):
+    from contextlib import contextmanager
+    import sys
+    from claudlobby.commands import host_owner_setup as guide, host_owner as console, releases
+    from claudlobby import supervision_inventory
+    from claudlobby.context import resolve_paths
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    from tests.test_host_owner import terminal
+    store, access, grant, _, clock, effects = setup_authority
+    access.path.unlink()  # Owned synthetic installation, with no retained authority.
+    monkeypatch.setattr(releases, "_release", lambda *_: SimpleNamespace(release_id=grant.release_id,
+        seal_sha256=grant.release_seal, cli_path=Path(sys.executable).with_name("claudlobby")))
+    directories = (Path(grant.install_directory),)
+    monkeypatch.setattr(guide, "_native_directories", lambda _: directories)
+    monkeypatch.setattr(supervision_inventory.Adapter, "read", lambda *a, **k: "synthetic catalog")
+    monkeypatch.setattr(supervision_inventory, "_catalog", lambda _: ("launchd", "gui/1000", directories, (), ()))
+    entered = []
+    @contextmanager
+    def serving(command, path, origin):
+        entered.append(command)
+        if "--workspace-issuer" not in command:
+            challenge = access.begin_pairing(OWNER)
+            monkeypatch.setattr(console, "_challenge", lambda *a, **k: challenge.token)
+        else:
+            workspace = access.workspace()
+            proposal = proposed((access, workspace, access.current_grant(), clock))
+            monkeypatch.setattr(console, "_challenge", lambda *a, **k: proposal.nonce)
+        class Child:
+            def wait(self): raise KeyboardInterrupt
+        yield Child()
+    monkeypatch.setattr(guide, "_serving", serving)
+    output = terminal(monkeypatch, iter(word+"\n" for word in (
+        "", "INITIALIZE", "PAIR", "INITIALIZE-WORKSPACE", "INITIALIZE-CONNECTED", "BIND-WORKSPACE", "ALLOW-SETUP")))
+    args = SimpleNamespace(origin="https://host.example.test", tailscale=Path(sys.executable), tailscale_socket=None,
+        socket=access.root/"state/owner/owner.sock", workspace_issuer=ISSUER, workspace_origin=ORIGIN,
+        target_fleet=grant.fleet, repository=grant.repository, install_directory=directories[0])
+    result = guide.run(args, resolve_paths(root=access.root), access, output)
+    assert result.data["state"] == "serving_stopped" and len(entered) == 2
+    assert access.workspace().status()[0] == "active"
+    retained = store.retained_state()
+    assert retained.state == "allowed" and retained.launch_id is None
+    assert retained.grant.repository == grant.repository and not effects
+    assert "Keep this terminal open" in output.getvalue()
