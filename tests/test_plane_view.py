@@ -1727,6 +1727,12 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
 
     initialize_plane(tmp_path)
     _full_capture(tmp_path)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    empty = view._ro_conn(db)
+    try:
+        assert view._host_samples(empty) is None
+    finally:
+        empty.close()
     emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "probe",
         "payload": {"subject_kind": "host", "subject": host,
                     "metric": "host.load", "value": value}}
@@ -1742,6 +1748,8 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
         "VALUES (?,?,'1','2020-01-01','2026-01-01',?,'probe','host',?,'host.load',?)",
         [(1_000_000 + n, f"sample_{n}", host, subject,
           "null" if n == 19_999 else "3") for n in range(20_000)])
+    # Retained samples still count after their subject leaves the registry.
+    conn.execute("DELETE FROM identity_registry WHERE uid=?", (subject,))
     conn.commit()
     conn.close()
     conn = view._ro_conn(db)
@@ -1749,7 +1757,8 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
     def bounded_work():
         nonlocal steps
         steps += 1
-        return int(steps > 200)
+        # Index seeks stay below 10,000 VM steps; DISTINCT walks this history.
+        return int(steps > 10)
     conn.set_progress_handler(bounded_work, 1000)
     try:
         samples = view._host_samples(conn)

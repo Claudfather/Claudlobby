@@ -1545,11 +1545,16 @@ def _host_samples(conn: sqlite3.Connection) -> dict | None:
     """metric -> {value, occurred_at} for the host probe's newest facets;
     None when the probe has never recorded (dormant, or armed on another
     host) — absent is not an empty dashboard."""
-    # Discover subjects through the covering (subject_uid, metric, ingest_seq)
-    # index, including historical subjects absent from today's registry. Seek
-    # only their newest facet instead of sorting all retained host samples.
+    # Jump between subjects through the leading subject_uid index key rather
+    # than scanning every retained sample for DISTINCT. Historical subjects
+    # absent from today's registry remain included; an empty table yields none.
     subjects = [row[0] for row in conn.execute(
-        "SELECT DISTINCT subject_uid FROM metric_samples")]
+        "WITH RECURSIVE subjects(subject_uid) AS ("
+        " SELECT MIN(subject_uid) FROM metric_samples"
+        " UNION ALL SELECT (SELECT MIN(subject_uid) FROM metric_samples"
+        " WHERE subject_uid > subjects.subject_uid)"
+        " FROM subjects WHERE subject_uid IS NOT NULL)"
+        " SELECT subject_uid FROM subjects WHERE subject_uid IS NOT NULL")]
     newest = {}
     for subject in subjects:
         for metric in _HOST_METRICS:
