@@ -583,22 +583,40 @@ class OwnerAccess:
             return grant
 
     def _allow_action(self, action, expected_owner, fleet_uid, actor_uid, actor_alias):
+        with self._connection(write=True) as conn:
+            return self._allow_action_in(conn, action, expected_owner, fleet_uid, actor_uid, actor_alias)
+
+    def allow_actions(self, *, actions: tuple[str, ...], expected_owner: OwnerGrant,
+                      fleet_uid: str, actor_uid: str, actor_alias: str):
+        """Locally approve an explicit ordinary-action selection in one transaction.
+
+        Matching retained grants keep their generations, including requests
+        already prepared against them. Permission decisions use their own door.
+        """
+        if (not actions or any(action not in ("message", "nudge", "feedback") for action in actions)
+                or len(set(actions)) != len(actions)):
+            raise AccessDenied("invalid_actions_binding")
+        with self._connection(write=True) as conn:
+            return tuple(self._allow_action_in(conn, action, expected_owner, fleet_uid, actor_uid, actor_alias)
+                         for action in actions)
+
+    def _allow_action_in(self, conn, action, expected_owner, fleet_uid, actor_uid, actor_alias):
+        """Shared canonical grant writer; the caller owns the transaction."""
         fleet_uid = _canonical_uid(fleet_uid, "fleet", action=action)
         actor_uid = _canonical_uid(actor_uid, "actor", action=action)
         actor_alias = _human_alias(actor_alias, action=action)
         table, _ = _ACTION_GRANTS[action]
-        with self._connection(write=True) as conn:
-            owner = self._expected_owner(conn, expected_owner)
-            self._prepare_grants(conn, action)
-            row = conn.execute(f"SELECT actor_uid, actor_alias FROM {table} "
-                "WHERE owner_revision = ? AND fleet_uid = ?", (owner.revision, fleet_uid)).fetchone()
-            if row is not None:
-                if row["actor_uid"] != actor_uid or row["actor_alias"] != actor_alias:
-                    raise AccessDenied(f"{action}_binding_changed")
-            else:
-                conn.execute(f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?)",
-                    (owner.revision, fleet_uid, actor_uid, actor_alias, secrets.token_hex(32)))
-            return self._action_grant(conn, owner, fleet_uid, action)
+        owner = self._expected_owner(conn, expected_owner)
+        self._prepare_grants(conn, action)
+        row = conn.execute(f"SELECT actor_uid, actor_alias FROM {table} "
+            "WHERE owner_revision = ? AND fleet_uid = ?", (owner.revision, fleet_uid)).fetchone()
+        if row is not None:
+            if row["actor_uid"] != actor_uid or row["actor_alias"] != actor_alias:
+                raise AccessDenied(f"{action}_binding_changed")
+        else:
+            conn.execute(f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?)",
+                (owner.revision, fleet_uid, actor_uid, actor_alias, secrets.token_hex(32)))
+        return self._action_grant(conn, owner, fleet_uid, action)
 
     def _current_action(self, action, expected_owner, fleet_uid):
         fleet_uid = _canonical_uid(fleet_uid, "fleet", action=action)

@@ -33,6 +33,16 @@ def register_host_owner(hosts):
             route.add_argument("--before-first-fleet", action="store_true",
                 help="Explicitly prepare host identity and owner authority before first activation")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
+    allow_actions = actions.add_parser("allow-actions",
+        help="Approve selected messages, nudges and feedback for one local human and active fleet (interactive)")
+    allow_actions.add_argument("--target-fleet", required=True, help="Explicit active fleet name")
+    allow_actions.add_argument("--actor", required=True, help="Explicit local human: actor alias")
+    allow_actions.add_argument("--capabilities", required=True, nargs="+", choices=("messages", "nudges", "feedback"),
+                               help="Explicit ordinary actions to approve together; permission decisions use allow-permissions")
+    allow_actions.add_argument("--register-actor", action="store_true",
+                               help="Separately approve first-contact registration if the actor is absent")
+    allow_actions.add_argument("--json", action="store_true", help="Not supported for interactive approval")
+    allow_actions.set_defaults(func=_dispatch, public_command="host.owner.allow-actions")
     for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
                               ("feedback", "task-linked comments"),
                               ("permissions", "task permission decisions")):

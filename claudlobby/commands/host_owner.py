@@ -141,8 +141,8 @@ def _unchanged(before, after):
         raise CommandFailure("conflict", "displayed owner or actor identities changed; inspect and retry")
 
 
-def _allow_action(args, paths, store, terminal, action):
-    from ..operation_context import _valid_human_alias, resolve_task_context, resolve_task_mutation_context
+def _prepare_action_approval(args, paths, store, terminal):
+    from ..operation_context import _valid_human_alias, resolve_task_mutation_context
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
     if not _valid_human_alias(args.actor):
@@ -166,6 +166,54 @@ def _allow_action(args, paths, store, terminal, action):
                 raise CommandFailure("conflict", "approved actor registration is unavailable")
             _unchanged(preview, {**registered, "actor_uid": None})
             preview = registered
+    return preview
+
+
+def _approved_action_context(args, paths, store, preview, release):
+    from ..operation_context import resolve_task_context
+
+    _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
+    ctx = resolve_task_context(root=paths.root, fleet=preview["fleet"],
+                               operator_alias=args.actor, package=paths.package)
+    if (ctx.host_uid != preview["owner"].host_uid or ctx.fleet_uid != preview["bindings"]["fleet_uid"]
+            or ctx.caller.uid != preview["actor_uid"] or ctx.caller.alias != preview["actor_alias"]):
+        raise CommandFailure("conflict", "approved actor identities changed")
+    return ctx
+
+
+def _allow_actions(args, paths, store, terminal):
+    from ..runtime_admission import RuntimeIdentity, mutation_admission
+
+    if len(set(args.capabilities)) != len(args.capabilities):
+        raise CommandFailure("invalid_argument", "--capabilities must name each selected action only once")
+    preview = _prepare_action_approval(args, paths, store, terminal)
+    _describe_action(terminal, preview)
+    terminal.write("Approve only these capabilities for this actor and fleet:\n")
+    descriptions = {"messages": "ordinary messages to this fleet",
+                    "nudges": "selected-task nudges that ask this fleet's manager to act",
+                    "feedback": "task-linked comments to this fleet's configured lead"}
+    for capability in args.capabilities:
+        terminal.write(f"- {capability}: {descriptions[capability]}\n")
+    terminal.write("These capabilities may be used through direct owner access or its explicitly bound connected workspace.\n"
+                   "Permission decisions require separate local approval through allow-permissions.\n"
+                   "The selected approvals are saved together; matching approvals and prepared requests stay valid.\n")
+    _approve(terminal, "ALLOW-ACTIONS")
+    with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
+                            expected_release=preview["release"]) as release:
+        ctx = _approved_action_context(args, paths, store, preview, release)
+        actions = tuple({"messages": "message", "nudges": "nudge", "feedback": "feedback"}[capability]
+                        for capability in args.capabilities)
+        grants = store.allow_actions(actions=actions, expected_owner=preview["owner"], fleet_uid=ctx.fleet_uid,
+                                    actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    return CommandOutput({"state": "allowed", "capabilities": args.capabilities,
+                          "grants": [asdict(grant) for grant in grants]},
+                         lines=("Owner actions allowed for this actor and fleet: " + ", ".join(args.capabilities) + ".",))
+
+
+def _allow_action(args, paths, store, terminal, action):
+    from ..runtime_admission import RuntimeIdentity, mutation_admission
+
+    preview = _prepare_action_approval(args, paths, store, terminal)
     _describe_action(terminal, preview)
     terminal.write("This capability may be used through direct owner access or its explicitly bound connected workspace.\n"
                    "Workspace approval alone grants no fleet action.\n")
@@ -190,12 +238,7 @@ def _allow_action(args, paths, store, terminal, action):
     _approve(terminal, allow_word)
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
                             expected_release=preview["release"]) as release:
-        _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
-        ctx = resolve_task_context(root=paths.root, fleet=preview["fleet"],
-                                   operator_alias=args.actor, package=paths.package)
-        if (ctx.host_uid != preview["owner"].host_uid or ctx.fleet_uid != preview["bindings"]["fleet_uid"]
-                or ctx.caller.uid != preview["actor_uid"] or ctx.caller.alias != preview["actor_alias"]):
-            raise CommandFailure("conflict", "approved actor identities changed")
+        ctx = _approved_action_context(args, paths, store, preview, release)
         allow = {"message": store.allow_messages, "nudge": store.allow_nudges,
                  "feedback": store.allow_feedback, "permission": store.allow_permissions}[action]
         grant = allow(expected_owner=preview["owner"], fleet_uid=ctx.fleet_uid,
@@ -243,13 +286,14 @@ def _grant_errors(action):
     except ActivationError as exc:
         raise CommandFailure("conflict", "active configuration is unavailable; verify the selected installation") from exc
     except AccessDenied as exc:
-        if exc.code == f"invalid_{action}_binding":
-            raise CommandFailure("invalid_argument", f"{action} grants require canonical fleet and human actor bindings") from exc
-        if exc.code == ACTION_DENIALS[action]:
-            raise CommandFailure("conflict", f"no retained {action} grant for this fleet; inspect host owner status") from exc
-        if exc.code == f"{action}_binding_changed":
-            raise CommandFailure("conflict", f"{action} grant changed or already belongs to another actor; inspect host owner status "
-                                 "and revoke the retained grant before approving a replacement") from exc
+        for capability in (("message", "nudge", "feedback") if action == "actions" else (action,)):
+            if exc.code == f"invalid_{capability}_binding":
+                raise CommandFailure("invalid_argument", f"{capability} grants require canonical fleet and human actor bindings") from exc
+            if exc.code == ACTION_DENIALS[capability]:
+                raise CommandFailure("conflict", f"no retained {capability} grant for this fleet; inspect host owner status") from exc
+            if exc.code == f"{capability}_binding_changed":
+                raise CommandFailure("conflict", f"{capability} grant changed or already belongs to another actor; inspect host owner status "
+                                     "and revoke the retained grant before approving a replacement") from exc
         if exc.code == "grant_changed":
             raise CommandFailure("conflict", "owner pairing changed; inspect host owner status before retrying") from exc
         raise
@@ -367,6 +411,9 @@ def dispatch(args):
                 _approve(terminal, "INITIALIZE-CONNECTED")
                 store.connected().initialize(expected_owner=owner)
                 return CommandOutput({"state": "initialized"}, lines=("Connected read-session storage initialized.",))
+            if args.owner_action == "allow-actions":
+                with _grant_errors("actions"):
+                    return _allow_actions(args, paths, store, terminal)
             if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
                                      "allow-feedback", "revoke-feedback", "allow-permissions", "revoke-permissions"}:
                 action = {"messages": "message", "nudges": "nudge", "feedback": "feedback", "permissions": "permission"}[
