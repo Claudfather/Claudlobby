@@ -66,11 +66,19 @@ def test_initialization_requires_current_native_pairing(local):
     access, workspace, owner, _ = local
     with pytest.raises(AccessDenied):
         workspace.initialize(expected_owner=replace(owner, revision=0))
+    before = access.path.read_bytes()
+    with pytest.raises(AccessDenied):
+        access.connected().initialize(expected_owner=replace(owner, revision=0), prepare_workspace=True)
+    assert access.path.read_bytes() == before
     access.revoke_owner(expected_revision=owner.revision)
     p = access.begin_pairing(PrincipalRef("other-verifier", "human-001"))
     new = access.confirm_pairing(p.token, expected_principal=p.principal)
     with pytest.raises(AccessDenied, match="workspace_native_owner_required"):
         workspace.initialize(expected_owner=new)
+    before = access.path.read_bytes()
+    with pytest.raises(AccessDenied, match="workspace_native_owner_required"):
+        access.connected().initialize(expected_owner=new, prepare_workspace=True)
+    assert access.path.read_bytes() == before
     assert access.open_session(new.principal).grant == new  # legacy direct pairing unchanged
 
 

@@ -70,9 +70,11 @@ class OwnerConnected:
         for table in ("connected_challenges", "connected_sessions"):
             conn.execute(f"SELECT digest,owner_revision,binding_revision,binding_generation,binding_snapshot,created_at,expires_at FROM {table} LIMIT 0")
 
-    def initialize(self, *, expected_owner):
+    def initialize(self, *, expected_owner, prepare_workspace=False):
         with self.access._connection(write=True) as conn:
             self.access._expected_owner(conn, expected_owner)
+            if prepare_workspace:
+                self.workspace._initialize(conn, expected_owner=expected_owner)
             self.workspace._schema(conn)
             self.workspace._owner(conn, expected_owner.principal)
             names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

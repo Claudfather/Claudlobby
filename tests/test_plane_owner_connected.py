@@ -51,6 +51,59 @@ def test_no_binding_no_session_and_partial_schema_never_repairs(local):
         store.initialize(expected_owner=owner)
 
 
+def test_combined_initialization_prepares_missing_workspace_only_explicitly(local):
+    access, _, owner, _ = local
+    direct = access.open_session(OWNER)
+    with sqlite3.connect(access.path) as conn:
+        for table in ("workspace_metadata", "workspace_challenges", "workspace_bindings"):
+            conn.execute(f"DROP TABLE {table}")
+    before = access.path.read_bytes()
+    with pytest.raises(AccessUnavailable):
+        access.connected().initialize(expected_owner=owner)
+    assert access.path.read_bytes() == before
+    access.connected().initialize(expected_owner=owner, prepare_workspace=True)
+    assert access.workspace().status() == ("absent", None)
+    with sqlite3.connect(access.path) as conn:
+        for table in ("workspace_challenges", "workspace_bindings", "connected_challenges", "connected_sessions"):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    after = access.path.read_bytes()
+    access.connected().initialize(expected_owner=owner, prepare_workspace=True)
+    assert access.path.read_bytes() == after
+    assert access.authorize_read(direct.token, OWNER, host_uid=owner.host_uid) == owner
+    assert access.local_action_status().owner == owner
+
+
+@pytest.mark.parametrize("partial", ["workspace", "connected"])
+def test_combined_initialization_partial_schema_rolls_back(local, partial):
+    access, _, owner, _ = local
+    with sqlite3.connect(access.path) as conn:
+        if partial == "workspace":
+            conn.execute("DROP TABLE workspace_bindings")
+        else:
+            for table in ("workspace_metadata", "workspace_challenges", "workspace_bindings"):
+                conn.execute(f"DROP TABLE {table}")
+            conn.execute("CREATE TABLE connected_metadata(singleton INTEGER PRIMARY KEY, version INTEGER)")
+            conn.execute("INSERT INTO connected_metadata VALUES(1,1)")
+    before = access.path.read_bytes()
+    with pytest.raises(AccessUnavailable):
+        access.connected().initialize(expected_owner=owner, prepare_workspace=True)
+    assert access.path.read_bytes() == before
+
+
+def test_combined_initialization_preserves_retained_authority(connected):
+    store, access, workspace, binding, clock = connected
+    direct = access.open_session(OWNER)
+    session = store.issue(evidence(store, clock), OWNER)
+    challenge = store.begin(OWNER)
+    before = access.path.read_bytes()
+    store.initialize(expected_owner=binding.owner, prepare_workspace=True)
+    assert access.path.read_bytes() == before
+    assert workspace.status() == ("active", binding)
+    assert admit(store, session.token, binding) == session.admission
+    assert store.expected(challenge.expected.nonce, OWNER) == challenge.expected
+    assert access.authorize_read(direct.token, OWNER, host_uid=binding.owner.host_uid) == binding.owner
+
+
 def test_one_use_hash_only_read_credential_no_cookie_or_action_authority(connected):
     store, access, _, binding, clock = connected
     attestation = evidence(store, clock)
@@ -169,6 +222,38 @@ def test_init_cli_preview_refusal_then_explicit_initialize(local, monkeypatch):
     assert "optional connected read-session storage" in t.getvalue()
 
 
+@pytest.mark.parametrize("answers,rc", [(["NO\n"], 4),
+    (["INITIALIZE-WORKSPACE\n", "NO\n"], 4),
+    (["INITIALIZE-WORKSPACE\n", "INITIALIZE-CONNECTED\n"], 0)])
+def test_combined_cli_requires_both_confirmations_before_writes(local, monkeypatch, answers, rc):
+    access, _, _, _ = local
+    with sqlite3.connect(access.path) as conn:
+        for table in ("workspace_metadata", "workspace_challenges", "workspace_bindings"):
+            conn.execute(f"DROP TABLE {table}")
+    before = access.path.read_bytes()
+    output = terminal(monkeypatch, iter(answers))
+    assert call(access, "initialize-connected", "--prepare-workspace") == rc
+    assert "No binding, session or action grant" in output.getvalue()
+    assert "workspace authority and connected read-session storage" in output.getvalue()
+    if rc:
+        assert access.path.read_bytes() == before
+    else:
+        assert access.workspace().status() == ("absent", None)
+
+
+def test_combined_cli_owner_change_during_confirmation_refuses(local, monkeypatch):
+    access, _, owner, _ = local
+    snapshots = []
+    def answers():
+        yield "INITIALIZE-WORKSPACE\n"
+        access.revoke_owner(expected_revision=owner.revision)
+        snapshots.append(access.path.read_bytes())
+        yield "INITIALIZE-CONNECTED\n"
+    terminal(monkeypatch, answers())
+    assert call(access, "initialize-connected", "--prepare-workspace") == 4
+    assert access.path.read_bytes() == snapshots[0]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="controlling terminal requires POSIX")
 def test_real_private_terminal_initialization_and_refusal(local):
     from tests.test_host_owner_terminal import _command
@@ -179,6 +264,14 @@ def test_real_private_terminal_initialization_and_refusal(local):
     assert rc == 0 and "storage initialized" in text
     with sqlite3.connect(access.path) as conn:
         assert conn.execute("SELECT count(*) FROM connected_sessions").fetchone()[0] == 0
+    before = access.path.read_bytes()
+    rc, text = _command(access.root, "initialize-connected", [
+        ("Type INITIALIZE-WORKSPACE", "INITIALIZE-WORKSPACE"),
+        ("Type INITIALIZE-CONNECTED", "INITIALIZE-CONNECTED"),
+    ], args=("--prepare-workspace",), on_prompt=lambda _: (
+        access.path.read_bytes() == before or pytest.fail("storage changed before consent completed")))
+    assert rc == 0 and "workspace authority and connected read-session storage" in text
+    assert access.path.read_bytes() == before
 
 
 def test_capacity_refusal_keeps_challenge_and_full_retained_binding_is_checked(connected, monkeypatch):

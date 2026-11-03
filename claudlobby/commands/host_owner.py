@@ -406,11 +406,20 @@ def dispatch(args):
             if args.owner_action == "initialize-connected":
                 owner = _active_owner(store)
                 _describe(terminal, owner)
-                terminal.write("Prepare optional connected read-session storage in this authority database.\n"
-                               "Workspace authority must already be initialized. No binding, session or action grant is issued.\n")
+                if args.prepare_workspace:
+                    terminal.write("Prepare optional local workspace authority and connected read-session storage "
+                                   "together in this authority database.\n"
+                                   "Both local confirmations are required before storage changes. "
+                                   "No binding, session or action grant is issued.\n")
+                    _approve(terminal, "INITIALIZE-WORKSPACE")
+                else:
+                    terminal.write("Prepare optional connected read-session storage in this authority database.\n"
+                                   "Workspace authority must already be initialized. No binding, session or action grant is issued.\n")
                 _approve(terminal, "INITIALIZE-CONNECTED")
-                store.connected().initialize(expected_owner=owner)
-                return CommandOutput({"state": "initialized"}, lines=("Connected read-session storage initialized.",))
+                store.connected().initialize(expected_owner=owner, prepare_workspace=args.prepare_workspace)
+                line = ("Local workspace authority and connected read-session storage initialized."
+                        if args.prepare_workspace else "Connected read-session storage initialized.")
+                return CommandOutput({"state": "initialized"}, lines=(line,))
             if args.owner_action == "allow-actions":
                 with _grant_errors("actions"):
                     return _allow_actions(args, paths, store, terminal)
@@ -541,6 +550,9 @@ def dispatch(args):
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
     except (AccessUnavailable, ValueError) as exc:
         if args.owner_action == "initialize-connected":
+            if args.prepare_workspace:
+                raise CommandFailure("unavailable", "connected storage or workspace authority is unavailable; inspect local schemas; "
+                                     "partial schemas are never repaired") from exc
             raise CommandFailure("unavailable", "connected storage or workspace authority is unavailable; inspect local schemas "
                                  "and initialize workspace authority first; partial schemas are never repaired") from exc
         if "workspace" in args.owner_action:
