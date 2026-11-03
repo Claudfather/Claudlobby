@@ -908,7 +908,7 @@ function inspectionHarness({room = false} = {}) {
           button.isConnected = false;
         }
         registry.clear(); this.content = value;
-        for (const name of ['ed-close', 'ed-message', 'ed-message-note', 'rb-refresh']) if (value.includes(name)) {
+        for (const name of ['ed-close', 'ed-message', 'ed-message-note', 'rb-refresh', 'rb-conversation']) if (value.includes(name)) {
           registry.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
             focus() { this.focusCalls++; document.activeElement = this; },
             matches(selector) { return selector === '.' + name; },
@@ -922,12 +922,12 @@ function inspectionHarness({room = false} = {}) {
   box = detail();
   const roomButtons=new Map(),roomBox=detail(roomButtons);roomBox.id='room-bot-inspection';
   const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: room?'channel':'fleet',
-    roomBotInspection:null,roomBotEpoch:0,interactionApi:room?{dispose(){}}:{},activeRoom:()=>state.currentFleet,
+    conversationSnapshot:null,conversationFocus:{bot:'',other:''},renderChannel(){},roomBotInspection:null,roomBotEpoch:0,interactionApi:room?{dispose(){}}:{},activeRoom:()=>state.currentFleet,
     inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity, equipmentFocus: null,
     fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
     inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
     EQUIP_ORDER: ['skills'], esc: value => String(value), ago: () => '',
-    document, $: id => id === 'room-bot-inspection'?roomBox:id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {} },
+    document, $: id => id === 'room-bot-inspection'?roomBox:id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {},focus(){} },
     stateBlock: (state, provenance, text) => text || state,
     renderState(node) { node.innerHTML = 'loading'; },
     jget(url) { const pending = deferred(); reads.push({ url, ...pending }); return pending.promise; },
@@ -997,6 +997,22 @@ test(`room bot inspection erases detail and refuses late responses after ${loss}
   h.reads[0].resolve(roomPresence());await pending;
   assert.equal(h.roomBox.innerHTML,'');assert.equal(h.selections.length,0);
 });
+test('inspector conversation shortcut uses exact admitted read identity without reads or message authority',async()=>{
+  const h=inspectionHarness({room:true}),actor={...botIdentity,uid:'north::'+botIdentity.uid,alias:'north::lead',fleet:'north / team',fleet_uid:'north::'+botIdentity.fleet_uid};
+  h.state.currentFleet='all';h.state.rosterIdentities=new Map([[actor.uid,actor]]);h.state.fleets=[{alias:actor.fleet,uid:actor.fleet_uid}];
+  h.state.conversationSnapshot={state:'ok',data:{sources:[{key:'north',state:'ok'},{key:'south',state:'ok'}],threads:[]}};
+  const renders=[];h.state.renderChannel=value=>renders.push(value);h.state.workLoop.canSelectMessageRecipient=()=>false;
+  const pending=h.state.openRoomBot(actor);h.reads[0].resolve({state:'unavailable'});await pending;
+  assert.equal(h.roomButtons.get('.rb-conversation').disabled,false);assert.equal(h.roomButtons.get('.ed-message').disabled,true);
+  const old=h.roomButtons.get('.rb-conversation');old.onclick();
+  assert.equal(h.state.conversationFocus.bot,actor.alias);assert.equal(h.state.conversationFocus.other,'');
+  assert.equal(h.state.currentFleet,'all');assert.equal(h.roomBox.hidden,true);assert.equal(renders.length,1);
+  assert.equal(h.reads.length,1);assert.equal(h.selections.length,0);old.onclick();assert.equal(renders.length,1);
+  const second=h.state.openRoomBot(actor);h.reads[1].resolve({state:'unavailable'});await second;
+  h.state.conversationSnapshot.data.sources[0].state='denied';h.state.refreshRoomBot();
+  assert.equal(h.roomButtons.get('.rb-conversation').disabled,true);h.roomButtons.get('.rb-conversation').onclick();assert.equal(renders.length,1);
+});
+
 test('room inspector preserves unknown evidence and revoked message access without inferring idle',async()=>{
   const h=inspectionHarness({room:true}),pending=h.state.openRoomBot(botIdentity);
   h.reads[0].resolve({state:'unavailable'});await pending;

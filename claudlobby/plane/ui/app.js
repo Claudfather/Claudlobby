@@ -38,10 +38,8 @@ function updateRoomHeading() {
 function paintConversationFocus() {
   const root = $("room-focus");
   if (root?.id !== "room-focus") return;
-  const sources = conversationSnapshot?.data?.sources;
-  const identities = !conversationSnapshot || typeof rosterIdentities === "undefined" ? [] : [...rosterIdentities.values()]
-    .filter(a => a.fleet === activeRoom() && !a.provisional
-      && (!sources || sources.some(s => s.state === "ok" && a.alias.startsWith(s.key + "::"))));
+  const identities = typeof rosterIdentities === "undefined" ? [] : [...rosterIdentities.values()]
+    .filter(a => conversationIdentity(a.uid));
   if (!identities.some(a => a.alias === conversationFocus.bot)) conversationFocus = {bot:"",other:""};
   const participants = new Map();
   for (const thread of conversationSnapshot?.data?.threads || []) for (const m of thread.messages)
@@ -455,6 +453,7 @@ function renderChannel(env) {
   if (env?.state === "ok") conversationSnapshot = env;
   else {conversationSnapshot = null; conversationFocus = {bot:"",other:""};}
   paintConversationFocus();
+  if (typeof refreshRoomBot === "function") refreshRoomBot();
   const el = $("channel");
   const retryFocused = !!activityRecovery && activityRecovery.button === document.activeElement;
   if (renderState(el, env, { idleWhenEmpty: (d) => !d.coverage?.partial && !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) {
@@ -2352,12 +2351,21 @@ function currentRoomBot(snapshot = roomBotInspection) {
     && ["uid","alias","fleet","fleet_uid"].every(key => current[key] === snapshot.identity[key])
     && fleets.some(f => f.alias === current.fleet && f.uid === current.fleet_uid);
 }
+function conversationIdentity(uid) {
+  if (sessionPaused || conversationSnapshot?.state !== "ok") return null;
+  const actor = rosterIdentities.get(uid), sources = conversationSnapshot.data.sources;
+  return actor && !actor.provisional && (activeRoom() === "all" || actor.fleet === activeRoom())
+    && (!sources || sources.some(source => source.state === "ok" && actor.uid.startsWith(source.key + "::")
+      && actor.alias.startsWith(source.key + "::"))) ? actor : null;
+}
 function roomBotRecipient() {
   return currentRoomBot() ? {...rosterIdentities.get(roomBotInspection.identity.uid),current:true} : null;
 }
 function refreshRoomBot() {
   if (!roomBotInspection) return;
   if (!currentRoomBot()) { closeRoomBot(); return; }
+  const conversation = roomBotPanel()?.querySelector(".rb-conversation");
+  if (conversation) conversation.disabled = !conversationIdentity(roomBotInspection.identity.uid);
   const button = roomBotPanel()?.querySelector(".ed-message");
   if (button) button.disabled = !workLoop?.canSelectMessageRecipient(roomBotRecipient());
 }
@@ -2395,11 +2403,21 @@ async function openRoomBot(identity) {
     <p class="note">Snapshot only. Refresh to check again; recorded activity alone does not mean idle.</p>
     ${value?.state !== "ok" ? '<p class="note">Presence is unavailable. No running or idle state is inferred.</p>' : ''}
     <div class="room-bot-actions"><button type="button" class="pill ghost rb-refresh">Refresh status</button>
+    <button type="button" class="pill ghost rb-conversation" disabled>View conversation</button>
     <button type="button" class="pill ghost ed-message" disabled>Message this bot</button>
     ${typeof interactionApi.dispose !== "function" ? '<button type="button" class="pill ghost rb-equipment">Equipment details</button>' : ''}</div>`;
   connectClose();
   panel.querySelector(".rb-refresh").onclick = () => {
     if (ticket === roomBotEpoch && currentRoomBot(snapshot)) void openRoomBot(snapshot.identity);
+  };
+  const conversation = panel.querySelector(".rb-conversation");
+  conversation.onclick = () => {
+    if (!conversation.isConnected || ticket !== roomBotEpoch || !currentRoomBot(snapshot)) return;
+    const actor = conversationIdentity(snapshot.identity.uid);
+    if (!actor) { refreshRoomBot(); return; }
+    conversationFocus = {bot:actor.alias,other:""};
+    closeRoomBot(); renderChannel(conversationSnapshot);
+    $("room-bot")?.focus(); $("channel").scrollIntoView({block:"nearest"});
   };
   const message = panel.querySelector(".ed-message");
   message.onclick = () => {
