@@ -17,6 +17,56 @@ import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
 const $ = (id) => document.getElementById(id);
+let conversationFocus = {bot:"", other:""}, conversationSnapshot = null;
+function focusedThreads(threads) {
+  const {bot, other} = conversationFocus;
+  if (!bot) return threads;
+  return threads.filter(t => t.messages.some(m => other
+    ? m.sender_alias === bot && m.recipient_alias === other || m.sender_alias === other && m.recipient_alias === bot
+    : m.sender_alias === bot || m.recipient_alias === bot));
+}
+function resetConversationFocus() {
+  conversationFocus = {bot:"", other:""}; conversationSnapshot = null;
+  paintConversationFocus();
+}
+function updateRoomHeading() {
+  const heading = $("room-title");
+  if (heading?.id !== "room-title") return;
+  const selected = activeRoom(), team = fleets.find(f => f.alias === selected);
+  heading.textContent = team?.display_label || (selected === "all" ? "All teams" : selected);
+}
+function paintConversationFocus() {
+  const root = $("room-focus");
+  if (root?.id !== "room-focus") return;
+  const sources = conversationSnapshot?.data?.sources;
+  const identities = !conversationSnapshot || typeof rosterIdentities === "undefined" ? [] : [...rosterIdentities.values()]
+    .filter(a => a.fleet === activeRoom() && !a.provisional
+      && (!sources || sources.some(s => s.state === "ok" && a.alias.startsWith(s.key + "::"))));
+  if (!identities.some(a => a.alias === conversationFocus.bot)) conversationFocus = {bot:"",other:""};
+  const participants = new Map();
+  for (const thread of conversationSnapshot?.data?.threads || []) for (const m of thread.messages)
+    for (const side of ["sender","recipient"]) if (m[side + "_alias"])
+      participants.set(m[side + "_alias"], m[side + "_short"] || m[side + "_alias"]);
+  if (!participants.has(conversationFocus.other)) conversationFocus.other = "";
+  const options = (rows, selected) => rows.map(([id,label]) => `<option value="${esc(id)}"${id === selected ? ' selected' : ''}>${esc(label)}</option>`).join("");
+  const focused = document.activeElement?.id;
+  root.innerHTML = `<label>Conversation <select id="room-bot"><option value="">Whole team</option>${options(identities.map(a=>[a.alias,a.short || participants.get(a.alias) || a.alias]),conversationFocus.bot)}</select></label>
+    <label>With <select id="room-participant"${conversationFocus.bot ? '' : ' disabled'}><option value="">Anyone</option>${options([...participants].filter(([id])=>id !== conversationFocus.bot),conversationFocus.other)}</select></label>
+    <button id="room-message-bot" class="pill ghost" type="button"${conversationFocus.bot ? '' : ' disabled'}>Message bot</button>
+    <small>Recent recorded threads, not complete message history. Whole threads may include other participants.</small>`;
+  const repaint = () => { if (conversationSnapshot) renderChannel(conversationSnapshot); };
+  $("room-bot").onchange = event => {conversationFocus = {bot:event.target.value,other:""};repaint();};
+  $("room-participant").onchange = event => {conversationFocus.other = event.target.value;repaint();};
+  const recipient = identities.find(a => a.alias === conversationFocus.bot);
+  const allowed = recipient && rosterMessageRecipient(recipient.uid);
+  $("room-message-bot").disabled = !allowed;
+  $("room-message-bot").onclick = () => {
+    const current = recipient && rosterMessageRecipient(recipient.uid);
+    if (current?.alias === recipient.alias && current.fleet === recipient.fleet
+        && $("room-message-bot").isConnected && workLoop.selectMessageRecipient(current)) $("work-loop").scrollIntoView({block:"nearest"});
+  };
+  if (["room-bot","room-participant"].includes(focused)) $(focused)?.focus();
+}
 
 // Plain-language transmission states — PRESENTATION ONLY (the ok/pend/bad
 // coloring of a tx rides its server-stamped `activated` + failed check).
@@ -226,7 +276,7 @@ function machineryBlock(m, prose = null) {
   const raw = m.body && (m.report && m.report.state !== "legacy"
     || m.body !== (prose ?? (m.body_words || "")))
     ? `<div class="machinery raw">${esc(m.body)}</div>` : "";
-  return `<details><summary>machinery</summary>`
+  return `<details><summary>Technical detail</summary>`
        + `<div class="machinery">${parts}</div>${raw}</details>`;
 }
 
@@ -402,6 +452,9 @@ function renderActivityRecovery(env, restoreFocus) {
   if (restoreFocus) activityRecovery.button.focus();
 }
 function renderChannel(env) {
+  if (env?.state === "ok") conversationSnapshot = env;
+  else {conversationSnapshot = null; conversationFocus = {bot:"",other:""};}
+  paintConversationFocus();
   const el = $("channel");
   const retryFocused = !!activityRecovery && activityRecovery.button === document.activeElement;
   if (renderState(el, env, { idleWhenEmpty: (d) => !d.coverage?.partial && !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) {
@@ -434,7 +487,8 @@ function renderChannel(env) {
     }
     frag.appendChild(article);
   }
-  for (const t of env.data.threads) {
+  const threads = focusedThreads(env.data.threads);
+  for (const t of threads) {
     const prev = existing.get(t.key);
     const reuse = prev && prev.dataset.seq === String(t.latest_seq)
       && prev.dataset.room === room && prev.dataset.receipts === channelReceiptKey(t);
@@ -448,6 +502,10 @@ function renderChannel(env) {
       }
     }
     frag.appendChild(article);
+  }
+  if (!threads.length && conversationFocus.bot) {
+    const empty = document.createElement("p"); empty.className = "dim";
+    empty.textContent = "No matching conversation in this recent window."; frag.appendChild(empty);
   }
   el.replaceChildren(frag);
   renderActivityRecovery(env, retryFocused);
@@ -619,11 +677,12 @@ function renderTasks(env) {
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
-      <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || r.task_id)}</button>
-      <div class="sub">${esc(who)} · task ${esc(r.task_id)}`
+      <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
+      <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
+      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
-      + delivery + lastAct + prior + `</div>`;
+      + `</div>`;
   };
   const limited = env.data.truncated
     ? `<div class="card attn"><div class="why">⚠ Showing the newest ${env.data.limit || 200}`
@@ -700,7 +759,7 @@ function renderFleet(env) {
   }
   const rows = env.data.identities;
   adoptRoster(new Map(rows.filter(a => a.kind === "actor" && a.fleet)
-    .map(a => [a.uid, Object.freeze({ uid: a.uid, alias: a.alias, fleet: a.fleet,
+    .map(a => [a.uid, Object.freeze({ uid: a.uid, alias: a.alias, short: a.short, fleet: a.fleet,
       fleet_uid: fleets.find(f => f.alias === a.fleet)?.uid, provisional: !!a.provisional })])));
   const groups = new Set(rows.map((a) => a.fleet).filter(Boolean));
   el.innerHTML = groups.size < 2 ? rows.map(railRow).join("") : groupBy(rows, (a) => a.fleet || "")
@@ -755,6 +814,7 @@ function adoptRoster(next) {
     return !!b && Object.keys(a).every(key => a[key] === b[key]);
   });
   if (!same) { rosterIdentities = next; ++rosterGeneration; }
+  if (typeof paintConversationFocus === "function") paintConversationFocus();
   if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
   else refreshEquipmentAction();
 }
@@ -1345,6 +1405,7 @@ function channelUrl() {
 }
 
 function renderFleetTabs() {
+  if (typeof updateRoomHeading === "function") updateRoomHeading();
   const el = $("fleet-tabs");
   if (!fleets.length) { el.innerHTML = ""; return; }
   const hidden = hiddenTeams(), hiddenCount = fleets.filter(f => hidden.has(f.uid)).length;
@@ -1359,7 +1420,6 @@ function renderFleetTabs() {
       : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
     return `<span class="fleet-tab-choice"><button class="pill ghost ${f === currentFleet || currentFleet === null && fleets.length === 1 && meta ? "on" : ""}"`
       + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`
-      + (meta ? `<button class="pill ghost fleet-message" data-message-team="${esc(f)}" type="button" title="Open this team’s bot list; sending still requires granted access" aria-label="Choose a bot to message in ${esc(meta.display_label || f)}">Message a bot</button>` : '')
       + (meta && typeof meta.uid === 'string' && meta.uid.trim() ? `<button class="pill ghost fleet-hide" data-hide-team="${esc(meta.uid)}" type="button" aria-label="${hidden.has(meta.uid) ? 'Show' : 'Hide'} ${esc(meta.display_label || f)} in my view">${hidden.has(meta.uid) ? 'Unhide' : 'Hide'}</button>` : '') + '</span>';
   }).join("") + (hiddenCount ? `<button class="pill ghost fleet-visibility" type="button" aria-pressed="${showHiddenTeams}">${showHiddenTeams ? 'Hide hidden teams' : 'Show hidden teams'} (${hiddenCount})</button><small class="fleet-visibility-note">Hidden only in this browser; the selected team stays visible. Combined activity and totals still include hidden teams.</small>` : '');
   el.querySelectorAll("[data-fleet]").forEach((b) =>
@@ -1368,10 +1428,6 @@ function renderFleetTabs() {
     setTeamHidden(b.dataset.hideTeam, !hidden.has(b.dataset.hideTeam));
     renderFleetTabs(); applyFleetVisibility();
     focusFleetControl(b.dataset.hideTeam);
-  }));
-  el.querySelectorAll("[data-message-team]").forEach(b => b.addEventListener("click", () => {
-    pickFleet(b.dataset.messageTeam);
-    $("fleet")?.scrollIntoView?.({ block: "nearest" });
   }));
   el.querySelector?.('.fleet-visibility')?.addEventListener('click', () => {
     showHiddenTeams = !showHiddenTeams; renderFleetTabs(); applyFleetVisibility();
@@ -1399,6 +1455,7 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
   if (currentFleet !== f) { ++generation; closeEquipment(); }
   currentFleet = f;
   syncWorkRoom();
@@ -1640,6 +1697,9 @@ function setView(view) {
   currentView = view;
   document.body.classList.toggle("agent-directory-view", agentDirectoryVisible());
   $("channel").hidden = view !== "channel";
+  $("rail-right").hidden = view !== "tasks";
+  $("room-focus").hidden = view !== "channel";
+  $("search").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
   if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
@@ -1920,7 +1980,7 @@ function showLoading() {
 }
 showLoading();
 let workLoop = null;
-workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); } });
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); paintConversationFocus(); } });
 let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
@@ -1935,8 +1995,10 @@ function activeRoom() {
 }
 const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
+      onConnectionAttention() { const details = $("computers-details"); if (details) details.open = true; },
       onPause() {
         sessionPaused = true;
+        if (typeof resetConversationFocus === "function") resetConversationFocus();
         activityRecovery?.paint();
         ++sessionEpoch;
         ++generation; ++trustGen;

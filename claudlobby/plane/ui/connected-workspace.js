@@ -65,7 +65,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     paused = true; invoke(mount?.onPause);
     if (mount) {
       // A changed account cannot leave private records in a paused old document.
-      mount.document.querySelector('main')?.replaceChildren();
+      mount.element.replaceChildren(); mount.controls = null;
+      mount.document.querySelector('main')?.replaceChildren(mount.element);
       for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane', 'focus-title'])
         mount.document.getElementById(id)?.replaceChildren();
       const title = mount.document.getElementById('focus-title');
@@ -392,7 +393,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); element.append(row);
-      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle'});
+      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,buttons,help,access} = controls;
@@ -410,6 +411,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
         ? 'This connection expires soon. Use Keep connected to continue; active use renews it automatically.'
+        : status.state === 'setup_only' ? 'Choose Check setup approval below to continue setting up your first team.'
         : connection === 'not_connected' ? 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
@@ -419,8 +421,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           ? 'Local approval may have been prepared. Inspect the retained code on this computer; do not prepare it again. Connect only after local approval.'
           : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
       access.hidden = ['ready','setup_only'].includes(status.state);
-      if (approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
+      // Reveal setup on entry; later paints preserve the chosen disclosure state.
+      if (status.state === 'setup_only' && !controls.setupOnly
+          || approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
+      controls.setupOnly = status.state === 'setup_only';
       const primaryOperation = expired || continuity?.connectRequired ? 'connect' : status.state === 'unavailable' ? 'check'
         : ['ready','setup_only','logout'].includes(status.state) ? 'logout'
         : status.state === 'renewing' ? 'renew' : 'connect';
@@ -440,14 +445,20 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           || ['renew','logout'].includes(operation) && !['ready','setup_only','unavailable','renewing','logout'].includes(status.state);
         button.disabled = disabled(operation);
       }
+      if (connection === 'ready') controls.attentionState = null;
+      else if (['setup_only','not_connected','denied','unavailable'].includes(connection)
+          && controls.attentionState !== connection) {
+        controls.attentionState = connection;
+        invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
+      }
     });
   }
-  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}}) {
-    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange}; paused = true; invoke(onPause); changed();
+  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
+    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (['channel','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
+        if (['channel','tasks','grid'].includes(button.dataset.view) && !['denied','disposed'].includes(phase)) {
           button.disabled = false; button.title = ''; continue;
         }
         button.disabled = true; button.title = unavailable;

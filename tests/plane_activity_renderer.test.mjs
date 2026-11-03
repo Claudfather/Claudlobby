@@ -5,6 +5,37 @@ import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
 
+test('room focus keeps whole threads for exact source-qualified participants and clears to the full room',()=>{
+  const c={$:()=>null};
+  runInNewContext(source.slice(source.indexOf('let conversationFocus ='),source.indexOf('// Plain-language transmission'))+'\nthis.focus=(bot,other="")=>{conversationFocus={bot,other};};',c);
+  const bot='north::bot:team/worker',lead='north::bot:team/lead';
+  const related={key:'task',messages:[{sender_alias:bot,recipient_alias:lead},{sender_alias:lead,recipient_alias:'north::bot:team/reviewer'}]};
+  const twin={key:'other-host',messages:[{sender_alias:'south::bot:team/worker',recipient_alias:'south::bot:team/lead'}]};
+  const unrelated={key:'other-bot',messages:[{sender_alias:lead,recipient_alias:'north::bot:team/reviewer'}]};
+  const threads=[related,twin,unrelated];
+  c.focus(bot);assert.deepEqual(Array.from(c.focusedThreads(threads)),[related]);
+  c.focus(bot,lead);assert.deepEqual(Array.from(c.focusedThreads(threads)),[related]);
+  assert.equal(c.focusedThreads(threads)[0].messages.length,2,'thread context stays intact');
+  c.focus(bot,'south::bot:team/lead');assert.equal(c.focusedThreads(threads).length,0);
+  c.resetConversationFocus();assert.equal(c.focusedThreads(threads),threads);
+});
+
+test('Rooms and Tasks switch existing main panels while keeping the composer mounted and secondary views accessible',async()=>{
+  const html=await readFile(new URL('../claudlobby/plane/ui/index.html',import.meta.url),'utf8');
+  assert.match(html,/data-view="channel"[^>]*>Rooms/);assert.match(html,/data-view="tasks"[^>]*>Tasks/);
+  for(const id of ['fleet-tabs','attention','tasks','work-loop','channel'])assert.equal((html.match(new RegExp('id="'+id+'"','g'))||[]).length,1);
+  assert.ok(html.indexOf('id="fleet-tabs"')>html.indexOf('id="rail-fleet"'));
+  assert.ok(html.indexOf('id="fleet-tabs"')<html.indexOf('id="rail-channel"'));
+  assert.match(html,/<details id="computers-details"/);assert.doesNotMatch(html,/workspace-intro/);
+  const nodes=new Map(),c={currentView:'channel',agentDirectoryVisible:()=>false,closeEquipment(){},clearInterval(){},gridTimer:null,trustTimer:null,
+    $:id=>{if(!nodes.has(id))nodes.set(id,{hidden:false,value:''});return nodes.get(id);},document:{body:{classList:{toggle(){}}},querySelectorAll:()=>[]}};
+  runInNewContext(source.slice(source.indexOf('function setView('),source.indexOf('let trustTimer =')),c);
+  c.setView('tasks');assert.equal(nodes.get('channel').hidden,true);assert.equal(nodes.get('rail-right').hidden,false);
+  assert.equal(nodes.get('room-focus').hidden,true);c.$('work-loop');assert.equal(nodes.get('work-loop').hidden,false);
+  c.setView('channel');assert.equal(nodes.get('channel').hidden,false);assert.equal(nodes.get('rail-right').hidden,true);
+  assert.equal(nodes.get('work-loop').hidden,false);
+});
+
 test('roster message entry names the exact bot and remains disabled until existing grant admission',()=>{
   const c={Date,esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=> 'recently'};
   runInNewContext(source.slice(source.indexOf('function railRow('),source.indexOf('// Selection uses only')),c);
@@ -221,7 +252,7 @@ test('genuine paired nudge renders authored reason, accurate purpose and full ra
   assert.match(visible(rendered), /task update request/);
   assert.match(visible(rendered), /  Please check\nthis task — thanks\.  /);
   assert.doesNotMatch(visible(rendered), /task_nudge|dispatched|working…|delivered|approved/);
-  assert.match(rendered, /<details><summary>machinery/);
+  assert.match(rendered, /<details><summary>Technical detail/);
   assert.ok(rendered.includes(panel.esc(t.messages[0].body)));
   assert.match(rendered, new RegExp(msg));
 });

@@ -1008,6 +1008,24 @@ test('capability recovery does not overwrite a message edited while its nudge co
 
 
 const ownerFeedback = {...ownerNudge,scope:{...ownerNudge.scope,viewer:'feedback-grant'},actions:['feedback']};
+for(const authority of ['matching','no-lead','other-host','ungranted-recipient'])
+test(`manager shortcut composes only an explicit matching granted lead and never sends: ${authority}`,async()=>{
+  const lead=ownerNudge.recipients[0],first={id:'first-recipient',label:'First recipient'};
+  const message={...context,simulation:false,actions:['message'],recipients:authority==='ungranted-recipient'?[first]:[first,{id:lead.id,label:lead.label}]};
+  const nudge=authority==='other-host'?{...ownerNudge,scope:{...ownerNudge.scope,host:'another-host'}}:ownerNudge;
+  const h=harness({interactionContext:()=>message,...(authority==='no-lead'?{}:{nudgeContext:()=>nudge})});
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-manager').hidden,authority!=='matching');
+  h.get('work-body').value='First recipient draft';h.get('work-body').emit('input');
+  h.get('work-manager').onclick();await settle();
+  if(authority==='matching') {
+    assert.equal(h.get('work-recipient').value,lead.id);assert.equal(h.get('work-form').hidden,false);
+    h.get('work-recipient').value=first.id;h.get('work-recipient').onchange();
+    assert.equal(h.get('work-body').value,'First recipient draft');
+    h.loop.invalidate(undefined,message.scope,'message');assert.equal(h.get('work-manager').hidden,true);
+  } else assert.equal(h.get('work-recipient').value,first.id);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
 const feedbackOptions = extra => ({interactionContext:()=>null,feedbackContext:()=>ownerFeedback,protected:true,jget:()=>ownerDetail(),
   crypto:{randomUUID:()=> '22222222-2222-4222-8222-222222222222'},...extra});
 for(const transition of ['none','room','session'])

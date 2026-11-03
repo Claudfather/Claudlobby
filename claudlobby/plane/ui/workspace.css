@@ -704,3 +704,96 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .ed-message { margin:12px 0; }
 
 .ed-message-note:empty { display:none; }
+
+/* Room-first workspace: mounted records/actions, one primary surface. */
+body.plane-workspace { padding:0 24px 24px; }
+.plane-workspace > header { padding:14px 0; justify-content:space-between; }
+.plane-workspace > header h1 { flex-basis:auto; font-size:18px; }
+.plane-workspace #view-nav { display:flex; align-items:center; gap:8px; }
+.workspace-tools { position:relative; }
+.workspace-tools > summary { cursor:pointer; padding:6px 10px; }
+.workspace-tools[open] { display:flex; flex-wrap:wrap; gap:6px; }
+.plane-workspace main,
+.plane-workspace.agent-directory-view main { display:grid; grid-template-columns:240px minmax(0,1fr); gap:28px; padding-top:20px; align-items:start; }
+.plane-workspace #rail-fleet { display:block; grid-column:1; grid-row:auto; order:0; min-width:0; }
+.plane-workspace #rail-channel { display:block; grid-column:2; grid-row:auto; order:1; min-width:0; }
+.plane-workspace #rail-right { display:block; grid-column:auto; grid-row:auto; order:0; }
+.plane-workspace #rail-right[hidden], .plane-workspace [hidden] { display:none !important; }
+.plane-workspace #fleet-tabs { display:flex; flex-direction:column; align-items:stretch; gap:5px; margin:8px 0 18px; }
+.fleet-tab-choice { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
+.plane-workspace .fleet-tab-choice > [data-fleet] { flex:1 1 100%; text-align:left; padding:9px 10px; font-size:13px; }
+.plane-workspace .fleet-tab-choice > .fleet-message,
+.plane-workspace .fleet-tab-choice > .fleet-hide { font-size:10px; padding:2px 6px; }
+.sidebar-bots, .workspace-diagnostics { margin:16px 0; border-top:1px solid var(--edge); padding-top:12px; }
+.sidebar-bots > summary, .workspace-diagnostics > summary { cursor:pointer; font-size:12px; font-weight:600; }
+.plane-workspace #fleet { display:block; padding:8px 0; }
+.plane-workspace .actor { margin:10px 0; flex-wrap:wrap; }
+.workspace-diagnostics .pill { max-width:100%; white-space:normal; }
+.workspace-diagnostics #fleet-totals { display:block; margin:10px 0; line-height:1.6; }
+.workspace-diagnostics .owner-session.connected-session { display:block; margin:12px 0; }
+.workspace-diagnostics .connection-card { margin:10px 0; }
+.workspace-diagnostics .overview { display:block; padding:0; margin-top:12px; }
+.workspace-diagnostics .ov-card { min-width:0; margin:10px 0; }
+.room-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+.plane-workspace .room-heading h2 { font-size:20px; letter-spacing:0; text-transform:none; margin:0; }
+.room-heading #search { width:230px; max-width:45%; margin:0; }
+#room-focus { display:flex; flex-wrap:wrap; align-items:end; gap:10px; margin-bottom:18px; }
+#room-focus label { font-size:11px; color:var(--dim); }
+#room-focus select { display:block; margin-top:4px; padding:7px; max-width:240px; border:1px solid var(--edge); border-radius:6px; background:var(--panel); color:var(--ink); }
+#room-focus small { flex-basis:100%; font-size:11px; color:var(--dim); }
+.plane-workspace #work-loop,
+.plane-workspace.agent-directory-view #work-loop { display:block; margin-top:20px; border:1px solid var(--edge); border-radius:10px; padding:16px; }
+.plane-workspace #channel { min-height:180px; }
+.plane-workspace .thread { margin-bottom:14px; padding:16px; }
+.plane-workspace #rail-right .card { padding:12px 14px; margin-bottom:8px; }
+.task-record { margin-top:7px; font-size:11px; color:var(--dim); }
+.task-record > summary { cursor:pointer; }
+#work-manager { margin-bottom:12px; }
+@media(max-width:760px) {
+  body.plane-workspace { padding:0 14px 18px; }
+  .plane-workspace main, .plane-workspace.agent-directory-view main { display:flex; flex-direction:column; gap:16px; }
+  .plane-workspace #rail-fleet, .plane-workspace #rail-channel { width:100%; order:0; }
+  .plane-workspace #fleet-tabs { flex-direction:row; flex-wrap:wrap; margin-bottom:10px; }
+  .fleet-tab-choice { flex:1 1 140px; }
+  .sidebar-bots, .workspace-diagnostics { margin:10px 0; }
+  .room-heading { flex-wrap:wrap; gap:10px; }
+  .room-heading #search { max-width:100%; width:100%; }
+  #room-focus label { min-width:0; flex:1; }
+  #room-focus select { width:100%; max-width:100%; }
+}
+
+/* Keep composition reachable while the recorded feed scrolls independently. */
+@media(min-width:761px) {
+  body.plane-workspace { height:100dvh; overflow:hidden; padding-bottom:12px; }
+  .plane-workspace main, .plane-workspace.agent-directory-view main { height:calc(100dvh - 78px); min-height:0; }
+  .plane-workspace #rail-fleet { height:100%; overflow:auto; }
+}
+.plane-workspace #rail-channel { display:flex; flex-direction:column; height:100%; min-height:0; }
+.room-heading, #room-focus { flex-shrink:0; }
+.plane-workspace #channel, .plane-workspace #search-results,
+.plane-workspace #rail-right, .plane-workspace #grid,
+.plane-workspace #fleet-room, .plane-workspace #trust { flex:1; min-height:0; overflow:auto; }
+.plane-workspace #channel { min-height:100px; }
+.plane-workspace #work-loop { flex-shrink:0; max-height:45dvh; overflow:auto; margin:10px 0 0; padding:10px 14px; }
+#work-loop #work-form { margin-top:8px; }
+#work-loop .work-target { margin-bottom:7px; }
+#work-loop #work-body { min-height:64px; padding:8px 10px; }
+#work-loop .work-controls { margin-top:7px; }
+#work-loop #work-manager { float:right; margin:0 0 5px 10px; }
+#work-loop #work-notice { margin-top:6px; }
+.plane-workspace #channel .thread { padding:0; margin:0 0 7px; border-radius:7px; box-shadow:none; }
+#channel .thread .t-kicker { padding:6px 12px 0; font-size:9px; }
+#channel .thread > .t-head { padding:3px 12px 6px; gap:5px; }
+#channel .t-head .t-title { font-size:12px; }
+#channel .t-head .t-meta { display:none; }
+#channel .msg { padding:7px 12px; }
+#channel .msg .body { line-height:1.5; font-size:13px; margin:4px 0; }
+#channel .msg details { margin-top:4px; }
+#channel .t-ladder { padding:0 12px 5px; }
+@media(max-width:760px) {
+  .plane-workspace #rail-fleet { max-height:30dvh; overflow:auto; }
+  .plane-workspace #rail-channel { height:calc(100dvh - 90px); min-height:420px; }
+  #room-focus { gap:6px; margin-bottom:10px; }
+  #room-focus small { font-size:10px; }
+  .plane-workspace #work-loop { max-height:48dvh; }
+}

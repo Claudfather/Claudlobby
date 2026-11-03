@@ -50,7 +50,7 @@ function dom() {
     click(){if(!this.disabled)this.handlers.click?.();}
   }
   for(const id of ['owner-session','main','fleet','channel','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
-  const nav=['channel','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
+  const nav=['channel','tasks','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
   class Observer {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
 }
@@ -282,15 +282,26 @@ test('incremental reads use the same account and transport fence as final reads'
 });
 
 test('observed account refusal retires clients, fences held private reads and clears all private regions even if callback throws',async()=>{
-  const h=harness();h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
-  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])h.ui.get(name).append(h.ui.document.createElement('b'));
+  for(const refusal of [401,403,409,'generation']) {
+  const h=harness();h.ui.get('main').append(h.ui.get('owner-session'));
+  h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane']) {
+    const privateNode=h.ui.document.createElement('b');privateNode.textContent='private stale content';h.ui.get(name).append(privateNode);
+  }
   const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/read/tasks',()=>held.promise);
-  const old=h.api.jget('/api/tasks');await flush();h.metadataStatus=401;await h.api.checkAccount();
+  const old=h.api.jget('/api/tasks');await flush();
+  if(refusal==='generation')h.metadata={...h.metadata,context_generation:id(99)};else h.metadataStatus=refusal;
+  await h.api.checkAccount();
   held.resolve(reply(200,ok({tasks:[{task_id:wi,title:'late private'}]})));const result=await old;
   assert.equal(result.state,'denied');assert.equal(result.data,undefined);assert.equal(h.api.snapshot().phase,'denied');
-  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])assert.equal(h.ui.get(name).children.length,0);
+  for(const name of ['fleet-totals','presence-strip','task-detail-content','focus-pane'])assert.equal(h.ui.get(name).children.length,0);
+  assert.deepEqual(h.ui.get('main').children,[h.ui.get('owner-session')],'only the safe recovery scaffold remains in the rendered main');
+  const recovery=descendants(h.ui.get('main')).map(node=>node.textContent).join(' ');
+  assert.match(recovery,/Your account or saved computers changed.*open your workspace again/);
+  assert.doesNotMatch(recovery,/private stale content|late private|[ab]\.example\.test/);
   assert.equal(h.ui.get('task-detail').closed,true);assert.equal(h.ui.get('focus-overlay').hidden,true);
   h.metadataStatus=200;assert.equal(await h.api.checkAccount(),false);assert.equal(await h.api.act(0,'connect'),false);h.api.dispose();
+  }
 });
 
 test('metadata total body deadline and disposal reject late responses without issuing hosts',async()=>{
@@ -318,13 +329,18 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
 
 test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
+  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','tasks','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
   const connect=row.children[1].children[0];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[0],connect);
   for(const id of ['fleet','channel']){
     const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
     const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
   }
+  const tasks=h.ui.nav.find(button=>button.dataset.view==='tasks');assert.equal(tasks.disabled,false);
+  h.metadataStatus=503;await h.api.checkAccount();h.ui.observers[0].fn();
+  assert.equal(tasks.disabled,false,'an account-service outage preserves task navigation over retained reads');
+  h.metadataStatus=403;await h.api.checkAccount();h.ui.observers[0].fn();
+  assert.equal(tasks.disabled,true,'account refusal retires task navigation');
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
@@ -349,7 +365,8 @@ test('account recheck preserves the same focused control rather than replacing i
 
 
 test('computer cards offer one primary action and keep first-use setup and diagnostics in a native disclosure',async()=>{
- const h=harness();h.mount();await h.api.checkAccount();await flush();
+ const h=harness(),attention=[];h.mount({onConnectionAttention:event=>attention.push(event)});await h.api.checkAccount();await flush();
+ assert.deepEqual(attention,[{source:sourceA,state:'not_connected'},{source:sourceB,state:'not_connected'}]);
  const row=h.ui.get('owner-session').children[1],actions=row.children[1],primary=actions.children[0],help=row.children.at(-1);
  assert.equal(actions.children.length,1);assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
  assert.equal(help.tagName,'DETAILS');assert.ok(!help.open);
@@ -393,8 +410,10 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
 
 test('account loss during host staging erases approval code and fences late staged result',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
+ const panel=proposalOf(h.ui.get('owner-session').children[1]);
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
- assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=proposalOf(h.ui.get('owner-session').children[1]);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.ok(!descendants(h.ui.get('owner-session')).includes(panel),'retired source controls are absent from recovery guidance');
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
@@ -448,8 +467,8 @@ test('retirement selectors are pinned to actual canonical HTML',async()=>{
   const html=await read('index.html');
   for(const id of ['view-nav','debug-toggle','fleet-totals','presence-strip','task-detail-content','focus-pane','focus-title','task-detail','focus-overlay','search','fleet'])
     assert.match(html,new RegExp('id="'+id+'"'));
-  const nav=html.match(/<nav id="view-nav">([\s\S]*?)<\/nav>/)[1];
-  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','grid','fleet','trust']);
+  const nav=html.match(/<nav id="view-nav"[^>]*>([\s\S]*?)<\/nav>/)[1];
+  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','tasks','grid','fleet','trust']);
   assert.match(workspaceText,/#view-nav button, #debug-toggle, \[data-bot-inspect\]/);
   assert.match(workspaceText,/'focus-title'/);
 });
@@ -751,16 +770,35 @@ test('actual host rejection is distinct from a missing computer session',async()
 });
 
 test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
-  const h=harness(),a=refs[0].endpoint_origin;h.mount();
+  const h=harness(),a=refs[0].endpoint_origin,attention=[];
+  let computersOpen=false;
+  h.mount({onConnectionAttention:event=>{attention.push(event);computersOpen=true;}});
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
     setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
-  await h.api.checkAccount(); await h.api.act(0,'connect'); await h.api.act(1,'connect');
+  await h.api.checkAccount();
+  const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0],help=card.children.at(-1);
+  const summary=help.children[0];summary.focus();
+  await h.api.act(0,'connect');
+  assert.equal(computersOpen,true);
+  assert.equal(attention.filter(event=>event.source===sourceA&&event.state==='setup_only').length,1);
+  assert.equal(help.open,true,'setup-only admission reveals the next setup step');
+  assert.match(card.children[2].textContent,/Check setup approval/);
+  assert.equal(h.ui.document.activeElement,summary,'revealing setup never moves focus');
+  help.open=false;
+  await h.api.act(1,'connect');
+  const attentionCount=attention.length;computersOpen=false;
+  await h.api.checkAccount();
+  assert.equal(attention.length,attentionCount,'unchanged source state never repeats attention');
+  assert.equal(computersOpen,false,'manual collapse of the outer computer disclosure survives refresh');
+  assert.equal(help.open,false,'later connection and account paints preserve manual collapse');
+  assert.ok(!h.ui.get('owner-session').children[2].children.at(-1).open,'another computer is not expanded');
+  assert.equal(h.ui.document.activeElement,summary);
+  assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0,'revealing guidance never checks approval or launches setup');
   assert.equal(h.api.snapshot().computers[0].state,'setup_only');
   const fleets=await h.api.jget('/api/fleets');
   assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
-  const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0];
   assert.equal(primary.textContent,'Disconnect');assert.equal(primary.disabled,false);
   h.overrides.set(a+'/api/owner/connected/logout',init=>{assert.equal(init.headers.Authorization,'Bearer '+'A'.repeat(43));return reply(200,{version:1,state:'signed_out'});});
   assert.equal(await h.api.act(0,'logout'),true);
@@ -768,6 +806,21 @@ test('setup-only computer stays visible without blocking the other admitted dash
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');
   assert.equal(h.api.snapshot().computers[1].state,'ready');
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
+  await h.api.act(0,'connect');
+  assert.equal(help.open,true,'a new explicit setup-only connection reveals the next step again');
+  assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0);
+  const b=refs[1].endpoint_origin;
+  const unavailable=()=>attention.filter(event=>event.source===sourceB&&event.state==='unavailable').length;
+  const beforeUnavailable=unavailable();
+  h.overrides.set(b+'/api/owner/connected/status',()=>reply(503,{}));
+  await h.api.act(1,'check');
+  assert.equal(unavailable(),beforeUnavailable+1);computersOpen=false;
+  await h.api.checkAccount();assert.equal(computersOpen,false);assert.equal(unavailable(),beforeUnavailable+1);
+  h.overrides.delete(b+'/api/owner/connected/status');await h.api.act(1,'check');
+  assert.equal(h.api.snapshot().computers[1].state,'ready');
+  h.overrides.set(b+'/api/owner/connected/status',()=>reply(503,{}));await h.api.act(1,'check');
+  assert.equal(unavailable(),beforeUnavailable+2,'ready resets attention so a later unavailable transition reveals once');
+  assert.equal(computersOpen,true);
   h.api.dispose();
 });
 
