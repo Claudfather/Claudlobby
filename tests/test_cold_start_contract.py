@@ -140,8 +140,13 @@ class TestDocumentedInstallPath:
         assert "Browser route: assembly is complete." in walkthrough
         assert walkthrough.index("Browser route: assembly is complete.") < walkthrough.index("## 3. Author the first fleet")
         first_team = (REPO_ROOT / "documentation" / "first-team-setup.md").read_text()
-        assert "RELEASE_ID=$(jq -er" in first_team
-        assert "USER_UNIT_DIR=$(jq -er" in first_team
+        assert '"$PYTHON" -I "$INSTALLER" --root "$DATA" --guided' in first_team
+        assert "Save this command to resume local setup:" in first_team
+        assert '"$RELEASE_CLI" --root "$DATA" host owner setup' in first_team
+        assert first_team.index("## Run the guided installer") < first_team.index(
+            "## Before approving local access"
+        )
+        assert "Do not type `INITIALIZE`" in first_team
         assert "python3.11 -c" not in first_team
         # The executable copy uses the installed package path, including when
         # the operator is still in the source checkout after building it.

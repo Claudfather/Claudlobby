@@ -1,131 +1,98 @@
 # First-team setup
 
-Use this route to create a lead, engineer and reviewer for a bounded goal in an existing approved repository, through your [Claudfather.ai](https://claudfather.ai) workspace. It joins release assembly, local computer approval, browser preview, one explicit launch and the original activation receipt. No Telegram channel is required. The [Telegram seed/direct-CLI walkthrough](getting-started.md#3-author-the-first-fleet) remains an optional operator path.
+Create a lead, engineer and reviewer for a bounded goal in an existing approved repository, using your [Claudfather.ai](https://claudfather.ai) workspace. This is the manual terminal/browser route; it does not invoke the `/setup` skill. No Telegram channel is required. The [Telegram seed/direct-CLI walkthrough](getting-started.md#3-author-the-first-fleet) remains an optional operator path.
 
-A supervised trial has completed native launch, an implementation with independent review, and browser task feedback. That does not establish unattended installation or automatic native consent. **The revised newcomer instructions still require a fresh cold run.** Candidate qualification and public availability are separate: a trusted exact release can be assembled before website setup is enabled. If **Create the first team** is unavailable, stop before browser launch at that publication gate rather than substituting seed activation.
+## Prepare the computer and trusted installer
 
-## Prepare the installation and access
+Choose a fresh, dedicated data directory with no selected installation, activation history, fleet runtime or recorder. For an interrupted existing launch, keep its original identifiers and follow recovery instead of creating a replacement installation.
 
-Use a fresh, dedicated data root with no selected release, activation history, fleet runtime or existing recorder. Do not use this first-team route to repair or replace an existing installation. Keep an interrupted activation's original identifiers and inspect its existing recovery state instead.
+Complete the [host prerequisites and Python check](getting-started.md#prerequisites): CPython 3.11 for the supplied bundles, `tmux`, `jq`, Claude Code and a working native **user** manager (launchd on macOS or `systemctl --user` on Linux). Keep the proven absolute `PYTHON` executable. The bots inherit this OS user's permissions; read the [safety model](../README.md#safety-model) before choosing that user. The guide does not install prerequisites, change permissions or enable Linux user lingering.
 
-Before release assembly, check the noncredential host prerequisites and select trusted inputs:
+Obtain a trusted exact installer supporting `--guided`, the `revenue-web-app` template and `plane-ui`, for your host platform. Use the [trusted installer verification](getting-started.md#trusted-local-release-bundle-no-checkout-required) and independently published checksum, then use the guided command below instead of the assembly-only command. Public installer links are not automatically updated with this guide; do not substitute an older release or guess a download. If no compatible trusted installer was supplied, stop or explicitly choose the [operator source-build alternative](getting-started.md#1-prepare-the-release-inputs-source-build-alternative), completing its assembly only and returning to [the local guide](#continue-after-release-assembly). Do not activate the seed fleet for this browser route.
 
-- The [getting-started prerequisites](getting-started.md#prerequisites), including CPython 3.11 for the release-bundle path, a working native user manager, `tmux`, `jq` and Claude Code. Choose the OS user with its actual permissions in mind.
-- A trusted matching release that includes the `revenue-web-app` template, `host owner allow-setup` and the `[plane-ui]` dependencies. Choose either the [trusted local installer](getting-started.md#trusted-local-release-bundle-no-checkout-required), explicitly built with `plane-ui`, or the [source-build alternative](getting-started.md#1-prepare-the-release-inputs-source-build-alternative) with `[plane-ui]` in its wheelhouse. No current hosted installer, latest-release download or compatible artifact is promised by this guide.
+## Run the guided installer
 
-For the operator source-build alternative, use a committed revision that includes this setup capability, record its full revision and retain its wheel/lock checksums. These features are merged; a source build still needs qualification with the matching browser publication before it is offered as a tested setup release. Building and assembling a candidate is allowed while website setup publication is gated; it does not qualify or publish that candidate.
+Use a local operator terminal on the computer where the team will run, outside generated bot or managed-service contexts. Set `INSTALLER` to the verified local file and `DATA` to your chosen new absolute directory. `PYTHON` is the absolute executable already proven by the prerequisite check.
 
-Assemble the release with the chosen getting-started path, retaining `WORK/host-setup.json`, `DATA` and its exact returned `RELEASE_CLI`. Source-build users complete sections 1–2 only; **do not copy/activate the seed fleet** for this browser trial. Assembly starts no bots. Read its unsuccessful result before proceeding; do not guess a CLI, release or native directory.
+```bash
+INSTALLER="/absolute/trusted/claudlobby-install.pyz"
+DATA="/absolute/new/claudlobby-data"
+"$PYTHON" -I -c 'import sys; assert sys.version_info[:2] == (3, 11), "This bundle requires CPython 3.11"' &&
+"$PYTHON" -I "$INSTALLER" --root "$DATA" --guided
+```
+
+Assembly starts no team and grants no owner access. On success, the installer prints **Save this command to resume local setup:** followed by the exact sealed CLI command, shell-quoted for your data directory. Copy and save the complete command before continuing. Read any assembly error before retrying.
+
+The guide asks for non-secret configuration. You may assemble and reach these prompts without provider credentials or owner approval. If an exact value is unavailable, stop at its prompt; do not fabricate a value to reach the next step. Credentials do not belong in these prompts.
+
+| Prompt | Where the value comes from |
+| --- | --- |
+| This computer's exact private HTTPS origin | The host operator's intended private Serve origin, with no `/owner` path. It is this computer's value, separate from the website. |
+| Absolute native Tailscale executable | The actual executable provisioned for this OS user by the host operator. |
+| Exact website issuer | In your workspace's **Prepare it** step, expand **Local approval values** and use the identically labeled value. |
+| Exact operational browser origin | Use the identically labeled value in that same disclosure. Do not infer it from the current page or substitute demo/preview origins. |
+| Private owner socket | The exact backend selected for the private Serve route. The displayed default is `DATA/state/owner/owner.sock`, outside recorder storage. A shorter custom path requires an existing private 0700 directory. |
+| Native Tailscale control socket | Supply it only when the native daemon requires one; blank uses its native default. This is separate from the owner socket. |
+| First team name and approved existing `OWNER/REPO` | Human-approved team name and repository scope. You enter the goal later in the browser. |
+| Native installation directory | Choose from the user-manager paths observed and displayed by the guide. |
+
+If you cannot open **Local approval values**, the deployment operator can supply those same exact non-secret values. If configuration is missing or unavailable, stop rather than infer it. Configured origins, repository names and socket paths do not prove credentials, connectivity or access.
+
+## Before approving local access
+
+The guide displays the chosen configuration before asking for `INITIALIZE`. **Do not type `INITIALIZE`** if any of the following is missing or unverified; stop with Ctrl-C at that prompt:
+
+- Native provider sign-in plus separately provisioned Git/CLI and GitHub MCP access to the approved repository, for this OS user. Website login or a repository string establishes none of that access.
+- Verified native Tailscale identity/access and a host-operator-prepared private HTTPS Serve route to the selected **private Unix owner socket**. Entering an origin/socket does not verify ingress. Follow the [owner-server boundary](architecture/observable-plane.md#private-socket-owner-server-and-source-binding); do not substitute localhost `plane view` forwarding, a public Funnel or unprotected TCP backend.
+- Signed-in workspace membership and a compatible operational browser with **Create the first team** available. A saved computer address is navigation only; browser local-network permission and actual device connectivity require verification when connecting.
+
+Do not accept authority or launch a team to discover whether these prerequisites work, and do not borrow a running fleet's credentials. The guide does not provision accounts, repository credentials or Tailscale/Serve. A credential-free acceptance run can exercise assembly and configuration, then stop before this first approval and record its exploration events.
+
+Once access is independently established, review each local preview before its requested typed confirmation. The same terminal guides you through:
+
+1. `INITIALIZE` for local owner identity, then browser **Start pairing** at the displayed `/owner` address. Paste the short-lived code at the hidden terminal prompt, compare the native identity and approve it with `PAIR` only if it matches.
+2. Separate `INITIALIZE-WORKSPACE` and `INITIALIZE-CONNECTED` confirmations for workspace/session storage. The guide manages its foreground server transition; no second preparation terminal is needed.
+3. In the computer's connected browser panel, choose **Prepare local approval** under **Connection options and first-time setup**. Paste its code at the hidden terminal prompt, review the workspace/computer and confirm with `BIND-WORKSPACE`.
+4. Review the exact release, team, repository and native directory before `ALLOW-SETUP`. This permits one later explicit browser launch, which can start native services and consume provider usage. It grants no repository credentials or ordinary team actions. Approval lasts at most 24 hours; `host owner revoke-setup` withdraws it without undoing already-started activation.
+
+Codes belong only in hidden prompts. Retain an uncertain step's original code or identifiers before inspecting it. Before activation, fleet reads are unavailable because no recorder exists; do not initialize a recorder or run `bind-source` to force access.
+
+When local access is prepared, **keep this terminal open** for browser preview and launch. The owner server remains a foreground process; this guide installs no owner service or second server. Ctrl-C stops the browser connection and waits for already-started work to finish. It does not withdraw approvals or stop a team that has started.
+
+## Preview once, launch once, keep the original receipt
+
+In the computer's connected panel, choose **Connect**, then **Create the first team** and **Check setup approval**. A fresh computer may initially be connected for setup only.
+
+Enter the approved repository goal and choose **Preview team**. Review the team, repository, goal and **Plan changes and recovery identifiers**. Preview stages a canonical plan and starts no bots. The plan expires after ten minutes or earlier when local approval expires.
+
+When ready, choose **Launch this exact plan** once. Keep the original generation, plan ID and request UUID. If a response is lost or the page reloads, use **Check original activation receipt** for those same identifiers. Keep conflicting identifiers if reported. An unknown receipt does not mean nothing happened; do not launch again, replace the plan or seek a new approval to recover it.
+
+An active receipt records activation. Independently check `host doctor`, `host status`, the dashboard and meaningful bot/provider/repository behavior, such as a bounded task with a reviewed result. Native trust or tool approvals may still need you at this computer. Recurring lead check-ins can consume provider usage with the browser closed. Read the [team's permission policy](../examples/teams/revenue-web-app/README.md); a recorded launch does not prove restart durability or useful work.
 
 ## Continue after release assembly
 
-From the successful assembly result, retain the exact release and native directory:
+After an interruption, run the complete resume command saved from the installer, unchanged, in a local operator terminal. It already names the validated sealed executable and the same data directory. No release-path extraction or directory search is needed. Its form is:
 
 ```bash
-RELEASE_ID=$(jq -er \
-  'select(.ok == true) | .data.release_id | select(type == "string" and length > 0)' \
-  "$WORK/host-setup.json") &&
-USER_UNIT_DIR=$(jq -er \
-  'select(.ok == true) | .data.install_directories | select(type == "array" and length > 0) | .[0] | select(type == "string" and length > 0)' \
-  "$WORK/host-setup.json")
+"$RELEASE_CLI" --root "$DATA" host owner setup
 ```
 
-## Before connecting: access and publication gates
+For the examples here, set `RELEASE_CLI` to that exact executable path from the saved command and keep the original `DATA`. The installer prints the command; it does not create an additional receipt file. If you explicitly chose source-build or assembly-only instructions, use their exact returned `data.cli` as `RELEASE_CLI` and enter the same local guide with the command above.
 
-Assembly is complete; it has not selected a release or started a team. Before owner pairing, workspace approval or browser launch, establish:
-
-- Native Tailscale identity and private HTTPS ingress configured to forward to this host's **private Unix owner socket**, using the [owner-server boundary](architecture/observable-plane.md#private-socket-owner-server-and-source-binding). The ordinary localhost `plane view` forwarding recipe is not this owner server. Provisioning Tailscale/Serve remains a host prerequisite; the commands below do not configure it.
-- A signed-in website workspace and a matching operational browser publication containing the same release's first-team setup capability. Saving a computer's exact HTTPS address supplies navigation only. The website issuer and operational browser origin must be the deployed, configured HTTPS origins; do not substitute demo or preview aliases. Browser local-network permission and actual device connectivity need separate verification.
-- Human-approved `OWNER/REPO` scope and goal, native provider authentication for the OS user, and separately provisioned host Git/CLI and GitHub MCP access to that repository. A GitHub website login, template name or repository string proves none of that access. This route does not install a GitHub App, create repository credentials or prepare a repository automatically.
-
-**Credential gate:** stop here if provider/repository access, website membership or native Tailscale identity is missing or unverified. Do not borrow a running fleet's credentials, start the owner server or launch a team to discover whether access works. A cold-host validation stops at this gate and records its exploration events; the continuation below is for an operator who has separately established the prerequisites. This route uses no Telegram channel.
-
-Use operator terminals on this computer, outside generated bot or managed-service contexts. Keep the same `DATA`, sealed `RELEASE_CLI` and native user domain throughout. Set `HOST_ORIGIN` to the exact private HTTPS owner-server origin, `TAILSCALE` to the absolute native executable, `WORKSPACE_ISSUER` to the configured website issuer and `WORKSPACE_ORIGIN` to the configured operational browser origin. These are existing deployment values, not URLs generated by setup.
-
-## Pair the owner before the first fleet
-
-In the first terminal:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner initialize --before-first-fleet &&
-"$RELEASE_CLI" --root "$DATA" host owner serve \
-  --origin "$HOST_ORIGIN" --tailscale "$TAILSCALE"
-```
-
-Initialization asks for its existing `INITIALIZE` confirmation. With no explicit socket, the fresh-host server creates the private directory and socket at `DATA/state/owner/owner.sock`, outside recorder storage. Configure the private Serve route to that exact socket before accessing it; if its path exceeds the native socket limit, use an explicitly chosen shorter socket in an existing private 0700 directory and retain that same path for both server invocations and Serve. If the native daemon uses a separate control socket, use the existing `--tailscale-socket` option consistently. Never substitute a public Funnel or unprotected TCP backend.
-
-Open `/owner` at `HOST_ORIGIN`, choose **Start pairing**, and compare the displayed native identity with the local confirmation. In a second operator terminal:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner confirm
-"$RELEASE_CLI" --root "$DATA" host owner status --json
-```
-
-Paste the short-lived code at the hidden prompt and inspect its identity before the existing `PAIR` confirmation. Do not put codes in arguments or URLs. Owner pairing establishes identity; before activation, private fleet reads are still unavailable because no recorder exists. Do not initialize a recorder or run `bind-source` to force this fresh route.
-
-Stop the foreground server with Ctrl-C. Prepare its optional workspace/session storage:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner initialize-workspace &&
-"$RELEASE_CLI" --root "$DATA" host owner initialize-connected &&
-"$RELEASE_CLI" --root "$DATA" host owner serve \
-  --origin "$HOST_ORIGIN" --tailscale "$TAILSCALE" \
-  --socket "$DATA/state/owner/owner.sock" \
-  --workspace-issuer "$WORKSPACE_ISSUER" --workspace-origin "$WORKSPACE_ORIGIN"
-```
-
-Keep this server running for setup and activation. It remains a foreground operator process; this guide enrolls no second owner server. Preserve its explicit socket path after activation too.
-
-## Approve this workspace and one setup
-
-From the signed-in workspace, open its connected operational browser, using the saved computer address that exactly matches `HOST_ORIGIN`. Under that computer's **Connection options and first-time setup** disclosure, choose **Prepare local approval**. Inspect the displayed workspace, issuer and host. In the second terminal:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner confirm-workspace
-"$RELEASE_CLI" --root "$DATA" host owner workspace-status --json
-```
-
-Paste the retained workspace code at the hidden prompt and review the local preview before its existing `BIND-WORKSPACE` confirmation. If staging was uncertain, inspect the original code locally instead of repeating it. Continue only with an effective active binding for the intended workspace.
-
-Replace `example-org/web-app` below with the approved existing repository and `web-app` with the intended first fleet name. Create only the native directory reported by assembly, then approve the exact release/repository/directory tuple:
-
-```bash
-mkdir -p "$USER_UNIT_DIR" &&
-"$RELEASE_CLI" --root "$DATA" host owner allow-setup \
-  --template revenue-web-app --target-fleet web-app \
-  --repository example-org/web-app --release "$RELEASE_ID" \
-  --install-directory "$USER_UNIT_DIR"
-"$RELEASE_CLI" --root "$DATA" host owner setup-status --json
-```
-
-Read the local preview before its existing `ALLOW-SETUP` confirmation. This permits one browser setup and can start native services and consume agreed provider usage. The grant lasts at most 24 hours and supplies no repository credentials or message/task-action grants. `host owner revoke-setup` withdraws retained setup approval; it does not undo already-started activation.
-
-## Preview once, launch once, inspect the original receipt
-
-In that computer's connected panel choose **Connect** explicitly. A fresh computer may be connected for setup only; that is not a ready dashboard. Open **Create the first team**, choose **Check setup approval**, enter the approved repository goal, and choose **Preview team**. Review the team, repository, goal and **Plan changes and recovery identifiers**. Preview authors/stages a canonical plan but starts no bots; it expires after ten minutes or earlier when local approval expires.
-
-Only when ready to start this team, choose **Launch this exact plan** once. The browser saves the original generation, plan ID and request UUID before sending. On a lost response or reload, choose **Check original activation receipt** for those identifiers; never launch again, replan or resume merely because a reply was lost. Keep conflicting identifiers if the UI reports them. After approval expires or is revoked, retain the original IDs and inspect locally:
+Re-enter the same configuration. Matching retained preparation and approvals are reused; a different/inactive binding stops, renewal needs explicit consent, and launches are never replayed. A completed matching installation can return to foreground serving. For an unresolved launch, inspect its original browser receipt or read local state:
 
 ```bash
 "$RELEASE_CLI" --root "$DATA" host status --json
-"$RELEASE_CLI" --root "$DATA" config diff PLAN_ID
+"$RELEASE_CLI" --root "$DATA" config diff ORIGINAL_PLAN_ID
 ```
 
-Replace `PLAN_ID` with the original retained value. The corresponding read-only journal is `DATA/state/activations/REQUEST_UUID/activation.json`, using that same original UUID. An unknown receipt is not proof that activation did nothing. Use the [existing activation/refusal guidance](getting-started.md#4-activate-and-diagnose) before deciding any repair; a new setup approval does not recover the previous grant's browser journal authority.
+Use the original plan ID and request UUID. Its journal is `DATA/state/activations/REQUEST_UUID/activation.json`; it survives setup approval expiry/revocation. Follow [activation/refusal guidance](getting-started.md#4-activate-and-diagnose) before recovery. A new setup approval does not restore the previous grant's browser journal authority.
 
-An `active` receipt establishes the canonical activation state only. Check the connection for its dashboard and independently inspect `host doctor`, `host status`, actual bot/provider/repository behavior and the [team's task permission policy](../examples/teams/revenue-web-app/README.md). The lead's recurring check-ins can consume provider usage and continue with the browser closed. A recorded launch does not demonstrate useful work, permission enforcement, restart durability or a business result. The completed supervised trial is evidence for that bounded journey; a new installation still needs its own readiness checks, and the revised onboarding route needs cold-host acceptance. Native trust or tool approvals may require you at this computer. Reading the dashboard does not grant messages, task nudges, task feedback or permission decisions: continue with local action approval below.
+## Approve team actions separately
 
-## Approve team actions after launch
+Reading the team grants no messages, nudges, feedback or permission decisions. After launch, select the team and open **Action access help** beside **Check action access**. An unavailable check may reflect the connection/session rather than missing local approval.
 
-After the team has launched, select it in the operational browser and open **Action access help** beside **Check action access**. The status lists this team's messages, nudges and feedback permissions. Connecting and reading the team does not approve any of those actions. An unavailable check can reflect a connection or session problem; it does not establish that local approval is missing.
-
-Use the same installation and sealed `RELEASE_CLI` in a local operator terminal. Check whether that release supports the combined approval command:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner allow-actions --help
-```
-
-For a release that supports it, replace `TEAM` with the exact launched team name and `human:ALIAS` with the intended local human actor. Choose only the capabilities the owner wants to approve; this example selects all three ordinary actions:
+To approve ordinary actions, use the same sealed CLI locally. Replace `TEAM` and `human:ALIAS`, choosing only wanted capabilities; this example selects all three:
 
 ```bash
 "$RELEASE_CLI" --root "$DATA" host owner allow-actions \
@@ -133,8 +100,8 @@ For a release that supports it, replace `TEAM` with the exact launched team name
   --capabilities messages nudges feedback --register-actor
 ```
 
-Read the displayed owner, team, actor and selected capabilities before typing `ALLOW-ACTIONS`. If the actor is absent, `--register-actor` first requires its own `REGISTER` confirmation; registration alone grants no actions. The selected action grants are saved together, and repeating the same approval preserves matching grants and prepared requests. Approving one team does not approve another team or human actor.
+Review the owner, team, actor and capabilities before `ALLOW-ACTIONS`. A new actor also requires the separate `REGISTER` confirmation; registration alone grants no actions. Approving one team or human does not approve another. Task permission decisions require their own local `host owner allow-permissions` approval; ordinary-action approval grants none of them.
 
-Older releases that lack `allow-actions` can use their existing `host owner allow-messages`, `host owner allow-nudges` and `host owner allow-feedback` doors individually, with the same explicit team and actor and their separate local confirmations. The browser cannot issue these approvals. **Permission decisions remain separate:** `host owner allow-permissions` is the local door for authority over exact task permission requests; the ordinary-action command supplies none of it.
+Return to **Check action access** in the browser to read existing approvals. It sends/replays no action and does not inspect a saved request's receipt. Use each original receipt control separately.
 
-Return to **Computers & status**, reconnect the computer if its session needs renewal, then select the approved team and choose **Check action access**. This reads existing access only. It does not approve actions, send a message or task action, replay a saved request or check its receipt. Inspect any saved request through its original receipt control separately.
+These revised manual instructions require a fresh cold run before publication. Mechanical installer checks and unit tests do not establish newcomer acceptance.
