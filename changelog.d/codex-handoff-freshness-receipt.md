@@ -1,3 +1,5 @@
+### Fixed — retain handoff results and recover early upgrades
+
 Recent handoff checks now use the saved context timestamp as well as the file
 write time. Activation retains the native handoff result before checking the
 capture, so a known recent-save skip is not lost as an unknown send. Resuming
