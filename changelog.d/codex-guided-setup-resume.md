@@ -1,4 +1,4 @@
-### Candidate guided setup resume command
+### Fixed — Guided setup resume command
 
 Before entering the local guide, the installer displays a copyable resume
 command using the exact validated sealed CLI and selected data root. Paths are
