@@ -946,6 +946,19 @@ test('connected bot inspection from Tasks returns to Rooms presence without equi
   h.state.inspectBot(botIdentity);assert.equal(h.state.currentView,'channel');assert.equal(inspected[0],botIdentity);assert.equal(h.reads.length,0);
 });
 
+test('connected cross-team directory inspection selects that room and survives only an unchanged selected identity',async()=>{
+  const h=inspectionHarness({room:true});h.state.currentView='grid';h.state.currentFleet='other';
+  const picks=[];h.state.pickFleet=fleet=>{picks.push(fleet);h.state.currentFleet=fleet;};
+  h.state.setView=view=>{h.state.currentView=view;};
+  h.state.rosterIdentities.set('other',{...botIdentity,uid:'other',fleet:'other'});
+  h.state.inspectBot(botIdentity);assert.deepEqual(picks,[botIdentity.fleet]);assert.equal(h.state.currentView,'channel');
+  runInNewContext(rosterHelpers,h.state);h.state.adoptRoster(new Map([[botIdentity.uid,botIdentity]]));
+  assert.equal(h.roomBox.hidden,false,'narrowing the roster keeps the exact selected bot');
+  h.reads[0].resolve(roomPresence());await flush();assert.match(h.roomBox.innerHTML,/Recorded heartbeat/);
+  h.state.adoptRoster(new Map([[botIdentity.uid,{...botIdentity,alias:'replacement'}]]));
+  assert.equal(h.roomBox.hidden,true,'replaced identity erases the inspector');
+});
+
 const roomPresence=()=>({state:'ok',provenance:{checked_at:'2026-01-01T00:00:00Z'},data:{sampler_available:true,bots:[{alias:botIdentity.alias,live:'up',presence:'idle'}]}});
 test('room bot inspection reads scoped presence, keeps Rooms open and only prepares the existing message composer',async()=>{
   const h=inspectionHarness({room:true}),pending=h.state.openRoomBot({...botIdentity,last_seen:'2026-01-01'});

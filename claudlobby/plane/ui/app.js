@@ -814,7 +814,12 @@ function adoptRoster(next) {
     return !!b && Object.keys(a).every(key => a[key] === b[key]);
   });
   if (!same) { rosterIdentities = next; ++rosterGeneration; }
-  if (!same && typeof closeRoomBot === "function") closeRoomBot();
+  if (!same && typeof roomBotInspection !== "undefined" && roomBotInspection) {
+    const selected = roomBotInspection.identity, replacement = next.get(selected.uid);
+    if (replacement && ["uid","alias","fleet","fleet_uid","provisional"].every(key => replacement[key] === selected[key]))
+      roomBotInspection.roster = rosterGeneration;
+    refreshRoomBot();
+  }
   if (typeof paintConversationFocus === "function") paintConversationFocus();
   if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
   else refreshEquipmentAction();
@@ -2185,6 +2190,7 @@ function closeEquipment() {
 function inspectBot(identity) {
   if (!identity || sessionPaused) return;
   if (currentView === "channel" || typeof interactionApi.dispose === "function") {
+    if (activeRoom() !== "all" && activeRoom() !== identity.fleet) pickFleet(identity.fleet);
     if (currentView !== "channel") setView("channel");
     void openRoomBot(identity); return;
   }
