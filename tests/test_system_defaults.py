@@ -579,6 +579,53 @@ class TestComposeFleetTimers:
         _validate_alert_pair(fleet, report)
         assert any("no declared channel bot is in the fleet chat" in w for w in report.warnings)
 
+    @pytest.mark.parametrize(("fleet_chat", "lead", "aide", "pulse", "warns"), [
+        (None, "telegram", "none", None, "has no Telegram chat"),
+        ("-1009999999999", "none", "telegram", None, "is not a Telegram channel bot"),
+        ("-1009999999999", "telegram", "none", None, None),
+        (None, "telegram-own-chat", "none", None, None),
+        ("-1009999999999", "none", "telegram", ("-1007777777777", "/srv/escalation"), None),
+        ("-1009999999999", "none", "telegram", ("-1007777777777", None), None),
+        (None, "none", "none", None, None),
+        (None, "default", "default", None, None),
+    ], ids=["telegram-manager-without-a-chat", "manager-without-telegram", "fleet-chat",
+            "own-chat", "declared-pair", "chat-without-its-sender", "no-telegram",
+            "telegram-channel-by-default-only"])
+    def test_a_fleet_whose_alerts_reach_only_the_managers_pane_is_a_validator_warning(
+            self, fleet_chat, lead, aide, pulse, warns):
+        """#2654: with neither a declared pair nor the manager's own chat, `fleet
+        notify` and a failed job alert the manager's pane only. A fleet that sets up
+        no Telegram is not warned, though its bots take the Telegram channel by
+        default, and a chat without its sender is alert-unpaired's."""
+        from claudlobby.config import FleetPulseConfig, TelegramConfig
+        from claudlobby.validator import ValidationReport, _validate_alert_target
+
+        def bot(bot_id, kind):
+            # "default": the channel bot every bot is unless it says otherwise,
+            # with no Telegram set up; "telegram": the documented token_env.
+            if kind == "none":
+                return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"], channels=[])
+            if kind == "default":
+                return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"])
+            chat = "-1008888888888" if kind == "telegram-own-chat" else None
+            return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"],
+                             channels=["plugin:telegram@claude-plugins-official"],
+                             telegram=TelegramConfig(token_env="TELEGRAM_BOT_TOKEN", chat_id=chat))
+
+        fleet = FleetConfig(manager="lead", name="test-fleet", service_prefix="com.test",
+                            telegram_group_chat_id=fleet_chat,
+                            bots={"lead": bot("lead", lead), "aide": bot("aide", aide)},
+                            fleet_pulse=None if pulse is None else FleetPulseConfig(
+                                escalation_chat_id=pulse[0], escalation_state_dir=pulse[1]))
+        report = ValidationReport()
+        _validate_alert_target(fleet, report)
+        found = [message for kind, message in report.categorized() if kind == "alert-pane-only"]
+        if warns is None:
+            assert found == []
+        else:
+            assert len(found) == 1 and warns in found[0], found
+            assert found[0].startswith("fleet manager 'lead' ")
+
     @staticmethod
     def _paths(tmp_path):
         root = tmp_path / "claudlobby"
