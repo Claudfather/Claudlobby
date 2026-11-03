@@ -925,6 +925,20 @@ def test_linux_catalog_keeps_escaped_services_but_skips_non_consumers(tmp_path):
         inventory._catalog(text.replace(r"foo\x2dbar", r"foo\x2gbar"))
 
 
+def test_runtime_unit_directory_is_the_one_directory_under_home_the_runtime_reads(tmp_path, monkeypatch):
+    # supervisor.sh's svc_is_registered and keepalive-all.sh name these two literally (#2610).
+    assert inventory.runtime_unit_directory("Linux", tmp_path) == tmp_path / ".config/systemd/user"
+    assert inventory.runtime_unit_directory("Darwin", tmp_path) == tmp_path / "Library/LaunchAgents"
+    assert inventory.runtime_unit_directory("Linux", str(tmp_path)) == tmp_path / ".config/systemd/user"
+    assert inventory.runtime_unit_directory("FreeBSD", tmp_path) is None
+    assert inventory.runtime_unit_directory("", tmp_path) is None
+    # Without a home it is the caller's, read when asked.
+    assert inventory.runtime_unit_directory("Linux") == Path.home() / ".config/systemd/user"
+    assert inventory.runtime_unit_directory("Darwin") == Path.home() / "Library/LaunchAgents"
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    assert inventory.runtime_unit_directory("Linux") == tmp_path / "elsewhere" / ".config/systemd/user"
+
+
 def test_linux_native_properties_accepts_only_complete_systemd_escapes():
     prologue = '''
 uname() { printf 'Linux\n'; }

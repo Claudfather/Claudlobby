@@ -183,7 +183,7 @@ and `data/` remain mutable and are preserved during composition.
 |------|-------|
 | macOS (Mac mini) | launchd via `<bot>.plist`. `claudlobby/_runtime_scripts/creds-check.sh` ships with a launchd install pattern. |
 | Linux (Raspberry Pi 5, Debian, Ubuntu) | systemd user services via `<bot>.service`. Set `CLAUDLOBBY_ROOT=$HOME/claudlobby` in the unit's Environment. |
-| Linux (root systemd) | Same as user systemd; install to `/etc/systemd/system/` instead of `~/.config/systemd/user/`. |
+| Linux (root systemd) | Not supported: bots run as systemd user services, and activation installs their units only into `~/.config/systemd/user/`. |
 
 **GitHub identity.** By default bots use a shared `GITHUB_PAT`. To give a fleet its own
 **GitHub App identity** (short-lived installation tokens, branch protection that binds the

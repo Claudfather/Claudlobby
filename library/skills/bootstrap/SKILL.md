@@ -109,6 +109,12 @@ Have the operator provide `data.cli` and `data.release_id` from its result; set 
 reported path. Do not guess an installed CLI or write generated runtime files
 from the checkout.
 
+Set `USER_UNIT_DIR` to the one directory the runtime reads units from:
+`$HOME/.config/systemd/user` on Linux, `$HOME/Library/LaunchAgents` on macOS,
+and have the operator create it if absent. Activation refuses any other
+directory, and refuses this one too when the result's
+`data.install_directories` does not list it.
+
 For a first fleet, give the operator the sealed CLI path and this command to run from their shell outside the generated bot session:
 
 ```bash

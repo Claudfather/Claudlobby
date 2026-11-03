@@ -40,7 +40,8 @@ from .resources import get_resources
 from .runtime_admission import RuntimeIdentity, validate_unit_admission
 from .supervision_inventory import (Adapter, EnrolledUnit, FileSnapshot, InventoryError, UnitDeclaration,
                                     _catalog, _darwin_disabled, _darwin_source, _environment,
-                                    collect_enrollment, is_unit_template, legacy_linux_declarations)
+                                    collect_enrollment, is_unit_template, legacy_linux_declarations,
+                                    runtime_unit_directory)
 
 
 # A live preview can race normal writers; these facts need the authoritative
@@ -213,6 +214,36 @@ def _legacy_declarations(plan) -> tuple[UnitDeclaration, ...]:
     return tuple(result)
 
 
+def _require_runtime_directory(manager: str, install_directory: Path, directories) -> None:
+    """Refuse a new-unit directory the runtime does not read (#2610).
+
+    The native search path lists several directories, systemd's first being
+    ~/.config/systemd/user.control. A unit there loads, but keepalive and
+    svc_is_registered read only the runtime's own directory and skip it.
+    systemd-analyze derives the path from the caller's environment, where
+    XDG_CONFIG_HOME or SYSTEMD_UNIT_PATH can leave that directory off it.
+    """
+    runtime = runtime_unit_directory(manager)
+    if runtime is None:
+        raise ActivationRefusal("this native manager has no directory the runtime reads units from")
+    if install_directory != runtime:
+        raise ActivationRefusal(
+            f"the install directory must be {runtime}, the one directory the runtime reads units from")
+    if runtime not in directories:
+        why = ("; systemd derives that path from this environment, and XDG_CONFIG_HOME or "
+               "SYSTEMD_UNIT_PATH, when set, changes it") if manager == "Linux" else ""
+        raise ActivationRefusal(
+            f"{runtime}, the one directory the runtime reads units from, is not on the native search path{why}")
+
+
+def _refuse_directory_before_lock(adapter, install_directory) -> None:
+    """Refuse a directory the runtime does not read before taking the activation
+    lock, which can wait ACTIVATION_WAIT_S for running jobs. The check runs again
+    under the lock, on the catalog the enrollment digest covers."""
+    manager, _, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    _require_runtime_directory(manager, Path(install_directory), directories)
+
+
 def _preflight_candidate_placement(inventory, candidates, install_directory: Path) -> None:
     """Refuse foreign candidate labels before preparing or pausing an activation.
 
@@ -272,6 +303,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("bootstrap adapter differs from the candidate release")
+    _refuse_directory_before_lock(adapter, install_directory)
     with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         if read_selection(root) is not None:
             raise ActivationError("bootstrap refuses an existing release selection")
@@ -283,6 +315,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         inventory = collect_enrollment(root, (), bootstrap_empty=True, adapter=adapter).require_complete()
         install_directory = Path(install_directory)
         manager, domain, directories, _, _ = _catalog(inventory.catalog)
+        _require_runtime_directory(manager, install_directory, directories)
         if (not install_directory.is_absolute() or install_directory.resolve() != install_directory
                 or install_directory not in directories):
             raise ActivationError("bootstrap install directory is not an observed native search path")
@@ -1171,6 +1204,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("activation adapter differs from the candidate release")
+    _refuse_directory_before_lock(adapter, install_directory)
     with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         selected = read_selection(root)
         if legacy_source and selected is not None:
@@ -1228,6 +1262,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             raise ActivationError("legacy native manager changed during enrollment")
         manager, domain, directories, _, _ = _catalog(inventory.catalog)
         install_directory = Path(install_directory)
+        _require_runtime_directory(manager, install_directory, directories)
         if (not install_directory.is_absolute() or install_directory.resolve() != install_directory
                 or install_directory not in directories):
             raise ActivationError("install directory is not an observed native search path")

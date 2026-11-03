@@ -29,6 +29,8 @@ import stat
 import tempfile
 import time
 
+from .supervision_inventory import runtime_unit_directory
+
 RECORD_NAME = ".stopped"
 _BY = re.compile(r"[A-Za-z0-9:/._@-]{1,128}")
 _REASON_MAX_BYTES = 2000
@@ -128,10 +130,8 @@ def unit_installed(label: str, *, home: Path | None = None, system: str | None =
     for Python readers (parity-pinned by tests/test_stop_record.py)."""
     if not label:
         return False
-    home = Path.home() if home is None else Path(home)
     system = platform.system() if system is None else system
-    if system == "Linux":
-        return (home / ".config/systemd/user" / f"{label}.service").is_file()
-    if system == "Darwin":
-        return (home / "Library/LaunchAgents" / f"{label}.plist").is_file()
-    return False
+    directory = runtime_unit_directory(system, home)
+    if directory is None:
+        return False
+    return (directory / (f"{label}.service" if system == "Linux" else f"{label}.plist")).is_file()

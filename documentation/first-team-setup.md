@@ -19,16 +19,18 @@ Assemble the release with the chosen getting-started path, retaining `WORK/host-
 
 ## Continue after release assembly
 
-From the successful assembly result, retain the exact release and native directory:
+From the successful assembly result, retain the exact release and select the native directory the runtime reads (`$HOME/.config/systemd/user` on Linux, `$HOME/Library/LaunchAgents` on macOS); the command stops unless `data.install_directories` lists it:
 
 ```bash
 RELEASE_ID=$(jq -er \
   'select(.ok == true) | .data.release_id | select(type == "string" and length > 0)' \
   "$WORK/host-setup.json") &&
-USER_UNIT_DIR=$(jq -er \
-  'select(.ok == true) | .data.install_directories | select(type == "array" and length > 0) | .[0] | select(type == "string" and length > 0)' \
+USER_UNIT_DIR=$(jq -er --arg home "$HOME" \
+  'select(.ok == true) | .data | ($home + ({"Darwin": "/Library/LaunchAgents", "Linux": "/.config/systemd/user"}[.manager] // empty)) as $dir | select(any(.install_directories[]; . == $dir)) | $dir' \
   "$WORK/host-setup.json")
 ```
+
+That list is systemd's search path on Linux. `XDG_CONFIG_HOME` or `SYSTEMD_UNIT_PATH` set in the shell can leave the directory off it; activation then refuses too.
 
 ## Before connecting: access and publication gates
 
@@ -87,7 +89,7 @@ From the signed-in workspace, open its connected operational browser, using the 
 
 Paste the retained workspace code at the hidden prompt and review the local preview before its existing `BIND-WORKSPACE` confirmation. If staging was uncertain, inspect the original code locally instead of repeating it. Continue only with an effective active binding for the intended workspace.
 
-Replace `example-org/web-app` below with the approved existing repository and `web-app` with the intended first fleet name. Create only the native directory reported by assembly, then approve the exact release/repository/directory tuple:
+Replace `example-org/web-app` below with the approved existing repository and `web-app` with the intended first fleet name. Create only the native directory selected above, then approve the exact release/repository/directory tuple:
 
 ```bash
 mkdir -p "$USER_UNIT_DIR" &&

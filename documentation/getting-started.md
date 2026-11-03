@@ -60,8 +60,8 @@ RELEASE_CLI=$("$PYTHON" -I -c \
   'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
   "$WORK/host-setup.json") &&
 USER_UNIT_DIR=$("$PYTHON" -I -c \
-  'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["install_directories"][0])' \
-  "$WORK/host-setup.json") &&
+  'import json,sys; data=json.load(open(sys.argv[1]))["data"]; unit_dir=sys.argv[2]+{"Darwin": "/Library/LaunchAgents", "Linux": "/.config/systemd/user"}[data["manager"]]; assert unit_dir in data["install_directories"], unit_dir; print(unit_dir)' \
+  "$WORK/host-setup.json" "$HOME") &&
 "$RELEASE_CLI" --help
 ```
 
@@ -71,7 +71,7 @@ Use real absolute, unredirected paths. No installed Claudlobby or repository che
 
 The workflow also retains the unpacked `claudlobby-release-<revision>-<platform>-py311` artifact. After checking that bundle's inventory against the workflow checksums, it supports the same command with `/absolute/trusted-bundle/bootstrap.py` in place of `/absolute/claudlobby-install.pyz`.
 
-This command only assembles a release: no selection, activation, unit enrollment, credential changes or fleet startup. On success, `DATA` is the chosen absolute data root, `RELEASE_CLI` is the exact returned `data.cli`, and `USER_UNIT_DIR` is the first directory allowed by the native owner's returned `data.install_directories`. Keep the success JSON in `WORK/host-setup.json`; none of these references the deleted temporary environment. **Return to [First-team setup](first-team-setup.md#continue-after-release-assembly) with those variables. Do not run the optional seed or template `fleet setup` command for the browser route.** The installed template is selected by the browser after local setup approval; preview and activation remain separate from this launcher. For a browser/Plane host, the operator must request the workflow's explicit `plane-ui` extras input; the default bundle does not silently include that optional capability.
+This command only assembles a release: no selection, activation, unit enrollment, credential changes or fleet startup. On success, `DATA` is the chosen absolute data root, `RELEASE_CLI` is the exact returned `data.cli`, and `USER_UNIT_DIR` is the one directory the runtime reads units from: `$HOME/.config/systemd/user` on Linux, `$HOME/Library/LaunchAgents` on macOS. The command above stops unless the native owner's returned `data.install_directories` lists it. That list is the native search path in the manager's own order; on Linux its first entry, `~/.config/systemd/user.control`, is a directory the runtime never reads. `XDG_CONFIG_HOME` or `SYSTEMD_UNIT_PATH` set in the shell can leave `USER_UNIT_DIR` off the list; activation then refuses too. Keep the success JSON in `WORK/host-setup.json`; none of these references the deleted temporary environment. **Return to [First-team setup](first-team-setup.md#continue-after-release-assembly) with those variables. Do not run the optional seed or template `fleet setup` command for the browser route.** The installed template is selected by the browser after local setup approval; preview and activation remain separate from this launcher. For a browser/Plane host, the operator must request the workflow's explicit `plane-ui` extras input; the default bundle does not silently include that optional capability.
 
 The following numbered sections are **source-build-only**; bundle users do not run their `WORK/bootstrap` commands. If a compatible trusted bundle is unavailable, use that source-build alternative. A CI offline assembly rehearsal does not prove newcomer onboarding, credentials or useful runtime work. The changed instructions require a fresh exported, scrubbed cold run stopping at the credential gate.
 
@@ -186,7 +186,7 @@ Replace every `REPLACE_ME` in the manifest, including the Telegram handle and us
 
 ## 4. Activate and diagnose
 
-Set `USER_UNIT_DIR` to a path reported in `host-setup.json` under `data.install_directories`. For a normal macOS user, that is `$HOME/Library/LaunchAgents`; for Linux user systemd, use `$HOME/.config/systemd/user`. Run from the same user-manager domain observed by setup.
+Set `USER_UNIT_DIR` to the one directory the runtime reads units from, which `host-setup.json` lists under `data.install_directories`; activation refuses any other. For a normal macOS user, that is `$HOME/Library/LaunchAgents`; for Linux user systemd, use `$HOME/.config/systemd/user`. Run from the same user-manager domain observed by setup.
 
 ```bash
 case "$(uname -s)" in

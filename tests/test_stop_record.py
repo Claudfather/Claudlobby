@@ -96,3 +96,21 @@ def test_unit_installed_is_svc_is_registered(tmp_path, installed):
                          str(tmp_path), label], env=env, capture_output=True, text=True, timeout=60).returncode
     assert (rc == 0) is installed
     assert stop_record.unit_installed(label, home=home) is installed
+
+
+def test_unit_installed_reads_the_one_directory_the_runtime_reads_for_each_manager(tmp_path):
+    label = "com.t.dir2610"
+    runtime, control = tmp_path / ".config/systemd/user", tmp_path / ".config/systemd/user.control"
+    agents = tmp_path / "Library/LaunchAgents"
+    for directory in (runtime, control, agents):
+        directory.mkdir(parents=True)
+    # systemd loads a unit in user.control, but the runtime never reads it (#2610).
+    (control / f"{label}.service").write_text("[Service]\n")
+    assert stop_record.unit_installed(label, home=tmp_path, system="Linux") is False
+    (runtime / f"{label}.service").write_text("[Service]\n")
+    assert stop_record.unit_installed(label, home=tmp_path, system="Linux") is True
+    assert stop_record.unit_installed(label, home=tmp_path, system="Darwin") is False
+    (agents / f"{label}.plist").write_text("<plist/>\n")
+    assert stop_record.unit_installed(label, home=tmp_path, system="Darwin") is True
+    assert stop_record.unit_installed(label, home=tmp_path, system="FreeBSD") is False
+    assert stop_record.unit_installed("", home=tmp_path, system="Linux") is False

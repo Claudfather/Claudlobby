@@ -208,7 +208,8 @@ def register_release_subparsers(sub):
     activate.set_defaults(func=_dispatch_host)
     activate.add_argument("plan_id", metavar="PLAN_ID")
     activate.add_argument("--install-directory", required=True, metavar="PATH",
-                          help="Absolute native user-unit directory; verified against the OS adapter's search paths")
+                          help="The one native user-unit directory the runtime reads: $HOME/.config/systemd/user "
+                               "on Linux, $HOME/Library/LaunchAgents on macOS")
     activate.add_argument("--preserve-bot-state", action="store_true",
                           help="Selected release upgrades only: restart witnessed live bots and keep absent servers stopped")
     activate.add_argument("--forward-recovery", action=BooleanOptionalAction, default=None,

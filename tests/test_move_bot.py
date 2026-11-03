@@ -15,6 +15,8 @@ import pytest
 from claudlobby.command_result import CommandFailure
 from claudlobby.commands import move_bot
 from claudlobby.config import load_fleet_snapshot
+from tests.test_activation import cold, tmp_path  # noqa: F401 — real short-root activation fixtures
+from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 
 
 def _move(tmp_path: Path, *, channel: bool = False) -> move_bot.Move:
@@ -360,7 +362,9 @@ def _preflight_fixture(tmp_path, monkeypatch, *, registry_preflight=False):
     monkeypatch.setattr(_helpers, "_validation_gate", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(host, "_operator_shell", lambda *_: None)
     monkeypatch.setattr(supervision_inventory, "Adapter", lambda *_: SimpleNamespace(read=lambda *_: ""))
-    monkeypatch.setattr(supervision_inventory, "_catalog", lambda *_: ("Linux", "", (), set(), {}))
+    # preflight refuses a search path that lacks the one directory the runtime reads (#2610), so the stub lists it.
+    monkeypatch.setattr(supervision_inventory, "_catalog", lambda *_: (
+        "Linux", "", (Path.home() / ".config/systemd/user",), set(), {}))
     monkeypatch.setattr(activation_enrollment, "selected_bot_entry", lambda *_: {"installed": str(root / "units/worker.service"),
                                     "target": "worker.service"})
     if not registry_preflight:
@@ -449,3 +453,113 @@ def test_retained_copy_leaves_the_stop_record_behind(tmp_path):
     assert (move.target_dir / "data" / "record.json").read_text() == '{"kept":true}'  # data/ was copied
     assert not (move.target_dir / "data" / ".stopped").exists()
     assert (move.source_dir / "data" / ".stopped").exists()  # the source keeps its own
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_preflight_installs_into_the_directory_the_runtime_reads_not_the_source_units_own(tmp_path, monkeypatch, manager):
+    """#2610's review: the move passed the directory its source unit sits in. On a host set up in user.control that
+    is one activation refuses, after the move has stopped the bot. macOS lists the runtime directory first, so
+    there the two are the same directory."""
+    from claudlobby import activation, activation_enrollment, supervision_inventory
+
+    args, _, _ = _preflight_fixture(tmp_path, monkeypatch)
+    home = Path.home()
+    if manager == "Linux":
+        runtime, unit_in = home / ".config/systemd/user", home / ".config/systemd/user.control"
+        directories, domain = (unit_in, runtime), ""
+    else:
+        runtime = unit_in = home / "Library/LaunchAgents"
+        directories, domain = (runtime, Path("/Library/LaunchAgents")), "gui/501"
+    unit = str(unit_in / "claudlobby.worker.service")
+    monkeypatch.setattr(supervision_inventory, "_catalog", lambda *_: (manager, domain, directories, set(), {}))
+    monkeypatch.setattr(activation_enrollment, "selected_bot_entry",
+                        lambda *_: {"installed": unit, "target": "claudlobby.worker.service"})
+    move = move_bot.preflight(args)
+    assert move.install_directory == runtime and move.installed == unit  # the new unit's directory; the source's own
+    activation._require_runtime_directory(manager, move.install_directory, directories)  # the rule the upgrade applies
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_a_move_is_refused_before_any_change_when_the_runtime_directory_is_off_the_search_path(
+        tmp_path, monkeypatch, apply):
+    """#2610's review: with XDG_CONFIG_HOME set, systemd's search path leaves ~/.config/systemd/user, which the
+    upgrade refuses, after the move has stopped the bot and copied its files. Preview and --apply both refuse first."""
+    from claudlobby import bot_operations, supervision_inventory
+    from claudlobby.commands import releases
+
+    args, _, _ = _preflight_fixture(tmp_path, monkeypatch)
+    args.apply = apply
+    xdg = tmp_path / "xdg-config/systemd"
+    monkeypatch.setattr(supervision_inventory, "_catalog",
+                        lambda *_: ("Linux", "", (xdg / "user.control", xdg / "user"), set(), {}))
+    monkeypatch.setattr(releases, "_executing_release", lambda _root: "selected")  # --apply wants the selected CLI
+    monkeypatch.setattr(move_bot, "update_access", lambda *_, **__: None)
+    monkeypatch.setattr(move_bot, "apply_move", lambda *_, **__: pytest.fail("the move ran"))
+    monkeypatch.setattr(bot_operations, "set_bot_running", lambda **_: pytest.fail("the source bot was stopped"))
+    with pytest.raises(CommandFailure) as refused:
+        move_bot.dispatch(args)
+    error = refused.value.error
+    assert error.code == "conflict" and error.message.startswith("bot move refused before it stops anything: ")
+    assert str(Path.home() / ".config/systemd/user") in error.message
+    assert "XDG_CONFIG_HOME" in error.message and "SYSTEMD_UNIT_PATH" in error.message
+
+
+def test_a_move_gives_the_real_upgrade_the_directory_the_runtime_reads(cold, tmp_path, monkeypatch):  # noqa: F811
+    """#2610's review: the move passed the directory its source unit sits in. On a host set up in user.control the
+    real upgrade refuses that one, after the move stopped the bot; the runtime's own directory passes. The upgrade
+    itself is real; the native manager, the stop, the staging and the move's pre-checks are not."""
+    from claudlobby import activation, activation_state, bot_operations, config_staging
+    from claudlobby.activation_enrollment import selected_bot_entry
+    from claudlobby.config_plan import ConfigPlanBuilder
+
+    root, release, plan, host = cold
+    runtime, control = Path.home() / ".config/systemd/user", Path.home() / ".config/systemd/user.control"
+    # A host set up before #2610: its units sit in user.control, which no activation installs into now.
+    control.mkdir(parents=True)
+    host.directory, host.search_path = control, [control, runtime]
+    real = activation._require_runtime_directory
+    monkeypatch.setattr(activation, "_require_runtime_directory", lambda *_: None)
+    activation.bootstrap_activation(root, "cold", plan.plan_id, control, adapter=host)
+    monkeypatch.setattr(activation, "_require_runtime_directory", real)
+    entry = selected_bot_entry(root, "example", "worker", "Linux")
+    assert Path(entry["installed"]).parent == control  # what the move used to pass as its install directory
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
+                                effects={"units": plan.effects["units"]})
+    for item in plan.effects["units"]:
+        builder.file(Path(item["source"]), plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+
+    class ReachedRoster(Exception):
+        pass
+
+    def roster(*_):
+        raise ReachedRoster  # past the install-directory checks
+
+    events = []
+    monkeypatch.setattr(move_bot, "no_active_assignment", lambda *_: None)
+    monkeypatch.setattr(move_bot, "source_session", lambda *_, **__: None)
+    monkeypatch.setattr(bot_operations, "set_bot_running",
+                        lambda **_: (events.append("stop") or SimpleNamespace(state="stopped")))
+    monkeypatch.setattr(config_staging, "stage_configuration", lambda *_: candidate)
+    monkeypatch.setattr(move_bot, "declared_paths", lambda *_, **__: [object()])
+    monkeypatch.setattr(move_bot, "staged_scope", lambda *_: None)
+    monkeypatch.setattr(activation, "Adapter", lambda *_: host)
+    monkeypatch.setattr(activation, "_roster", roster)
+
+    def move_into(arm, directory):  # a target directory of its own: the first arm copies into it
+        return replace(_move(tmp_path / arm), root=root, release_id=release.release_id, install_directory=directory,
+                       installed=entry["installed"], native_target=entry["target"], selected_plan_id=plan.plan_id)
+
+    with pytest.raises(CommandFailure, match="incomplete") as refused:
+        move_bot.apply_move(move_into("control", control), "worker", force=False, cleanup=False)
+    cause = refused.value.__cause__
+    assert isinstance(cause, activation_state.ActivationRefusal)
+    assert str(runtime) in str(cause) and str(control) not in str(cause)
+    assert events == ["stop"] and refused.value.data["source_stopped"] is True
+    events.clear()
+    directory = move_bot._install_directory("Linux", [control, runtime])
+    assert directory == runtime
+    with pytest.raises(CommandFailure, match="incomplete") as passed:
+        move_bot.apply_move(move_into("runtime", directory), "worker", force=False, cleanup=False)
+    assert isinstance(passed.value.__cause__, ReachedRoster) and events == ["stop"]
+    assert not (root / "state/activations" / passed.value.data["activation_id"]).exists()

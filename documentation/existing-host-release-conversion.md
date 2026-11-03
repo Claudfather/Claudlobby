@@ -78,7 +78,9 @@ venv and call `host setup`. For an existing estate, set `DATA` to the **existing
 absolute host data root** that owns the fleet manifests, runtime and Plane state;
 do not substitute a new empty root or copy only part of an estate. Keep `WORK`
 and the build checkout separate from that root. Retain the exact `RELEASE_CLI`,
-`RELEASE_ID`, wheel hash and native `USER_UNIT_DIR` reported by assembly.
+`RELEASE_ID`, wheel hash and the native `USER_UNIT_DIR` (`$HOME/.config/systemd/user`
+on Linux, `$HOME/Library/LaunchAgents` on macOS), which assembly lists in
+`data.install_directories`.
 
 Assembly leaves selection unchanged and starts nothing. Keep the old checkout
 pinned so old bots and enrolled timers can still read their existing scripts.

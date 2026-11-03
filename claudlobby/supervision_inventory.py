@@ -314,6 +314,23 @@ def launchd_list_rows(text: str) -> list[list[str]]:
     raise InventoryError("launchctl list printed no header")
 
 
+# The one directory the runtime reads units from, under $HOME, for each native
+# manager: svc_is_registered, keepalive-all.sh and the other shell readers name
+# it literally. The native search path lists more directories, and systemd lists
+# ~/.config/systemd/user.control first; a unit there loads, but the runtime never
+# sees it (#2610).
+_RUNTIME_UNIT_DIRECTORIES = {"Linux": ".config/systemd/user", "Darwin": "Library/LaunchAgents"}
+
+
+def runtime_unit_directory(manager: str, home: Path | None = None) -> Path | None:
+    """The one unit directory the runtime reads for MANAGER (a catalog's
+    `manager`, as `uname -s` names it), under HOME; None for another manager."""
+    relative = _RUNTIME_UNIT_DIRECTORIES.get(manager)
+    if relative is None:
+        return None
+    return (Path.home() if home is None else Path(home)) / relative
+
+
 def _catalog(text):
     manager, domain, directories, names, loaded = "", "", [], set(), {}
     launchd_rows = False
