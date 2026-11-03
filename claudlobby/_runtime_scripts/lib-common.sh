@@ -4412,20 +4412,29 @@ try:
         for ref, entries in registry.items():
             if ref.split("@", 1)[0] != plugin or enabled.get(ref) is not True:
                 continue
+            # Claude Code loads the FIRST entry that applies, in registry order
+            # and whatever its scope: a user or managed entry, or one recorded
+            # for this directory. A stale entry after it is inert (#2666). One
+            # recorded for another directory applies when both share a git
+            # root, which is not modelled here, so one ahead of the pick
+            # leaves the loaded install unknown.
             for entry in entries:
-                scope = entry.get("scope")
-                if scope != "user" and not (scope in ("project", "local") and entry.get("projectPath") == str(bot)):
-                    continue
-                install = Path(entry["installPath"])
-                if not install.is_absolute():
+                if entry.get("scope") in ("user", "managed") or entry.get("projectPath") == str(bot):
+                    break
+                if entry.get("projectPath"):
                     raise ValueError()
-                install = install.resolve()
-                if not any(install == root or root in install.parents for root in discovered):
-                    raise ValueError()
-                manifest = json.loads((install / ".claude-plugin/plugin.json").read_text())
-                if manifest.get("name") != plugin:
-                    raise ValueError()
-                candidates.append(install / "skills" / skill / "SKILL.md")
+            else:
+                continue
+            install = Path(entry["installPath"])
+            if not install.is_absolute():
+                raise ValueError()
+            install = install.resolve()
+            if not any(install == root or root in install.parents for root in discovered):
+                raise ValueError()
+            manifest = json.loads((install / ".claude-plugin/plugin.json").read_text())
+            if manifest.get("name") != plugin:
+                raise ValueError()
+            candidates.append(install / "skills" / skill / "SKILL.md")
     if len(set(candidates)) != 1:
         raise ValueError()
     lines = candidates[0].read_text().splitlines()

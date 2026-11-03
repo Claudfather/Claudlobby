@@ -64,7 +64,11 @@ class TestStartupBootstrap:
 
     @pytest.mark.parametrize("mode", ["plugin", "local", "cache-only", "disabled-skill",
                                       "disabled-plugin", "ambiguous", "native", "opaque",
-                                      "empty", "stale", "missing", "absent"])
+                                      "empty", "stale", "missing", "absent", "stale-local",
+                                      "skill-file-missing", "corrupt",
+                                      pytest.param("unreadable", marks=pytest.mark.skipif(
+                                          os.geteuid() == 0, reason="root reads a mode-000 file")),
+                                      "managed-first", "foreign-first"])
     def test_skill_bootstrap_and_literal_compatibility(self, tmp_path, mode):
         bot, account = tmp_path / "bot", tmp_path / "selected account"
         skills = bot / ".claude/skills"
@@ -81,15 +85,49 @@ class TestStartupBootstrap:
         # plugin.json name, skills/session/SKILL.md name and argument-hint.
         # Provider/path identifiers are synthetic; see startup-one-prompt receipt.
         entries = [{"scope": "user", "version": "1.0.0", "installPath": str(install)}]
+        plugins = {"provider@market": entries}
+        enabled = {"provider@market": mode != "disabled-plugin"}
         if mode == "ambiguous":
-            other = install.parent / "2.0.0"
+            # A real tie: two enabled plugins share the name, each with its own install.
+            mirror = account / "plugins/cache/mirror/provider/1.0.0"
+            shutil.copytree(install, mirror)
+            plugins["provider@mirror"] = [{"scope": "user", "version": "1.0.0", "installPath": str(mirror)}]
+            enabled["provider@mirror"] = True
+        elif mode in {"stale-local", "skill-file-missing", "managed-first"}:
+            # Two entries apply and Claude Code loads the FIRST in registry
+            # order. Each case breaks the install it must not read, so a wrong
+            # choice flips the verdict.
+            other = install.parent / "0.9.0"
             shutil.copytree(install, other)
-            entries.append({"scope": "user", "installPath": str(other)})
+            stale = {"scope": "local", "projectPath": str(bot), "version": "0.9.0", "installPath": str(other)}
+            refusing = "---\nname: session\ndisable-model-invocation: true\n---\nResume.\n"
+            if mode == "stale-local":
+                # The production shape: the user entry first, then a stale entry
+                # for this directory whose Skill would refuse.
+                (other / "skills/session/SKILL.md").write_text(refusing)
+                entries.append(stale)
+            elif mode == "skill-file-missing":
+                # The entry for this directory first: it loads and has no Skill
+                # file, though the later user entry has one.
+                (other / "skills/session/SKILL.md").unlink()
+                entries.insert(0, stale)
+            else:
+                # A managed entry applies as a user entry does.
+                (other / "skills/session/SKILL.md").write_text(refusing)
+                entries[0]["scope"] = "managed"
+                entries.append({"scope": "user", "version": "0.9.0", "installPath": str(other)})
+        elif mode == "foreign-first":
+            # An entry recorded for another directory can apply through a shared
+            # git root, which the script does not model: the loaded install is unknown.
+            entries.insert(0, {"scope": "local", "projectPath": str(tmp_path / "elsewhere"),
+                               "version": "1.0.0", "installPath": str(install)})
         if mode != "cache-only":
-            (account / "plugins/installed_plugins.json").write_text(json.dumps({
-                "version": 2, "plugins": {"provider@market": entries}}))
-        (bot / ".claude/settings.local.json").write_text(json.dumps({
-            "enabledPlugins": {"provider@market": mode != "disabled-plugin"}}))
+            registry = account / "plugins/installed_plugins.json"
+            registry.write_text("{not json" if mode == "corrupt" else json.dumps({
+                "version": 2, "plugins": plugins}))
+            if mode == "unreadable":
+                registry.chmod(0)
+        (bot / ".claude/settings.local.json").write_text(json.dumps({"enabledPlugins": enabled}))
         command = "/provider:session resume --auto --note 'keep spaces'"
         if mode == "local":
             local = skills / "restore"
@@ -126,18 +164,20 @@ emit_fleet_event() { :; }
         assert result.returncode == 0, result.stderr
         assert not errors.exists()
         payloads = sends.read_bytes().decode().rstrip("\0").split("\0")
-        if mode in {"plugin", "local"}:
+        bootstrap = mode in {"plugin", "local", "stale-local", "managed-first"}
+        assert ("STARTUP mode=skill-bootstrap" in (log.read_text() if log.exists() else "")) == bootstrap
+        if bootstrap:
             assert len(payloads) == 1
             assert payloads[0].startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1")
-            slash_name = "/provider:session" if mode == "plugin" else "/restore"
+            slash_name = "/restore" if mode == "local" else "/provider:session"
             assert "\n\n" + slash_name + "\n\n" in payloads[0]
             call = json.loads(next(line for line in payloads[0].splitlines()
                                    if line.startswith('{"skill":')))
             assert "stop and report" in payloads[0]
             assert "Do not continue to startup" in payloads[0]
             assert "do not reproduce the Skill by another route" in payloads[0]
-            assert call == {"skill": "provider:session" if mode == "plugin" else "restore",
-                            "args": "resume --auto --note 'keep spaces'" if mode == "plugin" else "resume --auto"}
+            assert call == {"skill": "restore" if mode == "local" else "provider:session",
+                            "args": "resume --auto" if mode == "local" else "resume --auto --note 'keep spaces'"}
             assert "FLEET_STARTUP_INSTRUCTIONS_BEGIN\n" + startup + "\nFLEET_STARTUP_INSTRUCTIONS_END" in payloads[0]
         elif mode in {"empty", "stale", "missing", "absent"}:
             assert payloads == ["set +H; " + startup]
