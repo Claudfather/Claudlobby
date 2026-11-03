@@ -779,7 +779,7 @@ function renderFleet(env) {
     const identity = rosterIdentities.get(button.dataset.botInspect), version = rosterGeneration, epoch = sessionEpoch;
     button.addEventListener("click", () => {
       if (!button.isConnected || sessionPaused || epoch !== sessionEpoch || version !== rosterGeneration) return;
-      inspectBot(identity);
+      inspectBot({...identity,last_seen:rows.find(a => a.uid === identity.uid)?.last_seen});
     });
   });
   el.querySelectorAll("[data-bot-message]").forEach(button => {
@@ -814,6 +814,7 @@ function adoptRoster(next) {
     return !!b && Object.keys(a).every(key => a[key] === b[key]);
   });
   if (!same) { rosterIdentities = next; ++rosterGeneration; }
+  if (!same && typeof closeRoomBot === "function") closeRoomBot();
   if (typeof paintConversationFocus === "function") paintConversationFocus();
   if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
   else refreshEquipmentAction();
@@ -1355,6 +1356,7 @@ function ansiToHtml(text) {
 let currentView = "channel";
 let equipmentAlias = null;
 let equipmentGeneration = 0, equipmentSelection = null, equipmentFocus = null, inventoryAliases = new Set();
+let roomBotInspection = null, roomBotEpoch = 0;
 let rosterGeneration = 0, rosterIdentities = new Map();
 let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
@@ -1383,6 +1385,7 @@ function savePick(f) {
 function adoptFleets(env) {
   if (!env || !env.data || (env.state !== "ok" && !Array.isArray(env.data.fleet_choices))) return;
   fleets = env.data.fleet_choices || env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  if (typeof refreshRoomBot === "function") refreshRoomBot();
   // An empty unreadable first snapshot is not discovery. A later degraded
   // overview must not erase a dimension already learned from a readable reply.
   fleetsSeen ||= env.data.coverage?.reachable !== 0 || fleets.length > 0;
@@ -1455,6 +1458,7 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f && typeof closeRoomBot === "function") closeRoomBot();
   if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
   if (currentFleet !== f) { ++generation; closeEquipment(); }
   currentFleet = f;
@@ -1481,22 +1485,29 @@ function agentDirectoryVisible() {
 }
 function resetAgentPresence() {
   agentPresence = null; agentPresenceDue = 0;
+  if (typeof closeRoomBot === "function") closeRoomBot();
   if (agentDirectoryVisible()) renderState($("grid"), { state: "loading" });
 }
-function agentDirectoryCard(actor, presence) {
-  const source = presence?.data?.sources?.find(s => actor.uid.startsWith(s.key + "::"));
+function botPresenceFacts(actor, presence) {
+  const sources = presence?.data?.sources;
+  const source = sources ? sources.find(s => actor.uid.startsWith(s.key + "::") && actor.alias.startsWith(s.key + "::"))
+    : !actor.uid.includes("::") && presence?.data ? {...presence.data,state:presence.state,provenance:presence.provenance} : null;
   const observed = presence?.data?.bots?.find(b => b.alias === actor.alias);
   const live = source?.state === "ok" && source.sampler_available
     && ["up", "down"].includes(observed?.live) ? observed.live : "unknown";
   const heartbeat = source?.state === "ok" && !source.recorded_unavailable
     && observed ? PRESENCE_WORD[observed.presence] || "unknown" : "unknown";
+  return {live,heartbeat,checked:source?.state === "ok" ? source.provenance?.checked_at : null};
+}
+function agentDirectoryCard(actor, presence) {
+  const {live,heartbeat,checked} = botPresenceFacts(actor,presence);
   const team = fleets.find(f => f.alias === actor.fleet);
   return `<article class="agent-card"><h3>${esc(actor.short || actor.alias)}</h3>`
     + `<p>${esc(team?.display_label || actor.fleet)}</p>`
     + `<dl><dt>Recorded activity</dt><dd>${esc(ago(actor.last_seen))}</dd>`
     + `<dt>Live session</dt><dd>${esc(live)}</dd>`
     + `<dt>Recorded heartbeat</dt><dd>${esc(heartbeat)}</dd></dl>`
-    + (source?.provenance?.checked_at ? `<small>Presence checked ${esc(ago(source.provenance.checked_at))}</small>` : "")
+    + (checked ? `<small>Presence checked ${esc(ago(checked))}</small>` : "")
     + (actor.provisional ? `<p class="dim">Unconfirmed identity; messaging is unavailable.</p>` : "")
     + `<button class="pill ghost" type="button" data-agent-team="${esc(actor.uid)}"`
     + ` ${!team || actor.provisional ? "disabled" : ""}>Open team</button></article>`;
@@ -1692,6 +1703,7 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  if (view !== "channel" && typeof closeRoomBot === "function") closeRoomBot();
   const wasDirectory = agentDirectoryVisible();
   if (view !== "fleet") closeEquipment();
   currentView = view;
@@ -1980,7 +1992,7 @@ function showLoading() {
 }
 showLoading();
 let workLoop = null;
-workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); paintConversationFocus(); } });
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); paintConversationFocus(); refreshRoomBot(); } });
 let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
@@ -2167,6 +2179,7 @@ function closeEquipment() {
 }
 function inspectBot(identity) {
   if (!identity || sessionPaused) return;
+  if (currentView === "channel") { void openRoomBot(identity); return; }
   const origin = document.activeElement;
   const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
   if (roomChanged) pickFleet(identity.fleet);
@@ -2298,4 +2311,93 @@ async function openEquipment(alias) {
     }
     box.scrollIntoView({ block: "nearest" });
   }
+}
+
+// Room inspection is a read-only presence snapshot, separate from equipment.
+function roomBotPanel(create = false) {
+  let panel = $("room-bot-inspection");
+  if (panel?.id === "room-bot-inspection") return panel;
+  const anchor = $("room-focus");
+  if (!create || !anchor) return null;
+  panel = document.createElement("section"); panel.id = "room-bot-inspection";
+  panel.className = "room-bot-inspector"; panel.hidden = true;
+  panel.setAttribute("aria-label", "Bot inspection"); anchor.after(panel);
+  return panel;
+}
+function closeRoomBot() {
+  ++roomBotEpoch; roomBotInspection = null;
+  const panel = roomBotPanel();
+  if (panel) { panel.innerHTML = ""; panel.hidden = true; }
+}
+function currentRoomBot(snapshot = roomBotInspection) {
+  if (!snapshot || sessionPaused || snapshot.session !== sessionEpoch || snapshot.roster !== rosterGeneration
+      || currentView !== "channel" || activeRoom() !== snapshot.room
+      || snapshot.room !== "all" && snapshot.room !== snapshot.identity.fleet) return false;
+  const current = rosterIdentities.get(snapshot.identity.uid);
+  return !!current && !current.provisional
+    && ["uid","alias","fleet","fleet_uid"].every(key => current[key] === snapshot.identity[key])
+    && fleets.some(f => f.alias === current.fleet && f.uid === current.fleet_uid);
+}
+function roomBotRecipient() {
+  return currentRoomBot() ? {...rosterIdentities.get(roomBotInspection.identity.uid),current:true} : null;
+}
+function refreshRoomBot() {
+  if (!roomBotInspection) return;
+  if (!currentRoomBot()) { closeRoomBot(); return; }
+  const button = roomBotPanel()?.querySelector(".ed-message");
+  if (button) button.disabled = !workLoop?.canSelectMessageRecipient(roomBotRecipient());
+}
+async function openRoomBot(identity) {
+  const current = identity && rosterIdentities.get(identity.uid);
+  if (!current || current.provisional || ["alias","fleet","fleet_uid"].some(key => current[key] !== identity[key])) return;
+  const snapshot = {identity:Object.freeze({...current,last_seen:identity.last_seen}),session:sessionEpoch,roster:rosterGeneration,room:activeRoom()};
+  if (!currentRoomBot(snapshot)) return;
+  const panel = roomBotPanel(true); if (!panel) return;
+  const ticket = ++roomBotEpoch; roomBotInspection = snapshot;
+  panel.hidden = false;
+  const heading = `<div class="ed-head"><b>${esc(current.short || current.alias)}</b><button type="button" class="pill ghost ed-close">Close inspection</button></div>`;
+  const connectClose = () => {
+    const close = panel.querySelector(".ed-close");
+    close.onclick = () => {
+      if (!close.isConnected || ticket !== roomBotEpoch || roomBotInspection !== snapshot) return;
+      closeRoomBot();
+      [...($("fleet")?.querySelectorAll?.('[data-bot-inspect]') || [])]
+        .find(button => button.dataset.botInspect === current.uid)?.focus();
+    };
+  };
+  panel.innerHTML = heading + '<p class="note">Checking recorded heartbeat and live session…</p>';
+  connectClose(); panel.querySelector(".ed-close").focus(); panel.scrollIntoView({block:"nearest"});
+  let value;
+  try { value = await jget(`/api/presence?fleet=${encodeURIComponent(current.fleet)}`); }
+  catch { value = {state:"unavailable"}; }
+  if (ticket !== roomBotEpoch || roomBotInspection !== snapshot) return;
+  if (!currentRoomBot(snapshot)) { closeRoomBot(); return; }
+  const focused = panel.contains(document.activeElement);
+  const facts = botPresenceFacts(current,value);
+  panel.innerHTML = heading + `<dl><dt>Recorded activity</dt><dd>${esc(snapshot.identity.last_seen ? ago(snapshot.identity.last_seen) : "unknown")}</dd>
+    <dt>Live session at check</dt><dd>${esc(facts.live)}</dd>
+    <dt>Recorded heartbeat</dt><dd>${esc(facts.heartbeat)}</dd>
+    <dt>Presence checked</dt><dd>${esc(facts.checked ? ago(facts.checked) : "unconfirmed")}</dd></dl>
+    <p class="note">Snapshot only. Refresh to check again; recorded activity alone does not mean idle.</p>
+    ${value?.state !== "ok" ? '<p class="note">Presence is unavailable. No running or idle state is inferred.</p>' : ''}
+    <div class="room-bot-actions"><button type="button" class="pill ghost rb-refresh">Refresh status</button>
+    <button type="button" class="pill ghost ed-message" disabled>Message this bot</button>
+    ${typeof interactionApi.dispose !== "function" ? '<button type="button" class="pill ghost rb-equipment">Equipment details</button>' : ''}</div>`;
+  connectClose();
+  panel.querySelector(".rb-refresh").onclick = () => {
+    if (ticket === roomBotEpoch && currentRoomBot(snapshot)) void openRoomBot(snapshot.identity);
+  };
+  const message = panel.querySelector(".ed-message");
+  message.onclick = () => {
+    if (!message.isConnected || ticket !== roomBotEpoch || !currentRoomBot(snapshot)) return;
+    if (workLoop.selectMessageRecipient(roomBotRecipient())) { closeRoomBot(); $("work-loop").scrollIntoView({block:"nearest"}); }
+    else refreshRoomBot();
+  };
+  const equipment = panel.querySelector(".rb-equipment");
+  if (equipment) equipment.onclick = () => {
+    if (ticket !== roomBotEpoch || !currentRoomBot(snapshot)) return;
+    setView("fleet"); inspectBot(snapshot.identity);
+  };
+  refreshRoomBot();
+  if (focused) panel.querySelector(".ed-close").focus();
 }
