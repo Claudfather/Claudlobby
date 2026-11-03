@@ -387,11 +387,11 @@ def test_bootstrap_install_failure_identifies_step_without_echoing_output(monkey
 
 
 @pytest.mark.parametrize("packaged", [False, True])
-def test_guided_bootstrap_cleans_temporary_inputs_before_durable_terminal_handoff(bootstrap_bundle, tmp_path, monkeypatch, packaged):
+def test_guided_bootstrap_cleans_temporary_inputs_before_durable_terminal_handoff(bootstrap_bundle, tmp_path, monkeypatch, capsys, packaged):
     import json
     bootstrap, script, _, _ = bootstrap_bundle
     monkeypatch.setattr(bootstrap, "_run", lambda *a, **k: None)
-    root = (tmp_path / "data").resolve()
+    root = (tmp_path / "data with spaces and 'quotes'").resolve()
     cli = root / "state/releases" / ("r-"+"a"*64) / "venv/bin/claudlobby"
     cli.parent.mkdir(parents=True); cli.write_text("#!/bin/sh\nexit 0\n"); cli.chmod(0o700)
     seen = {}
@@ -410,6 +410,11 @@ def test_guided_bootstrap_cleans_temporary_inputs_before_durable_terminal_handof
         def wait(self): return 0
     monkeypatch.setattr(bootstrap.subprocess, "Popen", Assembly)
     def continue_in_terminal(argv, env):
+        output = capsys.readouterr()
+        lines = output.out.splitlines()
+        assert lines[0] == "Save this command to resume local setup:"
+        assert len(lines) == 2 and shlex.split(lines[1]) == argv
+        assert not output.err
         assert not seen["work"].exists()
         if packaged:
             assert not seen["bundle"].exists()
