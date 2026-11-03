@@ -961,7 +961,7 @@ function renderHeader(env) {
   const t = env.data.totals;
   const coverage = env.data.coverage;
   const coverageCopy = t.overview_retained ? ' · <small class="warn">Refreshing summaries; totals include the last read for pending computers</small>'
-    : coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
+    : coverage?.partial ? ` · <small class="warn">Team summaries: ${coverage.reachable}/${coverage.total} readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
     el.innerHTML = `<span class="dim">${t.overview_retained ? "no fleet recorded in last summaries" : coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
@@ -1015,16 +1015,17 @@ function renderSummary(env) {
   if (env?.data?.sources) {
     const c = env.data.coverage;
     const health = s => {
+      if (s.state === 'checking') return 'checking recorder status';
       if (s.state !== 'ok') return s.connection_state === 'not_connected' ? 'not connected'
         : s.connection_state === 'disconnected' ? 'disconnected'
-        : s.connection_state === 'ready' ? 'recording summary unavailable' : s.state;
+        : s.connection_state === 'ready' ? 'recorder status unavailable' : s.state;
       if (s.summary?.daemon_serving === false) return 'recorder DOWN';
       if (s.summary?.daemon_serving !== true) return 'recorder unknown';
       const at = Date.parse(s.provenance?.last_ingest_at);
       return Number.isFinite(at) && Date.now() - at < 12e4 ? 'recording' : 'recorder up, quiet';
     };
     beat.className = `dot ${!c.partial && env.data.sources.every(s => health(s) === 'recording') ? 'ok' : 'warn'}`;
-    label.textContent = `${c.reachable}/${c.total} sources readable · `
+    label.textContent = `Recorder status: ${c.reachable}/${c.total} readable · `
       + env.data.sources.map(s => `${s.label}: ${health(s)}`).join(' · ');
     return;
   }
