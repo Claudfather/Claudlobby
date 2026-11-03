@@ -248,3 +248,147 @@ def test_alerts_read_only_keys_the_fleet_pulse_block_composes():
     """A variable renamed in FLEET_PULSE_ENV_KEYS cannot drop out of alerts unseen."""
     from claudlobby.recording_alerts import _FLEET_PULSE_KEYS
     assert _FLEET_PULSE_KEYS <= set(FLEET_PULSE_ENV_KEYS.values())
+
+
+# #2654: a fleet that declares no pair alerts its manager's own chat, as the
+# manager's own bot. `aide` sorts before `manager` and is a channel bot in the
+# fleet chat, so a scan for the first channel bot in the chat would pick it.
+_TELEGRAM = "channels: [plugin:telegram@claude-plugins-official]"
+
+
+def _no_pair_fleet(tmp_path, *, chat='"-1004444444444"', manager=_TELEGRAM, pulse=""):
+    lines = ["fleet:", "  name: fleet", "  manager: manager", "  service_prefix: svc"]
+    if chat:
+        lines.append(f"  telegram_group_chat_id: {chat}")
+    lines += ["  bots:", "    aide:", "      expertise: [eng]", f"      {_TELEGRAM}",
+              "    manager:", "      expertise: [eng]"]
+    lines += [f"      {line}" for line in manager.splitlines()]
+    lines += [f"  {line}" for line in pulse.splitlines()]
+    fleet, _defaults = load_fleet(_write(tmp_path / "no-pair", "\n".join(lines) + "\n"))
+    return fleet
+
+
+def _tiers(**values):
+    return {key: SimpleNamespace(value=value) for key, value in values.items()}
+
+
+def _record_senders(package):
+    """The Telegram carrier records each alert's chat and sender, and whether a
+    token rode in with them: without one, tg-post reads the sender's own."""
+    (package.native / "tg-post.sh").write_text(
+        "#!/bin/bash\n"
+        "printf '%s|%s|%s\\n' \"$TELEGRAM_GROUP_CHAT_ID\" \"$TELEGRAM_STATE_DIR\" "
+        "\"${TELEGRAM_BOT_TOKEN:+token}\" >> \"$CLAUDLOBBY_ROOT/telegram-target\"\n")
+
+
+def _notify_with(context, package, manager, monkeypatch, *, tiers=None,
+                 message="svc.creds-check.service failed"):
+    """`fleet notify` as the selected manager, the manager's .env tiers given."""
+    monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
+    monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
+    @contextmanager
+    def admitted(*args, **kwargs):
+        yield SimpleNamespace(release_id="selected", native_path=package.native)
+    monkeypatch.setattr(operation, "mutation_admission", admitted)
+    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "_transport", lambda *_: manager)
+    monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: dict(tiers or {}))
+    return operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
+                                  event="job_failed", message=message, identity=object(),
+                                  emit=lambda *a, **k: [SimpleNamespace(status="committed")])
+
+
+def _targets(context):
+    target = context.paths.root / "telegram-target"
+    return target.read_text().splitlines() if target.exists() else []
+
+
+@pytest.mark.parametrize(("manager_yaml", "chat", "handle"), [
+    (_TELEGRAM, "-1004444444444", "manager"),
+    (f'{_TELEGRAM}\ntelegram:\n  chat_id: "-1005555555555"', "-1005555555555", "manager"),
+    (f"{_TELEGRAM}\ntelegram:\n  handle: lead_bot", "-1004444444444", "lead_bot"),
+], ids=["fleet-chat", "own-chat", "declared-handle"])
+def test_a_fleet_with_no_pair_alerts_the_managers_own_chat_as_the_manager(
+        private_alert, monkeypatch, tmp_path, manager_yaml, chat, handle):  # noqa: F811
+    """#2654: with no pair declared, the second channel is the chat the manager
+    is composed with, sent as the manager's own bot, with no token from the CLI."""
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = replace(context, fleet=_no_pair_fleet(tmp_path, manager=manager_yaml))
+    _record_senders(package)
+    result = _notify_with(context, package, manager, monkeypatch)
+    assert (result.manager.status, result.telegram.status) == ("submitted", "carrier_accepted")
+    sender = tmp_path / "home" / f".claude/channels/telegram-{handle}"
+    assert _targets(context) == [f"{chat}|{sender}|"]
+    # The chat is the one the manager's bot.conf is composed with.
+    from claudlobby.composer import _bot_template_context
+    composed = _bot_template_context(context.fleet.bots["manager"], context.fleet,
+                                     _make_paths(tmp_path / "no-pair"))
+    assert str(composed["TELEGRAM_GROUP_CHAT_ID"]) == chat
+
+
+def test_a_declared_pair_wins_over_the_managers_own(private_alert, monkeypatch, tmp_path):  # noqa: F811
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    escalation = tmp_path / "escalation-channel"
+    context = replace(context, fleet=_no_pair_fleet(tmp_path, pulse=(
+        f'fleet_pulse:\n  escalation_chat_id: "-1002222222222"\n  escalation_state_dir: {escalation}')))
+    _record_senders(package)
+    result = _notify_with(context, package, manager, monkeypatch)
+    assert result.telegram.status == "carrier_accepted"
+    assert _targets(context) == [f"-1002222222222|{escalation}|"]
+
+
+@pytest.mark.parametrize(("chat", "manager_yaml", "pulse"), [
+    ('"-1004444444444"', "channels: []", ""),
+    ("", _TELEGRAM, ""),
+    ('"-1004444444444"', _TELEGRAM, 'fleet_pulse:\n  escalation_chat_id: "-1002222222222"'),
+], ids=["manager-without-telegram", "manager-without-a-chat", "chat-without-its-sender"])
+def test_with_no_pair_and_no_managers_own_chat_the_second_channel_stays_unconfigured(
+        private_alert, monkeypatch, tmp_path, chat, manager_yaml, pulse):  # noqa: F811
+    """As before #2654: no other bot's sender is scanned for, and a chat declared
+    without its sender is refused, as the pulse refuses it, not replaced."""
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = replace(context, fleet=_no_pair_fleet(tmp_path, chat=chat, manager=manager_yaml,
+                                                    pulse=pulse))
+    _record_senders(package)
+    result = _notify_with(context, package, manager, monkeypatch)
+    assert (result.manager.status, result.telegram.status) == ("submitted", "unconfigured")
+    assert _targets(context) == []
+
+
+def test_a_tier_pair_still_wins_and_a_lone_tier_token_never_rides_the_managers_pair(
+        private_alert, monkeypatch, tmp_path):  # noqa: F811
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = replace(context, fleet=_no_pair_fleet(tmp_path))
+    _record_senders(package)
+    token = "8888888:AAAAAAAAAAAAAAAAAAAA"
+    paired = _notify_with(context, package, manager, monkeypatch, message="tier pair", tiers=_tiers(
+        TELEGRAM_GROUP_CHAT_ID="-1006666666666", TELEGRAM_STATE_DIR=str(tmp_path / "tier-channel"),
+        TELEGRAM_BOT_TOKEN=token))
+    lone = _notify_with(context, package, manager, monkeypatch, message="lone token",
+                        tiers=_tiers(TELEGRAM_BOT_TOKEN=token))
+    assert (paired.telegram.status, lone.telegram.status) == ("carrier_accepted", "carrier_accepted")
+    sender = tmp_path / "home" / ".claude/channels/telegram-manager"
+    assert _targets(context) == [f"-1006666666666|{tmp_path / 'tier-channel'}|token",
+                                 f"-1004444444444|{sender}|"]
+
+
+def test_a_failed_message_write_alerts_the_managers_own_chat_too(
+        private_alert, monkeypatch, tmp_path):  # noqa: F811
+    from claudlobby import env_tiers
+    from claudlobby.application_messages import _alert_tiers
+
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = replace(context, fleet=_no_pair_fleet(tmp_path))
+    _record_senders(package)
+    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **k: {})
+    tiers, available = _alert_tiers(SimpleNamespace(selected=context))
+    result = notify_recording_degraded(context, package, manager, request_id=REQUEST,
+                                       component="message", at=AT, trusted_tiers=tiers)
+    assert (available, result.telegram.status) == (True, "carrier_accepted")
+    sender = tmp_path / "home" / ".claude/channels/telegram-manager"
+    assert _targets(context) == [f"-1004444444444|{sender}|"]

@@ -4197,6 +4197,52 @@ harness_check "chunk N doctor --switches names every opt-in that ships OFF" "$r"
 grep -q "bots.<bot>.claudna.harvest: true" "$SW_ROOT/sw.txt" && r=yes || r=no
 harness_check "  ...each with the one line that arms it" "$r"
 
+# --- #2654: a fleet whose alerts reach only the manager's pane is WARNED ----
+# The fleet declares no fleet_pulse pair. With Telegram set up for m1 (the
+# documented token_env) and no chat id, `fleet notify` and a failed job alert
+# its pane only, and generate says so. Chunk N's own fleet sets up no Telegram,
+# though m1 takes the channel by default, and with a fleet chat the alerts go
+# to the manager's own chat: generate is silent for both. Each check for an
+# absence stands on a compose shown to have run.
+sw_generate ""
+r=no; [ -f "$SW_ROOT/runtime/bots/m1/bot.conf" ] && r=yes
+harness_check "#2654 the fleet with no Telegram set up composed" "$r"
+r=yes; grep -qF '[alert-pane-only]' "$SW_ROOT/gen.log" && r=no
+harness_check "  ...and generate does not warn about its alert target" "$r"
+cat > "$SW_ROOT/fleet.yaml" <<'SWEOF'
+fleet:
+  name: sw-validate
+  manager: m1
+  service_prefix: com.swvalidate
+  bots:
+    m1:
+      expertise: [orchestration]
+      telegram:
+        token_env: TELEGRAM_BOT_TOKEN
+SWEOF
+sw_generate ""
+r=no; [ -f "$SW_ROOT/runtime/bots/m1/bot.conf" ] && r=yes
+harness_check "#2654 the fleet with Telegram set up and no chat composed" "$r"
+r=no; grep -qF '[alert-pane-only]' "$SW_ROOT/gen.log" && r=yes
+harness_check "  ...and generate warns that its alerts reach the manager's pane only" "$r"
+cat > "$SW_ROOT/fleet.yaml" <<'SWEOF'
+fleet:
+  name: sw-validate
+  manager: m1
+  service_prefix: com.swvalidate
+  telegram_group_chat_id: "-1001234567890"
+  bots:
+    m1:
+      expertise: [orchestration]
+      telegram:
+        token_env: TELEGRAM_BOT_TOKEN
+SWEOF
+sw_generate ""
+r=no; [ -f "$SW_ROOT/runtime/bots/m1/bot.conf" ] && r=yes
+harness_check "#2654 the same fleet composed with a fleet chat" "$r"
+r=yes; grep -qF '[alert-pane-only]' "$SW_ROOT/gen.log" && r=no
+harness_check "  ...and generate is silent: its alerts go to the manager's own chat" "$r"
+
 rm -rf "$SW_ROOT"
 
 # =============================================================================

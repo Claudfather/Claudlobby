@@ -1,0 +1,5 @@
+### Fixed — a fleet with no escalation pair sends its alerts to the manager's own Telegram chat (#2654)
+
+`claudlobby fleet notify`, a failed fleet job's alert and a failed message write's alert reached only the manager's pane in a fleet that declares no `fleet_pulse` escalation pair, reported as `telegram=unconfigured`. They now go to the fleet manager's own chat (its `telegram.chat_id`, else `telegram_group_chat_id`), posted by the manager's own bot, whose token tg-post reads from the manager's channel state dir as it does for a declared pair. So an alert reaches a person with no extra configuration, including when the manager's session is what is down (#997). A declared pair still wins, as does a `TELEGRAM_GROUP_CHAT_ID` and `TELEGRAM_STATE_DIR` pair in the manager's `.env` tiers; a chat declared without its sender is still refused.
+
+`claudlobby config validate` now warns (`alert-pane-only`) when a fleet that sets up Telegram (a fleet chat, or a bot that declares a `handle`, `chat_id` or `token_env`) still leaves its alerts no Telegram target, because its manager is not a channel bot or has no chat.

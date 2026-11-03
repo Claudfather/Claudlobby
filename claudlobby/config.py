@@ -1011,6 +1011,85 @@ class FleetConfig:
 
 
 # ----------------------------------------------------------------------
+# Telegram identity
+# ----------------------------------------------------------------------
+# Plain facts about a bot's Telegram channel. They live here rather than in
+# the composer, so a runtime reader such as the alert path (#2654) needs no
+# compositor; the composer imports them from here.
+
+
+def _has_telegram_channel(channels: list[str]) -> bool:
+    """True when a bot launches with a Telegram channel.
+
+    A channel entry names the channel either bare (``telegram``) or as a
+    marketplace-pinned plugin ref (``plugin:telegram@claude-plugins-official``);
+    both mean the same channel. ``channels: []`` — the documented way to declare
+    a bot with no channel — yields False.
+    """
+    return any(
+        chan.removeprefix("plugin:").split("@", 1)[0] == "telegram" for chan in channels
+    )
+
+
+def telegram_channel_rel(handle: str) -> str:
+    """A channel bot's Telegram state dir, relative to the home dir: the ONE
+    definition behind its consumers (#1786), which need it in two forms.
+    ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
+    exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
+    (#976); ``access.json``, ``fleet_alert_sender_state_dir`` and
+    ``manager_alert_target`` take it absolute, as ``Path.home() / <this>``."""
+    return f".claude/channels/telegram-{handle}"
+
+
+def telegram_handle(bot: BotConfig) -> str | None:
+    """This bot's Telegram handle, or None when it is not a channel bot.
+
+    ``handle`` is optional and ``fleet.yaml`` documents the default plainly —
+    "handle defaults to bot_id". TELEGRAM_STATE_DIR has applied that default
+    since #43; the readers of the handle VARIABLE never did. So a fleet using
+    the documented default composed a working state dir, a live bridge, and no
+    TELEGRAM_BOT_HANDLE — and every consumer keyed off that variable concluded
+    the bot had no channel at all: bridge_state returned `no_handle` for a
+    provably live bridge, halting rolling-restart on its first bot (#1107), and
+    creds-check's Telegram probe skipped every bot on the host (#1097). One
+    resolver, so the default cannot drift apart again.
+
+    Returns None for a bot with no Telegram channel AND no declared handle —
+    the genuine non-channel class, which must stay expressible because
+    `bridge_state`'s `no_handle` and the restart gates' non-channel contract
+    (#901) both rest on it. An explicitly declared handle still wins outright,
+    channel or not: it names an existing state dir, and silently re-pointing
+    that path would orphan a live channel.
+    """
+    if bot.telegram.handle:
+        return bot.telegram.handle
+    if _has_telegram_channel(bot.channels):
+        return bot.bot_id
+    return None
+
+
+def manager_alert_target(fleet: FleetConfig) -> tuple[str, str] | None:
+    """The fleet manager's own Telegram chat and sender, or None (#2654).
+
+    Where a fleet alert goes when the fleet declares no ``fleet_pulse``
+    escalation pair: the chat the manager is composed with (its
+    ``telegram.chat_id``, else ``telegram_group_chat_id``, as
+    ``_bot_template_context`` writes it into its ``bot.conf``) and the manager's
+    own channel state dir. A bot's own chat is one it is in, as
+    ``_bot_with_own_chat`` takes it, so the two are one pair from one source
+    (#1771). Nothing here reads a token: tg-post reads the manager's from that
+    dir, as for a declared pair. None when the manager is not a channel bot or
+    has no chat.
+    """
+    bot = fleet.bots[fleet.manager]
+    handle = telegram_handle(bot)
+    chat = bot.telegram.chat_id or fleet.telegram_group_chat_id
+    if handle is None or not chat:
+        return None
+    return str(chat), str(Path.home() / telegram_channel_rel(handle))
+
+
+# ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
 

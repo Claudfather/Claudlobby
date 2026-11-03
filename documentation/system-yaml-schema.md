@@ -478,9 +478,11 @@ claudlobby --root <data root> --fleet <fleet> fleet notify --level alert --event
   data. The type is `fleet_alert`, not `job_failed`: find these with
   `claudlobby --json --fleet <fleet> event list --type fleet_alert`, or with
   `--critical`. `--type job_failed` finds nothing.
-- **Whom it reaches:** the fleet manager's pane and the fleet's alert chat,
+- **Whom it reaches:** the fleet manager's pane and the fleet's alert chat:
   the target fleet-pulse escalates to (the `fleet_pulse` block in
-  [`fleet-yaml-schema.md`](fleet-yaml-schema.md)). Each channel pages once for
+  [`fleet-yaml-schema.md`](fleet-yaml-schema.md)), or, in a fleet that
+  declares no pair, the manager's own chat, posted by the manager's own bot
+  (#2654). Each channel pages once for
   a unit, and again after `renotify_after_s` (6 h by default) while the unit
   keeps failing; every failure is still recorded.
 - **What stays out:** bot services (fleet-pulse watches them), host jobs, which
