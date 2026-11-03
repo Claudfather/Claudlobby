@@ -997,18 +997,29 @@ test(`room bot inspection erases detail and refuses late responses after ${loss}
   h.reads[0].resolve(roomPresence());await pending;
   assert.equal(h.roomBox.innerHTML,'');assert.equal(h.selections.length,0);
 });
-test('inspector conversation shortcut uses exact admitted read identity without reads or message authority',async()=>{
+for(const searchState of ['visible','debounced','pending'])
+test(`inspector conversation shortcut uses exact admitted read identity and exits ${searchState} search without reads or message authority`,async()=>{
   const h=inspectionHarness({room:true}),actor={...botIdentity,uid:'north::'+botIdentity.uid,alias:'north::lead',fleet:'north / team',fleet_uid:'north::'+botIdentity.fleet_uid};
   h.state.currentFleet='all';h.state.rosterIdentities=new Map([[actor.uid,actor]]);h.state.fleets=[{alias:actor.fleet,uid:actor.fleet_uid}];
   h.state.conversationSnapshot={state:'ok',data:{sources:[{key:'north',state:'ok'},{key:'south',state:'ok'}],threads:[]}};
   const renders=[];h.state.renderChannel=value=>renders.push(value);h.state.workLoop.canSelectMessageRecipient=()=>false;
   const pending=h.state.openRoomBot(actor);h.reads[0].resolve({state:'unavailable'});await pending;
   assert.equal(h.roomButtons.get('.rb-conversation').disabled,false);assert.equal(h.roomButtons.get('.ed-message').disabled,true);
+  const search={value:'old query',addEventListener(type,handler){this[type]=handler;}},results={hidden:false},channel={hidden:true,scrollIntoView(){}};
+  const originalDollar=h.state.$,timers=new Map();h.state.$=id=>id==='search'?search:id==='search-results'?results:id==='channel'?channel:originalDollar(id);
+  Object.assign(h.state,{searchTimer:null,setTimeout(callback){timers.set(1,callback);return 1;},clearTimeout(id){timers.delete(id);},renderSearch(){throw Error('stale search must not paint');}});
+  runInNewContext(inspectionApp.slice(inspectionApp.indexOf('$("search").addEventListener("input"'),inspectionApp.indexOf('function resumeOwnerReads()')),h.state);
+  let searchPending;
+  if(searchState!=='visible') {search.input();if(searchState==='pending')searchPending=timers.get(1)();}
+  const readsBefore=h.reads.length;
   const old=h.roomButtons.get('.rb-conversation');old.onclick();
+  assert.equal(search.value,'');assert.equal(results.hidden,true);assert.equal(channel.hidden,false);assert.equal(timers.size,0);
+  assert.equal(h.state.searchTimer,null);
+  if(searchPending) {h.reads[1].resolve({state:'ok',data:{results:[]}});await searchPending;assert.equal(results.hidden,true);assert.equal(channel.hidden,false);}
   assert.equal(h.state.conversationFocus.bot,actor.alias);assert.equal(h.state.conversationFocus.other,'');
   assert.equal(h.state.currentFleet,'all');assert.equal(h.roomBox.hidden,true);assert.equal(renders.length,1);
-  assert.equal(h.reads.length,1);assert.equal(h.selections.length,0);old.onclick();assert.equal(renders.length,1);
-  const second=h.state.openRoomBot(actor);h.reads[1].resolve({state:'unavailable'});await second;
+  assert.equal(h.reads.length,readsBefore);assert.equal(h.selections.length,0);old.onclick();assert.equal(renders.length,1);
+  const second=h.state.openRoomBot(actor);h.reads.at(-1).resolve({state:'unavailable'});await second;
   h.state.conversationSnapshot.data.sources[0].state='denied';h.state.refreshRoomBot();
   assert.equal(h.roomButtons.get('.rb-conversation').disabled,true);h.roomButtons.get('.rb-conversation').onclick();assert.equal(renders.length,1);
 });

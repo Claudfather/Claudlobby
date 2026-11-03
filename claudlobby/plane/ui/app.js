@@ -2465,6 +2465,8 @@ async function openRoomBot(identity) {
     const actor = conversationIdentity(snapshot.identity.uid);
     if (!actor) { refreshRoomBot(); return; }
     conversationFocus = {bot:actor.alias,other:""};
+    clearTimeout(searchTimer); searchTimer = null;
+    $("search").value = ""; $("search-results").hidden = true; $("channel").hidden = false;
     closeRoomBot(); renderChannel(conversationSnapshot);
     $("room-bot")?.focus(); $("channel").scrollIntoView({block:"nearest"});
   };
