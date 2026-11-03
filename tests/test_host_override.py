@@ -136,16 +136,25 @@ def test_host_job_reads_effective_host_override_without_fleet_merge(tmp_path, ov
     listing = json.loads(capsys.readouterr().out)
     assert listing["command"] == "host.job.list" and listing["ok"]
     assert {item["name"]: item["enroll"] for item in listing["data"]["jobs"]}["claude-update"] is False
+    assert listing["data"]["source"] == "effective_host_configuration"
+    assert listing["data"]["native_state"] == "not_checked"
 
     assert main(["--root", str(tmp_path), "host", "job", "list"]) == 0
-    assert "claude-update\tenroll=false" in capsys.readouterr().out
+    plain = capsys.readouterr().out
+    assert "claude-update\tenroll=false" in plain
+    assert "host.jobs.claude-update.enroll" in plain and "host doctor --switches" in plain
+    assert "installed/running state was not checked" in plain
 
     assert main(["--root", str(tmp_path), "host", "job", "show", "claude-update", "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["data"]["job"] == load_host_jobs()["claude-update"]
+    assert "config plan" in shown["data"]["enrollment_hint"]
 
     assert main(["--root", str(tmp_path), "host", "job", "show", "claude-update"]) == 0
-    assert json.loads(capsys.readouterr().out) == shown["data"]["job"]
+    lines = capsys.readouterr().out.splitlines()
+    assert json.loads(lines[0]) == shown["data"]["job"]
+    assert "host.jobs.claude-update.enroll" in " ".join(lines[1:])
+    assert "installed/running state was not checked" in " ".join(lines[1:])
 
 
 def test_host_job_run_requires_selected_enabled_unit_and_reports_only_request(tmp_path, monkeypatch):
@@ -225,6 +234,16 @@ def test_host_job_run_requires_selected_enabled_unit_and_reports_only_request(tm
     with pytest.raises(host_run.HostJobError, match="disabled"):
         host_run.run_host_job(root, "plane-prune", adapter=adapter)
     assert calls == []
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import host, host_jobs, releases
+    monkeypatch.setattr(host, "_operator_shell", lambda *_: None)
+    monkeypatch.setattr(releases, "_host_root", lambda *_: root)
+    with pytest.raises(CommandFailure) as disabled:
+        host_jobs._run(SimpleNamespace(name="plane-prune"))
+    assert "host.jobs.plane-prune.enroll" in disabled.value.error.hint
+    assert "host doctor --switches" in disabled.value.error.hint
+    assert "config plan" in disabled.value.error.hint
+    assert disabled.value.data["native_outcome"] == "unattempted" and calls == []
 
     monkeypatch.setattr(host_run, "load_host_jobs", lambda: {"plane-prune": {"type": "oneshot"}})
     entries[0]["installed"] = str(tmp_path / "foreign" / (name + ".service"))

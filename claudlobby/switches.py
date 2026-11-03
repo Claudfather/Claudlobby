@@ -104,7 +104,7 @@ broken. So the carrier is declared and the two lines are DERIVED from it:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -233,9 +233,10 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
         )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
+        extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
         return (
             f"{key}: true in this host's override, ~/.config/claudlobby/system.yaml"
-            " (host jobs bypass the fleet merge), then config plan + config diff + host activate",
+            f" (host jobs bypass the fleet merge){extra}, then config plan + config diff + host activate",
             f"{key}: false in this host's override, ~/.config/claudlobby/system.yaml,"
             " then config plan + config diff + host activate (removes the"
             " installed unit)",
@@ -896,6 +897,10 @@ class SwitchState:
     def disarm(self) -> str:
         return self.switch.disarm
 
+    def as_dict(self) -> dict:
+        """The same resolved state and action lines used by the plain table."""
+        return {**asdict(self), "label": self.label, "arm": self.arm, "disarm": self.disarm}
+
 
 def _env_state(cascade, sw: Switch) -> tuple[bool | None, str]:
     """(on, tier) from the cascade, or (None, "") when no tier assigns it.
@@ -1145,7 +1150,7 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
                        f"[{sw.scope}]  set by: {src}")
             out.append(f"    {'':<{name_w}}  {sw.what}")
             if sw.why_opt_in:
-                out.append(f"    {'':<{name_w}}  stays off — "
+                out.append(f"    {'':<{name_w}}  ships off because "
                            f"{sw.why_opt_in}")
             # An UNKNOWN row prints BOTH directions: we do not know which way
             # it is set, so printing only one would be picking a side.
@@ -1167,13 +1172,19 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
     render(rest, "on by default", "")
     n_off = sum(1 for s in rest if not s.on and not s.unknown)
     n_unknown = sum(1 for s in rows if s.unknown)
-    tail = (f"  {len(rows)} shipped · {len(opt_in)} opt-in (off)"
+    tail = (f"  {len(rows)} shipped · {_opt_in_summary(opt_in)}"
             f" · {n_off} on-by-default door(s) turned off here")
     if n_unknown:
         tail += f" · {n_unknown} not read here"
     out.append(tail)
     out.append("")
     return "\n".join(out)
+
+
+def _opt_in_summary(rows: list[SwitchState]) -> str:
+    unknown = sum(row.unknown for row in rows)
+    on = sum(row.on and not row.unknown for row in rows)
+    return f"{len(rows)} opt-in ({on} on, {len(rows) - on - unknown} off, {unknown} unknown)"
 
 
 def summary_line(states: list[SwitchState]) -> str:
@@ -1184,7 +1195,7 @@ def summary_line(states: list[SwitchState]) -> str:
     unknown = [s for s in states if s.unknown]
     parts = [f"{len(states)} shipped",
              f"{len(rest) - len(off) - sum(1 for s in rest if s.unknown)} on",
-             f"{len(opt_in)} opt-in (off)"]
+             _opt_in_summary(opt_in)]
     if off:
         parts.append("turned off here: " + ", ".join(s.switch.key for s in off))
     if any(s.unknown_reason == "resolver" for s in unknown):

@@ -31,6 +31,14 @@ export function createWorkspaceReadTransport({ sources }) {
   const admittedHosts = entries.map(e => e.reader.snapshot().read_profile?.host_uid).filter(Boolean);
   if (new Set(admittedHosts).size !== admittedHosts.length)
     throw new Error('Distinct independently admitted hosts are required.');
+  function sourceFailure(e) {
+    const note = e.reader.snapshot().remediation;
+    return failed(e.state, note || (e.state === 'not_connected'
+      ? 'Not connected. Rooms and Tasks need this computer’s connection. Open Computers & status and choose Connect; for first-time owner pairing, use Set up computer access. Teams have not been checked.'
+      : 'Open Computers & status and check this computer’s connection.'));
+  }
+  const blockers = (sources, values) => sources.map((e,i) =>
+    `${e.label}: ${values[i].remediation || sourceFailure(e).remediation}`).join(' ');
   function notify(change) { for (const stream of streams) stream.refresh(change); }
   function adopt(e, snapshot) {
     const host = snapshot.read_profile?.host_uid;
@@ -97,13 +105,13 @@ export function createWorkspaceReadTransport({ sources }) {
       snapshot.read_profile.host_uid === e.host && !entries.some(other => other !== e && other.host === e.host);
   }
   async function read(e, url) {
-    if (!admitted(e)) return failed(e.state, e.reader.snapshot().remediation || 'This source is not currently readable. Check its owner session.');
+    if (!admitted(e)) return sourceFailure(e);
     const overview = url === '/api/overview';
     if (overview && e.overviewTimeout) return e.overviewTimeout;
     const epoch = e.epoch, revision = e.overviewRevision;
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
-    if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return failed(e.state);
+    if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return sourceFailure(e);
     const timedOut = e.readFailure?.(url) === 'timed_out'
       || value?.state === 'unreadable' && value.reason === 'query_timeout';
     if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object'))
@@ -192,11 +200,11 @@ export function createWorkspaceReadTransport({ sources }) {
     data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
     data.totals.overview_retained = values.some(v => v.overview_retained);
     return {state:good.length ? 'ok' : 'unavailable', provenance:null, data,
-      ...(!good.length ? {remediation:'No source is currently readable.'} : {})};
+      ...(!good.length ? {remediation:blockers(entries, values)} : {})};
   }
   function overviewSnapshot() {
     return combineOverview(entries.map(e => e.overviewSnapshot?.epoch === e.epoch && admitted(e)
-      ? e.overviewPending === null ? e.overviewSnapshot.value : pendingOverview(e) : failed(e.state)));
+      ? e.overviewPending === null ? e.overviewSnapshot.value : pendingOverview(e) : sourceFailure(e)));
   }
   // Optional accepted partial snapshots; the Promise still settles with the full read.
   async function jget(input, onUpdate) {
@@ -255,7 +263,7 @@ export function createWorkspaceReadTransport({ sources }) {
       chosen.forEach((e, i) => {
         if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision
             || rosterRead && tickets[i] !== e.rosterRequest) {
-          values[i] = failed(e.state); projected.delete(e);
+          values[i] = sourceFailure(e); projected.delete(e);
         }
       });
       if (owning && path !== '/api/tasks') return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
@@ -293,7 +301,7 @@ export function createWorkspaceReadTransport({ sources }) {
       }
       // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
       return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
-        ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
+        ...(!good.length ? { remediation: blockers(chosen, values) } : {}) };
     }
     let progressTimer = null, complete = false;
     function progress() {
@@ -325,7 +333,7 @@ export function createWorkspaceReadTransport({ sources }) {
               values[i] = failed('unavailable', 'Task history continuation is unsupported; refresh tasks.');
           }
         }
-        if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision) values[i] = failed(e.state);
+        if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision) values[i] = sourceFailure(e);
         if (values[i].state === 'ok') {
           try {
             const label = values[i].data.host?.display_name;

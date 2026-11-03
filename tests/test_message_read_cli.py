@@ -152,13 +152,28 @@ def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatc
     assert [row["message_id"] for row in ordinary["items"]] == [f"msg_{2:032x}"]
     assert ordinary["items"][0]["report"]["state"] == "withheld"
     assert ordinary["ack_cursor"] is None and ordinary["ack_available"] is False
+    assert main(["--root", str(root), "fleet", "reports", "list", "--status", "failed"]) == 0
+    plain = capsys.readouterr().out
+    assert "[content withheld]" in plain and "capture policy" in plain
+    assert "future records" in plain and "cannot recover" in plain
+    assert "Private reason" not in plain
     empty = listed("--since", "2026-09-29T00:00:00Z")["data"]
     assert empty["items"] == [] and empty["next_cursor"] is None
     with monkeypatch.context() as patch:
-        patch.setattr(brief, "plane_session", lambda paths, fleet: (None, "unavailable"))
+        patch.setattr(brief, "plane_session", lambda paths, fleet: (None, "plane db unreadable: SECRET-storage-error"))
         unavailable = listed("--since", "2026-09-29T00:00:00Z", expected=6)
     assert unavailable["ok"] is False and unavailable["error"]["code"] == "unavailable"
     assert unavailable["data"] == {}
+    assert "unreadable" in unavailable["error"]["hint"]
+    assert "plane status" in unavailable["error"]["hint"]
+    assert "SECRET-storage-error" not in json.dumps(unavailable)
+    for note, says in (("no plane db at /private/example", "No Plane database"),
+                       ("the matcher installed at /private/example is unreadable", "Plane reader is unavailable"),
+                       ("the plane at /private/example holds no bot of fleet 'example'", "no recorded bot roster")):
+        with monkeypatch.context() as patch:
+            patch.setattr(brief, "plane_session", lambda paths, fleet, note=note: (None, note))
+            refusal = listed(expected=6)
+        assert says in refusal["error"]["hint"] and "plane status" in refusal["error"]["hint"]
     refused = listed("--unacknowledged", expected=4)["error"]
     assert refused["code"] == "conflict" and "generated viewer" in refused["message"]
     _generated(monkeypatch, root, "manager")

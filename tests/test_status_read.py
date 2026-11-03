@@ -40,6 +40,27 @@ def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, 
         assert row["pane_state"] is None and row["state"] == "unknown"
     assert fleet.release_id is None
 
+    def unreadable(*args):
+        raise RuntimeError("private diagnostic must not be echoed")
+    monkeypatch.setattr(switches, "resolve", unreadable)
+    failed = status_read.dispatch(SimpleNamespace(public_command="fleet.status"))
+    assert failed.data["switches_state"] == "unavailable"
+    assert "switches_off" not in failed.data
+    assert "switch states unavailable" in "\n".join(failed.lines).lower()
+    assert "host doctor --switches" in "\n".join(failed.lines)
+    assert "private diagnostic" not in str(failed)
+
+    unknown = switches.SwitchState(switches.by_key("task-recheck"), True, "?",
+                                   unknown=True, unknown_reason="resolver",
+                                   detail=switches.RESOLVER_DETAIL)
+    monkeypatch.setattr(switches, "resolve", lambda *args: [unknown])
+    unobserved = status_read.dispatch(SimpleNamespace(public_command="fleet.status"))
+    assert unobserved.data["switches_state"] == "unknown"
+    assert unobserved.data["switches_off"] == []
+    assert unobserved.data["switches_unknown"] == [{"key": "task-recheck", "reason": "resolver"}]
+    assert "task-recheck" in "\n".join(unobserved.lines)
+    assert "unknown" in "\n".join(unobserved.lines)
+
 
 def test_uptime_refuses_unavailable_plane_before_reporting_zero(monkeypatch, tmp_path):
     from claudlobby.commands import orientation

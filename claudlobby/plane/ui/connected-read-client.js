@@ -442,6 +442,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     accessRejected = false; connectIncomplete = false;
     stop('Signing in to the selected computer…');
     const gen = epoch;
+    let stage = 'challenge';
     try {
       const result = await http(ref.endpoint_origin + '/api/owner/connected/challenge', { method: 'POST', body: {}, bearer: null });
       const c = result.data;
@@ -453,6 +454,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           || (binding && (binding.binding_revision !== c.binding_revision || binding.binding_generation !== c.binding_generation))) throw new Error();
       hostUID = c.host_uid;
       binding = { binding_revision: c.binding_revision, binding_generation: c.binding_generation };
+      stage = 'assertion';
       const signing = new AbortController(); requests.add(signing);
       const timer = setTimeout(() => signing.abort(), 15000);
       let evidence;
@@ -468,6 +470,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           || evidence.version !== 1 || typeof evidence.assertion !== 'string' || evidence.assertion.length > 8192
           || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(evidence.assertion)
           || !positive(evidence.expires_at)) throw new Error();
+      stage = 'issue';
       const issued = await http(ref.endpoint_origin + '/api/owner/connected/issue', { method: 'POST',
         body: { nonce: c.nonce, assertion: evidence.assertion }, bearer: null, timeout: 35000 });
       if (issued.status !== 200 || disposed || gen !== epoch) throw new Error();
@@ -478,7 +481,11 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } catch {
       if (!disposed && gen === epoch) {
         connectIncomplete = !ended && !accessRejected;
-        stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
+        stop(stage === 'challenge'
+          ? 'Computer connection challenge failed or was refused. No session issue was sent. Check Tailscale and Set up computer access for local owner approval, then choose Connect explicitly.'
+          : stage === 'assertion'
+          ? 'Website access check did not complete. No session issue was sent. Check your account, then choose Connect explicitly.'
+          : 'Sign-in did not complete after requesting a session. Its host outcome is unknown; choose Connect again explicitly.');
       }
       return false;
     } finally { busy = false; scheduleContinuity(); }

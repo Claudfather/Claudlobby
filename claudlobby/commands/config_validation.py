@@ -31,6 +31,19 @@ _AREAS = {"improper_path": "composed_bot", "denied_value": "composed_bot",
           "env_denied_value": "environment_tier", "env_bot_secret_leaked": "host_shared_env"}
 
 
+def _configuration_hint(paths, error=None) -> str:
+    """Only selected paths and parser coordinates; never authored scalar text."""
+    mark = getattr(error, "problem_mark", None)
+    location = (f"YAML syntax error at line {mark.line + 1}, column {mark.column + 1}. "
+                if mark is not None and type(mark.line) is int and type(mark.column) is int else "")
+    if paths is None:
+        return location + "check --root, --fleet and the selected fleet.yaml; run config validate after correcting the declaration"
+    source = (paths.projects_yaml if mark is not None and mark.name == str(paths.projects_yaml)
+              else paths.fleet_yaml)
+    return (location + f"inspect selected configuration {source} and its project/host defaults; "
+            "check the required fleet.manager and local bot declarations, then rerun config validate")
+
+
 def _safe_finding(f):
     from ..freshbox import _GRANT_KINDS
 
@@ -117,8 +130,12 @@ def dispatch(args) -> CommandOutput:
                              hint="build and select a sealed release with packaged resources") from exc
     except EmptyFleetConfigError as exc:
         raise empty_fleet_conflict(exc.path, exc.size) from exc
-    except (ValueError, yaml.YAMLError) as exc:
-        raise CommandFailure("conflict", "selected fleet configuration is invalid") from exc
+    except yaml.YAMLError as exc:
+        raise CommandFailure("conflict", "selected fleet configuration is invalid",
+                             hint=_configuration_hint(paths, exc)) from exc
+    except ValueError as exc:
+        raise CommandFailure("conflict", "selected fleet configuration is invalid",
+                             hint=_configuration_hint(paths)) from exc
 
     if args.runtime:
         return _runtime_audit(args, context)

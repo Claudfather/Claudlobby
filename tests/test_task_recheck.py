@@ -119,6 +119,7 @@ def test_known_failure_retries_next_tick_and_empty_uuid_stays_empty(active, monk
     task_id = _admit(capsys, root, "Queue for manager")
     empty_replay = _recheck(capsys, root, empty_id)
     assert empty_replay["data"]["replayed"] is True and empty_replay["data"]["task_ids"] == []
+    assert empty_replay["data"]["selection_notes"] is None
     first = _recheck(capsys, root, expected=5)
     assert first["data"]["task_ids"] == [task_id]
     assert first["data"]["transport"] == "failed" and len(calls) == 1
@@ -127,6 +128,12 @@ def test_known_failure_retries_next_tick_and_empty_uuid_stays_empty(active, monk
     held = _recheck(capsys, root)
     assert held["data"]["task_ids"] == [] and held["data"]["held"] == 1
     assert len(calls) == 2
+    assert main(["--root", str(root), "task", "recheck", "--max-age-h", "0",
+                 "--dry-run", "--request-id", str(uuid4())]) == 0
+    plain = capsys.readouterr().out
+    assert "no task is due" not in plain
+    assert "1 task(s) held" in plain and "24h repeat window" in plain
+    assert "wait" in plain and len(calls) == 2
 
 
 def test_private_timer_off_switch_skips_before_request_or_identity(active, monkeypatch, capsys):  # noqa: F811
@@ -164,6 +171,19 @@ def test_uncertain_digest_holds_new_uuid_and_escalated_work_is_waiting(active, m
     assert held["data"]["task_ids"] == [] and held["data"]["uncertain"] == 1
     assert held["data"]["uncertain_request_ids"] == [first["request_id"]]
     assert held["data"]["waiting"] == 1 and len(calls) == 1
+    assert any(first["request_id"] in note for note in held["data"]["selection_notes"])
+    with sqlite3.connect(db_file(root)) as conn:
+        before = conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0]
+    assert main(["--root", str(root), "task", "recheck", "--max-age-h", "0",
+                 "--dry-run", "--request-id", str(uuid4())]) == 0
+    plain = capsys.readouterr().out
+    assert "no task is due" not in plain
+    assert "1 task(s) held for uncertain prior delivery" in plain
+    assert first["request_id"] in plain and "request show" in plain
+    assert "1 escalated task(s) waiting on a human" in plain
+    assert len(calls) == 1
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == before
 
 
 def test_a_persons_deadline_less_assignment_is_a_standing_goal(active, monkeypatch, capsys):  # noqa: F811

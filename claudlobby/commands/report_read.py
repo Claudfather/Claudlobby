@@ -8,6 +8,7 @@ import base64
 import binascii
 from datetime import datetime, timezone
 import json
+import shlex
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
@@ -58,7 +59,38 @@ def _line(row: dict) -> str:
     summary = ((" ".join(row["summary"].split()) or "[summary unavailable]")
                if report["state"] in ("captured", "legacy")
                else f"[content {report['state']}]")
+    if report["state"] in ("withheld", "truncated", "unsupported"):
+        # These decoder states have fixed product-authored reasons. Invalid
+        # content can carry nested exception text, which stays out of plain output.
+        summary += f" {report['reason']}"
+        if report["state"] == "withheld":
+            summary += ("; inspect state/plane/capture.json for future records; "
+                        "this read cannot recover withheld historical content")
+        elif report["state"] == "truncated":
+            summary += "; this read cannot reconstruct missing historical content"
+        else:
+            summary += "; inspect the recorded report and matching installed release before interpreting its evidence"
+    elif report["state"] == "invalid":
+        summary += " stored report content is missing or invalid; inspect the recorded report and matching installed release"
     return f"{row['message_id']}\t{row['author']}\t{row['status'] or 'unknown'}\t{summary}"
+
+
+def _storage_hint(root, note) -> str:
+    """Classify the reader's fixed refusal families, never its nested errors."""
+    note = note if isinstance(note, str) else ""
+    if note.startswith("no plane db at "):
+        reason = "No Plane database was found at the selected root."
+    elif note.startswith("the matcher installed at "):
+        reason = "The selected package's Plane reader is unavailable or incompatible; inspect host releases."
+    elif note.startswith("no fleet is named"):
+        reason = "No fleet was named for this Plane read; supply --fleet from the active selection."
+    elif note.startswith("the plane at ") and " holds no bot of fleet" in note:
+        reason = "This Plane source has no recorded bot roster for the selected fleet; verify the root and fleet."
+    else:
+        reason = "The selected Plane report source is unreadable or unavailable."
+    prefix = f"claudlobby --root {shlex.quote(str(root))}"
+    return (f"{reason} Inspect {prefix} plane status and {prefix} host status; "
+            "verify the root and selected release. This read does not create, restore or migrate storage.")
 
 
 def _item(row: dict) -> dict:
@@ -141,7 +173,8 @@ def _read(args) -> CommandOutput:
         session, _note = plane_session(destination.paths, destination.fleet.name)
         if session is None:
             raise CommandFailure("unavailable", "Plane report storage is unavailable; inspect host status",
-                                 retryable=True, release_id=release_id)
+                                 retryable=True, release_id=release_id,
+                                 hint=_storage_hint(destination.paths.root, _note))
         with session:
             session.conn.execute("BEGIN")
             require_current_schema(session.conn)

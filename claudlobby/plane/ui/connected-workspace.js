@@ -456,6 +456,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
     mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
+    const tools = document.getElementById('view-nav')?.querySelector?.('details');
+    if (tools) {
+      const explanation = document.createElement('p'); explanation.className = 'note';
+      explanation.textContent = 'Team details, Recorder and activity search are unavailable in this connected view. Use Rooms, Tasks or All agents.';
+      tools.append(explanation);
+    }
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
         if ((['channel','tasks','grid'].includes(button.dataset.view)

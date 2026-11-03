@@ -14,7 +14,7 @@ export function createGuidedSetup({client, storage, storageKey,
       pending = value.pending && Object.freeze({...value.pending}); conflicts = value.conflicts.map(v => Object.freeze({...v}));
     } } } catch {}
   const active = () => !disposed && ['ready','setup_only'].includes(client.snapshot().state);
-  function save(value) { try { if (!storage || typeof storage.setItem !== 'function') throw new Error(); storage.setItem(storageKey,JSON.stringify({pending:value,conflicts})); } catch { throw new Error('Save the original activation identifiers before launching.'); } }
+  function save(value) { try { if (!storage || typeof storage.setItem !== 'function') throw new Error(); storage.setItem(storageKey,JSON.stringify({pending:value,conflicts})); } catch { throw Object.assign(new Error('This browser could not retain activation identifiers. No new launch was sent. Restore site storage before launching; keep any original identifiers for recovery.'), {code:'setup_storage_unavailable'}); } }
   function retainConflict(value) {
     if (conflicts.some(v => ['generation','plan_id','request_id'].every(key => v[key] === value[key]))) return;
     if (conflicts.length >= 16) throw new Error('Inspect retained conflicting identifiers locally.');
@@ -76,8 +76,8 @@ export function createGuidedSetup({client, storage, storageKey,
         receipt(result);
       } else return false;
       return true;
-    } catch {
-      if (!disposed && ticket === epoch) note = pending ? 'Activation outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
+    } catch (error) {
+      if (!disposed && ticket === epoch) note = error?.code === 'setup_storage_unavailable' ? error.message : pending ? 'Activation outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
       return false;
     } finally { busy = false; if (!disposed) changed(); }
   }
@@ -94,7 +94,15 @@ export function createGuidedSetup({client, storage, storageKey,
     if (!mount) return;
     const {area, status, declaration, authority, controls, details, summary} = mount;
     area.disabled = !active() || busy || !!pending;
-    status.textContent = note || (active() ? 'First-team setup requires an explicit local approval on this computer.' : 'Connect this computer before setup.');
+    const guard = !active() ? 'Connect this computer before setup.' : busy ? 'Checking setup…'
+      : pending ? 'Use Check original activation receipt; launch is not repeated.'
+      : !context ? 'Choose Check setup approval before previewing a team.'
+      : context.expires_at <= now() ? 'Local setup approval expired. Choose Check setup approval.'
+      : !goal.trim() ? 'Enter a goal to enable Preview team.'
+      : !plan || goal !== planGoal ? 'Choose Preview team before launching this goal.'
+      : plan.expires_at <= now() ? 'This preview expired. Choose Preview team again.'
+      : 'Review the plan, then choose Launch this exact plan.';
+    status.textContent = [note,guard].filter(Boolean).join(' ');
     declaration.textContent = context ? `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
     authority.textContent = context ? `Local approval covers ${context.repository} and release ${context.release_id}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '';
     summary.textContent = plan ? `Goal: ${planGoal}. Plan changes ${plan.changes?.length || 0} generated files; ${plan.effects?.restart_bots?.length || 0} bots require starting or restarting. Review the plan before launch.` : '';
