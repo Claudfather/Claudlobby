@@ -9,64 +9,65 @@
 <link rel="stylesheet" href="/workspace.css">
 </head>
 <body class="plane-workspace">
-<section class="workspace-intro" aria-label="Your team workspace">
-  <div>
-    <p class="eyebrow">Your team, at work</p>
-    <h1>Good work keeps moving.</h1>
-    <p class="intro-copy">See what changed, follow the work, and help your teams take the next step.</p>
-  </div>
-</section>
 <header>
-  <h1>Team activity</h1>
-  <nav id="view-nav">
-    <button class="pill ghost on" data-view="channel" type="button">Activity</button>
-    <button class="pill ghost" data-view="grid" type="button">All agents</button>
-    <button class="pill ghost" data-view="fleet" type="button">Team details</button>
-    <button class="pill ghost" data-view="trust" type="button">Recorder</button>
+  <h1>Claudfather</h1>
+  <nav id="view-nav" aria-label="Workspace views">
+    <button class="pill ghost on" data-view="channel" type="button">Rooms</button>
+    <button class="pill ghost" data-view="tasks" type="button">Tasks</button>
+    <details class="workspace-tools"><summary>More</summary>
+      <button class="pill ghost" data-view="grid" type="button">All agents</button>
+      <button class="pill ghost" data-view="fleet" type="button">Team details</button>
+      <button class="pill ghost" data-view="trust" type="button">Recorder</button>
+    </details>
   </nav>
-  <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
-  <span class="pill" id="fleet-totals" title="every fleet on this host — bots, working now, needing you, overdue (the overview's own figures)"><b>—</b> bots</span>
-  <span class="pill presence-strip" id="presence-strip" hidden></span>
-  <span class="spacer"></span>
-  <div id="owner-session" class="owner-session" aria-label="Owner session" hidden>
-    <span id="owner-session-status" role="status" aria-live="polite"></span>
-    <button id="owner-session-renew" class="pill ghost" type="button">Keep signed in</button>
-    <button id="owner-session-check" class="pill ghost" type="button">Check session</button>
-    <button id="owner-session-logout" class="pill ghost" type="button" title="Ends this browser session; local owner pairing remains">Sign out</button>
-  </div>
-  <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">Technical detail</button>
 </header>
 <main>
-  <section id="rail-fleet" aria-label="fleet">
-    <h2>People &amp; agents</h2>
-    <div class="scroll" id="fleet"></div>
+  <section id="rail-fleet" aria-label="Teams and bots">
+    <h2>Teams</h2>
+    <div id="fleet-tabs"></div>
+    <details class="sidebar-bots"><summary>Bots in this team</summary>
+      <div class="scroll" id="fleet"></div>
+    </details>
+    <details id="computers-details" class="workspace-diagnostics"><summary>Computers &amp; status</summary>
+      <div id="owner-session" class="owner-session" aria-label="Owner session" hidden>
+        <span id="owner-session-status" role="status" aria-live="polite"></span>
+        <button id="owner-session-renew" class="pill ghost" type="button">Keep signed in</button>
+        <button id="owner-session-check" class="pill ghost" type="button">Check session</button>
+        <button id="owner-session-logout" class="pill ghost" type="button" title="Ends this browser session; local owner pairing remains">Sign out</button>
+      </div>
+      <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
+      <span class="pill" id="fleet-totals"><b>—</b> bots</span>
+      <span class="pill presence-strip" id="presence-strip" hidden></span>
+      <div id="overview" class="overview" aria-label="fleets overview"></div>
+      <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">Technical detail</button>
+      <div id="rail-debug" aria-label="event machinery" hidden>
+        <div class="host-facts" id="host-facts">host ingest — · rows — · spool —</div>
+        <h2>event stream <span class="hint">(raw ledger)</span></h2>
+        <div class="scroll" id="debug"></div>
+      </div>
+    </details>
   </section>
-  <section id="rail-channel" aria-label="channel">
-    <h2>Teams <span id="fleet-tabs"></span>
-      <input id="search" type="search" placeholder="search the channel…"
-             aria-label="search the channel" autocomplete="off"></h2>
-    <div id="overview" class="overview" aria-label="fleets overview"></div>
-    <section id="work-loop" aria-label="Team messages"></section>
+  <section id="rail-channel" aria-label="Team workspace">
+    <div class="room-heading"><h2 id="room-title">Choose a team</h2>
+      <input id="search" type="search" placeholder="Search recorded activity…" aria-label="search the channel" autocomplete="off">
+    </div>
+    <div id="room-focus"></div>
     <div class="scroll" id="search-results" hidden></div>
     <div class="scroll" id="channel"></div>
+    <section id="rail-right" hidden>
+      <div id="rail-attention" aria-label="attention">
+        <h2>Needs your decision <span id="attn-count" class="count" hidden></span></h2>
+        <div class="scroll" id="attention"></div>
+      </div>
+      <div id="rail-tasks" aria-label="tasks">
+        <h2>Work &amp; results</h2>
+        <div class="scroll" id="tasks"></div>
+      </div>
+    </section>
     <div class="scroll" id="grid" hidden></div>
     <div class="scroll" id="fleet-room" hidden></div>
     <div class="scroll" id="trust" hidden></div>
-  </section>
-  <section id="rail-right">
-    <div id="rail-attention" aria-label="attention">
-      <h2>Needs your decision <span id="attn-count" class="count" hidden></span></h2>
-      <div class="scroll" id="attention"></div>
-    </div>
-    <div id="rail-tasks" aria-label="tasks">
-      <h2>Work &amp; results</h2>
-      <div class="scroll" id="tasks"></div>
-    </div>
-    <div id="rail-debug" aria-label="event machinery" hidden>
-      <div class="host-facts" id="host-facts" title="the host's recorder — every fleet on this host writes here">host ingest — · rows — · spool —</div>
-      <h2>event stream <span class="hint">(raw ledger)</span></h2>
-      <div class="scroll" id="debug"></div>
-    </div>
+    <section id="work-loop" aria-label="Team messages"></section>
   </section>
 </main>
 <dialog id="task-detail" aria-labelledby="task-detail-title">

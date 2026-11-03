@@ -1216,7 +1216,7 @@ test('hidden teams are an explicit local preference, with reveal and a safe visi
   c.currentFleet=null;c.loadPick=()=>null;setTeamHidden(second.uid,true,storage);c.adoptFleets(env);
   assert.equal(c.currentFleet,'all','all-hidden preferences never create a blank default');
   c.showHiddenTeams=true;c.renderFleetTabs();assert.match(node.innerHTML,/data-fleet="source \/ test"/);
-  assert.match(node.innerHTML,/Message a bot/,'team shortcut opens existing roster messaging');
+  assert.doesNotMatch(node.innerHTML,/Message a bot/,'room bot controls replace repetitive per-team message shortcuts');
   // Exercise the real explicit handlers; a background render must not steal focus.
   values.clear();c.showHiddenTeams=false;c.currentFleet=second.alias;c.renderFleetTabs();
   const hideFirst=buttons.find(b=>b.dataset.hideTeam===first.uid);hideFirst.focus();hideFirst.handlers.click();

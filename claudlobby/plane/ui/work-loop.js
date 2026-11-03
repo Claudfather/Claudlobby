@@ -45,8 +45,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let conversation = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
   let notice = "Choose a team to see its available actions.";
-  root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
+  root.innerHTML = `<div class="work-loop-head"><div><h2>Message</h2>
     <p id="work-scope"></p></div><span id="work-mode" class="tag"></span></div>
+    <button id="work-manager" class="pill ghost" type="button" hidden>Talk to manager</button>
     <p id="work-unavailable" class="note"></p>
     <form id="work-form" hidden>
       <div class="work-target"><label for="work-recipient">To</label>
@@ -115,10 +116,23 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function selectMessageRecipient(identity) {
     if (!canSelectMessageRecipient(identity)) return false;
+    return composeMessage(identity.uid);
+  }
+  function managerRecipient() {
+    const message = contextsByKind.get("message");
+    if (!message?.actions.includes("message")) return null;
+    const leads = [...new Set(["feedback","nudge"].flatMap(action => {
+      const value = contextsByKind.get(action);
+      return value?.version === 2 && ["workspace","host","fleet"].every(key => value.scope[key] === message.scope[key])
+        ? value.recipients.filter(r => r.lead === true).map(r => r.id) : [];
+    }))];
+    return leads.length === 1 && message.recipients.some(r => r.id === leads[0]) ? leads[0] : null;
+  }
+  function composeMessage(recipient) {
     saveDraft(); ++compositionEpoch;
     context = contextsByKind.get("message"); kind = "message"; targetTitle = null;
-    target = { recipient: identity.uid, task_id: null };
-    messageRecipients.set(scopeKey(context.scope), identity.uid);
+    target = { recipient, task_id: null };
+    messageRecipients.set(scopeKey(context.scope), recipient);
     opener = null; openerIdentity = null;
     closeDetail(); notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
     return true;
@@ -141,6 +155,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     && (!channel || channel.state === "ok");
   function paint({ restoreDraft = false } = {}) {
     const usable = !!context && !!target;
+    $("work-manager").hidden = !managerRecipient();
     $("work-form").hidden = !usable;
     $("work-open-task").hidden = !usable || !target.task_id;
     $("work-open-task").disabled = !canOpenComposerTask();
@@ -599,7 +614,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       : closed ? `This task is ${task.state === "completed" ? "complete" : "closed"}; it cannot be nudged. ${feedback ? "Use feedback to comment to the team lead without reopening it." : availability("feedback", feedback)}`
       : `${availability("feedback", feedback)} ${availability("nudge", nudge)}`;
     $("task-action-note").textContent = taskActions + (feedback?.version === 2 ? " Feedback is a linked comment, not approval or a task change." : "") + (nudge?.version === 2 ? " A nudge asks about this task; it is not approval." : "")
-      + (capability("message") ? " Close this task and use Talk to your team to send an ordinary message." : "");
+      + (capability("message") ? " Close this task and use the composer to send an ordinary message." : "");
   }
   function update(tasks, messages) {
     board = tasks; updateChannel(messages);
@@ -668,6 +683,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
   $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); });
+  $("work-manager").onclick = () => { const recipient = managerRecipient(); if (recipient) composeMessage(recipient); };
   $("work-recipient").onchange = () => {
     saveDraft(); ++compositionEpoch; target = { ...target, recipient: $("work-recipient").value };
     notice = ""; paint({ restoreDraft: true });
