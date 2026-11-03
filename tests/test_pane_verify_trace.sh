@@ -156,6 +156,13 @@ for fx in "$FIXTURES"/*.txt; do
     done
 done
 assert_eq "trace verdict agrees with pane_holds_unsubmitted on all $checked pane/payload pairs" "0" "$mismatch"
+# A box taller than the pane has no prompt line in view (#2669): its payload's
+# end right above the rule is held, as pane_holds_unsubmitted reads it.
+printf '%s\n' "  line two of a tall payload" "  TALL2669 END" "$(printf '\342\224\200%.0s' 1 2 3 4 5 6 7 8)" "  footer" > "$TMPD/tall.txt"
+assert_eq "a tall box showing the payload's end above its rule classifies held" "held" \
+    "$(_pane_trace_candidate "$(cat "$TMPD/tall.txt")" "line one"$'\n'"line two of a tall payload"$'\n'"TALL2669 END")"
+assert_eq "...and one showing another payload's end does not" "no-region" \
+    "$(_pane_trace_candidate "$(cat "$TMPD/tall.txt")" "some other payload")"
 
 echo
 echo "TOTAL=$TOTAL PASS=$PASS FAIL=$FAIL"

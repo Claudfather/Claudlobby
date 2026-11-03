@@ -2865,8 +2865,10 @@ _PANE_INPUT_GLYPH_RE='^[[:space:]]*(>|❯)'
 # instead reaches UP into the transcript, where a cleanly-submitted command is
 # still visible, and would re-fire Enter at an already-idle prompt.
 #
-# Empty output when the pane has no prompt glyph at all: no prompt means nothing
-# is sitting unsubmitted, so the caller must not retry.
+# Empty output when the pane has no prompt glyph at all. That alone does not
+# mean nothing sits unsubmitted: a box taller than the pane has lost its prompt
+# line, and the send reads that box's bottom edge instead
+# (pane_box_end_shows_payload, #2669).
 #
 # One awk pass, not grep|tail|cut to find the anchor plus a second serialization
 # through sed to re-slice the same text: this runs per poll tick, and the
@@ -2933,7 +2935,15 @@ pane_input_region() {
 _pane_trace_candidate() {
     local pane="$1" payload="$2" region line stripped floor first="" seen_first=0
     region=$(pane_input_region "$pane")
-    [ -n "$region" ] || { printf 'no-region'; return 0; }
+    if [ -z "$region" ]; then
+        # A box taller than the pane, read as pane_holds_unsubmitted reads it (#2669).
+        if [ -n "$payload" ] && pane_box_end_shows_payload "$pane" "$payload"; then
+            printf 'held'
+        else
+            printf 'no-region'
+        fi
+        return 0
+    fi
     if printf '%s\n' "$region" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER"; then
         printf 'held'; return 0
     fi
@@ -3037,7 +3047,8 @@ EOF
 pane_holds_unsubmitted() {
     local region
     region=$(pane_input_region "$1")
-    [ -n "$region" ] || return 1
+    # No prompt line in view: a box taller than the pane (#2669).
+    [ -n "$region" ] || { pane_box_end_shows_payload "$1" "$2"; return; }
     pane_shows_payload "$region" "$2"
 }
 
@@ -3272,6 +3283,62 @@ pane_shows_payload_end() {
         }'
 }
 
+# pane_box_end_shows_payload <pane_text> <payload>
+# Returns 0 when an input box whose prompt line has scrolled out of the pane
+# shows the END of the payload on its last lines, right above the rule drawn
+# under the box (#2669). The gate before the Enter and the verify after it ask
+# this when pane_input_region finds no prompt line.
+#
+# A box taller than the pane loses its top: Claude Code draws in the alternate
+# screen, so the rows above the pane are gone, prompt line included. Measured at
+# 80x24 with the one-prompt bootstrap (23 lines and more): what stays in view is
+# the box's last lines, then its bottom rule and the footer.
+#
+# It answers only for a capture with NO prompt-glyph line (a capture with one is
+# pane_input_region's), and only at the box's bottom edge: the payload's last
+# characters must END the text above the first rule, where
+# pane_shows_payload_end accepts them anywhere in the region. That anchor stands
+# in for the glyph. Text that merely contains the payload's end, such as a
+# transcript above a dialog's rule, has other lines between that end and the
+# rule. The tail and the blanks are pane_shows_payload_end's.
+pane_box_end_shows_payload() {
+    [ -n "$2" ] || return 1
+    _pane_box_end "$1" "$2"
+}
+
+# pane_box_end_held <pane_text>
+# Returns 0 when an input box whose prompt line has scrolled out of the pane
+# holds text: no prompt-glyph line, a rule, and text above it. A send types
+# nothing into such a box (rc 4), as into one pane_is_held reads as held: the
+# box end would show the new payload's end, and its Enter would submit the
+# text already there with it.
+pane_box_end_held() {
+    _pane_box_end "$1" ""
+}
+
+# _pane_box_end <pane_text> <payload>
+# The two predicates above in one awk pass, under LC_ALL=C: the glyph (U+276F)
+# and the rule (U+2500, alone on its line, as _held_box_squeezed reads it) are
+# matched as bytes. An empty <payload> asks only whether the box holds text.
+_pane_box_end() {
+    printf '%s\n' "$1" | _PANE_PROBE="$2" LC_ALL=C awk \
+        -v re="$_PANE_INPUT_GLYPH_RE" -v floor="$_PANE_MIN_VISIBLE_MATCH" '
+        function squeeze(s) { gsub(/[ \t\r\n]/, "", s); gsub("\302\240", "", s); return s }
+        $0 ~ re { glyph = 1; exit }
+        rule { next }
+        { t = $0; gsub("\342\224\200", "", t)
+          if (t ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) rule = NR; else box = box $0 }
+        END {
+            if (glyph || !rule) exit 1
+            b = squeeze(box); m = length(b)
+            if (m == 0) exit 1
+            p = squeeze(ENVIRON["_PANE_PROBE"]); n = length(p)
+            if (n == 0) exit 0
+            k = (n < floor) ? n : floor
+            exit (m >= k && substr(b, m - k + 1) == substr(p, n - k + 1)) ? 0 : 1
+        }'
+}
+
 # _pane_await_payload_shown <socket> <session> <text> <box> <repair>
 # The gate between the keystrokes and the Enter (#1236): poll until the input
 # box shows the END of the payload (pane_shows_payload_end). rc 0 = shown, so
@@ -3319,7 +3386,11 @@ _pane_await_payload_shown() {
         # does, so a pre-draw wait pays no fork per tick.
         case "$pane" in *[![:space:]]*) ;; *) continue ;; esac
         region=$(pane_input_region "$pane")
-        [ -n "$region" ] || continue
+        if [ -z "$region" ]; then
+            # No prompt line in view: a box taller than the pane (#2669).
+            pane_box_end_shows_payload "$pane" "$text" && return 0
+            continue
+        fi
         pane_shows_payload_end "$region" "$text" && return 0
         # The pre-draw repair is ruled ONCE, on the first frame with a box, as
         # it was when it ran after the Enter: the whole-frame scan costs forks
@@ -3586,7 +3657,7 @@ _pane_send_verified_locked() {
     # under the same recipient lock as the write; never clear or submit the hold.
     local before
     if before=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) &&
-        pane_is_held "$before"; then
+        { pane_is_held "$before" || pane_box_end_held "$before"; }; then
         emit_fleet_event send_miss dispatch \
             "$(printf '{"session":"%s","reason":"recipient-input-held"}' \
                 "$(json_escape "$session")")"
@@ -4472,19 +4543,26 @@ _startup_send() {
 # Canonical automatic injection. A proven Skill plus authored startup is one
 # fleet-owned prompt; opaque/native commands retain their literal semantics.
 # Success is submission evidence only, never completed resume or business work.
+# STARTUP_BOOTSTRAP_ENABLED=0 (the startup-bootstrap switch) turns the one
+# prompt off: a proven Skill then takes the literal start too, and its log line
+# names the switch.
 startup_inject() {
     local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5"
-    local checkpoint="$bot_dir/.claude/session.md" startup="${STARTUP_PROMPT:-}" payload
+    local checkpoint="$bot_dir/.claude/session.md" startup="${STARTUP_PROMPT:-}" payload off=""
     local max_age="${RESUME_MAX_AGE_S:-86400}" command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
     if should_resume_session "$checkpoint" "$max_age"; then
         if _session_command_resolve "$command" "$bot_dir"; then
-            if payload="$(_startup_bootstrap_payload "$bot_dir" "$startup" || true)" && [ -n "$payload" ]; then
+            if [ "$_SESSION_COMMAND_STATUS" = available ] &&
+                ! switch_is_on STARTUP_BOOTSTRAP_ENABLED startup-bootstrap \
+                    "the resume command and the startup prompt go as two literal sends"; then
+                off="; STARTUP_BOOTSTRAP_ENABLED=0"
+            elif payload="$(_startup_bootstrap_payload "$bot_dir" "$startup" || true)" && [ -n "$payload" ]; then
                 printf '%s STARTUP mode=skill-bootstrap — one resume/startup submission\n' "$(ts_iso)" >> "$log"
                 _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup BOOTSTRAP "set +H; $payload"
                 return
             fi
-            printf '%s RESUME — injecting resume command [%s; literal-compatibility]: %s\n' \
-                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
+            printf '%s RESUME — injecting resume command [%s; literal-compatibility%s]: %s\n' \
+                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$off" "$command" >> "$log"
             _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
         else
             printf '%s RESUME SKIP — fresh checkpoint present but no resume capability [%s]; starting clean, handoff left at %s\n' \

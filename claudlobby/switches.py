@@ -575,6 +575,23 @@ SWITCHES: tuple[Switch, ...] = (
              "fire to the second, sessions appear 36-168s later)",
     ),
     Switch(
+        key="startup-bootstrap",
+        scope=DOOR,
+        polarity=OPT_OUT,
+        # start-bot.sh reads it at each start, after it has sourced bot.conf and
+        # then the .env tiers into its own environment, so a tier assignment
+        # reaches it; the host or root .env turns it off for every bot at its
+        # next start, with no plan or activation.
+        carrier=ENV_HOST,
+        env="STARTUP_BOOTSTRAP_ENABLED",
+        what="when the resume command is a model-callable Skill, send the resume "
+             "and the authored startup prompt as ONE prompt (the fleet-ops "
+             "bootstrap envelope). Off, start-bot.sh keeps the literal start: "
+             "the resume command, then the startup prompt, as two sends; its "
+             "startup.log RESUME line names the switch. A bot reads it at its "
+             "next start",
+    ),
+    Switch(
         key="keepalive-limit-resume",
         scope=DOOR,
         polarity=OPT_IN,
