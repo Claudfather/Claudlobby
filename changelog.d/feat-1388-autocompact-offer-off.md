@@ -1,0 +1,5 @@
+### Changed — bots no longer stop on Claude Code's offer to autocompact earlier (#1388)
+
+On a model with a native 1M window, Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier … Want to autocompact at 400k tokens instead?". Nobody at a bot's pane answers it, and the answer is kept per account and model, so a new account or a new model asks again. Every bot's composed `settings.local.json` now carries `modelSettings`, naming each such model `{"autoCompactWindow": "auto"}`. That is Claude Code's own window, the one it uses with nothing set, so bots compact when they did before; a window set outside user settings stops the asking.
+
+The new `auto_compact_window:` key takes `auto` (the default) or a whole number of tokens from 100000 to 1000000, which composes `autoCompactWindow` and caps every model's window at it. Set it under `defaults:` or per bot. A window set in user settings no longer reaches bots: with `auto` on those models, with a number on any model. A composed `settings.local.json` change reaches a bot at its next restart.

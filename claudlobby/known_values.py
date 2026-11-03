@@ -109,6 +109,30 @@ SKILL_OVERRIDE_STATES: frozenset[str] = frozenset(
 )
 DEFAULT_SKILL_OVERRIDES = MappingProxyType({"auto-mode-setup": "off"})
 
+# ── Autocompact window (settings.local.json) ─────────────────────
+# Claude Code's autoCompactWindow takes a whole number of tokens from 100000
+# to 1000000 (per model also "auto") and drops any other value without a word.
+# Its end-of-turn autocompact offer appears only on a model with a native 1M
+# window: these, the `native_1m` models in Claude Code 2.1.316's registry.
+# BotConfig.auto_compact_window defaults to "auto", which names each of them
+# "auto" in modelSettings (#1388). A model Claude Code adds later can show the
+# offer until it is added here.
+AUTO_COMPACT_WINDOW_MIN = 100_000
+AUTO_COMPACT_WINDOW_MAX = 1_000_000
+NATIVE_1M_MODELS: tuple[str, ...] = (
+    "claude-haiku-5-5",
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
+)
+
 # ── Headless env vars (bot.conf) ─────────────────────────────────
 # Two sets, split by effect on Claude Code's --remote-control: HEADLESS_TRIM
 # vars are safe to emit, RC_KILLING vars must never be. Empirically verified

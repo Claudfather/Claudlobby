@@ -1,4 +1,4 @@
-"""Two composed defaults that keep an unattended bot from stalling (#1388, #941).
+"""Composed defaults that keep an unattended bot from stalling (#1388, #941).
 
 Once auto mode has blocked several actions, Claude Code ends a turn with a
 dialog offering `/auto-mode-setup`, and clauDNA's PreCompact hook refuses every
@@ -7,6 +7,12 @@ answer either. So every bot composes `skillOverrides` with `auto-mode-setup`
 "off" into its settings.local.json and `CLAUDNA_PRECOMPACT_REFLECT=0` into its
 bot.conf. A fleet overrides either under `defaults:`, and a bot under its own
 entry.
+
+On a model with a native 1M window, Claude Code can also end a turn past 200k
+tokens on an offer to autocompact earlier. A window set outside user settings
+stops it, so every bot composes `modelSettings` naming each such model "auto":
+Claude Code's own window, the one it uses with nothing set. A fleet or a bot
+sets `auto_compact_window` to a number to choose a window instead.
 """
 
 from __future__ import annotations
@@ -15,9 +21,13 @@ from pathlib import Path
 
 import pytest
 
+import yaml
+
+from claudlobby.known_values import NATIVE_1M_MODELS
 from tests.conftest import load_test_fleet, make_paths
 
 BOTS = ("lead", "worker-1")
+AUTO = {model: {"autoCompactWindow": "auto"} for model in NATIVE_1M_MODELS}
 
 
 def _write(fleet_dir: Path, where: str, *lines: str) -> None:
@@ -41,6 +51,19 @@ def _skill_overrides(fleet_dir: Path) -> dict:
     paths = make_paths(fleet_dir)
     return {b: compose_settings_local(fleet.bots[b], fleet, paths).get("skillOverrides")
             for b in BOTS}
+
+
+def _windows(fleet_dir: Path) -> dict:
+    """Each bot's composed (modelSettings, top-level autoCompactWindow)."""
+    from claudlobby.composer import compose_settings_local
+
+    fleet = load_test_fleet(fleet_dir)
+    paths = make_paths(fleet_dir)
+    out = {}
+    for b in BOTS:
+        settings = compose_settings_local(fleet.bots[b], fleet, paths)
+        out[b] = (settings.get("modelSettings"), settings.get("autoCompactWindow"))
+    return out
 
 
 def _reflect_lines(fleet_dir: Path) -> dict:
@@ -102,3 +125,59 @@ def test_a_fleet_default_arms_the_capture_prompt_and_a_bot_entry_wins(fleet_dir:
         "lead": ["export CLAUDNA_PRECOMPACT_REFLECT=1"],
         "worker-1": ["export CLAUDNA_PRECOMPACT_REFLECT=0"],
     }
+
+
+def test_every_bot_names_claude_codes_own_window_for_each_1m_model(fleet_dir: Path):
+    # "auto" is the value Claude Code reads as its own window, so the window is
+    # the one it uses with nothing set; no top-level key, which would cap every
+    # model's window instead.
+    assert "claude-sonnet-5-5" in NATIVE_1M_MODELS
+    assert _windows(fleet_dir) == {b: (AUTO, None) for b in BOTS}
+
+
+def test_a_number_sets_the_window_and_a_bot_entry_wins(fleet_dir: Path):
+    _write(fleet_dir, "defaults", "auto_compact_window: 400000")
+    assert _windows(fleet_dir) == {b: (None, 400000) for b in BOTS}
+    _write(fleet_dir, "worker-1", "auto_compact_window: auto")
+    assert _windows(fleet_dir) == {"lead": (None, 400000), "worker-1": (AUTO, None)}
+
+
+@pytest.mark.parametrize("value", [100000, 1000000])
+def test_the_bounds_claude_code_accepts_are_accepted(fleet_dir: Path, value):
+    _write(fleet_dir, "worker-1", f"auto_compact_window: {value}")
+    assert _windows(fleet_dir)["worker-1"] == (None, value)
+
+
+@pytest.mark.parametrize("value", [
+    # Claude Code drops each of these without a word, and the offer would return.
+    "99999", "1000001", "400k", '"400000"', "450000.5", "true", "null", "AUTO",
+])
+def test_a_window_claude_code_would_drop_is_refused(fleet_dir: Path, value):
+    _write(fleet_dir, "worker-1", f"auto_compact_window: {value}")
+    with pytest.raises(ValueError, match=r"bots\.worker-1\.auto_compact_window"):
+        load_test_fleet(fleet_dir)
+
+
+def test_a_refused_fleet_default_names_the_defaults_key(fleet_dir: Path):
+    _write(fleet_dir, "defaults", "auto_compact_window: 50000")
+    with pytest.raises(ValueError, match=r"'defaults\.auto_compact_window'"):
+        load_test_fleet(fleet_dir)
+
+
+@pytest.mark.parametrize("tier", ["bot", "fleet.defaults", "built_in"])
+def test_config_explain_names_where_the_window_came_from(tmp_path: Path, tier):
+    from claudlobby.config import load_fleet, scalar_config_origin
+
+    raw = {"name": "canary", "manager": "b", "bots": {"b": {"expertise": ["x"]}}}
+    if tier == "bot":
+        raw["bots"]["b"]["auto_compact_window"] = 400000
+    if tier == "fleet.defaults":
+        raw["defaults"] = {"auto_compact_window": 400000}
+    path = tmp_path / "fleet.yaml"
+    path.write_text(yaml.safe_dump({"fleet": raw}))
+    _, defaults = load_fleet(path)
+    assert scalar_config_origin(path, defaults, "auto_compact_window", bot="b") == (
+        tier,
+        None if tier == "built_in"
+        else f"fleet.{'bots.b' if tier == 'bot' else 'defaults'}.auto_compact_window",
+    )
