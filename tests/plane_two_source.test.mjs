@@ -606,14 +606,22 @@ for(const fallback of [false,true]) test(`first overview room discovery paints i
   assert.ok(h.callbacks.some(t=>t.ms===400),'routing discovery still coalesces a board refresh');
   api.dispose();
 });
-test('actual source loss still retires a held overview after routing discovery',async()=>{
+for(const painted of [false,true]) test(`actual source loss still retires a held overview after routing discovery (peer partial painted first: ${painted})`,async t=>{
   const {api,a,b}=await pair(),h=await appHarness(api);h.c.fleetsSeen=true;h.c.openStream();
+  t.mock.timers.enable({apis:['setTimeout']}); // The adapter's partial paint runs on a real timer; this test chooses when it fires.
   const held=deferred();a.routes.set('/api/overview',held.promise);
   const reading=h.c.refreshOverview();await h.settle();
+  if(painted){
+    t.mock.timers.tick(1);
+    assert.equal(h.overviewPaints.at(-1).state,'ok','a live peer paints before its held source');
+    assert.deepEqual(h.overviewPaints.at(-1).data.sources.map(s=>s.state),['checking','ok']);
+  }
+  const atLoss=h.overviewPaints.length;
   b.setStatus('sign_in_required');await b.reader.start();
+  if(!painted)t.mock.timers.tick(1);
   held.resolve(roster('team'));await reading;await h.settle();
   assert.equal(h.overviewPaints.at(-1).state,'unavailable');
-  assert.ok(h.overviewPaints.every(v=>v.state!=='ok'),'old private response cannot repaint after real access loss');
+  assert.ok(h.overviewPaints.slice(atLoss).every(v=>v.state!=='ok'),'old private response cannot repaint after real access loss');
   api.dispose();
 });
 for(const retirement of ['replacement','removal']) test(`All teams board cannot repaint retired room tasks after ${retirement}`,async()=>{
