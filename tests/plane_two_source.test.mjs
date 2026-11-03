@@ -212,6 +212,23 @@ test('ordinary overview failures remain retryable automatically and stale timeou
   api.dispose();a.reader.dispose();b.reader.dispose();
 });
 
+test('room presence facts accept actual scoped connected projection and reject a peer identity', async () => {
+  const {api,a,b}=await pair();
+  const value={...ok({bots:[{alias:'bot:team/lead',live:'up',presence:'idle'}],sampler_available:true}),provenance:{checked_at:'2026-01-01'}};
+  a.routes.set('/api/presence?fleet=team',value);
+  const scoped=await api.jget('/api/presence?fleet=a%20%2F%20team');
+  assert.equal(scoped.data.sources,undefined);
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const {runInNewContext}=await import('node:vm'),context={PRESENCE_WORD:{idle:'idle'}};
+  runInNewContext(app.slice(app.indexOf('function botPresenceFacts('),app.indexOf('function agentDirectoryCard(')),context);
+  const identity={uid:'a::'+actor,alias:'a::bot:team/lead',fleet:'a / team',fleet_uid:'a::'+fleet};
+  const facts=context.botPresenceFacts(identity,scoped);
+  assert.equal(facts.live,'up');assert.equal(facts.heartbeat,'idle');assert.equal(facts.checked,'2026-01-01');
+  assert.equal(context.botPresenceFacts({...identity,uid:'b::'+actor},scoped).live,'unknown');
+  assert.equal(context.botPresenceFacts({...identity,alias:'b::bot:team/lead'},scoped).heartbeat,'unknown');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('directory presence keeps colliding aliases source-qualified and retires lost-source reads', async () => {
   const {api,a,b}=await pair();
   for(const item of [a,b])item.routes.set('/api/presence',ok({bots:[{alias:'bot:team/lead',live:'sampling',presence:'working'}],sampler_available:item===a}));

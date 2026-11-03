@@ -1490,9 +1490,14 @@ function resetAgentPresence() {
 }
 function botPresenceFacts(actor, presence) {
   const sources = presence?.data?.sources;
-  const source = sources ? sources.find(s => actor.uid.startsWith(s.key + "::") && actor.alias.startsWith(s.key + "::"))
-    : !actor.uid.includes("::") && presence?.data ? {...presence.data,state:presence.state,provenance:presence.provenance} : null;
   const observed = presence?.data?.bots?.find(b => b.alias === actor.alias);
+  const qualifier = actor.uid.match(/^([a-z][a-z0-9-]{0,31})::/)?.[1];
+  // Scoped connected reads omit sources; their exact bot alias is still projected.
+  const scoped = !actor.uid.includes("::") || qualifier && observed
+    && actor.alias.startsWith(qualifier + "::") && actor.fleet_uid?.startsWith(qualifier + "::")
+    && actor.fleet?.startsWith(qualifier + " / ");
+  const source = sources ? sources.find(s => actor.uid.startsWith(s.key + "::") && actor.alias.startsWith(s.key + "::"))
+    : scoped && presence?.data ? {...presence.data,state:presence.state,provenance:presence.provenance} : null;
   const live = source?.state === "ok" && source.sampler_available
     && ["up", "down"].includes(observed?.live) ? observed.live : "unknown";
   const heartbeat = source?.state === "ok" && !source.recorded_unavailable
