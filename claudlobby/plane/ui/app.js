@@ -1352,7 +1352,8 @@ function renderFleetTabs() {
   // selected; the merged host view is the explicit last resort.
   el.innerHTML = [...fleets.filter(f => showHiddenTeams || !hidden.has(f.uid) || f.alias === currentFleet || fleets.length === 1 && currentFleet === null).map((f) => f.alias), "all"].map((f) => {
     const meta = fleets.find((x) => x.alias === f);
-    const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok"
+    const refreshing = meta?.overview_retained && meta.source_state === 'checking' && meta.connection_state === 'ready';
+    const n = meta ? `<small>${esc(refreshing ? 'Refreshing' : meta.source_state && meta.source_state !== "ok"
       ? meta.connection_state === 'ready' ? 'summary unavailable'
       : meta.connection_state === 'not_connected' ? 'not connected' : meta.source_state : `${meta.bots} recorded`)}</small>`
       : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;

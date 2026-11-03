@@ -55,6 +55,10 @@ test('accepted source paints before a held peer and rechecks admission before fi
 
 test('overview refresh retains only same-admission pending summaries and removes a failed source without hiding its peer',async()=>{
   const {api,a,b}=await pair();await api.jget('/api/overview');
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const node={innerHTML:'',querySelectorAll:()=>[]},context={fleets:[],currentFleet:'all',hiddenTeams:()=>new Set(),showHiddenTeams:false,esc:String,$:()=>node,interactionApi:{dispose(){}}};
+  runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),context);
+  const tabs=value=>{context.fleets=value.data.fleet_choices;context.renderFleetTabs();return node.innerHTML;};
   const held=deferred(),heldA=deferred();b.routes.set('/api/overview',held.promise);a.routes.set('/api/overview',heldA.promise);
   let accept,acceptA;const progress=new Promise(resolve=>{accept=resolve;}),progressA=new Promise(resolve=>{acceptA=resolve;});
   const reading=api.jget('/api/overview',value=>{accept(value);if(value.data.sources[0].state==='ok')acceptA(value);});
@@ -68,12 +72,20 @@ test('overview refresh retains only same-admission pending summaries and removes
   assert.equal(partial.data.sources[1].state,'checking');
   assert.equal(partial.data.sources[1].overview_retained,true);
   assert.equal(partial.data.fleets.find(f=>f.alias==='b / team').overview_retained,true);
+  assert.equal(partial.data.fleet_choices[1].source_state,'checking');
+  assert.equal(partial.data.fleet_choices[1].read_state,'checking');
+  assert.equal(partial.data.fleet_choices[1].overview_retained,true);
+  assert.match(tabs(partial),/b \/ team <small>Refreshing<\/small>/);
+  assert.doesNotMatch(node.innerHTML,/summary unavailable/);
   assert.ok(partial.data.sources[1].overview_read_at);
   held.resolve({state:'unreadable',provenance:null});const failed=await reading;
   assert.deepEqual(failed.data.fleets.map(f=>f.alias),['a / team']);
   assert.equal(failed.data.totals.bots,1);
   assert.equal(failed.data.sources[1].host,null);
   assert.equal(failed.data.totals.overview_retained,false);
+  assert.equal(failed.data.fleet_choices[1].overview_retained,false);
+  assert.match(tabs(failed),/b \/ team <small>summary unavailable<\/small>/);
+  assert.doesNotMatch(node.innerHTML,/Refreshing/);
   // A later admission cannot inherit even an earlier successful summary.
   b.setStatus('sign_in_required');await b.reader.start();
   b.setStatus('ready');await b.reader.start();
@@ -82,6 +94,8 @@ test('overview refresh retains only same-admission pending summaries and removes
   const refresh=api.jget('/api/overview',update),changed=await pending;
   assert.deepEqual(changed.data.fleets.map(f=>f.alias),['a / team']);
   assert.equal(changed.data.sources[1].overview_retained,false);
+  assert.match(tabs(changed),/b \/ team <small>summary unavailable<\/small>/);
+  assert.doesNotMatch(node.innerHTML,/Refreshing/);
   next.resolve(roster('team'));await refresh;api.dispose();
 });
 

@@ -150,6 +150,7 @@ export function createWorkspaceReadTransport({ sources }) {
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
       uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state,
+      overview_retained: values[i].state === 'checking' && values[i].overview_retained === true,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       read_state: values[i].state })));
   }
