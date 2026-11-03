@@ -335,12 +335,16 @@ test('controls retain focus across state updates and disable unsupported navigat
   for(const id of ['fleet','channel']){
     const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
     const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
+    const presence=new h.ui.Element('button');presence.dataset.botInspect='actor';presence.dataset.botInspection='presence';target.append(presence);
+    let inspections=0;presence.addEventListener('click',()=>{inspections++;});h.ui.observers[0].fn();
+    assert.equal(presence.disabled,false);assert.equal(presence.title,'');presence.click();assert.equal(inspections,1);
   }
   const tasks=h.ui.nav.find(button=>button.dataset.view==='tasks');assert.equal(tasks.disabled,false);
   h.metadataStatus=503;await h.api.checkAccount();h.ui.observers[0].fn();
   assert.equal(tasks.disabled,false,'an account-service outage preserves task navigation over retained reads');
   h.metadataStatus=403;await h.api.checkAccount();h.ui.observers[0].fn();
   assert.equal(tasks.disabled,true,'account refusal retires task navigation');
+  for(const id of ['fleet','channel'])for(const button of h.ui.get(id).children)assert.equal(button.disabled,true,'account refusal retires presence inspection too');
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
