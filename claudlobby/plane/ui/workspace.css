@@ -810,7 +810,7 @@ body.plane-workspace { padding:0 24px 24px; }
   .room-bot-inspector dl { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
 }
 
-.task-filters { display:flex; flex-wrap:wrap; align-items:end; gap:8px; margin-bottom:16px; }
+.plane-workspace #rail-right > .task-filters { display:flex; flex-direction:row; flex-wrap:wrap; align-items:end; gap:8px; margin-bottom:16px; }
 .task-filters small { flex-basis:100%; font-size:11px; color:var(--dim); }
 .task-filters label { min-width:0; font-size:11px; color:var(--dim); }
 .task-filters select { display:block; margin-top:4px; padding:7px; max-width:260px; border:1px solid var(--edge); border-radius:6px; background:var(--panel); color:var(--ink); }
