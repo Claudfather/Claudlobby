@@ -377,6 +377,10 @@ def test_an_armed_opt_in_names_what_armed_it(tmp_path):
     rows = _resolve(tmp_path, "OBSERVABILITY_UNASSIGNED_CHECK=1\n")
     st = _state(rows, "worker-unassigned")
     assert st.on is True and ".env" in st.source
+    text = sw.format_table([st])
+    assert "ships off because" in text and "stays off" not in text
+    for rendered in (text, sw.summary_line([st])):
+        assert "1 opt-in (1 on, 0 off, 0 unknown)" in rendered
 
 
 def test_an_unreachable_resolver_says_so_rather_than_guessing(tmp_path,
@@ -395,8 +399,12 @@ def test_an_unreachable_resolver_says_so_rather_than_guessing(tmp_path,
     assert st.unknown and st.label == "unknown"
     assert "resolver unreachable" in st.detail
     assert "resolver unreachable" in sw.summary_line(rows)
-    # ...and an UNKNOWN state never reaches status's header: naming a door as
-    # off when we could not read it is the fabrication this rule exists to stop.
+    opt_ins = [row for row in rows if row.switch.polarity == sw.OPT_IN]
+    on = sum(row.on and not row.unknown for row in opt_ins)
+    off = sum(not row.on and not row.unknown for row in opt_ins)
+    unknown = sum(row.unknown for row in opt_ins)
+    assert f"{len(opt_ins)} opt-in ({on} on, {off} off, {unknown} unknown)" in sw.summary_line(rows)
+    # An UNKNOWN state must never reach the known-off subset: unread is not off.
     assert st not in sw.target_workflow_off(rows)
 
 
@@ -442,6 +450,14 @@ def test_doctor_switches_prints_the_table_alone(tmp_path):
     # The npx-cache RUNG is the probe this guards against. Its name, not the
     # word: the table itself now names npx (mcp-direct-launch, #1604).
     assert "npx-cache" not in r.stdout and "=== claudlobby host doctor ===" not in r.stdout
+    import json
+    structured = _cli(tmp_path / "r", "host", "doctor", "--switches", "--json")
+    assert structured.returncode == 0, structured.stderr
+    rows = json.loads(structured.stdout)["data"]["fleets"][0]["switches"]
+    expected = {row.switch.key: row for row in _resolve(tmp_path, "TASK_RECHECK_ENABLED=0\n")}
+    for row in rows:
+        resolved = expected[row["switch"]["key"]]
+        assert (row["arm"], row["disarm"], row["label"]) == (resolved.arm, resolved.disarm, resolved.label)
 
 
 def test_the_doctor_rung_exists_and_never_fails(tmp_path):
@@ -671,6 +687,8 @@ def test_the_table_names_the_release_extra_when_it_is_missing(
     assert "plane-ui" in st.source
     assert "[plane-ui] extra in its offline wheelhouse" in st.arm
     assert "[plane-ui] extra in its offline wheelhouse" in _sw.format_table(rows)
+    assert st.as_dict()["arm"] == st.arm
+    assert st.as_dict()["label"] == "off"
 
 
 def test_the_composer_arming_tables_are_derived_not_listed():
@@ -754,6 +772,8 @@ def test_every_switch_declares_a_carrier_and_derives_its_two_lines():
         assert s.carrier, s.key
         assert s.arm == sw._carrier_lines(s)[0]
         assert s.disarm == sw._carrier_lines(s)[1]
+        if s.carrier == sw.ENROLL_HOST and s.config_extra:
+            assert s.config_extra in s.arm
         if s.carrier in (sw.ENV_FLEET, sw.ENV_HOST, sw.BOT_CONF):
             assert s.env, f"{s.key}: an env carrier with no variable"
             assert s.env in s.arm and s.env in s.disarm

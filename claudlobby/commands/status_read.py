@@ -40,14 +40,19 @@ def dispatch(args) -> CommandOutput:
     else:
         statuses = collect_fleet_status(context.fleet, context.paths)
         switch_states = None
+        switch_note = None
         try:
             from ..switches import resolve
             switch_states = resolve(context.paths, context.fleet)
         except Exception:
-            # Status remains readable when the optional switch header cannot be resolved.
-            pass
+            # Keep native/Plane status readable, without presenting an unread
+            # switch set as an observed absence of disabled reactions.
+            switch_note = "Switch states unavailable; inspect claudlobby host doctor --switches."
         data = json.loads(format_json(statuses, context.fleet.name, switch_states))
         lines = (format_table(statuses, context.fleet.name, switch_states).rstrip(),)
+        if switch_note:
+            data.update(switches_state="unavailable", switches_note=switch_note)
+            lines += (switch_note,)
     return CommandOutput(data, release_id=release_id, lines=lines)
 
 

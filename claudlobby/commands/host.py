@@ -41,6 +41,25 @@ def _status_data(root, state="unselected", evidence=None, recovery=()):
             "recovery": list(recovery)}
 
 
+def _status_recovery_hint(root, recovery):
+    if not recovery:
+        return ("Recovery support could not be verified. Inspect claudlobby --root "
+                f"{shlex.quote(str(root))} host releases and the recorded activation journals; "
+                "do not retry an activation without its missing evidence.")
+    lines = []
+    for row in recovery:
+        if row["abort_in_progress"]:
+            lines.append(f"Activation {row['activation_id']}: a recorded abort is in progress; "
+                         "inspect its abort-adoption or abort-upgrade procedure before continuing.")
+        elif row["supported_step"] is None:
+            lines.append(f"Activation {row['activation_id']}: no supported recovery step is recorded; "
+                         "preserve its journal and review the pending step with the operator; no resume command is offered.")
+        else:
+            lines.append(f"Activation {row['activation_id']}: supported recorded step {row['supported_step']}; "
+                         "inspect host activate --help and its frozen plan before an explicit operator resume.")
+    return "\n".join(lines)
+
+
 def _status(args, root):
     problem = None
     try:
@@ -80,8 +99,10 @@ def _status(args, root):
     if restored is not None:
         data["restored_backup"] = restored
     if problem:
-        raise CommandFailure(problem.code, f"{problem.code}: recorded host state is {state}",
-                             data=data, release_id=executing, hint=_hint(root))
+        message = problem.message if state == "incomplete" else f"{problem.code}: recorded host state is {state}"
+        raise CommandFailure(problem.code, message,
+                             data=data, release_id=executing,
+                             hint=_status_recovery_hint(root, recovery))
     lines = (f"Host recorded state: {state}; running processes are unobserved.",)
     if restored is not None and state == "unselected":
         lines += ("Restored backup is inactive. Review external work and credentials before planning activation; "

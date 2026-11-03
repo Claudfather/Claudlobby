@@ -9,6 +9,13 @@ from dataclasses import asdict
 from ..command_result import CommandFailure, CommandOutput
 
 
+def _enrollment_hint(name: str) -> str:
+    return (f"host.jobs.{name}.enroll=false in the effective host configuration; "
+            f"inspect claudlobby host job show {name} and claudlobby host doctor --switches. "
+            "To change enrollment, review this host's override, then config plan, config diff "
+            "and operator host activate. A run still requires the selected release and installed native placement.")
+
+
 def dispatch(args) -> CommandOutput:
     if args.public_command == "host.job.run":
         return _run(args)
@@ -18,8 +25,12 @@ def dispatch(args) -> CommandOutput:
     if args.public_command == "host.job.list":
         items = [{"name": name, "enroll": cfg.get("enroll", True)}
                  for name, cfg in sorted(jobs.items())]
-        return CommandOutput({"jobs": items}, lines=tuple(
-            f"{item['name']}\tenroll={'true' if item['enroll'] else 'false'}" for item in items))
+        return CommandOutput({"jobs": items, "source": "effective_host_configuration",
+                              "native_state": "not_checked"}, lines=tuple(
+            f"{item['name']}\tenroll={'true' if item['enroll'] else 'false'}"
+            + (f" — host.jobs.{item['name']}.enroll=false; inspect host job show {item['name']} "
+               "and host doctor --switches" if item['enroll'] is False else "")
+            for item in items) + ("Effective declarations only; installed/running state was not checked.",))
 
     if args.name not in jobs:
         raise CommandFailure("not_found", f"host job {args.name!r} is not packaged in this release",
@@ -27,8 +38,12 @@ def dispatch(args) -> CommandOutput:
     # YAML parses an unquoted hold.until date into a date object. The JSON
     # representation is the same ISO spelling expected by the existing reader.
     job = json.loads(json.dumps(jobs[args.name], sort_keys=True, default=str))
-    return CommandOutput({"name": args.name, "job": job},
-                         lines=(json.dumps(job, sort_keys=True),))
+    hint = _enrollment_hint(args.name) if job.get("enroll", True) is False else None
+    return CommandOutput({"name": args.name, "job": job, "source": "effective_host_configuration",
+                          "native_state": "not_checked", "enrollment_hint": hint},
+                         lines=(json.dumps(job, sort_keys=True),
+                                "Effective declaration only; installed/running state was not checked.",
+                                *((hint,) if hint else ())))
 
 
 def _run(args) -> CommandOutput:
@@ -51,9 +66,13 @@ def _run(args) -> CommandOutput:
     except HostJobError as exc:
         data.update(native_outcome="unknown" if exc.effect_attempted else "unattempted",
                     release_id=exc.release_id, target=exc.target)
+        hint = "inspect the exact native job before any retry"
+        if not exc.effect_attempted:
+            hint = (_enrollment_hint(args.name) if str(exc) == "host job is disabled by this host's effective configuration" else
+                    f"inspect claudlobby host job show {args.name} and claudlobby host doctor --switches; "
+                    "the selected release and installed native placement are still required")
         raise CommandFailure("unavailable" if exc.unavailable else "conflict", str(exc),
-                             data=data, release_id=exc.release_id,
-                             hint="inspect the exact native job before any retry" if exc.effect_attempted else None) from exc
+                             data=data, release_id=exc.release_id, hint=hint) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "host job requires the selected executable and release",
                              data=data) from exc

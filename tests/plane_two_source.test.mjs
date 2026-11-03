@@ -959,7 +959,7 @@ test('actual app supports one ready host, zero-of-one loss and recovery without 
   overview=await api.jget('/api/overview');
   assert.equal(overview.state,'unavailable');
   assert.deepEqual(overview.data.coverage,{total:1,reachable:0,partial:true});
-  assert.match(overview.remediation,/No source/);
+  assert.match(overview.remediation,/a: .*Computers & status/);
   assert.equal(h.c.currentFleet,null); // Canonical single-fleet auto selection is unchanged.
   assert.equal(h.c.fleets[0].source_state,'denied');
   assert.ok(h.paints.slice(-2).every(v=>v.state!=='ok'));

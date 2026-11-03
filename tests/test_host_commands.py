@@ -520,6 +520,12 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     assert pending["data"]["unfinished_activations"][0]["pending_step"] == "producers_paused"
     assert pending["data"]["recovery_supported"] is False
     assert snapshot(root) == before
+    assert main(["--root", str(root), "host", "status"]) == 4
+    captured = capsys.readouterr()
+    plain = captured.out + captured.err
+    assert "interrupted" in plain and "producers_paused" in plain
+    assert "no supported recovery step" in plain
+    assert "--resume ID" not in plain and snapshot(root) == before
     (root / "state/activations/torn").mkdir()
     torn = call(capsys, argv, 4)
     assert any(row["activation_id"] == "torn" for row in torn["data"]["activation_errors"])

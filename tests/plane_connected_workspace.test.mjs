@@ -50,6 +50,7 @@ function dom() {
     click(){if(!this.disabled)this.handlers.click?.();}
   }
   for(const id of ['owner-session','main','fleet','channel','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
+  const tools=new Element('details'),viewNav=new Element('nav');viewNav.querySelector=q=>q==='details'?tools:null;elements.set('view-nav',viewNav);viewNav.append(tools);
   const nav=['channel','tasks','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
   class Observer {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
@@ -177,6 +178,36 @@ test('known expiry offers explicit Connect without reconnecting or disturbing an
   assert.equal(h.api.snapshot().computers[1].state,'ready');h.api.dispose();
 });
 
+test('unconnected Rooms and Tasks explain owner pairing without claiming it is disabled',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  for(const path of ['/api/tasks','/api/channel?limit=120']) {
+    const value=await h.api.jget(path);
+    assert.equal(value.state,'unavailable');
+    assert.match(value.remediation,/Not connected.*Rooms and Tasks.*Connect.*first-time owner pairing.*Set up computer access/);
+    assert.doesNotMatch(value.remediation,/pairing (?:is )?(?:disabled|off)|no tasks|nothing here/i);
+  }
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);
+  h.api.dispose();
+});
+
+test('unreadable Rooms and Tasks retain known expiry guidance without hiding readable peers',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  assert.match(h.ui.get('view-nav').children[0].children[0].textContent,/Recorder and activity search are unavailable/);
+  await h.api.act(0,'connect');h.time=1000;await h.api.act(1,'connect');
+  h.time=900000;h.timer(900000);await flush();
+  const partial=await h.api.jget('/api/tasks');
+  assert.equal(partial.state,'ok');
+  assert.match(partial.data.sources[0].remediation,/expired.*Connect again/);
+  h.time=901000;h.timer(900000);await flush();
+  for(const path of ['/api/tasks','/api/channel?limit=120']) {
+    const value=await h.api.jget(path);
+    assert.equal(value.state,'unavailable');
+    assert.match(value.remediation,/expired.*Connect again/);
+  }
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,2);
+  h.api.dispose();
+});
+
 for(const stage of ['challenge','assertion','issue'])
  test(`failed ${stage} keeps explicit Connect available without expiry, automatic retry or peer disruption`,async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
@@ -189,7 +220,8 @@ for(const stage of ['challenge','assertion','issue'])
   const primary=rows[0].children[1].children[0];
   assert.equal(h.api.snapshot().computers[0].state,'unavailable');
   assert.doesNotMatch(rows[0].children[0].textContent,/expired/i);
-  assert.match(rows[0].children[2].textContent,/outcome is unknown/);
+  assert.match(rows[0].children[2].textContent,stage === 'issue' ? /outcome is unknown/ : /No session issue was sent/);
+  if(stage !== 'issue') assert.doesNotMatch(rows[0].children[2].textContent,/outcome is unknown/);
   assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
   assert.equal(rows[1].children[1].children[0].textContent,'Disconnect');
   const calls=h.calls.length;
@@ -868,7 +900,10 @@ test('changed connection fences held preview, preserves goal and never launches'
 test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
-  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  assert.ok(panel.children.some(e=>/Choose Check setup approval/.test(e.textContent)));
+  await h.api.run('context');
+  assert.ok(panel.children.some(e=>/Enter a goal to enable Preview team/.test(e.textContent)));
+  h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
   assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
   const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
@@ -878,7 +913,10 @@ test('setup panel retains disclosure/focus and refuses launch without durable id
   assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
   assert.ok(panel.children.some(e=>e.textContent.includes('Goal: Improve checkout tests.')));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
-  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
+  assert.match(h.api.snapshot().note,/could not retain activation identifiers.*No new launch was sent/);
+  assert.ok(panel.children.some(e=>/could not retain activation identifiers/.test(e.textContent)));
+  h.api.dispose();
 });
 
 test('canonical reserved request wins two-tab storage conflict, preserving both IDs through reload',async()=>{

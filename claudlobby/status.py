@@ -650,11 +650,16 @@ def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
     from . import switches as _sw
 
     off = _sw.target_workflow_off(switch_states or [])
-    if not off:
-        return ""
-    return ", ".join(
-        f"{s.switch.key} off on {fleet_name}" for s in off
-    ) + " — this reaction will not happen (claudlobby host doctor --switches)"
+    notes = []
+    if off:
+        notes.append(", ".join(f"{s.switch.key} off on {fleet_name}" for s in off)
+                     + " — this reaction will not happen (claudlobby host doctor --switches)")
+    unknown = [s for s in switch_states or [] if s.unknown]
+    if unknown:
+        notes.append("Switch states unknown: " + ", ".join(
+            f"{s.switch.key} ({s.unknown_reason})" for s in unknown)
+            + " — inspect claudlobby host doctor --switches")
+    return "\n".join(notes)
 
 
 def _context_display(bs: BotStatus) -> str:
@@ -884,4 +889,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
             s.switch.key for s in switch_states
             if s.switch.target_workflow and not s.on and not s.unknown
         ]
+        payload["switches_unknown"] = [
+            {"key": s.switch.key, "reason": s.unknown_reason}
+            for s in switch_states if s.unknown
+        ]
+        payload["switches_state"] = "unknown" if payload["switches_unknown"] else "read"
     return json.dumps(payload, indent=2) + "\n"

@@ -43,11 +43,12 @@ def dispatch(args):
             if args.switches:
                 rows = switches.resolve(scope, fleet)
                 items.append({"fleet": fleet.name if fleet else None,
-                              "switches": [asdict(row) for row in rows]})
+                              "switches": [row.as_dict() for row in rows]})
                 lines.append(switches.format_table(rows))
             else:
                 report = run_doctor(fleet, scope, delivery=args.delivery)
-                items.append({"fleet": fleet.name, **asdict(report)})
+                items.append({"fleet": fleet.name, **asdict(report),
+                              "switch_rows": [row.as_dict() for row in report.switch_rows]})
                 lines.append(f"Fleet {fleet.name}\n{format_report(report)}")
                 failed |= report.has_failures
         finally:

@@ -83,8 +83,12 @@ def _dispatch(args) -> CommandOutput:
                               "waiting": selection.waiting, "overflow": selection.overflow,
                               "standing_task_ids": list(selection.standing_task_ids),
                               "issues": [asdict(issue) for issue in selection.issues],
+                              "selection_notes": list(_selection_notes(selection, args.repeat_h)),
                               "digest": body}, release_id=release_id,
-                             lines=(body or "recheck: no task is due",) + _standing(selection))
+                             lines=(body or ("recheck: no task is eligible for this sweep"
+                                    if selection.held or selection.uncertain or selection.waiting
+                                    else "recheck: no task is due"),)
+                             + _selection_notes(selection, args.repeat_h) + _standing(selection))
 
     bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
     if origin is not None and not bound_release:
@@ -121,6 +125,7 @@ def _dispatch(args) -> CommandOutput:
             "overflow": None if result.replayed else result.selection.overflow,
             "standing_task_ids": list(result.selection.standing_task_ids),
             "issues": [asdict(issue) for issue in result.selection.issues],
+            "selection_notes": None if result.replayed else list(_selection_notes(result.selection, args.repeat_h)),
             "replayed": result.replayed, "recording": "committed",
             "message_id": result.message_id, "recipient_uid": result.recipient_uid,
             "request_persisted": True,
@@ -131,13 +136,35 @@ def _dispatch(args) -> CommandOutput:
             raise CommandFailure("notification_failed",
                                  "recheck asks committed; manager digest is unverified; inspect request and receipt",
                                  data=data, release_id=release_id)
-    if result.selection.uncertain:
-        ids = ", ".join(result.selection.uncertain_request_ids)
-        lines = (f"recheck: {result.selection.uncertain} task(s) held for uncertain prior delivery;"
-                 f" inspect request {ids}",)
-    else:
+    if result.replayed:
+        lines = (f"recheck: original receipt names {len(result.task_ids)} task(s);"
+                 " no new selection or delivery was attempted",)
+    elif result.task_ids:
         lines = (f"recheck: {len(result.task_ids)} task(s) named in one manager digest",)
+        lines += _selection_notes(result.selection, args.repeat_h)
+    else:
+        lines = ("recheck: no task is eligible for this sweep"
+                 if result.selection.held or result.selection.uncertain or result.selection.waiting
+                 else "recheck: no task is due",)
+        lines += _selection_notes(result.selection, args.repeat_h)
     return CommandOutput(data, release_id=release_id, lines=lines + _standing(result.selection))
+
+
+def _selection_notes(selection, repeat_h: float) -> tuple[str, ...]:
+    """Explain the canonical selector's exclusions without making a new selection."""
+    notes = []
+    if selection.held:
+        notes.append(f"recheck: {selection.held} task(s) held by the {repeat_h:g}h repeat window;"
+                     " wait for that window to pass before another recheck")
+    if selection.uncertain:
+        ids = ", ".join(selection.uncertain_request_ids)
+        notes.append(f"recheck: {selection.uncertain} task(s) held for uncertain prior delivery;"
+                     f" inspect the original receipt with claudlobby request show REQUEST_ID: {ids};"
+                     " no replacement digest was sent for them")
+    if selection.waiting:
+        notes.append(f"recheck: {selection.waiting} escalated task(s) waiting on a human;"
+                     " inspect claudlobby task list and task show TASK_ID for the question")
+    return tuple(notes)
 
 
 def _standing(selection) -> tuple[str, ...]:

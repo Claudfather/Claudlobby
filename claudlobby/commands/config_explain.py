@@ -43,10 +43,12 @@ def _config_field(key, bot):
 def dispatch(args) -> CommandOutput:
     from ..context import BotNotFoundError, generated_selectors, load_context, resolve_paths
     from ..env_register import ResolverUnavailable, build, exits_nonzero, format_report
+    from .config_validation import _configuration_hint
     import yaml
 
     if args.key is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", args.key):
         raise CommandFailure("invalid_argument", "KEY must be an environment name or fleet/bot field")
+    paths = None
     try:
         fleet, bot = generated_selectors(fleet=args.fleet, bot=args.bot,
                                         include_bot=True, seed=args.seed)
@@ -59,8 +61,12 @@ def dispatch(args) -> CommandOutput:
     except RuntimeError as exc:
         raise CommandFailure("unavailable", "installed library package is unavailable",
                              hint="build and select a sealed release with packaged resources") from exc
-    except (ValueError, yaml.YAMLError) as exc:
-        raise CommandFailure("conflict", "configuration or requested scope is invalid") from exc
+    except yaml.YAMLError as exc:
+        raise CommandFailure("conflict", "configuration or requested scope is invalid",
+                             hint=_configuration_hint(paths, exc)) from exc
+    except ValueError as exc:
+        raise CommandFailure("conflict", "configuration or requested scope is invalid",
+                             hint=_configuration_hint(paths)) from exc
     config_field = _config_field(args.key, bot) if args.key else None
     if config_field:
         from ..config import scalar_config_origin
