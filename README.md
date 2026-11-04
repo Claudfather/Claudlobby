@@ -140,10 +140,9 @@ claudlobby host doctor                # pre-flight fleet health diagnostic
 claudlobby --json fleet reports list  # paginated worker reports (--bot, --status, --since RFC3339)
 claudlobby fleet uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
 claudlobby event list                # fleet events from the plane (--bot, --type, --critical)
-claudlobby bot create --interactive               # author a bot; stage and activate separately
+claudlobby bot create --interactive               # author a bot; this does not start it
 claudlobby library create --kind skill             # scaffold a new skill directory
 claudlobby library create --kind guardrail         # scaffold a new guardrail file
-claudlobby bot move <bot> --to <fleet>  # move a bot between fleets
 claudlobby host cache warm            # pre-download npx + uvx packages for MCP servers
 ```
 
@@ -167,12 +166,13 @@ See [`documentation/getting-started.md`](documentation/getting-started.md) for t
 
 ## Sync-back: bots that learn
 
-Put intended skill and policy changes in authored fleet-overlay source. Packaged
-release assets are sealed: editing a generated skill's symlink target can damage
-the installed release. `claudlobby config diff --bot <bot>` identifies rendered
-drift without printing values; review the change, edit its authored source, then
-stage and inspect a configuration plan before activation. Bot-owned `memory/`
-and `data/` remain mutable and are preserved during composition.
+Put intended skill and policy changes in authored fleet-overlay source. Generated
+skill links may point into the managed Git checkout; do not edit through them.
+`claudlobby config diff --bot <bot>` identifies rendered drift without printing
+values. Review the change, edit its authored source, and use the common Git
+updater. Bot-owned `memory/` and `data/` remain mutable and are preserved during
+composition. Moving or removing bots is not yet supported by the Git updater;
+those commands refuse without changing the fleet.
 
 ## Hosts
 
@@ -180,7 +180,7 @@ and `data/` remain mutable and are preserved during composition.
 |------|-------|
 | macOS (Mac mini) | launchd via `<bot>.plist`. `claudlobby/_runtime_scripts/creds-check.sh` ships with a launchd install pattern. |
 | Linux (Raspberry Pi 5, Debian, Ubuntu) | systemd user services via `<bot>.service`. Set `CLAUDLOBBY_ROOT=$HOME/claudlobby` in the unit's Environment. |
-| Linux (root systemd) | Same as user systemd; install to `/etc/systemd/system/` instead of `~/.config/systemd/user/`. |
+| Linux (root systemd) | Not supported by this setup path; use the observed systemd user manager. |
 
 **GitHub identity.** By default bots use a shared `GITHUB_PAT`. To give a fleet its own
 **GitHub App identity** (short-lived installation tokens, branch protection that binds the

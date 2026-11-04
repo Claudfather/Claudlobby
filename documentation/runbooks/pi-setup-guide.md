@@ -430,12 +430,7 @@ wedges still completes. 10min is the sensible default.
 
 ## Host jobs
 
-`system.yaml` declares the host-level jobs. The sealed release's `config plan`
-stages their units with the fleet; `config diff` exposes the proposed changes,
-and `host activate` installs them through the native user manager. First-time
-`fleet setup` performs those steps together. Follow the
-[cold-host walkthrough](../getting-started.md) before enabling jobs; inspect
-their resulting state with `host doctor` and the systemd user journal.
+`system.yaml` declares the host-level jobs. They are prepared and published with the fleet through the managed Git updater: first-time `fleet setup --plan-only` prepares them, `host update continue` applies the original operation, and later changes use `host update apply`. Follow the [cold-host walkthrough](../getting-started.md) and the [update guide](../fleet-update-lifecycle.md#managed-git-delivery) before enabling jobs; inspect their resulting state with `host doctor` and the systemd user journal.
 
 ## Installing the fleet
 
@@ -444,9 +439,7 @@ One supported pattern on Linux — systemd user services; the cron + tmux patter
 ### systemd user services (self-restarting)
 
 Enable user lingering through your host administrator for persistence past
-logout. Then follow the [cold-host walkthrough](../getting-started.md) to
-assemble a release and run `fleet setup` with
-`--install-directory "$HOME/.config/systemd/user"`.
+logout. Then follow the [cold-host walkthrough](../getting-started.md) to prepare the managed installation and first fleet, passing `$HOME/.config/systemd/user` as the native install directory when it asks. A Pi already installed through the earlier sealed-release model needs a reviewed conversion that is not yet implemented; do not run the walkthrough over its data root.
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
 
@@ -455,4 +448,4 @@ Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `s
 - `claudlobby --fleet FLEET bot restart BOT` — supervised bot restart
 - `claudlobby --fleet FLEET fleet logs` — bounded bot log tails
 - `claudlobby host job run disk-monitor` — request the selected, enabled disk check
-- Declare periodic bot prompts in fleet configuration and activate the reviewed plan; the private scheduled dispatcher is not a public command.
+- Declare periodic bot prompts in fleet configuration and apply the reviewed change through `host update apply`; the private scheduled dispatcher is not a public command.

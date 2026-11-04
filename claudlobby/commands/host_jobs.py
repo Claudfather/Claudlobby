@@ -12,8 +12,8 @@ from ..command_result import CommandFailure, CommandOutput
 def _enrollment_hint(name: str) -> str:
     return (f"host.jobs.{name}.enroll=false in the effective host configuration; "
             f"inspect claudlobby host job show {name} and claudlobby host doctor --switches. "
-            "To change enrollment, review this host's override, then config plan, config diff "
-            "and operator host activate. A run still requires the selected release and installed native placement.")
+            "To change enrollment, review this host's authored override, then use "
+            "the operator host update apply workflow. A run still requires committed configuration and installed native placement.")
 
 
 def dispatch(args) -> CommandOutput:
@@ -70,17 +70,17 @@ def _run(args) -> CommandOutput:
         if not exc.effect_attempted:
             hint = (_enrollment_hint(args.name) if str(exc) == "host job is disabled by this host's effective configuration" else
                     f"inspect claudlobby host job show {args.name} and claudlobby host doctor --switches; "
-                    "the selected release and installed native placement are still required")
+                    "committed configuration and installed native placement are still required")
         raise CommandFailure("unavailable" if exc.unavailable else "conflict", str(exc),
                              data=data, release_id=exc.release_id, hint=hint) from exc
     except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "host job requires the selected executable and release",
+        raise CommandFailure("release_mismatch", "host job requires the committed Git installation",
                              data=data) from exc
     except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected host job release differs from this executable",
+        raise CommandFailure("release_mismatch", "host job installation differs from this executable",
                              data=data) from exc
     except (ActivationError, PlanError) as exc:
-        raise CommandFailure("conflict", "selected host job activation or configuration is incomplete",
+        raise CommandFailure("conflict", "committed host job configuration is incomplete",
                              data=data) from exc
     except (InventoryError, OSError, RuntimeError) as exc:
         raise CommandFailure("unavailable", "host job native state or effective configuration is unavailable",

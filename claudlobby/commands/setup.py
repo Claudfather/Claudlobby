@@ -127,7 +127,7 @@ def _template_config(template: str, fleet: str, repository: str | None, goal: st
         load_fleet_snapshot(source, content, None)
         return content
     except (RuntimeError, OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
-        raise CommandFailure("unavailable", "unavailable: installed team template; use a compatible sealed release") from exc
+        raise CommandFailure("unavailable", "unavailable: installed team template; inspect the managed Git installation") from exc
 
 
 def _flat_destination(root: Path, fleet: str) -> Path:
@@ -148,7 +148,7 @@ def _flat_destination(root: Path, fleet: str) -> Path:
     if observed not in (None, flat):
         raise CommandFailure("conflict", f"conflict: fleet {fleet} is already declared nested at {observed}; "
                              "no flat declaration written",
-                             hint=f"edit {observed / 'fleet.yaml'} in place, then run config plan and host activate")
+                             hint=f"edit {observed / 'fleet.yaml'} in place, review the authored changes, then use host update apply")
     return flat / "fleet.yaml"
 
 

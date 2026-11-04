@@ -49,3 +49,10 @@ explicit full commit, before freezing a new operation. A pending operation keeps
 its original target and request without another fetch. Remove unused sealed
 release/configuration writers and their rollback path; the shared Git publication
 owner retains interrupted-write recovery. Old records remain readable.
+
+### Changed — align operator guidance with the Git updater
+
+Remove obsolete sealed-update instructions from the current runbooks and CLI
+recovery hints. Distinguish authored source review from published-output drift,
+and document the remaining conversion, roster-change and restored-root startup
+limitations instead of suggesting commands that no longer exist.

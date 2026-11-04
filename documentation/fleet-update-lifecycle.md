@@ -13,7 +13,7 @@ Binary updates take effect on the next session start. Framework and authored con
 
 ## Managed Git delivery
 
-Use the stable installation CLI and explicit data root. Edit reviewed authored configuration/library inputs, then run:
+Use the stable installation CLI (`INSTALL/bin/claudlobby`) and the explicit, separate data root; [Getting started](getting-started.md) defines `CLI`, `INSTALL` and `DATA`. There is one managed installation per host (`INSTALL/src` and `INSTALL/env`), so a framework change moves that installation, never a per-release copy. Edit reviewed authored configuration/library inputs, then run:
 
 ```bash
 "$CLI" --root "$DATA" host update apply FULL_COMMIT --json
@@ -28,14 +28,16 @@ Use the stable installation CLI and explicit data root. Edit reviewed authored c
 
 New configuration commits before consumer startup. A failed consumer remains visible in update health without revoking the committed configuration. Existing jobs/starts participate in the runtime-use fence; the updater drains admitted work and preserves stopped/disabled consumers and schedules. A canary needs its own installation/data root and native labels, not another fleet inside a production root.
 
-The sealed `host activate`, repair/abort commands, `config plan --release` and `migration plan` are retired public execution routes. Historical release/activation/migration evidence remains inspectable with `host releases`, `host status` and `migration status`. Do not delete pending historical evidence to bypass an existing-host conversion or restore requirement.
+The sealed-release routes (`host activate`, its resume, rollback, adoption and repair/abort modes, `config plan --release` and `migration plan`) are retired as public execution paths; this guide does not describe them as instructions. Historical release/activation/migration evidence remains inspectable with `host releases`, `host status` and `migration status`. Do not delete pending historical evidence to bypass an existing-host conversion or restore requirement.
+
+**Existing sealed hosts are not covered.** A host that was installed and activated through the sealed-release model needs an explicit, reviewed conversion onto the managed Git installation. That conversion is **not yet implemented**, and this guide offers no workaround. Until it exists, do not point `host setup`, `fleet setup` or `host update apply` at that host's data root.
 
 ### Refreshing a skill's installed copies
 
 A bot's skills are copied into its generated runtime through the same Git configuration publication. Change their authored library source and apply the reviewed Git/configuration update; never hand-edit generated copies. `config diff --bot` includes the committed owned skill tree. Verify the published copy and actual bot behavior separately.
 
 Claudlobby never writes a user-level `~/.claude/skills/<name>/`. A copy there was put
-there by hand or by the operator's own sync, so no release or activation refreshes it
+there by hand or by the operator's own sync, so no Git update refreshes it
 and nothing reports when it drifts. Every bot whose Claude config directory is
 `~/.claude` (the default) loads it too, beside its own copy, and which of two
 same-named skills a session runs is not established here. After a skill changes,
@@ -47,13 +49,13 @@ diff -r ~/.claude/skills/<name> <data-root>/<fleet-overlay>/runtime/bots/<bot>/.
 
 ## The rule as the root CLAUDE.md stated it
 
-The root `CLAUDE.md` stated the rule in this paragraph until #2035; it now keeps a summary. The paragraph predates sealed releases: where it says `generate`, read activation.
+The root `CLAUDE.md` stated the rule in this paragraph until #2035; it now keeps a summary. The paragraph predates sealed releases: where it says `generate`, read the Git update's configuration publication.
 
 **Changing a running fleet:** a change reaches a bot by one of several carriers, and they differ on whether they reach a *running* process and whether they survive a restart. **The discriminator is WHEN THE ARTIFACT IS READ, not what type of file it is** (#1310). Read **once at session start** — composed `CLAUDE.md` text, `bot.conf` env, `.mcp.json` — and a canary window exists. Read **on demand, per use** — skill symlinks, hook scripts — and there is **no canary window at all**: the change is live on every bot the instant `generate` writes it. Sorting by artifact type collapses those two, and a composed *skill* is a composed *file*: it was filed under the restart row and has no restart gate, which is how a live-estate `generate` got run without a canary. `settings.local.json` **splits the two**: the session process does not re-read it (strace, two bots), yet a composed `deny` is **enforced on the very next tool call** — measured mid-session, both directions, three bots, Read tool only, `claude 2.1.240` on Linux. So permissions have **no canary window**; *where* that read happens is unestablished. The leaf-manager check-in default is a worked instance of the same rule: the `checkin` protocol's prose is composed `CLAUDE.md` text, read once at session start, so equipping or un-equipping a manager reaches a *running* manager only at its next restart, while the protocol's `requires:`-linked skill symlink and grants are live the moment `generate` writes them.
 
 ## Artifact read timing
 
-The read timing below explains why activation must control publication, including
+The read timing below explains why the updater must control publication, including
 files that a running session can observe immediately. The historical probes that
 follow measured those mechanisms on the earlier mutable installation.
 
@@ -66,15 +68,15 @@ correctly from that row ran `generate` across a live estate without a canary (#1
 | Carrier | Read | Reaches a *running* process | Survives restart | Delivered by |
 |---|---|---|---|---|
 | **Dispatch** (tmux message) | on arrival | yes — but with no delivery-time guarantee | no | sending a message |
-| **Composed instructions** (`CLAUDE.md`, `bot.conf` env) | **once, at session start** | **no** — arrives at the next restart | yes | sealed config activation |
-| **Composed MCP config** (`.mcp.json`) | **once, at session start** | **no** — servers are bound at startup | yes | sealed config activation |
-| **Repo `CLAUDE.md`** (project instructions) | once, at session start | no | yes | a project checkout update (separate from the sealed framework) |
-| **Composed skills** (`.claude/skills/` symlinks) | **on demand, per use** | **YES — live the instant the symlink lands** | yes | sealed config activation |
-| **Hook script** (`claudlobby/_runtime_scripts/*.sh` wired via `PreToolUse` etc.) | on demand, per call | yes — at the next tool call | yes | sealed release activation |
-| **Composed permissions** (`settings.local.json`) | **reads: not during a turn. enforcement: on demand, per tool call — see below** | **YES for enforcement — live if rewritten during a session. NO for reads** | yes | sealed config activation |
+| **Composed instructions** (`CLAUDE.md`, `bot.conf` env) | **once, at session start** | **no** — arrives at the next restart | yes | Git configuration update |
+| **Composed MCP config** (`.mcp.json`) | **once, at session start** | **no** — servers are bound at startup | yes | Git configuration update |
+| **Repo `CLAUDE.md`** (project instructions) | once, at session start | no | yes | a project checkout update (separate from the managed installation) |
+| **Composed skills** (`.claude/skills/` symlinks) | **on demand, per use** | **YES — live the instant the symlink lands** | yes | Git configuration update |
+| **Hook script** (`claudlobby/_runtime_scripts/*.sh` wired via `PreToolUse` etc.) | on demand, per call | yes — at the next tool call | yes | Git update (framework source) |
+| **Composed permissions** (`settings.local.json`) | **reads: not during a turn. enforcement: on demand, per tool call — see below** | **YES for enforcement — live if rewritten during a session. NO for reads** | yes | Git configuration update |
 
-Anything resolved on demand can become live when published. Staging alone does
-not publish it; the activation boundary now controls that exposure.
+Anything resolved on demand can become live when published. Preparing an update does
+not publish it; the updater's publication step now controls that exposure.
 
 ### What was measured, and how
 
@@ -451,7 +453,7 @@ bot". A change to the fleet's **manifest** — `fleet.yaml`, `projects.yaml`, th
 mission file — is a different question with the same discriminator: **when is
 the artifact read?**
 
-A manifest is read by `generate`, and only by `generate`. Nothing a bot executes
+(`generate` below names the composition step; today the managed Git updater performs it.) A manifest is read by `generate`, and only by `generate`. Nothing a bot executes
 opens `fleet.yaml`. So a manifest change reaches a bot in **two** steps, and
 neither happens on its own:
 
@@ -518,10 +520,10 @@ here — tracked as #1732.
 
 ## Mechanism 1 — daily selected-fleet plugin refresh
 
-The `reload-fleet` timer calls the selected release's `claudlobby fleet reload` at `03:30`. The public command uses the active plan's fleet roster and plugin list, then calls the packaged `claudlobby/_runtime_scripts/reload-fleet.sh` owner.
+The `reload-fleet` timer calls the installation's `claudlobby fleet reload` at `03:30`. The public command uses the committed configuration’s fleet roster and plugin list, then calls the packaged `claudlobby/_runtime_scripts/reload-fleet.sh` owner.
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
-2. Drops `data/.reload-pending` on each **running bot in the active plan**. It does not send any keystroke itself.
+2. Drops `data/.reload-pending` on each **running bot in the committed configuration**. It does not send any keystroke itself.
 
 The timer never composes or enrolls native units. Changes to authored configuration, composed skills, or native enrollment go through the same managed Git updater.
 
@@ -529,11 +531,11 @@ Every step is announced in `state/reload-fleet.log` before it runs (`reload-flee
 
 Activation is consolidated in `claudlobby/_runtime_scripts/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. A bot mid-task is never interrupted by *this* path, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
 
-> **The idle gate does not cover composed skill symlinks.** A separate operator activation that replaces a skill symlink makes it visible on demand immediately, even while a bot is busy. This timer no longer writes those symlinks.
+> **The idle gate does not cover composed skill symlinks.** A Git configuration update that replaces a skill symlink makes it visible on demand immediately, even while a bot is busy. This timer no longer writes those symlinks.
 >
 > The idle gate covers the plugin-cache refresh. Whether `/reload-skills` is required for another purpose has not been established.
 
-Runnable **on-demand** as `claudlobby --root DATA --fleet FLEET fleet reload`; it does not deploy a new release.
+Runnable **on-demand** as `claudlobby --root DATA --fleet FLEET fleet reload`; it does not apply a Git update.
 
 **Applies to every running bot, managers included** — live reload is free and lossless, so there's no reason to exclude managers here (contrast Mechanism 2).
 
@@ -580,22 +582,17 @@ Every bot start — intentional (restart skill, weekly bounce), crash (keepalive
 - Startup logs distinguish `mode=skill-bootstrap` from `literal-compatibility`, and a literal line taken because of the switch names it; both report submission, not completed resume or business work. The bootstrap is taller than the 80x24 pane a session starts in, so Claude Code's input box loses its prompt line off the top of the pane; the send then reads the payload's end at the bottom of the box, right above the rule under it. A send that still ends unsubmitted writes `NOT SUBMITTED` after the mode line. This change does not hold activation startup until selected-active or pace host-wide work.
 - **Stale** checkpoint (age ≥ threshold) or none → resume is skipped and the bot clean-starts rather than replaying dead state (e.g. re-attempting an already-merged PR).
 
-On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `claudlobby/_runtime_scripts/pre-stop-handoff.sh` triggers a fresh handoff before the restart — behind the same capability gate, since this runs on the `ExecStop` path where an unresolvable command costs the handoff at exactly the moment it matters. Non-blocking either way (always exits 0, even on a 30s timeout), so the restart never stalls on a slow or failed handoff; a skip is logged and emits `handoff_skipped`. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
+Planned restarts and Git updates use the same lifecycle owner. It records one
+checkpoint request, verifies a genuine saved capture, then stops the bot. A short
+native wait expiring does not authorize a stop or another send: the retained
+request is observed again on continuation. After a verified quiet stop, unchanged
+saved context remains valid without an age deadline halfway through the update.
+Use `bot handoff BOT --check` or `host update status` to inspect pending work.
 
-Host activation uses the explicit, verified handoff path. If that request reports
-`handoff-timeout` after its initial 30-second wait, activation continues observing
-the same request for up to 15 minutes, printing progress to stderr every 30 seconds.
-It stops the bot only after verifying the saved context. If the deadline expires,
-the activation retains its pending request and prints its exact `--resume` ID;
-resuming observes that request without sending another handoff. Other native
-refusals remain refusals, and JSON output stays on stdout.
-
-On Linux, activation first confirms the exact bot's restart mask, then stops its
-checkpointed private tmux server before stopping the unit. This lets the child
-subreaper exit with its children rather than waiting for a service-stop timeout.
-Recovery can clear a failed marker only for an owned, masked bot with no native
-PIDs or remaining cgroup members; it retains the raw failure diagnostic and still
-requires the normal independent quiescence check.
+Crash recovery cannot ask a dead process for new context; it resumes from the last
+usable durable checkpoint and reports what was recoverable. Native scheduled
+restarts enter through the same bot lifecycle command. The low-level handoff
+script is an internal mechanism, not a separate supported restart procedure.
 
 ## Relationship to PR #399
 
@@ -610,6 +607,6 @@ PR #399 added `claudlobby/_runtime_scripts/update-claude-code.sh` with a daily *
 | `claudlobby/_runtime_scripts/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
 | `claudlobby/_runtime_scripts/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
 | `claudlobby/_runtime_scripts/start-bot.sh` | Submits Skill resume + authored startup in one bootstrap when callable proof is positive; otherwise retains literal compatibility, gated on BOTH checkpoint age and resume capability; logs `RESUME SKIP` + `resume_skipped` when either gate closes |
-| `claudlobby/_runtime_scripts/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
+| `claudlobby/_runtime_scripts/pre-stop-handoff.sh` | Internal checkpoint delivery; the lifecycle owner verifies the saved result before a planned stop |
 
 Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.
