@@ -37,7 +37,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths, tmux_socket_for_bot
 
 
@@ -300,7 +300,7 @@ _FLEET = """\
 
 
 def _make_paths(root):
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _conf_val(conf, key):

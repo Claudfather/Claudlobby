@@ -47,7 +47,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -91,7 +91,7 @@ def execstarted_scripts(tmp_path_factory) -> set[str]:
     fleet_dir.mkdir(parents=True, exist_ok=True)
     (fleet_dir / "fleet.yaml").write_text(dedent(_FLEET))
     fleet, merged = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
+    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
 
     found: set[str] = set()
 

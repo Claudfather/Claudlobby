@@ -24,7 +24,7 @@ from claudlobby.composer import (
 from claudlobby.config import load_fleet
 from claudlobby.freshbox import audit_bot
 from claudlobby.loader import iter_library_requires, library_requires
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.registry_emit import bot_payload
 from claudlobby.validator import validate
@@ -90,7 +90,7 @@ def _paths(fleet_dir: Path) -> Paths:
     # These tests deliberately replace package.library with their tiny
     # synthetic library. Carry the real universal skill into that isolated
     # fixture so the effective-skill resolver can link and grant it.
-    source = source_package()
+    source = git_package(fleet_dir)
     skill = fleet_dir / "library" / "skills" / "fleet-ops" / "SKILL.md"
     skill.parent.mkdir(parents=True, exist_ok=True)
     skill.write_bytes((source.library / "skills" / "fleet-ops" / "SKILL.md").read_bytes())

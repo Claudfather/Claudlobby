@@ -47,7 +47,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import BotConfig, FleetConfig, TeamConfig
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 # design doc §6.1's table, in claudlobby.boot.bot_conf_lines' render order.
@@ -94,7 +94,7 @@ def _fixture_paths(tmp_path) -> Paths:
     for bot_id in ("lead", "w1", "w2"):
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
     (root / "lib").mkdir()
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _pin_cpu_count(monkeypatch, count: int) -> None:
