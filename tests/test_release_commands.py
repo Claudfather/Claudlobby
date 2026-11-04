@@ -3,20 +3,17 @@
 import builtins
 import json
 from pathlib import Path
-import re
 from types import SimpleNamespace
 
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import (activation_state, composer, config, config_install, config_staging, context,
-                        freshbox, migration_apply, resources)
+from claudlobby import activation_state, config_install, context, freshbox, migration_apply, resources
 from claudlobby import releases as release_store
 from claudlobby.commands import releases as commands
-from claudlobby.config_plan import ConfigPlanBuilder, read_plan
+from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.migration_plan import build_migration_manifest
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION
-from tests.test_config_staging import staging_case, _fleet, _tree, _write
 from tests.test_migration_plan import releases, _database, _snapshot
 from tests.test_releases import installed, r
 
@@ -39,8 +36,7 @@ def _call(capsys, argv, expected=0):
 def test_json_syntax_and_scope_failures_preserve_legacy_help_and_hide_values(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
-    for argv, command in ((["config", "plan", "--json"], "config.plan"),
-                          (["host", "repos", "pull", "--json"], "host.repos.pull"),
+    for argv, command in ((["host", "repos", "pull", "--json"], "host.repos.pull"),
                           (["host", "releases", "--json", "--unknown", "SECRET-value"], "host.releases")):
         with pytest.raises(SystemExit) as exit:
             main(argv)
@@ -59,8 +55,8 @@ def test_json_syntax_and_scope_failures_preserve_legacy_help_and_hide_values(tmp
     assert exit.value.code == 2
     assert json.loads(capsys.readouterr().out)["command"] == "config.validate"
     with pytest.raises(SystemExit) as exit:
-        main(["config", "plan", "--help"])
-    assert exit.value.code == 0 and "--fleet-path" in capsys.readouterr().out
+        main(["config", "diff", "--help"])
+    assert exit.value.code == 0 and "FINGERPRINT" in capsys.readouterr().out
 
     def broken(*_):
         raise RuntimeError("SECRET-value")
@@ -127,206 +123,6 @@ def test_host_release_diagnosis_works_without_application_dependencies(installed
     empty_root.mkdir()
     empty, _ = _call(capsys, ["--root", str(empty_root), "host", "releases", "--json"])
     assert empty["data"]["items"] == [] and not list(empty_root.iterdir())
-
-
-def test_config_plan_covers_declared_and_explicit_fleets_and_diff_never_dumps_bytes(staging_case, capsys, monkeypatch):
-    case = staging_case
-    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
-    _fleet(case.root, case.root / "local/system/local-fleet", "local-fleet", case.package)
-    external = case.root.parent / "external/external-fleet"
-    _fleet(case.root, external, "external-fleet", case.package)
-    (case.root / ".env").write_text("STAGE_TOKEN=SECRET-config-value\nPLANE_EMIT_DISABLED=1\n")
-    before = _tree(case.root, excluding=case.root / "state/config-plans")
-    external_before, home_before = _tree(external), _tree(Path.home())
-    argv = ["--root", str(case.root), "config", "plan", "--release", case.release.release_id,
-            "--fleet-path", str(external / "fleet.yaml"), "--json"]
-    planned, capture = _call(capsys, argv)
-    assert planned["request_id"] and planned["command"] == "config.plan"
-    assert planned["data"]["fleets"] == ["external-fleet", "local-fleet", "primary"]
-    assert _tree(case.root, excluding=case.root / "state/config-plans") == before
-    assert _tree(external) == external_before and _tree(Path.home()) == home_before
-    assert "SECRET-config-value" not in capture.out + capture.err
-    plan_id = planned["data"]["plan_id"]
-    diff, capture = _call(capsys, ["--root", str(case.root), "config", "diff", plan_id, "--json"])
-    assert diff["request_id"] is None and diff["data"] == planned["data"]
-    assert "SECRET-config-value" not in capture.out + capture.err
-    assert all(set(change) == {"path", "change", "before", "after"} for change in diff["data"]["changes"])
-    assert all(set(change["after"]) == {"kind", "state_sha256"} for change in diff["data"]["changes"])
-    # Repeating the same source location is harmless; different sources may
-    # never claim the same fleet name and redirect the planned runtime.
-    repeated, _ = _call(capsys, argv[:-1] + ["--fleet-path", str(external), "--json"])
-    assert repeated["data"]["fleets"] == planned["data"]["fleets"]
-    duplicate = case.root.parent / "duplicate/external-fleet"
-    _fleet(case.root, duplicate, "external-fleet", case.package)
-    _call(capsys, argv[:-1] + ["--fleet-path", str(duplicate), "--json"], 4)
-    plan = read_plan(case.root, plan_id)
-    secret_target = case.root / "runtime/secret.conf"
-    builder = ConfigPlanBuilder(case.root, plan.release_id, plan.release_seal, plan.fleets, effects={})
-    builder.file(secret_target, b"ACTUAL_STAGED_SECRET=do-not-print\n")
-    secret_plan = builder.seal()
-    secret, capture = _call(capsys, ["--root", str(case.root), "config", "diff", secret_plan.plan_id, "--json"])
-    assert "ACTUAL_STAGED_SECRET" not in capture.out + capture.err and not secret_target.exists()
-    # A plan that records no bot paths (staged by an older release) cannot say
-    # which bots its changes reach: unknown, never an empty list.
-    assert secret["data"]["summary"] == {"paths": 1, "content": 1, "mode": 0, "unchanged": 0,
-                                         "content_bots": None, "content_outside_bots": None}
-
-
-def _applied(case, release):
-    """Stage a plan and write it with activation's own writer."""
-    plan = config_staging.stage_configuration([case.paths], release)
-    activation = "applied-" + plan.plan_id[2:14]
-    config_install.prepare_config(plan, activation)
-    config_install.apply_config(case.root, activation)
-    return plan
-
-
-def test_config_diff_names_re_records_and_mode_changes_apart_from_content_changes(
-        staging_case, capsys, monkeypatch):
-    """#2449: a plan staged over what the last activation wrote said every path
-    changed, since each entry's two digests hashed different shapes, and it
-    named every bot to restart without saying why."""
-    case = staging_case
-    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
-    first = _applied(case, case.release)
-    instructions = case.paths.bot_runtime("primary-manager") / "CLAUDE.md"
-    mode = {Path(change.target): change for change in first.changes}[instructions].after["mode"]
-    instructions.chmod(0o600 if mode != 0o600 else 0o640)
-    # Outside the worker's directory, and a field every plan resets.
-    access = Path.home() / composer.telegram_channel_rel("primary_worker") / "access.json"
-    access.write_text(json.dumps({**json.loads(access.read_text()), "dmPolicy": "set-by-hand"}))
-    plan = config_staging.stage_configuration([case.paths], case.release)
-    staged = {Path(change.target): change for change in plan.changes}
-    expected = dict.fromkeys(staged, "unchanged")
-    expected.update({instructions: "mode", access: "content"})
-    composed = case.paths.runtime / "composed.json"
-    if plan.content(staged[composed]) != composed.read_bytes():
-        expected[composed] = "content"  # it records the second it was composed in
-
-    diff, _ = _call(capsys, ["--root", str(case.root), "config", "diff", plan.plan_id, "--json"])
-    items = {Path(item["path"]): item for item in diff["data"]["changes"]}
-    assert set(items) == set(expected)
-    for path, item in items.items():
-        same = item["before"]["state_sha256"] == item["after"]["state_sha256"]
-        assert same is (expected[path] == "unchanged"), path
-    assert {path: item["change"] for path, item in items.items()} == expected
-    content = sum(want == "content" for want in expected.values())
-    assert diff["data"]["summary"] == {
-        "paths": len(expected), "content": content, "mode": 1,
-        "unchanged": len(expected) - content - 1,
-        "content_bots": ["primary/primary-worker"], "content_outside_bots": content - 1}
-    effects = diff["data"]["effects"]
-    assert effects["restart_bots"] == ["primary/primary-manager", "primary/primary-worker"]
-    assert effects["restart_reason"]
-
-    assert main(["--root", str(case.root), "config", "diff", plan.plan_id]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    # Every path line, whatever its label, so a listed unchanged path fails too.
-    named = {match[2]: match[1] for match in (re.fullmatch(r"(\S+) (/.+): \S+ -> \S+", line)
-                                              for line in lines) if match}
-    assert named == {str(path): want for path, want in expected.items() if want != "unchanged"}
-    assert f"unchanged {len(expected) - content - 1}" in lines[0]
-    assert any("primary/primary-worker" in line and "primary/primary-manager" not in line
-               for line in lines)
-
-
-def test_config_diff_names_every_bot_when_a_new_release_reaches_their_runtime(
-        staging_case, capsys, monkeypatch):
-    """#2449: a plan for a new release changes each bot's unit, environment and
-    CLI link, so every bot reads as a content change, and every bot restarts."""
-    case = staging_case
-    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
-    _applied(case, case.release)
-    cli = _write(case.root / "state/releases" / ("r-" + "c" * 64) / "venv/bin/claudlobby",
-                 "#!/bin/sh\nexit 97\n")
-    cli.chmod(0o755)
-    release = SimpleNamespace(release_id="r-" + "c" * 64, seal_sha256="d" * 64, cli_path=cli,
-                              native_path=case.package.native,
-                              inputs=SimpleNamespace(artifact_id=case.package.artifact_id))
-    monkeypatch.setattr(config_staging, "read_release", lambda *_: release)
-    monkeypatch.setattr(release_store, "read_release", lambda *_, **__: release)
-    for module in (config_staging, context, composer):
-        monkeypatch.setattr(module, "selected_cli", lambda: cli)
-    plan = config_staging.stage_configuration([case.paths], release)
-
-    diff, _ = _call(capsys, ["--root", str(case.root), "config", "diff", plan.plan_id, "--json"])
-    changes = {Path(item["path"]): item["change"] for item in diff["data"]["changes"]}
-    for bot in ("primary-manager", "primary-worker"):
-        directory = case.paths.bot_runtime(bot)
-        for name in ("bot.conf", f"com.primary.{bot}.service", f"com.primary.{bot}.plist",
-                     ".cli/bin/claudlobby"):
-            assert changes[directory / name] == "content", (bot, name)
-    bots = ["primary/primary-manager", "primary/primary-worker"]
-    assert diff["data"]["summary"]["content_bots"] == bots
-    assert diff["data"]["effects"]["restart_bots"] == bots
-
-
-
-@pytest.mark.parametrize("kind,hint", [
-    ("claudron-migration", "claudron doctor --fix --json --vault <vault>"),
-    ("claudron-doctor", "claudron doctor --json --vault <vault>"),
-])
-def test_config_plan_names_migration_warning_and_safe_remedy_without_authored_values(
-    staging_case, tmp_path, capsys, monkeypatch, kind, hint
-):
-    from claudlobby import claudron_compat, validator
-    case = staging_case
-    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
-    vault = tmp_path / "SECRET-vault-path"
-    (vault / "_shared").mkdir(parents=True)
-    manifest = case.paths.fleet_yaml
-    manifest.write_text(manifest.read_text().replace("    channels: []\n",
-        f"    channels: []\n    claudron_vault_path: {vault}\n"))
-    actual_which = validator.shutil.which
-    monkeypatch.setattr(validator.shutil, "which", lambda exe: "/fake/claudron" if exe == "claudron" else actual_which(exe))
-    state = (claudron_compat.VaultMigrationState("pending", (("SECRET-pending-id", "SECRET-title"),), 2, 3, "")
-             if kind == "claudron-migration" else
-             claudron_compat.VaultMigrationState("unknown", (), None, None, "SECRET-provider-detail"))
-    monkeypatch.setattr(claudron_compat, "vault_migration_state", lambda *a, **kw: state)
-    result, capture = _call(capsys, ["--root", str(case.root), "config", "plan", "--release",
-                                     case.release.release_id, "--json"])
-    assert result["data"]["plan_id"]
-    assert f"[{kind}]" in capture.err and hint in capture.err
-    assert "config validate" in capture.err
-    assert "SECRET-" not in capture.out + capture.err
-
-
-def test_config_plan_never_echoes_an_unknown_warning_category(staging_case, capsys, monkeypatch):
-    from claudlobby import config_staging, validator
-    case = staging_case
-    monkeypatch.setattr(resources, "get_resources", lambda: case.package)
-    report = validator.ValidationReport()
-    report.warn("SECRET-category", "SECRET-warning-value")
-    monkeypatch.setattr(config_staging, "validate", lambda *a, **kw: report)
-    _, capture = _call(capsys, ["--root", str(case.root), "config", "plan", "--release",
-                               case.release.release_id, "--json"])
-    assert "[uncategorized]" in capture.err
-    assert "SECRET-" not in capture.out + capture.err
-
-
-def test_config_diff_current_reports_drift_without_values_or_retired_routes(staging_case, capsys, monkeypatch):
-    case = staging_case
-    monkeypatch.setattr(context, "get_resources", lambda: case.package)
-    fleet, _ = config.load_fleet(case.paths.fleet_yaml)
-    bot = "primary-manager"
-    composer.compose_bot(fleet.bots[bot], fleet, case.paths)
-    conf = case.paths.bot_runtime(bot) / "bot.conf"
-    conf.write_text(conf.read_text() + "\nexport PRIVATE_MARKER=SECRET-current-value\n")
-
-    current, capture = _call(capsys, ["--root", str(case.root), "config", "diff",
-                                       "--bot", bot, "--json"])
-    assert current["command"] == "config.diff"
-    assert current["data"]["mode"] == "current"
-    assert current["data"]["bot"] == bot
-    assert any("bot.conf drift" in line for line in current["data"]["drift"])
-    assert "SECRET-current-value" not in capture.out + capture.err
-    assert "PRIVATE_MARKER" not in capture.out + capture.err
-
-    for retired in ("diff", "promote"):
-        with pytest.raises(SystemExit) as exit:
-            main(["--root", str(case.root), retired])
-        assert exit.value.code == 2
-        capsys.readouterr()
 
 
 def test_config_validate_runtime_keeps_audit_severities_and_hides_details(fleet_dir, capsys, monkeypatch):
@@ -424,18 +220,12 @@ def test_converter_copy_failure_keeps_item_status_without_exception_text(monkeyp
     assert "SECRET-copy-error" not in str(failure.value.data) + str(failure.value.error)
 
 
-def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progress(releases, capsys):
+def test_migration_status_reads_historical_progress_without_execution(releases, capsys):
     from claudlobby import activation_enrollment, activation_units, config_install
 
     root, _, release = releases
     _database(root).close()
-    argv = ["--root", str(root), "migration", "plan", "--source-release", release.release_id,
-            "--target-release", release.release_id, "--json"]
     before = _snapshot(root)
-    result, _ = _call(capsys, argv)
-    assert result["request_id"] is None and result["data"]["manifest"]["preview_only"]
-    assert result["data"]["manifest"]["database"]["user_version"] == 1
-    assert _snapshot(root) == before
     status_argv = ["--root", str(root), "migration", "status", "--json"]
     old, _ = _call(capsys, status_argv, 4)
     assert old["data"]["database"]["user_version"] == 1
@@ -480,3 +270,64 @@ def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progre
     assert {item["activation_id"] for item in blocked["data"]["items"]} == {"upgrade", broken.name}
     assert blocked["data"]["blockers"] == [
         f"activation migration evidence cannot be verified: {broken.name}"]
+
+
+@pytest.mark.parametrize('argv', [
+    ['host', 'activate'], ['host', 'repair-start'], ['host', 'repair-after-reset'],
+    ['host', 'abort-adoption'], ['host', 'abort-upgrade'],
+    ['config', 'plan', '--release', 'r-' + 'a' * 64],
+    ['migration', 'plan', '--source-release', 'r-' + 'a' * 64],
+])
+def test_removed_sealed_write_routes_refuse_at_parser(tmp_path, capsys, argv):
+    with pytest.raises(SystemExit) as refused:
+        main(['--root', str(tmp_path), *argv])
+    assert refused.value.code == 2
+    capsys.readouterr()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_committed_git_diff_uses_owned_snapshot_and_hides_authored_values(tmp_path, monkeypatch):
+    from claudlobby import active_config
+    from claudlobby.config_plan import path_state
+    from claudlobby.resources import get_resources
+    from claudlobby.installation import Installation
+    root = tmp_path / 'data'
+    root.mkdir()
+    target = root / 'generated.conf'
+    target.write_text('SECRET actual bytes')
+    directory = root / 'mutable'
+    directory.mkdir()
+    (directory / 'private').write_text('SECRET mutable data')
+    installation = Installation(tmp_path / 'installation', root)
+    package = SimpleNamespace(installation=installation, source_revision='a' * 40)
+    snapshot = {'revision': package.source_revision, 'fingerprint': 'b' * 64,
+                'owned_outputs': [{'target': str(target), 'state': {'kind': 'file', 'mode': 0o600, 'sha256': 'c' * 64}},
+                                  {'target': str(directory), 'state': {'kind': 'directory', 'mode': directory.stat().st_mode & 0o777}}]}
+    monkeypatch.setattr(resources, 'get_resources', lambda: package)
+    monkeypatch.setattr(active_config, 'read_current_config', lambda *_a, **_k: snapshot)
+    checks = []
+    monkeypatch.setattr(active_config, 'runtime_read_stamp', lambda *_a, **_k:
+                        SimpleNamespace(check=lambda *_a, **_k: checks.append('checked')))
+    result = commands._config_current_drift(SimpleNamespace(root=root, fleet=None, bot=None, seed=False))
+    assert result.release_id is None and result.data['config_fingerprint'] == snapshot['fingerprint']
+    changes = {item['path']: item for item in result.data['changes']}
+    assert changes[str(target)]['change'] == 'content'
+    assert changes[str(directory)]['change'] == 'unchanged'
+    assert checks == ['checked'] and 'SECRET' not in json.dumps(result.data)
+    assert (directory / 'private').read_text() == 'SECRET mutable data'
+
+
+def test_pending_git_diff_reads_canonical_render_without_new_planning(tmp_path, monkeypatch):
+    from claudlobby import config_plan
+    from claudlobby.installation import Installation
+    installation = Installation(tmp_path / 'installation', tmp_path / 'data')
+    package = SimpleNamespace(installation=installation)
+    rendered = SimpleNamespace(fingerprint='a' * 64, revision='b' * 40, fleets=('example',), changes=(), effects={})
+    calls = []
+    monkeypatch.setattr(resources, 'get_resources', lambda: package)
+    monkeypatch.setattr(config_plan, 'read_rendered', lambda root, fingerprint:
+                        calls.append((root, fingerprint)) or rendered)
+    result = commands._config_diff(SimpleNamespace(bot=None, fingerprint=rendered.fingerprint), installation.data_root)
+    assert calls == [(installation.data_root, rendered.fingerprint)]
+    assert result.release_id is None and result.data['source_revision'] == rendered.revision
+    assert 'plan_id' not in result.data and 'release_seal' not in result.data

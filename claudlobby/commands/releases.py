@@ -1,4 +1,4 @@
-"""Public preparation/diagnostic adapters; lifecycle effects stay in their owners.
+"""Read-only historical evidence and Git configuration diff adapters.
 
 Keep module imports stdlib-only so host releases remains available when optional
 application dependencies are broken. No command here selects or starts a release.
@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import re
 import shlex
-import sys
+import stat
 
 from ..command_result import CommandFailure, CommandOutput
 
@@ -54,24 +54,6 @@ def _executing_release(root: Path) -> str | None:
     except ReleaseError:
         return None  # Diagnosis must work even if this executable has no valid seal.
     return release.release_id if release.cli_path == cli else None
-
-
-def _release(root: Path, release_id: str):
-    from ..releases import ReleaseError, read_release, release_path
-
-    if not re.fullmatch(r"r-[0-9a-f]{64}", release_id):
-        raise CommandFailure("invalid_argument", "invalid argument: invalid release ID")
-    try:
-        return read_release(root, release_id)
-    except ReleaseError as exc:
-        try:
-            absent = not release_path(root, release_id).exists()
-        except ReleaseError:
-            absent = False
-        hint = f"inspect claudlobby --root {shlex.quote(str(root))} host releases"
-        if absent:
-            raise CommandFailure("not_found", f"release not found: {release_id}", hint=hint) from exc
-        raise CommandFailure("conflict", "conflict: release is incomplete or changed", hint=hint) from exc
 
 
 def _selection(root: Path):
@@ -239,19 +221,17 @@ def _summary(plan, changes: list[dict]) -> dict:
     return summary
 
 
-def _plan_data(plan) -> dict:
-    changes = _changes(plan)
-    return {"plan_id": plan.plan_id, "release_id": plan.release_id, "release_seal": plan.release_seal,
-            "fleets": list(plan.fleets), "changes": changes, "summary": _summary(plan, changes),
-            "effects": {"restart_bots": plan.effects.get("restart_bots", []),
-                        "restart_reason": plan.effects.get("restart_reason"),
-                        "reload_supervision": plan.effects.get("reload_supervision", False),
-                        "coverage": plan.effects.get("coverage")}}
+def _render_data(rendered) -> dict:
+    changes = _changes(rendered)
+    return {"config_fingerprint": rendered.fingerprint, "source_revision": rendered.revision,
+            "fleets": list(rendered.fleets), "changes": changes, "summary": _summary(rendered, changes),
+            "effects": {"restart_bots": rendered.effects.get("restart_bots", []),
+                        "restart_reason": rendered.effects.get("restart_reason")}}
 
 
 def _summary_line(data) -> str:
     summary = data["summary"]
-    return (f"Configuration plan {data['plan_id']}: {summary['paths']} proposed paths "
+    return (f"Configuration {data['config_fingerprint']}: {summary['paths']} reviewed paths "
             f"(content {summary['content']}, mode only {summary['mode']}, unchanged {summary['unchanged']})")
 
 
@@ -269,109 +249,72 @@ def _review_lines(data) -> tuple[str, ...]:
                      f"{', '.join(summary['content_bots']) or 'none'}; paths outside bot directories: "
                      f"{summary['content_outside_bots']}.")
     reason = data["effects"]["restart_reason"]
-    lines.append(f"Restarts all {len(bots)} declared bots" + (f": {reason}." if reason else "."))
+    lines.append(f"Declared restart scope: {len(bots)} bots" + (f": {reason}." if reason else "."))
     return tuple(lines)
 
 
-def _configuration_warning(category: str) -> None:
-    """Metadata-only plan diagnostics: categories and static remedies, never values."""
-    from ..validator import UNCATEGORIZED, WARNING_CATEGORIES
-
-    kind = category if category in WARNING_CATEGORIES else UNCATEGORIZED
-    detail = f"configuration warning [{kind}] — run `claudlobby config validate` for details"
-    if kind == "claudron-migration":
-        detail += (". Once per vault, from one clone, a human runs "
-                   "`claudron doctor --fix --json --vault <vault>` (it commits), "
-                   "then pulls on every clone and plans again")
-    elif kind == "claudron-doctor":
-        detail += ". Check the migration state with `claudron doctor --json --vault <vault>`"
-    print(detail, file=sys.stderr)
-
-
-def _config_plan(args, root: Path) -> CommandOutput:
-    from ..config_plan import PlanError
-    from ..config_staging import stage_configuration
-    from ..context import declared_paths
+def _config_diff(args, root: Path) -> CommandOutput:
+    from ..config_plan import PlanError, read_rendered
     from ..resources import get_resources
-
-    release = _release(root, args.release)
+    if args.bot:
+        raise CommandFailure("invalid_argument", "invalid argument: --bot applies only to committed drift")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.fingerprint):
+        raise CommandFailure("invalid_argument", "invalid argument: expected a Git render fingerprint")
     try:
         package = get_resources()
-    except RuntimeError as exc:
-        raise CommandFailure("unavailable", "unavailable: installed package resources") from exc
-    try:
-        paths = declared_paths(root, package, external=args.fleet_path)
-    except FileNotFoundError as exc:
-        raise CommandFailure("not_found", str(exc)) from exc
-    try:
-        plan = stage_configuration(paths, release, validation_warning=_configuration_warning,
-                                   log=lambda _: print("configuration warning reported while staging",
-                                                       file=sys.stderr))
-    except (PlanError, ValueError) as exc:
-        # Validation exceptions can embed secret authored values. The diagnostic
-        # command exposes metadata only, including on failures.
-        raise CommandFailure("conflict", "conflict: configuration could not be staged from these inputs",
-                             hint=f"use the sealed candidate CLI {release.cli_path} and inspect fleet declarations") from exc
-    data = _plan_data(plan)
-    return CommandOutput(data, _executing_release(root),
-                         (_summary_line(data) + f"; review it with config diff {plan.plan_id}.",))
-
-
-def _config_diff(args, root: Path) -> CommandOutput:
-    from ..config_plan import PlanError, read_plan
-
-    if args.bot:
-        raise CommandFailure("invalid_argument", "invalid argument: --bot applies only to current drift")
-    if not re.fullmatch(r"p-[0-9a-f]{64}", args.plan_id):
-        raise CommandFailure("invalid_argument", "invalid argument: invalid configuration plan ID")
-    try:
-        plan = read_plan(root, args.plan_id)
-    except PlanError as exc:
-        if not (root / "state/config-plans" / args.plan_id).exists():
-            raise CommandFailure("not_found", f"configuration plan not found: {args.plan_id}") from exc
-        raise CommandFailure("conflict", "conflict: configuration plan is incomplete or changed") from exc
-    data = _plan_data(plan)
-    return CommandOutput(data, _executing_release(root), _review_lines(data))
+        if package.installation is None or package.installation.data_root != root:
+            raise ValueError()
+        rendered = read_rendered(root, args.fingerprint)
+        if rendered.revision is None:
+            raise ValueError()
+    except (PlanError, ValueError, RuntimeError, OSError) as exc:
+        raise CommandFailure("conflict", "pending Git configuration is unavailable or changed") from exc
+    data = _render_data(rendered)
+    return CommandOutput(data, None, _review_lines(data))
 
 
 def _config_current_drift(args) -> CommandOutput:
-    from ..context import BotNotFoundError, resolve_context
-    from ..diff import diff_bot, diff_fleet_timers, manifest_header
-
+    from types import SimpleNamespace
+    from ..active_config import read_current_config, load_active_context, runtime_read_stamp
+    from ..config_plan import ConfigChange, PlanError, path_state
+    from ..resources import get_resources
+    if args.seed:
+        raise CommandFailure("invalid_argument", "committed configuration does not use --seed")
     try:
-        context = resolve_context(root=args.root, fleet=args.fleet, bot=args.bot, seed=args.seed)
-    except BotNotFoundError as exc:
-        raise CommandFailure("not_found", "bot is not declared in the selected fleet") from exc
-    except (ValueError, RuntimeError, FileNotFoundError) as exc:
-        # Authored configuration errors can carry secret values. Keep the
-        # public diagnostic at the metadata boundary used by staged diff.
-        raise CommandFailure("conflict", "conflict: fleet configuration could not be loaded") from exc
-    paths, fleet = context.paths, context.fleet
-    lines = [manifest_header(fleet, paths).rstrip("\n")]
-    for name in ([args.bot] if args.bot else fleet.bots):
-        lines.extend(diff_bot(name, fleet, paths, metadata_only=True).splitlines())
-    if not args.bot:
-        lines.extend(diff_fleet_timers(fleet, paths, context.merged_defaults,
-                                       metadata_only=True).splitlines())
-    lines = [line for line in lines if line]
-    return CommandOutput({"mode": "current", "fleet": fleet.name, "bot": args.bot,
-                          "drift": lines}, _executing_release(paths.root), tuple(lines))
-
-
-def _migration_plan(args, root: Path) -> CommandOutput:
-    from ..migration_plan import build_migration_manifest
-
-    source, target = _release(root, args.source_release), _release(root, args.target_release)
-    try:
-        manifest = build_migration_manifest(root, source, target, initialize_empty=args.initialize_empty)
-    except ValueError as exc:
-        raise CommandFailure("conflict", "conflict: migration inputs changed or cannot be verified") from exc
-    data = {"manifest_id": manifest.manifest_id, "manifest": manifest.payload()}
-    executing = _executing_release(root)
-    if manifest.blockers:
-        raise CommandFailure("conflict", "conflict: migration preview has blockers", data=data,
-                             release_id=executing, hint="resolve the named blockers and repeat migration plan under quiescence")
-    return CommandOutput(data, executing, (f"Migration preview {manifest.manifest_id}; repeat under quiescence before apply.",))
+        package = get_resources()
+        if package.installation is None:
+            raise ValueError()
+        root = Path(args.root).expanduser().resolve() if args.root is not None else package.installation.data_root
+        stamp = runtime_read_stamp(root, package=package)
+        snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
+        prefix = None
+        if args.bot or args.fleet:
+            context = load_active_context(root, args.fleet, bot=args.bot, package=package)
+            prefix = context.paths.bot_runtime(args.bot) if args.bot else context.paths.runtime_fleet
+        changes = []
+        for item in snapshot['owned_outputs']:
+            target, desired = Path(item['target']), item['state']
+            if prefix is not None and not target.is_relative_to(prefix):
+                continue
+            info = target.lstat() if target.exists() or target.is_symlink() else None
+            if desired['kind'] == 'directory' and info is not None and stat.S_ISDIR(info.st_mode):
+                # Never traverse mutable memory/projects beneath ensured dirs.
+                before = {'node': {'kind': 'directory', 'mode': stat.S_IMODE(info.st_mode), 'entries': {}}}
+            else:
+                before = path_state(target)
+            changes.append(ConfigChange(str(target), before, desired))
+        items = _changes(SimpleNamespace(changes=changes))
+        stamp.check(root, package=package)
+    except CommandFailure:
+        raise
+    except (PlanError, ValueError, RuntimeError, OSError) as exc:
+        raise CommandFailure("conflict", "committed Git configuration drift is unavailable") from exc
+    data = {'mode': 'current', 'fleet': args.fleet, 'bot': args.bot,
+            'source_revision': snapshot['revision'], 'config_fingerprint': snapshot['fingerprint'],
+            'changes': items}
+    lines = tuple(f"{item['change']} {item['path']}: {item['before']['kind']} -> {item['after']['kind']}"
+                  for item in items if item['change'] != 'unchanged')
+    return CommandOutput(data, None, lines or ('Committed generated outputs are unchanged.',))
 
 
 def _migration_status(args, root: Path) -> CommandOutput:
@@ -438,9 +381,8 @@ def _migration_status(args, root: Path) -> CommandOutput:
 
 
 def dispatch(args) -> CommandOutput:
-    if args.public_command == "config.diff" and args.plan_id is None:
+    if args.public_command == "config.diff" and args.fingerprint is None:
         return _config_current_drift(args)
     root = _host_root(args)
-    return {"host.releases": _host_releases, "config.plan": _config_plan,
-            "config.diff": _config_diff, "migration.plan": _migration_plan,
+    return {"host.releases": _host_releases, "config.diff": _config_diff,
             "migration.status": _migration_status}[args.public_command](args, root)

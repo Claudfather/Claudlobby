@@ -274,10 +274,14 @@ def test_guided_setup_initial_consent_cancellation_over_real_terminal(tmp_path):
     bootstrap = """import sys
 from pathlib import Path
 from types import SimpleNamespace
-from claudlobby.commands import releases, host_owner_setup
+from dataclasses import replace
+from claudlobby.commands import host_owner_setup
+from claudlobby import resources
+from claudlobby.installation import Installation
 from claudlobby.__main__ import main
-releases._executing_release=lambda _: 'r-'+'a'*64
-releases._release=lambda *_: SimpleNamespace(release_id='r-'+'a'*64,seal_sha256='b'*64,cli_path=Path(sys.executable).with_name('claudlobby'))
+root=Path(sys.argv[sys.argv.index('--root')+1])
+package=replace(resources.get_resources(), installation=Installation(root.parent/'installation',root),source_revision='a'*40)
+resources.get_resources=lambda:package
 host_owner_setup._native_directories=lambda _: (Path(sys.argv[sys.argv.index('--install-directory')+1]),)
 raise SystemExit(main(sys.argv[1:]))
 """

@@ -264,9 +264,14 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         || c.issuer !== doc.issuer || c.subject !== doc.subject || c.workspace_id !== doc.workspace_id
         || c.operational_origin !== doc.operational_origin || c.binding_revision !== binding?.binding_revision
         || c.binding_generation !== binding?.binding_generation
-        || (setup ? (!keys(data.setup_profile,['version','profile','host_uid']) || data.setup_profile.version !== 1 || data.setup_profile.profile !== 'first-team-setup-v1' || data.setup_profile.host_uid !== hostUID) : data.read_profile?.host_uid !== hostUID)
+        || (!setup && data.read_profile?.host_uid !== hostUID)
         || (needsToken && !secret(data.token)) || !valid() || start + data.expires_in * 1000 <= now()) {
       stop('Connected session compatibility or bound identity could not be verified. Reopen Plane.', true);
+      throw new Error();
+    }
+    if (setup && (!keys(data.setup_profile,['version','profile','host_uid']) || data.setup_profile.version !== 2
+        || data.setup_profile.profile !== 'first-team-setup-v2' || data.setup_profile.host_uid !== hostUID)) {
+      stop('This computer has an incompatible setup profile. Update local setup before connecting again.', true);
       throw new Error();
     }
     // The single canonical owner checker still validates and pins read_profile.
@@ -548,7 +553,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     finally { busy = false; }
   }
   async function setupRequest(operation, input) {
-    if (!valid(true)) throw new Error('Setup outcome unknown. Check the original activation receipt.');
+    if (!valid(true)) throw new Error('Setup outcome unknown. Check the original update receipt.');
     const result = await http(ref.endpoint_origin + '/api/owner/connected/setup/' + operation,
       {method:'POST',body:input,timeout:operation === 'launch' ? 45000 : 15000,limit:131072});
     if (result.status !== 200) throw new Error('Setup unavailable or refused. A lost launch must be inspected, never repeated.');

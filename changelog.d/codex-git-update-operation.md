@@ -17,3 +17,17 @@ dependencies without silently repairing them. Initial recorder and registry setu
 share the update coordinator, and new native consumers use the existing supervision
 adapter. The CLI guide and CI installation rehearsal follow this path; browser
 first-team integration, existing-host migration and native acceptance remain pending.
+
+### Changed — use the Git update request for browser first-team setup
+
+Browser setup now prepares and launches the same Git operation as the CLI. It
+retains the original request before launch and shows its receipt after reconnects
+or uncertain responses, without sending a replacement. First-owner binding survives
+an interrupted configuration publication. Historical sealed setup records remain
+readable as recovery evidence and cannot authorize a Git launch.
+
+Remove the public sealed activation, repair, abort and plan commands and the unused
+release assembly module. Configuration diff reads the pending Git render or the
+committed generated-output snapshot. Existing-host conversion and native/browser
+cold-start acceptance are still required before rollout; the remaining legacy
+coordinator internals are being retired separately.

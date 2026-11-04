@@ -9,67 +9,30 @@ Two update classes, two mechanisms:
 | Selected plugin cache | `claudlobby fleet reload` refreshes plugins through `claudlobby/_runtime_scripts/reload-fleet.sh` | Keepalive sends `/reload-plugins` + `/reload-skills` when idle | **No** | Daily, `03:30`, + on-demand |
 | Claude Code binary | `npm install -g @anthropic-ai/claude-code@latest` (`claudlobby/_runtime_scripts/update-claude-code.sh`) | new `claude` process at next start | **Yes** (binary swap) | Downloaded daily at `04:00`; applied via natural restarts + a weekly worker-only restart, `Sun 05:00` |
 
-Binary updates take effect on the next session start. A sealed configuration or
-framework release also reaches sessions through explicit activation, which hands
-off and restarts affected consumers. Plugin refresh is a separate idle-gated
-operation; it does not publish authored configuration.
+Binary updates take effect on the next session start. Framework and authored configuration updates use the common Git updater, which saves and stops affected consumers before publishing shared runtime files. Plugin refresh remains a separate idle-gated operation.
 
-## Sealed release delivery
+## Managed Git delivery
 
-An existing mutable installation must first satisfy the [conversion prerequisite](existing-host-release-conversion.md), including stopping its old source puller before merging code that timer follows.
+Use the stable installation CLI and explicit data root. Edit reviewed authored configuration/library inputs, then run:
 
-Edit source configuration and library inputs, assemble the reviewed release, then
-run `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`,
-and use `host activate PLAN_ID --install-directory PATH`. A plan writes staged
-artifacts; activation owns publication and the required handoff/restart. A source
-checkout pull does not modify an already sealed release. Do not edit installed
-release files or generated bot output. See [getting started](getting-started.md)
-for cold-host assembly and the [implementation record](plans/2026-09-28-unified-cli-run-log.md)
-for measured canary evidence and remaining platform limits.
+```bash
+"$CLI" --root "$DATA" host update apply FULL_COMMIT --json
+"$CLI" --root "$DATA" host update status --json
+"$CLI" --root "$DATA" config diff CONFIG_FINGERPRINT --json
+"$CLI" --root "$DATA" host update continue --json
+```
 
-**Reading `config diff PLAN_ID`.** A plan records every path it renders, so most
-of its paths are usually recorded again exactly as they are. Each path carries
-`change`, decided by the comparison activation itself holds an applied path to:
+`apply` is an effectful operator command that prepares and dispatches the update; it is not a preview-only command. Inspect its retained operation and exact pending render fingerprint. First-fleet setup has the explicit `fleet setup --plan-only` preparation gate described in [Getting started](getting-started.md). After interruption, continue the original operation rather than request another target or resend unknown work.
 
-- `content`: the bytes, the kind, a link target or a tree's entries differ.
-- `mode`: only permission bits differ.
-- `unchanged`: activation would write what is already there.
+`config diff FINGERPRINT` reads the exact retained Git render. `config diff` without a fingerprint compares committed owned generated outputs with current disk state; it does not silently adopt pending authored edits. `--bot` limits that current report to the selected bot. Both reports expose metadata/digests, never secret bytes. `content` means bytes/kind/link/tree entries differ; `mode` means permissions alone differ; `unchanged` means the compared owned state matches. Ensured directories own their mode, not mutable children.
 
-The text lists only `content` and `mode` paths, then the bots the content
-changes reach. `--json` lists every path, with digests that are equal exactly
-when a path is unchanged. Two things read the same whatever the edit:
+New configuration commits before consumer startup. A failed consumer remains visible in update health without revoking the committed configuration. Existing jobs/starts participate in the runtime-use fence; the updater drains admitted work and preserves stopped/disabled consumers and schedules. A canary needs its own installation/data root and native labels, not another fleet inside a production root.
 
-- **Each fleet's `composed.json` reads `content` on every plan,** because it
-  records when it was composed.
-- **The restart line covers every declared bot,** because activation stops each
-  enrolled bot and starts each declared one, whatever the plan changes.
-
-A `content` or `mode` line can also come from where the plan was staged rather
-than from its sources: composition reads the caller's PATH, umask and host
-override variable (#2194). A plan staged by an older release records no bot
-paths, so its diff says the bots it reaches are unknown (#2449).
-
-**While jobs run.** Every composed timer job, host operation and native bot start holds
-the host activation lock shared while it runs, and activation takes it exclusively.
-`host activate` first marks itself pending, so a job or operation that starts meanwhile
-backs off as if the activation were already running. It then waits up to 300 s for the
-ones already running to finish; the longest timer job, the pulse, is capped under its
-300 s cadence. It refuses at once only when another activation is running or pending. A
-refusal after the wait names a running job or host operation, not another activation (#2208).
-
-A canary must have its own root, Plane and native unit names. Activation is scoped
-to that selected root; using a second fleet inside the production root does not
-provide an independent release switch. On-demand skills, hooks and permissions
-are published only after the activation owner has quiesced affected consumers.
+The sealed `host activate`, repair/abort commands, `config plan --release` and `migration plan` are retired public execution routes. Historical release/activation/migration evidence remains inspectable with `host releases`, `host status` and `migration status`. Do not delete pending historical evidence to bypass an existing-host conversion or restore requirement.
 
 ### Refreshing a skill's installed copies
 
-A bot's skills are copies, frozen into `runtime/bots/<bot>/.claude/skills/` when a plan
-is activated. They never follow `library/` or a source checkout on their own: a changed
-skill reaches a bot only through the steps above, a release that contains it, then
-`config plan`, `config diff` and `host activate`. `config diff --bot` does not compare
-skills, so to confirm a bot carries the new copy, read its
-`.claude/skills/<name>/SKILL.md` after activation.
+A bot's skills are copied into its generated runtime through the same Git configuration publication. Change their authored library source and apply the reviewed Git/configuration update; never hand-edit generated copies. `config diff --bot` includes the committed owned skill tree. Verify the published copy and actual bot behavior separately.
 
 Claudlobby never writes a user-level `~/.claude/skills/<name>/`. A copy there was put
 there by hand or by the operator's own sync, so no release or activation refreshes it
@@ -560,7 +523,7 @@ The `reload-fleet` timer calls the selected release's `claudlobby fleet reload` 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
 2. Drops `data/.reload-pending` on each **running bot in the active plan**. It does not send any keystroke itself.
 
-The timer never composes or enrolls native units. Changes to authored configuration, composed skills, or native enrollment require a staged config plan and operator `host activate`.
+The timer never composes or enrolls native units. Changes to authored configuration, composed skills, or native enrollment go through the same managed Git updater.
 
 Every step is announced in `state/reload-fleet.log` before it runs (`reload-fleet[<fleet>] pid N step: …`), and its output streams there as it runs. A run killed or aborted mid-step raises `reload_failed` naming the step: at once on SIGTERM, SIGINT or SIGHUP, from its EXIT trap, and at the next run for a SIGKILL, which runs no trap (each run keeps a record under `state/reload-fleet.inflight/` until it ends).
 

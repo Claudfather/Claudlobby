@@ -57,7 +57,7 @@ def _input(terminal, value, label, default=None, *, optional=False):
     return str(value)
 
 
-def _configuration(args, paths, terminal, release):
+def _configuration(args, paths, terminal, cli):
     from ..plane.owner_service import service_command
     from .setup import _template_config
     config = {
@@ -71,7 +71,7 @@ def _configuration(args, paths, terminal, release):
     }
     # The existing service validator validates paths/origins without enrolling it.
     try:
-        service_command(paths.root, release.cli_path, config)
+        service_command(paths.root, cli, config)
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "local serving configuration is invalid; review exact HTTPS origins and absolute native paths") from exc
     fleet = _input(terminal, args.target_fleet, "First team name", "web-app")
@@ -91,7 +91,7 @@ def _configuration(args, paths, terminal, release):
     terminal.write("Provider/repository login, website login and native Tailscale/Serve access must already be ready.\n"
                    "This guide does not configure them or enroll an owner service.\n")
     return config, SimpleNamespace(template="revenue-web-app", target_fleet=fleet,
-        repository=repository, release=release.release_id, install_directory=directory)
+        repository=repository, install_directory=directory)
 
 
 def _ready(path, origin):
@@ -159,35 +159,38 @@ def interrupted():
 
 def run(args, paths, store, terminal):
     from . import host_owner as console
-    from .host import _status
-    from .releases import _executing_release, _release
-    from ..activation_state import read_selection
+    from ..active_config import read_current_config
+    from ..git_update import read_update
+    from ..plane.owner_setup import managed_setup, _continuation
     from ..config import load_host_jobs
     from ..plane.owner_service import service_command
     from ..plane.owner_source import fresh_owner_setup
 
     retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
-    selected = read_selection(paths.root)
-    if retained and retained.launch_id is not None:
-        if selected is None:
-            _original_launch(retained)
-        status = _status(SimpleNamespace(), paths.root)  # refuses unfinished/indeterminate state
-        if (status.data["recorded_status"] != "active" or selected["activation_id"] != retained.launch_id
-                or selected["plan_id"] != retained.launch_plan):
-            _original_launch(retained)
-    elif selected is not None:
-        raise CommandFailure("conflict", "guided setup cannot replace an existing selected installation")
-    if selected is None:
+    if retained and retained.state == "legacy_recovery_required":
+        raise CommandFailure("conflict", "historical sealed setup requires local recovery; no Git operation was inferred",
+                             data=asdict(retained))
+    package = managed_setup(paths.root)
+    installation = package.installation
+    record = read_update(installation)
+    selected = os.path.lexists(paths.root / "state/config.json")
+    if record is not None:
+        if (not retained or retained.grant is None or record.get("request_id") != retained.launch_id
+                or record.get("config_fingerprint") != retained.launch_plan or record.get("phase") != "done"):
+            raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
+                data={"request_id":record["request_id"]},
+                hint=_continuation(paths.root,retained.grant) if retained and retained.grant else "host update status")
+        snapshot=read_current_config(paths.root,installation=installation,revision=record["target"])
+        if snapshot!=record.get("candidate_config"):
+            raise CommandFailure("conflict", "current configuration differs from the original setup")
+    elif selected or retained and retained.launch_id is not None:
+        raise CommandFailure("conflict", "guided setup cannot replace existing or unknown installation state")
+    if not selected:
         fresh_owner_setup(paths.root, allow_absent=True)
-    release_id = _executing_release(paths.root)
-    if release_id is None:
-        raise CommandFailure("release_mismatch", "guided setup requires the exact assembled sealed CLI")
-    release = _release(paths.root, release_id)
     if load_host_jobs()["plane-owner"].get("enroll", True):
         raise CommandFailure("conflict", "guided setup retains foreground serving; configured owner service enrollment requires separate reviewed handover")
-    if selected is not None and (selected["release_id"] != retained.grant.release_id or release_id != selected["release_id"]):
-        raise CommandFailure("release_mismatch", "serving continuation requires the original selected release")
-    config, approval = _configuration(args, paths, terminal, release)
+    cli = installation.cli
+    config, approval = _configuration(args, paths, terminal, cli)
     # No authority method is reached before the terminal's ancestry check.
     if not os.path.lexists(store.path):
         console._initialize_first_owner(paths, terminal)
@@ -195,14 +198,14 @@ def run(args, paths, store, terminal):
     if owner is None or not owner.active:
         direct = {**config, "workspace_issuer": None, "workspace_origin": None}
         terminal.write("Open " + json.dumps(config["origin"] + "/owner") + " and choose Start pairing.\n")
-        with _serving(service_command(paths.root, release.cli_path, direct), Path(config["socket"]), config["origin"]):
+        with _serving(service_command(paths.root, cli, direct), Path(config["socket"]), config["origin"]):
             console._confirm_owner(paths, store, terminal)
     owner = console._active_owner(store)
     console._describe(terminal, owner)
-    if selected is None and store.connected().preparation_state() != "ready":
+    if not selected and store.connected().preparation_state() != "ready":
         console._initialize_connected(store, terminal, prepare_workspace=True)
-    with _serving(service_command(paths.root, release.cli_path, config), Path(config["socket"]), config["origin"]) as child:
-        if selected is None:
+    with _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"]) as child:
+        if not selected:
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
                 terminal.write("In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
@@ -217,14 +220,14 @@ def run(args, paths, store, terminal):
                 _original_launch(retained)
             if retained.state == "allowed":
                 grant = retained.grant
-                if (grant.fleet, grant.repository, grant.release_id, grant.release_seal, grant.install_directory) != (
-                        approval.target_fleet, approval.repository, release_id, release.seal_sha256, str(approval.install_directory)):
+                if (grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
+                        approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
                 terminal.write("Matching setup approval retained without renewal.\n")
             else:
                 approval.install_directory.mkdir(parents=True, exist_ok=True)
                 console._allow_setup(approval, paths, store, terminal, expected_retained=retained)
-        terminal.write("Local access prepared. Review and launch the exact plan in your browser; keep original receipt IDs.\n"
+        terminal.write("Local access prepared. Review and launch the exact prepared request in your browser; keep original receipt IDs.\n"
                        "Keep this terminal open. Closing it disconnects browser access, not started bots or approvals.\n")
         terminal.flush()
         try:

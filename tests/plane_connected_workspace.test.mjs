@@ -810,7 +810,7 @@ test('setup-only computer stays visible without blocking the other admitted dash
   let computersOpen=false;
   h.mount({onConnectionAttention:event=>{attention.push(event);computersOpen=true;}});
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
-    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+    setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
   await h.api.checkAccount();
   const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0],help=card.children.at(-1);
@@ -863,31 +863,37 @@ test('setup-only computer stays visible without blocking the other admitted dash
 const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
 function setupHarness(options={}) {
   const calls=[],listeners=new Set(),saved=new Map(); let state={state:'setup_only',epoch:1};
-  const pending={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
-  const context={version:1,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',release_id:'r-'+'b'.repeat(64),release_seal:'c'.repeat(64),generation:id(9),expires_at:1800003600,request:null};
-  const preview={...context,plan_id:pending.plan_id,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},activation:'not_requested',expires_at:1800000600};
+  const pending={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
+  const context={version:2,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',source_revision:pending.source_revision,
+    generation:id(9),expires_at:1800003600,request:null,launch_reserved:false};
+  const preview={...pending,version:2,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},
+    dispatch:'prepared',phase:'quiesce',expires_at:1800000600};
   const client={snapshot:()=>state,subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},
     async setupContext(){calls.push(['context']);return context;},
     async setupPreview(input){calls.push(['preview',input]);return preview;},
-    async setupLaunch(input){assert.equal(saved.has('test'),true);calls.push(['launch',input]);throw new Error('lost');},
-    async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:1,state:'active',recorded_activation:{}};},...options.client};
+    async setupLaunch(input){assert.deepEqual(JSON.parse(saved.get('test')).pending,pending);calls.push(['launch',input]);throw new Error('lost');},
+    async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:2,state:'done',launch_reserved:true,config_committed:true,health_errors:{}};},...options.client};
   const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
-  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:()=>1800000000});
+  const api=createGuidedSetup({client,storage,storageKey:'test',now:()=>1800000000});
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
 }
-test('goal preview and explicit exact-plan launch retain UUID before lost response; reload only inspects',async()=>{
+test('preview owns original Git request before one explicit launch; lost response and reload only inspect',async()=>{
   const h=setupHarness();assert.equal(h.calls.length,0);
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
-  h.api.setGoal('Changed goal');assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,2);
-  h.api.setGoal('Improve checkout tests');assert.equal(await h.api.run('launch'),false);
-  assert.deepEqual(h.api.snapshot().pending,h.pending);assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.deepEqual(JSON.parse(h.saved.get('test')).pending,h.pending);
+  h.api.setGoal('Changed goal');assert.equal(h.api.snapshot().goal,'Improve checkout tests','a real preview freezes its goal');
+  assert.equal(await h.api.run('preview'),false);
+  assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.calls.at(-1),['launch',h.pending]);
   await h.api.run('launch');assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
   h.api.dispose();
   const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
-  assert.deepEqual(resumed.snapshot().pending,h.pending);assert.equal(h.calls.length,3);
+  assert.deepEqual(resumed.snapshot().pending,h.pending);
+  assert.equal(await resumed.run('launch'),false);
   await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');
-  assert.equal(resumed.snapshot().note,'Launch recorded. Check connection to view your team. Bots may still be starting or waiting for local approval.');
+  assert.match(resumed.snapshot().note,/Configuration committed.*native health separately/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
 });
 test('changed connection fences held preview, preserves goal and never launches',async()=>{
@@ -897,85 +903,117 @@ test('changed connection fences held preview, preserves goal and never launches'
   assert.equal(h.api.snapshot().plan,null);assert.equal(h.api.snapshot().goal,'Improve checkout tests');
   assert.equal(await h.api.run('launch'),false);h.api.dispose();
 });
-test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
+test('lost preview requires context recovery and offers local continuation without another preview or launch',async()=>{
+  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);throw new Error('lost preview');}}});
+  await h.api.run('context');h.api.setGoal('Improve tests');assert.equal(await h.api.run('preview'),false);
+  assert.equal(h.api.snapshot().context,null);assert.equal(await h.api.run('preview'),false);
+  h.context.request={...h.pending};h.context.continuation="'/example/managed cli' --root '/example/data root' host update continue";await h.api.run('context');
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.ok(h.api.snapshot().note.includes(h.context.continuation));
+  assert.equal(await h.api.run('launch'),false);
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
+  h.api.dispose();
+});
+test('setup panel retains disclosure/focus and refuses launch without durable original identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
-  const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
-  assert.ok(panel.children.some(e=>/Choose Check setup approval/.test(e.textContent)));
-  await h.api.run('context');
-  assert.ok(panel.children.some(e=>/Enter a goal to enable Preview team/.test(e.textContent)));
-  h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  const detail=panel.children.find(e=>e.tagName==='DETAILS');detail.open=true;detail.focus();
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
-  assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
   const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
-  assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.release_id));
+  assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.source_revision));
   assert.match(authority.textContent,/starts native services.*configured provider accounts/);
   assert.match(authority.textContent,/Local folder, tool and account approvals may still be needed/);
   assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
   assert.ok(panel.children.some(e=>e.textContent.includes('Goal: Improve checkout tests.')));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
-  assert.match(h.api.snapshot().note,/could not retain activation identifiers.*No new launch was sent/);
-  assert.ok(panel.children.some(e=>/could not retain activation identifiers/.test(e.textContent)));
+  assert.match(h.api.snapshot().note,/could not retain the original update identifiers.*No launch was sent/);
   h.api.dispose();
 });
-
-test('canonical reserved request wins two-tab storage conflict, preserving both IDs through reload',async()=>{
+test('canonical request wins two-tab storage conflict, preserving both original bindings through reload',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
-  const losing={...h.pending,request_id:id(11)};
-  h.saved.set('test',JSON.stringify(losing));
+  const losing={...h.pending,request_id:id(11)};h.saved.set('test',JSON.stringify(losing));
   const restored=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
-  h.context.request={...h.pending};
+  h.context.request={...h.pending};h.context.launch_reserved=true;
   assert.equal(await restored.run('context'),true);
   assert.deepEqual(restored.snapshot().pending,h.pending);assert.deepEqual(restored.snapshot().conflicts,[losing]);
   await restored.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
-  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
   const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
   assert.deepEqual(reloaded.snapshot().pending,h.pending);assert.deepEqual(reloaded.snapshot().conflicts,[losing]);
+  assert.equal(await reloaded.run('launch'),false);
   restored.dispose();reloaded.dispose();h.api.dispose();
 });
-
-test('only a new grant generation clears blocking pending; same-generation null never permits retry',async()=>{
+test('null context or a new grant never clears the original request or permits another preview',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
-  assert.equal(await h.api.run('context'),true);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  h.context.generation=id(12);await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);
-  h.context.generation=id(12);
-  assert.equal(await h.api.run('context'),true);assert.equal(h.api.snapshot().pending,null);
-  assert.deepEqual(h.api.snapshot().conflicts,[h.pending]);
-  h.client.setupPreview=async input=>{h.calls.push(['preview',input]);return {...h.preview,generation:id(12)};};
-  assert.equal(await h.api.run('preview'),true);assert.equal(h.api.snapshot().goal,'Improve tests');
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
-
-test('expired or revoked browser receipt retains original identifiers with local inspection guidance',async()=>{
+test('historical sealed identifiers remain visible and block a replacement Git request',async()=>{
+  const h=setupHarness(),legacy={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
+  h.saved.set('test',JSON.stringify(legacy));
+  const restored=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  const ui=dom(),panel=new ui.Element();restored.mountPanel({document:ui.document,element:panel});
+  assert.deepEqual(restored.snapshot().legacy,[legacy]);assert.equal(restored.snapshot().pending,null);
+  await restored.run('context');restored.setGoal('Improve tests');assert.equal(await restored.run('preview'),false);
+  assert.ok(panel.children.some(e=>/Incompatible historical setup identifiers/.test(e.textContent)));
+  assert.equal(h.saved.get('test'),JSON.stringify(legacy));assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
+  restored.dispose();h.api.dispose();
+});
+test('mixed legacy or changed-source previews are refused without dispatch',async()=>{
+  for(const defect of ['legacy','source']) {
+    const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');
+    h.client.setupPreview=async()=>({...h.preview,...(defect==='legacy'?{release_id:'r-'+'a'.repeat(64)}:{source_revision:'c'.repeat(40)})});
+    assert.equal(await h.api.run('preview'),false);assert.equal(h.api.snapshot().pending,null);
+    assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+  }
+});
+test('unknown receipt after fresh preview retires launch permission without a launch POST',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const launch=panel.children.find(e=>e.tagName==='BUTTON'&&e.textContent==='Launch this exact configuration');
+  assert.equal(launch.disabled,false);
+  h.client.setupReceipt=async input=>({...input,version:2,state:'unknown',launch_reserved:false,
+    config_committed:false,health_errors:{}});
+  assert.equal(await h.api.run('receipt'),true);assert.match(h.api.snapshot().note,/do not launch again/);
+  assert.equal(launch.disabled,true);assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});
+test('prepared receipt shows exact server continuation and never launches or treats restoration errors as healthy',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+  h.change({epoch:2,state:'setup_only'});
+  const command="'/example/managed cli' --root '/example/data root' host update continue";
+  h.client.setupReceipt=async input=>({...input,version:2,state:'quiesce',launch_reserved:false,
+    config_committed:false,health_errors:{},continuation:command});
+  assert.equal(await h.api.run('receipt'),true);assert.ok(h.api.snapshot().note.includes(command));
+  assert.equal(await h.api.run('launch'),false);
+  h.client.setupReceipt=async input=>({...input,version:2,state:'done',launch_reserved:true,
+    config_committed:true,health_errors:{'example.service':'unknown start'}});
+  assert.equal(await h.api.run('receipt'),true);assert.match(h.api.snapshot().note,/needs attention/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});
+test('expired or revoked receipt preserves original identifiers and local inspection guidance',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
   h.client.setupReceipt=async()=>{throw new Error('approval expired');};
   assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
-
-test('failed setup approval refresh disables new work but keeps the goal and original recovery identifiers',async()=>{
+test('failed approval refresh retires new-work permission while retaining original request and goal',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   const button=title=>panel.children.find(e=>e.tagName==='BUTTON'&&e.textContent===title);
   await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
-  const plan=h.api.snapshot().plan,check=h.client.setupContext;
-  const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
-  assert.equal(button('Launch this exact plan').disabled,false);
+  const plan=h.api.snapshot().plan;
+  assert.equal(button('Launch this exact configuration').disabled,false);
   h.client.setupContext=async()=>{throw new Error('approval revoked');};
-  assert.equal(await h.api.run('context'),false);
-  assert.equal(h.api.snapshot().context,null);assert.equal(h.api.snapshot().plan,plan);
-  assert.equal(authority.textContent,'');
-  assert.equal(h.api.snapshot().goal,'Improve tests');
-  assert.equal(button('Preview team').disabled,true);assert.equal(button('Launch this exact plan').disabled,true);
-  const before=h.calls.length;
-  assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,before);
-  h.client.setupContext=check;await h.api.run('context');await h.api.run('preview');await h.api.run('launch');
-  const saved=h.saved.get('test');assert.deepEqual(h.api.snapshot().pending,h.pending);
-  h.client.setupContext=async()=>{throw new Error('approval revoked');};
-  assert.equal(await h.api.run('context'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
-  assert.equal(h.saved.get('test'),saved);assert.equal(button('Check original activation receipt').disabled,false);
+  assert.equal(await h.api.run('context'),false);assert.equal(h.api.snapshot().context,null);assert.equal(h.api.snapshot().plan,plan);
+  assert.equal(h.api.snapshot().goal,'Improve tests');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(button('Preview team').disabled,true);assert.equal(button('Launch this exact configuration').disabled,true);
+  assert.equal(await h.api.run('launch'),false);
   await h.api.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
-  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
 
 test('explicit connected summary retry forwards only its source key and successful reconnect clears its latch',async()=>{

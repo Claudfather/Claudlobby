@@ -725,16 +725,16 @@ def test_feedback_console_refuses_owner_or_generation_replacement(message_owner,
         assert call(store, "allow-feedback", "--target-fleet", "example", "--actor", ctx.caller.alias) == 4
 
 
-def test_fresh_initialize_is_explicit_sealed_and_cancel_leaves_no_identity(tmp_path, monkeypatch):
-    from claudlobby.commands import releases
+def test_fresh_initialize_is_explicit_git_and_cancel_leaves_no_identity(tmp_path, monkeypatch):
+    from claudlobby import resources
+    from claudlobby.installation import Installation
     store = OwnerAccess(tmp_path)
     terminal(monkeypatch, iter(["INITIALIZE\n"]))
     assert call(store, "initialize") == 6  # Existing missing-identity behavior.
-    monkeypatch.setattr(releases, "_executing_release", lambda root: None)
     assert call(store, "initialize", "--before-first-fleet") == 7
     assert not (tmp_path / "state/host-uid").exists()
-    monkeypatch.setattr(releases, "_executing_release", lambda root: "synthetic-sealed")
-    monkeypatch.setattr(releases, "_release", lambda root, release: object())
+    package = SimpleNamespace(installation=Installation(tmp_path.parent / "managed",tmp_path),source_revision="a"*40)
+    monkeypatch.setattr(resources,"get_resources",lambda:package)
     terminal(monkeypatch, iter(["no\n"]))
     assert call(store, "initialize", "--before-first-fleet") == 4
     assert not (tmp_path / "state/host-uid").exists()
