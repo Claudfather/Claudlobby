@@ -179,3 +179,98 @@ def test_standalone_update_status_needs_neither_source_nor_runtime(update):
     unsupported = subprocess.run([str(installation.cli), "host", "update"], env=constructed_env(),
                                  cwd=installation.data_root, capture_output=True, text=True, timeout=10)
     assert unsupported.returncode != 0 and "application update owner" in unsupported.stderr
+
+
+def _tiny_wheel(directory, version):
+    """A real, dependency-free wheel, built locally without a build backend."""
+    import base64
+    import csv
+    import hashlib
+    import io
+    import zipfile
+    stem = f"example-{version}.dist-info"
+    files = {"example.py": f"VERSION = {version!r}\n".encode(),
+             f"{stem}/METADATA": f"Metadata-Version: 2.1\nName: example\nVersion: {version}\n".encode(),
+             f"{stem}/WHEEL": b"Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    rows = [[name, "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("="),
+             str(len(content))] for name, content in files.items()]
+    rows.append([f"{stem}/RECORD", "", ""])
+    record = io.StringIO()
+    csv.writer(record).writerows(rows)
+    files[f"{stem}/RECORD"] = record.getvalue().encode()
+    wheel = directory / f"example-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return f"example=={version} --hash=sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}\n".encode()
+
+
+def test_unchanged_dependencies_perform_no_install_or_python_observation(update, monkeypatch):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        monkeypatch.setattr(store, "_dependency_run", lambda _: pytest.fail("unchanged lock ran Python/pip"))
+        assert store.prepare_dependencies(interpreter=Path("/unavailable"))["dependencies"]["prepared"]
+        quiet(store)
+        store.cutover_git()
+        record = store.load()
+        record["phase"] = "environment"
+        store.save(record)
+        store.cutover_environment()
+        assert store.load()["dependencies"]["environment_complete"]
+
+
+def test_dependency_wheels_preflight_and_offline_final_path_interruption(update, tmp_path, monkeypatch):
+    installation, _, _, commit = update
+    wheels = tmp_path / "fixture-wheels"
+    wheels.mkdir()
+    old_lock = _tiny_wheel(wheels, "1.0")
+    new_lock = _tiny_wheel(wheels, "2.0")
+    (installation.source / "requirements-runtime.lock").write_bytes(old_lock)
+    before = commit("Real wheel baseline")
+    (installation.source / "requirements-runtime.lock").write_bytes(new_lock)
+    target = commit("Real wheel target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], tmp_path)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        run = store._dependency_run
+        def local_download(arguments):
+            if "download" in arguments:
+                arguments = [*arguments, "--no-index", "--find-links", wheels]
+            return run(arguments)
+        monkeypatch.setattr(store, "_dependency_run", local_download)
+        prepared = store.prepare_dependencies(interpreter=Path(sys.executable).resolve())
+        assert prepared["maintenance"] is False
+        assert installation.preflight() == before
+        assert not installation.environment.exists()
+        foreign = deepcopy(prepared)
+        foreign["dependencies"]["proof"]["binding"]["request_id"] = "00000000-0000-4000-8000-000000000099"
+        store.save(foreign)
+        with pytest.raises(UpdateError, match="proof"):
+            store.verify_dependencies()
+        store.save(prepared)
+        quiet(store)
+        store.cutover_git()
+        record = store.load()
+        record["phase"] = "environment"
+        store.save(record)
+        install = store._install_dependencies
+        def interrupted(python, name):
+            # Venv exists at its final path when the process is interrupted.
+            assert python == installation.environment / "bin/python"
+            raise OSError("interrupted environment install")
+        monkeypatch.setattr(store, "_install_dependencies", interrupted)
+        with pytest.raises(OSError, match="interrupted"):
+            store.cutover_environment()
+        assert (installation.environment / "bin/python").exists()
+        monkeypatch.setattr(store, "_install_dependencies", install)
+    with UpdateStore(installation) as resumed:
+        resumed.cutover_environment()  # No network, application imports, or temporary-env rename.
+        assert resumed.load()["dependencies"]["environment_complete"] is True
+        output = _run([installation.environment / "bin/python", "-I", "-c",
+                       "import example; print(example.VERSION)"], tmp_path)
+        assert "2.0" in output
+        cached = next((resumed.work / "wheels-target").glob("*.whl"))
+        cached.write_bytes(b"changed immutable wheel")
+        with pytest.raises(UpdateError, match="immutable"):
+            resumed.verify_dependencies()

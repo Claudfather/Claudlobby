@@ -48,6 +48,12 @@ class WatchdogActivationPause(ActivationError):
 def wrap_unit_argv(environment: dict[str, str], *, unit: str, phase: str,
                    mode: str, argv: tuple[str, ...] | list[str]) -> tuple[str, ...]:
     """Bind sealed generated units; source-only renders are not activatable."""
+    if "CLAUDLOBBY_INSTALLATION" in environment:
+        from .installation import parse_git_unit_argv
+        result = (environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
+                  "_native", "--unit", unit, "--phase", phase, "--mode", mode, "--", *argv)
+        parse_git_unit_argv(result)
+        return result
     if "CLAUDLOBBY_RELEASE_ID" not in environment:
         return tuple(argv)
     result = (str(Path(environment["CLAUDLOBBY_CLI"]).parent / "python"), *_UNIT_PREFIX,

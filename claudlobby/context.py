@@ -67,10 +67,11 @@ def native_environment(paths: Paths) -> dict[str, str]:
         "CLAUDLOBBY_NATIVE_DIR": str(paths.package.runtime_native),
         "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.runtime_library),
         "CLAUDLOBBY_CLI": str(cli),
-        "CLAUDLOBBY_ARTIFACT_ID": paths.package.artifact_id,
     }
     if installation is not None:
         result["CLAUDLOBBY_INSTALLATION"] = str(installation.directory)
+    else:
+        result["CLAUDLOBBY_ARTIFACT_ID"] = paths.package.artifact_id
     # Composition can run from an explicit development package, but a sealed
     # candidate binds generated callers to its complete release (dependencies
     # included), not merely the source/resource artifact identity.

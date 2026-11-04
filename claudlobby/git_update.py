@@ -247,6 +247,137 @@ class UpdateStore:
         self.save(record)
         return record
 
+    def _dependency_inputs(self, record):
+        for name in ("before", "target"):
+            path = _plain(self.work / f"dependencies-{name}.lock")
+            if _digest(path.read_bytes()) != record["dependencies"][name]:
+                raise UpdateError("frozen dependency input changed")
+
+    def _dependency_run(self, arguments):
+        # Neither ambient pip configuration nor Python import paths select inputs.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("PIP_", "PYTHON"))}
+        environment["PIP_CONFIG_FILE"] = os.devnull
+        try:
+            result = subprocess.run([str(arg) for arg in arguments], env=environment,
+                                    capture_output=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise UpdateError("dependency preparation or rebuild did not complete") from exc
+        if result.returncode:
+            raise UpdateError("dependency preparation or rebuild refused; current progress retained")
+        return result.stdout
+
+    def _dependency_inventory(self, directory):
+        directory = _plain(directory)
+        inventory = {}
+        for path in sorted(directory.iterdir()):
+            if path.is_symlink() or not path.is_file() or path.suffix != ".whl":
+                raise UpdateError("dependency cache must contain only plain binary wheels")
+            inventory[path.name] = _digest(path.read_bytes())
+        if not inventory:
+            raise UpdateError("dependency wheel cache is empty")
+        return inventory
+
+    def _dependency_binding(self, record, interpreter):
+        interpreter = _plain(Path(interpreter))
+        if (not interpreter.is_file() or not os.access(interpreter, os.X_OK)
+                or interpreter.is_relative_to(self.installation.source)
+                or interpreter.is_relative_to(self.installation.environment)):
+            raise UpdateError("dependency rebuild requires an independent host Python")
+        runtime = self._dependency_run([interpreter, "-I", "-c",
+            "import json,sys,sysconfig; print(json.dumps([sys.version,sysconfig.get_platform(),sys.implementation.cache_tag]))"])
+        return {"request_id": record["request_id"], "installation": record["installation"],
+                "data_root": record["data_root"], "target": record["target"],
+                "interpreter": str(interpreter), "python_sha256": _digest(interpreter.read_bytes()),
+                "runtime_sha256": _digest(runtime)}
+
+    def verify_dependencies(self):
+        """Recheck request/runtime-bound immutable inputs before quieting consumers."""
+        self._assert_locked()
+        record = self.load()
+        if record is None:
+            raise UpdateError("current dependency operation is unavailable")
+        self._dependency_inputs(record)
+        dependencies = record["dependencies"]
+        if dependencies["before"] == dependencies["target"]:
+            return record
+        proof = dependencies.get("proof")
+        if not dependencies["prepared"] or type(proof) is not dict:
+            raise UpdateError("changed dependencies lack installability proof")
+        try:
+            binding = self._dependency_binding(record, proof["binding"]["interpreter"])
+            inventories = {name: self._dependency_inventory(self.work / f"wheels-{name}")
+                           for name in ("before", "target")}
+            expected = {"binding": binding, "wheels": inventories}
+            if (proof != expected or dependencies["receipt_sha256"] !=
+                    _digest(json.dumps(expected, sort_keys=True).encode())):
+                raise UpdateError("dependency proof or cached immutable inputs changed")
+        except (KeyError, TypeError, OSError) as exc:
+            raise UpdateError("dependency proof or cache is unavailable") from exc
+        return record
+
+    def prepare_dependencies(self, *, interpreter):
+        """Download hashed wheels and prove dependency installability before downtime.
+
+        This proves dependencies only, never candidate application validation.
+        Both frozen sets remain available for explicit compatible recovery.
+        """
+        self._assert_locked()
+        record = self.load()
+        if record is None or record["phase"] != "prepare" or record["maintenance"]:
+            raise UpdateError("dependencies must be prepared before quiescence")
+        self._dependency_inputs(record)
+        dependencies = record["dependencies"]
+        if dependencies["before"] == dependencies["target"]:
+            return record  # No interpreter observation, download, or installation.
+        if dependencies["prepared"]:
+            return self.verify_dependencies()
+        binding = self._dependency_binding(record, interpreter)
+        python = Path(binding["interpreter"])
+        inventories = {}
+        for name in ("before", "target"):
+            check = _plain(self.work / "dependency-check")
+            self._dependency_run([python, "-I", "-m", "venv", "--clear", check])
+            cache = _plain(self.work / f"wheels-{name}")
+            cache.mkdir(mode=0o700, exist_ok=True)
+            self._dependency_run([check / "bin/python", "-I", "-m", "pip", "--isolated", "download",
+                "--disable-pip-version-check", "--only-binary=:all:", "--require-hashes",
+                "--no-deps", "--dest", cache, "-r", self.work / f"dependencies-{name}.lock"])
+            inventories[name] = self._dependency_inventory(cache)
+            self._install_dependencies(check / "bin/python", name)
+        dependencies["proof"] = {"binding": binding, "wheels": inventories}
+        dependencies["receipt_sha256"] = _digest(json.dumps(dependencies["proof"], sort_keys=True).encode())
+        dependencies["prepared"] = True
+        self.save(record)
+        return self.verify_dependencies()
+
+    def _install_dependencies(self, python, name):
+        self._dependency_run([python, "-I", "-m", "pip", "--isolated", "install",
+            "--disable-pip-version-check", "--no-index", "--find-links", self.work / f"wheels-{name}",
+            "--only-binary=:all:", "--require-hashes", "--no-deps", "-r",
+            self.work / f"dependencies-{name}.lock"])
+        self._dependency_run([python, "-I", "-m", "pip", "--isolated", "check"])
+
+    def cutover_environment(self):
+        """Offline, repeatable rebuild at the final path; imports no application code."""
+        self._assert_locked()
+        record = self.load()
+        if (record is None or record["phase"] != "environment" or not record["maintenance"]
+                or not record["git_complete"]):
+            raise UpdateError("environment rebuild requires completed Git cutover under maintenance")
+        _require_quiet(record)
+        record = self.verify_dependencies()
+        if _head(self.installation) != record["target"]:
+            raise UpdateError("environment rebuild requires the frozen target checkout")
+        dependencies = record["dependencies"]
+        if dependencies["before"] != dependencies["target"]:
+            environment = _plain(self.installation.environment)
+            python = dependencies["proof"]["binding"]["interpreter"]
+            self._dependency_run([python, "-I", "-m", "venv", "--clear", environment])
+            self._install_dependencies(environment / "bin/python", "target")
+        dependencies["environment_complete"] = True
+        self.save(record)
+
     def begin_cutover(self):
         """Called immediately after the native owner re-observes every frozen consumer quiet."""
         self._assert_locked()
@@ -256,6 +387,7 @@ class UpdateStore:
         _require_quiet(record)
         if not record["dependencies"]["prepared"]:
             raise UpdateError("changed dependencies have not been prepared and validated")
+        self.verify_dependencies()
         record.update(phase="git", maintenance=True)
         self.save(record)
 
@@ -268,10 +400,7 @@ class UpdateStore:
         _require_quiet(record)
         if not record["dependencies"]["prepared"]:
             raise UpdateError("changed dependencies have not been prepared and validated")
-        for name in ("before", "target"):
-            path = _plain(self.work / f"dependencies-{name}.lock")
-            if _digest(path.read_bytes()) != record["dependencies"][name]:
-                raise UpdateError("frozen dependency input changed")
+        self.verify_dependencies()
         actual = _head(self.installation)
         if actual == record["before"] and actual != record["target"]:
             _git(self.installation, "-c", "merge.autoStash=false", "-c", "submodule.recurse=false",

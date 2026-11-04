@@ -4487,7 +4487,8 @@ def _write_service_units(
     argv = wrap_unit_argv(environment, unit=service_name,
                           phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
                           argv=command if command is not None else _native_script_argv(script, environment))
-    exec_start = unit_systemd_command(argv) if command is not None or "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
+    guarded = "CLAUDLOBBY_RELEASE_ID" in environment or "CLAUDLOBBY_INSTALLATION" in environment
+    exec_start = unit_systemd_command(argv) if command is not None or guarded else script_expanded
     tool_path = _scheduler_tool_path(paths)
 
     # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
@@ -4646,7 +4647,8 @@ def _write_timer_units(
             argv.append(fleet_name)
         argv.extend(exec_args or [])
     argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
-    if "CLAUDLOBBY_RELEASE_ID" in environment or (fleet_name and name == _FLEET_PULSE_JOB):
+    if ("CLAUDLOBBY_RELEASE_ID" in environment or "CLAUDLOBBY_INSTALLATION" in environment
+            or (fleet_name and name == _FLEET_PULSE_JOB)):
         exec_start = unit_systemd_command(argv)
 
     # Compute the tool PATH once so systemd and launchd emit an identical value

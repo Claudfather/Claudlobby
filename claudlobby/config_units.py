@@ -12,11 +12,75 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import re
+import shlex
 
 from .config_plan import ConfigPlan, PlanError
 from .activation_state import ActivationError
 from .supervision_inventory import UnitDeclaration, is_unit_template
-from .runtime_admission import parse_unit_argv, unit_systemd_environment
+from .runtime_admission import parse_unit_argv, unit_systemd_command, unit_systemd_environment
+
+
+def _systemd_fields(content: bytes) -> dict:
+    section, fields = None, {}
+    for raw in content.decode().splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            raise ValueError("unsupported generated native field")
+        fields.setdefault((section, key), []).append(value)
+    return fields
+
+
+def _systemd_environment(fields: dict) -> dict:
+    result = {}
+    for value in fields.get(("Service", "Environment"), []):
+        assignments = shlex.split(value)
+        if len(assignments) != 1:
+            raise ValueError("ambiguous generated native environment")
+        key, separator, text = assignments[0].partition("=")
+        text = text.replace("%%", "%")
+        if (not separator or key in result
+                or unit_systemd_environment(key, text) != "Environment=" + value):
+            raise ValueError("unsupported generated native environment")
+        result[key] = text
+    return result
+
+
+def _git_family(files, definition, *, destination, scope, phase, fleet, bot, enroll):
+    from .installation import parse_git_unit_argv
+    admission = parse_git_unit_argv(definition["ProgramArguments"])
+    stem, directory = definition["Label"], definition["WorkingDirectory"]
+    if (admission.unit != stem or admission.phase != phase
+            or not Path(directory).is_absolute()):
+        raise ValueError("unbound Git native family")
+    service_fields = _systemd_fields(files[stem + ".service"][0])
+    if (service_fields.get(("Service", "ExecStart")) != [unit_systemd_command(admission.argv)]
+            or service_fields.get(("Service", "WorkingDirectory")) != [directory]):
+        raise ValueError("systemd service bypasses its Git entry")
+    linux_environment = _systemd_environment(service_fields)
+    result = []
+    for name, (content, mode) in sorted(files.items()):
+        timer = name.endswith(".timer")
+        if timer:
+            fields = _systemd_fields(content)
+            if fields.get(("Timer", "Unit"), [stem + ".service"]) != [stem + ".service"]:
+                raise ValueError("timer names another native service")
+        result.append({"source": str(destination / name), "scope": scope, "phase": phase,
+                       "working_directory": directory,
+                       "environment": definition["EnvironmentVariables"] if name.endswith(".plist") else linux_environment,
+                       "fleet": fleet, "bot": bot, "enroll": enroll,
+                       "admission": None if timer else {"kind": "git-native-v1", "unit": admission.unit,
+                           "mode": admission.mode, "argv": list(admission.argv), "command": list(admission.command)},
+                       "service": stem + ".service" if timer else None,
+                       "platform": "Darwin" if name.endswith(".plist") else "Linux",
+                       "sha256": hashlib.sha256(content).hexdigest(), "mode": mode})
+    return result
 
 
 def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
@@ -31,10 +95,14 @@ def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
     if set(files) not in ({plist, stem + ".service"},
                           {plist, stem + ".service", stem + ".timer"}):
         raise PlanError("partial or unexpected staged unit family")
+    environment = {}
     try:
         definition = plistlib.loads(files[plist][0])
         environment = definition["EnvironmentVariables"]
         working_directory = definition["WorkingDirectory"]
+        if "CLAUDLOBBY_INSTALLATION" in environment:
+            return _git_family(files, definition, destination=destination, scope=scope,
+                               phase=phase, fleet=fleet, bot=bot, enroll=enroll)
         admission = parse_unit_argv(definition["ProgramArguments"])
         if admission.unit != stem or admission.phase != phase or admission.release_id != release_id:
             raise ValueError("unbound unit admission")
@@ -44,6 +112,8 @@ def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
                 or environment.get("CLAUDLOBBY_RELEASE_ID") != release_id):
             raise ValueError("unbound native identity")
     except (ValueError, TypeError, KeyError, ActivationError, plistlib.InvalidFileException) as exc:
+        if isinstance(environment, dict) and "CLAUDLOBBY_INSTALLATION" in environment:
+            raise PlanError("staged unit is not bound to its Git native entry") from exc
         raise PlanError("staged unit is not bound to its candidate release") from exc
     # Native identity is public location metadata. Other environment values may
     # be credentials; they stay in the private staged bytes, never in summaries.
@@ -75,23 +145,42 @@ def template_units(templates: dict[str, tuple[bytes, int]], families: list[dict]
     parks its file. It claims the identity every family beside it declares,
     which its own reviewed bytes must spell line for line.
     """
-    identities = {json.dumps([item["working_directory"], item["environment"]], sort_keys=True)
-                  for item in families}
+    git = bool(families) and "release_id" not in families[0]
+    identity_keys = {"CLAUDLOBBY_ROOT", "FLEET_ROOT", "CLAUDLOBBY_INSTALLATION",
+                     "CLAUDLOBBY_CLI", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR"}
+    identities = {json.dumps([item["working_directory"],
+                  {key: value for key, value in item["environment"].items() if key in identity_keys}
+                  if git else item["environment"]], sort_keys=True) for item in families}
     if scope != "fleet" or not fleet or len(identities) != 1:
         raise PlanError("a unit template needs one fleet identity from the job units naming it")
     working_directory, environment = families[0]["working_directory"], families[0]["environment"]
+    if git:
+        # Linux-only templates inherit the actual Linux environment, not the
+        # additional HOME/PATH values of the corresponding launchd definition.
+        linux = next(item for item in families if item["platform"] == "Linux")
+        working_directory, environment = linux["working_directory"], linux["environment"]
     result = []
     for name, (content, mode) in sorted(templates.items()):
         try:
             lines = set(content.decode("utf-8").splitlines())
+            if git:
+                fields = _systemd_fields(content)
+                actual_environment = _systemd_environment(fields)
+                if (fields.get(("Service", "WorkingDirectory")) != [working_directory]
+                        or any(actual_environment.get(key) != value for key, value in environment.items()
+                               if key in identity_keys)):
+                    raise ValueError("unbound Git template")
+                environment = actual_environment
         except UnicodeDecodeError as exc:
             raise PlanError("unit template is not UTF-8") from exc
+        except ValueError as exc:
+            raise PlanError("unit template differs from its Git identity") from exc
         if (f"WorkingDirectory={working_directory}" not in lines
                 or any(unit_systemd_environment(key, value) not in lines
                        for key, value in environment.items())):
             raise PlanError("unit template differs from its fleet identity")
         result.append({"source": str(destination / name), "scope": scope, "phase": "producers",
-                       "release_id": release_id, "working_directory": working_directory,
+                       **({} if git else {"release_id": release_id}), "working_directory": working_directory,
                        "environment": dict(environment), "fleet": fleet, "bot": None,
                        "enroll": True, "admission": None, "service": None, "platform": "Linux",
                        "sha256": hashlib.sha256(content).hexdigest(), "mode": mode})
@@ -177,4 +266,90 @@ def current_declarations(plan: ConfigPlan, platform: str) -> tuple[UnitDeclarati
                 or source.stat().st_mode & 0o777 != item["mode"]):
             raise PlanError(f"current generated unit differs from its saved plan: {source}")
         result.append(declaration)
+    return tuple(result)
+
+
+def validate_git_units(units: list[dict], installation) -> None:
+    """Validate committed native bindings without a release or current source reads."""
+    from .installation import parse_git_unit_argv
+    fields = {"source", "scope", "phase", "working_directory", "environment", "fleet", "bot",
+              "enroll", "admission", "service", "platform", "sha256", "mode"}
+    if not isinstance(units, list):
+        raise PlanError("effective configuration native units are invalid")
+    seen = set()
+    for item in units:
+        if not isinstance(item, dict) or set(item) != fields:
+            raise PlanError("effective configuration native unit fields are invalid")
+        source, directory, env = item["source"], item["working_directory"], item["environment"]
+        if (not isinstance(source, str) or not Path(source).is_absolute() or ".." in Path(source).parts
+                or source in seen or not isinstance(directory, str) or not Path(directory).is_absolute()
+                or ".." in Path(directory).parts or item["platform"] not in {"Linux", "Darwin"}
+                or item["scope"] not in {"host", "fleet", "bot"}
+                or item["phase"] not in {"bots", "ingest", "producers"}
+                or (item["scope"] == "bot") != (item["phase"] == "bots")
+                or type(item["enroll"]) is not bool
+                or type(item["mode"]) is not int or item["mode"] & ~0o777
+                or not isinstance(item["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                or not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+                or any(key in env for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID"))):
+            raise PlanError("effective configuration native unit identity is invalid")
+        seen.add(source)
+        expected = {"CLAUDLOBBY_ROOT": str(installation.data_root),
+                    "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+                    "CLAUDLOBBY_CLI": str(installation.cli), "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+                    "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+        if any(env.get(key) != value for key, value in expected.items()):
+            raise PlanError("effective native unit belongs to another installation")
+        if ((item["scope"] in {"fleet", "bot"} and not isinstance(item["fleet"], str))
+                or item["scope"] == "host" and item["fleet"] is not None
+                or (item["scope"] == "bot") != isinstance(item["bot"], str)):
+            raise PlanError("effective native unit fleet/bot binding is invalid")
+        suffix = ".plist" if item["platform"] == "Darwin" else ".service"
+        admission = item["admission"]
+        if Path(source).suffix == ".timer":
+            if item["platform"] != "Linux" or admission is not None or item["service"] != Path(source).stem + ".service":
+                raise PlanError("effective timer has an invalid service binding")
+        elif is_unit_template(Path(source).name):
+            if item["platform"] != "Linux" or admission is not None or item["service"] is not None:
+                raise PlanError("effective native template is invalid")
+        else:
+            if (Path(source).suffix != suffix or item["service"] is not None
+                    or not isinstance(admission, dict)
+                    or set(admission) != {"kind", "unit", "mode", "argv", "command"}
+                    or admission["kind"] != "git-native-v1"):
+                raise PlanError("effective native unit has no Git entry")
+            try:
+                parsed = parse_git_unit_argv(admission["argv"])
+            except ValueError as exc:
+                raise PlanError("effective native unit has an invalid Git entry") from exc
+            if (parsed.argv[0] != str(installation.cli) or parsed.root != installation.data_root
+                    or parsed.unit != Path(source).stem or parsed.phase != item["phase"]
+                    or parsed.unit != admission["unit"] or parsed.mode != admission["mode"]
+                    or list(parsed.command) != admission["command"]):
+                raise PlanError("effective native command differs from its Git entry")
+    for timer in (item for item in units if item["service"] is not None):
+        matches = [item for item in units if item["source"] == str(Path(timer["source"]).with_name(timer["service"]))]
+        if (len(matches) != 1 or any(timer[key] != matches[0][key] for key in
+                ("scope", "phase", "fleet", "bot", "working_directory", "environment", "enroll"))):
+            raise PlanError("effective timer has no matching native service")
+
+
+def current_git_declarations(snapshot: dict, platform: str) -> tuple[UnitDeclaration, ...]:
+    """Inventory declarations from committed metadata and exact generated bytes."""
+    from .installation import Installation
+    if platform not in {"Linux", "Darwin"}:
+        raise PlanError("unsupported supervision platform")
+    installation = Installation(Path(snapshot["installation"]), Path(snapshot["data_root"]))
+    validate_git_units(snapshot["units"], installation)
+    result = []
+    for item in snapshot["units"]:
+        if item["platform"] != platform:
+            continue
+        source = Path(item["source"])
+        if (not source.is_file() or source.is_symlink() or source.parent.resolve() != source.parent
+                or hashlib.sha256(source.read_bytes()).hexdigest() != item["sha256"]
+                or source.stat().st_mode & 0o777 != item["mode"]):
+            raise PlanError(f"current generated unit differs from its committed configuration: {source}")
+        result.append(UnitDeclaration(source, item["scope"], Path(item["working_directory"]), "",
+                                     tuple(sorted(item["environment"].items())), item["fleet"], item["bot"], item["service"]))
     return tuple(result)

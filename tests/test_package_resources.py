@@ -216,7 +216,7 @@ def test_stable_launcher_executes_actual_source_cli_without_resource_copies(tmp_
     assert outcome.stdout == "claudlobby source-fixture\n"
     assert not (installation.source / "claudlobby/_artifact.json").exists()
     assert not (installation.source / "claudlobby/_resources").exists()
-    (installation.data_root / "state").mkdir()
+    (installation.data_root / "state").mkdir(exist_ok=True)
     (installation.data_root / "state/update.json").write_text('{"schema":1,"maintenance":false,"phase":"saving"}')
     # Quiescing bots still need the CLI until the updater raises maintenance.
     assert _launch(installation, "--version").stdout == "claudlobby source-fixture\n"
@@ -231,7 +231,7 @@ def test_stable_launcher_executes_actual_source_cli_without_resource_copies(tmp_
 ])
 def test_stable_launcher_fences_before_loading_missing_source_or_environment(tmp_path, record):
     installation = _stable_launcher(tmp_path)
-    (installation.data_root / "state").mkdir()
+    (installation.data_root / "state").mkdir(exist_ok=True)
     (installation.data_root / "state/update.json").write_text(record if isinstance(record, str) else json.dumps(record))
     shutil.rmtree(installation.source)
     outcome = _launch(installation, "--version")
@@ -264,7 +264,7 @@ def test_stable_launcher_update_route_is_independent_and_never_falls_back(tmp_pa
     updater.write_text(f"#!{Path(sys.executable).resolve()}\nimport sys\nprint('independent update ' + sys.argv[-1])\n")
     updater.chmod(0o755)
     shutil.rmtree(installation.source)
-    (installation.data_root / "state").mkdir()
+    (installation.data_root / "state").mkdir(exist_ok=True)
     (installation.data_root / "state/update.json").write_text('{"schema":1,"maintenance":true,"phase":"cutover"}')
     outcome = _launch(installation, *prefix, "host", "update", "status")
     assert outcome.returncode == 0 and outcome.stdout == "independent update status\n"

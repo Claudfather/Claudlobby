@@ -16,7 +16,7 @@ import tempfile
 from . import claudron_compat
 from . import composer as compose
 from .config import host_override_path, host_unit_name, load_fleet_snapshot
-from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
+from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError, RenderedConfiguration
 from .config_units import job_units, unit_family
 from .context import Context
 from .paths import Paths, _iter_fleet_dirs
@@ -145,6 +145,28 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             or package.native != release.native_path
             or package.artifact_id != release.inputs.artifact_id):
         raise PlanError("run configuration planning with the sealed candidate release CLI")
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={})
+    return _render_configuration(fleet_paths, builder, log=log, validation_warning=validation_warning).seal()
+
+
+def render_git_configuration(fleet_paths: list[Paths], *, revision: str,
+                             log=lambda message: None, validation_warning=None) -> RenderedConfiguration:
+    """Render candidate resources once with final installation paths, without a release seal."""
+    if not fleet_paths:
+        raise PlanError("select the declared host fleets before rendering configuration")
+    package = fleet_paths[0].package
+    installation = package.installation
+    if (installation is None or installation.data_root != fleet_paths[0].root
+            or package.source_revision != revision or package.artifact_id):
+        raise PlanError("Git rendering requires the exact candidate installation/revision binding")
+    builder = ConfigPlanBuilder(installation.data_root, effects={})
+    return _render_configuration(fleet_paths, builder, log=log,
+                                 validation_warning=validation_warning).freeze(revision)
+
+
+def _render_configuration(fleet_paths, builder, *, log, validation_warning):
+    """The single compositor body for the Git and transitional sealed callers."""
+    root, package = fleet_paths[0].root, fleet_paths[0].package
     if any(paths.root != root or paths.package != package or paths.seed for paths in fleet_paths):
         raise PlanError("configuration fleets must share one data root and candidate package")
     manifests = {paths.fleet_yaml.resolve() for paths in fleet_paths}
@@ -160,7 +182,6 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     if missing:
         raise PlanError("host plan omits local fleet declarations: "
                         + ", ".join(map(str, sorted(missing))))
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={})
     builder.input(host_override_path())
     builder.input(Path.home() / ".gitconfig")
     contexts = []
@@ -239,7 +260,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             files = _snapshot(timers)
             builder.effects["units"].extend(job_units(
                 files, destination=paths.runtime_fleet / "timers", scope="fleet",
-                release_id=release.release_id, fleet=fleet.name))
+                release_id=builder.release_id, fleet=fleet.name))
             builder.tree(paths.runtime_fleet / "timers", files)
             if paths.shared_docs:
                 for name in ("planning/active", "planning/completed", "decisions", "knowledge", "runbooks"):
@@ -254,7 +275,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
         files = _snapshot(timers)
         builder.effects["units"].extend(job_units(
             files, destination=root / "runtime/_host/timers", scope="host",
-            release_id=release.release_id,
+            release_id=builder.release_id,
             # This is the declared host ingest service, not a pattern over
             # installed unit names. It must survive until the controlled drain.
             resident_phases={host_unit_name(name): phase
@@ -264,4 +285,4 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             result = render(paths, output_dir=host, manifests=sorted(manifests))
             paths.assert_writable(root / "runtime/_host" / result.name)
             builder.file(root / "runtime/_host" / result.name, result.read_bytes())
-    return builder.seal()
+    return builder

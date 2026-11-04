@@ -350,6 +350,35 @@ class Observations:
 
 
 @pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_git_inventory_keeps_exact_native_ownership_without_sealed_identity(tmp_path, manager):
+    from claudlobby.installation import Installation
+    obs = Observations(tmp_path)
+    installation = Installation(tmp_path / "installation", obs.root)
+    obs.package = replace(obs.package, installation=installation)
+    obs.manager = manager
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "FLEET_ROOT": str(obs.root / "local/alpha"),
+               "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+               "CLAUDLOBBY_CLI": str(installation.cli),
+               "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+               "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+    name = "example.worker.service" if manager == "Linux" else "example.worker.plist"
+    installed = obs.add(name, scope="bot")
+    declaration = replace(obs.declarations[0], release_id="")
+    obs.declarations = [declaration]
+    result = obs.collect().require_complete()
+    assert not result.legacy_source and result.units[0].installed[0].path == str(installed)
+    for key in ("CLAUDLOBBY_INSTALLATION", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"):
+        changed = {**obs.env, key: str(tmp_path / "wrong")}
+        obs.declarations = [replace(declaration, environment=tuple(changed.items()))]
+        with pytest.raises(InventoryError, match="incomplete declaration"):
+            obs.collect()
+    obs.declarations = [declaration]
+    installed.write_bytes(installed.read_bytes() + b"\n")
+    with pytest.raises(InventoryError, match="installed bytes differ"):
+        obs.collect().require_complete()
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
 @pytest.mark.parametrize("scope", ["host", "fleet", "bot"])
 def test_only_host_services_may_omit_fleet_context(tmp_path, manager, scope):
     obs = Observations(tmp_path)

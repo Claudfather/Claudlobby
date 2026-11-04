@@ -131,10 +131,11 @@ def render_systemd_unit(spec: SupervisionSpec, *, boot_delay_s: int = 0) -> str:
     """
     stagger = f"\nExecStartPre=/bin/sleep {boot_delay_s}" if boot_delay_s > 0 else ""
     launcher_cmd = " ".join([str(spec.launcher), *spec.launcher_args])
-    if "CLAUDLOBBY_RELEASE_ID" in spec.environment:
+    guarded = "CLAUDLOBBY_RELEASE_ID" in spec.environment or "CLAUDLOBBY_INSTALLATION" in spec.environment
+    if guarded:
         launcher_cmd = unit_systemd_command((str(spec.launcher), *spec.launcher_args))
     stop_post = ("# Explicit supervisor teardown owns .tmux-env cleanup."
-                 if "CLAUDLOBBY_RELEASE_ID" in spec.environment
+                 if guarded
                  else f"ExecStopPost=/bin/{spec.stop_post_command}")
     env_lines = "\n".join(unit_systemd_environment(k, v) for k, v in spec.environment.items())
     restart_directive = "on-failure" if spec.restart_on_failure else "no"

@@ -205,8 +205,8 @@ class ConfigPlanBuilder:
     may be replaced only when a renderer explicitly owns their entire content.
     """
 
-    def __init__(self, data_root: Path, release_id: str, release_seal: str,
-                 fleets: tuple[str, ...], *, effects: dict):
+    def __init__(self, data_root: Path, release_id: str = "", release_seal: str = "",
+                 fleets: tuple[str, ...] = (), *, effects: dict):
         self.root = _absolute(data_root).resolve()
         self.release_id = release_id
         self.release_seal = release_seal

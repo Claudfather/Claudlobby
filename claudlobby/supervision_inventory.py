@@ -809,22 +809,40 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         raise InventoryError("empty generated manifest is not deletion authority")
     if bootstrap_empty:
         _require_no_selection(data_root)
+        if (data_root / "state/config.json").exists() or (data_root / "state/config.json").is_symlink():
+            raise InventoryError("bootstrap requires no committed configuration")
     adapter = adapter if adapter is not None else Adapter(package, runner=runner)
+    installation = getattr(getattr(adapter, "package", package), "installation", None)
+    if installation is not None and (installation.data_root != data_root or legacy_source):
+        raise InventoryError("Git inventory requires its recorded data root and current declarations")
     expected = {}
     for declaration in declarations:
         name = declaration.source.name
         env = dict(declaration.environment)
+        if installation is not None:
+            identity = {
+                "CLAUDLOBBY_ROOT": str(data_root),
+                "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+                "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+                "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library"),
+                "CLAUDLOBBY_CLI": str(installation.cli),
+            }
+            invalid_identity = (declaration.release_id != ""
+                                or any(env.get(key) != value for key, value in identity.items())
+                                or bool(env.get("CLAUDLOBBY_ARTIFACT_ID") or env.get("CLAUDLOBBY_RELEASE_ID")))
+        elif legacy_source:
+            invalid_identity = declaration.release_id != ""
+        else:
+            invalid_identity = not declaration.release_id or not all(env.get(key) for key in (
+                "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI", "CLAUDLOBBY_ARTIFACT_ID"))
         if (name in expected or not _NAME.fullmatch(name) or not name.endswith(_SUFFIXES)
                 or not declaration.source.is_absolute() or not declaration.working_directory.is_absolute()
                 or declaration.scope not in ("host", "fleet", "bot")
-                or (declaration.release_id != "" if legacy_source else not declaration.release_id)
+                or invalid_identity
                 or (declaration.scope in ("fleet", "bot") and not declaration.fleet)
                 or (declaration.scope == "bot" and not declaration.bot)
                 or len(env) != len(declaration.environment)
                 or env.get("CLAUDLOBBY_ROOT") != str(data_root)
-                or not legacy_source and not all(env.get(key) for key in (
-                    "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI",
-                    "CLAUDLOBBY_ARTIFACT_ID"))
                 or not legacy_source and declaration.scope in ("fleet", "bot")
                 and not env.get("FLEET_ROOT")):
             raise InventoryError(f"ambiguous or incomplete declaration: {name}")
@@ -1115,6 +1133,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 raise InventoryError("launchd disabled overrides changed during inventory")
         if bootstrap_empty:
             _require_no_selection(data_root)
+            if (data_root / "state/config.json").exists() or (data_root / "state/config.json").is_symlink():
+                raise InventoryError("committed configuration appeared during bootstrap inventory")
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:
         issues.append(str(exc))
     return EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,

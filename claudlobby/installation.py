@@ -7,10 +7,14 @@ The update owner alone changes Git, dependencies, configuration or services.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -144,6 +148,11 @@ def write_installation(installation: Installation) -> None:
 def install_launcher(installation: Installation, *, interpreter: Path) -> None:
     """Install this stdlib entry outside src/env; create no runtime or services."""
     _install_entry(installation, interpreter, Path(__file__), installation.cli)
+    state = _path(installation.data_root / "state")
+    state.mkdir(parents=True, exist_ok=True)
+    fd = os.open(state / "runtime-use.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    _sync_directory(state)
 
 
 def install_updater(installation: Installation, *, interpreter: Path) -> None:
@@ -181,6 +190,152 @@ def _install_entry(installation, interpreter, source, destination):
             os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _runtime_lock(installation, *, exclusive=False, inherited=None):
+    path = _path(installation.data_root / "state/runtime-use.lock")
+    fd = inherited
+    try:
+        if fd is None:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        linked, opened = path.lstat(), os.fstat(fd)
+        if (not stat.S_ISREG(linked.st_mode) or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise InstallationError("runtime exclusion file changed")
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        os.set_inheritable(fd, False)
+        return fd
+    except (OSError, ValueError):
+        if fd is not None:
+            os.close(fd)
+        raise InstallationError("runtime is in use or its exclusion lock is unavailable") from None
+
+
+@contextmanager
+def native_start_fence(installation):
+    """Coordinator EX: after quiesce, before final quiet, through config commit.
+
+    Persist quiesce first to deny new native entries while existing short CLI
+    calls finish saves. Acquire EX after stopping consumers, then re-observe
+    quiet before cutover. Exit before restoring services. Never hold this for
+    a service lifetime or replace the independent update-owner process lock.
+    """
+    fd = _runtime_lock(installation, exclusive=True)
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+@dataclass(frozen=True)
+class GitUnitStart:
+    argv: tuple[str, ...]
+    root: Path
+    unit: str
+    phase: str
+    mode: str
+    command: tuple[str, ...]
+
+
+def parse_git_unit_argv(argv) -> GitUnitStart:
+    if (not isinstance(argv, (list, tuple)) or len(argv) < 12
+            or not all(isinstance(value, str) and "\x00" not in value for value in argv)
+            or not all(value and value.isprintable() for value in argv[:12])
+            or argv[1] != "--root" or tuple(argv[3:5]) != ("_native", "--unit")
+            or argv[6] != "--phase" or argv[8] != "--mode" or argv[10] != "--"
+            or not all(Path(argv[index]).is_absolute() for index in (0, 2, 11))
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*", argv[5])
+            or argv[7] not in {"bots", "ingest", "producers"} or argv[9] not in {"exec", "oneshot"}
+            or argv[7] in {"bots", "ingest"} and argv[9] != "exec"):
+        raise InstallationError("native entry requires the exact committed argument vector")
+    return GitUnitStart(tuple(argv), Path(argv[2]), argv[5], argv[7], argv[9], tuple(argv[11:]))
+
+
+def _committed_unit(installation, target, environment):
+    path = _path(installation.data_root / "state/config.json")
+    try:
+        snapshot = json.loads(path.read_bytes())
+        fingerprint = snapshot["fingerprint"]
+        payload = {key: value for key, value in snapshot.items() if key != "fingerprint"}
+        if (type(snapshot["schema"]) is not int or snapshot["schema"] != 1
+                or snapshot["installation"] != str(installation.directory)
+                or snapshot["data_root"] != str(installation.data_root)
+                or snapshot["source"] != str(installation.source)
+                or fingerprint != hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()):
+            raise ValueError()
+        platform = "Darwin" if sys.platform == "darwin" else "Linux" if sys.platform == "linux" else "unsupported"
+        rows = [row for row in snapshot["units"] if row["platform"] == platform
+                and isinstance(row.get("admission"), dict) and row["admission"].get("unit") == target.unit]
+        if len(rows) != 1:
+            raise ValueError()
+        row = rows[0]
+        admission = row["admission"]
+        if (admission != {"kind": "git-native-v1", "unit": target.unit, "mode": target.mode,
+                          "argv": list(target.argv), "command": list(target.command)}
+                or row["phase"] != target.phase or row["enroll"] is not True
+                or Path(row["working_directory"]) != Path.cwd()
+                or type(row["environment"]) is not dict
+                or any(environment.get(key) != value for key, value in row["environment"].items())):
+            raise ValueError()
+        if row["scope"] == "bot":
+            if (target.phase != "bots" or row["fleet"] not in snapshot["fleets"]
+                    or not isinstance(row["bot"], str) or Path(row["working_directory"]).name != row["bot"]):
+                raise ValueError()
+        elif (row["scope"] not in {"fleet", "host"} or target.phase == "bots" or row["bot"] is not None
+                or row["scope"] == "fleet" and row["fleet"] not in snapshot["fleets"]
+                or row["scope"] == "host" and row["fleet"] is not None):
+            raise ValueError()
+        required = {"CLAUDLOBBY_ROOT": str(installation.data_root), "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+                    "CLAUDLOBBY_CLI": str(installation.cli), "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+                    "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+        if any(row["environment"].get(key) != value for key, value in required.items()):
+            raise ValueError()
+        source = _path(Path(row["source"]))
+        if (not source.is_file() or source.is_symlink() or stat.S_IMODE(source.stat().st_mode) != row["mode"]
+                or hashlib.sha256(source.read_bytes()).hexdigest() != row["sha256"]
+                or snapshot["revision"] != checkout_revision(installation.source)):
+            raise ValueError()
+        return row
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise InstallationError("native command or context differs from committed configuration") from exc
+
+
+_NATIVE_CLI = """import pathlib,sys
+source=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(source))
+import claudlobby
+if pathlib.Path(claudlobby.__file__).resolve()!=source/'claudlobby/__init__.py':
+    raise SystemExit('native CLI package differs from committed source')
+from claudlobby.__main__ import main
+raise SystemExit(main(sys.argv[2:]))
+"""
+
+
+def _run_git_unit(installation, argv, environment):
+    target = parse_git_unit_argv(argv)
+    if target.argv[0] != str(installation.cli) or target.root != installation.data_root:
+        raise InstallationError("native entry differs from its installation/data root")
+    fd = _runtime_lock(installation)
+    try:
+        _check_maintenance(installation, native=True)
+        _committed_unit(installation, target, environment)
+        clean = {key: value for key, value in environment.items()
+                 if key not in {"BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME"} and not key.startswith("BASH_FUNC_")}
+        if target.command[0] == str(installation.cli):
+            python = installation.environment / "bin/python"
+            arguments = _bound_arguments(installation, list(target.command[1:]))
+            os.execve(python, [str(python), "-I", "-B", "-c", _NATIVE_CLI,
+                               str(installation.source), *arguments], clean)
+        os.execve(target.command[0], target.command, clean)
+    finally:
+        os.close(fd)  # CLOEXEC closes it at the native process transition
 
 
 def _global_option(argument: str) -> str:
@@ -238,7 +393,7 @@ def _update_route(argv: list[str]) -> bool:
     return False
 
 
-def _check_maintenance(installation: Installation) -> None:
+def _check_maintenance(installation: Installation, *, native=False) -> None:
     record = installation.data_root / "state/update.json"
     try:
         if record.is_symlink() or record.parent.resolve() != record.parent:
@@ -250,6 +405,8 @@ def _check_maintenance(installation: Installation) -> None:
             raise InstallationError("maintenance record has an unsupported schema")
         if payload["maintenance"]:
             raise InstallationError("maintenance is active; use host update status or recovery")
+        if native and payload["phase"] not in {"prepare", "commit", "restore", "done"}:
+            raise InstallationError("native startup is fenced while the update quiesces consumers")
     except FileNotFoundError:
         return  # no update exists; core admission still owns operational authority
     except (OSError, ValueError, TypeError) as exc:
@@ -265,7 +422,13 @@ def _launch(argv: list[str]) -> int:
     if Path(__file__).absolute() != installation.cli:
         raise InstallationError("invoke the stable installation launcher")
     runtime = bool(argv and argv[0] == "--_source-runtime")
-    arguments = _bound_arguments(installation, argv[1:] if runtime else argv)
+    inherited = None
+    if runtime:
+        try:
+            inherited = int(argv[1])
+        except (IndexError, ValueError):
+            raise InstallationError("runtime entry requires its inherited reader lock") from None
+    arguments = _bound_arguments(installation, argv[2:] if runtime else argv)
     environment = {**os.environ, "CLAUDLOBBY_INSTALLATION": str(installation.directory),
                    "CLAUDLOBBY_ROOT": str(installation.data_root), "PYTHONDONTWRITEBYTECODE": "1"}
     if _update_route(arguments):
@@ -274,11 +437,24 @@ def _launch(argv: list[str]) -> int:
             raise InstallationError("independent Git updater is unavailable; no runtime fallback attempted")
         os.execve(updater, [str(updater), *arguments], environment)
     _check_maintenance(installation)
+    if len(arguments) > 2 and arguments[2] == "_native":
+        return _run_git_unit(installation, [str(installation.cli), *arguments], environment)
+    fd = _runtime_lock(installation, inherited=inherited)
+    try:
+        return _run_cli(installation, arguments, environment, runtime, fd)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _run_cli(installation, arguments, environment, runtime, fd):
+    _check_maintenance(installation)  # same lock as coordinator, before env/source use
     python = installation.environment / "bin/python"
     if not runtime:
         if not python.is_file() or not os.access(python, os.X_OK):
             raise InstallationError("recorded runtime Python is unavailable")
-        os.execve(python, [str(python), "-I", "-B", str(installation.cli), "--_source-runtime", *arguments], environment)
+        os.set_inheritable(fd, True)
+        os.execve(python, [str(python), "-I", "-B", str(installation.cli), "--_source-runtime", str(fd), *arguments], environment)
     if Path(sys.executable).absolute() != python:
         raise InstallationError("runtime interpreter differs from the recorded environment")
     os.environ.update(environment)
