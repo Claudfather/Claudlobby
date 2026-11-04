@@ -973,21 +973,53 @@ def test_planned_restart_waits_for_native_idle_and_resumes_exact_session(cold, m
     assert not (bot_dir / "data/.handoff-request").exists()
 
 
-@pytest.mark.parametrize("unknown_result", [None, {"marker": "handoff-timeout", "returncode": 3}])
-def test_shared_checkpoint_preserves_original_unresolved_handoff(cold, monkeypatch, capsys, unknown_result):
+@pytest.mark.parametrize("receipt_state", ["pending", "unknown", "malformed", pytest.param(
+    "unreadable", marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files"))])
+def test_native_restart_preserves_independent_optional_handoff(cold, monkeypatch, capsys, receipt_state):
     worker = _worker_cli(cold, monkeypatch, capsys)
     bot_dir = worker.root / "runtime/bots/worker"
+    native_before = native_session.read(bot_dir)
     request = bot_operations._new_handoff_request(bot_dir)
-    request["native_result"] = unknown_result
+    request["native_result"] = ({"marker": "handoff-timeout", "returncode": 3}
+                                if receipt_state == "unknown" else None)
     assert bot_operations._write_handoff_request(bot_dir, request)
     path = bot_dir / "data/.handoff-request"
+    if receipt_state == "malformed":
+        path.write_bytes(b"{unreadable as JSON\n")
     original = path.read_bytes()
+    if receipt_state in {"pending", "unknown"}:
+        refused = worker.call("bot", "handoff", "worker", expected=6)
+        assert refused["data"]["reason"] == "pending"
+        assert path.read_bytes() == original
     worker.native.calls.clear()
-    with pytest.raises(bot_operations.BotLifecycleError, match="unresolved"):
-        bot_operations.save_planned_checkpoint(bot_dir, "com.example.worker", str(worker.private_tmpdir),
-                                               worker.native, operation_id="update-one")
+    before = path.stat()
+    # Keep a read-only descriptor so unchanged bytes can be checked while the
+    # optional receipt remains inaccessible by path throughout continuation.
+    with path.open("rb") as retained:
+        if receipt_state == "unreadable":
+            path.chmod(0)
+        try:
+            proof = bot_operations.save_planned_checkpoint(
+                bot_dir, "com.example.worker", str(worker.private_tmpdir),
+                worker.native, operation_id="update-one")
+            assert proof["session"]["session_id"] == native_before["session_id"]
+            restarted = worker.call("bot", "restart", "worker")["data"]
+            assert restarted["state"] == "running" and restarted["handoff"] == "native_session"
+            current = native_session.confirm(bot_dir, expected=proof["session"])
+            assert current["process"] != native_before["process"]
+            bot_operations.retire_planned_checkpoint(bot_dir, proof)
+            retained.seek(0)
+            assert retained.read() == original
+            after = path.stat()
+            assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+            assert stat.S_IMODE(after.st_mode) == (0 if receipt_state == "unreadable"
+                                                  else stat.S_IMODE(before.st_mode))
+        finally:
+            if receipt_state == "unreadable":
+                path.chmod(stat.S_IMODE(before.st_mode))
     assert path.read_bytes() == original
-    assert worker.native.calls == [] and worker.native.actions == []
+    assert "svc_activation_handoff" not in worker.native.calls
+    assert worker.native.actions == ["start"]
 
 
 def test_stopped_native_checkpoint_retains_prefix_and_exact_identity(cold, monkeypatch, capsys):

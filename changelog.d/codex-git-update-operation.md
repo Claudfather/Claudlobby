@@ -72,3 +72,7 @@ the saved identity tied to its account, working directory and native process;
 unknown prior sends are never replayed. Background updates measure Claude using
 the same tool path as the bot. Older bots without a native session receipt still
 need an explicit one-time adoption before this update path can stop them.
+
+Optional `bot handoff` receipts remain untouched and do not gate native restart
+or update, including pending, unknown, malformed or unreadable receipts. Explicit
+handoff retains its existing no-resend protection.

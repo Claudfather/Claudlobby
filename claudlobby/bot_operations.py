@@ -448,9 +448,6 @@ def save_planned_checkpoint(bot_dir: Path, label: str, tmpdir: str, adapter: Ada
     from .native_session import checkpoint, checkpoint_account, NativeSessionBusy, NativeSessionError
     if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", operation_id):
         raise BotLifecycleError("checkpoint requires one exact operation ID")
-    # Never overwrite or replay an unresolved historical model request.
-    if _read_handoff_request(bot_dir) is not None and handoff_state(bot_dir).state != "saved":
-        raise BotLifecycleError("existing handoff is unresolved; inspect its original receipt; it is never resent", unavailable=True)
     try:
         account = checkpoint_account(bot_dir, label, adapter)
     except (NativeSessionError, OSError, InventoryError, subprocess.SubprocessError) as exc:

@@ -608,9 +608,10 @@ new bot instead receives an explicit fresh UUID and its normal startup prompt.
 Missing or invalid transcript/session evidence refuses before stopping a running
 bot. Older bots without this metadata require an explicit one-time adoption;
 this implementation never guesses the newest transcript or silently falls back
-to model handoff. Existing pending or unknown handoff receipts stay inspectable
-and are never resent. `bot handoff` remains an optional explicit tool, rather
-than a prerequisite for routine updates. Crash recovery can resume only what
+to model handoff. Native continuation does not read or change optional handoff
+receipts; pending, unknown, malformed or unreadable receipts do not block it.
+`bot handoff` remains an optional explicit tool with its own no-resend protection,
+rather than a prerequisite for routine updates. Crash recovery can resume only what
 Claude durably saved; it does not claim interrupted work completed or replay
 unknown tool effects.
 
