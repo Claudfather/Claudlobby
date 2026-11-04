@@ -527,3 +527,37 @@ def test_clear_capture_keeps_new_identity_when_checkpoint_is_published_first(bou
     assert interleaved and current["session_id"] == OTHER and current["checkpoint"] is None
     with pytest.raises(native.NativeSessionError):
         native.verify(b.bot, interleaved[0])
+
+
+@pytest.mark.parametrize(("state", "expected_rc"), [
+    ("pending", 75), ("confirmed", 0), ("missing", 6), ("malformed", 6),
+    ("wrong-account", 6), ("wrong-process", 6),
+])
+def test_confirm_entry_distinguishes_pending_hook_from_fatal_identity_errors(bound, monkeypatch, state, expected_rc):
+    from claudlobby import resources, supervision_inventory
+    b = bound
+    monkeypatch.setattr(resources, "get_resources", lambda: b.adapter.package)
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _package: b.adapter)
+    path = b.bot / "data" / native.NAME
+    if state == "missing":
+        path.unlink()
+    elif state == "malformed":
+        path.write_bytes(b"invalid original receipt")
+    elif state != "confirmed":
+        receipt = native.read(b.bot)
+        changed = {**receipt, "pending": state in {"pending", "wrong-account"}}
+        if state == "wrong-account": changed["account"] = str(b.bot / "another-account")
+        if state == "wrong-process": changed["process"] = "1:2"
+        native._write(b.bot, changed, expected=receipt)
+    before = path.read_bytes() if path.exists() else None
+    args = SimpleNamespace(root=b.bot.parent, directory=b.bot, label=b.label, tmpdir=b.tmpdir, action="confirm")
+    assert native.entry(args) == expected_rc
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+def test_pending_confirmation_checks_expected_uuid_before_waiting(bound):
+    b = bound
+    native.launch(b.bot, b.label, b.tmpdir, b.account)
+    with pytest.raises(native.NativeSessionError, match="differs from the original checkpoint") as error:
+        native.confirm(b.bot, expected={**b.receipt, "session_id": OTHER})
+    assert not isinstance(error.value, native.NativeSessionPending)

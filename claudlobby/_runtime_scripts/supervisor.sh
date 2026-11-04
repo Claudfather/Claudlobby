@@ -772,7 +772,7 @@ svc_bot_native_session() (
     region=$(pane_input_region "$text")
     if [ -n "$region" ] && ! pane_is_busy "$text" && ! pane_is_menu "$text" \
             && pane_is_idle "$text" && ! pane_is_held "$text" \
-            && ! printf '%s\n' "$text" | grep -Fq 'Press up to edit queued messages'; then
+            && [[ "$text" != *'Press up to edit queued messages'* ]]; then
         idle=idle
     fi
     [ "$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}')" = "$pane" ] || return 3
@@ -1407,6 +1407,7 @@ svc_activation_bot_fence() (
 svc_activation_bot_ready() (
     export CLAUDLOBBY_ROOT="$1"
     local bot_dir="$2" ceiling="$3" token="$4" tmpdir="${5:-}" declared_tmpdir socket session outcome=channel handle
+    local started="$SECONDS" confirmation cli
     case "$bot_dir:$tmpdir" in /*:/*) ;; *) return 3 ;; esac
     case "$ceiling" in ''|*[!0-9]*) return 3 ;; esac
     [ -n "$token" ] || return 3
@@ -1424,8 +1425,20 @@ svc_activation_bot_ready() (
     socket=$(tmux_socket_for_bot "$bot_dir") || return 3
     [ -n "$socket" ] || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
-    check_tmux_session "$session" "$socket" || return 3
-    "$(bot_conf_get_path "$bot_dir" CLAUDLOBBY_CLI "")" --root "$CLAUDLOBBY_ROOT" _native-session confirm "$bot_dir" "$socket" "$tmpdir" || return 3
+    cli=$(bot_conf_get_path "$bot_dir" CLAUDLOBBY_CLI "") || return 3
+    while :; do
+        check_tmux_session "$session" "$socket" || return 3
+        confirmation=0
+        "$cli" --root "$CLAUDLOBBY_ROOT" _native-session confirm "$bot_dir" "$socket" "$tmpdir" || confirmation=$?
+        case "$confirmation" in
+            0) break ;;
+            75) ;; # Only a retained launch waiting for its SessionStart hook.
+            *) return 3 ;;
+        esac
+        # Share the original readiness ceiling, including the bridge wait.
+        [ "$((SECONDS - started))" -lt "$ceiling" ] || return 3
+        sleep 0.5
+    done
     case "$WAIT_BRIDGE_READY_OUTCOME" in
         bridge) printf 'bridge-ready\n' ;;
         session) printf 'session-ready\n' ;;

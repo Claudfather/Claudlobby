@@ -23,6 +23,10 @@ class NativeSessionError(ValueError):
     pass
 
 
+class NativeSessionPending(NativeSessionError):
+    """The retained launch is valid but its SessionStart hook has not finished."""
+
+
 class NativeSessionBusy(NativeSessionError):
     """The bound process is present but has not reached an empty idle prompt."""
 
@@ -332,10 +336,14 @@ def capture(bot_dir, label, tmpdir, account, adapter, payload, *, caller):
 
 def confirm(bot_dir, *, expected=None):
     value = read(bot_dir)
-    if value is None or value["pending"] or value["process"] is None:
+    if value is None:
         raise NativeSessionError("native SessionStart has not confirmed the retained launch")
     if expected is not None and any(value[key] != expected[key] for key in ("session_id", "account", "cwd", "label", "tmpdir", "transcript")):
         raise NativeSessionError("resumed native session differs from the original checkpoint")
+    if value["pending"]:
+        raise NativeSessionPending("native SessionStart has not confirmed the retained launch")
+    if value["process"] is None:
+        raise NativeSessionError("native SessionStart has not confirmed the retained launch")
     return value
 
 
@@ -383,7 +391,8 @@ def entry(args):
         if args.action == "capture":
             capture(bot_dir, args.label, Path(args.tmpdir), account, Adapter(package), json.load(sys.stdin), caller=os.getpid())
         elif args.action == "confirm":
-            value = confirm(bot_dir)
+            expected = _binding(read(bot_dir), bot_dir, args.label, Path(args.tmpdir), account)
+            value = confirm(bot_dir, expected=expected)
             current = observe(Adapter(package), bot_dir, args.label, Path(args.tmpdir))
             if value["process"] != current["process"]:
                 raise NativeSessionError("native SessionStart process changed before readiness")
@@ -392,6 +401,9 @@ def entry(args):
             mode, sid = launch(bot_dir, args.label, Path(args.tmpdir), account)
             print(mode + "\t" + sid)
         return 0
+    except NativeSessionPending as exc:
+        print("native continuation pending: " + str(exc), file=sys.stderr)
+        return 75
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print("native continuation unavailable: " + str(exc), file=sys.stderr)
         return 6

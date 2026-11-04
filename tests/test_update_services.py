@@ -558,7 +558,7 @@ svc_activation_start "$file" "$target"
 
 
 
-def _native_confirm_cli(bot, tmpdir):
+def _native_confirm_cli(bot, tmpdir, *, observations=None):
     """Isolate bridge/tmux readiness while executing the real receipt verifier."""
     import sys
     from claudlobby import native_session
@@ -568,10 +568,17 @@ def _native_confirm_cli(bot, tmpdir):
     retain_native_session(bot, "fixture-worker", Path(tmpdir), bot / "account", adapter)
     cli = bot / "fixture-cli"
     cli.write_text("#!" + sys.executable + "\n"
-        "import sys\nfrom pathlib import Path\nfrom claudlobby.native_session import confirm\n"
+        "import sys\nfrom pathlib import Path\nfrom claudlobby.native_session import confirm, NativeSessionPending\n"
         "assert sys.argv[1] == '--root' and sys.argv[3:5] == ['_native-session','confirm']\n"
-        "value = confirm(Path(sys.argv[5]))\n"
-        "assert value['label'] == sys.argv[6] and value['tmpdir'] == sys.argv[7]\n")
+        "trace = " + repr(str(observations) if observations else None) + "\n"
+        "def record(value):\n"
+        "    if trace:\n"
+        "        with Path(trace).open('a') as stream: stream.write(value + '\\n')\n"
+        "record('attempt')\n"
+        "try:\n    value = confirm(Path(sys.argv[5]))\n"
+        "except NativeSessionPending:\n    record('pending')\n    raise SystemExit(75)\n"
+        "assert value['label'] == sys.argv[6] and value['tmpdir'] == sys.argv[7]\n"
+        "record('confirmed')\n")
     cli.chmod(0o700)
     with (bot / "bot.conf").open("a") as stream:
         stream.write("CLAUDLOBBY_CLI=" + str(cli) + "\n")
@@ -1105,3 +1112,83 @@ def test_completed_old_producer_pause_restores_original_intent(tmp_path, monkeyp
     assert adapter.state == desired
     resumes = [args for name, args in adapter.calls if name == "svc_activation_resume"]
     assert len(resumes) == 1 and resumes[0][2] == desired
+
+
+def test_native_readiness_waits_for_matching_sessionstart_without_second_start(tmp_path):
+    import concurrent.futures
+    import time
+    from claudlobby import native_session
+    from tests.test_native_session import Observation, session_start
+
+    bot, tmpdir, observations = tmp_path / "bots/worker", tmp_path / "private-tmux", tmp_path / "confirmations"
+    bot.mkdir(parents=True)
+    (bot / "bot.conf").write_text(f'BOT_SERVICE="fixture-worker"\nTMUX_TMPDIR="{tmpdir}"\n')
+    receipt_path = _native_confirm_cli(bot, tmpdir, observations=observations)
+    original = native_session.read(bot)
+    assert native_session.launch(bot, "fixture-worker", tmpdir, bot / "account") == ("resume", original["session_id"])
+    prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
+TMUX_BIN=fixture_tmux; export TMUX_BIN
+. "$1/supervisor.sh"; shift; "$@"'''
+    fence = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "5")
+    assert fence.returncode == 0, fence.stderr
+    _, token = fence.stdout.strip().split("\t")
+    with (bot / "logs/startup.log").open("a") as log:
+        log.write("READY — non-channel bot, no poller to await\n")
+
+    def delayed_hook():
+        deadline = time.monotonic() + 5
+        while not observations.exists() or "pending" not in observations.read_text():
+            assert time.monotonic() < deadline, "readiness never observed the original pending hook"
+            time.sleep(0.01)
+        native = Observation(tmp_path)
+        native.pid += 1
+        native_session.capture(bot, "fixture-worker", tmpdir, bot / "account", native,
+            session_start(bot, bot / "account", original["session_id"], source="resume"), caller=123)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        hook = pool.submit(delayed_hook)
+        ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "5", token, tmpdir)
+        hook.result(timeout=6)
+    assert ready.returncode == 0, ready.stderr
+    assert ready.stdout.strip() == "session-ready"
+    attempts = observations.read_text().splitlines()
+    assert "pending" in attempts and attempts[-1] == "confirmed" and attempts.count("attempt") >= 2
+    confirmed = native_session.confirm(bot, expected=original)
+    assert confirmed["session_id"] == original["session_id"] and confirmed["process"] != original["process"]
+    assert json.loads(receipt_path.read_text()) == confirmed
+
+
+@pytest.mark.parametrize("state", ["pending-no-budget", "pending-spent-budget", "malformed"])
+def test_native_readiness_never_retries_fatal_receipt_or_extends_original_ceiling(tmp_path, state):
+    from claudlobby import native_session
+    bot, tmpdir, observations = tmp_path / "bots/worker", tmp_path / "private-tmux", tmp_path / "confirmations"
+    bot.mkdir(parents=True)
+    (bot / "bot.conf").write_text(f'BOT_SERVICE="fixture-worker"\nTMUX_TMPDIR="{tmpdir}"\n')
+    receipt = _native_confirm_cli(bot, tmpdir, observations=observations)
+    if state == "malformed":
+        receipt.write_bytes(b"invalid original receipt")
+    else:
+        native_session.launch(bot, "fixture-worker", tmpdir, bot / "account")
+    original = receipt.read_bytes()
+    prefix = '''fixture_tmux() {
+    [ "$*" = '-L fixture-worker has-session -t worker' ] || return 1
+    [ "${SPEND_BUDGET:-0}" = 0 ] || SECONDS=$((SECONDS + 5))
+}
+sleep() { printf unexpected-poll > "$POLL_TRACE"; return 99; }
+TMUX_BIN=fixture_tmux; export TMUX_BIN
+. "$1/supervisor.sh"; shift; "$@"'''
+    from tests.conftest import constructed_env
+    poll = tmp_path / "poll"
+    env = constructed_env(HOME=tmp_path, POLL_TRACE=poll,
+                          SPEND_BUDGET="1" if state == "pending-spent-budget" else "0")
+    fence = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "5", env=env)
+    assert fence.returncode == 0, fence.stderr
+    _, token = fence.stdout.strip().split("\t")
+    with (bot / "logs/startup.log").open("a") as log:
+        log.write("READY — non-channel bot, no poller to await\n")
+    ceiling = "0" if state == "pending-no-budget" else "5"
+    refused = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, ceiling, token, tmpdir, env=env)
+    assert refused.returncode != 0
+    assert observations.read_text().splitlines().count("attempt") == 1
+    assert not poll.exists(), "fatal/past-ceiling confirmation was polled again"
+    assert receipt.read_bytes() == original
