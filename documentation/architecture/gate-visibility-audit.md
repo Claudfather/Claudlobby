@@ -57,13 +57,13 @@ already returned by the gate; it must not reconstruct authority in the renderer.
 
 ## Shipped switch coverage
 
-All 33 switches below use the existing registry/resolver and shared table/JSON
+All 32 switches below use the existing registry/resolver and shared table/JSON
 presentation. This list is an audit index, not a second definition of defaults,
 arming steps or runtime state. Those remain in `claudlobby/switches.py`.
 
 | Area | Switches audited |
 | --- | --- |
-| Session and context | `session-export`, `claudna-session-summary`, `claudna-harvest`, `claudna-precompact-reflect`, `startup-bootstrap`, `boot-brief` |
+| Session and context | `session-export`, `claudna-session-summary`, `claudna-harvest`, `claudna-precompact-reflect`, `boot-brief` |
 | Work loop | `task-recheck`, `manager-checkin`, `worker-unassigned`, `code-audit-sweep` |
 | Plane and recording | `plane-expire`, `plane-recording`, `plane-daemon`, `plane-view`, `plane-owner`, `plane-host-probe`, `plane-prune`, `plane-prune-system-events`, `registry-scan` |
 | Lifecycle and transport | `pane-send-chunking`, `spindown-receipt`, `claude-staged-update`, `boot-capture`, `boot-capture-stamp`, `keepalive-limit-resume`, `weekly-worker-restart` |

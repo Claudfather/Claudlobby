@@ -114,7 +114,7 @@ from tests.test_task_read_cli import active  # noqa: F401 — real current fleet
 
 
 def test_git_status_and_doctor_use_committed_fleet_not_authored_or_historical_selection(active, monkeypatch):
-    from claudlobby import doctor, status
+    from claudlobby import doctor, status, supervision_inventory
     from claudlobby.commands import host_doctor, orientation
     from tests.test_task_read_cli import _use_git_current
     root, package, snapshot = _use_git_current(active, monkeypatch)
@@ -125,6 +125,14 @@ def test_git_status_and_doctor_use_committed_fleet_not_authored_or_historical_se
     monkeypatch.setattr(status, "_check_systemd_service", lambda *args: pytest.fail("legacy native target used"))
     monkeypatch.setattr(status, "_check_launchd_service", lambda *args: pytest.fail("guessed launchd domain used"))
     monkeypatch.setattr(status, "_live_context", lambda *args: None)
+    # Native availability is an external fact, independent of whether status
+    # resolves the committed fleet. Do not let the runner's user manager decide it.
+    def unavailable_native(actual_root, declarations, **kwargs):
+        assert actual_root == root
+        assert {row.bot for row in declarations if row.scope == "bot"} == {"manager", "worker"}
+        assert kwargs["only_names"] == frozenset({"com.example.manager.service", "com.example.worker.service"})
+        raise supervision_inventory.InventoryError("native manager unavailable in this case")
+    monkeypatch.setattr(supervision_inventory, "collect_enrollment", unavailable_native)
     args = SimpleNamespace(root=root, fleet=None, seed=False, public_command="fleet.status")
     result = status_read.dispatch(args)
     assert {row["name"] for row in result.data["bots"]} == {"manager", "worker"}

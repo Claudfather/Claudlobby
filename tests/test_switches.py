@@ -752,13 +752,12 @@ def test_the_validator_namespaces_come_from_the_registry():
         # here (KEEPALIVE_ACTIVE_WINDOW_S, KEEPALIVE_BUSY_PATTERNS), none of
         # them an *_ENABLED key, so claiming it flags no existing setting.
         "KEEPALIVE",
-        # startup-bootstrap (#2669). start-bot.sh's STARTUP_PROMPT lives here
-        # too, and it is no *_ENABLED key, so claiming it flags no existing
-        # setting.
-        "STARTUP",
     }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
+    assert "STARTUP_BOOTSTRAP_ENABLED" not in sw.env_names()
+    assert "STARTUP_BOOTSTRAP_ENABLED" in sw.RETIRED
+    assert "STARTUP_BOOTSTRAP_ENABLED" not in (REPO / "claudlobby/_runtime_scripts/lib-common.sh").read_text()
 
 
 def test_doctor_switches_requires_current_configuration_and_prints_host_rows(current_runtime, capsys, tmp_path):
@@ -1019,7 +1018,6 @@ def test_switch_is_on_owns_polarity(tmp_path, value, off):
     ("claudlobby/_runtime_scripts/plane-expire.sh", "PLANE_EXPIRE_ENABLED"),
     ("claudlobby/_runtime_scripts/plane-prune.sh", "PLANE_PRUNE_ENABLED"),
     ("claudlobby/_runtime_scripts/spin-down-bot.sh", "SPINDOWN_RECEIPT_ENABLED"),
-    ("claudlobby/_runtime_scripts/lib-common.sh", "STARTUP_BOOTSTRAP_ENABLED"),
 ])
 def test_the_remaining_shell_launchers_call_the_shared_gate(script, var):
     body = (REPO / script).read_text()
