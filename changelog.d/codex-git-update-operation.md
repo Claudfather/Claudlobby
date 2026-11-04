@@ -56,3 +56,9 @@ Remove obsolete sealed-update instructions from the current runbooks and CLI
 recovery hints. Distinguish authored source review from published-output drift,
 and document the remaining conversion, roster-change and restored-root startup
 limitations instead of suggesting commands that no longer exist.
+
+### Fixed — reject invalid first-fleet input before preparing an update
+
+Validate an authored fleet with the canonical configuration parser before copying
+it or recording an update. Invalid input now leaves setup ready for a corrected
+file, without a recovery operation or any native service effects.

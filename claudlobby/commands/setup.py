@@ -91,6 +91,16 @@ def _authored_config(source: Path, fleet: str) -> bytes:
     if body.get("name", "unnamed-fleet") != fleet:
         raise CommandFailure("conflict", "conflict: authored fleet name differs from --fleet; no declaration written",
                              hint=f"set fleet.name in {source} to {fleet} or pass the authored name as --fleet")
+    # The canonical parser decides validity from these bytes alone (no projects
+    # file is read), before any declaration or update record exists. Its message
+    # can quote authored values, so none of it is reported.
+    from ..config import load_fleet_snapshot
+
+    try:
+        load_fleet_snapshot(source, content, None)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise CommandFailure("conflict", "conflict: fleet configuration is not valid; no declaration written",
+                             hint=f"correct {source} using documentation/fleet-yaml-schema.md, then rerun fleet setup") from None
     return content
 
 

@@ -269,7 +269,8 @@ def test_authorized_fleet_file_copy_is_atomic_and_requires_explicit_replacement(
 def test_fleet_setup_passes_copied_external_config_to_initialization(team_setup):
     args, root, effects = team_setup
     source = root.parent / "authored-fleet.yaml"
-    source.write_text("fleet:\n  name: shop\n")
+    source.write_text("fleet:\n  name: shop\n  manager: lead\n  bots:\n"
+                      "    lead:\n      expertise: [orchestration]\n")
     args.config, args.template, args.repository, args.goal = str(source), None, None, None
     result = setup.dispatch(args)
     destination = root / "local/shop/fleet.yaml"
@@ -290,6 +291,28 @@ def test_fleet_setup_refuses_mismatched_or_malformed_authored_name_before_copy(t
     with pytest.raises(CommandFailure, match="not readable YAML") as refused:
         setup.dispatch(args)
     assert "SECRET-value" not in str(refused.value) and not (root / "local").exists()
+
+
+@pytest.mark.parametrize("plan_only", [True, False])
+def test_fleet_setup_refuses_invalid_authored_config_before_any_record(team_setup, plan_only):
+    args, root, effects = team_setup
+    source = root.parent / "authored-fleet.yaml"
+    source.write_text("fleet:\n  name: shop\n  manager: lead\n  defaults:\n    effort: SECRET-default\n"
+                      "  bots:\n    lead:\n      expertise: [software-engineering]\n")
+    args.config, args.template, args.repository, args.goal = str(source), None, None, None
+    args.plan_only = plan_only
+    with pytest.raises(CommandFailure) as refused:
+        setup.dispatch(args)
+    assert refused.value.error.code == "conflict"
+    assert "SECRET-default" not in str(refused.value) and "SECRET-default" not in str(refused.value.error.hint)
+    assert not (root / "local").exists() and not effects and not args.dispatches
+    assert args.retained["record"] is None
+    # A retained operation is still refused before new input is read: no retarget.
+    args.retained["record"] = {"phase": "prepare", "request_id": "00000000-0000-4000-8000-000000000001"}
+    source.write_text("fleet:\n  name: shop\n")
+    with pytest.raises(CommandFailure, match="existing update operation"):
+        setup.dispatch(args)
+    assert not (root / "local").exists() and not effects
 
 
 @pytest.mark.parametrize("recorded", [False, True])
