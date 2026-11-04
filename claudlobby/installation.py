@@ -519,8 +519,11 @@ def _check_maintenance(installation: Installation, *, native=False) -> None:
 def _launch(argv: list[str]) -> int:
     # This file is copied outside both changing trees. No application imports
     # occur until the recorded root and current maintenance fence are checked.
-    installation = read_installation(Path(__file__).absolute().parent.parent)
-    if Path(__file__).absolute() != installation.cli:
+    # Generated bot PATH entries symlink to this stable launcher. Bind its
+    # canonical file, never the alias directory or an inherited installation.
+    launcher = Path(__file__).resolve(strict=True)
+    installation = read_installation(launcher.parent.parent)
+    if launcher != installation.cli:
         raise InstallationError("invoke the stable installation launcher")
     runtime = bool(argv and argv[0] == "--_source-runtime")
     inherited = None

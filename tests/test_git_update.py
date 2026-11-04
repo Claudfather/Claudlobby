@@ -63,6 +63,55 @@ def quiet(store):
     store.begin_cutover()
 
 
+def test_application_stage_recovery_clears_only_the_matching_successful_error(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        outcomes = iter([
+            subprocess.CompletedProcess([], 6, "", "render refused"),
+            subprocess.TimeoutExpired("render", 900),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ])
+        def stage(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(updater.subprocess, "run", stage)
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="render refused"):
+            updater._application_stage(store, "render", python=interpreter)
+        error = {"stage": "render", "detail": "render refused"}
+        assert store.load()["stage_error"] == error
+        with pytest.raises(UpdateError, match="render interrupted"):
+            updater._application_stage(store, "render", python=interpreter)
+        assert store.load()["stage_error"] == error
+        assert updater._application_stage(store, "prepare", python=interpreter)["stage_error"] == error
+        recovered = updater._application_stage(store, "render", python=interpreter)
+        assert "stage_error" not in recovered and store.load() == original
+
+
+def test_invalid_authorization_response_keeps_original_stage_error(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["stage_error"] = {"stage": "authorize", "detail": "original authorization refusal"}
+        store.save(record)
+        outcomes = iter(["invalid-json", json.dumps({"directory": "/native", "revision": before})])
+        monkeypatch.setattr(updater.subprocess, "run", lambda *_args, **_kwargs:
+                            subprocess.CompletedProcess([], 0, next(outcomes), ""))
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="no bound installation context"):
+            updater._application_stage(store, "authorize", python=interpreter)
+        assert store.load() == record
+        authorized = updater._application_stage(store, "authorize", python=interpreter)
+        assert authorized == {"directory": "/native", "revision": before, "interpreter": str(interpreter)}
+        assert "stage_error" not in store.load()
+
+
 def test_update_freezes_target_and_resumes_after_git_effect_before_receipt(update, monkeypatch):
     installation, before, target, _ = update
     with UpdateStore(installation) as store:

@@ -314,3 +314,51 @@ read -r finish
         if process.poll() is None:
             process.kill()
         process.communicate(timeout=10)
+
+
+
+@pytest.mark.parametrize("binding", ["canonical", "foreign-installation", "foreign-root", "maintenance"])
+def test_generated_bot_cli_symlink_uses_stable_installation_and_preserves_fences(native, binding):
+    installation, _, _, _, _, _ = native
+    python = installation.environment / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(Path(sys.executable).resolve())
+    (installation.source / "claudlobby/__main__.py").write_text(
+        "import json,os\n"
+        "def main(argv):\n"
+        "    print(json.dumps({'installation':os.environ['CLAUDLOBBY_INSTALLATION'],"
+        "'root':os.environ['CLAUDLOBBY_ROOT'],'arguments':argv}))\n"
+        "    return 0\n")
+    bot = installation.data_root / "local/example/runtime/bots/worker"
+    cli_dir = bot / ".cli/bin"
+    cli_dir.mkdir(parents=True)
+    alias = cli_dir / "claudlobby"
+    alias.symlink_to(installation.cli)
+    environment = {"CLAUDLOBBY_ROOT": str(installation.data_root),
+                   "CLAUDLOBBY_INSTALLATION": str(installation.directory)}
+    if binding == "foreign-installation":
+        # Even a real alternative record cannot retarget this launcher alias.
+        from claudlobby.installation import Installation, write_installation
+        other = Installation(installation.directory.parent / "other-installation",
+                             installation.data_root.parent / "other-data")
+        other.directory.mkdir()
+        write_installation(other)
+        environment["CLAUDLOBBY_INSTALLATION"] = str(other.directory)
+    elif binding == "foreign-root":
+        environment["CLAUDLOBBY_ROOT"] = str(installation.data_root.parent / "other-data")
+    elif binding == "maintenance":
+        (installation.data_root / "state/update.json").write_text(json.dumps(
+            {"schema": 1, "phase": "publish", "maintenance": True}))
+    result = subprocess.run([str(alias), "--json", "message", "receipt", "example"],
+                            cwd=bot, env=constructed_env(**environment),
+                            capture_output=True, text=True, timeout=10)
+    if binding in {"foreign-root", "maintenance"}:
+        assert result.returncode != 0
+        expected_error = "root" if binding == "foreign-root" else "maintenance"
+        assert expected_error in result.stderr
+        assert not result.stdout and "Traceback" not in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        assert output == {"installation": str(installation.directory), "root": str(installation.data_root),
+                          "arguments": ["--root", str(installation.data_root), "--json", "message", "receipt", "example"]}

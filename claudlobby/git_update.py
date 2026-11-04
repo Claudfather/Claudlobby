@@ -806,10 +806,14 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
         try:
             authorized = json.loads(result.stdout)
             authorized["interpreter"] = str(Path(sys.executable).resolve())
-            return authorized
         except (ValueError, TypeError) as exc:
             raise UpdateError("operator authorization returned no bound installation context") from exc
-    return store.load()
+    record = store.load()
+    error = record.get("stage_error") if record is not None else None
+    if isinstance(error, dict) and error.get("stage") == stage:
+        record.pop("stage_error")
+        store.save(record)
+    return authorized if stage == "authorize" else record
 
 
 def _candidate_revision(store, source):
