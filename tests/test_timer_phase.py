@@ -23,7 +23,7 @@ import pytest
 
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 
 FLEETS = (
     "fleet-a",
@@ -136,7 +136,7 @@ def _compose_fleet(root: Path, fleet_dir: Path | None, out: Path) -> Path:
     from claudlobby.composer import compose_fleet_timers
 
     fleet, merged = load_fleet((fleet_dir or root) / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+    paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
     return compose_fleet_timers(fleet, paths, merged, output_dir=out)
 
 
@@ -144,7 +144,7 @@ def _compose_host(root: Path, out: Path) -> Path:
     from claudlobby.composer import compose_host_timers
 
     return compose_host_timers(
-        Paths(root=root, package=source_package()), output_dir=out
+        Paths(root=root, package=git_package(root)), output_dir=out
     )
 
 
@@ -425,13 +425,13 @@ def test_n_fleets_keepalives_and_the_probe_start_60_over_n_plus_1_s_apart(
             Paths(
                 root=root,
                 fleet_dir=root / "local" / "home" / name,
-                package=source_package(),
+                package=git_package(root),
             )
         )
         for name in names
     ]
     slots.append(
-        _host_timer_slot(Paths(root=root, package=source_package()), host=True)
+        _host_timer_slot(Paths(root=root, package=git_package(root)), host=True)
     )
     starts = [_calendar_seconds(jobs, slot)["keepalive"] for slot in slots]
     assert starts == sorted(starts) and starts[0] == 0
