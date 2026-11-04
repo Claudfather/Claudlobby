@@ -10,6 +10,9 @@ The [website boundary](website-boundary.md) maps the shared operational UI and h
 ```
 claudlobby/
   installation.py    — Explicit Git installation/data-root binding and read-only source preflight; its stdlib launcher lives outside the changing source/environment and checks maintenance before importing the application. Foundation for the common Git updater; existing fleet deployments still use the sealed path until coordinated cutover.
+  git_update.py      — Stdlib current-update record, process lock, frozen Git/dependency inputs and fast-forward cutover primitives; installed status inspection works without application source or environment. Native coordination and public apply remain unbound during migration development.
+  supervision_runtime.py — Shared native quiet evidence and start-budget primitives, independent of release/activation journals. Callers own scope, lifecycle ordering and readiness.
+  active_config.py   — Exact effective fleet inputs and generated-output ownership committed atomically before consumer startup; a failed consumer does not invalidate Git configuration reads. Transitional sealed-selection reader remains until cutover.
   task_permissions.py — Canonical task-scoped permission requests, explicit human decisions and exact bot/scope checks over existing Plane facts; `commands/task_permissions.py` owns CLI admission and local terminal confirmation. No effect execution. Reference: `documentation/architecture/task-permissions.md`.
   host_backup.py      — Owner-managed private database/configuration export and inactive replacement restore; reuses SQLite backup and bootstrap/migration, preserves historical identities and excludes credential/owner authority. `commands/host_backup.py` exposes `host backup create|inspect|restore`; instructions and exclusions: `documentation/backup-and-restore.md`.
   application_result.py — Data/release outcome shared by application workflows; CLI text belongs to command facades.

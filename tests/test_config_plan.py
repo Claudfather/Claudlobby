@@ -9,6 +9,44 @@ from claudlobby.config_plan import ConfigPlanBuilder, PlanError, read_plan
 from tests.test_releases import installed, r
 
 
+def test_current_render_has_no_permanent_plan_or_release_store(tmp_path):
+    from claudlobby.config_plan import read_rendered
+    root = tmp_path / "data"
+    root.mkdir()
+    source = root / "fleet.yaml"
+    source.write_text("reviewed input")
+    target = root / "runtime/bot.conf"
+    builder = ConfigPlanBuilder(root, "", "", ("demo",), effects={})
+    builder.input_snapshot(source)
+    builder.file(target, b"reviewed output")
+    rendered = builder.freeze("a" * 40)
+    assert read_rendered(root, rendered.fingerprint) == rendered
+    assert not target.exists()
+    assert not (root / "state/config-plans").exists()
+    assert not (root / "state/releases").exists()
+    assert set(rendered.payload()).isdisjoint({"plan_id", "release_id", "release_seal"})
+    assert builder.freeze("a" * 40) == rendered
+    with pytest.raises(PlanError, match="changed"):
+        builder.freeze("b" * 40)
+    source.write_text("edited after review")
+    with pytest.raises(PlanError, match="input changed"):
+        rendered.check_fresh()
+    assert read_rendered(root, rendered.fingerprint) == rendered
+
+
+def test_current_render_refuses_state_outputs_and_redirected_store(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    builder = ConfigPlanBuilder(root, "", "", ("demo",), effects={})
+    builder.file(root / "state/config.json", b"cannot own updater state")
+    with pytest.raises(PlanError, match="persistent state"):
+        builder.freeze("a" * 40)
+    builder = ConfigPlanBuilder(root, "", "", ("demo",), effects={})
+    (root / "state").symlink_to(tmp_path)
+    with pytest.raises(PlanError, match="redirected"):
+        builder.freeze("a" * 40)
+
+
 @pytest.fixture
 def proposal(installed):
     root, inputs, paths, compatibility, directory = installed

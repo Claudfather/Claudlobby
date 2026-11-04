@@ -143,6 +143,16 @@ def write_installation(installation: Installation) -> None:
 
 def install_launcher(installation: Installation, *, interpreter: Path) -> None:
     """Install this stdlib entry outside src/env; create no runtime or services."""
+    _install_entry(installation, interpreter, Path(__file__), installation.cli)
+
+
+def install_updater(installation: Installation, *, interpreter: Path) -> None:
+    """Install independent current-update inspection; it exposes no apply shortcut."""
+    _install_entry(installation, interpreter, Path(__file__).with_name("git_update.py"),
+                   installation.bin / "claudlobby-update")
+
+
+def _install_entry(installation, interpreter, source, destination):
     if read_installation(installation.directory) != installation:
         raise InstallationError("launcher installation differs from its recorded paths")
     if not Path(interpreter).is_absolute():
@@ -154,7 +164,7 @@ def install_launcher(installation: Installation, *, interpreter: Path) -> None:
             or interpreter.is_relative_to(installation.environment)):
         raise InstallationError("launcher needs an executable host Python outside source/environment")
     _path(installation.bin).mkdir(parents=True, exist_ok=True)
-    content = f"#!{interpreter}\n".encode() + Path(__file__).read_bytes()
+    content = f"#!{interpreter}\n".encode() + source.read_bytes()
     fd, name = tempfile.mkstemp(prefix=".launcher-", dir=installation.bin)
     temporary = Path(name)
     try:
@@ -163,7 +173,7 @@ def install_launcher(installation: Installation, *, interpreter: Path) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, installation.cli)
+        os.replace(temporary, destination)
         directory_fd = os.open(installation.bin, os.O_RDONLY)
         try:
             os.fsync(directory_fd)

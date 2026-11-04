@@ -25,6 +25,67 @@ def _tree(root):
     ) for p in root.rglob("*")}
 
 
+def test_current_update_publication_resumes_without_a_second_journal(tmp_path, monkeypatch):
+    from claudlobby.config_plan import read_rendered
+    root = tmp_path / "data"
+    first = _file(root / "runtime/first.conf", b"old first")
+    second = _file(root / "runtime/second.conf", b"unchanged")
+    mutable = _file(root / "runtime/bot/data/user.txt", b"keep user data")
+    inode = second.stat().st_ino
+    builder = ConfigPlanBuilder(root, "", "", ("demo",), effects={})
+    builder.file(first, b"new first")
+    builder.file(second, b"unchanged")
+    rendered = builder.freeze("a" * 40)
+    state = root / "state/update.json"
+
+    # A real durable record stands in only for the update owner's process lock.
+    # The test exercises real before-image files, renames and process re-reads.
+    class Store:
+        def __init__(self):
+            self.root, self.work = root, root / "state/update-work"
+        def load(self):
+            return json.loads(state.read_text())
+        def save(self, record):
+            state.write_text(json.dumps(record))
+
+    store = Store()
+    record = {"config_fingerprint": rendered.fingerprint, "target": rendered.revision,
+              "phase": "quiesce", "maintenance": False}
+    store.save(record)
+    assert install.prepare_publication(rendered, store) == "prepared"
+    assert first.read_bytes() == b"old first"
+    with pytest.raises(install.ConfigInstallError, match="maintenance phase"):
+        install.apply_publication(rendered, store)
+    record = store.load()
+    record.update(phase="publish", maintenance=True)
+    store.save(record)
+    replace = install._replace
+
+    def interrupted(source, target):
+        replace(source, target)
+        if target == first:
+            raise InterruptedError("updater interrupted after rename")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(install, "_replace", interrupted)
+        with pytest.raises(InterruptedError, match="after rename"):
+            install.apply_publication(rendered, store)
+    assert first.read_bytes() == b"new first"
+    fresh = read_rendered(root, rendered.fingerprint)
+    assert install.apply_publication(fresh, Store()) == "applied"
+    assert install.apply_publication(fresh, Store()) == "applied"
+    assert second.stat().st_ino == inode
+    assert mutable.read_bytes() == b"keep user data"
+    assert not list((root / "state/update-work").rglob("journal.json"))
+    assert not (root / "state/activations").exists()
+    assert store.load()["publication"]["status"] == "applied"
+    record = store.load()
+    record["publication"]["rows"][0]["after"]["sha256"] = "f" * 64
+    store.save(record)
+    with pytest.raises(install.ConfigInstallError, match="bytes changed"):
+        install.apply_publication(fresh, store)
+
+
 @pytest.fixture
 def proposal(installed, tmp_path):
     root, inputs, paths, _compatibility, _directory = installed

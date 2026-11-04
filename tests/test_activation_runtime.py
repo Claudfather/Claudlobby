@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby import activation_runtime as runtime, activation_state as state, runtime_admission as admission
+from claudlobby import supervision_runtime
 from claudlobby.releases import read_release
 from claudlobby.supervision_inventory import Adapter as NativeAdapter
 from tests.test_config_plan import proposal
@@ -32,7 +33,8 @@ def test_high_linux_boot_rung_extends_only_its_exact_start_budget():
         runtime._start_budget(bot, Path("worker.service"), b"ExecStartPre=/bin/sh -c 'sleep 33'\n")
 
 
-def test_a_unit_start_budget_counts_only_a_linux_units_boot_delay():
+@pytest.mark.parametrize("runtime", [runtime, supervision_runtime], ids=["legacy", "shared"])
+def test_a_unit_start_budget_counts_only_a_linux_units_boot_delay(runtime):
     """bot start and restart size their enroll call with it too (#2087)."""
     assert runtime.unit_start_budget(Path("worker.service"),
             b"[Service]\nExecStartPre=/bin/sleep 30\n") == 60
@@ -393,7 +395,8 @@ def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, m
     assert gate.exists()  # the drain ran, else no survivor could have written late
 
 
-def test_quiet_settle_is_the_native_wait_and_widens_the_call_budget(tmp_path):
+@pytest.mark.parametrize("runtime", [runtime, supervision_runtime], ids=["legacy", "shared"])
+def test_quiet_settle_is_the_native_wait_and_widens_the_call_budget(tmp_path, runtime):
     """#2227: settle_s reaches svc_activation_quiet as its wait, inside a call
     budget that covers it; without it the native argv and budget are unchanged."""
     calls = []
@@ -415,7 +418,8 @@ def test_quiet_settle_is_the_native_wait_and_widens_the_call_budget(tmp_path):
     assert len(calls) == 2  # a refused settle reaches no native call
 
 
-def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_path):
+@pytest.mark.parametrize("runtime", [runtime, supervision_runtime], ids=["legacy", "shared"])
+def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_path, runtime):
     class Adapter:
         def call(self, *args, **kwargs):
             return subprocess.CompletedProcess(args, 0, "inactive\tno-cgroup-witness\n", "")
@@ -433,3 +437,15 @@ def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_
     assert observed.details["socket_state"] == "refused"
     assert observed.details["coverage"] == "named-unit-and-supplied-witnesses-only"
     assert path.exists()  # observation never unlinks a socket
+
+
+def test_legacy_native_refusal_keeps_the_activation_error_boundary(tmp_path):
+    class Adapter:
+        def call(self, function, *args, **kwargs):
+            return subprocess.CompletedProcess(args, 3, "", "native refusal")
+
+    with pytest.raises(state.ActivationError) as error:
+        runtime.assert_quiescent(Adapter(), installed_file=tmp_path / "worker.service",
+                                 target="worker.service")
+    assert (error.value.operation, error.value.target, error.value.detail) == (
+        "svc_activation_quiet", "worker.service", "native refusal (3)")

@@ -25,7 +25,7 @@ import re
 import shutil
 import tempfile
 
-from .config_plan import ConfigPlan, PlanError, _digest, _json, _sync, path_state, read_plan
+from .config_plan import ConfigPlan, RenderedConfiguration, PlanError, _digest, _json, _sync, path_state, read_plan, read_rendered
 
 
 class ConfigInstallError(PlanError):
@@ -62,7 +62,10 @@ def _write_new(path: Path, content: bytes, mode: int = 0o600) -> None:
 def _save(directory: Path, journal: dict) -> None:
     if journal["schema"] != 2:
         raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
-    payload = {key: value for key, value in journal.items() if key != "_plan"}
+    payload = {key: value for key, value in journal.items() if not key.startswith("_")}
+    if "_persist" in journal:
+        journal["_persist"](payload)
+        return
     data = {"journal": payload, "sha256": _digest(_json(payload))}
     fd, name = tempfile.mkstemp(prefix=".journal-", dir=directory)
     temporary = Path(name)
@@ -191,25 +194,12 @@ def _backup(path: Path, node: dict, contents: dict, staged: set[str], plan: Conf
             _backup(path / name, child, contents, staged, plan)
 
 
-def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
-    """Back up a fresh plan before any target write; caller holds activation lock.
-
-    An existing matching journal is returned for recovery. A different plan or
-    incomplete published directory is refused, never overwritten or resealed.
-    """
-    directory = _location(plan.data_root, activation_id)
-    if directory.exists():
-        existing = read_config_install(plan.data_root, activation_id)
-        if existing.plan_id != plan.plan_id:
-            raise ConfigInstallError("activation already belongs to a different plan")
-        return existing
-    if read_plan(plan.data_root, plan.plan_id) != plan:
-        raise ConfigInstallError("configuration plan changed before preparation")
-    plan.check_fresh()
+def _prepare_rows(plan):
     rows, contents = {}, {}
     staged = {path.name for path in (plan.directory / "files").iterdir()}
     reserved = [plan.data_root / "state" / name
-                for name in ("activations", "config-plans", "releases", "plane")]
+                for name in ("activations", "config-plans", "releases", "plane", "owner", "update-work")
+                ] + [plan.data_root / "state/update.json", plan.data_root / "state/config.json"]
     for change in plan.changes:
         target = Path(change.target)
         # The leaf itself may be an owned symlink into the old selected
@@ -239,6 +229,25 @@ def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
             raise ConfigInstallError("an ensured directory must have been absent in the plan")
         if not unchanged:
             _backup(target, change.before["node"], contents, staged, plan)
+    return rows, contents
+
+
+def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
+    """Back up a fresh plan before any target write; caller holds activation lock.
+
+    An existing matching journal is returned for recovery. A different plan or
+    incomplete published directory is refused, never overwritten or resealed.
+    """
+    directory = _location(plan.data_root, activation_id)
+    if directory.exists():
+        existing = read_config_install(plan.data_root, activation_id)
+        if existing.plan_id != plan.plan_id:
+            raise ConfigInstallError("activation already belongs to a different plan")
+        return existing
+    if read_plan(plan.data_root, plan.plan_id) != plan:
+        raise ConfigInstallError("configuration plan changed before preparation")
+    plan.check_fresh()
+    rows, contents = _prepare_rows(plan)
     journal = {"schema": 2, "directory": str(directory), "plan_id": plan.plan_id,
                "status": "prepared", "blobs": sorted(contents),
                "rows": [rows[name] for name in sorted(rows)], "_plan": plan}
@@ -436,6 +445,11 @@ def apply_config(data_root: Path, activation_id: str) -> ConfigInstall:
         raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
     if journal["status"] in ("rolling_back", "rolled_back"):
         raise ConfigInstallError("configuration rollback has begun; cannot resume apply")
+    _apply(directory, journal)
+    return _result(directory, journal)
+
+
+def _apply(directory, journal):
     _check_rows(journal)
     journal["status"] = "applying"
     _save(directory, journal)
@@ -453,7 +467,99 @@ def apply_config(data_root: Path, activation_id: str) -> ConfigInstall:
     _check_rows(journal)
     journal["status"] = "applied"
     _save(directory, journal)
-    return _result(directory, journal)
+
+
+def _publication(plan: RenderedConfiguration, store, *, required: bool):
+    """Bind recovery to the locked current update, never a nested journal."""
+    operation = store.load()
+    if (operation is None or store.root != plan.data_root
+            or operation.get("config_fingerprint") != plan.fingerprint
+            or operation.get("target") != plan.revision):
+        raise ConfigInstallError("publication differs from the current update")
+    if read_rendered(plan.data_root, plan.fingerprint) != plan:
+        raise ConfigInstallError("pending configuration render changed")
+    directory = store.work / "publication"
+    if directory.resolve() != directory:
+        raise ConfigInstallError("publication backup store is redirected")
+
+    def persist(payload):
+        operation["publication"] = payload
+        store.save(operation)
+
+    journal = operation.get("publication")
+    if journal is None:
+        if required:
+            raise ConfigInstallError("configuration publication is not prepared")
+        return directory, None, persist
+    if (not isinstance(journal, dict) or journal.get("schema") != 2
+            or journal.get("directory") != str(directory)
+            or journal.get("fingerprint") != plan.fingerprint):
+        raise ConfigInstallError("configuration publication identity changed")
+    expected = {change.target: change for change in plan.changes}
+    actual = {row["target"]: row for row in journal["rows"]}
+    if len(actual) != len(journal["rows"]) or not set(expected).issubset(actual):
+        raise ConfigInstallError("configuration publication coverage changed")
+    for target, row in actual.items():
+        if target in expected:
+            change = expected[target]
+            if row["before"] != change.before or row["after"] != _desired(change.after):
+                raise ConfigInstallError("configuration publication bytes changed")
+        elif (not row["ensure"] or row["before"]["node"] != {"kind": "absent"}
+                or row["after"] != {"kind": "directory", "mode": 0o755, "entries": {}}
+                or not any(Path(item).is_relative_to(target) and item != target for item in expected)):
+            raise ConfigInstallError("configuration publication includes an unowned parent")
+    for digest in journal["blobs"]:
+        _blob(directory, digest)
+    journal = {**journal, "_plan": plan, "_persist": persist}
+    _check_rows(journal)
+    return directory, journal, persist
+
+
+def prepare_publication(plan: RenderedConfiguration, store) -> str:
+    """Retain changed before bytes; progress lives in the single update record.
+
+    The update owner holds the lock and rechecks input freshness before effects.
+    This step changes no generated destination and calls no native service.
+    """
+    directory, existing, persist = _publication(plan, store, required=False)
+    if existing is not None:
+        return existing["status"]
+    plan.check_inputs()
+    rows, contents = _prepare_rows(plan)
+    journal = {"schema": 2, "directory": str(directory), "fingerprint": plan.fingerprint,
+               "status": "prepared", "blobs": sorted(contents),
+               "rows": [rows[name] for name in sorted(rows)], "_plan": plan, "_persist": persist}
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    blobs = directory / "blobs"
+    if blobs.resolve() != blobs:
+        raise ConfigInstallError("publication backup store is redirected")
+    blobs.mkdir(mode=0o700, exist_ok=True)
+    for digest, content in contents.items():
+        path = blobs / digest
+        if path.exists() or path.is_symlink():
+            if _blob(directory, digest) != content:
+                raise ConfigInstallError("publication backup changed")
+        else:
+            _write_new(path, content)
+    _sync(blobs)
+    _sync(directory)
+    _sync(directory.parent)
+    plan.check_inputs()
+    _check_rows(journal)
+    _save(directory, journal)
+    return journal["status"]
+
+
+def apply_publication(plan: RenderedConfiguration, store) -> str:
+    """Publish/resume after quiet/code/dependency steps under the current fence."""
+    operation = store.load()
+    if operation is None or operation.get("phase") != "publish" or operation.get("maintenance") is not True:
+        raise ConfigInstallError("configuration publication requires the current update maintenance phase")
+    directory, journal, _ = _publication(plan, store, required=True)
+    if journal["status"] not in {"prepared", "applying", "applied"}:
+        raise ConfigInstallError("configuration publication cannot resume from this state")
+    _apply(directory, journal)
+    return journal["status"]
 
 
 def rollback_config(data_root: Path, activation_id: str) -> ConfigInstall:
