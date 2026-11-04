@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import sys
 import time
 
 from .activation_state import ActivationError, ActivationRefusal, ActivationStore, read_activation, read_selection
@@ -146,7 +147,23 @@ def _call(adapter, function, *args, timeout=None):
     result = adapter.call(function, *args) if timeout is None else adapter.call(function, *args, timeout=timeout)
     if result.returncode:
         raise ActivationError(f"{function} refused ({result.returncode}): {result.stderr.strip()}")
+    if result.stderr:
+        sys.stderr.write(result.stderr)
     return result.stdout.strip()
+
+
+def _bot_pause_args(unit: dict) -> tuple[str, ...]:
+    """The native bot capability comes only from the owner's frozen bot row."""
+    from .activation import _frozen_unit, _original_bot_tmpdir
+    original = _frozen_unit(unit)
+    declaration = original.declaration
+    if (declaration.scope != "bot" or not declaration.bot
+            or declaration.source.suffix != ".service"
+            or original.target != declaration.source.name
+            or not declaration.working_directory.is_absolute()):
+        raise ActivationError("bot pause differs from its frozen bot owner")
+    return ("bot-owned", str(declaration.working_directory), declaration.source.stem,
+            _original_bot_tmpdir(original))
 
 
 def _check_source(saved: dict) -> None:
@@ -395,9 +412,14 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
         if is_unit_template(unit["target"]):
             continue  # parked above; no instance can start without its file
         timer_service = pause.enrollment["manager"] == "Linux" and unit["target"] in scheduled
+        capability = ("timer-owned",) if timer_service else ()
+        if phase == "bots" and pause.enrollment["manager"] == "Linux":
+            if "sessions_handed_off" not in record.body["completed"]:
+                raise ActivationError("bot pause lacks completed session handoff")
+            capability = _bot_pause_args(unit)
         _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
               _native_saved(unit, scheduled, allow_failed=timer_service), str(os.getpid()),
-              *(("timer-owned",) if timer_service else ()), timeout=_PAUSE_TIMEOUT)
+              *capability, timeout=_PAUSE_TIMEOUT)
     _darwin_check(adapter, pause.enrollment)
     return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
                              tuple(unit["target"] for unit in pause.units(phase)), "paused")
@@ -458,8 +480,9 @@ def pause_bot(store: ActivationStore, activation_id: str, *, target: str, adapte
     _check_source(row["generated"])
     _call(adapter, "svc_activation_assert_external", _file(row), target, str(os.getpid()))
     _darwin_check(adapter, pause.enrollment, {target})
+    capability = _bot_pause_args(row) if pause.enrollment["manager"] == "Linux" else ()
     _call(adapter, "svc_activation_pause", _file(row), target,
-          _native_saved(row, set()), str(os.getpid()), timeout=_PAUSE_TIMEOUT)
+          _native_saved(row, set()), str(os.getpid()), *capability, timeout=_PAUSE_TIMEOUT)
     _darwin_check(adapter, pause.enrollment, {target})
     return UnitPhaseEvidence("bots", identifier, pause.plan("bots").plan_id, (target,), "paused")
 

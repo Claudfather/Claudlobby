@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
+import sys
 from types import SimpleNamespace
 import time
 
@@ -65,30 +67,58 @@ pane_send_verified() {
 
 @pytest.mark.parametrize("message, mode, expected_rc", [
     ("no server running on", "retired", 0),
+    ("missing endpoint", "retired", 0),
+    ("missing endpoint", "refuse", 3),
+    ("no server running on", "refuse", 3),
     ("no server running on", "retired-purge", 3),
     ("permission denied on", "retired", 3),
     ("wrong socket", "retired", 3),
 ])
-def test_retired_private_server_handles_stale_socket_without_hiding_errors(tmp_path, message, mode, expected_rc):
+@pytest.mark.parametrize("endpoint", ["absent", "stale", "file", "listening"])
+def test_retired_private_server_handles_stale_socket_without_hiding_errors(tmp_path, message, mode, expected_rc, endpoint):
     native = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/supervisor.sh"
     private = tmp_path / "native"
     private.mkdir()
     (private / "lib-common.sh").write_text('''
 tmux_session_name() { printf 'worker'; }
+tmux_socket_for_bot() { printf 'worker.socket'; }
 bot_tmux() {
     [ "$2" = list-sessions ] || exit 99
+    if [ "$FAILURE" = 'missing endpoint' ]; then
+        printf 'error connecting to %s/tmux-%s/worker.socket (No such file or directory)\\n' "$SOCKET_ROOT" "$(id -u)" >&2
+        return 1
+    fi
     printf '%s %s/tmux-%s/worker.socket\\n' "$FAILURE" "$SOCKET_ROOT" "$(id -u)" >&2
     return 1
 }
 ''')
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
            "_SUPERVISOR_LIB_DIR": str(private), "FAILURE": message, "PLANE_EMIT_DISABLED": "1",
-           "SOCKET_ROOT": str(tmp_path)}
+           "SOCKET_ROOT": str(tmp_path), "CLAUDLOBBY_NATIVE_PYTHON": sys.executable}
+    endpoint_path = tmp_path / f"tmux-{os.getuid()}" / "worker.socket"
+    endpoint_path.parent.mkdir()
+    listener = None
+    if endpoint in {"stale", "listening"}:
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(endpoint_path))
+        if endpoint == "stale":
+            listener.close()
+            listener = None
+        else:
+            listener.listen(1)
+    elif endpoint == "file":
+        endpoint_path.write_text("foreign non-socket node")
+    if endpoint in {"file", "listening"}:
+        expected_rc = 3
     if message == "wrong socket":
         env.update(FAILURE="no server running on", SOCKET_ROOT=str(tmp_path / "other"))
-    result = subprocess.run(["/bin/bash", "-c", '. "$1"; svc_activation_stop_private_server "$2" worker.socket "$3" "$4"',
-                             "stop", str(native), str(tmp_path / "bot"), str(tmp_path), mode],
-                            env=env, capture_output=True, text=True, timeout=5)
+    try:
+        result = subprocess.run(["/bin/bash", "-c", '. "$1"; svc_activation_stop_private_server "$2" worker.socket "$3" "$4"',
+                                 "stop", str(native), str(tmp_path / "bot"), str(tmp_path), mode],
+                                env=env, capture_output=True, text=True, timeout=5)
+    finally:
+        if listener is not None:
+            listener.close()
     assert result.returncode == expected_rc
     if mode == "retired-purge":
         assert "liveness is unverified" in result.stderr

@@ -876,22 +876,50 @@ svc_activation_stop_private_server() (
     case "$tmpdir" in *$'\n'*|*$'\t'*) return 3 ;; esac
     export TMUX_TMPDIR="$tmpdir"
     . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    [ "$(tmux_socket_for_bot "$bot_dir")" = "$expected" ] || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
     if ! sessions=$(LC_ALL=C bot_tmux "$expected" list-sessions -F '#{session_name}' 2>&1); then
-        # tmux leaves its socket file after a clean server exit, but a full
-        # live-server backlog can print the same no-server text. Ordinary
-        # retired cleanup may leave the directory; purge must refuse it.
-        # Permission/connection/other failures remain unknown.
+        # Diagnostics classify the exact endpoint; they do not prove absence.
+        # A full live-server backlog can also print no-server text.
         case "$absent" in retired|retired-purge) ;; *) return 3 ;; esac
-        physical_tmpdir=$(cd "$tmpdir" && pwd -P) || return 3
+        physical_tmpdir=$(cd "$tmpdir" 2>/dev/null && pwd -P) || physical_tmpdir="$tmpdir"
         case "$sessions" in
             "no server running on $tmpdir/tmux-$(id -u)/$expected"|\
-            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected")
+            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected"|\
+            "error connecting to $tmpdir/tmux-$(id -u)/$expected (No such file or directory)"|\
+            "error connecting to $physical_tmpdir/tmux-$(id -u)/$expected (No such file or directory)")
                 if [ "$absent" = retired-purge ]; then
                     echo 'retired private server liveness is unverified; inspect the retained socket and bot session, then clean up manually before purge' >&2
                     return 3
                 fi
-                return 0 ;;
+                # Same named-socket proof as activation quiescence: lstat must
+                # prove absence, or an owned socket must refuse a bounded
+                # connection. Never unlink it or infer a host-wide quiet state.
+                "${CLAUDLOBBY_NATIVE_PYTHON-python3}" - "$tmpdir/tmux-$(id -u)/$expected" <<'PY'
+import os
+import socket
+import stat
+import sys
+
+try:
+    path = sys.argv[1]
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        sys.exit(0)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        sys.exit(3)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        try:
+            probe.connect(path)
+        except ConnectionRefusedError:
+            sys.exit(0)
+except OSError:
+    pass
+sys.exit(3)
+PY
+                return $? ;;
             *) return 3 ;;
         esac
     fi
@@ -955,11 +983,15 @@ EOF
 }
 
 svc_activation_pause() {
-    local file="$1" target="$2" saved="$3" remaining=20 reset=0 timer_owned="${5:-}"
-    case "$timer_owned" in ""|timer-owned) ;; *) return 3 ;; esac
-    [ -z "$timer_owned" ] || { [ "$_OS" = Linux ] && [ "${target##*.}" = service ]; } || return 3
+    local file="$1" target="$2" saved="$3" remaining=20 reset=0 owner="${5:-}" bot_group="" members
+    case "$owner" in ""|timer-owned|bot-owned) ;; *) return 3 ;; esac
+    [ -z "$owner" ] || { [ "$_OS" = Linux ] && [ "${target##*.}" = service ]; } || return 3
+    if [ "$owner" = bot-owned ]; then
+        [ "$#" = 8 ] && [ "$target" = "${7}.service" ] && [ "${file##*/}" = "$target" ] || return 3
+    fi
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
+    bot_group="$SVC_ACT_GROUP"
     case "$_OS" in
         Linux)
             # The enrollment owner parks higher-priority installed bytes first.
@@ -969,6 +1001,12 @@ svc_activation_pause() {
             esac
             _svc_activation_read "$file" "$target" || return 3
             [ "$SVC_ACT_LOAD" = masked ] || { _svc_activation_unknown "$target mask did not take precedence"; return 3; }
+            if [ "$owner" = bot-owned ]; then
+                # The owner has already bound a fresh capture/stop intent. Keep
+                # the verified mask in place while the subreaper loses its last
+                # child; TERM alone cannot make that reaper exit.
+                svc_activation_stop_private_server "$6" "$7" "$8" retired || return $?
+            fi
             systemctl --user stop "$target" || return $?
             # systemctl may acknowledge a timer stop while the exact unit is
             # still deactivating. Observe its final state before publication.
@@ -987,10 +1025,20 @@ svc_activation_pause() {
                     continue
                 fi
                 # The owner supplies this capability only from frozen timer
-                # membership. Preserve native failure history; never run the job.
-                if [ "$reset" = 0 ] && [ "$timer_owned" = timer-owned ] \
+                # or admitted bot membership. Preserve the raw native failure.
+                if [ "$reset" = 0 ] && { [ "$owner" = timer-owned ] || [ "$owner" = bot-owned ]; } \
                         && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE:$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" = masked:failed:0:0 ]; then
                     printf 'activation parking: %s raw state masked failed MainPID=0 ControlPID=0\n' "$target" >&2
+                    if [ "$owner" = bot-owned ]; then
+                        # Retain the pre-stop group even after systemd collects
+                        # it. Unknown or remaining children cannot be reset.
+                        [ -z "$SVC_ACT_GROUP" ] || [ -z "$bot_group" ] || [ "$bot_group" = "$SVC_ACT_GROUP" ] || return 3
+                        [ -n "$bot_group" ] || bot_group="$SVC_ACT_GROUP"
+                        if [ -n "$bot_group" ]; then
+                            members=$(_svc_cgroup_members "$bot_group") || return 3
+                            [ -z "$members" ] || { _svc_activation_unknown "$target failed unit has remaining cgroup members"; return 3; }
+                        fi
+                    fi
                     systemctl --user reset-failed "$target" || return $?
                     reset=1
                     continue

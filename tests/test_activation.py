@@ -2645,7 +2645,8 @@ def test_a_handoff_the_retry_keeps_must_still_be_at_most_300_s_old_when_the_sess
     assert case.calls == ["alpha", "bravo"]
 
 
-def test_preserved_handoff_saved_in_the_requests_own_file_clock_tick_stays_held(preserved_handoff_case, monkeypatch):
+def test_preserved_handoff_saved_in_the_requests_own_file_clock_tick_stays_held(
+        preserved_handoff_case, monkeypatch, handoff_wait_clock):
     """#2528: a capture saved just before the request can share the file clock's reading at
     the request (one 4 ms tick at 250 Hz). The request waits for the clock's next reading,
     so a resume still finds that capture older than the request and holds it."""
@@ -2655,12 +2656,12 @@ def test_preserved_handoff_saved_in_the_requests_own_file_clock_tick_stays_held(
     readings = iter([saved, saved, saved + 4_000_000])
     monkeypatch.setattr(bot_operations, "_file_clock_ns", lambda _directory: next(readings))
     case.outcome[:] = [3, "handoff-timeout"]
-    with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+    with pytest.raises(state.ActivationRefusal, match="waiting for checkpoint"):
         case.run()
     assert case.body["handoff_requests"][case.target]["started_at_ns"] == saved + 4_000_000
     with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff") as refused:
         case.run()
-    assert str(refused.value.__cause__.__cause__) == "handoff predates its request"
+    assert str(refused.value.__cause__.__cause__.__cause__) == "handoff predates its request"
     assert case.body["handoff_effects"][case.target] is None and len(case.calls) == 1
 
 
@@ -2705,7 +2706,8 @@ def test_old_default_completed_handoff_without_witness_refuses_before_stop(prese
 
 @pytest.mark.parametrize("kind", ["reference-only", "stale-capture", "pre-attempt"])
 @pytest.mark.parametrize("preserve", [True, False])
-def test_preserved_unknown_handoff_stays_held_without_request_bound_capture(preserved_handoff_case, kind, preserve):
+def test_preserved_unknown_handoff_stays_held_without_request_bound_capture(
+        preserved_handoff_case, kind, preserve, handoff_wait_clock):
     case = preserved_handoff_case
     if not preserve:
         case.body["intent"].pop("preserve_bot_state")
@@ -2883,6 +2885,7 @@ def test_ordinary_completed_handoff_without_target_evidence_refuses_before_nativ
 def per_bot_case(tmp_path, monkeypatch):
     """A private two-bot estate; every native effect is a fake observation."""
     case = _preserved_estate(tmp_path, monkeypatch, ["alpha", "bravo"])
+    case.handoff_returncode = [0]
     case.body["intent"]["quiesce_mode"] = "per-bot-v1"
     case.body["bot_quiescence"] = {}
     from datetime import datetime, timedelta, timezone
@@ -2938,7 +2941,7 @@ def per_bot_case(tmp_path, monkeypatch):
             case.calls.append(bot_dir.name)
             if case.outcome[0] == "handoff-saved":
                 _preserve_capture(bot_dir, kind="shell-below", now=CaptureClock.now(timezone.utc))
-            return subprocess.CompletedProcess([function], 0, case.outcome[0] + "\n", "")
+            return subprocess.CompletedProcess([function], case.handoff_returncode[0], case.outcome[0] + "\n", "")
         assert function == "svc_activation_stop_private_server"
         assert case.body["bot_quiescence"][target]["result"] is None
         events.append("stop:" + target)
@@ -3373,3 +3376,138 @@ def test_recent_skip_receipt_survives_capture_validation_and_resume_never_sends(
         case.run()
     assert len(case.calls) == 1
     assert case.body["handoff_effects"][target] == ("handed_off" if fresh else None)
+
+
+@pytest.fixture
+def handoff_wait_clock(monkeypatch):
+    """Advance only the activation wait clock; capture verification stays real."""
+    clock = SimpleNamespace(now=0.0, sleeps=[], on_sleep=None)
+
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+        if clock.on_sleep is not None:
+            clock.on_sleep(clock.now)
+
+    monkeypatch.setattr(activation, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(activation, "_HANDOFF_CAPTURE_WAIT_S", 90, raising=False)
+    monkeypatch.setattr(activation, "_HANDOFF_CAPTURE_POLL_S", 5, raising=False)
+    return clock
+
+
+def _timeout_handoff_case(request, monkeypatch, flow):
+    case = request.getfixturevalue("per_bot_case" if flow == "per-bot" else "preserved_handoff_case")
+    if flow == "per-bot":
+        target, bot_dir = case.units[0].target, case.dirs["alpha"]
+        case.outcome[0], case.handoff_returncode[0] = "handoff-timeout", 3
+        monkeypatch.setattr(activation, "_quiesce_one_bot",
+                            lambda *_: (_ for _ in ()).throw(case.BotPauseReached()))
+    else:
+        target, bot_dir = case.target, case.bot_dir
+        case.outcome[:] = [3, "handoff-timeout"]
+    return case, target, bot_dir
+
+
+@pytest.mark.parametrize("flow", ["legacy", "per-bot"])
+def test_activation_waits_for_delayed_checkpoint_after_native_timeout_without_resending(
+        request, monkeypatch, capsys, handoff_wait_clock, flow):
+    case, target, bot_dir = _timeout_handoff_case(request, monkeypatch, flow)
+    _preserve_capture(bot_dir, kind="stale-capture")
+
+    def save_later(elapsed):
+        if elapsed >= 45:
+            _preserve_capture(bot_dir)
+            handoff_wait_clock.on_sleep = None
+
+    handoff_wait_clock.on_sleep = save_later
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert handoff_wait_clock.now == 45
+    assert len(case.calls) == 1
+    assert case.body["handoff_effects"][target] == "handed_off"
+    assert case.body["handoff_requests"][target]["native_result"] == {
+        "marker": "handoff-timeout", "returncode": 3}
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "waiting for checkpoint" in output.err and target in output.err
+    assert output.err.count("waiting for checkpoint") == 2  # Initial notice, then one 30 s update.
+    assert "checkpoint verified" in output.err
+
+
+@pytest.mark.parametrize("flow", ["legacy", "per-bot"])
+@pytest.mark.parametrize("kind", ["pre-request", "stale-capture", "reference-only", "missing", "redirected"])
+def test_activation_checkpoint_wait_expires_with_same_resumable_request_and_late_save(
+        request, monkeypatch, handoff_wait_clock, flow, kind):
+    case, target, bot_dir = _timeout_handoff_case(request, monkeypatch, flow)
+    _preserve_capture(bot_dir, kind=kind if kind != "redirected" else "capture")
+    if kind == "missing":
+        (bot_dir / ".claude/session.md").unlink()
+    if kind == "redirected":
+        path = bot_dir / ".claude/session.md"
+        path.rename(path.with_name("other.md"))
+        path.symlink_to("other.md")
+    with pytest.raises(state.ActivationRefusal, match=r"waiting for checkpoint.*--resume upgrade"):
+        case.run()
+    assert handoff_wait_clock.now == 90
+    assert len(case.calls) == 1 and case.body["handoff_effects"][target] is None
+    record = SimpleNamespace(body=case.body, status="activating")
+    assert activation.resumable_running_step(record) == "sessions_handed_off"
+    original_request = deepcopy(case.body["handoff_requests"][target])
+    if kind == "redirected":
+        (bot_dir / ".claude/session.md").unlink()
+    _preserve_capture(bot_dir)
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert handoff_wait_clock.now == 90  # A completed late save needs no further wait.
+    assert len(case.calls) == 1 and case.body["handoff_effects"][target] == "handed_off"
+    assert case.body["handoff_requests"][target] == original_request
+
+
+@pytest.mark.parametrize("flow", ["legacy", "per-bot"])
+def test_activation_resume_waits_for_original_checkpoint_without_a_second_native_call(
+        request, monkeypatch, handoff_wait_clock, flow):
+    case, target, bot_dir = _timeout_handoff_case(request, monkeypatch, flow)
+    _preserve_capture(bot_dir, kind="stale-capture")
+    with pytest.raises(state.ActivationRefusal, match="waiting for checkpoint"):
+        case.run()
+    began_resume = handoff_wait_clock.now
+
+    def save_on_resume(elapsed):
+        if elapsed >= began_resume + 40:
+            _preserve_capture(bot_dir)
+            handoff_wait_clock.on_sleep = None
+
+    handoff_wait_clock.on_sleep = save_on_resume
+    with pytest.raises(case.BotPauseReached):
+        case.run()
+    assert handoff_wait_clock.now == began_resume + 40
+    assert len(case.calls) == 1 and case.body["handoff_effects"][target] == "handed_off"
+
+
+@pytest.mark.parametrize("marker,returncode", [
+    ("handoff-unavailable", 3), ("handoff-skipped:capability", 0),
+    ("handoff-timeout", 0), ("unrecognized", 3),
+])
+def test_activation_real_handoff_refusal_does_not_enter_checkpoint_wait(
+        preserved_handoff_case, handoff_wait_clock, marker, returncode):
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir)
+    case.outcome[:] = [returncode, marker]
+    with pytest.raises(state.ActivationRefusal, match="did not produce a verified save"):
+        case.run()
+    assert handoff_wait_clock.sleeps == [] and len(case.calls) == 1
+
+
+@pytest.mark.parametrize("receipt", [None, {"marker": "handoff-unavailable", "returncode": 3}])
+def test_activation_unknown_handoff_without_timeout_receipt_remains_proof_only(
+        preserved_handoff_case, handoff_wait_clock, receipt):
+    case = preserved_handoff_case
+    _preserve_capture(case.bot_dir)
+    case.body["pending"] = "sessions_handed_off"
+    case.body["handoff_effects"][case.target] = None
+    case.body["handoff_requests"] = {case.target: {"started_at_ns": time.time_ns() + 1_000_000_000}}
+    if receipt is not None:
+        case.body["handoff_requests"][case.target]["native_result"] = receipt
+    with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
+        case.run()
+    assert case.calls == [] and handoff_wait_clock.sleeps == []
