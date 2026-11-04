@@ -55,15 +55,15 @@ def _commit(repo, name):
 
 
 def _seal_release(root, source_revision):
-    """Seal a release built from SOURCE_REVISION under ROOT; its ID.
+    """Author archived release evidence for SOURCE_REVISION under ROOT; its ID.
 
-    notify-behind reads only the selection and the sealed manifest, never the
-    release's files, so the tree tests/test_releases.py seals is enough.
+    notify-behind reads only the selection and the archived manifest, never the
+    release's files, so the tree tests/test_releases.py builds is enough.
     """
-    from tests.test_releases import r as releases, release_tree
+    from tests.test_releases import historical_release, release_tree
 
     inputs, paths, _, _ = release_tree(root, source_revision, "artifact-" + source_revision[:12])
-    return releases.seal_release(root, inputs, paths).release_id
+    return historical_release(root, inputs, paths).release_id
 
 
 def _select(root, release_id):
@@ -151,7 +151,7 @@ class Harness:
         return out.stdout.strip()
 
     def select(self, source_revision):
-        """Seal a release built from SOURCE_REVISION and select it; its ID."""
+        """Author an archived release for SOURCE_REVISION and select it; its ID."""
         release_id = _seal_release(self.root, source_revision)
         _select(self.root, release_id)
         return release_id

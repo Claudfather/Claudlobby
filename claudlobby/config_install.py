@@ -1,18 +1,9 @@
-"""Private configuration writes for the coordinated host activation owner.
+"""Git publication through the single current update record.
 
-Every caller MUST hold the host activation lock and quiesce config producers
-for preparation, application, recovery and rollback. This is not an activation
-door: it selects no release, calls no supervisor, and never restores a database.
-Only ``state/activations/<explicit id>/config`` belongs to this backend.
-
-The reviewed plan owns the only staged desired bytes. This backend retains
-publication progress and changed before bytes only; it never copies the plan
-or its desired content into another store. Legacy journals remain readable
-for migration, but this writer never changes their representation.
-Replacement workspaces live beside each target (including external fleets), so
-no rename crosses a filesystem. A crash before a workspace is journaled may
-leave an unreferenced private workspace; it cannot have changed a live target
-and is deliberately not guessed at or deleted by recovery.
+The caller holds the update lock and maintenance fence. Desired bytes remain
+in the frozen render; only before bytes and progress belong to publication.
+Historical activation journals are strictly read-only evidence. Replacement
+workspaces stay beside targets so recovery never crosses filesystems.
 """
 
 from __future__ import annotations
@@ -25,7 +16,7 @@ import re
 import shutil
 import tempfile
 
-from .config_plan import ConfigPlan, RenderedConfiguration, PlanError, _digest, _json, _sync, path_state, read_plan, read_rendered
+from .config_plan import RenderedConfiguration, PlanError, _digest, _json, _sync, path_state, read_plan, read_rendered
 
 
 class ConfigInstallError(PlanError):
@@ -60,27 +51,13 @@ def _write_new(path: Path, content: bytes, mode: int = 0o600) -> None:
 
 
 def _save(directory: Path, journal: dict) -> None:
-    if journal["schema"] != 2:
-        raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
-    payload = {key: value for key, value in journal.items() if not key.startswith("_")}
-    if "_persist" in journal:
-        journal["_persist"](payload)
-        return
-    data = {"journal": payload, "sha256": _digest(_json(payload))}
-    fd, name = tempfile.mkstemp(prefix=".journal-", dir=directory)
-    temporary = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(_json(data))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, directory / "journal.json")
-        _sync(directory)
-    finally:
-        temporary.unlink(missing_ok=True)
+    """Persist only through the held current-update record, never an old journal."""
+    if journal["schema"] != 2 or "_persist" not in journal:
+        raise ConfigInstallError("historical configuration journals are read-only")
+    journal["_persist"]({key: value for key, value in journal.items() if not key.startswith("_")})
 
 
-def _blob(directory: Path, digest: str, plan: ConfigPlan | None = None) -> bytes:
+def _blob(directory: Path, digest: str, plan: RenderedConfiguration | None = None) -> bytes:
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ConfigInstallError("invalid configuration backup digest")
     path = directory / "blobs" / digest
@@ -180,7 +157,7 @@ def change_effect(change) -> str:
     return "mode" if _modeless(before) == _modeless(after) else "content"
 
 
-def _backup(path: Path, node: dict, contents: dict, staged: set[str], plan: ConfigPlan) -> None:
+def _backup(path: Path, node: dict, contents: dict, staged: set[str], plan: RenderedConfiguration) -> None:
     if node["kind"] == "file":
         if node["sha256"] in staged:
             plan.blob(node["sha256"])  # A filename alone is not verified recovery content.
@@ -211,7 +188,7 @@ def _prepare_rows(plan):
         after = _desired(change.after)
         unchanged = change.before["node"] == after
         # Access.json and other file outputs may need parents not explicitly
-        # emitted by the compositor. Record each ensure, including its rollback.
+        # emitted by the compositor. Record each ensure without owning its future mutable children.
         parent = target.parent
         while not unchanged and not parent.exists():
             rows.setdefault(str(parent), {
@@ -230,46 +207,6 @@ def _prepare_rows(plan):
         if not unchanged:
             _backup(target, change.before["node"], contents, staged, plan)
     return rows, contents
-
-
-def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
-    """Back up a fresh plan before any target write; caller holds activation lock.
-
-    An existing matching journal is returned for recovery. A different plan or
-    incomplete published directory is refused, never overwritten or resealed.
-    """
-    directory = _location(plan.data_root, activation_id)
-    if directory.exists():
-        existing = read_config_install(plan.data_root, activation_id)
-        if existing.plan_id != plan.plan_id:
-            raise ConfigInstallError("activation already belongs to a different plan")
-        return existing
-    if read_plan(plan.data_root, plan.plan_id) != plan:
-        raise ConfigInstallError("configuration plan changed before preparation")
-    plan.check_fresh()
-    rows, contents = _prepare_rows(plan)
-    journal = {"schema": 2, "directory": str(directory), "plan_id": plan.plan_id,
-               "status": "prepared", "blobs": sorted(contents),
-               "rows": [rows[name] for name in sorted(rows)], "_plan": plan}
-    # No stale input or before snapshot may acquire a prepared journal.
-    plan.check_fresh()
-    _check_rows(journal)
-    directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _sync(directory.parent.parent)
-    _sync(directory.parent.parent.parent)
-    temporary = Path(tempfile.mkdtemp(prefix=".preparing-config-", dir=directory.parent))
-    try:
-        (temporary / "blobs").mkdir(mode=0o700)
-        for digest, content in contents.items():
-            _write_new(temporary / "blobs" / digest, content)
-        _sync(temporary / "blobs")
-        _save(temporary, journal)
-        os.rename(temporary, directory)
-        _sync(directory.parent)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
-    return read_config_install(plan.data_root, activation_id)
 
 
 def _identity(path: Path) -> list[int]:
@@ -301,7 +238,7 @@ def _remaining(actual: dict, expected: dict) -> bool:
 def _workspace(row: dict) -> Path | None:
     work = row["work"]
     path = Path(work["path"])
-    if (work.get("cleaning") and row["status"] in ("applied", "reverted")
+    if (work.get("cleaning") and row["status"] == "applied"
             and path_state(path)["node"]["kind"] == "absent"):
         return None  # deletion completed before its final journal update
     if (path.parent != Path(row["target"]).parent or path.is_symlink()
@@ -324,16 +261,14 @@ def _check_rows(journal: dict) -> None:
             valid = path_state(Path(row["target"])) == row["before"]
         elif status == "applied":
             valid = _ensured(row) if row["ensure"] else _matches(row, row["after"])
-        elif status == "reverted":
-            valid = _ensured(row) if row.get("retained") else _matches(row, row["before"]["node"])
-        elif status == "removing_directory":
-            valid = _ensured(row) or _matches(row, {"kind": "absent"})
-        else:
+        elif status == "installing":
             workspace = _workspace(row)
             work = row["work"]
             valid = (_matches(row, work["original"]) or _matches(row, work["desired"])
                      or (_matches(row, {"kind": "absent"})
                          and path_state(workspace / "previous")["node"] == work["original"]))
+        else:
+            raise ConfigInstallError("unsupported publication progress")
         if not valid:
             raise ConfigInstallError(f"foreign configuration change at {row['target']}")
         if "work" in row:
@@ -365,10 +300,10 @@ def _replace(source: Path, target: Path) -> None:
         _sync(target.parent)
 
 
-def _begin(directory: Path, journal: dict, row: dict, *, rollback: bool) -> None:
+def _begin(directory: Path, journal: dict, row: dict) -> None:
     target = Path(row["target"])
-    original = row["after"] if rollback else row["before"]["node"]
-    desired = row["before"]["node"] if rollback else row["after"]
+    original = row["before"]["node"]
+    desired = row["after"]
     if not _matches(row, original):
         raise ConfigInstallError(f"foreign configuration change at {target}")
     workspace = Path(tempfile.mkdtemp(prefix=f".claudlobby-config-{directory.parent.name}-",
@@ -379,9 +314,9 @@ def _begin(directory: Path, journal: dict, row: dict, *, rollback: bool) -> None
     _sync(workspace.parent)
     row["work"] = {"path": str(workspace), "identity": _identity(workspace),
                    "original": original, "desired": desired}
-    if row["ensure"] and not rollback:
+    if row["ensure"]:
         row["identity"] = _identity(workspace / "next")
-    row["status"] = "reverting" if rollback else "installing"
+    row["status"] = "installing"
     _save(directory, journal)  # intent durable BEFORE any live rename
 
 
@@ -411,7 +346,7 @@ def _finish(directory: Path, journal: dict, row: dict) -> None:
     # the interrupted process could fsync its directory entries.
     _sync(target.parent)
     _sync(workspace)
-    row["status"] = "reverted" if row["status"] == "reverting" else "applied"
+    row["status"] = "applied"
     _save(directory, journal)
     _cleanup(directory, journal, row)
 
@@ -437,18 +372,6 @@ def _cleanup(directory: Path, journal: dict, row: dict) -> None:
     _save(directory, journal)
 
 
-def apply_config(data_root: Path, activation_id: str) -> ConfigInstall:
-    """Apply/resume a prepared config under the caller's host activation lock."""
-    directory = _location(data_root, activation_id)
-    journal = _load(directory)
-    if journal["schema"] != 2:
-        raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
-    if journal["status"] in ("rolling_back", "rolled_back"):
-        raise ConfigInstallError("configuration rollback has begun; cannot resume apply")
-    _apply(directory, journal)
-    return _result(directory, journal)
-
-
 def _apply(directory, journal):
     _check_rows(journal)
     journal["status"] = "applying"
@@ -459,7 +382,7 @@ def _apply(directory, journal):
                 row["status"] = "applied"
                 _save(directory, journal)
             else:
-                _begin(directory, journal, row, rollback=False)
+                _begin(directory, journal, row)
         if row["status"] == "installing":
             _finish(directory, journal, row)
         else:
@@ -560,55 +483,3 @@ def apply_publication(plan: RenderedConfiguration, store) -> str:
         raise ConfigInstallError("configuration publication cannot resume from this state")
     _apply(directory, journal)
     return journal["status"]
-
-
-def rollback_config(data_root: Path, activation_id: str) -> ConfigInstall:
-    """Restore config in reverse order; preserve children of ensured directories.
-
-    A started per-target swap is completed before undoing it. Pending changes
-    are never applied. New mutable children keep their ensured directory alive
-    and are reported to the coordinator; they are never recursively removed.
-    """
-    directory = _location(data_root, activation_id)
-    journal = _load(directory)
-    if journal["schema"] != 2:
-        raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
-    _check_rows(journal)
-    journal["status"] = "rolling_back"
-    _save(directory, journal)
-    for row in reversed(journal["rows"]):
-        if row["status"] == "installing":
-            _finish(directory, journal, row)
-        if row["status"] == "pending":
-            row["status"] = "reverted"
-            _save(directory, journal)
-        elif row["status"] == "applied":
-            _cleanup(directory, journal, row)
-            if row["before"]["node"] == row["after"]:
-                row["status"] = "reverted"
-                _save(directory, journal)
-            elif row["ensure"]:
-                row["status"] = "removing_directory"
-                _save(directory, journal)
-            else:
-                _begin(directory, journal, row, rollback=True)
-        if row["status"] == "removing_directory":
-            target = Path(row["target"])
-            if target.exists():
-                if not _ensured(row):
-                    raise ConfigInstallError(f"foreign configuration directory at {target}")
-                if any(target.iterdir()):
-                    row["retained"] = True
-                else:
-                    target.rmdir()
-            _sync(target.parent)
-            row["status"] = "reverted"
-            _save(directory, journal)
-        if row["status"] == "reverting":
-            _finish(directory, journal, row)
-        elif row["status"] == "reverted":
-            _cleanup(directory, journal, row)
-    _check_rows(journal)
-    journal["status"] = "rolled_back"
-    _save(directory, journal)
-    return _result(directory, journal)

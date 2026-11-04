@@ -92,6 +92,65 @@ def _head(installation):
         raise UpdateError(str(exc)) from exc
 
 
+def _fetch_prepared_target(installation, target):
+    """Resolve only the preparation's trusted source, before freezing a new update."""
+    before = _head(installation)
+    path = _plain(installation.directory / "preparation.json")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError()
+            content = stream.read(65537)
+        receipt = json.loads(content) if len(content) <= 65536 else None
+        if (not isinstance(receipt, dict) or set(receipt) != {
+                "schema", "purpose", "installation", "data_root", "remote", "ref",
+                "interpreter", "interpreter_sha256", "revision", "lock_sha256",
+                "environment_owned", "complete"}
+                or type(receipt["schema"]) is not int or receipt["schema"] != 1
+                or receipt["purpose"] != "installation-preparation-only"
+                or receipt["installation"] != str(installation.directory)
+                or receipt["data_root"] != str(installation.data_root)
+                or receipt["complete"] is not True or receipt["environment_owned"] is not True
+                or any(not isinstance(receipt[key], str) for key in (
+                    "remote", "ref", "interpreter", "interpreter_sha256", "revision", "lock_sha256"))
+                or not _COMMIT.fullmatch(receipt["revision"])
+                or not all(_SHA.fullmatch(receipt[key]) for key in ("interpreter_sha256", "lock_sha256"))):
+            raise ValueError()
+        interpreter = _plain(Path(receipt["interpreter"]))
+        if interpreter.is_relative_to(installation.directory) or interpreter.is_relative_to(installation.data_root):
+            raise ValueError()
+        remote, ref = receipt["remote"], receipt["ref"]
+        if (not remote or not remote.isprintable() or remote != remote.strip() or remote.startswith("-")
+                or not ref or not ref.isprintable() or ref.startswith("-")
+                or any(char.isspace() for char in ref) or any(char in ref for char in ":*")):
+            raise ValueError()
+        if Path(remote).is_absolute():
+            _plain(Path(remote))
+        elif not (re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s]+", remote)
+                  or re.fullmatch(r"(?:[^@/:\s]+@)?[^/:\s]+:[^\s]+", remote)):
+            raise UpdateError("prepared remote must be an explicit URL or absolute path, not a remote alias; inspect host setup inputs")
+        git_dir = installation.source / ".git"
+        if git_dir.is_symlink() or not git_dir.is_dir():
+            raise ValueError()
+    except (OSError, ValueError, TypeError) as exc:
+        if isinstance(exc, UpdateError):
+            raise
+        raise UpdateError("completed preparation receipt is unavailable, redirected or differs from this installation") from exc
+    # Bootstrap provenance stays the initial revision after later updates.
+    if (_git(installation, "merge-base", "--is-ancestor", receipt["revision"], before, check=False).returncode
+            or _digest(_lock_bytes(installation, receipt["revision"], "requirements-runtime.lock")) != receipt["lock_sha256"]):
+        raise UpdateError("prepared source history or original dependency lock differs")
+    _git(installation, "fetch", "--no-tags", "--no-recurse-submodules", "--", remote, target or ref)
+    resolved = _git(installation, "rev-parse", "--verify", "FETCH_HEAD^{commit}").stdout.decode().strip()
+    if not _COMMIT.fullmatch(resolved) or (target is not None and resolved != target):
+        raise UpdateError("trusted remote did not resolve the exact full update commit")
+    if _head(installation) != before:
+        raise UpdateError("managed checkout changed while fetching; no update was prepared")
+    return resolved
+
+
 def _lock_bytes(installation, revision, path):
     content = _git(installation, "show", f"{revision}:{path}").stdout
     validate_dependency_lock(content)
@@ -1012,7 +1071,7 @@ def _require_expected_request(record, expected_request_id):
         raise UpdateError(f"original update request {expected_request_id} is no longer current")
 
 
-def _prepare_update_locked(store, *, target=None, initialization=None, prepare_only=False, expected_request_id=None):
+def _prepare_update_locked(store, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False):
     """Use the held update lock for canonical preparation; never dispatch native work."""
     store._assert_locked()
     installation = store.installation
@@ -1048,6 +1107,8 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
         finally:
             os.close(runtime)
         if not pending:
+            if from_prepared_remote:
+                target = _fetch_prepared_target(installation, target)
             if target is None:
                 return record
             if record is not None:
@@ -1066,12 +1127,13 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
     return record
 
 
-def _apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None):
+def _apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False):
     """The single operator route; always continue the original frozen operation."""
     dispatch = None
     with UpdateStore(installation) as store:
         record = _prepare_update_locked(store, target=target, initialization=initialization,
-                                         prepare_only=prepare_only, expected_request_id=expected_request_id)
+                                         prepare_only=prepare_only, expected_request_id=expected_request_id,
+                                         from_prepared_remote=from_prepared_remote)
         if record is None or (target is None and record["phase"] == "done" and not record.get("health_errors")):
             return {"update": record, "dispatch": "nothing_pending"}
         if prepare_only:
@@ -1095,13 +1157,19 @@ def _apply_or_continue(installation, *, target=None, initialization=None, prepar
 
 
 
-def apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None):
+def apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False):
     """Prepare/dispatch once, or attach read-only to the active original job."""
     if type(prepare_only) is not bool:
         raise UpdateError("prepare-only must be an explicit boolean")
+    if type(from_prepared_remote) is not bool:
+        raise UpdateError("prepared-remote resolution must be an explicit boolean")
+    if from_prepared_remote and (initialization is not None or prepare_only
+            or target is not None and (not isinstance(target, str) or not _COMMIT.fullmatch(target))):
+        raise UpdateError("remote update apply takes only an optional full Git commit")
     try:
         return _apply_or_continue(installation, target=target, initialization=initialization,
-                                  prepare_only=prepare_only, expected_request_id=expected_request_id)
+                                  prepare_only=prepare_only, expected_request_id=expected_request_id,
+                                  from_prepared_remote=from_prepared_remote)
     except UpdateBusyError:
         if prepare_only:
             raise UpdateBusyError("another update is active; inspect its original operation") from None
@@ -1177,11 +1245,12 @@ def main(argv=None):
     else:
         if args.fleet or args.seed:
             raise UpdateError("host update cannot select a fleet")
-        if args.action == "apply" and (args.target is None or not _COMMIT.fullmatch(args.target)):
-            raise UpdateError("apply requires one frozen full Git commit")
+        if args.action == "apply" and args.target is not None and not _COMMIT.fullmatch(args.target):
+            raise UpdateError("apply accepts only an optional full Git commit")
         if args.action == "continue" and args.target is not None:
             raise UpdateError("continue uses the existing frozen target")
-        result = apply_or_continue(installation, target=args.target)
+        result = apply_or_continue(installation, target=args.target,
+                                   from_prepared_remote=args.action == "apply")
     print(json.dumps(result, sort_keys=True))
     return 0
 

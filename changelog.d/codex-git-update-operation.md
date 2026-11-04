@@ -41,3 +41,11 @@ activation and migration records remain read-only diagnostic evidence. Bot move
 and removal explicitly refuse without effects until the common updater supports
 roster changes; they cannot invoke the retired coordinator. Human task feedback
 also refuses admitted native maintenance children.
+
+### Changed — fetch updates from the prepared Git source
+
+`host update apply` fetches the installation’s configured trusted ref, or an
+explicit full commit, before freezing a new operation. A pending operation keeps
+its original target and request without another fetch. Remove unused sealed
+release/configuration writers and their rollback path; the shared Git publication
+owner retains interrupted-write recovery. Old records remain readable.

@@ -18,7 +18,7 @@ from claudlobby.releases import ReleaseError
 from claudlobby import request_receipts as rr
 from claudlobby.task_state import TASK_EMITTER
 from tests.test_request_receipts import receipt_case
-from tests.test_releases import installed, r
+from tests.test_releases import historical_release, installed, r
 from tests.test_task_audit import _assignment, _event, _insert, _task
 
 
@@ -45,7 +45,7 @@ def releases(installed, request):
         for source in sql_dir.glob("*.sql"):
             if int(source.name[:4]) <= version:
                 shutil.copy2(source, selected / source.name)
-    return root, r.seal_release(root, inputs, paths), r.seal_release(root, target_inputs, paths)
+    return root, historical_release(root, inputs, paths), historical_release(root, target_inputs, paths)
 
 
 def _database(root, version=1):

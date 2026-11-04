@@ -1181,3 +1181,170 @@ def test_initial_render_uses_original_manifests_and_candidate_resources_with_fin
         assert all(path.package.runtime_native == installation.native for path in paths)
         assert all(path.package.runtime_library == installation.source / "library" for path in paths)
         assert store.load()["request_id"] == record["request_id"]
+
+
+def _prepared_update_remote(update, tmp_path):
+    """A new commit exists only in an explicit local Git remote, never fetched yet."""
+    from claudlobby.git_update import _digest
+    installation, before, _, _ = update
+    remote = tmp_path / "trusted-remote"
+    _run(["git", "clone", "--quiet", "--no-hardlinks", installation.source, remote], tmp_path)
+    _run(["git", "-C", remote, "checkout", "--quiet", "-b", "updates", update[2]], tmp_path)
+    (remote / "templates/day-two.txt").write_text("new upstream source\n")
+    _run(["git", "-C", remote, "add", "."], tmp_path)
+    _run(["git", "-C", remote, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "-m", "Day-two update"], tmp_path)
+    target = _run(["git", "-C", remote, "rev-parse", "HEAD"], tmp_path).strip()
+    interpreter = Path(sys.executable).resolve()
+    receipt = {"schema": 1, "purpose": "installation-preparation-only",
+        "installation": str(installation.directory), "data_root": str(installation.data_root),
+        "remote": str(remote), "ref": "refs/heads/updates", "interpreter": str(interpreter),
+        "interpreter_sha256": _digest(interpreter.read_bytes()), "revision": before,
+        "lock_sha256": _digest(LOCK), "environment_owned": True, "complete": True}
+    (installation.directory / "preparation.json").write_text(json.dumps(receipt))
+    install_launcher(installation, interpreter=interpreter)
+    return installation, before, target, receipt
+
+
+def _stop_after_public_target(monkeypatch):
+    """Substitute authorization/candidate boundaries, retaining real Git/UpdateStore."""
+    from claudlobby import git_update as updater
+    calls = []
+    def application(store, stage, **kwargs):
+        calls.append(stage)
+        assert stage == "authorize"
+        return {"directory": str(store.root / "native"), "interpreter": str(Path(sys.executable).resolve())}
+    monkeypatch.setattr(updater, "_application_stage", application)
+    def render(store, **kwargs):
+        raise UpdateError("target frozen before candidate effects")
+    monkeypatch.setattr(updater, "prepare_candidate_render", render)
+    return calls
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("after_update", [False, True])
+def test_public_apply_fetches_missing_commit_only_from_prepared_source(
+        update, tmp_path, monkeypatch, explicit, after_update):
+    from claudlobby import git_update as updater
+    installation, before, target, receipt = _prepared_update_remote(update, tmp_path)
+    if after_update:
+        _run(["git", "-C", installation.source, "checkout", "--quiet", update[2]], tmp_path)
+        before = update[2]  # The completed bootstrap receipt intentionally keeps its initial revision.
+    assert updater._git(installation, "cat-file", "-e", target, check=False).returncode != 0
+    calls = _stop_after_public_target(monkeypatch)
+    actual_git, fetches = updater._git, []
+    def git(current, *args, **kwargs):
+        if args[0] == "fetch":
+            assert calls == ["authorize"] and read_update(installation) is None
+            fetches.append(args)
+        return actual_git(current, *args, **kwargs)
+    monkeypatch.setattr(updater, "_git", git)
+    # Ambient Git selectors cannot redirect either preflight or fetch.
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "foreign.git"))
+    with pytest.raises(UpdateError, match="target frozen before candidate"):
+        updater.apply_or_continue(installation, target=target if explicit else None, from_prepared_remote=True)
+    record = read_update(installation)
+    assert record["before"] == before and record["target"] == target
+    assert record["phase"] == "prepare" and record["maintenance"] is False
+    assert fetches == [("fetch", "--no-tags", "--no-recurse-submodules", "--",
+                        receipt["remote"], target if explicit else receipt["ref"])]
+    assert installation.preflight() == before
+    assert not (installation.source / "templates/day-two.txt").exists()
+
+
+def test_public_apply_pending_uses_original_request_without_receipt_or_refetch(update, tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, receipt = _prepared_update_remote(update, tmp_path)
+    target = update[2]
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+    # A moved/unavailable preparation source cannot alter an already frozen operation.
+    (installation.directory / "preparation.json").unlink()
+    calls = _stop_after_public_target(monkeypatch)
+    monkeypatch.setattr(updater, "_fetch_prepared_target", lambda *_: pytest.fail("pending operation refetched"))
+    with pytest.raises(UpdateError, match="target frozen before candidate"):
+        updater.apply_or_continue(installation, from_prepared_remote=True,
+                                  expected_request_id=record["request_id"])
+    assert read_update(installation) == record and calls == ["authorize"]
+    with pytest.raises(UpdateError, match="existing frozen target"):
+        updater.apply_or_continue(installation, target="f" * 40, from_prepared_remote=True)
+    assert read_update(installation) == record
+
+
+@pytest.mark.parametrize("defect", ["root", "alias", "incomplete", "redirected", "dirty"])
+def test_public_fetch_refuses_changed_preparation_or_dirty_source_before_network(
+        update, tmp_path, monkeypatch, defect):
+    from claudlobby import git_update as updater
+    installation, before, target, receipt = _prepared_update_remote(update, tmp_path)
+    path = installation.directory / "preparation.json"
+    if defect == "root":
+        receipt["data_root"] = str(tmp_path / "another-root")
+    elif defect == "alias":
+        receipt["remote"] = "origin"
+    elif defect == "incomplete":
+        receipt["complete"] = False
+    elif defect == "redirected":
+        path.rename(tmp_path / "foreign-preparation.json")
+        path.symlink_to(tmp_path / "foreign-preparation.json")
+    elif defect == "dirty":
+        (installation.source / "untracked.txt").write_text("keep operator work\n")
+    if defect != "redirected":
+        path.write_text(json.dumps(receipt))
+    _stop_after_public_target(monkeypatch)
+    actual_git = updater._git
+    def git(current, *args, **kwargs):
+        assert args[0] != "fetch", "refused inputs reached fetch"
+        return actual_git(current, *args, **kwargs)
+    monkeypatch.setattr(updater, "_git", git)
+    with pytest.raises(UpdateError):
+        updater.apply_or_continue(installation, target=target, from_prepared_remote=True)
+    assert read_update(installation) is None
+    if defect == "dirty":
+        assert (installation.source / "untracked.txt").read_text() == "keep operator work\n"
+    else:
+        assert installation.preflight() == before
+
+
+def test_public_fetch_operator_refusal_precedes_remote_resolution(update, tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = _prepared_update_remote(update, tmp_path)
+    def refused(*_args, **_kwargs):
+        raise UpdateError("operator ancestry refused")
+    monkeypatch.setattr(updater, "_application_stage", refused)
+    monkeypatch.setattr(updater, "_fetch_prepared_target", lambda *_: pytest.fail("fetch preceded authority"))
+    with pytest.raises(UpdateError, match="operator ancestry"):
+        updater.apply_or_continue(installation, target=target, from_prepared_remote=True)
+    assert read_update(installation) is None
+
+
+@pytest.mark.parametrize("arguments, target, fetch", [
+    (["apply"], None, True), (["apply", "a" * 40], "a" * 40, True),
+    (["continue"], None, False),
+])
+def test_public_update_parser_opts_only_apply_into_prepared_remote(update, monkeypatch, capsys,
+                                                                  arguments, target, fetch):
+    from claudlobby import git_update as updater
+    installation = update[0]
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    monkeypatch.setattr(updater, "__file__", str(installation.bin / "update.py"))
+    seen = []
+    def apply(current, **kwargs):
+        seen.append((current.directory, current.data_root, kwargs))
+        return {"update": None}
+    monkeypatch.setattr(updater, "apply_or_continue", apply)
+    assert updater.main(["--root", str(installation.data_root), "host", "update", *arguments]) == 0
+    assert seen == [(installation.directory, installation.data_root,
+                     {"target": target, "from_prepared_remote": fetch})]
+    assert json.loads(capsys.readouterr().out) == {"update": None}
+
+
+def test_public_remote_fetch_failure_does_not_prepare_or_cutover(update, tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, _, receipt = _prepared_update_remote(update, tmp_path)
+    receipt["remote"] = str(tmp_path / "unavailable-remote")
+    (installation.directory / "preparation.json").write_text(json.dumps(receipt))
+    calls = _stop_after_public_target(monkeypatch)
+    with pytest.raises(UpdateError, match="Git observation or cutover refused"):
+        updater.apply_or_continue(installation, from_prepared_remote=True)
+    assert calls == ["authorize"] and read_update(installation) is None
+    assert installation.preflight() == before

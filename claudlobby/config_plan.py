@@ -1,9 +1,7 @@
-"""Content-addressed configuration proposals; never an activation writer.
+"""Frozen Git configuration and strict read-only historical plan evidence.
 
-Renderers supply exact destinations and bytes. This store binds them to the
-release, source inputs and current generated files, so reviewing a proposal
-cannot change a running bot and applying a stale proposal can be refused.
-Only the coordinated host activation owner may consume changes as writes.
+Renderers retain exact inputs, destinations and bytes for the current updater.
+Historical plans can be inspected but never created or admitted for deployment.
 """
 
 from __future__ import annotations
@@ -83,27 +81,8 @@ class ConfigChange:
     after: dict
 
 
-@dataclass(frozen=True)
-class ConfigPlan:
-    directory: Path
-    data_root: Path
-    release_id: str
-    release_seal: str
-    fleets: tuple[str, ...]
-    inputs: dict[str, dict]
-    changes: tuple[ConfigChange, ...]
-    effects: dict
-
-    def payload(self) -> dict:
-        return {"schema": CONFIG_PLAN_VERSION, "data_root": str(self.data_root),
-                "release_id": self.release_id, "release_seal": self.release_seal,
-                "fleets": list(self.fleets), "inputs": self.inputs,
-                "changes": [asdict(change) for change in self.changes],
-                "effects": self.effects}
-
-    @property
-    def plan_id(self) -> str:
-        return "p-" + _digest(_json(self.payload()))
+class _FrozenConfiguration:
+    """Verified retained bytes and inputs, independent of deployment identity."""
 
     def content(self, change: ConfigChange) -> bytes:
         if change.after.get("kind") != "file":
@@ -144,15 +123,6 @@ class ConfigPlan:
             raise PlanError("frozen source differs from its reviewed input")
         return path, self.blob(digest)
 
-    def check_fresh(self) -> None:
-        """Called under the activation lock, before the first live change."""
-        from .releases import read_release
-
-        release = read_release(self.data_root, self.release_id)
-        if release.seal_sha256 != self.release_seal:
-            raise PlanError("candidate release changed; create a new configuration plan")
-        self.check_inputs()
-
     def check_inputs(self) -> None:
         """Recheck authored inputs and generated destinations without code identity.
 
@@ -168,7 +138,32 @@ class ConfigPlan:
 
 
 @dataclass(frozen=True)
-class RenderedConfiguration:
+class ConfigPlan(_FrozenConfiguration):
+    """Read-only archived sealed-plan evidence; never an executable proposal."""
+
+    directory: Path
+    data_root: Path
+    release_id: str
+    release_seal: str
+    fleets: tuple[str, ...]
+    inputs: dict[str, dict]
+    changes: tuple[ConfigChange, ...]
+    effects: dict
+
+    def payload(self) -> dict:
+        return {"schema": CONFIG_PLAN_VERSION, "data_root": str(self.data_root),
+                "release_id": self.release_id, "release_seal": self.release_seal,
+                "fleets": list(self.fleets), "inputs": self.inputs,
+                "changes": [asdict(change) for change in self.changes],
+                "effects": self.effects}
+
+    @property
+    def plan_id(self) -> str:
+        return "p-" + _digest(_json(self.payload()))
+
+
+@dataclass(frozen=True)
+class RenderedConfiguration(_FrozenConfiguration):
     """The one pending render, retained only for its current update operation."""
 
     directory: Path
@@ -188,28 +183,21 @@ class RenderedConfiguration:
     def fingerprint(self) -> str:
         return _digest(_json(self.payload()))
 
-    # One implementation of the byte/freshness contract, shared while legacy
-    # callers are converted. No release/activation lookup exists on this path.
-    content = ConfigPlan.content
-    blob = ConfigPlan.blob
-    frozen_input = ConfigPlan.frozen_input
-    check_inputs = ConfigPlan.check_inputs
-    check_fresh = ConfigPlan.check_inputs
+    def check_fresh(self) -> None:
+        """Check this Git operation's inputs and destinations before publication."""
+        self.check_inputs()
 
 
 class ConfigPlanBuilder:
     """Accumulate one reviewed rendering; never write its target paths.
 
     The compositor remains responsible for ownership checks and desired bytes.
-    Inputs are captured before rendering and rechecked on sealing. Directories
+    Inputs are captured before rendering and rechecked on freezing. Directories
     may be replaced only when a renderer explicitly owns their entire content.
     """
 
-    def __init__(self, data_root: Path, release_id: str = "", release_seal: str = "",
-                 fleets: tuple[str, ...] = (), *, effects: dict):
+    def __init__(self, data_root: Path, fleets: tuple[str, ...] = (), *, effects: dict):
         self.root = _absolute(data_root).resolve()
-        self.release_id = release_id
-        self.release_seal = release_seal
         self.fleets = tuple(sorted(fleets))
         self.effects = effects
         self.inputs: dict[str, dict] = {}
@@ -226,8 +214,8 @@ class ConfigPlanBuilder:
     def input_snapshot(self, path: Path) -> tuple[bytes | None, str | None]:
         """Retain and return the exact authored bytes used by staged rendering.
 
-        Its fingerprint remains a freshness gate before activation; its sealed
-        bytes remain authoritative after activation, while authoring continues.
+        Its fingerprint remains a freshness gate before publication; its frozen
+        bytes remain authoritative after publication, while authoring continues.
         """
         self.input(path)
         recorded = self.inputs[str(_absolute(path))]["state"]["node"]
@@ -305,43 +293,6 @@ class ConfigPlanBuilder:
             raise PlanError(f"generated directory is redirected or not a directory: {target}")
         if not target.exists():
             self._add(target, {"kind": "directory", "mode": 0o755})
-
-    def seal(self) -> ConfigPlan:
-        # No proposal may overlap its own store, including via a parent link.
-        store = self.root / "state" / "config-plans"
-        if store.resolve() != store:
-            raise PlanError("configuration plan store is redirected")
-        for change in self.changes.values():
-            destination = Path(change.target).resolve()
-            if destination.is_relative_to(store) or store.is_relative_to(destination):
-                raise PlanError("configuration output overlaps its plan store")
-        for path, recorded in self.inputs.items():
-            if path_state(Path(path), source=recorded["follow_links"]) != recorded["state"]:
-                raise PlanError(f"input changed during rendering: {path}")
-        plan = ConfigPlan(store, self.root, self.release_id, self.release_seal,
-                          self.fleets, self.inputs,
-                          tuple(self.changes[key] for key in sorted(self.changes)),
-                          self.effects)
-        destination = store / plan.plan_id
-        if destination.exists():
-            return read_plan(self.root, plan.plan_id)
-        store.mkdir(mode=0o700, parents=True, exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix=".preparing-", dir=store))
-        try:
-            files = temporary / "files"
-            files.mkdir(mode=0o700)
-            for digest, content in self.contents.items():
-                _write(files / digest, content)
-            _write(temporary / "plan.json", _json(plan.payload()))
-            for directory in (files, temporary):
-                _sync(directory)
-            # The plan ID binds all bytes; never update a published proposal.
-            os.rename(temporary, destination)
-            _sync(store)
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary)
-        return read_plan(self.root, plan.plan_id)
 
     def freeze(self, revision: str) -> RenderedConfiguration:
         """Freeze this operation's render without a permanent plan/release store.

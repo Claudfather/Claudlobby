@@ -8,11 +8,12 @@ import pytest
 
 from claudlobby.__main__ import main
 from claudlobby import resources
-from claudlobby.config_install import prepare_config
 from claudlobby.config_plan import ConfigPlanBuilder
 from tests.test_activation_state import write_activation, write_selection
 from tests.test_cli_loading import _run, PARSE
-from tests.test_releases import installed, r
+from tests.test_config_install import historical_config_install
+from tests.test_config_plan import historical_plan
+from tests.test_releases import historical_release, installed
 from tests.fixtures.current_runtime import current_runtime, tmp_path
 
 
@@ -48,8 +49,9 @@ def test_host_doctor_discloses_macos_reaper_native_limit(current_runtime, monkey
 @pytest.fixture
 def candidate(installed, monkeypatch, tmp_path):
     root, inputs, paths, _, _ = installed
-    release = r.seal_release(root, inputs, paths)
-    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
+    release = historical_release(root, inputs, paths)
+    plan = historical_plan(ConfigPlanBuilder(root, (), effects={}),
+                           release_id=release.release_id, release_seal=release.seal_sha256)
     directory = tmp_path / "private-native-user"
     directory.mkdir()
     monkeypatch.setattr(resources, "selected_cli", lambda: release.cli_path)
@@ -121,9 +123,9 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     assert list(empty.iterdir()) == []
     write_activation(root, "previous", release_id=release.release_id)
     write_selection(root, "previous", release_id=release.release_id)
-    journal = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (),
-                                effects={"owner": "activation-units-v1"}).seal()
-    prepare_config(journal, "units-" + "a" * 64)
+    journal = historical_plan(ConfigPlanBuilder(root, (), effects={"owner": "activation-units-v1"}),
+                              release_id=release.release_id, release_seal=release.seal_sha256)
+    historical_config_install(journal, "units-" + "a" * 64)
     before = snapshot(root)
     argv = ["--root", str(root), "host", "status", "--json"]
     active = call(capsys, argv)

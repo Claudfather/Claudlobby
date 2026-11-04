@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import config_install, context, freshbox, resources
+from claudlobby import context, freshbox, resources
 from claudlobby import releases as release_store
 from claudlobby.commands import releases as commands
 from claudlobby.config_plan import ConfigPlanBuilder
@@ -18,7 +18,9 @@ from claudlobby.plane.migrations import SCHEMA_USER_VERSION, migrate
 from tests.test_activation_state import write_activation, write_selection
 from tests.test_migration_apply import write_migration
 from tests.test_migration_plan import releases, _database, _snapshot
-from tests.test_releases import installed, r
+from tests.test_config_install import historical_config_install
+from tests.test_config_plan import historical_plan
+from tests.test_releases import historical_release, installed
 
 
 def _call(capsys, argv, expected=0):
@@ -72,7 +74,7 @@ def test_json_syntax_and_scope_failures_preserve_legacy_help_and_hide_values(tmp
 
 def test_host_release_diagnosis_works_without_application_dependencies(installed, capsys, monkeypatch):
     root, inputs, paths, _, directory = installed
-    release = r.seal_release(root, inputs, paths)
+    release = historical_release(root, inputs, paths)
     before = _snapshot(root)
     original = builtins.__import__
 
@@ -235,9 +237,10 @@ def test_migration_status_reads_historical_progress_without_execution(releases, 
         migrate(conn)
     for name, owner in (("units-" + "d" * 64, "activation-units-v1"),
                         ("enrollment-" + "e" * 64, "activation-enrollment-v1")):
-        journal_plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (),
-            effects={"owner": owner, "activation_id": "upgrade"}).seal()
-        config_install.prepare_config(journal_plan, name)
+        journal_plan = historical_plan(
+            ConfigPlanBuilder(root, (), effects={"owner": owner, "activation_id": "upgrade"}),
+            release_id=release.release_id, release_seal=release.seal_sha256)
+        historical_config_install(journal_plan, name)
     before = _snapshot(root)
     complete, _ = _call(capsys, status_argv)
     assert complete["data"]["database"]["user_version"] == SCHEMA_USER_VERSION

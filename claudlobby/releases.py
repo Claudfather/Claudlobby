@@ -1,11 +1,7 @@
-"""Stdlib-only release identity and sealing; no install, selection or activation.
+"""Stdlib-only historical release identity and strict read-only seal evidence.
 
-The directory ID describes assembly inputs, known before creating a venv at its
-final path. The seal separately binds exact installed bytes, including absolute
-shebangs; hashing those bytes into their own directory name would be circular.
-Sealing detects later changes, not hostile writes by the same operating user.
-Install without bytecode and run with bytecode writes disabled. Escaping links
-are forbidden, so an interpreter must be copied or linked within the release.
+These records preserve old deployment provenance; they never authorize current
+execution and no release assembly or sealing writer remains.
 """
 
 from __future__ import annotations
@@ -17,7 +13,6 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-import tempfile
 
 
 MANIFEST = "release.json"
@@ -335,56 +330,11 @@ def _verify_inputs(directory: Path, inputs: ReleaseInputs, paths: ReleasePaths) 
     return Compatibility.from_dict(artifact.get("compatibility"))
 
 
-def seal_release(data_root: Path, inputs: ReleaseInputs, paths: ReleasePaths) -> ReleaseManifest:
-    """Verify a final-location install, then publish its seal once, atomically."""
-    directory = release_path(data_root, inputs.release_id)
-    target = directory / MANIFEST
-    if target.exists() or target.is_symlink():
-        raise ReleaseError("release already has a seal; it cannot be resealed")
-    try:
-        compatibility = _verify_inputs(directory, inputs, paths)
-        inventory = inventory_release(directory)
-    except (OSError, RuntimeError, AttributeError, TypeError, ValueError) as exc:
-        if isinstance(exc, ReleaseError):
-            raise
-        raise ReleaseError(f"cannot verify installed release: {exc}") from exc
-    manifest = ReleaseManifest(directory, inputs, paths, compatibility, inventory,
-                               _inventory_digest(inventory))
-    payload = manifest._payload()
-    payload["seal_sha256"] = manifest.seal_sha256
-    fd, name = tempfile.mkstemp(prefix=".release-", dir=directory)
-    published = False
-    try:
-        with os.fdopen(fd, "wb") as output:
-            output.write(_json(payload) + b"\n")
-            output.flush()
-            os.fsync(output.fileno())
-        # Hard-link publication is atomic and refuses a competing existing seal.
-        os.link(name, target)
-        published = True
-        os.unlink(name)
-        if inventory_release(directory) != inventory:
-            raise ReleaseError("runtime changed while sealing")
-        dir_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except BaseException:
-        if published:
-            target.unlink()
-        raise
-    finally:
-        Path(name).unlink(missing_ok=True)
-    return manifest
-
-
 def read_release(data_root: Path, release_id: str, *, verify_files: bool = True) -> ReleaseManifest:
     """Read a sealed release without importing or executing its code.
 
-    Lifecycle boundaries verify all files. Ordinary command admission may read
-    the sealed identity only: hashing an entire venv per call is not a runtime
-    integrity policy. Same-user callers are trusted; activation owns validation.
+    Full evidence inspection verifies files. Metadata-only historical readers
+    may omit runtime hashing; neither mode grants execution authority.
     """
     directory = release_path(data_root, release_id)
     target = directory / MANIFEST

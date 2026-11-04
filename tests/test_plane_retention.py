@@ -25,8 +25,6 @@ from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.retention import prune_metric_samples
 from tests.conftest import constructed_env
 from tests.plane_setup import initialize_plane
-from tests.test_config_plan import proposal  # noqa: F401 — selected release fixture
-from tests.test_releases import installed  # noqa: F401 — dependency of proposal
 from tests.test_runtime_admission import git_current  # noqa: F401 — private Git installation
 
 REPO = Path(__file__).resolve().parent.parent
@@ -197,23 +195,14 @@ def test_cli_prune_dry_run_and_unselected_live_refusal(tmp_path, test_cli):
     assert empty.returncode == 7
 
 
-@pytest.mark.parametrize("runtime", ["sealed", "git"])
-def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposal, test_cli, monkeypatch, runtime, request):
+def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(git_current, test_cli, monkeypatch):
     from claudlobby.command_result import CommandFailure
     from claudlobby.commands.plane_maintenance import prune, spool
     from claudlobby.plane import retention
     from claudlobby.plane.spool import spool_dir
-    from claudlobby.runtime_admission import RuntimeIdentity
-    from tests.test_runtime_admission import _active, _identity
 
-    builder, _, _ = proposal
-    if runtime == "git":
-        installation, _snapshot = request.getfixturevalue("git_current")
-        root = installation.data_root
-    else:
-        plan = builder.seal()
-        _active(plan)
-        root = builder.root
+    installation, _snapshot = git_current
+    root = installation.data_root
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     _sample(root)
@@ -224,9 +213,7 @@ def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposa
     assert body["data"]["dry_run"] is True and _counts(root)[0] == 1
 
     monkeypatch.setenv("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED", "1")
-    if runtime == "sealed":
-        monkeypatch.setattr(RuntimeIdentity, "current", classmethod(lambda cls: _identity(builder)))
-    stale = "r-stale"
+    stale = "historical-identity"
     monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", stale)
     name = "ev_" + "c" * 32 + ".json"
     entry = spool_dir(root) / name
@@ -360,48 +347,58 @@ def test_prune_launcher_is_thin_and_root_flag_precedes_subcommand():
 
 
 def test_host_prune_timer_arms_from_the_host_tier(tmp_path, monkeypatch):
-    """Chunk 3a.1: a host timer starts with a CLOSED env, so the
-    self-gated prune door needs PLANE_PRUNE_ENABLED stamped as an
-    Environment= line — resolved from the host tier cascade, on the
-    plane-prune job only, unarmed by default (the safe default for a
-    DELETE door)."""
-    from claudlobby.composer import compose_host_timers
-    from tests.package_fixtures import source_package
+    """Closed timer environments carry the resolved host flag only to prune.
+
+    Retention ships on: exact 0 disarms its script, and an absent flag leaves
+    that default intact. Explicit enroll:false still suppresses the unit.
+    """
+    import shlex
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
+    from claudlobby.installation import parse_git_unit_argv
     import claudlobby.composer as comp
+    import claudlobby.env_tiers as et
 
     root = tmp_path / "root"
-    (root / "claudlobby").mkdir(parents=True)
-    # a minimal host.jobs with plane-prune + a neighbor
-    (root / "claudlobby" / "system.yaml").write_text(
-        "host:\n  jobs:\n"
-        "    plane-prune:\n      enroll: false\n"
-        "      script: \"$CLAUDLOBBY_ROOT/lib/plane-prune.sh\"\n"
-        "      schedule: \"*-*-* 05:15:00\"\n      type: oneshot\n"
-        "    claude-update:\n"
-        "      script: \"$CLAUDLOBBY_ROOT/lib/update-claude-code.sh\"\n"
-        "      schedule: \"*-*-* 04:00:00\"\n      type: oneshot\n")
-    paths = Paths(root=root, package=source_package())
+    root.mkdir()
+    paths = Paths(root=root, package=git_package(root))
+    # Use shipped job definitions, not an ignored root/claudlobby/system.yaml.
+    canonical = comp.load_host_jobs()
+    jobs = {name: dict(canonical[name]) for name in ('plane-prune', 'claude-update')}
+    assert jobs['plane-prune'].get('enroll', True) is True
+    assert jobs['plane-prune']['script'] == '$CLAUDLOBBY_NATIVE_DIR/plane-prune.sh'
+    monkeypatch.setattr(comp, 'load_host_jobs', lambda: jobs)
+    host_env = tmp_path / 'host.env'
+    def tiers(_paths, bot_name=None, fleet_name=None):
+        assert _paths == paths and bot_name is fleet_name is None
+        return [et.EnvTier('host', host_env, 'present'),
+                et.EnvTier('root', root / '.env', 'absent')]
+    monkeypatch.setattr(et, 'read_tiers', tiers)
 
-    import claudlobby.env_tiers as et
-    # armed: the host tier resolves PLANE_PRUNE_ENABLED=1
-    from claudlobby.env_tiers import Resolution
-    monkeypatch.setattr(et, "read_tiers",
-                        lambda paths, bot_name=None, fleet_name=None: [])
-    monkeypatch.setattr(et, "cascade", lambda tiers: {
-        "PLANE_PRUNE_ENABLED": Resolution(
-            name="PLANE_PRUNE_ENABLED", value="1", tier="host", path=None)})
-    out = compose_host_timers(paths)
-    svc = (out / "claudlobby-plane-prune.service").read_text()
-    assert "Environment=PLANE_PRUNE_ENABLED=1" in svc
-    # the neighbor job never gets it
-    upd = (out / "claudlobby-claude-update.service").read_text()
-    assert "PLANE_PRUNE_ENABLED" not in upd
-    # unarmed: no flag stamped
-    monkeypatch.setattr(et, "cascade", lambda tiers: {})
-    out2 = compose_host_timers(paths)
-    assert "PLANE_PRUNE_ENABLED" not in (
-        out2 / "claudlobby-plane-prune.service").read_text()
+    # Real dotenv/cascade parsing, over private explicit host-tier bytes.
+    host_env.write_text('PLANE_PRUNE_ENABLED=1\n')
+    out = comp.compose_host_timers(paths)
+    svc = (out / 'claudlobby-plane-prune.service').read_text()
+    assert 'Environment=PLANE_PRUNE_ENABLED=1' in svc
+    executable = next(line.partition('=')[2] for line in svc.splitlines() if line.startswith('ExecStart='))
+    entry = parse_git_unit_argv(shlex.split(executable))
+    assert (entry.unit, entry.mode, entry.command) == ('claudlobby-plane-prune', 'oneshot',
+        (str(paths.package.runtime_native / 'plane-prune.sh'),))
+    assert 'PLANE_PRUNE_ENABLED' not in (out / 'claudlobby-claude-update.service').read_text()
+
+    host_env.write_text('PLANE_PRUNE_ENABLED=0\n')
+    out = comp.compose_host_timers(paths)
+    assert 'Environment=PLANE_PRUNE_ENABLED=0' in (out / 'claudlobby-plane-prune.service').read_text()
+    assert 'PLANE_PRUNE_ENABLED' not in (out / 'claudlobby-claude-update.service').read_text()
+
+    host_env.write_text('')
+    out = comp.compose_host_timers(paths)
+    assert 'PLANE_PRUNE_ENABLED' not in (out / 'claudlobby-plane-prune.service').read_text()
+    jobs['plane-prune']['enroll'] = False
+    comp.compose_host_timers(paths)
+    assert not any((out / ('claudlobby-plane-prune.' + suffix)).exists()
+                   for suffix in ('service', 'timer', 'plist'))
+    assert (out / 'claudlobby-claude-update.service').is_file()
 
 
 # --- #1751: the metric_sample prune watermark ------------------------------
