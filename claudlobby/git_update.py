@@ -94,6 +94,12 @@ def _head(installation):
 
 def _lock_bytes(installation, revision, path):
     content = _git(installation, "show", f"{revision}:{path}").stdout
+    validate_dependency_lock(content)
+    return content
+
+
+def validate_dependency_lock(content: bytes) -> None:
+    """The pinned dependency grammar shared by setup and updates."""
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -112,7 +118,75 @@ def _lock_bytes(installation, revision, path):
         count += 1
     if not count:
         raise UpdateError("dependency lock is empty")
-    return content
+
+
+def run_dependency_command(arguments) -> bytes:
+    """Execute the fixed dependency tools without ambient pip/Python selectors."""
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("PIP_", "PYTHON"))}
+    environment["PIP_CONFIG_FILE"] = os.devnull
+    try:
+        result = subprocess.run([str(arg) for arg in arguments], env=environment,
+                                capture_output=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UpdateError("dependency preparation or rebuild did not complete") from exc
+    if result.returncode:
+        raise UpdateError("dependency preparation or rebuild refused; current progress retained")
+    return result.stdout
+
+
+def install_locked_dependencies(python: Path, lock: Path, wheels: Path, *, runner=None) -> None:
+    """One offline dependency installation policy; never install Claudlobby itself."""
+    run = run_dependency_command if runner is None else runner
+    run([python, "-I", "-m", "pip", "--isolated", "install",
+         "--disable-pip-version-check", "--no-index", "--find-links", wheels,
+         "--only-binary=:all:", "--require-hashes", "--no-deps", "-r", lock])
+    run([python, "-I", "-m", "pip", "--isolated", "check"])
+
+
+def verify_locked_dependencies(python: Path, lock: Path, wheels: Path | None = None, *, runner=None) -> None:
+    """Verify the final environment offline without resolving markers ourselves or installing."""
+    run = run_dependency_command if runner is None else runner
+    command = [python, "-I", "-B", "-m", "pip", "--isolated", "install", "--dry-run",
+               "--disable-pip-version-check", "--no-index", "--require-hashes", "--no-deps",
+               "--only-binary=:all:", "--no-cache-dir", "--quiet", "--report", "-", "-r", lock]
+    if wheels is not None:
+        command.extend(["--find-links", wheels])
+    try:
+        raw = run(command)
+    except UpdateError as exc:
+        raise UpdateError("offline dependency verification refused; pip dry-run/report support and installed locked dependencies are required") from exc
+    try:
+        report = json.loads(raw)
+        if (not isinstance(report, dict) or report.get("version") != "1"
+                or not isinstance(report.get("install"), list)):
+            raise ValueError()
+    except (ValueError, TypeError) as exc:
+        raise UpdateError("offline dependency verification requires a supported pip installation report") from exc
+    if report["install"]:
+        raise UpdateError("installed dependencies differ from the frozen lock; explicit repair is required")
+    run([python, "-I", "-B", "-m", "pip", "--isolated", "check"])
+
+
+def _initialization_scope(value):
+    """One explicit first-install scope, readable without the mutable application."""
+    if (type(value) is not dict or set(value) != {"directory", "manifests"}
+            or not isinstance(value["directory"], str) or type(value["manifests"]) is not list
+            or not value["manifests"] or any(not isinstance(path, str) for path in value["manifests"])):
+        raise UpdateError("initialization requires one native directory and exact authored manifests")
+    paths = [value["directory"], *value["manifests"]]
+    if any(not Path(path).is_absolute() or ".." in Path(path).parts or str(Path(path)) != path
+           or any(ord(char) < 32 for char in path) for path in paths):
+        raise UpdateError("initialization paths must be exact absolute paths")
+    if (len(set(value["manifests"])) != len(value["manifests"])
+            or any(Path(path).name != "fleet.yaml" for path in value["manifests"])):
+        raise UpdateError("initialization manifest paths are duplicated or not fleet.yaml")
+    return {"directory": value["directory"], "manifests": sorted(value["manifests"])}
+
+
+def _check_initialization_intent(record, proposed):
+    if proposed is not None and record.get("initialization_scope") != proposed:
+        raise UpdateError("initialization differs from the original frozen operation")
 
 
 def _validate(installation, record):
@@ -134,6 +208,12 @@ def _validate(installation, record):
         if type(record.get("finalized", True)) is not bool:
             raise ValueError()
         uuid.UUID(record["request_id"])
+        initialization = record.get("initialization_scope")
+        if initialization is not None and _initialization_scope(initialization) != initialization:
+            raise ValueError()
+        if ("initialize" in record and (type(record["initialize"]) is not bool
+                or record["initialize"] != (initialization is not None))):
+            raise ValueError()
         dispatch = record.get("job_dispatch")
         if dispatch is not None and (type(dispatch) is not dict or set(dispatch) != {"state", "attempt"}
                 or dispatch["state"] not in {"pending", "entered", "finished"}
@@ -227,6 +307,9 @@ class UpdateStore:
         if current is not None and current["phase"] == "done" and record["phase"] == "prepare" and current.get("health_errors"):
             raise UpdateError("prior consumer health/unknown-effect evidence must be reconciled")
         if current is not None and not (current["phase"] == "done" and record["phase"] == "prepare"):
+            if (current.get("initialization_scope") != record.get("initialization_scope")
+                    or "initialize" in current and current["initialize"] != record.get("initialize")):
+                raise UpdateError("frozen initialization intent changed")
             for key in ("request_id", "before", "target"):
                 if current[key] != record[key]:
                     raise UpdateError("frozen update intent changed")
@@ -247,10 +330,15 @@ class UpdateStore:
         self.prepare_target(target_commit, request_id=request_id, lock_path=lock_path)
         return self.finalize_prepare(config_fingerprint=config_fingerprint, scope=scope)
 
-    def prepare_target(self, target_commit, *, request_id, lock_path="requirements-runtime.lock"):
+    def prepare_target(self, target_commit, *, request_id, lock_path="requirements-runtime.lock",
+                       initialization_scope=None):
         """Freeze Git/dependency inputs before candidate environment and rendering."""
         self._assert_locked()
         current = self.load()
+        initialization_scope = (_initialization_scope(initialization_scope)
+                                if initialization_scope is not None else None)
+        if current is not None and initialization_scope is not None:
+            _check_initialization_intent(current, initialization_scope)
         if current is not None and current["phase"] == "done" and current.get("health_errors"):
             raise UpdateError("previous committed update retains consumer health/unknown-effect evidence; reconcile it before another target")
         if current is not None and current["phase"] != "done":
@@ -277,6 +365,8 @@ class UpdateStore:
                   "git_complete": False,
                   "dependencies": {"path": lock_path, "before": _digest(old_lock), "target": _digest(new_lock),
                                    "prepared": old_lock == new_lock, "receipt_sha256": None}}
+        if initialization_scope is not None:
+            record["initialization_scope"] = initialization_scope
         _validate(self.installation, record)
         self.work.mkdir(mode=0o700, parents=True, exist_ok=True)
         _write(self.work / "dependencies-before.lock", old_lock)
@@ -320,18 +410,7 @@ class UpdateStore:
                 raise UpdateError("frozen dependency input changed")
 
     def _dependency_run(self, arguments):
-        # Neither ambient pip configuration nor Python import paths select inputs.
-        environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(("PIP_", "PYTHON"))}
-        environment["PIP_CONFIG_FILE"] = os.devnull
-        try:
-            result = subprocess.run([str(arg) for arg in arguments], env=environment,
-                                    capture_output=True, timeout=300)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise UpdateError("dependency preparation or rebuild did not complete") from exc
-        if result.returncode:
-            raise UpdateError("dependency preparation or rebuild refused; current progress retained")
-        return result.stdout
+        return run_dependency_command(arguments)
 
     def _dependency_inventory(self, directory):
         directory = _plain(directory)
@@ -418,11 +497,8 @@ class UpdateStore:
         return self.verify_dependencies()
 
     def _install_dependencies(self, python, name):
-        self._dependency_run([python, "-I", "-m", "pip", "--isolated", "install",
-            "--disable-pip-version-check", "--no-index", "--find-links", self.work / f"wheels-{name}",
-            "--only-binary=:all:", "--require-hashes", "--no-deps", "-r",
-            self.work / f"dependencies-{name}.lock"])
-        self._dependency_run([python, "-I", "-m", "pip", "--isolated", "check"])
+        install_locked_dependencies(python, self.work / f"dependencies-{name}.lock",
+                                    self.work / f"wheels-{name}", runner=self._dependency_run)
 
     def cutover_environment(self):
         """Offline, repeatable rebuild at the final path; imports no application code."""
@@ -513,7 +589,7 @@ raise SystemExit(update_entry.main(sys.argv[2:]))
 """
 
 
-def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None):
+def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None, initialization=None):
     """One fixed private stage in a fresh verified application process."""
     store._assert_locked()
     if stage not in {"authorize", "retire-render", "render", "prepare", "quiesce", "quiet", "publish", "restore"}:
@@ -529,6 +605,10 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
         _verify_inherited_lock(store.state / "runtime-use.lock", runtime_fd)
         inherited.append(runtime_fd)
         args.append(str(runtime_fd))
+    if initialization is not None:
+        if stage != "authorize":
+            raise UpdateError("initialization consent is accepted only at operator authorization")
+        args.extend(["--initialization-scope", json.dumps(_initialization_scope(initialization), sort_keys=True)])
     clean = {key: value for key, value in os.environ.items()
              if not key.startswith(("PYTHON", "GIT_", "BASH_FUNC_")) and key not in {"BASH_ENV", "ENV"}}
     clean.update(CLAUDLOBBY_INSTALLATION=str(store.installation.directory),
@@ -604,6 +684,9 @@ def prepare_application_operation(store, *, install_directory, interpreter):
         raise UpdateError("candidate render is not prepared")
     if _head(store.installation) != record["before"]:
         raise UpdateError("application preparation requires the unchanged current checkout")
+    if (record.get("initialization_scope") is not None
+            and record["initialization_scope"]["directory"] != str(install_directory)):
+        raise UpdateError("native directory differs from original initialization scope")
     record["native_install_directory"] = str(_plain(Path(install_directory)))
     record["host_interpreter"] = str(_plain(Path(interpreter)))
     store.save(record)
@@ -639,6 +722,14 @@ def _prepare_quiet_support(store):
 def _independent_quiet(store):
     """Reobserve quiet even with no usable mutable source/environment."""
     record = store.load()
+    consumers = record.get("consumers")
+    if not isinstance(consumers, dict) or set(consumers) != set(record["scope"]):
+        raise UpdateError("retained consumer set differs from original consent")
+    for key, progress in consumers.items():
+        row = progress.get("intent") if isinstance(progress, dict) else None
+        if (not isinstance(row, dict) or row.get("target") != key
+                or _digest(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()) != record["scope"][key]):
+            raise UpdateError("retained consumer intent differs from original consent")
     directory = _plain(store.work / ("quiet-" + record["request_id"]))
     support = record.get("quiet_support", {})
     if set(support) != {"supervisor.sh", "supervision_runtime.py"}:
@@ -653,22 +744,26 @@ def _independent_quiet(store):
     specification.loader.exec_module(module)
     class QuietAdapter:
         def call(self, function, *args, timeout=30):
-            if function != "svc_activation_quiet":
-                raise UpdateError("retained native adapter only observes quiet")
+            if function not in {"svc_activation_quiet", "svc_inventory_catalog", "svc_inventory_state"}:
+                raise UpdateError("retained native adapter only observes quiet or absence")
             environment = {key: value for key, value in os.environ.items()
                            if key not in {"BASH_ENV", "ENV"} and not key.startswith("BASH_FUNC_")}
             environment["LC_ALL"] = "C"
             return subprocess.run(["/bin/bash", "-c",
-                '_SUPERVISOR_LIB_DIR="$1"; shift; _OS=$(uname -s) || exit 3; . "$_SUPERVISOR_LIB_DIR/supervisor.sh" || exit 3; svc_activation_quiet "$@"',
-                "update-quiet", str(directory), *(str(arg) for arg in args)],
+                '_SUPERVISOR_LIB_DIR="$1"; shift; _OS=$(uname -s) || exit 3; . "$_SUPERVISOR_LIB_DIR/supervisor.sh" || exit 3; "$@"',
+                "update-quiet", str(directory), function, *(str(arg) for arg in args)],
                 env=environment, capture_output=True, text=True, timeout=timeout)
     for key, progress in record["consumers"].items():
         row = progress["intent"]
-        if not row["installed"] or "@." in key:
+        binding = row["bot_binding"]
+        socket = Path(binding[2]) / f"tmux-{os.getuid()}" / binding[1] if binding else None
+        if row.get("kind") == "added":
+            evidence = module.assert_native_absent(QuietAdapter(), manager=row["manager"],
+                domain=row["domain"], target=key, installed_file=Path(row["destination"]),
+                search_directories=row["search_directories"], socket_path=socket).details
+        elif not row["installed"] or "@." in key:
             evidence = {"uninstalled_or_template": True}
         else:
-            binding = row["bot_binding"]
-            socket = Path(binding[2]) / f"tmux-{os.getuid()}" / binding[1] if binding else None
             evidence = module.assert_quiescent(QuietAdapter(), installed_file=Path(row["installed"][0]["path"]),
                                                target=key, socket_path=socket).details
         record["quiet"][key] = {"identity": record["scope"][key],
@@ -904,68 +999,119 @@ def _dispatch_update_job(store):
     return None, (jobs, installation, adapter, directory, record["updater_job"]["target"])
 
 
-def _apply_or_continue(installation, *, target=None):
+def _require_expected_request(record, expected_request_id):
+    """An attachment or continuation cannot adopt a replacement operation."""
+    if expected_request_id is None:
+        return
+    try:
+        if str(uuid.UUID(expected_request_id)) != expected_request_id:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise UpdateError("expected request must be one canonical UUID") from exc
+    if record is None or record["request_id"] != expected_request_id:
+        raise UpdateError(f"original update request {expected_request_id} is no longer current")
+
+
+def _prepare_update_locked(store, *, target=None, initialization=None, prepare_only=False, expected_request_id=None):
+    """Use the held update lock for canonical preparation; never dispatch native work."""
+    store._assert_locked()
+    installation = store.installation
+    proposed = _initialization_scope(initialization) if initialization is not None else None
+    record = store.load()
+    _require_expected_request(record, expected_request_id)
+    pending = record is not None and (record["phase"] != "done" or record.get("health_errors"))
+    if record is not None and proposed is not None:
+        _check_initialization_intent(record, proposed)
+    if not pending and proposed is not None and (record is not None or target is None):
+        raise UpdateError("initialization requires a fresh operation and one frozen target")
+    initial_scope = record.get("initialization_scope") if pending else proposed
+    if prepare_only and (initial_scope is None or (record is not None and (
+            record["phase"] not in {"prepare", "quiesce"}
+            or record.get("job_support") is not None
+            or record.get("updater_job") is not None
+            or record.get("job_dispatch") is not None))):
+        raise UpdateError("prepare-only requires an undispatched first-install operation")
+    if pending and target is not None and target != record["target"]:
+        raise UpdateError("continue the existing frozen target before requesting another")
+    if pending and record["phase"] != "prepare" and record.get("job_support") is not None:
+        jobs, independent, adapter = _retained_job(store)
+        _authorize_retained_operator(store, adapter)
+    else:
+        # The current application owns operator authorization and committed
+        # placement. No candidate/dependency/native effect precedes this.
+        stable = runpy.run_path(str(installation.cli), run_name="_update_operator_admission")
+        runtime = stable["_runtime_lock"](installation)
+        try:
+            stable["_check_maintenance"](installation)
+            authorized = (_application_stage(store, "authorize", initialization=initial_scope)
+                          if initial_scope is not None else _application_stage(store, "authorize"))
+        finally:
+            os.close(runtime)
+        if not pending:
+            if target is None:
+                return record
+            if record is not None:
+                _application_stage(store, "retire-render")
+            intent = {"initialization_scope": initial_scope} if initial_scope is not None else {}
+            store.prepare_target(target, request_id=str(uuid.uuid4()), **intent)
+        record = store.load()
+        if record["phase"] == "prepare":
+            if not record.get("candidate_render"):
+                prepare_candidate_render(store, interpreter=Path(authorized["interpreter"]))
+            prepare_application_operation(store, install_directory=Path(authorized["directory"]),
+                                          interpreter=Path(authorized["interpreter"]))
+    record = store.load()
+    if prepare_only and (record["phase"] != "quiesce" or not record.get("finalized", True)):
+        raise UpdateError("first-install preparation has not finalized its configuration")
+    return record
+
+
+def _apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None):
     """The single operator route; always continue the original frozen operation."""
     dispatch = None
     with UpdateStore(installation) as store:
-        record = store.load()
-        pending = record is not None and (record["phase"] != "done" or record.get("health_errors"))
-        if pending and target is not None and target != record["target"]:
-            raise UpdateError("continue the existing frozen target before requesting another")
-        if pending and record["phase"] != "prepare" and record.get("job_support") is not None:
-            jobs, independent, adapter = _retained_job(store)
-            _authorize_retained_operator(store, adapter)
-        else:
-            # The current application owns operator authorization and committed
-            # placement. No candidate/dependency/native effect precedes this.
-            stable = runpy.run_path(str(installation.cli), run_name="_update_operator_admission")
-            runtime = stable["_runtime_lock"](installation)
-            try:
-                stable["_check_maintenance"](installation)
-                authorized = _application_stage(store, "authorize")
-            finally:
-                os.close(runtime)
-            if not pending:
-                if target is None:
-                    return {"update": record, "dispatch": "nothing_pending"}
-                if record is not None:
-                    _application_stage(store, "retire-render")
-                store.prepare_target(target, request_id=str(uuid.uuid4()))
-            record = store.load()
-            if record["phase"] == "prepare":
-                if not record.get("candidate_render"):
-                    prepare_candidate_render(store, interpreter=Path(authorized["interpreter"]))
-                prepare_application_operation(store, install_directory=Path(authorized["directory"]),
-                                              interpreter=Path(authorized["interpreter"]))
-        # An interrupted preparation may have finalized configuration before
-        # native job support/enrollment was retained. Finish that preparation
-        # only while the original application remains intact.
-        record = store.load()
+        record = _prepare_update_locked(store, target=target, initialization=initialization,
+                                         prepare_only=prepare_only, expected_request_id=expected_request_id)
+        if record is None or (target is None and record["phase"] == "done" and not record.get("health_errors")):
+            return {"update": record, "dispatch": "nothing_pending"}
+        if prepare_only:
+            return {"update": record, "dispatch": "prepared"}
         if record.get("updater_job") is None:
             jobs, independent, adapter = _prepare_job_support(store)
             directory = Path(record["native_install_directory"])
             jobs.prepare_update_job(independent, adapter, directory)
             jobs.bind_update_job(store, adapter, directory)
         observed, dispatch = _dispatch_update_job(store)
+        dispatched_request_id = record["request_id"]
         if dispatch is None:
             return {"update": store.load(), "job": observed}
     # The native job may acquire update.lock immediately. Never hold it while
     # starting or waiting for the manager's acknowledgement.
     jobs, independent, adapter, directory, native_target = dispatch
     outcome = jobs.run_update_job(independent, adapter, directory, native_target=native_target)
-    return {"update": read_update(installation), "job": outcome}
+    latest = read_update(installation)
+    _require_expected_request(latest, dispatched_request_id)
+    return {"update": latest, "job": outcome}
 
 
 
-def apply_or_continue(installation, *, target=None):
+def apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None):
     """Prepare/dispatch once, or attach read-only to the active original job."""
+    if type(prepare_only) is not bool:
+        raise UpdateError("prepare-only must be an explicit boolean")
     try:
-        return _apply_or_continue(installation, target=target)
+        return _apply_or_continue(installation, target=target, initialization=initialization,
+                                  prepare_only=prepare_only, expected_request_id=expected_request_id)
     except UpdateBusyError:
+        if prepare_only:
+            raise UpdateBusyError("another update is active; inspect its original operation") from None
         store = UpdateStore(installation)
         record = store.load()
+        _require_expected_request(record, expected_request_id)
         if record is None or record.get("updater_job") is None:
             raise UpdateBusyError("another update is preparing; inspect its current operation") from None
+        if initialization is not None:
+            _check_initialization_intent(record, _initialization_scope(initialization))
         if target is not None and target != record["target"]:
             raise UpdateError("another frozen target is running; continue its original operation") from None
         jobs, independent, adapter = _retained_job(store)
@@ -974,6 +1120,7 @@ def apply_or_continue(installation, *, target=None):
         observed = jobs.observe_update_job(independent, adapter, Path(record["native_install_directory"]),
                                            native_target=record["updater_job"]["target"])
         latest = store.load()
+        _require_expected_request(latest, record["request_id"])
         if (observed["state"] not in {"running", "starting"}
                 or latest["request_id"] != record["request_id"]):
             raise UpdateBusyError("update lock is occupied; native attachment is not established") from None

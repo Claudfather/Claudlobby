@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import message_operations, operation_context
+from claudlobby import activation_identity, message_operations, operation_context
 from claudlobby.activation_state import ActivationError
 from claudlobby.command_result import CommandFailure
 from claudlobby.message_payload import MessagePayloadError
@@ -508,8 +508,8 @@ def native_owner_gateway(cold, monkeypatch):
     plan = builder.seal()
     host = NativeHost(root, release, plan, old_host.directory, old_host.package)
     monkeypatch.setattr(activation, '_probe', host.probe)
-    monkeypatch.setattr(activation, '_registry_scan', host.registry_scan)
-    monkeypatch.setattr(activation, 'registry_scan_refusal', lambda _contexts: None)
+    monkeypatch.setattr(activation_identity, '_registry_scan', host.registry_scan)
+    monkeypatch.setattr(activation_identity, 'registry_scan_refusal', lambda _contexts: None)
     activation.bootstrap_activation(root, 'cold', plan.plan_id, host.directory, adapter=host)
     result = gateway.__wrapped__((root, host), monkeypatch)
     # Extend the existing manager seam with its real shared ownership reader.

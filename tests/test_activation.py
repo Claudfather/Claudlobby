@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudlobby import activation, activation_state as state, bot_operations, runtime_admission as admission
+from claudlobby import activation, activation_identity, activation_state as state, bot_operations, runtime_admission as admission
 from claudlobby.activation_handoffs import _BEGIN as _HANDOFF_BEGIN, _END as _HANDOFF_END
 from claudlobby.activation_identity import read_selected_identity_bindings
 from claudlobby.config_plan import ConfigPlanBuilder
@@ -641,12 +641,12 @@ def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False, registry_pr
     monkeypatch.setattr(activation, "_probe", host.probe)
     # The scan owner separately proves assembly/commit semantics; this authored
     # output fixture checks ordering and the real operation-context SQL reader.
-    monkeypatch.setattr(activation, "_registry_scan", host.registry_scan)
+    monkeypatch.setattr(activation_identity, "_registry_scan", host.registry_scan)
     if not registry_preflight:
         # The suite's own silencer (PLANE_EMIT_DISABLED=1) is a value this
         # refusal names, as it would in an operator's shell; it is faked with
         # the scan it guards.
-        monkeypatch.setattr(activation, "registry_scan_refusal", lambda _contexts: None)
+        monkeypatch.setattr(activation_identity, "registry_scan_refusal", lambda _contexts: None)
     return root, release, plan, host
 
 
@@ -1569,7 +1569,7 @@ def test_failed_readiness_keeps_candidate_pending_and_never_starts_producers(col
         assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service", "com.example.worker.service"]
 
 
-_SHIPPED_REGISTRY_SCAN = activation._registry_scan
+_SHIPPED_REGISTRY_SCAN = activation_identity._registry_scan
 _TIER_REFUSAL = r"PLANE_EMIT_ENABLED=0 in \S+/\.env opts fleet example out of the registry scan"
 
 
@@ -1586,7 +1586,7 @@ def test_cold_activation_refuses_an_opted_out_registry_scan_before_any_record(
     that turns the scan off is refused while the host is unchanged, by name."""
     root, _, plan, host = _cold_case(installed, monkeypatch, tmp_path, registry_preflight=True)
     # The shipped scan, so a refusal left to the bots start phase shows as itself.
-    monkeypatch.setattr(activation, "_registry_scan", _SHIPPED_REGISTRY_SCAN)
+    monkeypatch.setattr(activation_identity, "_registry_scan", _SHIPPED_REGISTRY_SCAN)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     if tier:
@@ -1617,7 +1617,7 @@ def test_upgrade_refuses_an_opted_out_fleet_tier_before_pausing_a_running_bot(
     for item in source_plan.effects["units"]:
         builder.file(Path(item["source"]), source_plan.blob(item["sha256"]), mode=item["mode"])
     candidate = builder.seal()
-    monkeypatch.setattr(activation, "_registry_scan", _SHIPPED_REGISTRY_SCAN)
+    monkeypatch.setattr(activation_identity, "_registry_scan", _SHIPPED_REGISTRY_SCAN)
     # The fixture's units report no private tmux directory: a pre-record check
     # this test is not about, which main would otherwise stop at before pausing.
     monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda *_args, **_kwargs: str(host.tmux_dir))

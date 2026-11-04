@@ -205,3 +205,153 @@ def test_candidate_consumer_placement_change_refuses_before_effects():
     changed["units"][0]["working_directory"] = "/foreign"
     with pytest.raises(UpdateError, match="relocates"):
         services.validate_candidate_consumers(old, changed, "Linux")
+
+
+class AddedNative(Native):
+    def __init__(self, directory):
+        super().__init__()
+        self.directory = directory
+        self.state = "not-found not-found inactive"
+        self.fail_start = False
+
+    def read(self, function, *args):
+        assert function == "svc_inventory_catalog"
+        return f"manager\tLinux\ndirectory\t{self.directory}\n"
+
+    def call(self, function, *args, timeout=30):
+        if function == "svc_inventory_catalog":
+            return SimpleNamespace(returncode=0, stdout=self.read(function), stderr="")
+        if function == "svc_activation_start":
+            self.calls.append((function, args))
+            if self.fail_start:
+                raise TimeoutError()
+            self.state = "enabled loaded active"
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if function == "svc_activation_reload":
+            self.state = "disabled loaded inactive"
+        return super().call(function, *args, timeout=timeout)
+
+
+def added_intent(tmp_path, monkeypatch, *, timer_owned=False):
+    source = tmp_path / "generated" / "example.service"
+    source.parent.mkdir()
+    source.write_bytes(b"[Service]\nExecStart=/bin/true\n")
+    directory = tmp_path / "native"
+    directory.mkdir()
+    row = {"kind": "added", "target": source.name, "manager": "Linux", "domain": "", "installed": [],
+           "phase": "required", "scheduled": timer_owned, "bot_binding": None,
+           "disposition": "resident", "destination": str(directory / source.name),
+           "search_directories": [str(directory)],
+           "declaration": {"source": str(source), "working_directory": str(tmp_path),
+                           "environment": [], "scope": "host"},
+           "candidate": {"sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                         "mode": source.stat().st_mode & 0o777,
+                         "content": {"base64": base64.b64encode(source.read_bytes()).decode()}},
+           "enabled": True, "enroll": True, "run_at_load": False}
+    monkeypatch.setattr(services, "current_git_declarations", lambda *_: [SimpleNamespace(
+        source=source, working_directory=tmp_path, environment=())])
+    monkeypatch.setattr(services, "collect_enrollment", lambda *a, **kw: SimpleNamespace(require_complete=lambda: None))
+    return row, AddedNative(directory)
+
+
+def test_added_timer_owned_service_is_published_without_off_schedule_start(tmp_path, monkeypatch):
+    row, native = added_intent(tmp_path, monkeypatch, timer_owned=True)
+    store = Store(tmp_path, row)
+    services.quiesce_consumer(store, row["target"], native)
+    services.observe_quiet(store, row["target"], native)
+    services.restore_consumer(store, row["target"], native, {"data_root": str(tmp_path)})
+    assert Path(row["destination"]).read_bytes() == Path(row["declaration"]["source"]).read_bytes()
+    assert store.record["consumers"][row["target"]]["restore"] == "done"
+    assert not any(name in {"svc_activation_start", "svc_activation_resume", "svc_activation_pause"}
+                   for name, _ in native.calls)
+
+
+def test_added_unknown_start_observes_without_repeating_or_recreating(tmp_path, monkeypatch):
+    row, native = added_intent(tmp_path, monkeypatch)
+    store = Store(tmp_path, row)
+    native.fail_start = True
+    with pytest.raises(Exception):
+        services.restore_consumer(store, row["target"], native, {"data_root": str(tmp_path)})
+    with pytest.raises(UpdateError, match="pending"):
+        services.restore_consumer(store, row["target"], native, {"data_root": str(tmp_path)})
+    assert sum(name == "svc_activation_start" for name, _ in native.calls) == 1
+    Path(row["destination"]).unlink()
+    with pytest.raises(UpdateError, match="disappeared"):
+        services.restore_consumer(store, row["target"], native, {"data_root": str(tmp_path)})
+    assert not Path(row["destination"]).exists()
+
+
+def test_added_collision_refuses_without_replacing_foreign_file(tmp_path, monkeypatch):
+    row, native = added_intent(tmp_path, monkeypatch)
+    installed = Path(row["destination"])
+    installed.write_bytes(b"foreign")
+    with pytest.raises(UpdateError, match="already exists"):
+        services.quiesce_consumer(Store(tmp_path, row), row["target"], native)
+    assert installed.read_bytes() == b"foreign"
+    assert native.calls == []
+
+
+def test_candidate_initial_and_added_bindings_allow_but_removal_refuses():
+    item = {"platform": "Linux", "source": "/generated/example.service",
+            "working_directory": "/root", "scope": "host"}
+    candidate = {"installation": "/install", "data_root": "/root", "units": [item]}
+    services.validate_candidate_consumers(None, candidate, "Linux")
+    services.validate_candidate_consumers({**candidate, "units": []}, candidate, "Linux")
+    with pytest.raises(UpdateError, match="removal is unsupported"):
+        services.validate_candidate_consumers(candidate, {**candidate, "units": []}, "Linux")
+
+
+def test_new_darwin_schedule_loads_without_kickstart(tmp_path, monkeypatch):
+    import plistlib
+    row, native = added_intent(tmp_path, monkeypatch)
+    source = Path(row["declaration"]["source"])
+    content = plistlib.dumps({"Label": "example", "ProgramArguments": ["/bin/true"],
+                             "StartInterval": 60})
+    source.write_bytes(content)
+    row.update(manager="Darwin", target="user/123/example", scheduled=True,
+               candidate={"sha256": hashlib.sha256(content).hexdigest(),
+                          "mode": source.stat().st_mode & 0o777,
+                          "content": {"base64": base64.b64encode(content).decode()}})
+    native.state = "unchanged unloaded inactive"
+    monkeypatch.setattr(services, "observe_added_absence", lambda *_: {"absent": True})
+    store = Store(tmp_path, row)
+    services.restore_consumer(store, row["target"], native, {"data_root": str(tmp_path)})
+    assert native.state == "unchanged loaded inactive"
+    assert sum(name == "svc_activation_resume" for name, _ in native.calls) == 1
+    assert not any(name == "svc_activation_start" for name, _ in native.calls)
+
+
+def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path):
+    from claudlobby.supervision_inventory import UnitDeclaration
+    directory = tmp_path / "native"
+    directory.mkdir()
+    source = tmp_path / "generated.service"
+    content = b"[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n"
+    item = {"sha256": hashlib.sha256(content).hexdigest(), "mode": 0o644,
+            "phase": "required", "scope": "host", "working_directory": str(tmp_path),
+            "fleet": None, "bot": None, "service": None, "enroll": True}
+    snapshot = {"supervision": {"manager": "Linux", "domain": "", "directory": str(directory)}}
+    declaration = UnitDeclaration(source, "host", tmp_path, "", (), None, None, None)
+    native = AddedNative(directory)
+    row = services._freeze_added(snapshot, native, directory, declaration, item, content, set())
+    assert row["kind"] == "added" and row["absence"]["absent"]
+    assert "saved_native" not in row and row["installed"] == []
+    assert row["enablement"]["path"] == str(directory / "default.target.wants" / source.name)
+    assert not Path(row["destination"]).exists()
+
+
+@pytest.mark.parametrize("drift", ["domain", "directory", "template"])
+def test_independent_absence_rejects_changed_native_witnesses(tmp_path, drift):
+    from claudlobby.supervision_runtime import assert_native_absent, RuntimeEvidenceError
+    directory = tmp_path / "native"
+    directory.mkdir()
+    target = "example@.service" if drift == "template" else "example.service"
+    lines = f"manager\tLinux\ndirectory\t{directory}\n"
+    if drift == "directory":
+        lines += f"directory\t{tmp_path / 'other'}\n"
+    if drift == "template":
+        lines += "loaded\texample@worker.service\n"
+    native = SimpleNamespace(call=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=lines, stderr=""))
+    with pytest.raises(RuntimeEvidenceError):
+        assert_native_absent(native, manager="Linux", domain="user/123" if drift == "domain" else "",
+                             target=target, installed_file=directory / target, search_directories=[directory])

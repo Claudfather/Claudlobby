@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 import sys
 
-from .git_update import UpdateError, UpdateStore, _head, _verify_inherited_lock, _candidate_revision
+from .git_update import (UpdateError, UpdateStore, _head, _verify_inherited_lock, _candidate_revision,
+                         _initialization_scope, _check_initialization_intent, _plain)
 from .installation import read_installation
 
 
@@ -105,6 +106,44 @@ def _retire_completed_render(store):
     directory.rmdir()
 
 
+def _authorize_initialization(store, scope, package):
+    """The canonical cold operator gate and observed native placement, before effects."""
+    import platform
+    from .commands.operator_context import require_operator_context
+    from .supervision_inventory import Adapter, _catalog
+    from .update_operation import _fresh_root
+
+    require_operator_context()  # Existing cold-setup gate; no committed runtime exists yet.
+    _fresh_root(store)
+    scope = _initialization_scope(scope)
+    for manifest in scope["manifests"]:
+        path = _plain(Path(manifest))
+        if not path.is_file():
+            raise UpdateError("initialization manifest is not an existing authored file")
+    directory = _plain(Path(scope["directory"]))
+    manager, _, directories, _, _ = _catalog(Adapter(package).read("svc_inventory_catalog"))
+    if manager != platform.system() or directory not in directories:
+        raise UpdateError("initial native directory is not observed in this host manager catalog")
+    return {"directory": str(directory), "revision": package.source_revision}
+
+
+def _render_paths(store, record, package):
+    """Select original manifest paths with candidate resources, without a second composer."""
+    from .active_config import read_current_config
+    from .paths import Paths
+    scope = record.get("initialization_scope")
+    if scope is not None:
+        manifests = _initialization_scope(scope)["manifests"]
+    else:
+        current = read_current_config(store.root, installation=store.installation)
+        manifests = [item["manifest"] for item in current["fleets"].values()]
+    paths = [Paths(store.root, package=package, fleet_dir=(None if Path(manifest).parent == store.root
+              else Path(manifest).parent)) for manifest in manifests]
+    if any(str(paths_item.fleet_yaml) != manifest for paths_item, manifest in zip(paths, manifests)):
+        raise UpdateError("rendered manifest differs from its original authored scope")
+    return paths
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Private updater application stage")
     parser.add_argument("installation")
@@ -113,7 +152,12 @@ def main(argv=None):
     parser.add_argument("parent_pid", type=int)
     parser.add_argument("request_id")
     parser.add_argument("runtime_fd", type=int, nargs="?")
+    parser.add_argument("--initialization-scope")
     args = parser.parse_args(argv)
+    if args.initialization_scope is not None and args.stage != "authorize":
+        raise UpdateError("initialization consent is accepted only at operator authorization")
+    proposed = (_initialization_scope(json.loads(args.initialization_scope))
+                if args.initialization_scope is not None else None)
     installation = read_installation(Path(args.installation))
     if args.stage == "authorize":
         if os.getppid() != args.parent_pid:
@@ -149,8 +193,15 @@ def main(argv=None):
         if args.stage == "authorize":
             from .commands.operator_context import require_operator_context
             from .active_config import read_current_config
-            require_operator_context(store.root)
             package = get_resources(installation=installation)
+            if record is not None:
+                _check_initialization_intent(record, proposed)
+            pending = record is not None and (record["phase"] != "done" or record.get("health_errors"))
+            scope = proposed if proposed is not None else (record.get("initialization_scope") if pending else None)
+            if scope is not None:
+                print(json.dumps(_authorize_initialization(store, scope, package)))
+                return 0
+            require_operator_context(store.root)
             snapshot = read_current_config(store.root, installation=installation, revision=package.source_revision)
             placement = snapshot.get("supervision")
             if placement is None:
@@ -163,13 +214,9 @@ def main(argv=None):
         from .supervision_inventory import Adapter
         from . import update_operation
         if args.stage == "render":
-            from .active_config import read_current_config
-            from .paths import Paths
             from .config_staging import render_git_configuration
             package = get_resources(installation=installation, checkout=source)
-            current = read_current_config(store.root, installation=installation)
-            paths = [Paths(store.root, package=package, fleet_dir=(None if Path(item["manifest"]).parent == store.root
-                      else Path(item["manifest"]).parent)) for item in current["fleets"].values()]
+            paths = _render_paths(store, record, package)
             rendered = render_git_configuration(paths, revision=record["target"])
             record["candidate_render"] = rendered.fingerprint
             store.save(record)
@@ -177,7 +224,8 @@ def main(argv=None):
             from .config_plan import read_rendered
             rendered = read_rendered(store.root, record["candidate_render"])
             update_operation.prepare_operation(store, rendered, Adapter(get_resources(installation=installation)),
-                Path(record["native_install_directory"]), Path(record["host_interpreter"]), record["request_id"])
+                Path(record["native_install_directory"]), Path(record["host_interpreter"]), record["request_id"],
+                initialize=record.get("initialization_scope") is not None)
         elif args.stage == "quiesce":
             update_operation.quiesce_operation(store, Adapter(get_resources(installation=installation)))
         elif args.stage == "quiet":

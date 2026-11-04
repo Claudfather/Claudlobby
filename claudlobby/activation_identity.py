@@ -1,8 +1,8 @@
 """Verified current identity bindings for operational fleets.
 
 Git configuration and legacy activation journals retain verified registry results.
-Selected reads never open Plane. Explicit registry capture uses the existing
-read-only identity owner and never creates an identity.
+Selected reads never open Plane. Explicit registry seeding uses the canonical
+committed scan, then the read-only binding owner; this module never invents IDs.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 
 from .active_config import context_from_plan, read_current_config, _selected_activation, _plan_for_selection
-from .activation_state import ActivationError
+from .activation_state import ActivationError, ActivationRefusal
 from .config_plan import ConfigPlan, RenderedConfiguration
 from .operation_context import OperationContextError, _host_uid
 from .plane.ids import ID_PATTERNS
@@ -115,19 +115,74 @@ def identity_bindings_from_registry(plan: ConfigPlan | RenderedConfiguration, re
     return payload
 
 
+def registry_scan_refusal(contexts) -> str | None:
+    """Collect every opt-out/unavailable reason before recording or stopping anything."""
+    from .plane.registry_emit import activation_scan_refusal
+    reasons = (activation_scan_refusal(context.paths, context.fleet) for context in contexts)
+    return "; ".join(dict.fromkeys(reason for reason in reasons if reason)) or None
+
+
+def preflight_registry_scan(contexts) -> None:
+    """Refuse a required registry scan before its first effect."""
+    reason = registry_scan_refusal(contexts)
+    if reason:
+        raise ActivationRefusal(reason)
+
+
+def _registry_scan(context):
+    from .plane.registry_emit import run_generate_scan
+    return run_generate_scan(context.paths, context.fleet, require_commit=True)
+
+
+def _registry_bindings(context) -> dict:
+    """Project the canonical existing identity reader's result for one frozen fleet."""
+    from .operation_context import bind_task_context
+    bound = bind_task_context(context, origin=replace(context, bot_id=context.fleet.manager))
+    return {"host_uid": bound.host_uid, "fleet_uid": bound.fleet_uid, "manager_uid": bound.caller.uid,
+            "bots": {bot: actor.uid for bot, actor in bound.bots.items()}}
+
+
+def scan_registry(plan: ConfigPlan | RenderedConfiguration, *, package: PackageResources,
+                  contexts=None) -> list[dict]:
+    """Seed the frozen roster through committed scans and bind its canonical IDs.
+
+    Schema/recorder initialization and mutation admission belong to the caller.
+    A partial or unknown scan keeps its original exception and receipt evidence;
+    this owner never retries it or publishes a current configuration.
+    """
+    if not plan.fleets or len(set(plan.fleets)) != len(plan.fleets):
+        raise ActivationError("candidate registry requires an unambiguous frozen fleet roster")
+    if package.installation is not None and package.installation.data_root != plan.data_root:
+        raise ActivationError("current identity bindings belong to another data root")
+    frozen = tuple(context_from_plan(plan, name, package=package) for name in sorted(plan.fleets))
+    if contexts is not None and tuple(contexts) != frozen:
+        raise ActivationError("candidate registry contexts differ from the frozen fleets")
+    preflight_registry_scan(frozen)
+    rows = []
+    for context in frozen:
+        result = _registry_scan(context)
+        if (not isinstance(result, dict) or result.get("complete") is not True
+                or result.get("recording") != "committed"):
+            raise ActivationError("candidate registry scan is disabled, incomplete or uncommitted; no bots started")
+        try:
+            bindings = _registry_bindings(context)
+        except OperationContextError as exc:
+            raise ActivationError("candidate registry identity binding failed; no bots started") from exc
+        rows.append({"fleet": context.fleet.name, "scan": result, "bindings": bindings})
+    identity_bindings_from_registry(plan, rows, package=package)
+    return rows
+
+
 def read_registry_identity_bindings(plan: ConfigPlan | RenderedConfiguration, *, package: PackageResources) -> dict:
     """Read already registered identities for frozen fleets; no scan, repair or write."""
-    from .operation_context import bind_task_context
     rows = []
     for name in plan.fleets:
         context = context_from_plan(plan, name, package=package)
         try:
-            bound = bind_task_context(context, origin=replace(context, bot_id=context.fleet.manager))
+            bindings = _registry_bindings(context)
         except OperationContextError as exc:
             raise ActivationError("existing Plane registry identity bindings are unavailable") from exc
-        rows.append({"fleet": name, "bindings": {
-            "host_uid": bound.host_uid, "fleet_uid": bound.fleet_uid, "manager_uid": bound.caller.uid,
-            "bots": {bot: actor.uid for bot, actor in bound.bots.items()}}})
+        rows.append({"fleet": name, "bindings": bindings})
     return identity_bindings_from_registry(plan, rows, package=package)
 
 

@@ -353,3 +353,32 @@ def current_git_declarations(snapshot: dict, platform: str) -> tuple[UnitDeclara
         result.append(UnitDeclaration(source, item["scope"], Path(item["working_directory"]), "",
                                      tuple(sorted(item["environment"].items())), item["fleet"], item["bot"], item["service"]))
     return tuple(result)
+
+
+def staged_git_declarations(snapshot, rendered, platform):
+    """Read exact pending unit bytes without requiring their live destination."""
+    if platform not in {"Linux", "Darwin"}:
+        raise PlanError("unsupported supervision platform")
+    from .installation import Installation
+    installation = Installation(Path(snapshot["installation"]), Path(snapshot["data_root"]))
+    validate_git_units(snapshot["units"], installation)
+    if (rendered.data_root != installation.data_root or rendered.revision != snapshot["revision"]
+            or rendered.effects.get("units") != snapshot["units"]):
+        raise PlanError("staged native declarations differ from candidate configuration")
+    changes = {change.target: change.after for change in rendered.changes}
+    result = []
+    for item in snapshot["units"]:
+        if item["platform"] != platform:
+            continue
+        source = Path(item["source"])
+        after = changes.get(str(source))
+        if after is None:
+            parent = changes.get(str(source.parent), {})
+            after = parent.get("files", {}).get(source.name) if parent.get("kind") == "tree" else None
+        if after is None or any(after.get(key) != item[key] for key in ("sha256", "mode")):
+            raise PlanError("staged native definition differs from candidate metadata")
+        content = rendered.blob(item["sha256"])
+        declaration = UnitDeclaration(source, item["scope"], Path(item["working_directory"]), "",
+                                      tuple(sorted(item["environment"].items())), item["fleet"], item["bot"], item["service"])
+        result.append((declaration, item, content))
+    return tuple(result)

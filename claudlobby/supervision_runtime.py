@@ -134,3 +134,44 @@ def assert_quiescent(adapter: Adapter, *, installed_file: Path, target: str,
         "native": observed, "known_pids": list(known_pids), "known_cgroup": known_cgroup,
         "socket_path": str(socket_path) if socket_path is not None else None,
         "socket_state": socket_state, "coverage": "named-unit-and-supplied-witnesses-only"})
+
+
+def assert_native_absent(adapter, *, manager: str, domain: str, target: str, installed_file: Path,
+                         search_directories, socket_path: Path | None = None) -> RuntimeEvidence:
+    """Reobserve frozen catalog coverage and positive absence of one new unit.
+
+    The inventory owner supplies its previously validated search directories.
+    This checks those witnesses, without discovering or adopting consumers.
+    """
+    file = Path(installed_file)
+    directories = tuple(Path(item) for item in search_directories)
+    if (manager not in {"Linux", "Darwin"} or not directories or file.parent not in directories
+            or any(not item.is_absolute() or item.resolve() != item for item in directories)):
+        raise RuntimeEvidenceError("absence", target, "invalid frozen native placement")
+    catalog = _call(adapter, "svc_inventory_catalog", target)
+    lines = catalog.splitlines()
+    expected_domain = target.rsplit("/", 1)[0] if manager == "Darwin" else ""
+    if domain != expected_domain:
+        raise RuntimeEvidenceError("absence", target, "native target differs from frozen domain")
+    if ([line for line in lines if line.startswith("manager\t")] != ["manager\t" + manager]
+            or [line for line in lines if line.startswith("directory\t")] !=
+               ["directory\t" + str(item) for item in directories]
+            or manager == "Darwin" and [line for line in lines if line.startswith("domain\t")] != ["domain\t" + expected_domain]):
+        raise RuntimeEvidenceError("absence", target, "native catalog placement changed")
+    if any((directory / file.name).exists() or (directory / file.name).is_symlink() for directory in directories):
+        raise RuntimeEvidenceError("absence", target, "added native definition already exists")
+    template = manager == "Linux" and "@." in file.name
+    if template:
+        prefix = "loaded\t" + file.name.split("@", 1)[0] + "@"
+        if any(line.startswith(prefix) for line in lines):
+            raise RuntimeEvidenceError("absence", target, "added native template has loaded instances")
+        observed = "template absent"
+    else:
+        observed = _call(adapter, "svc_inventory_state", target, file, target)
+        expected = "not-found not-found inactive" if manager == "Linux" else "unchanged unloaded inactive"
+        if observed != expected:
+            raise RuntimeEvidenceError("absence", target, "added native target absence is unproved")
+    if socket_path is not None and (socket_path.exists() or socket_path.is_symlink()):
+        raise RuntimeEvidenceError("absence", target, "added bot has a preexisting private session socket")
+    return RuntimeEvidence("absence", target, {"manager": manager, "target": target,
+                           "destination": str(file), "absent": True, "native": observed})

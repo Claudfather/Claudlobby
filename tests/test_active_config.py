@@ -10,7 +10,7 @@ import pytest
 
 from claudlobby import active_config, activation_identity, activation_state, operation_context
 from claudlobby.config import load_fleet
-from claudlobby.config_plan import ConfigPlanBuilder, PlanError, read_plan
+from claudlobby.config_plan import ConfigPlanBuilder, PlanError, RenderedConfiguration, read_plan
 from claudlobby.installation import Installation
 from claudlobby.releases import seal_release
 from tests.package_fixtures import source_package
@@ -260,6 +260,144 @@ def test_git_registry_binding_uses_existing_read_owner_without_registration(
     with pytest.raises(activation_state.ActivationError, match="registry identity bindings are unavailable"):
         activation_identity.read_registry_identity_bindings(plan, package=package)
     assert not (root / "state/plane/plane.db").exists()
+
+
+@pytest.fixture
+def registry_render(git_snapshot):
+    root, _, _, plan, _, package = git_snapshot
+    render = RenderedConfiguration(plan.directory, root, package.source_revision, plan.fleets,
+                                   plan.inputs, plan.changes, plan.effects)
+    return render, package
+
+
+def test_git_registry_scan_commits_frozen_roster_then_binds_existing_ids(
+        registry_render, git_registry, monkeypatch):
+    from claudlobby.plane import registry_emit
+    render, package = registry_render
+    original = git_registry[0]["bindings"]
+    observed = []
+
+    def preflight(paths, fleet):
+        observed.append(("preflight", fleet.name))
+        assert paths.package == package
+
+    def scan(paths, fleet, *, require_commit):
+        observed.append(("scan", fleet.name))
+        assert paths.root == render.data_root and require_commit is True
+        assert fleet.manager == "manager" and set(fleet.bots) == {"manager", "worker"}
+        return {"complete": True, "recording": "committed", "scan_id": "existing-scan"}
+
+    def bind(context, *, origin):
+        observed.append(("bind", context.fleet.name))
+        assert origin.bot_id == context.fleet.manager
+        return SimpleNamespace(host_uid=original["host_uid"], fleet_uid=original["fleet_uid"],
+                               caller=SimpleNamespace(uid=original["manager_uid"]),
+                               bots={name: SimpleNamespace(uid=uid) for name, uid in original["bots"].items()})
+
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", preflight)
+    monkeypatch.setattr(registry_emit, "run_generate_scan", scan)
+    monkeypatch.setattr(operation_context, "bind_task_context", bind)
+    monkeypatch.setattr(activation_identity, "validate_identity_bindings", lambda *_args, **_kwargs:
+                        pytest.fail("sealed identity lookup"))
+    (render.data_root / "fleet.yaml").unlink()
+    contexts = [active_config.context_from_plan(render, "example", package=package)]
+    rows = activation_identity.scan_registry(render, package=package, contexts=contexts)
+    assert observed == [("preflight", "example"), ("scan", "example"), ("bind", "example")]
+    assert rows == [{**git_registry[0], "scan": {
+        "complete": True, "recording": "committed", "scan_id": "existing-scan"}}]
+    identities = activation_identity.identity_bindings_from_registry(render, rows, package=package)
+    assert identities["fleets"]["example"]["bots"] == original["bots"]
+    assert not (render.data_root / "state/config.json").exists()
+    assert not (render.data_root / "state/plane/plane.db").exists()
+
+
+def test_registry_scan_preflights_all_fleets_before_first_emission(monkeypatch):
+    from claudlobby.plane import registry_emit
+    observed = []
+    reasons = {"alpha": "unavailable", "beta": "opted out", "gamma": "unavailable"}
+
+    def refusal(_paths, fleet):
+        observed.append(fleet.name)
+        return reasons[fleet.name]
+
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", refusal)
+    contexts = [SimpleNamespace(paths=None, fleet=SimpleNamespace(name=name)) for name in reasons]
+    with pytest.raises(activation_state.ActivationRefusal, match="^unavailable; opted out$"):
+        activation_identity.preflight_registry_scan(contexts)
+    assert observed == list(reasons)
+
+
+@pytest.mark.parametrize("refusal", ["opted out", "tier resolution unavailable"])
+def test_git_registry_scan_refusal_has_no_scan_or_binding_effect(registry_render, monkeypatch, refusal):
+    from claudlobby.plane import registry_emit
+    render, package = registry_render
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", lambda *_: refusal)
+    monkeypatch.setattr(registry_emit, "run_generate_scan", lambda *_args, **_kwargs: pytest.fail("scan"))
+    monkeypatch.setattr(operation_context, "bind_task_context", lambda *_args, **_kwargs: pytest.fail("bind"))
+    with pytest.raises(activation_state.ActivationRefusal, match=refusal):
+        activation_identity.scan_registry(render, package=package)
+
+
+@pytest.mark.parametrize("result", [None, {"complete": False, "recording": "committed"},
+                                     {"complete": True, "recording": "uncommitted"}])
+def test_git_registry_scan_requires_complete_committed_result_before_binding(
+        registry_render, monkeypatch, result):
+    from claudlobby.plane import registry_emit
+    render, package = registry_render
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", lambda *_: None)
+    monkeypatch.setattr(registry_emit, "run_generate_scan", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(operation_context, "bind_task_context", lambda *_args, **_kwargs: pytest.fail("bind"))
+    with pytest.raises(activation_state.ActivationError, match="disabled, incomplete or uncommitted"):
+        activation_identity.scan_registry(render, package=package)
+
+
+def test_git_registry_scan_preserves_original_unknown_scan_exception(registry_render, monkeypatch):
+    from claudlobby.plane import registry_emit
+    render, package = registry_render
+    failure = registry_emit.RegistryScanError("recording unknown", {"recording": "unknown", "scan_id": "same-scan"})
+    calls = []
+
+    def scan(*_args, **_kwargs):
+        calls.append("scan")
+        raise failure
+
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", lambda *_: None)
+    monkeypatch.setattr(registry_emit, "run_generate_scan", scan)
+    monkeypatch.setattr(operation_context, "bind_task_context", lambda *_args, **_kwargs: pytest.fail("bind"))
+    with pytest.raises(registry_emit.RegistryScanError) as raised:
+        activation_identity.scan_registry(render, package=package)
+    assert raised.value is failure and calls == ["scan"]
+    assert raised.value.summary == {"recording": "unknown", "scan_id": "same-scan"}
+
+
+def test_git_registry_scan_rejects_foreign_frozen_context_before_preflight(registry_render, monkeypatch):
+    from claudlobby.plane import registry_emit
+    render, package = registry_render
+    context = active_config.context_from_plan(render, "example", package=package)
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", lambda *_: pytest.fail("preflight"))
+    with pytest.raises(activation_state.ActivationError, match="contexts differ"):
+        activation_identity.scan_registry(render, package=package, contexts=[replace(context, bot_id="worker")])
+
+
+def test_git_registry_scan_refuses_unavailable_binding_after_committed_scan(registry_render, monkeypatch):
+    from claudlobby.plane import registry_emit
+    render, package = registry_render
+    observed = []
+
+    def scan(*_args, **_kwargs):
+        observed.append("committed")
+        return {"complete": True, "recording": "committed"}
+
+    def bind(*_args, **_kwargs):
+        raise operation_context.OperationContextUnavailableError("existing registry unavailable")
+
+    monkeypatch.setattr(registry_emit, "activation_scan_refusal", lambda *_: None)
+    monkeypatch.setattr(registry_emit, "run_generate_scan", scan)
+    monkeypatch.setattr(operation_context, "bind_task_context", bind)
+    with pytest.raises(activation_state.ActivationError, match="registry identity binding failed") as raised:
+        activation_identity.scan_registry(render, package=package)
+    assert isinstance(raised.value.__cause__, operation_context.OperationContextUnavailableError)
+    assert observed == ["committed"]
 
 
 def test_git_snapshot_commit_precedes_consumers_and_survives_startup_failure(git_snapshot):

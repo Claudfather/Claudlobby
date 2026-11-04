@@ -180,3 +180,293 @@ def test_schema_change_refuses_without_opening_or_initializing_db(monkeypatch):
     monkeypatch.setattr(operation, "db_file", lambda *_: SimpleNamespace(is_file=lambda: False))
     with pytest.raises(UpdateError, match="canonical migration"):
         operation._schema(store, "target")
+
+
+@pytest.fixture
+def initial_store(tmp_path):
+    from claudlobby.installation import Installation
+    data = record()
+    data.update(initialize=True, previous_config=None, consumers={}, sql_schema=operation.SQL_SCHEMA_VERSION,
+                candidate_config={"fingerprint": "initial", "identities": None,
+                                  "supervision": {"manager": "Linux", "domain": "",
+                                                  "directory": str(tmp_path / "units")}})
+    store = Store(data)
+    store.installation = Installation(tmp_path / "installation", tmp_path / "data")
+    store.root = store.installation.data_root
+    store.work = store.root / "state/update-work"
+    store.work.mkdir(parents=True, mode=0o700)
+    return store
+
+
+def test_initialize_prepares_null_previous_without_creating_schema_or_identities(initial_store, monkeypatch):
+    store, events = initial_store, []
+    store.record = None
+    rendered = SimpleNamespace(revision="target", fingerprint="render", fleets=("example",),
+                               check_inputs=lambda: events.append("inputs"))
+    context = SimpleNamespace(paths="frozen", fleet="example")
+    package = SimpleNamespace()
+    adapter = SimpleNamespace(package=package, read=lambda *_: "catalog")
+    monkeypatch.setattr(operation.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(operation, "_catalog", lambda *_: ("Linux", "", (), set(), {}))
+    monkeypatch.setattr(operation, "context_from_plan", lambda *_args, **_kwargs: context)
+    def preflight(contexts):
+        assert list(contexts) == [context]
+        events.append("preflight")
+    monkeypatch.setattr(operation, "preflight_registry_scan", preflight)
+    monkeypatch.setattr(operation, "read_current_config", lambda *_args, **_kwargs: pytest.fail("active read"))
+    monkeypatch.setattr(operation, "read_registry_identity_bindings", lambda *_args, **_kwargs: pytest.fail("identity read"))
+    def snapshot(render, installation, revision, *, identities, supervision):
+        assert render is rendered and identities is None
+        return {"fingerprint": "initial", "identities": None, "units": [], "supervision": supervision}
+    monkeypatch.setattr(operation, "snapshot_from_plan", snapshot)
+    monkeypatch.setattr(operation, "validate_candidate_consumers", lambda previous, *_:
+                        events.append(("candidate", previous)))
+    def freeze(previous, _adapter, directory, *, candidate_snapshot, rendered):
+        assert previous is None and rendered.fingerprint == "render"
+        assert candidate_snapshot["identities"] is None
+        return []
+    monkeypatch.setattr(operation, "freeze_service_intent", freeze)
+    monkeypatch.setattr(operation, "_git", lambda *_: SimpleNamespace(
+        stdout=f"SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n".encode()))
+    def prepare(target, *, config_fingerprint, scope, request_id):
+        store.record = {"phase": "prepare", "target": target, "config_fingerprint": config_fingerprint,
+                        "request_id": request_id, "scope": scope}
+        return store.load()
+    store.prepare = prepare
+    store.prepare_dependencies = lambda **_: events.append("dependencies")
+    monkeypatch.setattr(operation, "prepare_publication", lambda *_: events.append("publication prepared"))
+    result = operation.prepare_operation(store, rendered, adapter, store.root / "units", Path("/python"),
+                                         "same-request", initialize=True)
+    assert result["initialize"] is True and result["previous_config"] is None
+    assert result["candidate_config"]["identities"] is None and result["consumers"] == {}
+    assert result["phase"] == "quiesce"
+    assert events == ["inputs", "preflight", ("candidate", None), "publication prepared", "dependencies"]
+    assert not operation.db_file(store.root).exists()
+    assert not (store.root / "state/config.json").exists()
+
+
+@pytest.mark.parametrize("evidence", ["config.json", "selected-release.json", "activations", "migrations",
+                                      "restored-backup.json", "restored-backup", "plane/plane.db", "plane/spool"])
+def test_initialize_refuses_existing_active_or_recovery_state_without_overwrite(initial_store, evidence):
+    store = initial_store
+    path = store.root / "state" / evidence
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if evidence in {"activations", "migrations", "restored-backup", "plane/spool"}:
+        path.mkdir()
+    else:
+        path.write_bytes(b"original evidence")
+    with pytest.raises((UpdateError, RuntimeError)):
+        operation._fresh_root(store)
+    assert path.is_dir() or path.read_bytes() == b"original evidence"
+    assert not (store.root / "state/config.json").exists() or evidence == "config.json"
+
+
+def test_existing_update_includes_added_native_consumer_in_original_scope(initial_store, monkeypatch):
+    store = initial_store
+    store.record = None
+    placement = {"manager": "Linux", "domain": "", "directory": str(store.root / "units")}
+    previous = {"fingerprint": "previous", "identities": {}, "units": [], "supervision": placement}
+    candidate = {**previous, "fingerprint": "candidate", "units": [{"source": "new.service"}]}
+    rendered = SimpleNamespace(revision="target", fingerprint="render", check_inputs=lambda: None)
+    adapter = SimpleNamespace(package=None, read=lambda *_: "catalog")
+    monkeypatch.setattr(operation.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(operation, "_catalog", lambda *_: ("Linux", "", (), set(), {}))
+    monkeypatch.setattr(operation, "read_current_config", lambda *_a, **_k: previous)
+    monkeypatch.setattr(operation, "read_registry_identity_bindings", lambda *_a, **_k: {})
+    monkeypatch.setattr(operation, "snapshot_from_plan", lambda *_a, **_k: candidate)
+    monkeypatch.setattr(operation, "validate_candidate_consumers", lambda *_: None)
+    monkeypatch.setattr(operation, "_schema", lambda *_: operation.SQL_SCHEMA_VERSION)
+    added = {"kind": "added", "target": "new.service", "phase": "producers"}
+    def freeze(current, native, directory, *, candidate_snapshot, rendered):
+        assert current == previous and candidate_snapshot == candidate
+        assert rendered.fingerprint == "render"
+        return [added]
+    monkeypatch.setattr(operation, "freeze_service_intent", freeze)
+    def prepare(target, *, config_fingerprint, scope, request_id):
+        store.record = {"phase": "prepare", "target": target, "config_fingerprint": config_fingerprint,
+                        "request_id": request_id, "scope": scope}
+        return store.load()
+    store.prepare = prepare
+    store.prepare_dependencies = lambda **_: None
+    monkeypatch.setattr(operation, "prepare_publication", lambda *_: None)
+    result = operation.prepare_operation(store, rendered, adapter, Path(placement["directory"]),
+                                         Path("/python"), "same-request")
+    assert result["previous_config"] == "previous"
+    assert result["consumers"]["new.service"]["intent"] == added
+    assert result["scope"] == operation.consumer_scope([added])
+
+
+def test_initialize_preserves_canonical_owner_preparation(initial_store):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.ids import ensure_host_uid
+    store = initial_store
+    host = ensure_host_uid(store.root / "state")
+    OwnerAccess.initialize(store.root, before_first_fleet=True)
+    owner = store.root / "state/plane/owner-access.db"
+    before = owner.read_bytes()
+    operation._fresh_root(store)
+    assert owner.read_bytes() == before
+    assert (store.root / "state/host-uid").read_text().strip() == host
+    assert not operation.db_file(store.root).exists()
+
+
+def test_initialize_database_recovers_interrupted_no_overwrite_publish(initial_store, monkeypatch):
+    from claudlobby.plane import migrations
+    store = initial_store
+    monkeypatch.setattr(operation, "_git", lambda *_: SimpleNamespace(
+        stdout=f"SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n".encode()))
+    calls, save = [], store.save
+    real_migrate = migrations.migrate
+    def migrate(conn):
+        calls.append("migrate")
+        return real_migrate(conn)
+    monkeypatch.setattr(migrations, "migrate", migrate)
+    def interrupt(record):
+        if record.get("initialization", {}).get("database", {}).get("state") == "published":
+            raise OSError("interrupted after link")
+        save(record)
+    store.save = interrupt
+    with pytest.raises(OSError, match="after link"):
+        operation._initialize_database(store)
+    progress = store.load()["initialization"]["database"]
+    assert progress["state"] == "ready"
+    assert Path(progress["path"]).samefile(operation.db_file(store.root))
+    store.save = save
+    operation._initialize_database(store)
+    assert calls == ["migrate"]
+    assert store.load()["initialization"]["database"]["state"] == "published"
+    assert not Path(progress["path"]).exists()
+    conn = operation.connect_ro(operation.db_file(store.root))
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == operation.SQL_SCHEMA_VERSION
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    finally:
+        conn.close()
+
+
+def test_initialize_database_does_not_adopt_foreign_final_file(initial_store, monkeypatch):
+    store = initial_store
+    monkeypatch.setattr(operation, "_git", lambda *_: SimpleNamespace(
+        stdout=f"SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n".encode()))
+    save = store.save
+    def interrupt(record):
+        save(record)
+        if record.get("initialization", {}).get("database", {}).get("state") == "ready":
+            raise OSError("before link")
+    store.save = interrupt
+    with pytest.raises(OSError, match="before link"):
+        operation._initialize_database(store)
+    foreign = operation.db_file(store.root)
+    foreign.parent.mkdir(mode=0o700)
+    foreign.write_bytes(b"foreign database")
+    foreign.chmod(0o600)
+    store.save = save
+    with pytest.raises(UpdateError, match="owned staged file"):
+        operation._initialize_database(store)
+    assert foreign.read_bytes() == b"foreign database"
+
+
+@pytest.mark.parametrize("observed", [False, True])
+def test_initialize_unknown_registry_is_reobserved_without_new_scan(initial_store, monkeypatch, observed):
+    from claudlobby import resources
+    from claudlobby.activation_state import ActivationError
+    from claudlobby.plane.registry_emit import RegistryScanError
+    store = initial_store
+    store.record["initialization"] = {}
+    rendered = SimpleNamespace()
+    package, calls = object(), []
+    monkeypatch.setattr(resources, "get_resources", lambda **_: package)
+    failure = RegistryScanError("unknown scan", {"scan_id": "original", "recording": "unknown"})
+    def scan(*_args, **_kwargs):
+        assert store.load()["initialization"]["registry"] == {"state": "pending"}
+        calls.append("scan")
+        raise failure
+    monkeypatch.setattr(operation, "scan_registry", scan)
+    with pytest.raises(RegistryScanError) as raised:
+        operation._initialize_identities(store, rendered)
+    assert raised.value is failure
+    assert store.load()["initialization"]["registry"]["summary"] == failure.summary
+    def read(*_args, **_kwargs):
+        calls.append("read")
+        if not observed:
+            raise ActivationError("registry incomplete")
+        return {"existing": "canonical IDs"}
+    monkeypatch.setattr(operation, "read_registry_identity_bindings", read)
+    def snapshot(*_args, identities, **_kwargs):
+        return {**store.record["candidate_config"], "identities": identities, "fingerprint": "bound"}
+    monkeypatch.setattr(operation, "snapshot_from_plan", snapshot)
+    if observed:
+        operation._initialize_identities(store, rendered)
+        assert store.load()["candidate_config"]["identities"] == {"existing": "canonical IDs"}
+        assert store.load()["initialization"]["registry"]["state"] == "complete"
+        operation._initialize_identities(store, rendered)
+    else:
+        with pytest.raises(UpdateError, match="not resent"):
+            operation._initialize_identities(store, rendered)
+        assert store.load()["initialization"]["registry"]["state"] == "pending"
+    assert calls == ["scan", "read"]
+
+
+def test_initialize_quiet_has_no_current_snapshot_or_database(initial_store, monkeypatch):
+    store = initial_store
+    monkeypatch.setattr(operation, "_git", lambda *_: SimpleNamespace(
+        stdout=f"SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n".encode()))
+    monkeypatch.setattr(operation, "read_current_config", lambda *_args, **_kwargs: pytest.fail("active read"))
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: SimpleNamespace(check_inputs=lambda: None))
+    assert operation.quiesce_operation(store, None)["consumers"] == {}
+    assert operation.assert_operation_quiet(store, None)["previous_config"] is None
+    assert not operation.db_file(store.root).exists()
+
+
+def test_initialize_publication_finishes_files_schema_ids_before_current_commit(initial_store, monkeypatch):
+    store, events = initial_store, []
+    store.record.update(phase="environment", maintenance=True, git_complete=True,
+                        dependencies={"environment_complete": True}, host_interpreter="/python")
+    monkeypatch.setattr(operation, "_head", lambda *_: "target")
+    monkeypatch.setattr(operation, "_schema", lambda *_args, **_kwargs: operation.SQL_SCHEMA_VERSION)
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: "render")
+    monkeypatch.setattr(operation, "apply_publication", lambda *_: events.append("files"))
+    monkeypatch.setattr(operation, "_initialize_database", lambda *_: events.append("schema"))
+    def identities(store, rendered):
+        assert store.load()["maintenance"] is True and events == ["files", "schema"]
+        events.append("identities")
+        data = store.load()
+        data["candidate_config"]["identities"] = {"actual": "registry IDs"}
+        store.save(data)
+    monkeypatch.setattr(operation, "_initialize_identities", identities)
+    monkeypatch.setattr(operation, "install_launcher", lambda *_args, **_kwargs: events.append("launcher"))
+    monkeypatch.setattr(operation, "install_updater", lambda *_args, **_kwargs: events.append("updater"))
+    def commit(snapshot, *, installation, expected_previous):
+        assert expected_previous is None and snapshot["identities"] == {"actual": "registry IDs"}
+        assert store.load()["maintenance"] is True
+        events.append("config")
+    monkeypatch.setattr(operation, "publish_current_config", commit)
+    result = operation.publish_operation(store)
+    assert events == ["files", "schema", "identities", "launcher", "updater", "config"]
+    assert result["phase"] == "restore" and result["config_committed"] and not result["maintenance"]
+
+
+def test_initialize_added_bot_restore_intent_does_not_request_absent_session_checkpoint(initial_store, monkeypatch):
+    store = initial_store
+    added = record()["consumers"]["bot"]
+    added["intent"]["kind"] = "added"
+    store.record["consumers"] = {"bot": added}
+    monkeypatch.setattr(operation, "_git", lambda *_: SimpleNamespace(
+        stdout=f"SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n".encode()))
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: SimpleNamespace(check_inputs=lambda: None))
+    monkeypatch.setattr(bot_operations, "save_planned_checkpoint", lambda *_args, **_kwargs:
+                        pytest.fail("added bot has no previous session"))
+    monkeypatch.setattr(bot_operations, "verify_checkpoint_after_stop", lambda *_args, **_kwargs:
+                        pytest.fail("added bot has no previous checkpoint"))
+    def quiet(store, key, adapter):
+        data = store.load()
+        data["consumers"][key]["stop"] = "done"
+        store.save(data)
+    monkeypatch.setattr(operation, "quiesce_consumer", quiet)
+    observed = []
+    monkeypatch.setattr(operation, "observe_quiet", lambda store, key, adapter: observed.append(key))
+    operation.quiesce_operation(store, None)
+    result = operation.assert_operation_quiet(store, None)
+    assert observed == ["bot"]
+    assert result["consumers"]["bot"]["stop"] == "done"
+    assert "checkpoint" not in result["consumers"]["bot"]

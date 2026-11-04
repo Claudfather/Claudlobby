@@ -14,13 +14,13 @@ import platform
 import shlex
 import tempfile
 
-from .config_units import current_git_declarations
+from .config_units import current_git_declarations, staged_git_declarations
 from .git_update import UpdateError, _sync
 from .supervision_inventory import (
     FileSnapshot, collect_enrollment, is_unit_template, validate_darwin_unit,
-    _environment, _darwin_source,
+    _environment, _darwin_source, _catalog,
 )
-from .supervision_runtime import _call, assert_quiescent, unit_start_budget
+from .supervision_runtime import _call, assert_quiescent, assert_native_absent, unit_start_budget
 
 
 def _hash(value):
@@ -36,7 +36,7 @@ def validate_candidate_consumers(old_snapshot, candidate_snapshot, manager):
     """Reject unsupported roster or placement changes before maintenance."""
     if manager not in {"Linux", "Darwin"}:
         raise UpdateError("unsupported supervision platform")
-    if any(old_snapshot.get(key) != candidate_snapshot.get(key)
+    if old_snapshot is not None and any(old_snapshot.get(key) != candidate_snapshot.get(key)
            for key in ("installation", "data_root")):
         raise UpdateError("candidate consumer installation differs")
     def bindings(snapshot):
@@ -49,8 +49,14 @@ def validate_candidate_consumers(old_snapshot, candidate_snapshot, manager):
             result[source] = (row["working_directory"], row["scope"], row.get("fleet"),
                               row.get("bot"), row.get("service"))
         return result
-    if bindings(old_snapshot) != bindings(candidate_snapshot):
-        raise UpdateError("candidate adds, removes or relocates native consumers; unsupported in this update")
+    old, candidate = bindings(old_snapshot) if old_snapshot is not None else {}, bindings(candidate_snapshot)
+    if set(old) - set(candidate):
+        raise UpdateError("candidate removes native consumers; removal is unsupported in this update")
+    if any(old[key] != candidate[key] for key in old):
+        raise UpdateError("candidate relocates or rebinds a retained native consumer")
+    names = [Path(source).name for source in candidate]
+    if len(names) != len(set(names)):
+        raise UpdateError("candidate native names collide")
 
 
 def _content(snapshot):
@@ -65,16 +71,21 @@ def _check(snapshot):
         raise UpdateError(f"native definition changed: {snapshot['path']}")
 
 
-def freeze_service_intent(current_snapshot, adapter, install_directory):
+def freeze_service_intent(current_snapshot, adapter, install_directory, *, candidate_snapshot=None, rendered=None):
     """Freeze complete current declarations and actual native disposition."""
     install_directory = Path(install_directory)
     if not install_directory.is_absolute() or install_directory.resolve() != install_directory:
         raise UpdateError("native install directory must be absolute and unredirected")
     manager = platform.system()
-    declarations = current_git_declarations(current_snapshot, manager)
-    inventory = collect_enrollment(Path(current_snapshot["data_root"]), declarations,
-                                   adapter=adapter).require_complete()
-    rows = inventory.payload()["units"]
+    if current_snapshot is None:
+        if candidate_snapshot is None or rendered is None:
+            raise UpdateError("initial native preparation requires exact candidate render")
+        rows = []
+    else:
+        declarations = current_git_declarations(current_snapshot, manager)
+        inventory = collect_enrollment(Path(current_snapshot["data_root"]), declarations,
+                                       adapter=adapter).require_complete()
+        rows = inventory.payload()["units"]
     scheduled = {row["declaration"]["service"] for row in rows
                  if row["target"].endswith(".timer")}
     for row in rows:
@@ -131,6 +142,19 @@ def freeze_service_intent(current_snapshot, adapter, install_directory):
                 row["disposition"] = "uninstalled"
         if len(row["installed"]) > 1:
             raise UpdateError("consumer has multiple installed definitions")
+    if candidate_snapshot is not None:
+        validate_candidate_consumers(current_snapshot, candidate_snapshot, manager)
+        if rendered is None:
+            raise UpdateError("candidate native additions require exact staged bytes")
+        old_sources = {row["declaration"]["source"] for row in rows}
+        staged = staged_git_declarations(candidate_snapshot, rendered, manager)
+        paired = {item["service"] for _, item, _ in staged if item["service"]}
+        for declaration, item, content in staged:
+            if str(declaration.source) not in old_sources:
+                rows.append(_freeze_added(candidate_snapshot, adapter, install_directory, declaration, item, content, paired))
+        phases = {item["source"]: item["phase"] for item in candidate_snapshot["units"]}
+        for row in rows:
+            row["phase"] = phases[row["declaration"]["source"]]
     return rows
 
 
@@ -195,7 +219,9 @@ def _park(store, record, progress, row):
 def observe_quiet(store, key, adapter):
     """Fresh final observation; caller holds its exclusive maintenance fence."""
     record, progress, row = _row(store, key)
-    if not row["installed"] or is_unit_template(key):
+    if row.get("kind") == "added":
+        evidence = observe_added_absence(row, adapter)
+    elif not row["installed"] or is_unit_template(key):
         evidence = {"uninstalled_or_template": True, "intent": _hash(row)}
     else:
         binding = row["bot_binding"]
@@ -209,6 +235,11 @@ def observe_quiet(store, key, adapter):
 
 def quiesce_consumer(store, key, adapter):
     record, progress, row = _row(store, key)
+    if row.get("kind") == "added":
+        observe_added_absence(row, adapter)
+        progress["stop"] = "done"
+        store.save(record)
+        return progress
     if not row["installed"]:
         progress["stop"] = "done"
         store.save(record)
@@ -260,6 +291,8 @@ def quiesce_consumer(store, key, adapter):
 
 def restore_consumer(store, key, adapter, current_snapshot):
     record, progress, row = _row(store, key)
+    if row.get("kind") == "added":
+        return _restore_added(store, record, progress, row, adapter, current_snapshot)
     if not row["installed"]:
         progress["restore"] = "done"
         store.save(record)
@@ -376,6 +409,164 @@ def restore_consumer(store, key, adapter, current_snapshot):
     if not expected:
         raise UpdateError("native restoration remains pending; observation only on retry")
     _darwin(adapter, restored)
+    progress["restore"] = "done"
+    store.save(record)
+    return progress
+
+
+def observe_added_absence(row, adapter):
+    """Prove an approved new target is absent; no saved state is invented."""
+    manager, domain, directories, names, loaded = _catalog(adapter.read("svc_inventory_catalog"))
+    source = Path(row["declaration"]["source"])
+    installed = Path(row["destination"])
+    if manager != row["manager"] or installed.parent not in directories:
+        raise UpdateError("added native placement differs from observed manager/search path")
+    if manager == "Darwin" and row["target"].rsplit("/", 1)[0] != domain:
+        raise UpdateError("added native domain differs from observed domain")
+    if any((directory / source.name).exists() or (directory / source.name).is_symlink() for directory in directories):
+        raise UpdateError("added native definition already exists")
+    if source.name in names or source.name in loaded or (is_unit_template(source.name) and any(
+            name.startswith(source.name.split("@", 1)[0] + "@") for name in loaded)):
+        raise UpdateError("added native target is already observed")
+    if [str(item) for item in directories] != row["search_directories"]:
+        raise UpdateError("added native search path changed")
+    binding = row["bot_binding"]
+    socket = Path(binding[2]) / f"tmux-{os.getuid()}" / binding[1] if binding else None
+    return assert_native_absent(adapter, manager=manager, domain=row["domain"], target=row["target"],
+                                installed_file=installed, search_directories=directories,
+                                socket_path=socket).details
+
+
+def _freeze_added(snapshot, adapter, directory, declaration, item, content, paired):
+    from .activation_enrollment import _wanted_by, _enablement
+    from .stop_record import read_stop
+    from .supervision_inventory import _darwin_disabled
+    import plistlib
+
+    source = declaration.source
+    manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    placement = snapshot.get("supervision")
+    if (placement is None or placement != {"manager": manager, "domain": domain, "directory": str(directory)}
+            or directory not in directories or not directory.is_dir() or directory.stat().st_uid != os.getuid()
+            or directory / source.name == source):
+        raise UpdateError("new native consumer requires exact committed placement")
+    if hashlib.sha256(content).hexdigest() != item["sha256"]:
+        raise UpdateError("added staged native definition changed")
+    target = domain + "/" + source.stem if manager == "Darwin" else source.name
+    plist = plistlib.loads(content) if manager == "Darwin" else {}
+    scheduled = (source.name in paired or source.suffix == ".timer" if manager == "Linux" else
+                 any(key in plist for key in ("StartCalendarInterval", "StartInterval")))
+    if scheduled and manager == "Darwin" and (plist.get("RunAtLoad") or plist.get("KeepAlive")):
+        raise UpdateError("new schedule would execute during native load")
+    row = {"kind": "added", "target": target, "manager": manager, "domain": domain, "installed": [],
+           "phase": item["phase"], "scheduled": scheduled, "bot_binding": None,
+           "disposition": "resident", "declaration": {"source": str(source), "scope": item["scope"],
+           "working_directory": item["working_directory"], "environment": list(declaration.environment),
+           "fleet": item["fleet"], "bot": item["bot"], "service": item["service"]},
+           "destination": str(directory / source.name), "search_directories": [str(item) for item in directories],
+           "candidate": {"sha256": item["sha256"],
+           "mode": item["mode"], "content": {"base64": base64.b64encode(content).decode()}},
+           "enroll": item["enroll"], "enabled": True, "run_at_load": bool(plist.get("RunAtLoad"))}
+    if item["scope"] == "bot":
+        tmpdir = dict(declaration.environment).get("TMUX_TMPDIR")
+        if not tmpdir or not Path(tmpdir).is_absolute():
+            raise UpdateError("added bot has no explicit private tmux directory")
+        row["bot_binding"] = [item["working_directory"], source.stem, tmpdir]
+        row["disposition"] = "uninstalled" if read_stop(Path(item["working_directory"])) else "running"
+        if row["disposition"] == "uninstalled":
+            row["enroll"] = False
+    if manager == "Darwin":
+        row["enabled"] = _darwin_disabled(adapter.read("svc_inventory_disabled", domain)).get(source.stem) != "disabled"
+    else:
+        wanted = _wanted_by(content, source, paired)
+        row["enablement"] = _enablement({"installed": row["destination"], "original": False}, wanted, {})
+    row["absence"] = observe_added_absence(row, adapter)
+    return row
+
+
+def _restore_added(store, record, progress, row, adapter, snapshot):
+    source, installed = Path(row["declaration"]["source"]), Path(row["destination"])
+    candidates = current_git_declarations(snapshot, row["manager"])
+    declaration = next((item for item in candidates if item.source == source), None)
+    candidate = row["candidate"]
+    content = _content(candidate)
+    if (declaration is None or str(declaration.working_directory) != row["declaration"]["working_directory"]
+            or list(declaration.environment) != [tuple(item) for item in row["declaration"]["environment"]]
+            or source.read_bytes() != content or hashlib.sha256(content).hexdigest() != candidate["sha256"]
+            or source.stat().st_mode & 0o777 != candidate["mode"]):
+        raise UpdateError("added native definition differs from committed candidate")
+    if not row["enroll"]:
+        observe_added_absence(row, adapter)
+        progress.update(restore="done", outcome="left uninstalled")
+        store.save(record)
+        return progress
+    if row["target"].endswith(".timer") or row["manager"] == "Darwin" and row["scheduled"]:
+        if any(other.get("restore") != "done" for key, other in record["consumers"].items()
+               if key != row["target"] and not (key.endswith(".timer") or other["intent"]["manager"] == "Darwin" and other["intent"]["scheduled"])):
+            raise UpdateError("restore services before new schedules")
+    if progress.get("restore") is None:
+        observe_added_absence(row, adapter)
+        progress["restore"] = "files"
+        store.save(record)
+    if installed.exists() or installed.is_symlink():
+        if installed.is_symlink() or installed.read_bytes() != content or installed.stat().st_mode & 0o777 != candidate["mode"]:
+            raise UpdateError("added installed native definition changed")
+    else:
+        if progress["restore"] != "files":
+            raise UpdateError("published added native definition disappeared")
+        fd, name = tempfile.mkstemp(prefix=".update-native-", dir=installed.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content); stream.flush(); os.fchmod(stream.fileno(), candidate["mode"]); os.fsync(stream.fileno())
+            os.link(temporary, installed)  # Create only, never overwrite an unexpected node.
+            _sync(installed.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+    enablement = row.get("enablement")
+    if enablement:
+        link = Path(enablement["path"])
+        if link.parent.resolve() != link.parent or link.parent.is_symlink():
+            raise UpdateError("added enablement directory is redirected")
+        link.parent.mkdir(mode=0o755, exist_ok=True)
+        if not (link.exists() or link.is_symlink()):
+            if progress["restore"] != "files":
+                raise UpdateError("published added enablement disappeared")
+            link.symlink_to(installed)
+            _sync(link.parent)
+        if not link.is_symlink() or os.readlink(link) != str(installed):
+            raise UpdateError("added enablement link is foreign")
+    if row["manager"] == "Linux":
+        _native(adapter, row, "svc_activation_reload")
+    # The canonical inventory proves effective bindings after publication too.
+    collect_enrollment(Path(snapshot["data_root"]), candidates, adapter=adapter,
+                       only_names=frozenset({source.name})).require_complete()
+    if is_unit_template(row["target"]):
+        progress["restore"] = "done"; store.save(record); return progress
+    observed = _native(adapter, row, "svc_inventory_state", installed, row["target"])
+    should_start = row["enabled"] and not (row["manager"] == "Linux" and row["scheduled"] and source.suffix != ".timer")
+    if progress["restore"] == "files":
+        progress["restore"] = "pending"
+        store.save(record)
+        if row["manager"] == "Darwin" and row["enabled"]:
+            _native(adapter, row, "svc_activation_resume", installed, row["target"], "unchanged loaded inactive",
+                    timeout=unit_start_budget(source, content))
+        elif should_start:
+            _native(adapter, row, "svc_activation_start", installed, row["target"], timeout=unit_start_budget(source, content))
+        observed = _native(adapter, row, "svc_inventory_state", installed, row["target"])
+    if row["manager"] == "Darwin" and should_start and not row["scheduled"] and not row["run_at_load"] and observed == "unchanged loaded inactive":
+        if progress.get("start") is None:
+            progress["start"] = "pending"; store.save(record)
+            _native(adapter, row, "svc_activation_start", installed, row["target"], timeout=unit_start_budget(source, content))
+            observed = _native(adapter, row, "svc_inventory_state", installed, row["target"])
+    expected = (observed.endswith(" active") if should_start and not row["scheduled"] else
+                observed.startswith("unchanged loaded ") if row["manager"] == "Darwin" and row["enabled"] else
+                observed == "unchanged unloaded inactive" if row["manager"] == "Darwin" else
+                observed.endswith(" active") if source.suffix == ".timer" else observed.endswith(" inactive"))
+    if row["bot_binding"] and should_start:
+        expected = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], installed, row["target"]) == "ready"
+    if not expected:
+        raise UpdateError("added consumer restoration pending; retry observes original native action")
     progress["restore"] = "done"
     store.save(record)
     return progress

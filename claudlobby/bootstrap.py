@@ -1,9 +1,8 @@
-"""Install from a trusted release installer or unpacked bundle; stdlib only.
+"""Prepare a managed Git installation from a trusted source export; stdlib only.
 
-Checksums establish local integrity, not publisher authenticity. This launcher
-installs a temporary matching CLI, then delegates to canonical host setup. It
-never selects a release or activates a fleet. Bundles target CPython 3.11 on
-Linux aarch64 or macOS arm64; the host's interpreter/stdlib remain prerequisites.
+Run with ``python -m claudlobby.bootstrap`` and explicit installation, data root,
+trusted remote/ref and host interpreter. Preparation freezes Git/dependencies and
+installs stable entries; it never activates a fleet or launches a local guide.
 """
 from __future__ import annotations
 
@@ -11,34 +10,15 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
-import platform
+from pathlib import Path
 import re
-import shutil
-import shlex
-import signal
 import stat
 import subprocess
 import sys
-import tempfile
-import zipfile
-import zipimport
-
-_MAX_FILE = 256 * 1024 * 1024
-_MAX_TOTAL = 1024 * 1024 * 1024
-_MAX_FILES = 512
-_FIXED = {"bootstrap.py", "dependency.lock", "rehearsal.json", "built-on.txt"}
 
 
 class BundleError(ValueError):
-    """A fixed, safe operator-facing refusal."""
-
-
-def _regular(path: Path) -> int:
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_FILE:
-        raise BundleError("bundle contains a redirected, non-regular or oversized file")
-    return info.st_size
+    """A fixed preparation refusal; name retained for existing direct callers."""
 
 
 def _digest(path: Path) -> str:
@@ -49,329 +29,225 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _lock(content: bytes) -> None:
-    # Bootstrap pip must obey the same local-only boundary as the assembler,
-    # before the matching installed release_install module is available.
-    text = content.decode("utf-8")
-    if not text or "\0" in text:
-        raise BundleError("bundle dependency lock is empty or invalid")
-    for raw in re.sub(r"\\\r?\n", " ", text).splitlines():
-        line = raw.split(" #", 1)[0].strip()
-        if not line or line.startswith("#"):
-            continue
-        hashes = re.findall(r"\s+--hash=sha256:[a-fA-F0-9]{64}(?=\s|$)", line)
-        requirement = re.sub(r"\s+--hash=sha256:[a-fA-F0-9]{64}(?=\s|$)", "", line)
-        match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9_,.-]+\])?"
-                             r"==[A-Za-z0-9][A-Za-z0-9.!+_-]*(?:\s*;\s*[^\r\n]+)?", requirement)
-        if (not match or not hashes or any(value in requirement for value in ("--", "/", "\\", "@"))
-                or re.sub(r"[-_.]+", "-", match[1]).lower() == "claudlobby"):
-            raise BundleError("bundle lock requires pinned local dependencies with SHA-256 hashes")
+def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, ref: str,
+                             interpreter: Path) -> dict:
+    """Prepare explicit owned code/dependencies only; never initialize a fleet.
 
+    The small preparation receipt freezes a first-install Git resolution. It is
+    not an update, activation, owner grant or proof of runtime health.
+    """
+    import fcntl
+    import runpy
+    from .installation import Installation, write_installation
+    from .git_update import (_write, validate_dependency_lock, run_dependency_command,
+                             install_locked_dependencies, verify_locked_dependencies)
 
-def _platform(built_on: str) -> None:
-    lines = dict(line.split(" ", 1) for line in built_on.splitlines())
-    target = ("linux-aarch64" if sys.platform == "linux" and platform.machine() == "aarch64"
-              else "macos-arm64" if sys.platform == "darwin" and platform.machine() == "arm64" else None)
-    recorded = lines.get("platform", "")
-    if (sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 11)
-            or not lines.get("python", "").startswith("3.11.")
-            or target is None or (target == "linux-aarch64" and recorded != "linux-aarch64")
-            or (target == "macos-arm64" and not re.fullmatch(r"macosx-[0-9.]+-(?:arm64|universal2)", recorded))):
-        raise BundleError("bundle requires matching Linux aarch64 or macOS arm64 CPython 3.11; wheel/libc compatibility remains host-specific")
-
-
-def _checksums(content: bytes) -> dict[str, str]:
-    if len(content) > 128 * 1024:
-        raise BundleError("checksum inventory is oversized")
-    checksums = {}
-    for line in content.decode("utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (?:\./)?([A-Za-z0-9_./+-]+)", line)
-        if not match:
-            raise BundleError("invalid checksum inventory")
-        name = match[2]
-        relative = PurePosixPath(name)
-        if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
-                or name in checksums or name == "SHA256SUMS"):
-            raise BundleError("invalid checksum path or duplicate")
-        checksums[name] = match[1]
-    return checksums
-
-
-def _extract_installer(carrier: Path, directory: Path) -> Path:
-    """Expand a finite carrier into our private directory; _bundle owns identity."""
-    with zipfile.ZipFile(carrier) as archive:
-        entries = archive.infolist()
-        if len(entries) > _MAX_FILES or sum(info.file_size for info in entries) > _MAX_TOTAL:
-            raise BundleError("installer inventory is oversized")
-        names = {}
-        folded = set()
-        for info in entries:
-            name = "bootstrap.py" if info.filename == "__main__.py" else info.filename
-            path = PurePosixPath(name)
-            if (not re.fullmatch(r"[A-Za-z0-9_./+-]+", name) or path.is_absolute()
-                    or ".." in path.parts or str(path) != name or name.casefold() in folded
-                    or info.filename == "bootstrap.py" or info.is_dir()
-                    or stat.S_IFMT(info.external_attr >> 16) not in {0, stat.S_IFREG}
-                    or info.file_size > _MAX_FILE or info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
-                    or info.flag_bits & 1):
-                raise BundleError("installer contains a redirected, duplicate, unsupported or oversized file")
-            names[name] = info
-            folded.add(name.casefold())
-        if "bootstrap.py" not in names or "SHA256SUMS" not in names:
-            raise BundleError("installer lacks its launcher or checksum inventory")
-        if names["SHA256SUMS"].file_size > 128 * 1024:
-            raise BundleError("checksum inventory is oversized")
-        if set(names) != set(_checksums(archive.read(names["SHA256SUMS"]))) | {"SHA256SUMS"}:
-            raise BundleError("installer checksum inventory differs")
-        for name, info in names.items():
-            target = directory / name
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "wb") as output, archive.open(info) as source:
-                shutil.copyfileobj(source, output, length=1024 * 1024)
-    return directory / "bootstrap.py"
-
-
-def _bundle(script: Path) -> tuple[Path, Path, dict[str, str]]:
-    if not script.is_absolute() or script != script.resolve(strict=True):
-        raise BundleError("run the real bootstrap.py from an absolute, unredirected bundle path")
-    directory = script.parent
-    entries = list(directory.iterdir())
-    wheelhouse = directory / "wheelhouse"
-    if wheelhouse.is_symlink() or not wheelhouse.is_dir():
-        raise BundleError("bundle needs an unredirected wheelhouse directory")
-    wheels = list(wheelhouse.iterdir())
-    if not wheels:
-        raise BundleError("bundle wheelhouse is empty or oversized")
-    root_wheels = [path for path in entries if path.suffix == ".whl"]
-    if len(root_wheels) != 1 or {p.name for p in entries} != _FIXED | {"SHA256SUMS", "wheelhouse", root_wheels[0].name}:
-        raise BundleError("bundle needs one candidate wheel and the exact supported inventory")
-    paths = [p for p in entries if p != wheelhouse] + wheels
-    if len(paths) > _MAX_FILES:
-        raise BundleError("bundle inventory is oversized")
-    if any(p.suffix != ".whl" for p in wheels):
-        raise BundleError("wheelhouse may contain only regular local wheels")
-    if sum(_regular(p) for p in paths) > _MAX_TOTAL:
-        raise BundleError("bundle is oversized")
-    sums = directory / "SHA256SUMS"
-    if sums.stat().st_size > 128 * 1024:
-        raise BundleError("checksum inventory is oversized")
-    checksums = _checksums(sums.read_bytes())
-    actual = {p.relative_to(directory).as_posix() for p in paths if p != sums}
-    if set(checksums) != actual or any(_digest(directory / name) != value for name, value in checksums.items()):
-        raise BundleError("bundle checksum inventory or bytes differ")
-    wheel = root_wheels[0]
-    if (directory / "rehearsal.json").stat().st_size > 128 * 1024:
-        raise BundleError("bundle rehearsal metadata is oversized")
-    rehearsal = json.loads((directory / "rehearsal.json").read_bytes())
-    with zipfile.ZipFile(wheel) as archive:
-        names = archive.namelist()
-        required = {"claudlobby/bootstrap.py", "claudlobby/_artifact.json"}
-        if any(names.count(name) != 1 for name in required) or any(archive.getinfo(name).file_size > 128 * 1024 for name in required):
-            raise BundleError("candidate lacks bounded unique bootstrap identity")
-        if archive.read("claudlobby/bootstrap.py") != script.read_bytes():
-            raise BundleError("bootstrap.py differs from the candidate module")
-        artifact = json.loads(archive.read("claudlobby/_artifact.json"))
-    revision = artifact.get("source_revision") if isinstance(artifact, dict) else None
-    if (not isinstance(rehearsal, dict) or rehearsal.get("passed") is not True
-            or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision)
-            or rehearsal.get("source_revision") != revision or rehearsal.get("wheel_sha256") != checksums[wheel.name]):
-        raise BundleError("candidate and successful rehearsal identity differ")
-    _lock((directory / "dependency.lock").read_bytes())
-    _platform((directory / "built-on.txt").read_text(encoding="utf-8"))
-    return directory, wheel, checksums
-
-
-def _run(command: list[str], env: dict[str, str], *, step: str, timeout: int = 300) -> None:
-    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               start_new_session=True)
+    installation = Installation(Path(directory), Path(data_root))
+    interpreter = Path(interpreter)
+    if (not interpreter.is_absolute() or interpreter != interpreter.resolve()
+            or not interpreter.is_file() or not os.access(interpreter, os.X_OK)
+            or interpreter.is_relative_to(installation.directory)
+            or interpreter.is_relative_to(installation.data_root)):
+        raise BundleError("Git preparation requires an independent explicit host Python")
+    if (not isinstance(remote, str) or not remote or remote.startswith('-') or not remote.isprintable()
+            or remote != remote.strip() or not isinstance(ref, str) or not ref or ref.startswith('-')
+            or not ref.isprintable() or any(char.isspace() for char in ref)):
+        raise BundleError("Git preparation requires an explicit trusted remote and ref")
+    installation.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    receipt = installation.directory / 'preparation.json'
+    if not receipt.exists() and set(path.name for path in installation.directory.iterdir()) - {
+            'installation.json', 'preparation.lock'}:
+        raise BundleError("Git preparation refuses an unowned installation directory")
+    descriptor = os.open(installation.directory / 'preparation.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        process.communicate(timeout=timeout)
-    except BaseException as exc:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
-        if isinstance(exc, subprocess.TimeoutExpired):
-            raise BundleError(f"offline bootstrap timed out at {step}; inspect host Python and local wheel compatibility") from None
-        raise
-    if process.returncode:
-        raise BundleError(f"offline bootstrap failed at {step}; check host Python/venv and bundle wheel compatibility")
-
-
-def bootstrap(script: Path, root: Path, *, json_output: bool = False, guided: bool = False) -> int | tuple[Path, dict]:
-    if not root.is_absolute() or root.is_symlink():
-        raise BundleError("--root must be an explicit absolute, real host data path")
-    directory, wheel, checksums = _bundle(script)
-    interpreter = Path(sys.executable).resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix="claudlobby-bootstrap-") as temporary:
-        work = Path(temporary).resolve()
-        inputs = work / "bundle"
-        inputs.mkdir()
-        # Install and assemble from an owned snapshot; a changed input refuses.
-        for name, expected in checksums.items():
-            source = directory / name
-            _regular(source)
-            target = inputs / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-            if _digest(target) != expected:
-                raise BundleError("bundle changed while snapshotting")
-        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
-               "PIP_CONFIG_FILE": os.devnull, "PIP_NO_INPUT": "1",
-               "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
-        for key in ("HOME", "TMPDIR", "XDG_CACHE_HOME"):
-            p = work / key.lower()
-            p.mkdir()
-            env[key] = str(p)
-        venv = work / "venv"
-        _run([str(interpreter), "-I", "-B", "-m", "venv", str(venv)], env, step="temporary environment creation")
-        python = venv / "bin/python"
-        pip = [str(python), "-I", "-B", "-m", "pip", "--isolated", "--disable-pip-version-check",
-               "--no-input", "--no-cache-dir", "install", "--no-compile", "--no-index", "--only-binary=:all:"]
-        _run(pip + ["--require-hashes", "--no-deps", "--find-links", str(inputs / "wheelhouse"),
-                    "-r", str(inputs / "dependency.lock")], env, step="dependency installation")
-        _run(pip + ["--no-deps", str(inputs / wheel.name)], env, step="candidate installation")
-        _run([str(python), "-I", "-B", "-m", "pip", "--isolated", "check"], env, step="dependency consistency check")
-        # Preserve native user-domain inputs, never ambient Python/pip injection
-        # or credential variables. Canonical setup owns its subprocess budgets.
-        host_env = {key: value for key, value in os.environ.items() if key in {
-            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "XDG_RUNTIME_DIR",
-            "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "DBUS_SESSION_BUS_ADDRESS"}}
-        command = [str(python), "-I", "-B", "-m", "claudlobby", "--root", str(root), "host", "setup",
-                   "--wheel", str(inputs / wheel.name), "--dependency-lock", str(inputs / "dependency.lock"),
-                   "--wheelhouse", str(inputs / "wheelhouse"), "--interpreter", str(interpreter)]
-        if json_output or guided:
-            command.append("--json")
-        receipt = tempfile.TemporaryFile() if guided else None
-        process = subprocess.Popen(command, env=host_env, start_new_session=True,
-                                   **({"stdout": receipt} if guided else {}))
-        try:
-            result = process.wait()
-            if not guided:
-                return result
-            receipt.seek(0)
-            raw = receipt.read(65537)
-            if result:
-                _guided_failure(raw, result)
-                return result
-            continuation = _guided_target(raw, root)
-        finally:
-            # The canonical assembler owns already-started local work. Keep
-            # its input snapshot alive through a caller interrupt, too.
-            while True:
-                try:
-                    process.wait()
-                    break
-                except KeyboardInterrupt:
-                    continue
-            if receipt is not None:
-                receipt.close()
-    # Assembly snapshots and temporary Python are gone before console serving.
-    # Do not detach: the durable CLI must inherit the original controlling TTY.
-    return continuation, host_env
-
-
-def _guided_failure(raw: bytes, exit_code: int) -> None:
-    """Render only the sealed assembler's canonical safe error, never raw data."""
-    fallback = "offline assembly failed; inspect trusted local inputs and native user setup"
-    try:
-        if len(raw) > 65536:
-            raise ValueError
-        result = json.loads(raw)
-        error = result["error"]
-        exits = {"internal_error": 1, "invalid_argument": 2, "conflict": 4,
-                 "unavailable": 6, "release_mismatch": 7}
-        if (set(result) != {"schema_version", "ok", "command", "request_id", "release_id", "data", "error"}
-                or type(result["schema_version"]) is not int or result["schema_version"] != 1
-                or result["ok"] is not False or result["command"] != "host.setup"
-                or not isinstance(result["data"], dict)
-                or set(error) != {"code", "message", "retryable", "hint"}
-                or exits.get(error["code"]) != exit_code
-                or type(error["retryable"]) is not bool):
-            raise ValueError
-        message, hint = error["message"], error["hint"]
-        if (not isinstance(message, str) or not message or len(message) > 4096 or not message.isprintable()
-                or (hint is not None and (not isinstance(hint, str) or not hint
-                    or len(hint) > 4096 or not hint.isprintable()))):
-            raise ValueError
-    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
-        print(fallback, file=sys.stderr)
-        return
-    print(message, file=sys.stderr)
-    if hint is not None:
-        print(hint, file=sys.stderr)
-
-
-def _guided_target(raw: bytes, root: Path) -> Path:
-    try:
-        if len(raw) > 65536:
-            raise ValueError
-        result = json.loads(raw)
-        data = result["data"]
-        release_id = data["release_id"]
-        if result["ok"] is not True or not re.fullmatch(r"r-[0-9a-f]{64}", release_id):
-            raise ValueError
-        target = root.resolve() / "state/releases" / release_id / "venv/bin/claudlobby"
-        if (data["root"] != str(root.resolve()) or data["cli"] != str(target)
-                or target.is_symlink() or target.resolve() != target or not target.is_file()
-                or not os.access(target, os.X_OK)):
-            raise ValueError
-        return target
-    except (ValueError, TypeError, KeyError, OSError):
-        raise BundleError("guided setup requires the exact successful sealed assembly result") from None
-
-
-def _continue_guided(command, env):
-    """Keep the guide's controlling TTY and let it drain its own server on Ctrl-C."""
-    process = subprocess.Popen(command, env=env)
-    def terminate(_signal, _frame):
-        if process.poll() is None:
-            process.terminate()
-    previous = signal.signal(signal.SIGTERM, terminate)
-    try:
-        while True:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        binding = {'schema': 1, 'purpose': 'installation-preparation-only',
+                   'installation': str(installation.directory), 'data_root': str(installation.data_root),
+                   'remote': remote, 'ref': ref, 'interpreter': str(interpreter),
+                   'interpreter_sha256': _digest(interpreter)}
+        if receipt.is_symlink():
+            raise BundleError("Git preparation receipt is redirected")
+        if receipt.exists():
+            state = json.loads(receipt.read_bytes())
+            if not isinstance(state, dict) or any(state.get(key) != value for key, value in binding.items()):
+                raise BundleError("existing preparation belongs to different explicit inputs")
+        else:
+            state = {**binding, 'revision': None, 'lock_sha256': None, 'environment_owned': False,
+                     'complete': False}
+            _write(receipt, json.dumps(state, sort_keys=True).encode())
+        write_installation(installation)
+        def save():
+            _write(receipt, json.dumps(state, sort_keys=True).encode())
+        def git(*arguments, check=True):
+            environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
             try:
-                return process.wait()
-            except KeyboardInterrupt:
-                # The terminal delivered SIGINT to both processes. Never kill
-                # the guide while it is shutting down its foreground server.
-                continue
+                result = subprocess.run(['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+                    '-C', str(installation.source), *arguments], env=environment, capture_output=True,
+                    timeout=300, check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise BundleError("managed Git preparation did not complete; retry the same explicit inputs") from exc
+            if check and result.returncode:
+                raise BundleError("managed Git preparation refused; existing files were retained")
+            return result
+        source = installation.source
+        if source.is_symlink() or source.resolve() != source:
+            raise BundleError("managed source path is redirected")
+        if not source.exists():
+            source.mkdir(mode=0o700)
+        if not (source / '.git').exists():
+            if next(source.iterdir(), None) is not None:
+                raise BundleError("managed source contains unowned files")
+            git('init', '--quiet', '.')
+        if (source / '.git').is_symlink() or not (source / '.git').is_dir():
+            raise BundleError("managed source must have its own plain Git directory")
+        if state['revision'] is None:
+            # FETCH_HEAD survives a crash after fetching but before recording SHA.
+            fetched = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}', check=False)
+            if fetched.returncode:
+                git('fetch', '--no-tags', '--no-recurse-submodules', '--', remote, ref)
+                fetched = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}')
+            revision = fetched.stdout.decode().strip()
+            if re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', revision) is None:
+                raise BundleError("trusted ref did not resolve to a full Git commit")
+            state['revision'] = revision
+            save()
+        revision = state['revision']
+        head = git('rev-parse', '--verify', 'HEAD^{commit}', check=False)
+        if head.returncode:
+            git('checkout', '--detach', revision)
+        installation.preflight(expected_revision=revision)
+        lock = source / 'requirements-runtime.lock'
+        content = git('show', revision + ':requirements-runtime.lock').stdout
+        validate_dependency_lock(content)
+        if lock.is_symlink() or lock.read_bytes() != content:
+            raise BundleError("tracked runtime dependency lock differs from the frozen commit")
+        digest = hashlib.sha256(content).hexdigest()
+        if state['lock_sha256'] not in (None, digest):
+            raise BundleError("frozen installation dependency lock changed")
+        state['lock_sha256'] = digest
+        save()
+        environment = installation.environment
+        if environment.is_symlink() or environment.resolve() != environment:
+            raise BundleError("managed environment is redirected")
+        if environment.exists() and not state['environment_owned']:
+            raise BundleError("Git preparation refuses an unowned Python environment")
+        if not state['complete']:
+            state['environment_owned'] = True
+            save()
+            cache = installation.directory / 'cache'
+            wheels = cache / 'bootstrap-wheels'
+            for path in (cache, wheels):
+                if path.is_symlink() or path.resolve() != path:
+                    raise BundleError("dependency preparation cache is redirected")
+                path.mkdir(mode=0o700, exist_ok=True)
+            for path in wheels.iterdir():
+                if path.is_symlink() or not path.is_file() or path.suffix != '.whl':
+                    raise BundleError("dependency cache contains an unowned or redirected file")
+            frozen_lock = cache / 'bootstrap-requirements.lock'
+            if frozen_lock.is_symlink() or frozen_lock.exists() and frozen_lock.read_bytes() != content:
+                raise BundleError("frozen dependency preparation input changed")
+            if not frozen_lock.exists():
+                _write(frozen_lock, content)
+            # Re-running venv without --clear preserves unrelated files. This path
+            # is receipt-owned, final and never moved (its shebangs remain correct).
+            run_dependency_command([interpreter, '-I', '-m', 'venv', environment])
+            python = environment / 'bin/python'
+            run_dependency_command([python, '-I', '-m', 'pip', '--isolated', 'download',
+                '--disable-pip-version-check', '--only-binary=:all:', '--require-hashes', '--no-deps',
+                '--dest', wheels, '-r', frozen_lock])
+            install_locked_dependencies(python, frozen_lock, wheels)
+        python = environment / 'bin/python'
+        if not python.is_file() or not os.access(python, os.X_OK):
+            raise BundleError("prepared environment is unavailable; use the update recovery owner")
+        observed = run_dependency_command([python, '-I', '-c',
+            'import json,sys; print(json.dumps({"prefix":sys.prefix,'
+            '"base_prefix":sys.base_prefix,"executable":sys.executable,'
+            '"version":list(sys.version_info[:2])}))'])
+        try:
+            identity = json.loads(observed)
+            valid = (identity['prefix'] == str(environment)
+                     and identity['base_prefix'] != identity['prefix']
+                     and identity['executable'] == str(python)
+                     and tuple(identity['version']) >= (3, 10))
+        except (ValueError, TypeError, KeyError):
+            valid = False
+        if not valid:
+            raise BundleError("prepared interpreter is not the exact managed Python environment")
+        wheels = installation.directory / 'cache/bootstrap-wheels'
+        if wheels.is_symlink() or wheels.resolve() != wheels or wheels.exists() and not wheels.is_dir():
+            raise BundleError("dependency preparation cache is redirected")
+        verify_locked_dependencies(python, lock, wheels if wheels.is_dir() else None)
+        installation.preflight(expected_revision=revision)
+        for name in ('installation.py', 'git_update.py'):
+            target = source / 'claudlobby' / name
+            if target.is_symlink() or target.read_bytes() != git('show', revision + ':claudlobby/' + name).stdout:
+                raise BundleError("stable entry source differs from the frozen target commit")
+        entries = {'claudlobby': source / 'claudlobby/installation.py',
+                   'claudlobby-update': source / 'claudlobby/git_update.py'}
+        if installation.bin.is_symlink() or installation.bin.resolve() != installation.bin:
+            raise BundleError("stable entry directory is redirected")
+        if installation.bin.exists() and set(path.name for path in installation.bin.iterdir()) - set(entries):
+            raise BundleError("stable entry directory contains unowned files")
+        for name, target in entries.items():
+            destination = installation.bin / name
+            expected = f'#!{interpreter}\n'.encode() + target.read_bytes()
+            if destination.is_symlink():
+                raise BundleError("stable entry destination contains foreign bytes or mode")
+            if destination.exists():
+                info = destination.lstat()
+                if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o755
+                        or destination.read_bytes() != expected):
+                    raise BundleError("stable entry destination contains foreign bytes or mode")
+            elif state['complete']:
+                raise BundleError("prepared stable entry is missing; use the update recovery owner")
+        if state['complete']:
+            return {'installation': str(installation.directory), 'data_root': str(data_root),
+                    'source_revision': revision, 'cli': str(installation.cli), 'prepared': True, 'activated': False}
+        namespace = runpy.run_path(str(source / 'claudlobby/installation.py'), run_name='_prepared_installation')
+        target_installation = namespace['Installation'](installation.directory, installation.data_root)
+        namespace['install_launcher'](target_installation, interpreter=interpreter)
+        namespace['install_updater'](target_installation, interpreter=interpreter)
+        state['complete'] = True
+        save()
+        return {'installation': str(installation.directory), 'data_root': str(data_root),
+                'source_revision': revision, 'cli': str(installation.cli), 'prepared': True, 'activated': False}
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        os.close(descriptor)
+
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--installation", required=True, type=Path)
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--remote", required=True, help="Explicit trusted Git remote")
+    parser.add_argument("--ref", required=True, help="Resolve once for this preparation")
+    parser.add_argument("--interpreter", required=True, type=Path)
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--guided", action="store_true", help="Continue assembly in the local interactive first-team guide")
     args = parser.parse_args(argv)
     try:
-        if args.guided and (args.json or not sys.stdin.isatty() or any(key in os.environ for key in (
-                "BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT", "FLEET_NAME",
-                "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT"))):
-            raise BundleError("guided setup requires an interactive operator terminal without bot/fleet selectors or --json")
-        if isinstance(__loader__, zipimport.zipimporter) and Path(__file__).name == "__main__.py":
-            with tempfile.TemporaryDirectory(prefix="claudlobby-installer-") as temporary:
-                script = _extract_installer(Path(__loader__.archive), Path(temporary).resolve())
-                result = bootstrap(script, args.root, json_output=args.json, guided=args.guided)
+        result = prepare_git_installation(args.installation.expanduser(), args.root.expanduser(),
+                                          remote=args.remote, ref=args.ref,
+                                          interpreter=args.interpreter.expanduser())
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        # Never echo remote credentials, Git/Python output or retained metadata.
+        if isinstance(exc, BlockingIOError):
+            code, message, status = "conflict", "Git preparation is already in progress", 4
+        elif isinstance(exc, OSError):
+            code, message, status = "unavailable", "Git preparation filesystem or executable is unavailable; partial work retained", 6
         else:
-            result = bootstrap(Path(__file__).absolute(), args.root, json_output=args.json, guided=args.guided)
-        if isinstance(result, tuple):
-            continuation, host_env = result
-            command = [str(continuation), "--root", str(args.root), "host", "owner", "setup"]
-            print("Save this command to resume local setup:\n" + shlex.join(command), flush=True)
-            return _continue_guided(command, host_env)
-        return result
-    except (BundleError, OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
-        message = str(exc) if isinstance(exc, BundleError) else "bundle is unreadable or malformed; inspect trusted local inputs and host Python"
+            code, message, status = "conflict", "Git preparation refused; inspect retained installation and explicit inputs", 4
         if args.json:
-            print(json.dumps({"ok": False, "error": {"code": "invalid_bundle", "message": message}}))
+            print(json.dumps({"ok": False, "error": {"code": code, "message": message}}, sort_keys=True))
         else:
             print(message, file=sys.stderr)
-        return 2
+        return status
+    if args.json:
+        print(json.dumps({"ok": True, **result}, sort_keys=True))
+    else:
+        print(f"Git installation prepared at {result['installation']} (revision {result['source_revision']}).")
+        print(f"CLI: {result['cli']}")
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Cold host and fleet setup through the release, staging, and activation owners."""
+"""Managed Git host preparation and canonical first-fleet setup."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import re
 import shlex
 import shutil
 import tempfile
-from types import SimpleNamespace
 
 from ..command_result import CommandFailure, CommandOutput
 from ..setup_observations import RUNTIME_EXECUTABLES
@@ -28,53 +27,10 @@ def _root(args, *, create: bool = False) -> Path:
     return path
 
 
-# Fixed product-authored assembly refusals; anything else is classified below.
-_ASSEMBLY_REFUSALS = frozenset({
-    "wheelhouse directory and executable interpreter are required",
-    "offline wheelhouse must contain only regular local .whl files",
-    "dependency lock must be UTF-8 requirements text",
-    "dependency lock is empty or invalid",
-    "dependency lock must not install the candidate claudlobby wheel",
-    "candidate must be a local wheel",
-    "candidate wheel needs one distribution metadata record",
-    "candidate wheel must contain only claudlobby and its metadata",
-    "candidate wheel has no canonical claudlobby entrypoint",
-    "candidate wheel has unsupported artifact metadata",
-    "candidate wheel is missing system.yaml",
-    "sealed release differs from requested assembly or compatibility",
-})
-
-
-def _assembly_failure(root: Path, exc: Exception) -> CommandFailure:
-    """Name the product-owned cause and any retained release directory.
-
-    Subprocess output and nested exception text are never forwarded; only fixed
-    refusals, the failing assembly step and the owned release path are shown.
-    """
-    from ..releases import ReleaseError
-
-    text = str(exc) if isinstance(exc, ReleaseError) else ""
-    step = re.search(r"release assembly subprocess (?:failed \(-?[0-9]{1,3}\)|timed out)", text)
-    cause = (text if text in _ASSEMBLY_REFUSALS else step[0] if step else
-             "a supplied wheel, lock, wheelhouse or interpreter path does not exist"
-             if isinstance(exc, FileNotFoundError) else
-             "inspect supplied wheel, lock, and interpreter")
-    hint = "correct the supplied inputs and rerun host setup"
-    retained = re.search(re.escape(str(root / "state" / "releases")) + r"/r-[0-9a-f]{64}", text)
-    if retained:
-        # Assembly never repairs or overwrites a retained directory; the same
-        # inputs keep refusing until the operator removes it.
-        cause += f"; incomplete release retained at {retained[0]}"
-        hint = (f"inspect and manually remove {shlex.quote(retained[0])} (never a sealed or selected release), "
-                "then rerun host setup with the same inputs")
-    return CommandFailure("conflict", f"conflict: offline release assembly failed: {cause}", hint=hint)
-
-
 def _host_setup(args) -> CommandOutput:
     if args.fleet is not None or args.seed:
         raise CommandFailure("invalid_argument", "invalid argument: host setup rejects --fleet and --seed")
-    from ..release_install import assemble_release
-    from ..releases import ReleaseError
+    from ..bootstrap import prepare_git_installation, BundleError
     from ..resources import get_resources
     from ..supervision_inventory import Adapter, InventoryError, _catalog
 
@@ -88,20 +44,30 @@ def _host_setup(args) -> CommandOutput:
     if missing:
         raise CommandFailure("unavailable", "unavailable: required bot runtime executable: " + ", ".join(missing))
     root = _root(args, create=True)
+    hint = "inspect the retained installation and retry host setup with the same explicit inputs"
     try:
-        release = assemble_release(root, Path(args.wheel), Path(args.dependency_lock),
-                                   Path(args.wheelhouse), Path(args.interpreter))
-    except (ReleaseError, ValueError, OSError) as exc:
-        raise _assembly_failure(root, exc) from exc
-    if release.inputs.artifact_id != package.artifact_id:
-        raise CommandFailure("release_mismatch", "release mismatch: wheel differs from this installed setup command",
-                             release_id=release.release_id)
+        prepared = prepare_git_installation(Path(args.installation).expanduser(), root,
+                                           remote=args.remote, ref=args.ref,
+                                           interpreter=Path(args.interpreter).expanduser())
+    except BlockingIOError as exc:
+        raise CommandFailure("conflict", "conflict: Git preparation is already in progress",
+                             retryable=True, hint=hint) from exc
+    except OSError as exc:
+        raise CommandFailure("unavailable", "unavailable: Git preparation filesystem or executable; partial work retained",
+                             hint=hint) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        if isinstance(exc, BundleError) and str(exc) in {
+                "Git preparation requires an independent explicit host Python",
+                "Git preparation requires an explicit trusted remote and ref"}:
+            raise CommandFailure("invalid_argument", "invalid argument: " + str(exc)) from exc
+        # Git/Python output and arbitrary retained metadata never enter the public result.
+        raise CommandFailure("conflict", "conflict: Git preparation refused; existing installation retained",
+                             hint=hint) from exc
     return CommandOutput(
-        {"root": str(root), "release_id": release.release_id, "cli": str(release.cli_path),
-         "manager": manager, "domain": domain, "install_directories": [str(p) for p in directories],
-         "selection": "unchanged"},
-        release.release_id,
-        (f"Release {release.release_id} assembled. Run {release.cli_path} --root {root} --fleet F fleet setup --config FILE --install-directory PATH.",),
+        {**prepared, "root": str(root), "manager": manager, "domain": domain,
+         "install_directories": [str(path) for path in directories]},
+        None,
+        (f"Git installation prepared at {prepared['installation']} (revision {prepared['source_revision']}).",),
     )
 
 
@@ -260,89 +226,76 @@ def _write_config(destination: Path, content: bytes, *, replace: bool) -> None:
 
 
 def _fleet_setup(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
-    from ..config_plan import PlanError, read_plan
-    from .host import _activate, _operator_shell
-    from .releases import _config_plan, _executing_release, _release
+    from ..git_update import UpdateError, UpdateStore, _prepare_update_locked, apply_or_continue
+    from ..resources import get_resources
+    from .operator_context import require_operator_context
 
     root = _root(args)
-    _operator_shell()  # activation itself checks native ancestry
-    plan_only = getattr(args, "plan_only", False)
-    if not plan_only and not getattr(args, "install_directory", None):
-        raise CommandFailure("invalid_argument", "invalid argument: --install-directory is required unless --plan-only")
+    require_operator_context()
+    if not getattr(args, "install_directory", None):
+        raise CommandFailure("invalid_argument", "invalid argument: --install-directory is required")
     if args.seed or not args.fleet or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.fleet):
         raise CommandFailure("invalid_argument", "invalid argument: fleet setup requires one exact --fleet name")
-    executing = _executing_release(root)
-    if executing is None:
-        raise CommandFailure("release_mismatch", "release mismatch: fleet setup requires a sealed release CLI")
-    _release(root, executing)
-    template = getattr(args, "template", None)
-    if template is not None:
-        if args.config is not None:
-            raise CommandFailure("invalid_argument", "invalid argument: --config and --template are mutually exclusive")
-        content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None))
-        retry_text = "correct --repository/--goal or use an authored --config FILE and rerun fleet setup; "
-    else:
-        if getattr(args, "repository", None) is not None or getattr(args, "goal", None) is not None:
-            raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")
-        source = Path(args.config).expanduser().resolve(strict=True)
-        content = _authored_config(source, args.fleet)
-        retry_text = f"correct {source} and rerun fleet setup; "
+    package = get_resources()
+    installation = package.installation
+    if installation is None or installation.data_root != root:
+        raise CommandFailure("release_mismatch", "fleet setup requires this data root's managed Git CLI")
+    hint = "inspect the original operation with host update status; resume it with host update continue"
+    changed, prior, created = False, None, []
+    destination = None
+    declaration = "unchanged"
+    prepared_request = None
     try:
-        selected = read_selection(root)
-        external = []
-        if selected is not None:
-            selected_plan = read_plan(root, selected["plan_id"])
-            external = [path for path in selected_plan.effects["fleet_manifests"].values()
-                        if not Path(path).is_relative_to(root)]
-    except (ActivationError, PlanError, KeyError, TypeError) as exc:
-        raise CommandFailure("conflict", "conflict: selected fleet declarations cannot be verified") from exc
-    destination = _flat_destination(root, args.fleet)
-    if template is not None:
-        projects = destination.parent / "projects.yaml"
-        try:
-            has_projects = projects.exists() or projects.is_symlink()
-        except OSError as exc:
-            raise CommandFailure("conflict", "conflict: template target project declaration cannot be inspected") from exc
-        if has_projects:
-            raise CommandFailure("conflict", "conflict: template target has an existing project declaration; use authored --config")
-    changed, prior, created = _copy_config(content, destination, replace=args.replace_config)
-    try:
-        staged = _config_plan(SimpleNamespace(release=executing, fleet_path=external), root)
-        if args.fleet not in staged.data["fleets"]:
-            raise CommandFailure("conflict", "conflict: authored fleet name differs from --fleet; no activation performed",
-                                 release_id=executing)
-        if template is not None:
-            # Pin absence in the same snapshot used by rendering. Activation's
-            # existing freshness gate then refuses a later project declaration.
+        # Serialize declaration authoring with update preparation. An original
+        # pending operation must never be retargeted by reading new setup input.
+        with UpdateStore(installation) as store:
             try:
-                plan = read_plan(root, staged.data["plan_id"])
-                node = plan.inputs[str(projects)]["state"]["node"]
-            except (PlanError, KeyError, TypeError) as exc:
-                raise CommandFailure("conflict", "conflict: template project inputs cannot be verified") from exc
-            if node != {"kind": "absent"}:
-                raise CommandFailure("conflict", "conflict: template project declaration changed while staging; use authored --config")
+                record = store.load()
+                if record is not None:
+                    raise CommandFailure("conflict", "fleet setup refuses an existing update operation", hint=hint)
+                if os.path.lexists(root / "state/config.json"):
+                    raise CommandFailure("conflict", "fleet setup supports only the first installation")
+                template = getattr(args, "template", None)
+                if template is not None:
+                    if args.config is not None:
+                        raise CommandFailure("invalid_argument", "invalid argument: --config and --template are mutually exclusive")
+                    content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None))
+                else:
+                    if getattr(args, "repository", None) is not None or getattr(args, "goal", None) is not None:
+                        raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")
+                    source = Path(args.config).expanduser().resolve(strict=True)
+                    content = _authored_config(source, args.fleet)
+                destination = _flat_destination(root, args.fleet)
+                if template is not None and os.path.lexists(destination.parent / "projects.yaml"):
+                    raise CommandFailure("conflict", "template target has an existing project declaration; use authored --config")
+                changed, prior, created = _copy_config(content, destination, replace=args.replace_config)
+                record = _prepare_update_locked(store, target=package.source_revision,
+                    initialization={"directory": str(Path(args.install_directory).expanduser()),
+                                    "manifests": [str(destination)]}, prepare_only=True)
+                prepared_request = record["request_id"]
+                result = {"update": record, "dispatch": "prepared"}
+            except BaseException:
+                # Rollback belongs to this same lock, before any original record exists.
+                if changed and destination is not None and store.load() is None:
+                    declaration = _restore_config(destination, content, prior, created)
+                raise
+        if not getattr(args, "plan_only", False):
+            result = apply_or_continue(installation, expected_request_id=prepared_request)
     except BaseException as exc:
-        # Staging refused before activation: put the declaration back so the
-        # stray copy cannot block every later plan. Activation is never undone.
-        state = _restore_config(destination, content, prior, created) if changed else "unchanged"
-        if not isinstance(exc, CommandFailure):
+        if isinstance(exc, CommandFailure):
             raise
-        raise CommandFailure(exc.error.code, f"{exc.error.message}; fleet declaration {state}",
-                             data={**exc.data, "config": str(destination), "config_declaration": state},
-                             release_id=exc.release_id or executing,
-                             hint=(retry_text + f"claudlobby --root {shlex.quote(str(root))} --fleet {args.fleet} config validate "
-                                   "reports authored errors for an installed declaration")) from exc
-    if plan_only:
-        return CommandOutput({**staged.data, "fleet": args.fleet, "config": str(destination),
-                              "config_copied": changed, "activation": "not_requested"}, executing,
-                             (f"Fleet {args.fleet} prepared as configuration plan {staged.data['plan_id']}; no activation performed.",))
-    activation = _activate(SimpleNamespace(plan_id=staged.data["plan_id"],
-                                            install_directory=args.install_directory,
-                                            activation_id=args.activation_id, adopt_existing=False), root)
-    return CommandOutput({**activation.data, "fleet": args.fleet, "config": str(destination),
-                          "config_copied": changed}, activation.release_id,
-                         (f"Fleet {args.fleet} configured; {activation.lines[0]}",))
+        if isinstance(exc, (UpdateError, OSError, ValueError, RuntimeError)):
+            raise CommandFailure("conflict", "first fleet preparation refused; retained state requires inspection",
+                                 data={"config_declaration": declaration,
+                                       **({"request_id": prepared_request} if prepared_request else {})}, hint=hint) from exc
+        raise
+    record = result["update"]
+    prepared = getattr(args, "plan_only", False)
+    return CommandOutput({**result, "fleet": args.fleet, "config": str(destination),
+                          "config_copied": changed, "source_revision": record["target"],
+                          "config_fingerprint": record["config_fingerprint"]}, None,
+                         (("First fleet prepared; resume with host update continue." if prepared else
+                           "First fleet update submitted; inspect host update status."),))
 
 
 def dispatch(args) -> CommandOutput:

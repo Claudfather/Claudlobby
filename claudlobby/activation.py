@@ -26,7 +26,8 @@ from .activation_state import (ACTIVATION_WAIT_S, HANDOFF_NATIVE_MARKERS, START_
                                ActivationRefusal, CandidateDisabledOverride, _RUNNING_QUIESCE_STEPS, lock_busy,
                                handoff_request_started_ns, locked_activation, read_activation, read_selection,
                                resumable_running_step)
-from .activation_identity import identity_bindings_from_registry
+from .activation_identity import (identity_bindings_from_registry, registry_scan_refusal,
+                                  preflight_registry_scan as _preflight_registry_scan, scan_registry)
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import (RuntimeEvidence, RuntimeEvidenceError, assert_quiescent,
                                  observe_started_unit, start_unit)
@@ -134,51 +135,10 @@ def _roster(plan, declarations, package):
     return rank, contexts
 
 
-def _registry_scan(context):
-    from .plane.registry_emit import run_generate_scan
-    return run_generate_scan(context.paths, context.fleet, require_commit=True)
-
-
-def registry_scan_refusal(contexts) -> str | None:
-    """Every reason the registry scan would refuse for these fleets, or None.
-
-    The scan runs in the bots start phase, after every unit was paused, but its
-    silenced and opted-out refusals are reads (activation_scan_refusal in
-    plane/registry_emit.py), so callers ask before they record, pause or stop
-    anything. One answer names every fleet, so one edit and one new plan clear
-    them all; a reason the fleets share, such as an exported value, appears once.
-    """
-    from .plane.registry_emit import activation_scan_refusal
-    reasons = (activation_scan_refusal(context.paths, context.fleet) for context in contexts)
-    return "; ".join(dict.fromkeys(reason for reason in reasons if reason)) or None
-
-
-def _preflight_registry_scan(contexts) -> None:
-    """Refuse, before any record or pause, an activation whose registry scan would refuse."""
-    reason = registry_scan_refusal(contexts)
-    if reason:
-        raise ActivationRefusal(reason)
-
-
 def _registry_ready(plan, declarations, package) -> list[dict]:
-    from .operation_context import OperationContextError, bind_task_context
     # Re-read exact reviewed declarations, never a nearby/local discovery scan.
     _, contexts = _roster(plan, declarations, package)
-    results = []
-    for context in contexts:
-        result = _registry_scan(context)
-        if (not isinstance(result, dict) or result.get("complete") is not True
-                or result.get("recording") != "committed"):
-            raise ActivationError("candidate registry scan is disabled, incomplete or uncommitted; no bots started")
-        try:
-            bound = bind_task_context(context, origin=replace(context, bot_id=context.fleet.manager))
-        except OperationContextError as exc:
-            raise ActivationError("candidate registry identity binding failed; no bots started") from exc
-        results.append({"fleet": context.fleet.name, "scan": result,
-                        "bindings": {"host_uid": bound.host_uid, "fleet_uid": bound.fleet_uid,
-                                     "manager_uid": bound.caller.uid,
-                                     "bots": {name: actor.uid for name, actor in bound.bots.items()}}})
-    return results
+    return scan_registry(plan, package=package, contexts=contexts)
 
 
 def _legacy_declarations(plan) -> tuple[UnitDeclaration, ...]:

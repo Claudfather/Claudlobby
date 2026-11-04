@@ -1,20 +1,26 @@
-"""Bounded existing-installation update, coordinated by one UpdateStore.
+"""Bounded Git initialization/update, coordinated by one UpdateStore.
 
 The stable runner owns process replacement and the exclusive maintenance fence.
 This application-side owner prepares, saves/quiets, publishes and restores the
-same existing consumer roster. It neither initializes nor migrates a database.
+frozen consumer roster. Explicit initialization alone may create a new database;
+existing database migrations remain outside this operation.
 """
 from __future__ import annotations
 
 import ast
+import hashlib
+import os
+import stat
+import tempfile
 import platform
 from pathlib import Path
 
-from .active_config import read_current_config, snapshot_from_plan, publish_current_config
-from .activation_identity import read_registry_identity_bindings
+from .active_config import context_from_plan, read_current_config, snapshot_from_plan, publish_current_config
+from .activation_identity import (read_registry_identity_bindings, identity_bindings_from_registry,
+                                  preflight_registry_scan, scan_registry)
 from .config_install import prepare_publication, apply_publication
 from .config_plan import read_rendered
-from .git_update import UpdateError, _git, _head
+from .git_update import UpdateError, _git, _head, _sync
 from .installation import install_launcher, install_updater
 from .plane.db import db_file, connect_ro
 from .runtime_versions import SQL_SCHEMA_VERSION
@@ -35,7 +41,7 @@ def _operation(store, *phases):
     return record
 
 
-def _schema(store, revision):
+def _schema(store, revision, *, initialize=False):
     """Read declared target version without importing candidate code."""
     source = _git(store.installation, "show", f"{revision}:claudlobby/runtime_versions.py").stdout
     try:
@@ -49,6 +55,8 @@ def _schema(store, revision):
         raise UpdateError("candidate SQL schema declaration is ambiguous")
     if values[0] != SQL_SCHEMA_VERSION:
         raise UpdateError("SQL schema change requires the canonical migration owner before this update")
+    if initialize:
+        return values[0]
     path = db_file(store.root)
     if not path.is_file() or path.is_symlink():
         raise UpdateError("existing Plane database is unavailable; update cannot initialize it")
@@ -62,45 +70,111 @@ def _schema(store, revision):
     return actual
 
 
-def prepare_operation(store, rendered, adapter, install_directory, interpreter, request_id):
-    """Prepare all immutable inputs and dependencies before native effects."""
+def _initial_database(store, record):
+    """An initialized final DB must be the inode this operation created, never a foreign DB."""
+    progress = record.get("initialization", {}).get("database")
+    if not isinstance(progress, dict) or progress.get("state") not in {"ready", "published"}:
+        raise UpdateError("initialization found an unowned Plane database")
+    path = db_file(store.root)
+    info = path.lstat()
+    if (path.resolve() != path or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
+            or (info.st_dev, info.st_ino) != (progress["device"], progress["inode"])):
+        raise UpdateError("initialization Plane database differs from its owned staged file")
+    return progress
+
+
+def _fresh_root(store, record=None, *, committed=False):
+    """Reject adoption/recovery evidence, while preserving validated owner preparation."""
+    from .plane.owner_source import authority_only_plane
+    root = store.root
+    state = root / "state"
+    if root.resolve() != root or state.resolve() != state:
+        raise UpdateError("initialization data root is redirected")
+    config = state / "config.json"
+    if os.path.lexists(config):
+        if not committed or read_current_config(root, installation=store.installation) != record["candidate_config"]:
+            raise UpdateError("initialization requires no existing active configuration")
+    for name in ("selected-release.json", "restored-backup.json", "restored-backup", "activations", "migrations"):
+        path = state / name
+        if os.path.lexists(path):
+            raise UpdateError("initialization refuses existing activation or recovery evidence")
+    if not os.path.lexists(db_file(root)):
+        authority_only_plane(root, allow_absent=True)
+        if record and record.get("initialization", {}).get("database", {}).get("state") == "published":
+            raise UpdateError("initialization owned Plane database disappeared")
+        return
+    if record is None:
+        raise UpdateError("initialization requires no existing Plane database")
+    _initial_database(store, record)
+    directory = db_file(root).parent
+    allowed = {"plane.db", "plane.db-wal", "plane.db-shm", "owner-access.db",
+               "owner-access.db-wal", "owner-access.db-shm", "owner-access.db-journal"}
+    if (directory.resolve() != directory or directory.stat().st_uid != os.getuid()
+            or stat.S_IMODE(directory.stat().st_mode) != 0o700):
+        raise UpdateError("initialization Plane storage changed")
+    for path in directory.iterdir():
+        info = path.lstat()
+        if (path.name not in allowed or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
+            raise UpdateError("initialization refuses foreign Plane data or queues")
+    if (directory / "owner-access.db").exists():
+        from .plane.owner_access import OwnerAccess
+        OwnerAccess(root).validate_storage()
+
+
+def prepare_operation(store, rendered, adapter, install_directory, interpreter, request_id, *, initialize=False):
+    """Prepare immutable inputs/dependencies; explicit initialization writes no schema here."""
     store._assert_locked()
+    if type(initialize) is not bool:
+        raise UpdateError("initialize scope must be explicit boolean intent")
     existing = store.load()
     if existing is not None and existing["phase"] != "done":
         if ((existing["target"], existing["request_id"]) != (rendered.revision, request_id)
                 or existing.get("finalized", True)
-                and existing["config_fingerprint"] != rendered.fingerprint):
+                and existing["config_fingerprint"] != rendered.fingerprint
+                or "candidate_config" in existing and existing.get("initialize", False) != initialize):
             raise UpdateError("continue the existing frozen update operation")
         if existing["phase"] != "prepare":
             return _operation(store)
+    elif initialize and existing is not None:
+        raise UpdateError("initialization refuses prior update recovery evidence")
     rendered.check_inputs()
-    current = read_current_config(store.root, installation=store.installation)
+    if initialize:
+        if not rendered.fleets:
+            raise UpdateError("initialization requires a frozen first-team fleet")
+        _fresh_root(store)
+        current = None
+        preflight_registry_scan(context_from_plan(rendered, fleet, package=adapter.package)
+                                for fleet in rendered.fleets)
+        identities = None
+    else:
+        current = read_current_config(store.root, installation=store.installation)
+        identities = read_registry_identity_bindings(rendered, package=adapter.package)
     manager, domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
     if manager != platform.system():
         raise UpdateError("native manager differs from current host")
     placement = {"manager": manager, "domain": domain, "directory": str(install_directory)}
-    if current.get("supervision") not in (None, placement):
+    if current is not None and current.get("supervision") not in (None, placement):
         raise UpdateError("native install directory differs from committed placement")
-    identities = read_registry_identity_bindings(rendered, package=adapter.package)
     candidate = snapshot_from_plan(rendered, store.installation, rendered.revision,
                                    identities=identities, supervision=placement)
     validate_candidate_consumers(current, candidate, platform.system())
-    if current["identities"] != candidate["identities"]:
+    if current is not None and current["identities"] != candidate["identities"]:
         raise UpdateError("identity changes require an explicit configuration scope")
-    schema = _schema(store, rendered.revision)
+    schema = _schema(store, rendered.revision, initialize=True) if initialize else _schema(store, rendered.revision)
+    previous = current["fingerprint"] if current is not None else None
     if existing is not None and existing["phase"] == "prepare" and "consumers" in existing:
         record = existing
-        if record["candidate_config"] != candidate or record["previous_config"] != current["fingerprint"]:
+        if record["candidate_config"] != candidate or record["previous_config"] != previous:
             raise UpdateError("prepared effective configuration changed")
     else:
-        rows = freeze_service_intent(current, adapter, install_directory)
-        metadata = {unit["source"]: unit for unit in current["units"]}
-        for row in rows:
-            row["phase"] = metadata[row["declaration"]["source"]]["phase"]
+        rows = freeze_service_intent(current, adapter, install_directory,
+                                     candidate_snapshot=candidate, rendered=rendered)
         scope = consumer_scope(rows)
         record = store.prepare(rendered.revision, config_fingerprint=rendered.fingerprint,
                                scope=scope, request_id=request_id)
-        record.update(candidate_config=candidate, previous_config=current["fingerprint"],
+        record.update(candidate_config=candidate, previous_config=previous, initialize=initialize,
                       sql_schema=schema, consumers={row["target"]: {"intent": row} for row in rows})
         store.save(record)
     prepare_publication(rendered, store)
@@ -144,7 +218,9 @@ def quiesce_operation(store, adapter):
     """Schedules first; keep the recorder available until all bots save/stop."""
     record = _operation(store, "quiesce")
     store.verify_dependencies()
-    if read_current_config(store.root, installation=store.installation)["fingerprint"] != record["previous_config"]:
+    if record.get("initialize", False):
+        _fresh_root(store)
+    elif read_current_config(store.root, installation=store.installation)["fingerprint"] != record["previous_config"]:
         raise UpdateError("effective configuration changed before quiescence")
     if not any(item.get("stop") for item in record["consumers"].values()):
         read_rendered(store.root, record["config_fingerprint"]).check_inputs()
@@ -157,7 +233,8 @@ def quiesce_operation(store, adapter):
         row = progress["intent"]
         if progress.get("stop") == "done":
             continue
-        if row["bot_binding"] and row["disposition"] == "running" and progress.get("stop") is None:
+        if (row.get("kind") != "added" and row["bot_binding"] and row["disposition"] == "running"
+                and progress.get("stop") is None):
             _checkpoint(store, key, adapter)
         quiesce_consumer(store, key, adapter)
     return store.load()
@@ -171,14 +248,122 @@ def assert_operation_quiet(store, adapter):
         row = progress["intent"]
         if progress.get("stop") != "done":
             raise UpdateError("consumer stop has not completed")
-        if row["bot_binding"] and row["disposition"] == "running":
+        if row.get("kind") != "added" and row["bot_binding"] and row["disposition"] == "running":
             if progress.get("checkpoint") is None:
                 raise UpdateError("running bot lacks its original checkpoint proof")
             verify_checkpoint_after_stop(Path(row["bot_binding"][0]), progress["checkpoint"])
         observe_quiet(store, key, adapter)
-    if _schema(store, record["target"]) != record["sql_schema"]:
+    if record.get("initialize", False):
+        _fresh_root(store)
+        actual_schema = _schema(store, record["target"], initialize=True)
+    else:
+        actual_schema = _schema(store, record["target"])
+    if actual_schema != record["sql_schema"]:
         raise UpdateError("Plane schema changed during quiescence")
     return store.load()
+
+
+def _initialize_database(store):
+    """Migrate only an owned staged DB, then atomically publish without overwrite."""
+    from .plane.db import connect, db_path
+    from .plane.migrations import migrate
+    record = store.load()
+    _fresh_root(store, record, committed=True)
+    progress = record.setdefault("initialization", {}).get("database")
+    if progress is None:
+        store.work.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if store.work.resolve() != store.work:
+            raise UpdateError("initialization staging directory is redirected")
+        fd, name = tempfile.mkstemp(prefix="initialize-plane-", suffix=".db", dir=store.work)
+        try:
+            info = os.fstat(fd)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _sync(store.work)
+        progress = {"path": name, "device": info.st_dev, "inode": info.st_ino, "state": "created"}
+        record["initialization"]["database"] = progress
+        store.save(record)  # Durable ownership precedes canonical schema writes.
+    staged = Path(progress["path"])
+    if staged.parent != store.work or not staged.name.startswith("initialize-plane-"):
+        raise UpdateError("initialization staged database path changed")
+    if progress["state"] != "published":
+        info = staged.lstat()
+        if (staged.resolve() != staged or not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid()
+                or (info.st_dev, info.st_ino) != (progress["device"], progress["inode"])):
+            raise UpdateError("initialization staged database changed")
+        if progress["state"] == "created":
+            conn = connect(staged)
+            try:
+                if migrate(conn) != record["sql_schema"] or conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise UpdateError("initialization schema did not complete")
+            finally:
+                conn.close()
+            _sync(staged)
+            progress.update(state="ready", sha256=hashlib.sha256(staged.read_bytes()).hexdigest())
+            store.save(record)
+        if hashlib.sha256(staged.read_bytes()).hexdigest() != progress["sha256"]:
+            raise UpdateError("initialization staged schema bytes changed")
+        final = db_path(store.root)
+        try:
+            os.link(staged, final)
+        except FileExistsError:
+            _initial_database(store, record)
+        _sync(final.parent)
+        progress["state"] = "published"
+        store.save(record)
+    _initial_database(store, record)
+    if os.path.lexists(staged):
+        if staged.is_symlink() or not os.path.samefile(staged, db_file(store.root)):
+            raise UpdateError("initialization staged database identity changed")
+        staged.unlink()
+        _sync(store.work)
+    if _schema(store, record["target"]) != record["sql_schema"]:
+        raise UpdateError("initialized Plane schema changed")
+
+
+def _initialize_identities(store, rendered):
+    """A pending scan is re-observed, never blindly sent again after interruption."""
+    from .resources import get_resources
+    from .operation_context import OperationContextError
+    from .activation_state import ActivationError
+    from .plane.registry_emit import RegistryScanError
+    from .plane.ids import ensure_host_uid
+    record = store.load()
+    progress = record["initialization"].get("registry")
+    if progress is not None and progress.get("state") == "complete":
+        return
+    package = get_resources(installation=store.installation)
+    if progress is None:
+        # Existing owner preparation may already own the host UID. The canonical
+        # minter validates/preserves it; this coordinator never creates IDs itself.
+        ensure_host_uid(store.root / "state")
+        record["initialization"]["registry"] = {"state": "pending"}
+        store.save(record)
+        try:
+            rows = scan_registry(rendered, package=package)
+        except RegistryScanError as exc:
+            record = store.load()
+            record["initialization"]["registry"]["summary"] = exc.summary
+            store.save(record)
+            raise
+        identities = identity_bindings_from_registry(rendered, rows, package=package)
+    else:
+        try:
+            identities = read_registry_identity_bindings(rendered, package=package)
+        except (ActivationError, OperationContextError) as exc:
+            raise UpdateError("initial registry scan remains unverified; original unknown scan is not resent") from exc
+    candidate = snapshot_from_plan(rendered, store.installation, record["target"], identities=identities,
+                                   supervision=record["candidate_config"]["supervision"])
+    # Identity capture alone may refine the prepared snapshot after schema creation.
+    before = dict(candidate, identities=None)
+    before["fingerprint"] = record["candidate_config"]["fingerprint"]
+    if before != record["candidate_config"]:
+        raise UpdateError("initial configuration changed while binding registry identities")
+    record["candidate_config"] = candidate
+    record["initialization"]["registry"]["state"] = "complete"
+    store.save(record)
 
 
 def publish_operation(store):
@@ -193,7 +378,12 @@ def publish_operation(store):
             or not record["dependencies"].get("environment_complete")
             or _head(store.installation) != record["target"]):
         raise UpdateError("publication requires verified target code/environment under maintenance")
-    if _schema(store, record["target"]) != record["sql_schema"]:
+    if record.get("initialize", False):
+        _fresh_root(store, record, committed=True)
+        actual_schema = _schema(store, record["target"], initialize=True)
+    else:
+        actual_schema = _schema(store, record["target"])
+    if actual_schema != record["sql_schema"]:
         raise UpdateError("Plane schema changed before publication")
     rendered = read_rendered(store.root, record["config_fingerprint"])
     if record["phase"] in {"environment", "publish"}:
@@ -203,6 +393,10 @@ def publish_operation(store):
         record = store.load()
         record["phase"] = "commit"
         store.save(record)
+    if record.get("initialize", False):
+        _initialize_database(store)
+        _initialize_identities(store, rendered)
+        record = store.load()
     interpreter = Path(record["host_interpreter"])
     install_launcher(store.installation, interpreter=interpreter)
     install_updater(store.installation, interpreter=interpreter)

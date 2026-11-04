@@ -1,209 +1,82 @@
 # Getting started
 
-**For a new website-connected team, begin with [First-team setup](first-team-setup.md).** It creates a lead, engineer and reviewer for an approved repository and goal, without Telegram. This page supplies its release-assembly commands. After assembly, return to that guide for local owner/workspace approval, browser preview and one recorded launch.
-
-Use a trusted matching release bundle, or the operator source-build alternative below. The checkout is a build input; running bots use the sealed release's copied interpreter, packaged library and native scripts under a separate data root. Assembly does not select a release, enroll units or start bots.
-
-The [Telegram seed/direct-CLI path](#3-author-the-first-fleet) is an explicit operator alternative. Do not follow its seed authoring/activation steps while preparing the browser route. For an existing checkout-based host, first read the [conversion prerequisite](existing-host-release-conversion.md).
+Prepare one managed Git checkout and Python environment, then prepare the first fleet through the same updater used for later changes. Installation and host data must have separate, dedicated absolute paths. Existing hosts with activation or recovery history need a reviewed migration; do not erase that evidence to use fresh setup.
 
 ## Prerequisites
 
-- CPython 3.11 for the supplied `py311` bundles; an explicitly chosen source build requires CPython 3.10 or newer, subject to the candidate wheel and dependency compatibility. Prove the executable and a created virtual environment with the shared check below, `git` for a source build, and enough disk for a copied Python environment and dependency wheels. Debian, Ubuntu and Raspberry Pi OS ship `venv` without `ensurepip` unless the `python3-venv` package is installed; `import venv` alone is not proof.
-- `tmux`, `jq` and the installed `claude` executable on `PATH`. Provider sign-in is a separate gate before owner/team continuation or optional seed activation; release assembly does not verify it. Bot startup uses `jq` to pre-accept consent and seed trust, so `host setup` refuses without it.
-- A working **user** manager: launchd in the current macOS user domain, or `systemctl --user` on Linux. For unattended Linux boots, enable user lingering using your host's normal administrative procedure. `host setup` observes the manager; it does not install packages, enable lingering, or change system settings.
-- **A user to run the bots as.** Every bot runs as the user who runs `host setup` and `fleet setup`, and inherits that user's `sudo` rules and groups. Read the README's [Safety model](../README.md#safety-model) before you choose it: on Raspberry Pi OS the first user's `sudo` asks for no password, so every bot would have root.
-- Only for the optional seed's Telegram bot, install the Telegram channel plugin (`claude plugin install telegram@claude-plugins-official`), obtain a token from BotFather, and know your Telegram user and group IDs. A fleet without Telegram may author a different manifest.
+Use a local operator terminal outside a bot or managed-service context. Choose the OS user deliberately: bots inherit its files, credentials and permissions. Read the [safety model](../README.md#safety-model).
 
-The copied interpreter still uses the host's standard library and system libraries. A wheelhouse prepared for another platform or Python version may be unusable here.
+Provision Git, CPython 3.10 or newer with working `venv` and `ssl`, `tmux`, `jq`, Claude Code, and a working native **user** manager (launchd on macOS or systemd user services on Linux). On Debian, creating a venv may require the administrator-provided `python3-venv` package. Unattended Linux operation also needs administrator-configured user lingering. Setup installs none of those prerequisites and never invokes `sudo`.
 
 ### Prove the Python executable once
 
-Choose the installed interpreter explicitly: `python3.11` for a supplied bundle, or an operator-selected compatible CPython for a source build. A command alias can report the right version yet create a broken virtual environment. Resolve that command to its real executable, check the version, then actually run the created environment's interpreter and stdlib imports. This check installs no system packages; if it fails, inspect the error before choosing another interpreter. Do not assume a reinstall is needed.
+Set `PYTHON` to an explicit executable outside the future installation and data directories. Keep the resolved path printed by this check. A version string or `import venv` alone does not prove that a usable environment can be created.
 
 ```bash
-PYTHON_CANDIDATE="$(command -v python3.11)"  # or the operator's exact installed executable
-PYTHON=""
-PROBE="$(mktemp -d)"
-if RESOLVED_PYTHON=$("$PYTHON_CANDIDATE" -I -c \
-  'from pathlib import Path; import sys; assert sys.implementation.name == "cpython" and sys.version_info >= (3, 10), "CPython 3.10 or newer required"; print(Path(sys.executable).resolve(strict=True))') &&
-  "$RESOLVED_PYTHON" -I -c 'import plistlib, ssl' &&
-  "$RESOLVED_PYTHON" -I -m venv "$PROBE/venv" &&
-  "$PROBE/venv/bin/python" -I -c 'import encodings, plistlib, ssl, sys; assert sys.prefix != sys.base_prefix; print("python ok")'; then
-  PYTHON="$RESOLVED_PYTHON"
-else
-  printf '%s\n' 'Python prerequisite failed; stop and inspect this interpreter.'
-fi
-rm -rf "$PROBE"
+PYTHON="/absolute/path/to/python3"
+PYTHON=$("$PYTHON" -I -c 'import sys; from pathlib import Path; assert sys.version_info >= (3, 10); print(Path(sys.executable).resolve(strict=True))') &&
+PROBE=$(mktemp -d) &&
+"$PYTHON" -I -m venv "$PROBE/venv" &&
+"$PROBE/venv/bin/python" -I -c 'import encodings, plistlib, ssl, sys; assert sys.prefix != sys.base_prefix; print(sys.version)'
 ```
 
-Continue only if this prints `python ok` and leaves `PYTHON` set. Keep that proven absolute executable for both bundle and source-build commands below; do not switch back to an alias or an unverified `python3`. If you choose a different interpreter, repeat this same check. Bundle installation additionally requires its exact CPython 3.11 minor version, checked before launching the installer.
+Stop if any check fails. Remove only your own probe directory afterward.
 
-### Optional Telegram channel approval on managed Claude Code accounts
+## 1. Prepare the managed installation
 
-The official Telegram plugin and the `claudfather-plugins` fork need distinct channel approvals. After assembling the release below, run `"$RELEASE_CLI" host channels check --json` from an operator shell. If either approval is missing, a host administrator can run `"$RELEASE_CLI" host channels approve` with permission to write the OS managed settings file. The command never invokes `sudo` or writes user/project settings; it preserves existing managed keys and approvals. On macOS the file is `/Library/Application Support/ClaudeCode/managed-settings.json`; on Linux it is `/etc/claude-code/managed-settings.json`. An administrator must provision the directory and grant write access before approval. A malformed or unreadable existing file is left untouched.
+Obtain a trusted source checkout or source export containing the Python package. It is needed to run the stdlib bootstrap module, not as the eventual runtime. Supply the trusted remote and ref explicitly; setup does not discover a latest version or an ambient repository. The ref resolves once to a full commit and retries retain that commit.
 
-Approval does not change the separate `channelsEnabled` master policy. If the check reports it is not true, the organization's administrator must enable channels through its normal managed policy before inbound messages can arrive. Claude Code's [channel policy](https://code.claude.com/docs/en/channels#enterprise-controls) and [managed file locations](https://code.claude.com/docs/en/managed-settings#deploy-a-managed-settings-file) describe these controls.
-
-## Trusted local release bundle (no checkout required)
-
-The [release-bundle workflow](../.github/workflows/release-bundle.yml) can produce separate **Linux aarch64** and **macOS arm64** installers for CPython 3.11 when dispatched for an exact revision. A workflow artifact is not a promise of a currently published installer or a tested website setup release. From a source you trust, obtain the `claudlobby-installer-<revision>-<platform>-py311` artifact and unzip GitHub's download to get `claudlobby-install.pyz`. Compare its SHA-256 with the workflow's independently displayed installer checksum before running it. Checksums detect changed bytes, not an authentic publisher. This command does not download or select releases. These artifacts do not support Intel Macs or every Pi OS/libc; the companion unpacked bundle contains `built-on.txt` and the wheel tags for checking host compatibility.
-
-After the shared Python check above, use the operator-provided exact installer path. Do not search download or protected directories for it. If no trusted bundle was supplied, stop here and explicitly choose the source-build alternative instead of guessing a download. The bundle command first verifies CPython 3.11:
+Set these values to your own absolute paths and trusted inputs. `INSTALL` and `DATA` must not overlap each other or the independent host interpreter. The bootstrap command runs from `TRUSTED_SOURCE`; do not add `-I` to that module invocation because isolation hides the source module.
 
 ```bash
-WORK="$HOME/.local/share/claudlobby-build"   # authoring/output only, not the temporary install
-DATA="$HOME/.local/share/claudlobby-data"
-"$PYTHON" -I -c 'import sys; assert sys.version_info[:2] == (3, 11), "This bundle requires CPython 3.11"' &&
-mkdir -p "$WORK" &&
-"$PYTHON" -I /absolute/claudlobby-install.pyz --root "$DATA" --json > "$WORK/host-setup.json" &&
-RELEASE_CLI=$("$PYTHON" -I -c \
-  'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
-  "$WORK/host-setup.json") &&
-USER_UNIT_DIR=$("$PYTHON" -I -c \
-  'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["install_directories"][0])' \
-  "$WORK/host-setup.json") &&
-"$RELEASE_CLI" --help
+TRUSTED_SOURCE="/absolute/trusted/claudlobby-source"
+INSTALL="/absolute/new/claudlobby-installation"
+DATA="/absolute/new/claudlobby-data"
+REMOTE="https://example.invalid/your-trusted/claudlobby.git"
+REF="your-reviewed-ref"
+(cd "$TRUSTED_SOURCE" && "$PYTHON" -B -m claudlobby.bootstrap \
+  --installation "$INSTALL" --root "$DATA" \
+  --remote "$REMOTE" --ref "$REF" --interpreter "$PYTHON" --json)
 ```
 
-If the command exits unsuccessfully, read `WORK/host-setup.json` for the fixed failure step and guidance before continuing.
+Preparation can download hash-locked runtime dependencies. It creates `INSTALL/src`, the final `INSTALL/env`, and stable `INSTALL/bin/claudlobby` and `INSTALL/bin/claudlobby-update` entries. It installs no editable package, creates no fleet recorder or owner grants, and starts no agents. Retain the returned source revision. On interruption, inspect retained files and retry the same inputs; do not reset or clean unrelated files.
 
-Use real absolute, unredirected paths. No installed Claudlobby or repository checkout is required. The installer extracts its bounded contents into a private temporary directory and runs the same bootstrap shipped in the wheel. The launcher checks the finite bundle inventory, checksum bytes, successful rehearsal revision/wheel digest and exact candidate launcher bytes. It creates an owned temporary environment, installs only the local hash-locked dependency wheels and candidate, then calls that candidate's canonical `host setup`. Temporary inputs are removed afterward; allow space for two copies of the bundle plus the temporary environment. The sealed release uses the original host interpreter rather than a deleted bootstrap interpreter. Host stdlib/system libraries are still required. Native prerequisite/manager refusals and retained incomplete releases remain owned by `host setup`.
-
-The workflow also retains the unpacked `claudlobby-release-<revision>-<platform>-py311` artifact. After checking that bundle's inventory against the workflow checksums, it supports the same command with `/absolute/trusted-bundle/bootstrap.py` in place of `/absolute/claudlobby-install.pyz`.
-
-This command only assembles a release: no selection, activation, unit enrollment, credential changes or fleet startup. On success, `DATA` is the chosen absolute data root, `RELEASE_CLI` is the exact returned `data.cli`, and `USER_UNIT_DIR` is the first directory allowed by the native owner's returned `data.install_directories`. Keep the success JSON in `WORK/host-setup.json`; none of these references the deleted temporary environment. **Return to [First-team setup](first-team-setup.md#continue-after-release-assembly) with those variables. Do not run the optional seed or template `fleet setup` command for the browser route.** The installed template is selected by the browser after local setup approval; preview and activation remain separate from this launcher. For a browser/Plane host, the operator must request the workflow's explicit `plane-ui` extras input; the default bundle does not silently include that optional capability.
-
-The following numbered sections are **source-build-only**; bundle users do not run their `WORK/bootstrap` commands. If a compatible trusted bundle is unavailable, use that source-build alternative. A CI offline assembly rehearsal does not prove newcomer onboarding, credentials or useful runtime work. The changed instructions require a fresh exported, scrubbed cold run stopping at the credential gate.
-
-## 1. Prepare the release inputs (source-build alternative)
-
-Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory **and commit** first: `git init --quiet && git add --all && git commit -m 'Record release source'`. Configure a local Git author if needed; no remote is required. An uncommitted export can build a wheel, but release assembly refuses its missing source revision. There is no automatic hosted download/latest-release selection or installed lock-generation command; this section constructs local inputs explicitly. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
-
-Use the absolute `PYTHON` already proven by the shared prerequisite check above. A source build accepts CPython 3.10 or newer only when the candidate wheel and downloaded dependencies support it; it does not inherit the supplied bundle's `py311` compatibility. Do not silently select the host's default `python3`.
+Use the stable CLI for the native prerequisite check and the same installation preparation:
 
 ```bash
-git clone https://github.com/Claudfather/Claudlobby.git
-cd Claudlobby
-
-WORK="$HOME/.local/share/claudlobby-build"
-DATA="$HOME/.local/share/claudlobby-data"    # outside the checkout
-mkdir -p "$WORK/dist" "$WORK/wheelhouse"
-"$PYTHON" -m venv "$WORK/bootstrap"
-"$WORK/bootstrap/bin/python" -m pip install 'build>=1,<2' 'setuptools>=77' wheel
-"$WORK/bootstrap/bin/python" -m build --wheel --no-isolation --outdir "$WORK/dist" .
-WHEEL_REQ="$(ls "$WORK"/dist/*.whl)[plane-ui]"   # required for the browser route
-"$WORK/bootstrap/bin/python" -m pip download --only-binary=:all: \
-  --dest "$WORK/wheelhouse" "$WHEEL_REQ"
-"$WORK/bootstrap/bin/python" -m pip install --no-index \
-  --find-links "$WORK/wheelhouse" "$WORK"/dist/*.whl
+CLI="$INSTALL/bin/claudlobby"
+"$CLI" --root "$DATA" host setup --installation "$INSTALL" \
+  --remote "$REMOTE" --ref "$REF" --interpreter "$PYTHON" --json
 ```
 
-**The operator plane UI needs the `[plane-ui]` extra in this wheelhouse.** The assembler installs exactly the lock below, and the lock lists exactly this wheelhouse, so an extra left out here is absent from the release. A release without fastapi and uvicorn composes no `claudlobby-plane-view` unit, and activating it onto a host that runs the view removes that unit ([plane-view runbook](runbooks/plane-view.md)). The source-build block includes it in `WHEEL_REQ` before downloading; the `pip install` line stays as written. An operator building a host without browser serving may explicitly omit that extra. When upgrading a host, build with the same extras as the selected release: compare its `dependency.lock` (under `DATA/state/releases/<id>/`) for `fastapi` and `uvicorn`.
+This is the same preparation helper, plus the public host prerequisite/native catalog check. Choose the native installation directory from its observed `install_directories`; do not guess a replacement if the manager is unavailable.
 
-Verify the installed CLI from outside the source checkout before proceeding; a successful import from the checkout can hide a missing installation (#2004):
+**Credential gate:** stop here until provider sign-in and the intended repository/tool access are independently verified for this OS user. Preparation is not authentication or proof of agent readiness. Keep secrets in the appropriate private `.env` tiers, never in Git or command arguments. Teams without channels need no Telegram credentials. The optional `fleet.yaml.seed` is for an operator who explicitly chooses Telegram; complete its placeholders and channel prerequisites before using it.
+
+## 2. Prepare the first fleet
+
+Provide an authored `fleet.yaml` whose `fleet.name` matches `--fleet`. See the [schema](fleet-yaml-schema.md). Set `NATIVE_DIRECTORY` to the exact observed directory and `CONFIG` to your reviewed authored file.
 
 ```bash
-(cd / && "$WORK/bootstrap/bin/python" -I -c \
-  'import claudlobby.composer as c; print(c.__file__)')
-(cd / && "$WORK/bootstrap/bin/claudlobby" --help)
+NATIVE_DIRECTORY="/absolute/observed/user-unit-directory"
+CONFIG="/absolute/private/fleet.yaml"
+"$CLI" --root "$DATA" --fleet example fleet setup --config "$CONFIG" \
+  --install-directory "$NATIVE_DIRECTORY" --plan-only --json
 ```
 
-The printed module must belong to `WORK/bootstrap`, not the source checkout or another installation. Stop if either command fails. The virtualenv also avoids the externally-managed system Python restriction on macOS and Raspberry Pi OS.
+Alternatively, the [first-team template](first-team-setup.md) creates a lead, engineer and reviewer for an explicitly approved repository and goal. Choose one fleet setup command, not both.
 
-The older editable-install flow was measured at 45–61 seconds on one Raspberry Pi 5 in four runs (#2007); another cold run was stopped after eight minutes without a recorded cause. Those timings do not measure this sealed wheel/lock/assembly flow. Wheel availability, platform and cache state affect installation time; do not report an unmeasured time as a guarantee.
+`--plan-only` prepares the real update record, candidate configuration and dependencies. It requires the native directory and starts no native updater or agents. Review the returned request ID, target revision, configuration fingerprint, candidate configuration and consumer scope. This is a retained operation, not a disposable preview. Do not rerun fleet setup to replace it.
 
-The bootstrap venv runs the installed wheel. The target release is assembled separately under `DATA`. Prepare its hash lock from downloaded wheel metadata and bytes, excluding the Claudlobby wheel, which the assembler installs separately:
+**Agent-start gate:** stop before the next command until you approve the reviewed scope and possible provider usage. A prepared result is not an active or healthy fleet.
+
+## 3. Continue the original operation
 
 ```bash
-"$WORK/bootstrap/bin/python" - "$WORK/wheelhouse" "$WORK/dependency.lock" <<'PY'
-from email.parser import BytesParser
-from hashlib import sha256
-from pathlib import Path
-import sys
-from zipfile import ZipFile
-
-rows = []
-for wheel in sorted(Path(sys.argv[1]).glob("*.whl")):
-    with ZipFile(wheel) as archive:
-        names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
-        if len(names) != 1:
-            raise SystemExit(f"invalid wheel metadata: {wheel.name}")
-        metadata = BytesParser().parsebytes(archive.read(names[0]))
-    if metadata["Name"].lower() != "claudlobby":
-        rows.append(f"{metadata['Name']}=={metadata['Version']} "
-                    f"--hash=sha256:{sha256(wheel.read_bytes()).hexdigest()}")
-if not rows:
-    raise SystemExit("dependency wheelhouse is empty")
-Path(sys.argv[2]).write_text("\n".join(rows) + "\n")
-PY
+"$CLI" --root "$DATA" host update status --json
+"$CLI" --root "$DATA" host update continue --json
 ```
 
-The assembler refuses URLs, source distributions, unpinned requirements, missing SHA-256 hashes, and dependency resolution outside this wheelhouse. Keep the wheel, lock, and wheelhouse together for repeatable assembly.
+Continue uses the original request. It may enroll native services, initialize the fleet recorder, publish the committed configuration and start approved consumers. After a timeout or lost response, inspect status and continue that same operation; unknown effects are not permission to create another request or resend work.
 
-## 2. Assemble a sealed host release
-
-Choose the single wheel built above. `host setup` verifies package resources, the user manager, `tmux`, `jq`, and `claude`; it assembles an immutable release and reports its CLI and native search paths. It **does not select the release or start a bot**. The block stops at the first failure without closing your shell.
-
-```bash
-set -- "$WORK"/dist/*.whl
-if [ "$#" -ne 1 ]; then
-  echo 'expected exactly one candidate wheel; stop here' >&2
-else
-  WHEEL="$1"
-  "$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup \
-    --wheel "$WHEEL" --dependency-lock "$WORK/dependency.lock" \
-    --wheelhouse "$WORK/wheelhouse" --interpreter "$PYTHON" \
-    --json > "$WORK/host-setup.json" &&
-  RELEASE_CLI=$("$WORK/bootstrap/bin/python" -c \
-    'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
-    "$WORK/host-setup.json") &&
-  "$RELEASE_CLI" --help
-fi
-```
-
-Use the exact CLI reported by setup for the remaining commands. If setup refuses native manager access, repair the host's user-manager session first; a guessed unit directory cannot replace that proof. If assembly fails after creating its release directory, the refusal names the retained incomplete directory under `$DATA/state/releases/`. Assembly never repairs or overwrites it, so the same inputs keep refusing: inspect it, remove that directory yourself, then rerun `host setup`.
-
-**Browser route: assembly is complete.** Return to [First-team setup](first-team-setup.md#continue-after-release-assembly), using `DATA`, `WORK/host-setup.json` and the exact returned `RELEASE_CLI`. Stop at its credential gate before owner/lifecycle operations if access is unverified. The remaining sections are optional operator instructions, not the next step for website users.
-
-## Optional operator path: Telegram seed and direct CLI
-
-## 3. Author the first fleet
-
-The wheel ships `fleet.yaml.seed` and `.env.seed.example`. Copy them to **authoring locations**, then edit the placeholders. The seed's declared fleet name is `seed` and its manager bot is `claudfather`. `fleet.yaml.example` is a field reference, not a minimal first fleet.
-
-```bash
-SEEDS=$("$WORK/bootstrap/bin/python" -I -c \
-  'from claudlobby.resources import get_resources; print(get_resources().seeds)')
-cp "$SEEDS/fleet.yaml.seed" "$WORK/fleet.yaml"
-mkdir -p "$DATA/local/seed"
-cp "$SEEDS/.env.seed.example" "$DATA/local/seed/.env"
-chmod 600 "$DATA/local/seed/.env"
-"${EDITOR:-vi}" "$WORK/fleet.yaml"
-"${EDITOR:-vi}" "$DATA/local/seed/.env"
-```
-
-Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Use the actual Telegram group ID; `-1234567890` is a deliberately fake basic-group example, not a value to deploy. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument. Setup does not prewarm MCP packages; the first boot may download them. After authoring the manifest in the data root, `"$RELEASE_CLI" --root "$DATA" --fleet seed host cache warm` can prepare the declared caches explicitly.
-
-## 4. Activate and diagnose
-
-Set `USER_UNIT_DIR` to a path reported in `host-setup.json` under `data.install_directories`. For a normal macOS user, that is `$HOME/Library/LaunchAgents`; for Linux user systemd, use `$HOME/.config/systemd/user`. Run from the same user-manager domain observed by setup.
-
-```bash
-case "$(uname -s)" in
-  Darwin) USER_UNIT_DIR="$HOME/Library/LaunchAgents" ;;
-  Linux)  USER_UNIT_DIR="$HOME/.config/systemd/user" ;;
-  *) USER_UNIT_DIR=""; echo 'unsupported native manager; stop here' >&2 ;;
-esac
-if [ -n "$USER_UNIT_DIR" ] && mkdir -p "$USER_UNIT_DIR" &&
-   "$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
-     --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"; then
-  "$RELEASE_CLI" --root "$DATA" host doctor
-  "$RELEASE_CLI" --root "$DATA" host status
-fi
-```
-
-`fleet setup` checks that the manifest's `fleet.name` matches `--fleet`, copies it to `$DATA/local/seed/fleet.yaml`, stages all declared host fleets, and activates through the release owner. It may stop or start supervised processes, so run it when you intend to bring the fleet up. A different existing target manifest requires `--replace-config`; an unchanged, already active plan is not a new activation. It refuses when `local/seed` is a system container or `seed` is already declared nested under one. If staging refuses, setup puts back the previous manifest (or removes the new copy) and reports which. A refusal before any activation record reports `recording: unchanged` and its reason; correct it and rerun. A failed activation after its record exists retains its recorded pending step for explicit repair. `host doctor` reports configuration and host checks; verify the bot's channel and response separately. Native startup checks `bridge_state` against the current session PID, not merely a poller occupying the Telegram slot (#2008). An old `BRIDGE_READY` log line or tmux session alone does not establish current inbound readiness.
-
-For later config changes, edit an authoring file and stage and activate through the sealed CLI. The retired checkout `generate`/fleet setup sequence is outside the selected activation journal. The [fleet schema](fleet-yaml-schema.md) documents each manifest field.
-
-To reorganize a cold, unselected fleet before first activation, first place its edited manifest at `$DATA/local/seed/fleet.yaml` (step 3 leaves it under `WORK`). Then run `"$RELEASE_CLI" --root "$DATA" --fleet seed fleet move --system SYSTEM`. This moves the complete flat `local/seed/` directory to `local/SYSTEM/seed/` in one same-filesystem rename. It refuses any selected release, activation history, fleet runtime directory, or owned native consumer; it never stops or reenrolls a running fleet. If `local/` is Git-tracked, review and stage the resulting rename yourself. Then stage the new source with `config plan` and activate that reviewed plan through `host activate`. Active flat fleets currently have no supported nesting operation; keep them flat. Do not remove selection or activation history to bypass this refusal. A refused move may retain the empty `state/activation.lock` coordination file; it does not indicate activation.
+Check `host doctor`, `host status`, and meaningful bot/provider behavior separately. A committed configuration or successful dispatch does not prove startup health. Later source/configuration changes use `host update apply FULL_COMMIT`; preserve pending operations before requesting another target. Existing-host migration and browser first-team cold-start acceptance remain separate work, not outcomes established by this walkthrough.

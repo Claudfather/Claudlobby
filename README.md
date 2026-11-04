@@ -14,28 +14,28 @@ Runs anywhere the composed CLI does: Mac mini, Linux box, Raspberry Pi 5.
 
 The early "one directory per bot" pattern duplicated the same persona scaffolding, MCP boilerplate, lifecycle protocol, and guardrail rules across every bot. Adding a 9th bot meant copy-pasting a CLAUDE.md and editing it. Updating a guardrail meant editing 8 files.
 
-claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an MCP server config, a skill, a persona) lives **once** in `library/`. `fleet.yaml` declares which bot uses which pieces. A configuration plan composes self-contained bot directories under `runtime/bots/<name>/`; host activation applies the reviewed plan and enrolls their native units.
+claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an MCP server config, a skill, a persona) lives **once** in `library/`. `fleet.yaml` declares which bot uses which pieces. The Git updater composes self-contained bot directories under the data root, commits their configuration and enrolls approved native units.
 
-Add a 9th bot? Add its stanza to `fleet.yaml`. Update a guardrail? Edit its source in `library/guardrails/`. Stage and review a configuration plan, then activate it.
+Add a 9th bot? Add its stanza to `fleet.yaml`. Update a guardrail? Edit its source in `library/guardrails/`. Prepare and review the update, then continue its original request.
 
 ## What it changes on your machine
 
-The [setup walkthrough](documentation/getting-started.md) builds an installed wheel, assembles a sealed release with `host setup`, and activates an authored fleet with `fleet setup`. Assembly checks prerequisites and writes release files; **activation starts supervised processes and installs user units**. Neither step installs system packages, invokes `sudo`, enables Linux lingering, or installs Claude Code. Provision those prerequisites separately.
+The [setup walkthrough](documentation/getting-started.md) prepares one managed Git checkout and final Python environment, then stages the first fleet through the common updater. Preparation starts no agents. **Continuing the approved operation can install native units and start supervised processes.** Setup installs no system packages, invokes no `sudo`, enables no Linux lingering and installs no Claude Code.
 
 | Change | Where | Made by |
 |---|---|---|
-| A copied interpreter, dependency wheels and immutable framework resources | `<data-root>/releases/` | `host setup` / release assembly |
-| Authored manifests, staged configuration, activation records and Plane state | The explicit data root, including `local/` and `state/` | `fleet setup`, `config plan`, `host activate`, and runtime owners |
-| Units running under your account: bots, fleet timers and host jobs | The reviewed user-unit directory: normally `~/.config/systemd/user/` or `~/Library/LaunchAgents/` | `host activate` through the native supervisor adapter |
+| Managed source, environment and stable CLI/updater entries | The explicit installation directory: `src/`, `env/`, `bin/` | stdlib bootstrap / the same `host setup` preparation owner |
+| Authored manifests, committed configuration, update receipts and Plane state | The separate data root, including `local/` and `state/` | `fleet setup --plan-only`, `host update continue`, and runtime owners |
+| Units running under your account: bots, fleet timers and host jobs | The observed user-unit directory | The updater through the native supervisor adapter |
 | Claude Code plugins at user level | `~/.claude/plugins/` | `plugin_ensure` in `claudlobby/_runtime_scripts/lib-common.sh`, used by bot startup; this can affect your own Claude sessions too |
 | Your Claude Code consent settings | `~/.claude/settings.json`, or the selected Claude config directory | The headless consent block in `claudlobby/_runtime_scripts/start-bot.sh` sets `skipAutoPermissionPrompt` and `skipDangerousModePermissionPrompt`; malformed JSON is replaced with those keys |
 | Each bot's Telegram access list | `~/.claude/channels/telegram-<handle>/access.json` | The activation composition owner in `claudlobby/composer.py`; writes are atomic and mode 0600, and failures are disclosed per bot |
 | Optional managed channel approvals | `/etc/claude-code/managed-settings.json`, or `/Library/Application Support/ClaudeCode/managed-settings.json` | Explicit operator `host channels approve`; preserves existing keys, requires pre-existing administrative write access and never invokes `sudo` |
 | Optional MCP package downloads | Host cache directories | Explicit `host cache warm`; the first MCP launch may otherwise download packages |
 
-**After activation, enrolled jobs keep running.** `claudlobby/system.yaml` declares the defaults and `claudlobby host doctor --switches` exposes their state. Claude updates can update the user's shared CLI; plugin refreshes can affect shared plugin installs. The browser reaper targets verified automation leftovers. Sibling repository updates remain opt-in. The retired `pull-root` job is not installed by this release; an already-installed old puller must be held and retired through the [existing-host conversion runbook](documentation/existing-host-release-conversion.md).
+**After startup, enrolled jobs keep running.** `claudlobby/system.yaml` declares the defaults and `claudlobby host doctor --switches` exposes their state. Claude updates can update the user's shared CLI; plugin refreshes can affect shared plugin installs. The browser reaper targets verified automation leftovers. Sibling repository updates remain opt-in. The retired `pull-root` job is not installed by this release; an already-installed old puller must be held and retired through the [existing-host conversion runbook](documentation/existing-host-release-conversion.md).
 
-The Plane serves a read-only view on `127.0.0.1:8899` and receives events through `<data-root>/state/plane/ingest.sock`. Release assembly and configuration planning are distinct from native activation; a successful plan does not prove a bot is running or receiving messages.
+The Plane serves a read-only view on `127.0.0.1:8899` and receives events through `<data-root>/state/plane/ingest.sock`. Installation preparation and configuration preparation are distinct from native startup; a prepared update does not prove a bot is running or receiving messages.
 
 **Where secrets live**
 
@@ -74,16 +74,13 @@ To tighten it further: keep each fleet's Telegram group to people you would give
 
 ## Quick start
 
-**Start with [First-team setup](documentation/first-team-setup.md)** for the website-to-team path: prepare one computer, connect its private owner endpoint to your workspace, then preview and launch a lead, engineer and reviewer for an approved repository and goal. No Telegram bot is required.
+Follow [Getting started](documentation/getting-started.md) to prove host prerequisites, provide an explicit trusted source/remote/ref, and prepare separate installation and data directories. The stable CLI's `host setup` checks the native prerequisites using the same preparation helper. No editable package install is required.
 
-1. Check the guide's noncredential native prerequisites. Obtain a trusted exact compatible release with the `plane-ui` dependencies, using an available bundle or the explicitly chosen source-build alternative. Do not guess an installer download.
-2. Assemble that release with `host setup` using [Getting started](documentation/getting-started.md). Assembly starts no bots. Return to First-team setup after assembly; do not activate the optional seed.
-3. After assembly, establish provider/repository access, native identity and matching website setup publication. Missing access or publication blocks continuation, not candidate assembly. Pair the computer locally, approve the workspace and exact setup scope, then review the browser's frozen plan. Launch once only when ready for native services and agreed provider usage. Keep the original receipt if a response is lost.
-4. Check the connection to view the team. A recorded launch is not proof that bots finished starting or passed local native approval. Message/task access requires its separate local action grants; merges and deployments require separate permission.
+Stop at the credential gate. After provider and repository access are verified, use `fleet setup --config FILE --install-directory PATH --plan-only`, review the retained configuration and native scope, then explicitly run `host update continue`. Keep the original request after interruption and inspect `host update status` before continuing it.
 
-The guide uses existing release assembly, owner/workspace approval and recorded activation. It does not install system packages, Claude Code, Tailscale ingress or repository credentials. The supervised first-team trial has completed launch, task/review and browser feedback; unattended newcomer setup and the changed cold-host instructions still require validation.
+[First-team setup](documentation/first-team-setup.md) shows the optional lead/engineer/reviewer template. No Telegram is required for teams without channels; `fleet.yaml.seed` is only an explicit operator Telegram choice. Managed Git newcomer browser setup has not completed cold-host acceptance. Preparation grants no owner/browser access and proves neither runtime health nor useful work.
 
-**Operator alternatives:** the [source-build assembly path](documentation/getting-started.md#1-prepare-the-release-inputs-source-build-alternative) returns to the same browser guide. The optional [Telegram seed/direct-CLI path](documentation/getting-started.md#3-author-the-first-fleet) uses `fleet.yaml.seed` and `fleet setup` only when explicitly chosen. Existing checkout-based hosts must first follow the [conversion prerequisite](documentation/existing-host-release-conversion.md); a fresh setup does not retire their old source-pulling timers.
+Existing hosts need a reviewed migration that preserves activation history, receipts and old timers. Fresh setup does not convert an existing host or retire its source-pulling jobs.
 
 ## Architecture
 
@@ -100,7 +97,7 @@ The guide uses existing release assembly, owner/workspace approval and recorded 
                          ▼
                     fleet.yaml ← which bots, which pieces
                          │
-                         ▼ config plan → host activate
+                         ▼ prepare update → continue
                          │
 ┌────────────────────────────────────────────────────────────┐
 │  runtime/bots/<name>/     ← gitignored, regeneratable       │
@@ -130,11 +127,11 @@ See [`documentation/architecture/overview.md`](documentation/architecture/overvi
 
 ```
 claudlobby --fleet <name> config validate  # check authored fleet.yaml
-claudlobby host setup                      # assemble a sealed cold-host release
-claudlobby --fleet <name> fleet setup       # copy initial source, stage and activate
-claudlobby config plan --release <ID>      # stage all declared host fleets
-claudlobby config diff <PLAN_ID>           # inspect staged paths and state digests
-claudlobby host activate <PLAN_ID> --install-directory <PATH>  # apply the plan
+claudlobby host setup --installation PATH --remote REMOTE --ref REF --interpreter PYTHON
+claudlobby --fleet NAME fleet setup --config FILE --install-directory PATH --plan-only
+claudlobby host update status              # inspect the original operation
+claudlobby host update continue            # continue the reviewed operation
+claudlobby host update apply FULL_COMMIT   # prepare a later source/config update
 claudlobby library list          # show available personas / skills / mcp / etc.
 claudlobby config diff [--bot <name>]  # show current rendered drift without values
 claudlobby fleet status             # fleet health dashboard
