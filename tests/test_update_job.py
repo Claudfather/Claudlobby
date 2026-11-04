@@ -272,3 +272,26 @@ def test_exact_updater_target_cannot_change_user_installation_or_manager(fixture
         jobs.update_job_definition(installation, manager=manager, domain=f"gui/{os.getuid()}",
                                    install_directory=directory, native_target=target)
     assert native.calls == []
+
+
+@pytest.mark.parametrize("name", ["managed", 'managed with spaces "quotes" %n \\ $literal', "managed ", "managed\\"])
+def test_systemd_working_directory_is_a_literal_native_path(fixture, name):
+    """Pi systemd252 rejected quoted WorkingDirectory as a non-absolute path.
+
+    This field is one native path, not an ExecStart argument or shell word.
+    Native unit-file whitespace/continuation handling precedes specifier expansion.
+    """
+    from claudlobby.installation import Installation
+    original, directory, _ = fixture
+    moved = original.directory.with_name(name)
+    original.directory.rename(moved)
+    installation = Installation(moved, original.data_root)
+    job = jobs.update_job_definition(installation, manager="Linux", domain="", install_directory=directory)
+    assignments = [line.partition("=")[2] for line in job.content.decode().splitlines()
+                   if line.startswith("WorkingDirectory=")]
+    assert len(assignments) == 1
+    native = assignments[0].strip()
+    assert native.startswith("/") and not native.endswith("\\")
+    assert "%" not in native.replace("%%", ""), "literal percent must not become a native specifier"
+    assert Path(native.replace("%%", "%")).resolve() == installation.directory
+    assert job.content.decode().splitlines().count("[Service]") == 1

@@ -74,7 +74,12 @@ def update_job_definition(installation, *, manager, domain, install_directory, n
         directory = str(installation.directory)
         if any(character in directory for character in "\n\r\0"):
             raise UpdateError("updater directory has invalid native characters")
-        working_directory = '"' + directory.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+        # WorkingDirectory is one literal path, not ExecStart's quoted argv.
+        # Only specifiers expand. A trailing slash protects a final space or
+        # backslash from the unit-file whitespace/continuation parser.
+        working_directory = directory.replace("%", "%%")
+        if directory[-1].isspace() or directory.endswith("\\"):
+            working_directory += "/"
         content = ("[Unit]\nDescription=Claudlobby independent update\n[Service]\nType=exec\n"
                    + "WorkingDirectory=" + working_directory + "\n"
                    + "ExecStart=" + unit_systemd_command(argv) + "\n"
