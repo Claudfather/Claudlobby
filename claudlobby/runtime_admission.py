@@ -23,9 +23,13 @@ import subprocess
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from .activation_state import STEPS, ActivationError, ActivationStore, read_activation, read_selection
 from .releases import ReleaseManifest, read_release
+
+if TYPE_CHECKING:
+    from .installation import Installation
 
 
 RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
@@ -230,12 +234,72 @@ class RuntimeIdentity:
     cli: Path
     native: Path
     artifact_id: str
+    installation: Installation | None = None
+    source_revision: str | None = None
 
     @classmethod
     def current(cls) -> RuntimeIdentity:
         from .resources import get_resources, selected_cli
         package = get_resources()
-        return cls(selected_cli(), package.native, package.artifact_id)
+        installation = package.installation
+        if installation is not None:
+            if (Path(__file__).resolve() != installation.source / "claudlobby/runtime_admission.py"
+                    or Path(sys.executable).absolute() != installation.environment / "bin/python"
+                    or package.native != installation.native or not package.source_revision):
+                raise ActivationError("executing Git runtime differs from its recorded installation")
+        return cls(selected_cli(), package.native, package.artifact_id,
+                   installation, package.source_revision if installation is not None else None)
+
+
+@dataclass(frozen=True)
+class GitCurrentRuntime:
+    """Committed Git runtime provenance; never a release or action grant."""
+
+    installation: Installation
+    revision: str
+    config_fingerprint: str
+    snapshot: dict
+
+
+@contextmanager
+def _git_mutation_admission(root: Path, identity: RuntimeIdentity | None, expected_release):
+    from .active_config import read_current_config
+    from .config_plan import PlanError
+    from .installation import InstallationError, read_installation, _runtime_lock, _check_maintenance
+
+    if expected_release is not None or "CLAUDLOBBY_RELEASE_ID" in os.environ:
+        raise ActivationError("Git runtime cannot admit a sealed release expectation")
+    fd = None
+    try:
+        selected = os.environ.get("CLAUDLOBBY_INSTALLATION")
+        if selected is None and identity is not None and identity.installation is not None:
+            selected = str(identity.installation.directory)
+        if selected is None:
+            raise ActivationError("Git mutation requires its recorded installation")
+        installation = read_installation(Path(selected))
+        if installation.data_root != root:
+            raise ActivationError("Git mutation data root differs from its installation")
+        # A separate nonblocking SH description nests under the launcher's SH.
+        # Closing only our description never releases that inherited lifetime lock.
+        fd = _runtime_lock(installation)
+        _check_maintenance(installation)
+        actual = RuntimeIdentity.current()
+        if (actual.installation != installation or actual.source_revision is None
+                or (identity is not None and identity != actual)):
+            raise ActivationError("Git runtime identity differs from the executing installation")
+        snapshot = read_current_config(root, installation=installation, revision=actual.source_revision)
+        _check_maintenance(installation)
+        current = GitCurrentRuntime(installation, actual.source_revision, snapshot["fingerprint"], snapshot)
+    except (InstallationError, PlanError, OSError, RuntimeError, ValueError) as exc:
+        if fd is not None:
+            os.close(fd)
+        if isinstance(exc, ActivationError):
+            raise
+        raise ActivationError(f"Git mutation admission refused: {exc}") from exc
+    try:
+        yield current
+    finally:
+        os.close(fd)
 
 
 def _selected_active(root: Path, identity: RuntimeIdentity,
@@ -300,13 +364,19 @@ def _take_shared(root: Path, fd: int) -> None:
 @contextmanager
 def mutation_admission(root: Path, *, identity: RuntimeIdentity | None = None,
                        expected_release: str | None = None):
-    """Admit one operation under stable host selection, or refuse before effects.
+    """Admit current Git configuration or transitional sealed selection.
 
-    Generated callers supply their bound expected release. Bare operator calls
+    Git returns GitCurrentRuntime, never a release-shaped compatibility value.
+    Generated sealed callers supply their bound expected release. Bare operator calls
     omit it but must still run the selected executable and installed resources.
     This guard is not authentication between trusted local callers.
     """
     root = Path(root).expanduser().resolve()
+    if ("CLAUDLOBBY_INSTALLATION" in os.environ
+            or identity is not None and identity.installation is not None):
+        with _git_mutation_admission(root, identity, expected_release) as current:
+            yield current
+        return
     state = root / "state"
     if state.resolve() != state:
         raise ActivationError("activation state directory is redirected")

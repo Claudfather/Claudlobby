@@ -226,6 +226,13 @@ def quiesce_consumer(store, key, adapter):
             same = observed == row["saved_native"]
         if not same:
             raise UpdateError("native state drifted before stop")
+        if row["bot_binding"]:
+            session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], _file(row), key)
+            if session not in {"ready", "absent", "dead"}:
+                raise UpdateError("bot session disposition is unknown before stop")
+            disposition = "running" if session == "ready" else "stopped"
+            if disposition != row["disposition"]:
+                raise UpdateError("bot session disposition drifted before stop; prepare from its intended state")
     if row["manager"] == "Linux":
         _park(store, record, progress, row)
     if is_unit_template(key):

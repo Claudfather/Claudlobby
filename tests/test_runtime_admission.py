@@ -1,6 +1,8 @@
 """Stale CLI and interrupted activation refuse before a mutation starts."""
 
 from pathlib import Path
+from dataclasses import replace
+import json
 import os
 import selectors
 import shlex
@@ -86,6 +88,95 @@ def test_missing_host_state_never_creates_an_install(tmp_path):
         with mutation_admission(root):
             pytest.fail("missing install admitted")
     assert not root.exists()
+
+
+@pytest.fixture
+def git_current(tmp_path, monkeypatch):
+    from claudlobby import active_config, runtime_admission
+    from claudlobby.installation import install_launcher
+    from tests.test_package_resources import _source_installation
+
+    installation = _source_installation(tmp_path)
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    revision = installation.preflight()
+    snapshot = {"schema": 1, "data_root": str(installation.data_root),
+                "installation": str(installation.directory), "source": str(installation.source),
+                "revision": revision, "fleets": {"example": {
+                    "manifest": str(installation.data_root / "fleet.yaml"),
+                    "fleet": 'fleet: {name: example, manager: worker, system_defaults: false, bots: {worker: {expertise: [software-engineering]}}}\n',
+                    "projects": None}}, "units": [], "owned_outputs": [], "identities": None}
+    snapshot["fingerprint"] = active_config._fingerprint(snapshot)
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
+    # Model execution from the recorded environment/source, while exercising
+    # real Git/resource/config readers and the real exclusion file.
+    monkeypatch.setattr(sys, "executable", str(installation.environment / "bin/python"))
+    monkeypatch.setattr(runtime_admission, "__file__", str(installation.source / "claudlobby/runtime_admission.py"))
+    return installation, snapshot
+
+
+def test_git_current_admission_returns_configuration_and_preserves_launcher_lock(git_current):
+    from claudlobby.installation import _runtime_lock, native_start_fence, InstallationError
+    from claudlobby.runtime_admission import GitCurrentRuntime
+
+    installation, snapshot = git_current
+    inherited = _runtime_lock(installation)
+    try:
+        with mutation_admission(installation.data_root) as admitted:
+            assert isinstance(admitted, GitCurrentRuntime)
+            assert admitted.installation == installation
+            assert admitted.revision == snapshot["revision"]
+            assert admitted.config_fingerprint == snapshot["fingerprint"]
+            assert admitted.snapshot == snapshot
+            assert not hasattr(admitted, "release_id")
+            with pytest.raises(InstallationError):
+                with native_start_fence(installation):
+                    pytest.fail("exclusive update raced admission")
+        # Admission closes only its own SH, not the stable launcher's SH.
+        with pytest.raises(InstallationError):
+            with native_start_fence(installation):
+                pytest.fail("launcher lifetime lock was released")
+    finally:
+        os.close(inherited)
+    with native_start_fence(installation):
+        with pytest.raises(a.ActivationError, match="runtime is in use"):
+            with mutation_admission(installation.data_root):
+                pytest.fail("exclusive update admitted a mutation")
+    with native_start_fence(installation):
+        pass
+    assert not (installation.data_root / "state/activation.lock").exists()
+
+
+@pytest.mark.parametrize("change", ["maintenance", "fingerprint", "revision", "identity", "source", "interpreter", "release"])
+def test_git_current_admission_refuses_drift_before_effect(git_current, monkeypatch, change):
+    installation, snapshot = git_current
+    identity = RuntimeIdentity.current()
+    expected = None
+    if change == "maintenance":
+        (installation.data_root / "state/update.json").write_text(
+            json.dumps({"schema": 1, "maintenance": True, "phase": "git"}))
+    elif change in {"fingerprint", "revision"}:
+        snapshot[change] = "0" * (64 if change == "fingerprint" else 40)
+        if change == "revision":
+            from claudlobby.active_config import _fingerprint
+            snapshot["fingerprint"] = _fingerprint(snapshot)
+        (installation.data_root / "state/config.json").write_text(json.dumps(snapshot))
+    elif change == "identity":
+        identity = replace(identity, native=installation.native / "foreign")
+    elif change == "source":
+        from claudlobby import runtime_admission
+        monkeypatch.setattr(runtime_admission, "__file__", str(installation.data_root / "foreign.py"))
+    elif change == "interpreter":
+        monkeypatch.setattr(sys, "executable", str(installation.data_root / "foreign-python"))
+    else:
+        expected = "r-" + "1" * 64
+    with pytest.raises(a.ActivationError):
+        with mutation_admission(installation.data_root, identity=identity, expected_release=expected):
+            pytest.fail("changed Git runtime admitted")
+    # Refusal must not provision or repair sealed state.
+    assert not (installation.data_root / "state/activation.lock").exists()
+    assert not (installation.data_root / "state/selection.json").exists()
 
 
 def test_native_watchdog_pause_has_distinct_exit(monkeypatch, capsys):

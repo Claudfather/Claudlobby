@@ -973,6 +973,81 @@ def test_planned_restart_records_before_send_and_reuses_a_late_save(
     assert not request_path.exists()
 
 
+@pytest.mark.parametrize("unknown_result", [False, True])
+def test_shared_checkpoint_retains_original_operation_and_unknown_send(
+        cold, monkeypatch, capsys, unknown_result):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    worker.native.explicit_handoff, worker.native.handoff_rc = "handoff-timeout", 3
+    monkeypatch.setattr(bot_operations, "_HANDOFF_CAPTURE_WAIT_S", 0)
+    call = worker.native.call
+
+    def native(function, *args, **kwargs):
+        if unknown_result and function == "svc_activation_handoff":
+            worker.native.calls.append(function)
+            raise subprocess.TimeoutExpired([function], 45)
+        return call(function, *args, **kwargs)
+
+    worker.native.call = native
+    def save(operation="update-one"):
+        return bot_operations.save_planned_checkpoint(bot_dir, "com.example.worker", "/tmp",
+                                                      worker.native, operation_id=operation)
+    with pytest.raises(bot_operations.BotLifecycleError):
+        save()
+    request = (bot_dir / "data/.handoff-request").read_bytes()
+    with pytest.raises(bot_operations.BotLifecycleError, match="another operation"):
+        save("update-two")
+    assert (bot_dir / "data/.handoff-request").read_bytes() == request
+    now = datetime.now(timezone.utc)
+    (bot_dir / ".claude/session.md").write_text(
+        f'---\nlast_updated: "{now:%Y-%m-%dT%H:%M:%SZ}"\n---\noriginal context\n')
+    proof = save()
+    assert json.loads(json.dumps(proof)) == proof
+    assert proof["request_id"] == json.loads(request)["request_id"]
+    assert proof["operation_id"] == "update-one"
+    assert save() == proof
+    assert worker.native.calls.count("svc_activation_handoff") == 1
+    assert worker.native.actions == []  # Saving is not a stop or native quiet proof.
+    assert worker.call("bot", "handoff", "worker", expected=6)["data"]["reason"] == "pending"
+
+
+def test_stopped_checkpoint_has_no_age_cliff_but_refuses_changed_capture_or_request(
+        cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    now = datetime.now(timezone.utc)
+    capture = bot_dir / ".claude/session.md"
+    capture.write_text(f'---\nlast_updated: "{now:%Y-%m-%dT%H:%M:%SZ}"\n---\ndurable context\n')
+    proof = bot_operations.save_planned_checkpoint(bot_dir, "com.example.worker", "/tmp",
+                                                  worker.native, operation_id="update-one")
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now + timedelta(hours=2)
+    monkeypatch.setattr(bot_operations, "datetime", Later)
+    with pytest.raises(bot_operations.BotLifecycleError):
+        bot_operations.save_planned_checkpoint(bot_dir, "com.example.worker", "/tmp",
+                                               worker.native, operation_id="update-one")
+    # The caller separately proved the native consumer quiet. Verification
+    # here proves only unchanged capture/request, without rechecking its age.
+    bot_operations.verify_checkpoint_after_stop(bot_dir, proof)
+    capture.write_text(capture.read_text() + "later native work\n")
+    with pytest.raises(bot_operations.BotLifecycleError, match="capture"):
+        bot_operations.verify_checkpoint_after_stop(bot_dir, proof)
+    request = bot_dir / "data/.handoff-request"
+    original = request.read_bytes()
+    foreign = json.loads(original)
+    foreign["operation_id"] = "another-operation"
+    request.write_text(json.dumps(foreign))
+    with pytest.raises(bot_operations.BotLifecycleError, match="request"):
+        bot_operations.retire_planned_checkpoint(bot_dir, proof)
+    assert request.exists()
+    request.write_bytes(original)
+    bot_operations.retire_planned_checkpoint(bot_dir, proof)
+    bot_operations.retire_planned_checkpoint(bot_dir, proof)
+    assert not request.exists()
+
+
 @pytest.mark.parametrize("session, expected", [("absent", 0), ("unknown", 6)])
 def test_restart_distinguishes_dead_session_recovery_from_unknown_live_state(
         cold, monkeypatch, capsys, session, expected):  # noqa: F811

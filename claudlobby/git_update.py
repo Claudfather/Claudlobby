@@ -8,14 +8,17 @@ commands supplied by a record. Its installed status entry survives src/env loss.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from copy import deepcopy
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import runpy
+import stat
 import subprocess
 import sys
 import tempfile
@@ -113,12 +116,16 @@ def _validate(installation, record):
                 or record["data_root"] != str(installation.data_root)
                 or record["phase"] not in PHASES or type(record["maintenance"]) is not bool
                 or not all(_COMMIT.fullmatch(record[key]) for key in ("before", "target"))
-                or not _SHA.fullmatch(record["config_fingerprint"])
+                or (record.get("finalized", True) and not _SHA.fullmatch(record["config_fingerprint"]))
+                or (not record.get("finalized", True) and (record["phase"] != "prepare"
+                    or record["config_fingerprint"] is not None or record["scope"] != {}))
                 or type(record["scope"]) is not dict or type(record["quiet"]) is not dict
                 or type(record["git_complete"]) is not bool):
             raise ValueError()
         if ((record["maintenance"] and record["phase"] in {"prepare", "quiesce", "restore", "done"})
                 or (not record["maintenance"] and record["phase"] in {"git", "environment", "publish", "migrate"})):
+            raise ValueError()
+        if type(record.get("finalized", True)) is not bool:
             raise ValueError()
         uuid.UUID(record["request_id"])
         for name, identity in record["scope"].items():
@@ -203,10 +210,18 @@ class UpdateStore:
         self._assert_locked()
         _validate(self.installation, record)
         current = self.load()
+        if current is not None and current["phase"] == "done" and record["phase"] == "prepare" and current.get("health_errors"):
+            raise UpdateError("prior consumer health/unknown-effect evidence must be reconciled")
         if current is not None and not (current["phase"] == "done" and record["phase"] == "prepare"):
-            for key in ("request_id", "before", "target", "config_fingerprint", "scope"):
+            for key in ("request_id", "before", "target"):
                 if current[key] != record[key]:
                     raise UpdateError("frozen update intent changed")
+            if current.get("finalized", True):
+                if (not record.get("finalized", True) or any(current[key] != record[key]
+                        for key in ("config_fingerprint", "scope"))):
+                    raise UpdateError("frozen update consent changed")
+            elif record.get("finalized", True) and (current["phase"] != "prepare" or record["phase"] != "prepare"):
+                raise UpdateError("update consent can only finalize during preparation")
             for key in ("path", "before", "target"):
                 if current["dependencies"][key] != record["dependencies"][key]:
                     raise UpdateError("frozen dependency intent changed")
@@ -214,14 +229,22 @@ class UpdateStore:
 
     def prepare(self, target_commit, *, config_fingerprint, scope, request_id,
                 lock_path="requirements-runtime.lock"):
-        """Freeze already-resolved trusted Git inputs. Never fetch or resolve a moving ref."""
+        """Freeze target then finalize exact render/scope; compatible existing API."""
+        self.prepare_target(target_commit, request_id=request_id, lock_path=lock_path)
+        return self.finalize_prepare(config_fingerprint=config_fingerprint, scope=scope)
+
+    def prepare_target(self, target_commit, *, request_id, lock_path="requirements-runtime.lock"):
+        """Freeze Git/dependency inputs before candidate environment and rendering."""
         self._assert_locked()
         current = self.load()
+        if current is not None and current["phase"] == "done" and current.get("health_errors"):
+            raise UpdateError("previous committed update retains consumer health/unknown-effect evidence; reconcile it before another target")
         if current is not None and current["phase"] != "done":
-            if (current["target"], current["config_fingerprint"], current["scope"], current["request_id"]) != (
-                    target_commit, config_fingerprint, scope, request_id):
+            if (current["target"], current["request_id"]) != (target_commit, request_id):
                 raise UpdateError("current operation differs; continue it before preparing another")
             return current
+        if current is not None:
+            cleanup_candidate(self)
         if not isinstance(target_commit, str) or not _COMMIT.fullmatch(target_commit):
             raise UpdateError("target must be a frozen full Git commit")
         before = _head(self.installation)
@@ -235,8 +258,8 @@ class UpdateStore:
         new_lock = _lock_bytes(self.installation, target_commit, lock_path)
         record = {"schema": 1, "installation": str(self.installation.directory),
                   "data_root": str(self.installation.data_root), "request_id": request_id,
-                  "before": before, "target": target_commit, "config_fingerprint": config_fingerprint,
-                  "scope": deepcopy(scope), "quiet": {}, "phase": "prepare", "maintenance": False,
+                  "before": before, "target": target_commit, "config_fingerprint": None,
+                  "finalized": False, "scope": {}, "quiet": {}, "phase": "prepare", "maintenance": False,
                   "git_complete": False,
                   "dependencies": {"path": lock_path, "before": _digest(old_lock), "target": _digest(new_lock),
                                    "prepared": old_lock == new_lock, "receipt_sha256": None}}
@@ -246,6 +269,35 @@ class UpdateStore:
         _write(self.work / "dependencies-target.lock", new_lock)
         self.save(record)
         return record
+
+    def finalize_prepare(self, *, config_fingerprint, scope):
+        """Bind reviewed render/scope once; dependencies alone never authorize stop."""
+        self._assert_locked()
+        record = self.load()
+        if record is None:
+            raise UpdateError("update target has not been prepared")
+        if record.get("finalized", True):
+            if (record["config_fingerprint"], record["scope"]) != (config_fingerprint, scope):
+                raise UpdateError("current frozen update consent differs")
+            return record
+        if record["phase"] != "prepare" or not _SHA.fullmatch(config_fingerprint) or not isinstance(scope, dict):
+            raise UpdateError("exact render/scope must finalize during preparation")
+        record.update(config_fingerprint=config_fingerprint, scope=deepcopy(scope), finalized=True)
+        self.save(record)
+        return record
+
+    @classmethod
+    def from_parent(cls, installation, *, fd, parent_pid, request_id):
+        """Use only the calling parent's inherited locked open description."""
+        if os.getppid() != parent_pid or type(fd) is not int or fd < 3:
+            raise UpdateError("application stage does not belong to the updater parent")
+        store = cls(installation)
+        _verify_inherited_lock(store.state / "update.lock", fd)
+        store._fd = fd
+        record = store.load()
+        if record is None or record["request_id"] != request_id:
+            raise UpdateError("application stage request differs from its parent operation")
+        return store
 
     def _dependency_inputs(self, record):
         for name in ("before", "target"):
@@ -384,6 +436,8 @@ class UpdateStore:
         record = self.load()
         if record is None or record["phase"] not in {"quiesce", "git"}:
             raise UpdateError("cutover requires the current quiesce phase")
+        if not record.get("finalized", True):
+            raise UpdateError("update consent is not finalized")
         _require_quiet(record)
         if not record["dependencies"]["prepared"]:
             raise UpdateError("changed dependencies have not been prepared and validated")
@@ -410,6 +464,293 @@ class UpdateStore:
             raise UpdateError("actual Git HEAD differs from both frozen before and target; inspect without resetting")
         record["git_complete"] = True
         self.save(record)
+
+
+def _verify_inherited_lock(path, fd):
+    path = _plain(path)
+    linked, opened = path.lstat(), os.fstat(fd)
+    if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+            or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
+        raise UpdateError("inherited update/runtime lock differs from its recorded file")
+    # A separate open description must not be able to take EX. Closing this
+    # probe never unlocks the inherited parent's open description.
+    probe = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise UpdateError("inherited lock is not held by its coordinator")
+    finally:
+        os.close(probe)
+    os.set_inheritable(fd, False)
+
+
+_STAGE_IMPORT = """import pathlib,sys
+source=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(source))
+import claudlobby
+if pathlib.Path(claudlobby.__file__).resolve()!=source/'claudlobby/__init__.py':
+    raise SystemExit('application stage package differs from explicit source')
+from claudlobby import update_entry
+if pathlib.Path(update_entry.__file__).resolve()!=source/'claudlobby/update_entry.py':
+    raise SystemExit('application stage entry differs from explicit source')
+raise SystemExit(update_entry.main(sys.argv[2:]))
+"""
+
+
+def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None):
+    """One fixed private stage in a fresh verified application process."""
+    store._assert_locked()
+    if stage not in {"render", "prepare", "quiesce", "quiet", "publish", "restore"}:
+        raise UpdateError("unknown application update stage")
+    record = store.load()
+    source = _plain(source if source is not None else store.installation.source)
+    python = python if python is not None else store.installation.environment / "bin/python"
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise UpdateError("application stage interpreter is unavailable")
+    inherited = [store._fd]
+    args = [str(store.installation.directory), stage, str(store._fd), str(os.getpid()), record["request_id"]]
+    if runtime_fd is not None:
+        _verify_inherited_lock(store.state / "runtime-use.lock", runtime_fd)
+        inherited.append(runtime_fd)
+        args.append(str(runtime_fd))
+    clean = {key: value for key, value in os.environ.items()
+             if not key.startswith(("PYTHON", "GIT_", "BASH_FUNC_")) and key not in {"BASH_ENV", "ENV"}}
+    clean.update(CLAUDLOBBY_INSTALLATION=str(store.installation.directory),
+                 CLAUDLOBBY_ROOT=str(store.root), PYTHONDONTWRITEBYTECODE="1")
+    try:
+        result = subprocess.run([str(python), "-I", "-B", "-c", _STAGE_IMPORT, str(source), *args],
+                                cwd=store.root, env=clean, pass_fds=tuple(inherited),
+                                capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UpdateError(f"application stage {stage} interrupted; continue the same operation") from exc
+    if result.returncode:
+        record = store.load()
+        record["stage_error"] = {"stage": stage, "detail": result.stderr[-2000:]}
+        store.save(record)
+        raise UpdateError(f"application stage {stage} refused; retained diagnostics in current update")
+    return store.load()
+
+
+def _candidate_revision(store, source):
+    result = _git(store.installation, "-C", source, "rev-parse", "--verify", "HEAD^{commit}")
+    if result.stdout.decode().strip() != store.load()["target"]:
+        raise UpdateError("candidate checkout differs from frozen target")
+    dirty = _git(store.installation, "-C", source, "status", "--porcelain=v1", "--untracked-files=all")
+    if dirty.stdout:
+        raise UpdateError("candidate checkout has changed; leave its files intact")
+    top = _git(store.installation, "-C", source, "rev-parse", "--show-toplevel").stdout.decode().strip()
+    if top != str(source):
+        raise UpdateError("candidate source is not the exact owned checkout")
+
+
+def prepare_candidate_render(store, *, interpreter):
+    """Prepare a detached target and dependency environment before rendering."""
+    store._assert_locked()
+    record = store.load()
+    if record is None or record["phase"] != "prepare" or record.get("finalized", True):
+        raise UpdateError("candidate render requires the unfinalized frozen target")
+    if _head(store.installation) != record["before"]:
+        raise UpdateError("candidate preparation requires the unchanged current checkout")
+    store.prepare_dependencies(interpreter=interpreter)
+    record = store.load()
+    source = _plain(store.work / ("candidate-" + record["request_id"]))
+    if record.get("candidate_source") is None:
+        if source.exists():
+            raise UpdateError("candidate source path already exists without ownership")
+        record["candidate_source"] = str(source)
+        store.save(record)
+    elif record["candidate_source"] != str(source):
+        raise UpdateError("candidate source ownership changed")
+    if not source.exists():
+        _git(store.installation, "worktree", "add", "--detach", str(source), record["target"])
+    _candidate_revision(store, source)
+    python = store.installation.environment / "bin/python"
+    if record["dependencies"]["before"] != record["dependencies"]["target"]:
+        python = store.work / "dependency-check/bin/python"
+    record = store.load()
+    record["candidate_python"] = str(python)
+    store.save(record)
+    return _application_stage(store, "render", source=source, python=python)
+
+
+def prepare_application_operation(store, *, install_directory, interpreter):
+    """Finalize the reviewed candidate render through the current application."""
+    record = store.load()
+    if record is None or record["phase"] != "prepare" or not record.get("candidate_render"):
+        raise UpdateError("candidate render is not prepared")
+    if _head(store.installation) != record["before"]:
+        raise UpdateError("application preparation requires the unchanged current checkout")
+    record["native_install_directory"] = str(_plain(Path(install_directory)))
+    record["host_interpreter"] = str(_plain(Path(interpreter)))
+    store.save(record)
+    return _application_stage(store, "prepare")
+
+
+def _prepare_quiet_support(store):
+    record = store.load()
+    if record.get("quiet_support") is not None:
+        return
+    if record["phase"] != "quiesce" or _head(store.installation) != record["before"]:
+        raise UpdateError("resume lacks retained native quiet support; no cutover attempted")
+    files = {"supervisor.sh": store.installation.source / "claudlobby/_runtime_scripts/supervisor.sh",
+             "supervision_runtime.py": store.installation.source / "claudlobby/supervision_runtime.py"}
+    directory = _plain(store.work / ("quiet-" + record["request_id"]))
+    directory.mkdir(mode=0o700, exist_ok=True)
+    hashes = {}
+    for name, source in files.items():
+        if source.is_symlink() or not source.is_file():
+            raise UpdateError("current native quiet implementation is unavailable")
+        content = source.read_bytes()
+        destination = _plain(directory / name)
+        if destination.exists() and destination.read_bytes() != content:
+            raise UpdateError("retained native quiet support changed")
+        _write(destination, content)
+        hashes[name] = _digest(content)
+    if _head(store.installation) != record["before"]:
+        raise UpdateError("source changed while retaining native quiet support")
+    record["quiet_support"] = hashes
+    store.save(record)
+
+
+def _independent_quiet(store):
+    """Reobserve quiet even with no usable mutable source/environment."""
+    record = store.load()
+    directory = _plain(store.work / ("quiet-" + record["request_id"]))
+    support = record.get("quiet_support", {})
+    if set(support) != {"supervisor.sh", "supervision_runtime.py"}:
+        raise UpdateError("retained native quiet implementation is unavailable")
+    for name, digest in support.items():
+        path = _plain(directory / name)
+        if _digest(path.read_bytes()) != digest:
+            raise UpdateError("retained native quiet implementation changed")
+    specification = importlib.util.spec_from_file_location("_update_quiet_runtime", directory / "supervision_runtime.py")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    specification.loader.exec_module(module)
+    class QuietAdapter:
+        def call(self, function, *args, timeout=30):
+            if function != "svc_activation_quiet":
+                raise UpdateError("retained native adapter only observes quiet")
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in {"BASH_ENV", "ENV"} and not key.startswith("BASH_FUNC_")}
+            environment["LC_ALL"] = "C"
+            return subprocess.run(["/bin/bash", "-c",
+                '_SUPERVISOR_LIB_DIR="$1"; shift; _OS=$(uname -s) || exit 3; . "$_SUPERVISOR_LIB_DIR/supervisor.sh" || exit 3; svc_activation_quiet "$@"',
+                "update-quiet", str(directory), *(str(arg) for arg in args)],
+                env=environment, capture_output=True, text=True, timeout=timeout)
+    for key, progress in record["consumers"].items():
+        row = progress["intent"]
+        if not row["installed"] or "@." in key:
+            evidence = {"uninstalled_or_template": True}
+        else:
+            binding = row["bot_binding"]
+            socket = Path(binding[2]) / f"tmux-{os.getuid()}" / binding[1] if binding else None
+            evidence = module.assert_quiescent(QuietAdapter(), installed_file=Path(row["installed"][0]["path"]),
+                                               target=key, socket_path=socket).details
+        record["quiet"][key] = {"identity": record["scope"][key],
+                                "evidence_sha256": _digest(json.dumps(evidence, sort_keys=True).encode())}
+    store.save(record)
+
+
+def run_prepared_update(store):
+    """Run one finalized operation; no mutable application survives cutover."""
+    store._assert_locked()
+    record = store.load()
+    if record is None or not record.get("finalized", True) or record["phase"] == "prepare":
+        raise UpdateError("finalized application preparation is required")
+    if record["phase"] == "done":
+        if not record.get("health_errors"):
+            return cleanup_candidate(store)
+        if _head(store.installation) != record["target"]:
+            raise UpdateError("health reconciliation requires exact target checkout")
+        _application_stage(store, "restore")
+        return cleanup_candidate(store)
+    actual = _head(store.installation)
+    if record["phase"] == "quiesce":
+        if actual != record["before"]:
+            raise UpdateError("quiescence requires the exact previous checkout")
+        # Phase=quiesce fences new native starts. Drain those admitted before
+        # that transition before trusting the frozen bot disposition. Release
+        # the lock again so existing bots can record their handoff via the CLI.
+        with _exclusive_runtime(store):
+            pass
+        _prepare_quiet_support(store)
+        _application_stage(store, "quiesce")
+    record = store.load()
+    if record["phase"] in {"quiesce", "git", "environment", "publish", "commit"}:
+        with _exclusive_runtime(store) as fd:
+            record = store.load()
+            actual = _head(store.installation)
+            if record["phase"] == "quiesce":
+                if actual != record["before"]:
+                    raise UpdateError("final quiet requires the exact previous checkout")
+                _application_stage(store, "quiet", runtime_fd=fd)
+                store.begin_cutover()
+            # Every continuation re-observes quiet under this EX, including an
+            # interrupted target checkout or partially rebuilt environment.
+            _independent_quiet(store)
+            if store.load()["phase"] == "git":
+                if actual not in {record["before"], record["target"]}:
+                    raise UpdateError("Git cutover differs from frozen before/target")
+                store.cutover_git()
+                record = store.load()
+                record["phase"] = "environment"
+                store.save(record)
+            if store.load()["phase"] == "environment":
+                if _head(store.installation) != store.load()["target"]:
+                    raise UpdateError("environment cutover requires exact target checkout")
+                store.cutover_environment()
+            if _head(store.installation) != store.load()["target"]:
+                raise UpdateError("publication requires exact target checkout")
+            _application_stage(store, "publish", runtime_fd=fd)
+    record = store.load()
+    if record["phase"] == "restore":
+        if _head(store.installation) != record["target"]:
+            raise UpdateError("restoration requires exact target checkout")
+        _application_stage(store, "restore")
+    return cleanup_candidate(store)
+
+
+@contextmanager
+def _exclusive_runtime(store):
+    lock = _plain(store.state / "runtime-use.lock")
+    fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        linked, opened = lock.lstat(), os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+                or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise UpdateError("runtime exclusion file changed")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise UpdateError("runtime is still in use; continue after admitted readers finish") from exc
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def cleanup_candidate(store):
+    """Remove only this completed operation's clean registered Git checkout."""
+    store._assert_locked()
+    record = store.load()
+    if record is None or record["phase"] != "done" or record.get("health_errors"):
+        return record
+    candidate = record.get("candidate_source")
+    if candidate is None or record.get("candidate_cleaned"):
+        return record
+    source = _plain(store.work / ("candidate-" + record["request_id"]))
+    if candidate != str(source):
+        raise UpdateError("candidate cleanup ownership differs; files retained")
+    if source.exists():
+        _candidate_revision(store, source)
+        _git(store.installation, "worktree", "remove", str(source))
+    # Absence covers an interrupted successful removal; never prune unrelated
+    # worktrees or force removal of a dirty/unrecognized checkout.
+    record["candidate_cleaned"] = True
+    store.save(record)
+    return record
 
 
 def main(argv=None):

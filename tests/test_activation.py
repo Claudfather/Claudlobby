@@ -629,7 +629,7 @@ def _cold_case(installed, monkeypatch, tmp_path, *, fleet_job=False, registry_pr
         for name, (content, mode) in files.items():
             builder.file(timers / name, content, mode=mode)
     plan = builder.seal()
-    package = SimpleNamespace(native=release.native_path, artifact_id=release.inputs.artifact_id)
+    package = SimpleNamespace(native=release.native_path, artifact_id=release.inputs.artifact_id, installation=None)
     native_directory = tmp_path / "private-native-user"
     native_directory.mkdir()
     host = NativeHost(root, release, plan, native_directory, package)
@@ -914,7 +914,7 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
         candidate = seal_release(root, inputs, source.paths)
     plan = ConfigPlanBuilder(root, candidate.release_id, candidate.seal_sha256,
                              ("example",), effects={}).seal()
-    package = SimpleNamespace(native=candidate.native_path, artifact_id=candidate.inputs.artifact_id)
+    package = SimpleNamespace(native=candidate.native_path, artifact_id=candidate.inputs.artifact_id, installation=None)
     host.package = package
     monkeypatch.setattr(activation, "get_resources", lambda: package)
     monkeypatch.setattr(admission.RuntimeIdentity, "current", classmethod(lambda cls:
@@ -1592,7 +1592,7 @@ def test_legacy_adoption_resume_after_start_repair_reproves_old_bot_quiet(enroll
     root = inventory.data_root
     directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
     release = state.read_release(root, plan.release_id)
-    package = type("Package", (), {"native": release.native_path, "artifact_id": release.inputs.artifact_id})()
+    package = type("Package", (), {"native": release.native_path, "artifact_id": release.inputs.artifact_id, "installation": None})()
     adapter.package = package
     monkeypatch.setattr(activation, "get_resources", lambda: package)
     monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
@@ -2022,7 +2022,7 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     root = inventory.data_root
     directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
     release = state.read_release(root, plan.release_id)
-    package = SimpleNamespace(native=release.native_path, artifact_id=release.inputs.artifact_id)
+    package = SimpleNamespace(native=release.native_path, artifact_id=release.inputs.artifact_id, installation=None)
     adapter.package = package
     monkeypatch.setattr(activation, "get_resources", lambda: package)
     monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:

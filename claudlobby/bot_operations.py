@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import atexit
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -277,6 +278,10 @@ _HANDOFF_CAPTURE_WAIT_S = 900
 _HANDOFF_CAPTURE_POLL_S = 2
 
 
+def _handoff_boundary(requested, native_result):
+    return None if native_result == {"marker": "handoff-skipped:recent", "returncode": 0} else requested
+
+
 def wait_for_handoff(bot_dir: Path, *, requested: int, native_result: dict | None,
                      target: str, max_age_s: int = _HANDOFF_FRESH_S,
                      wait_s: int = _HANDOFF_CAPTURE_WAIT_S,
@@ -288,8 +293,7 @@ def wait_for_handoff(bot_dir: Path, *, requested: int, native_result: dict | Non
     A missing/unknown native result can be reconciled by a genuine late save,
     but never authorizes another native request or an inferred successful save.
     """
-    boundary = None if native_result == {
-        "marker": "handoff-skipped:recent", "returncode": 0} else requested
+    boundary = _handoff_boundary(requested, native_result)
     if native_result != {"marker": "handoff-timeout", "returncode": 3}:
         return _fresh_self_handoff(bot_dir, not_before=boundary, max_age_s=max_age_s)
     clock = time if _clock is None else _clock
@@ -389,11 +393,31 @@ def _record_native_handoff(bot_dir: Path, record: dict, outcome) -> list[str]:
     return marker
 
 
-def _planned_restart_handoff(bot_dir: Path, label: str, tmpdir: str,
-                             adapter: Adapter) -> None:
-    """Save once before a live planned restart; retries only observe that request."""
+def save_planned_checkpoint(bot_dir: Path, label: str, tmpdir: str, adapter: Adapter, *,
+                            operation_id: str) -> dict:
+    """Save once for an operation and retain exact request/capture evidence.
+
+    The caller serializes lifecycle operations and owns its no-new-work fence
+    and native stop. While live, reuse
+    still requires freshness; after a proven quiet stop use the separate
+    age-independent verifier. This helper never proves native quiescence.
+    """
+    if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", operation_id):
+        raise BotLifecycleError("checkpoint requires one exact operation ID")
     record = _read_handoff_request(bot_dir)
-    if record is not None and record.get("planned_restart") != label:
+    if record is not None and record.get("operation_id") is not None:
+        if record["operation_id"] != operation_id:
+            raise BotLifecycleError("checkpoint request belongs to another operation; it is never resent",
+                                    unavailable=True)
+        if record.get("checkpoint_label") != label:
+            raise BotLifecycleError("checkpoint request names another native bot", unavailable=True)
+    elif (record is not None and record.get("planned_restart") == label
+          and operation_id == "restart:" + label):
+        # Retain old ordinary restart requests across this structural change.
+        record.update(operation_id=operation_id, checkpoint_label=label)
+        if not _write_handoff_request(bot_dir, record):
+            raise BotLifecycleError("cannot retain the existing checkpoint request", unavailable=True)
+    elif record is not None:
         # An ordinary handoff may still be in flight. Do not overwrite an
         # unknown send merely because this invocation asks for a restart.
         if handoff_state(bot_dir).state != "saved":
@@ -401,7 +425,7 @@ def _planned_restart_handoff(bot_dir: Path, label: str, tmpdir: str,
                                     "it is never resent by restart", unavailable=True)
         record = None
     if record is None:
-        record = _new_handoff_request(bot_dir, planned_restart=label)
+        record = _new_handoff_request(bot_dir, operation_id=operation_id, checkpoint_label=label)
         try:
             outcome = adapter.call("svc_activation_handoff", bot_dir, label, tmpdir, "explicit", timeout=45)
         except (InventoryError, OSError, subprocess.SubprocessError) as exc:
@@ -417,15 +441,104 @@ def _planned_restart_handoff(bot_dir: Path, label: str, tmpdir: str,
     requested = record.get("requested_ns")
     if type(requested) is not int or requested < 0:
         raise BotLifecycleError("existing planned handoff has no request boundary", unavailable=True)
+    proof = record.get("checkpoint_proof")
+    if proof is not None:
+        verify_checkpoint_after_stop(bot_dir, proof)  # Exact bytes/request only; not a quiet claim.
+        _fresh_self_handoff(bot_dir, not_before=_handoff_boundary(requested, record.get("native_result")))
+        return proof
     try:
         wait_for_handoff(bot_dir, requested=requested, native_result=record.get("native_result"),
                          target=label, wait_s=_HANDOFF_CAPTURE_WAIT_S, poll_s=_HANDOFF_CAPTURE_POLL_S)
     except BotLifecycleError as exc:
         raise BotLifecycleError(f"planned restart requires a verified save: {exc}; "
                                 "inspect the retained request; it is never resent", unavailable=True) from exc
-    # The save is now known complete, before the existing native owner acts.
-    # Do not add a second native restart journal or leave an old save reusable.
-    (bot_dir / "data" / _HANDOFF_REQUEST).unlink()
+    before = _checkpoint_image(bot_dir)
+    boundary = _handoff_boundary(requested, record.get("native_result"))
+    _fresh_self_handoff(bot_dir, not_before=boundary)
+    _, stamp = _handoff_capture(bot_dir, not_before=boundary)
+    if _checkpoint_image(bot_dir) != before:
+        raise BotLifecycleError("checkpoint capture changed during verification", unavailable=True)
+    proof = {"schema": 1, "operation_id": operation_id, "request_id": record["request_id"],
+             "requested_ns": requested, "bot_dir": str(bot_dir), "label": label,
+             "native_result": record.get("native_result"), "last_updated": stamp.isoformat(), **before}
+    record["checkpoint_proof"] = proof
+    if not _write_handoff_request(bot_dir, record):
+        raise BotLifecycleError("cannot retain verified checkpoint proof; request is never resent", unavailable=True)
+    return proof
+
+
+def _checkpoint_image(bot_dir: Path) -> dict:
+    """Hash only the owned capture, refusing replacement or concurrent writes."""
+    try:
+        path = _owned_handoff_dir(bot_dir) / "session.md"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid():
+                raise OSError("not an owned capture")
+            digest = hashlib.sha256(stream.read()).hexdigest()
+            after = os.fstat(stream.fileno())
+        current = path.lstat()
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise OSError("capture changed while reading")
+    except OSError as exc:
+        raise BotLifecycleError("checkpoint capture cannot be verified", unavailable=True) from exc
+    return {"capture_sha256": digest, "capture_mtime_ns": after.st_mtime_ns}
+
+
+def _checkpoint_request(bot_dir: Path, proof: dict, *, absent_ok=False) -> dict | None:
+    fields = {"schema", "operation_id", "request_id", "requested_ns", "bot_dir", "label", "native_result",
+              "last_updated", "capture_sha256", "capture_mtime_ns"}
+    if (not isinstance(proof, dict) or set(proof) != fields or type(proof["schema"]) is not int
+            or proof["schema"] != 1 or proof["bot_dir"] != str(bot_dir)
+            or type(proof["requested_ns"]) is not int or proof["requested_ns"] < 0
+            or type(proof["capture_mtime_ns"]) is not int or proof["capture_mtime_ns"] < 0
+            or not isinstance(proof["capture_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", proof["capture_sha256"])):
+        raise BotLifecycleError("checkpoint request proof is invalid", unavailable=True)
+    record = _read_handoff_request(bot_dir)
+    if record is None and absent_ok:
+        return None
+    if (record is None or record.get("checkpoint_proof") != proof
+            or any(record.get(key) != proof[key] for key in
+                   ("operation_id", "request_id", "requested_ns", "native_result"))
+            or record.get("checkpoint_label") != proof["label"]):
+        raise BotLifecycleError("checkpoint request differs from its recorded proof", unavailable=True)
+    return record
+
+
+def verify_checkpoint_after_stop(bot_dir: Path, proof: dict) -> None:
+    """Require unchanged request/capture after caller-proven quiet, without an age cliff.
+
+    This is a file verifier, not evidence that a native consumer stopped or
+    did no later work. The caller must retain its quiet/no-new-work fence.
+    """
+    _checkpoint_request(bot_dir, proof)
+    image = _checkpoint_image(bot_dir)
+    _, stamp = _handoff_capture(bot_dir, not_before=_handoff_boundary(proof["requested_ns"], proof["native_result"]))
+    if (image != {key: proof[key] for key in ("capture_sha256", "capture_mtime_ns")}
+            or stamp.isoformat() != proof["last_updated"] or _checkpoint_image(bot_dir) != image):
+        raise BotLifecycleError("checkpoint capture differs from its saved proof", unavailable=True)
+
+
+def retire_planned_checkpoint(bot_dir: Path, proof: dict) -> None:
+    """Under the caller's lifecycle lock, retire only this operation's request."""
+    if _checkpoint_request(bot_dir, proof, absent_ok=True) is not None:
+        (bot_dir / "data" / _HANDOFF_REQUEST).unlink()
+        directory_fd = os.open(bot_dir / "data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
+def _planned_restart_handoff(bot_dir: Path, label: str, tmpdir: str,
+                             adapter: Adapter) -> None:
+    proof = save_planned_checkpoint(bot_dir, label, tmpdir, adapter, operation_id="restart:" + label)
+    # Ordinary restart consumes its known save before the existing native owner
+    # acts. The updater instead keeps proof until its restore is recorded done.
+    retire_planned_checkpoint(bot_dir, proof)
 
 
 def handoff_state(bot_dir: Path) -> HandoffState:
@@ -725,8 +838,9 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "skipped", "no_session")
             if session != "ready":
                 raise BotLifecycleError("private bot session is unverified", unavailable=True)
-            if (_read_handoff_request(spec.bot_dir) is not None
-                    and handoff_state(spec.bot_dir).state != "saved"):
+            prior_request = _read_handoff_request(spec.bot_dir)
+            if (prior_request is not None and (prior_request.get("operation_id") is not None
+                                              or handoff_state(spec.bot_dir).state != "saved")):
                 raise BotLifecycleError("existing handoff request is unresolved; inspect with --check; "
                                         "it is never automatically resent", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,

@@ -36,6 +36,7 @@ class Native:
         self.state = "disabled loaded inactive"
         self.fail_pause = False
         self.fail_resume = False
+        self.session = "absent"
 
     def call(self, function, *args, timeout=30):
         self.calls.append((function, args))
@@ -50,6 +51,8 @@ class Native:
         output = self.state if function in {"svc_activation_snapshot", "svc_inventory_state"} else ""
         if function == "svc_activation_quiet":
             output = "inactive\tcgroup-empty" if self.state.endswith(" inactive") else "unknown"
+        if function == "svc_bot_session_observe":
+            output = self.session
         return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
 
@@ -98,6 +101,19 @@ def test_unknown_stop_is_observed_without_resending(tmp_path):
     native.state = "masked-runtime masked inactive"
     services.quiesce_consumer(store, row["target"], native)
     assert sum(call[0] == "svc_activation_pause" for call in native.calls) == 1
+
+
+@pytest.mark.parametrize("frozen,observed", [("stopped", "ready"), ("running", "absent")])
+def test_bot_session_drift_refuses_before_parking_or_stop(tmp_path, frozen, observed):
+    row = intent(tmp_path)
+    row.update(bot_binding=[str(tmp_path), "example", str(tmp_path)], disposition=frozen)
+    store, native = Store(tmp_path, row), Native()
+    native.session = observed
+    with pytest.raises(UpdateError, match="session disposition drifted"):
+        services.quiesce_consumer(store, row["target"], native)
+    assert Path(services._file(row)).is_file()
+    assert not services._park_path(store, row).exists()
+    assert not any(call[0] == "svc_activation_pause" for call in native.calls)
 
 
 def test_unknown_start_never_replays_resume(tmp_path, monkeypatch):
