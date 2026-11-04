@@ -4472,6 +4472,22 @@ def _write_service_units(
 
     environment = native_environment(paths)
     command = None
+    resident_cli = {
+        "plane-daemon": ("plane-daemon.sh", "serve", (("PLANE_SOCKET", "--socket"),
+                                                     ("PLANE_DRAIN_INTERVAL", "--drain-interval"))),
+        "plane-view": ("plane-view.sh", "view", (("PLANE_VIEW_HOST", "--host"),
+                                               ("PLANE_VIEW_PORT", "--port"))),
+    }
+    if name in resident_cli:
+        launcher, verb, options = resident_cli[name]
+        if _native_script_argv(script, environment) == [str(paths.package.runtime_native / launcher)]:
+            # A shell wrapper would re-enter the ordinary CLI and hold its
+            # reader lock for the daemon lifetime. Direct admitted CLI exec
+            # releases startup exclusion before the resident process runs.
+            command = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"], "plane", verb]
+            for key, flag in options:
+                if environment.get(key):
+                    command.extend([flag, environment[key]])
     if owner_config is not None:
         from .plane.owner_service import service_command
         command = service_command(paths.root, environment["CLAUDLOBBY_CLI"], owner_config)
