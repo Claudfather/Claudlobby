@@ -4394,8 +4394,7 @@ _plugin_installed() {
 }
 
 # session_command_status <command> [bot_dir] — echo one status token. Serves
-# every session verb (resume at boot, handoff at shutdown): one predicate, not
-# one per call site.
+# explicit handoff commands; routine continuation does not inject a Skill.
 #   rc 0 -> INJECT      available | unverifiable
 #   rc 1 -> SKIP        no-command | provider-absent:<plugin>
 #
@@ -4441,96 +4440,6 @@ session_command_status() {
     return "$rc"
 }
 
-# Render only a positively callable installed Skill. Unavailable, ambiguous or
-# unreadable proof keeps the literal compatibility path; never guesses a Skill.
-# Inputs come from _session_command_resolve, not another account/path search.
-_startup_bootstrap_payload() {
-    local bot_dir="$1" startup="$2" python="${_NATIVE_ADMISSION_PYTHON:-}"
-    [ "$_SESSION_COMMAND_STATUS" = available ] && [ -x "$python" ] || return 1
-    "$python" -I -B - "$bot_dir" "$startup" "$_SESSION_COMMAND_ACCOUNT" \
-        "$_SESSION_COMMAND_FIRST" "$_SESSION_COMMAND_ARGS" "$_SESSION_COMMAND_PATHS" \
-        "$_SESSION_COMMAND_LOCAL" <<'BOOTSTRAP_PY'
-import json
-from pathlib import Path
-import re
-import sys
-try:
-    import yaml
-except ImportError:
-    sys.exit(1)
-
-bot, startup, account, first, args, roots, local = sys.argv[1:]
-bot, account = Path(bot), Path(account)
-try:
-    if not re.fullmatch(r"/[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?", first):
-        raise ValueError()
-    name = first[1:]
-    if local:
-        candidates = [Path(local) / "SKILL.md"]
-        skill = name
-    else:
-        plugin, skill = name.split(":", 1)
-        discovered = [Path(path).resolve() for path in roots.splitlines()]
-        registry = json.loads((account / "plugins/installed_plugins.json").read_text())["plugins"]
-        enabled = {}
-        for settings in (account / "settings.json", bot / ".claude/settings.json", bot / ".claude/settings.local.json"):
-            if settings.exists():
-                values = json.loads(settings.read_text()).get("enabledPlugins", {})
-                if not isinstance(values, dict):
-                    raise ValueError()
-                enabled.update(values)
-        candidates = []
-        for ref, entries in registry.items():
-            if ref.split("@", 1)[0] != plugin or enabled.get(ref) is not True:
-                continue
-            # Claude Code loads the FIRST entry that applies, in registry order
-            # and whatever its scope: a user or managed entry, or one recorded
-            # for this directory. A stale entry after it is inert (#2666). One
-            # recorded for another directory applies when both share a git
-            # root, which is not modelled here, so one ahead of the pick
-            # leaves the loaded install unknown.
-            for entry in entries:
-                if entry.get("scope") in ("user", "managed") or entry.get("projectPath") == str(bot):
-                    break
-                if entry.get("projectPath"):
-                    raise ValueError()
-            else:
-                continue
-            install = Path(entry["installPath"])
-            if not install.is_absolute():
-                raise ValueError()
-            install = install.resolve()
-            if not any(install == root or root in install.parents for root in discovered):
-                raise ValueError()
-            manifest = json.loads((install / ".claude-plugin/plugin.json").read_text())
-            if manifest.get("name") != plugin:
-                raise ValueError()
-            candidates.append(install / "skills" / skill / "SKILL.md")
-    if len(set(candidates)) != 1:
-        raise ValueError()
-    lines = candidates[0].read_text().splitlines()
-    if not lines or lines[0] != "---":
-        raise ValueError()
-    end = lines.index("---", 1)
-    metadata = yaml.safe_load("\n".join(lines[1:end]))
-    if (not isinstance(metadata, dict) or metadata.get("name") != skill
-            or metadata.get("disable-model-invocation", False) is not False):
-        raise ValueError()
-    template = (bot / ".claude/skills/fleet-ops/bootstrap.md").read_text()
-    if (not template.startswith("FLEET_STARTUP_BOOTSTRAP_V1\n")
-            or template.count("{{RESUME_SLASH_NAME}}") != 1
-            or template.count("{{RESUME_SKILL_CALL}}") != 1
-            or template.count("{{STARTUP_PROMPT}}") != 1):
-        raise ValueError()
-    values = {"RESUME_SLASH_NAME": first,
-              "RESUME_SKILL_CALL": json.dumps({"skill": name, "args": args.lstrip()}, ensure_ascii=False),
-              "STARTUP_PROMPT": startup}
-    print(re.sub(r"{{(RESUME_SLASH_NAME|RESUME_SKILL_CALL|STARTUP_PROMPT)}}", lambda match: values[match[1]], template), end="")
-except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError, yaml.YAMLError):
-    sys.exit(1)
-BOOTSTRAP_PY
-}
-
 _startup_send() {
     local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5" kind="$6" label="$7" text="$8"
     local started rc=0
@@ -4540,59 +4449,14 @@ _startup_send() {
     boot_send_settled "$label" "$rc" "$log"
 }
 
-# Canonical automatic injection. A proven Skill plus authored startup is one
-# fleet-owned prompt; opaque/native commands retain their literal semantics.
-# Success is submission evidence only, never completed resume or business work.
-# STARTUP_BOOTSTRAP_ENABLED=0 (the startup-bootstrap switch) turns the one
-# prompt off: a proven Skill then takes the literal start too, and its log line
-# names the switch.
+# Only a genuinely new native session receives the authored startup prompt.
+# Continuation resumes the provider transcript without another model turn.
 startup_inject() {
     local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5"
-    local checkpoint="$bot_dir/.claude/session.md" startup="${STARTUP_PROMPT:-}" payload off=""
-    local max_age="${RESUME_MAX_AGE_S:-86400}" command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
-    if should_resume_session "$checkpoint" "$max_age"; then
-        if _session_command_resolve "$command" "$bot_dir"; then
-            if [ "$_SESSION_COMMAND_STATUS" = available ] &&
-                ! switch_is_on STARTUP_BOOTSTRAP_ENABLED startup-bootstrap \
-                    "the resume command and the startup prompt go as two literal sends"; then
-                off="; STARTUP_BOOTSTRAP_ENABLED=0"
-            elif payload="$(_startup_bootstrap_payload "$bot_dir" "$startup" || true)" && [ -n "$payload" ]; then
-                printf '%s STARTUP mode=skill-bootstrap — one resume/startup submission\n' "$(ts_iso)" >> "$log"
-                _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup BOOTSTRAP "set +H; $payload"
-                return
-            fi
-            printf '%s RESUME — injecting resume command [%s; literal-compatibility%s]: %s\n' \
-                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$off" "$command" >> "$log"
-            _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
-        else
-            printf '%s RESUME SKIP — fresh checkpoint present but no resume capability [%s]; starting clean, handoff left at %s\n' \
-                "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$checkpoint" >> "$log"
-            emit_fleet_event resume_skipped startup \
-                "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$checkpoint\"}" || true
-        fi
-    elif [ -f "$checkpoint" ]; then
-        printf '%s RESUME SKIP — checkpoint older than %ss, clean-starting\n' "$(ts_iso)" "$max_age" >> "$log"
-    fi
+    local startup="${STARTUP_PROMPT:-}"
     if [ -n "$startup" ]; then
         _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup STARTUP "set +H; $startup"
     fi
-}
-
-should_resume_session() {
-    # F6 age gate: decide whether a handoff checkpoint is fresh enough to resume
-    # from. Returns 0 (resume) when the handoff timestamp is within
-    # <max_age_seconds> of now; returns 1 (skip — clean start) when older, or
-    # when the file is absent/unreadable. A future-dated checkpoint (clock skew)
-    # counts as fresh.
-    local file="${1:?Usage: should_resume_session <file> <max_age_seconds>}"
-    local max_age="${2:?Usage: should_resume_session <file> <max_age_seconds>}"
-    local epoch now age
-    [ -f "$file" ] || return 1
-    epoch=$(session_md_handoff_epoch "$file") || return 1
-    [ -n "$epoch" ] || return 1
-    now=$(date +%s)
-    age=$(( now - epoch ))
-    [ "$age" -lt "$max_age" ]
 }
 
 # --- Portable sed -i ---------------------------------------------------------

@@ -1453,7 +1453,7 @@ class TestHooksMergeAndSettings:
         post_groups = settings["hooks"]["PostToolUse"]
         assert post_groups[0]["matcher"] == "Bash"
 
-    def test_no_hooks_omits_key(self, tmp_path):
+    def test_native_session_capture_remains_when_optional_hooks_are_absent(self, tmp_path):
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
@@ -1463,7 +1463,16 @@ class TestHooksMergeAndSettings:
         fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test", service_prefix="com.test")
 
         settings = compose_settings_local(bot, fleet, paths)
-        assert "hooks" not in settings
+        groups = settings["hooks"]["SessionStart"]
+        hooks = [hook for group in groups for hook in group["hooks"]]
+        assert len(hooks) == 1
+        capture = hooks[0]
+        assert capture["type"] == "command"
+        assert capture["timeout"] == 10
+        assert shlex.split(capture["command"]) == [
+            str(paths.package.installation.cli), "--root", str(root), "_native-session", "capture",
+            str(root / "runtime/bots/worker"), "com.test.worker", "/tmp"]
+        assert set(settings["hooks"]) == {"SessionStart"}
 
     def test_bot_only_hooks_no_defaults(self, tmp_path):
         root = tmp_path / "claudlobby"

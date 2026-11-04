@@ -752,6 +752,33 @@ svc_bot_session_observe() (
     case "$state" in up|no_handle|no_token) printf 'ready\n' ;; *) printf 'unknown\n' ;; esac
 )
 
+# Exact native-session generation; hooks additionally prove their nearest
+# Claude ancestor is this pane, so headless/subagent hooks cannot replace it.
+svc_bot_native_session() (
+    local bot_dir="$1" expected="$2" tmpdir="$3" caller="${4:-}" session pane created text region idle=unready actual
+    export TMUX_TMPDIR="$tmpdir"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    [ "$(tmux_socket_for_bot "$bot_dir")" = "$expected" ] || return 3
+    [ "$(bot_conf_get_path "$bot_dir" TMUX_TMPDIR "")" = "$tmpdir" ] || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    pane=$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}') || return 3
+    created=$(bot_tmux "$expected" display-message -p -t "$session" '#{session_created}') || return 3
+    case "$pane:$created" in *[!0-9:]*|:*|*:) return 3 ;; esac
+    if [ -n "$caller" ]; then
+        actual=$("$_SUPERVISOR_LIB_DIR/claude-session-pid.sh" --from "$caller") || return 3
+        [ "$actual" = "$pane" ] || return 3
+    fi
+    text=$(bot_tmux "$expected" capture-pane -t "$session" -p -S -80) || return 3
+    region=$(pane_input_region "$text")
+    if [ -n "$region" ] && ! pane_is_busy "$text" && ! pane_is_menu "$text" \
+            && pane_is_idle "$text" && ! pane_is_held "$text" \
+            && ! printf '%s\n' "$text" | grep -Fq 'Press up to edit queued messages'; then
+        idle=idle
+    fi
+    [ "$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}')" = "$pane" ] || return 3
+    printf '%s\t%s\t%s\n' "$pane" "$created" "$idle"
+)
+
 # Submit exactly one explicit control to the selected bot's private session.
 # The public owner has already proved the frozen bot.conf and native unit. Check
 # that binding again here before touching tmux; never discover a pane by name.
@@ -1363,6 +1390,7 @@ svc_activation_bot_ready() (
     [ -n "$socket" ] || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
     check_tmux_session "$session" "$socket" || return 3
+    "$(bot_conf_get_path "$bot_dir" CLAUDLOBBY_CLI "")" --root "$CLAUDLOBBY_ROOT" _native-session confirm "$bot_dir" "$socket" "$tmpdir" || return 3
     case "$WAIT_BRIDGE_READY_OUTCOME" in
         bridge) printf 'bridge-ready\n' ;;
         session) printf 'session-ready\n' ;;

@@ -17,6 +17,7 @@ claudlobby/
   activation_state.py — Shared lifecycle errors and strict read-only historical activation/selection evidence; no legacy execution or journal mutation.
   migration_apply.py — Read-only historical migration receipts and shared SQLite backup/digest primitives; no sealed migration coordinator.
   supervision_runtime.py — Shared native quiet evidence and start-budget primitives, independent of release/activation journals. Callers own scope, lifecycle ordering and readiness.
+  native_session.py — Exact process-bound Claude SessionStart metadata, account/cwd/session binding and bounded transcript continuation proof; no model requests or newest-transcript discovery.
   active_config.py   — Exact committed Git fleet inputs, native placement, canonical identities and generated-output ownership. Current reads use this snapshot; a failed consumer does not invalidate other configuration reads.
   task_permissions.py — Canonical task-scoped permission requests, explicit human decisions and exact bot/scope checks over existing Plane facts; `commands/task_permissions.py` owns CLI admission and local terminal confirmation. No effect execution. Reference: `documentation/architecture/task-permissions.md`.
   host_backup.py      — Managed Git private database/configuration export and inactive replacement restore; reuses SQLite backup, preserves inert recovery evidence, and excludes credential/owner authority. Historical backups remain inspectable; restored data is not a runnable installation.

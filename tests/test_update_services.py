@@ -519,12 +519,33 @@ svc_activation_start "$file" "$target"
 
 
 
+def _native_confirm_cli(bot, tmpdir):
+    """Isolate bridge/tmux readiness while executing the real receipt verifier."""
+    import sys
+    from claudlobby import native_session
+    from tests.test_native_session import Observation, retain_native_session
+    (bot / "data").mkdir(exist_ok=True)
+    adapter = Observation(bot.parent)
+    retain_native_session(bot, "fixture-worker", Path(tmpdir), bot / "account", adapter)
+    cli = bot / "fixture-cli"
+    cli.write_text("#!" + sys.executable + "\n"
+        "import sys\nfrom pathlib import Path\nfrom claudlobby.native_session import confirm\n"
+        "assert sys.argv[1] == '--root' and sys.argv[3:5] == ['_native-session','confirm']\n"
+        "value = confirm(Path(sys.argv[5]))\n"
+        "assert value['label'] == sys.argv[6] and value['tmpdir'] == sys.argv[7]\n")
+    cli.chmod(0o700)
+    with (bot / "bot.conf").open("a") as stream:
+        stream.write("CLAUDLOBBY_CLI=" + str(cli) + "\n")
+    return bot / "data" / native_session.NAME
+
+
 def test_real_restart_policy_fence_is_verified_and_ready_uses_same_marker(tmp_path):
     bot = tmp_path / "bots/worker"
     bot_tmpdir = tmp_path / "private-tmux"
     bot.mkdir(parents=True)
     (bot / "bot.conf").write_text('RC_READY_TIMEOUT_S="001"\nBOT_SERVICE="fixture-worker"\n'
                                   f'TELEGRAM_BOT_HANDLE="fixture_handle"\nTMUX_TMPDIR="{bot_tmpdir}"\n')
+    _native_confirm_cli(bot, bot_tmpdir)
     prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
 TMUX_BIN=fixture_tmux; export TMUX_BIN
 . "$1/supervisor.sh"; shift; "$@"'''
@@ -574,6 +595,7 @@ def test_native_bot_readiness_accepts_only_configured_post_fence_outcome(
     log = bot / "logs/startup.log"
     log.parent.mkdir()
     log.write_text(accepted + "\n")  # an old boot cannot satisfy the new fence
+    _native_confirm_cli(bot, bot_tmpdir)
     prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
 TMUX_BIN=fixture_tmux; export TMUX_BIN
 . "$1/supervisor.sh"; shift; "$@"'''
@@ -612,6 +634,7 @@ def test_native_bot_readiness_uses_frozen_tmpdir_instead_of_operator_socket(tmp_
         bot = tmp_path / "bots/worker"
         bot.mkdir(parents=True)
         (bot / "bot.conf").write_text(f'BOT_SERVICE="fixture-worker"\nTMUX_TMPDIR="{bot_tmpdir}"\n')
+        _native_confirm_cli(bot, bot_tmpdir)
         env = constructed_env(HOME=tmp_path, TMUX_BIN=tmux, TMUX_TMPDIR=operator_tmpdir)
         bot_env = {**env, "TMUX_TMPDIR": str(bot_tmpdir)}
         prefix = '. "$1/supervisor.sh"; shift; "$@"'

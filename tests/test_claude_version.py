@@ -662,3 +662,26 @@ def test_no_other_script_reads_a_claude_version():
         and '"--version"' in p.read_text() and p.name not in {"__main__.py", "installation.py"}
     ]
     assert py == [], py
+
+
+def _version_tool_path(tmp_path):
+    """Expose the real timeout utility only on a private composed tool path."""
+    import shutil
+    timeout = shutil.which("timeout") or shutil.which("gtimeout")
+    if timeout is None:
+        pytest.skip("real timeout/gtimeout is required for bounded version measurement")
+    tools = tmp_path / "composed-tools"
+    tools.mkdir()
+    (tools / "timeout").symlink_to(Path(timeout).resolve())
+    return str(tools) + ":/usr/bin:/bin"
+
+
+def test_explicit_launch_path_bounds_the_actual_version_door_under_minimal_updater_path(tmp_path, monkeypatch):
+    from claudlobby import claude_version
+    canonical = _version_tool_path(tmp_path)
+    binary = _stub(tmp_path, "configured-private-provider", healthy("2.1.318"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    result = claude_version.measure(_paths(tmp_path), str(binary), launch_path=canonical)
+    assert (result.version, result.why) == ("2.1.318", None)
+    assert os.environ["PATH"] == "/usr/bin:/bin"

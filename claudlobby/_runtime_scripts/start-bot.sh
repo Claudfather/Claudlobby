@@ -189,6 +189,13 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
     exit 1
 }
 
+# Resolve only the retained native identity, never the account's latest session.
+_native_launch=$("$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" _native-session launch "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_TMPDIR") || exit 3
+IFS=$'\t' read -r _native_mode _native_session_id <<<"$_native_launch"
+case "$_native_mode" in fresh) _native_flag=--session-id ;; resume) _native_flag=--resume ;; *) exit 3 ;; esac
+case "$_native_session_id" in ''|*[!a-f0-9-]*) exit 3 ;; esac
+CLAUDE_FLAGS="${CLAUDE_FLAGS:-} $_native_flag $_native_session_id --system-prompt-snapshot off"
+
 # Kill any prior session — expected to fail on first boot or after clean shutdown
 bot_tmux "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
@@ -537,11 +544,13 @@ esac
 # this bot being unreachable. A one-shot assignment prefix is scoped to the single
 # command and does not persist afterwards.
 
-# Resume prior context and authored startup through the shared injection owner.
-# Positively resolved Skills use one enclosing fleet bootstrap; literal custom
-# commands retain the compatibility behavior. This proves submission, not that
-# the model completed resume. Activation-time release is a separate contract.
-startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+# Native continuation already restores the exact provider conversation. Only
+# a fresh UUID receives authored startup; a resume never adds a model turn.
+if [ "$_native_mode" = fresh ]; then
+    startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+else
+    printf '%s NATIVE RESUME — exact session, current composition; no startup/model restore injection\n' "$(ts_iso)" >> "$LOG"
+fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
 [ -x "$LIB_DIR/fleet-state-update.sh" ] && "$LIB_DIR/fleet-state-update.sh" "$BOT_NAME" "idle" || true

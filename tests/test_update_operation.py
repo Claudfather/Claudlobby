@@ -86,7 +86,7 @@ def test_final_quiet_verifies_original_proof_and_reobserves_every_consumer(monke
     assert {key for kind, key in events if kind == "quiet"} == set(data["consumers"])
 
 
-def test_resume_before_stop_rechecks_original_live_save_without_replaying(monkeypatch):
+def test_resume_before_stop_rechecks_original_native_identity_without_replaying(monkeypatch):
     data = record()
     for key in ("timer", "job"):
         data["consumers"][key]["stop"] = "done"
@@ -95,10 +95,10 @@ def test_resume_before_stop_rechecks_original_live_save_without_replaying(monkey
     monkeypatch.setattr(operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "previous"})
     def recheck(*_args, **kwargs):
         events.append(kwargs["operation_id"])
-        raise bot_operations.BotLifecycleError("existing save is no longer fresh")
+        raise bot_operations.BotLifecycleError("native process differs from retained identity")
     monkeypatch.setattr(bot_operations, "save_planned_checkpoint", recheck)
-    monkeypatch.setattr(operation, "quiesce_consumer", lambda *_: pytest.fail("must not stop on stale save"))
-    with pytest.raises(bot_operations.BotLifecycleError, match="no longer fresh"):
+    monkeypatch.setattr(operation, "quiesce_consumer", lambda *_: pytest.fail("must not stop on changed native identity"))
+    with pytest.raises(bot_operations.BotLifecycleError, match="native process differs"):
         operation.quiesce_operation(store, None)
     assert events == ["original"]
     assert store.load()["consumers"]["bot"].get("stop") is None

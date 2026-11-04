@@ -3292,6 +3292,14 @@ def compose_settings_local(
         bot_hooks = _with_heavy_slot_hook(bot_hooks)
     if bot.public_write_guard:
         bot_hooks = _with_public_write_guard_hook(bot_hooks)
+    # Native continuation metadata is lifecycle state, independent of optional
+    # model skills/brief hooks. The hook is silent and never requests a turn.
+    installation = paths.package.installation
+    if installation is not None:
+        bot_hooks = {key: list(value) for key, value in bot_hooks.items()}
+        capture = shlex.join([str(installation.cli), "--root", str(paths.root), "_native-session", "capture",
+                              str(bot_dir), f"{fleet.service_prefix}.{bot.bot_id}", _TMUX_TMPDIR])
+        bot_hooks.setdefault("SessionStart", []).append({"command": capture, "timeout": 10})
     hooks = _compose_hooks(bot_hooks)
     # No vault, no hooks: an explicit `claudron_session_loop: true` with no
     # `claudron_vault_path` has no address to render. The engine refuses to

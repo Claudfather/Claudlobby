@@ -106,7 +106,7 @@ class Adapter:
         "svc_activation_pause", "svc_activation_resume", "svc_activation_reload",
         "svc_activation_clear_runtime_mask",
         "svc_activation_start", "svc_activation_quiet", "svc_activation_bot_fence",
-        "svc_activation_bot_ready", "svc_activation_handoff",
+        "svc_activation_bot_ready", "svc_activation_handoff", "svc_bot_native_session",
         "svc_activation_stop_private_server",
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
         "svc_bot_control_exact",

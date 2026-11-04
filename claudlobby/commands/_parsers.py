@@ -19,6 +19,16 @@ def _command(module: str, name: str):
 def register_subparsers(sub) -> None:
     """Register all CLI subcommands on the given subparsers action."""
 
+    native_session = sub.add_parser("_native-session", help=argparse.SUPPRESS)
+    native_session.add_argument("action", choices=("capture", "launch", "confirm"))
+    native_session.add_argument("directory")
+    native_session.add_argument("label")
+    native_session.add_argument("tmpdir")
+    def native_session_entry(args):
+        from ..native_session import entry
+        return entry(args)
+    native_session.set_defaults(func=native_session_entry)
+
     from ._release_parsers import register_release_subparsers
     register_release_subparsers(sub)
     from ._orientation_parsers import register_orientation_subparsers

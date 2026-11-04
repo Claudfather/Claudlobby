@@ -246,18 +246,20 @@ def _checkpoint(store, key, adapter):
     progress = record["consumers"][key]
     row = progress["intent"]
     # A persisted save is not proof that a still-running bot did no later work.
-    # Re-enter the shared owner before an unattempted stop: it verifies the
-    # original request and live freshness without sending a replacement.
+    # Re-enter the shared owner before an unattempted stop: observe the same
+    # process-bound native session without sending a model request.
     if progress.get("checkpoint_operation") is None:
         progress["checkpoint_operation"] = record["request_id"]
         store.save(record)
     directory, label, tmpdir = row["bot_binding"]
+    progress["checkpoint_state"] = "waiting_for_native_idle"
+    store.save(record)
     proof = save_planned_checkpoint(Path(directory), label, tmpdir, adapter,
                                     operation_id=progress["checkpoint_operation"])
-    # The shared checkpoint owner retains the original request before sends;
-    # an interrupted return simply re-observes that same owner/request.
+    # Interrupted observation resumes the same operation without model sends.
     record = store.load()
     record["consumers"][key]["checkpoint"] = proof
+    record["consumers"][key]["checkpoint_state"] = "native_session_verified"
     store.save(record)
 
 

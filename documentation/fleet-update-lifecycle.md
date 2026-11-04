@@ -563,9 +563,9 @@ host timer enters that same selected operation before the private updater runs.
 The binary cannot hot-reload, so it reaches a running bot only via restart. `claudlobby/_runtime_scripts/weekly-worker-restart.sh` (job `weekly-worker-restart`, `schedule: "Sun *-*-* 05:00:00"`) bounces every **worker** bot once a week to pick it up:
 
 ```
-pre-stop-handoff.sh   (writes a session.md handoff, best-effort, never blocks)
-  → spin-up-bot.sh    (cross-platform idempotent restart)
-  → start-bot.sh       resumes from the handoff (age-gated) on the new session
+bot restart          (waits for the exact native session to become idle)
+  → native stop      (proves the private endpoint quiet)
+  → start-bot.sh     (resumes that exact Claude session UUID)
 ```
 
 **Managers are excluded** — identified by `MANAGER_TMUX == BOT_ID` (`bot_is_manager()` in `claudlobby/_runtime_scripts/lib-common.sh`) — because a manager's long-horizon orchestration context is the least summarizable. Managers still get Mechanism 1's daily reload; they just never get auto-restarted for the binary. They pick up a new binary on any natural restart or a deliberate human-initiated one. A worker's binary staleness is bounded to ≤1 week.
@@ -581,30 +581,38 @@ fleet:
 
 **Loud-failure contract:** a worker that doesn't come back raises `emit_failure_alert`, same as Mechanism 1.
 
-## Resume-on-every-start (the age gate)
+## Native conversation continuation
 
-Every bot start — intentional (restart skill, weekly bounce), crash (keepalive), or an operator's manual restart — is a potential context loss. `claudlobby/_runtime_scripts/start-bot.sh` closes that gap:
+Routine Git updates and planned restarts do not ask the model to write a
+checkpoint or invoke a restore Skill. Claude Code continuously persists the
+conversation; the lifecycle owner records its exact native session identity in
+`data/native-session.json`. A composed SessionStart hook binds that identity to
+the configured account, bot working directory, private tmux process and transcript.
+A `/clear` hook replaces the UUID only for that same native process. Headless
+child sessions cannot replace the bot's receipt.
 
-- Resume and `STARTUP_PROMPT` share one automatic-injection owner, behind **two independent gates** (`claudlobby/_runtime_scripts/lib-common.sh`): `should_resume_session()` for checkpoint age, and `session_command_status()` for whether that command can actually resolve. The command itself is configuration (`SESSION_RESUME_COMMAND`, empty to disable), not a hardcoded provider — under `plugins.include_defaults: false` there is no session plugin, and injecting an unresolvable keystroke into every pane on every boot was #1163.
-- `should_resume_session` reads the handoff's `last_updated:` frontmatter field from `.claude/session.md` (falling back to file mtime for older artifacts) and compares its age against `RESUME_MAX_AGE_S` (env-overridable; default `86400` seconds = 24h).
-- **Fresh** checkpoint (age < threshold): a positively resolved, enabled, model-callable installed Skill is invoked by name and arguments inside one ordinary fleet bootstrap prompt. The exact slash name appears on a standalone line after prose, following Claude Code's [message-scoped Skill permission contract](https://code.claude.com/docs/en/skills#where-you-write-the-skills-name); it is not an immediate slash invocation. Claude Code retains permission precedence. The current documented message-scoped syntax does not replace the composed Skill invocation permission required by supported older native versions. The envelope tells the model to stop and report an unavailable Skill, permission request, refusal or failed restore, without running startup or reproducing the Skill another way. After context is actually restored, the same turn follows the unchanged authored `STARTUP_PROMPT`, preserving nonfatal repository-scan caveats. A partial result without restored context does not authorize startup. The envelope is supplied by `fleet-ops/bootstrap.md`; startup instructions are never appended to slash-command arguments.
-- Composition grants `Skill(name)` for the authored resume command when it names a selected plugin Skill or an equipped local Skill. This permits invocation of the **whole Skill**, including its other modes, rather than only the resume arguments. It grants no underlying tools or second handoff Skill. Existing deny and ask rules remain native Claude Code policy. New `bot.conf` files supply the default only when `SESSION_RESUME_COMMAND` is absent, preserving inherited values, `.env` overrides and explicit-empty disabling. Runtime-only overrides needing another Skill require an explicit `tool_permissions.allow` entry; composition does not inspect runtime environment or account state.
-- Native commands, ambiguous or unreadable Skill metadata, and arbitrary custom overrides keep their existing literal command semantics, followed by the separate startup prompt. Explicit-empty `SESSION_RESUME_COMMAND` still disables resume. This compatibility path does not establish native-command completion before startup.
-- `STARTUP_BOOTSTRAP_ENABLED=0` (the `startup-bootstrap` switch) keeps a proven Skill on that literal path too: the resume command, then the startup prompt, as two sends. Set it in the host or root `.env`; each bot reads it at its next start, with no plan or activation.
-- Startup logs distinguish `mode=skill-bootstrap` from `literal-compatibility`, and a literal line taken because of the switch names it; both report submission, not completed resume or business work. The bootstrap is taller than the 80x24 pane a session starts in, so Claude Code's input box loses its prompt line off the top of the pane; the send then reads the payload's end at the bottom of the box, right above the rule under it. A send that still ends unsubmitted writes `NOT SUBMITTED` after the mode line. This change does not hold activation startup until selected-active or pace host-wide work.
-- **Stale** checkpoint (age ≥ threshold) or none → resume is skipped and the bot clean-starts rather than replaying dead state (e.g. re-attempting an already-merged PR).
+Before a planned stop, the shared owner waits within its existing bounded wait
+for an empty idle prompt, without sending a message. Identity or account drift
+refuses immediately. It retains a bounded transcript prefix proof and rechecks it
+after the native stop has proved quiet. The updater keeps the same request while
+waiting; `host update status` reports its consumer checkpoint state. Deliberately
+stopped bots and timer schedules retain their original intent.
 
-Planned restarts and Git updates use the same lifecycle owner. It records one
-checkpoint request, verifies a genuine saved capture, then stops the bot. A short
-native wait expiring does not authorize a stop or another send: the retained
-request is observed again on continuation. After a verified quiet stop, unchanged
-saved context remains valid without an age deadline halfway through the update.
-Use `bot handoff BOT --check` or `host update status` to inspect pending work.
+`start-bot.sh` resumes only the retained UUID with `--resume`, preserving current
+composed model, permissions and MCP flags. `--system-prompt-snapshot off` refreshes
+current composed instructions; Claude Code 2.1.257 or newer is required. A matching
+process-bound SessionStart confirms continuation before readiness is reported.
+Continuation sends neither a restore prompt nor the authored startup prompt. A
+new bot instead receives an explicit fresh UUID and its normal startup prompt.
 
-Crash recovery cannot ask a dead process for new context; it resumes from the last
-usable durable checkpoint and reports what was recoverable. Native scheduled
-restarts enter through the same bot lifecycle command. The low-level handoff
-script is an internal mechanism, not a separate supported restart procedure.
+Missing or invalid transcript/session evidence refuses before stopping a running
+bot. Older bots without this metadata require an explicit one-time adoption;
+this implementation never guesses the newest transcript or silently falls back
+to model handoff. Existing pending or unknown handoff receipts stay inspectable
+and are never resent. `bot handoff` remains an optional explicit tool, rather
+than a prerequisite for routine updates. Crash recovery can resume only what
+Claude durably saved; it does not claim interrupted work completed or replay
+unknown tool effects.
 
 ## Relationship to PR #399
 
@@ -618,7 +626,8 @@ PR #399 added `claudlobby/_runtime_scripts/update-claude-code.sh` with a daily *
 | `claudlobby/_runtime_scripts/update-claude-code.sh` | Daily binary download only (no restart) |
 | `claudlobby/_runtime_scripts/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
 | `claudlobby/_runtime_scripts/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
-| `claudlobby/_runtime_scripts/start-bot.sh` | Submits Skill resume + authored startup in one bootstrap when callable proof is positive; otherwise retains literal compatibility, gated on BOTH checkpoint age and resume capability; logs `RESUME SKIP` + `resume_skipped` when either gate closes |
-| `claudlobby/_runtime_scripts/pre-stop-handoff.sh` | Internal checkpoint delivery; the lifecycle owner verifies the saved result before a planned stop |
+| `claudlobby/_runtime_scripts/start-bot.sh` | Starts an explicit native UUID or resumes its exact retained transcript with current composition; startup injection is fresh-session only |
+| `claudlobby/native_session.py` | Process-bound native metadata and bounded transcript proof shared by update and restart |
+| `claudlobby/_runtime_scripts/pre-stop-handoff.sh` | Optional explicit model handoff delivery; not used by routine continuation |
 
 Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.

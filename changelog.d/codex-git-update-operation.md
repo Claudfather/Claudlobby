@@ -62,3 +62,13 @@ limitations instead of suggesting commands that no longer exist.
 Validate an authored fleet with the canonical configuration parser before copying
 it or recording an update. Invalid input now leaves setup ready for a corrected
 file, without a recovery operation or any native service effects.
+
+### Changed — resume native conversations without model-written update handoffs
+
+Routine Git updates and planned restarts wait for an idle bot, retain its exact
+Claude session, and resume that conversation with current composed instructions.
+They send no checkpoint or restore prompt. The mandatory SessionStart hook keeps
+the saved identity tied to its account, working directory and native process;
+unknown prior sends are never replayed. Background updates measure Claude using
+the same tool path as the bot. Older bots without a native session receipt still
+need an explicit one-time adoption before this update path can stop them.
