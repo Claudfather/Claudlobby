@@ -16,6 +16,7 @@ import re
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -57,7 +58,9 @@ def _pulse(root, libdir, *, scratch_plane_env, serve=True, socket=None, **extra)
            "FLEET_PULSE_ESCALATION_CHAT_ID": "-1001234567890",
            "FLEET_PULSE_ESCALATION_STATE_DIR": str(root / "escalation-sender"),
            "FLEET_PULSE_ESCALATION_THRESHOLD": "2", **extra}
-    return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), F], capture_output=True,
+    return subprocess.run([sys.executable, str(REPO / "harness/compose.py"),
+                          "--root", str(root), "--fleet", F, "--record-plane", "--pulse",
+                          "--native-dir", str(libdir)], capture_output=True,
                           text=True, timeout=300, env=env)
 
 
@@ -79,6 +82,12 @@ def _two_dead_bots(tmp_path):
         (paths.runtime_bots / b / "data").mkdir(parents=True, exist_ok=True)
         (paths.runtime_bots / b / "bot.conf").write_text(f"TMUX_SOCKET=r2b2-none-{b}\n")
     (root / "tmux").mkdir()
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
+    # Commit the ordinary fixture before tests deliberately damage its Plane.
+    prepared = subprocess.run([sys.executable, str(REPO / "harness/compose.py"),
+        "--root", str(root), "--fleet", F, "--prepare-runtime"],
+        capture_output=True, text=True, timeout=60)
+    assert prepared.returncode == 0, prepared.stderr
     return root, paths
 
 
@@ -192,8 +201,9 @@ if rc == 0 and "--escalation" in args and fleet in ("f", "g") and not os.path.ex
     open(first, "w").close()
     if fleet == "f":
         subprocess.Popen(
-            ["bash", "-c", 'bash "$1/fleet-pulse.sh" g >"$2/g.out" 2>"$2/g.err"; echo $? >"$2/g.rc"', "-", lib, sync],
-            env={{**os.environ, "CLAUDLOBBY_FLEET": "g", "FLEET_NAME": "g"}},
+            ["bash", "-c", '"$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" --fleet g fleet pulse >"$1/g.out" 2>"$1/g.err"; echo $? >"$1/g.rc"', "-", sync],
+            env={{**os.environ, "CLAUDLOBBY_FLEET": "g", "FLEET_NAME": "g",
+                  "FLEET_ROOT": os.path.join(os.environ["CLAUDLOBBY_ROOT"], "local", "g")}},
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True)
         until = os.path.join(sync, "g.parked")
