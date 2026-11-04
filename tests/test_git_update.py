@@ -335,7 +335,7 @@ def test_application_preparation_finalizes_the_original_staged_target(update, mo
     monkeypatch.setattr(update_operation, "read_current_config", lambda *_a, **_k: current)
     monkeypatch.setattr(update_operation, "read_registry_identity_bindings", lambda *_a, **_k: {})
     monkeypatch.setattr(update_operation, "snapshot_from_plan", lambda *_a, **_k: current)
-    monkeypatch.setattr(update_operation, "validate_candidate_consumers", lambda *_: None)
+    monkeypatch.setattr(update_operation, "validate_candidate_consumers", lambda *_, baseline: None if baseline is None else pytest.fail("unexpected conversion baseline"))
     monkeypatch.setattr(update_operation, "_schema", lambda *_: 14)
     monkeypatch.setattr(update_operation, "_catalog", lambda *_: (update_operation.platform.system(), "", [], set(), {}))
     monkeypatch.setattr(update_operation, "freeze_service_intent", lambda *_a, **_k: [])
@@ -1334,7 +1334,7 @@ def test_public_update_parser_opts_only_apply_into_prepared_remote(update, monke
     monkeypatch.setattr(updater, "apply_or_continue", apply)
     assert updater.main(["--root", str(installation.data_root), "host", "update", *arguments]) == 0
     assert seen == [(installation.directory, installation.data_root,
-                     {"target": target, "from_prepared_remote": fetch})]
+                     {"target": target, "from_prepared_remote": fetch, "convert_sealed": False, "prepare_only": False})]
     assert json.loads(capsys.readouterr().out) == {"update": None}
 
 
@@ -1348,3 +1348,175 @@ def test_public_remote_fetch_failure_does_not_prepare_or_cutover(update, tmp_pat
         updater.apply_or_continue(installation, from_prepared_remote=True)
     assert calls == ["authorize"] and read_update(installation) is None
     assert installation.preflight() == before
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_conversion_retires_selector_before_effect_and_resumes_rename_without_new_request(update, monkeypatch, interrupt):
+    import hashlib
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    selection = {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                 "plan_id": "p-" + "b" * 64}
+    raw = json.dumps(selection).encode()
+    scope = {"selection": selection, "selector_sha256": hashlib.sha256(raw).hexdigest(),
+             "evidence": {str(installation.data_root / "historical.json"): SHA}}
+    monkeypatch.setattr(updater, "_application_stage", lambda store, stage: None)
+    with UpdateStore(installation) as store:
+        store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001", conversion_scope=scope)
+        selected = store.state / "selected-release.json"
+        selected.write_bytes(raw)
+        (store.state / "activation.lock").touch()
+        save = store.save
+        if interrupt:
+            def interrupted(record):
+                if record.get("conversion_selector", {}).get("retired"):
+                    raise OSError("death after rename")
+                save(record)
+            monkeypatch.setattr(store, "save", interrupted)
+            with pytest.raises(OSError, match="death after rename"):
+                with updater._conversion_fence(store):
+                    pytest.fail("no effect may precede retirement receipt")
+            assert not selected.exists()
+            monkeypatch.setattr(store, "save", save)
+        with updater._conversion_fence(store):
+            archive = updater.assert_conversion_retired(store)
+            assert not selected.exists()
+            assert Path(archive["path"]).read_bytes() == raw
+            assert store.load()["request_id"] == "00000000-0000-4000-8000-000000000001"
+        assert Path(archive["path"]).read_bytes() == raw
+        selected.write_bytes(raw)  # Reopened old authority is never silently adopted.
+        with pytest.raises(UpdateError):
+            updater.assert_conversion_retired(store)
+
+
+def test_conversion_drains_legacy_admission_before_retiring_selector(update, monkeypatch):
+    import fcntl
+    import hashlib
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    selection = {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                 "plan_id": "p-" + "b" * 64}
+    raw = json.dumps(selection).encode()
+    scope = {"selection": selection, "selector_sha256": hashlib.sha256(raw).hexdigest(),
+             "evidence": {str(installation.data_root / "historical.json"): SHA}}
+    monkeypatch.setattr(updater, "_application_stage", lambda store, stage: None)
+    with UpdateStore(installation) as store:
+        store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001", conversion_scope=scope)
+        selected = store.state / "selected-release.json"
+        selected.write_bytes(raw)
+        with (store.state / "activation.lock").open("w") as admitted:
+            fcntl.flock(admitted.fileno(), fcntl.LOCK_SH)
+            with pytest.raises(UpdateError, match="old activation or admitted work"):
+                with updater._conversion_fence(store):
+                    pytest.fail("old admitted work must drain first")
+            assert selected.read_bytes() == raw
+            assert store.load().get("conversion_selector") is None
+        with updater._conversion_fence(store):
+            updater.assert_conversion_retired(store)
+
+
+def test_conversion_requires_explicit_preview_before_any_effect(update):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with pytest.raises(UpdateError, match="prepare-only"):
+        updater.apply_or_continue(installation, target=target, convert_sealed=True)
+    assert read_update(installation) is None
+
+
+def test_conversion_preview_freezes_original_evidence_before_candidate_and_continue_reuses_it(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    scope = {"selection": {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                           "plan_id": "p-" + "b" * 64}, "selector_sha256": SHA,
+             "evidence": {str(installation.data_root / "original.json"): SHA}}
+    calls = []
+    def authorize(store, stage, **kwargs):
+        assert stage == "authorize" and kwargs == {"convert_sealed": True}
+        calls.append("authorize")
+        return {"directory": str(installation.directory / "native"), "revision": before,
+                "interpreter": str(Path(sys.executable).resolve()), "conversion_scope": scope}
+    monkeypatch.setattr(updater, "_application_stage", authorize)
+    def interrupt(store, **kwargs):
+        assert store.load()["conversion_scope"] == scope
+        calls.append("candidate")
+        raise OSError("candidate interruption")
+    monkeypatch.setattr(updater, "prepare_candidate_render", interrupt)
+    with pytest.raises(OSError, match="candidate interruption"):
+        updater.apply_or_continue(installation, target=target, convert_sealed=True, prepare_only=True)
+    original = read_update(installation)
+    with pytest.raises(OSError, match="candidate interruption"):
+        updater.apply_or_continue(installation)
+    assert read_update(installation)["request_id"] == original["request_id"]
+    assert read_update(installation)["conversion_scope"] == scope
+    assert calls == ["authorize", "candidate", "authorize", "candidate"]
+
+
+
+def test_conversion_changed_history_under_legacy_ex_preserves_original_selector(update, monkeypatch):
+    import fcntl
+    import hashlib
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    selection = {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                 "plan_id": "p-" + "b" * 64}
+    raw = json.dumps(selection).encode()
+    scope = {"selection": selection, "selector_sha256": hashlib.sha256(raw).hexdigest(),
+             "evidence": {str(installation.data_root / "historical.json"): SHA}}
+    with UpdateStore(installation) as store:
+        store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001", conversion_scope=scope)
+        selected = store.state / "selected-release.json"
+        selected.write_bytes(raw)
+        (store.state / "activation.lock").touch()
+        def check(held, stage):
+            assert held is store and stage == "conversion-check"
+            assert selected.read_bytes() == raw
+            for name in ("activation-pending.lock", "activation.lock"):
+                with (store.state / name).open("r") as other:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(other.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            raise UpdateError("another sealed lifecycle is unfinished")
+        monkeypatch.setattr(updater, "_application_stage", check)
+        with pytest.raises(UpdateError, match="unfinished"):
+            with updater._conversion_fence(store):
+                pytest.fail("no retirement or quiescence after changed history")
+        assert selected.read_bytes() == raw
+        assert store.load().get("conversion_selector") is None
+        assert not list(store.work.glob("sealed-selector-*"))
+
+
+@pytest.mark.parametrize("wrong_head", [False, True])
+def test_conversion_check_entry_requires_original_before_revision(update, monkeypatch, wrong_head):
+    import os
+    from claudlobby import update_entry as entry, update_operation, resources, supervision_inventory
+    installation, before, target, _ = update
+    assert before != target
+    with UpdateStore(installation) as parent:
+        record = prepare(parent, target)
+        # Exercise main's real stage/source/revision routing against the fixture
+        # Git checkout; only process-origin and package/native boundaries differ.
+        monkeypatch.setattr(entry, "__file__", str(installation.source / "claudlobby/update_entry.py"))
+        monkeypatch.setattr(entry.sys, "executable", str(installation.environment / "bin/python"))
+        def inherited(cls, actual, *, fd, parent_pid, request_id):
+            assert actual == installation and fd == parent._fd
+            assert parent_pid == os.getpid() and request_id == record["request_id"]
+            borrowed = UpdateStore(actual)
+            borrowed._fd = os.dup(fd)
+            return borrowed
+        monkeypatch.setattr(UpdateStore, "from_parent", classmethod(inherited))
+        package, adapter, calls = object(), object(), []
+        monkeypatch.setattr(resources, "get_resources", lambda **kwargs: package)
+        monkeypatch.setattr(supervision_inventory, "Adapter", lambda actual: adapter if actual is package else None)
+        monkeypatch.setattr(update_operation, "check_conversion_before_retirement",
+                            lambda store, actual: calls.append((store.load()["request_id"], actual)))
+        if wrong_head:
+            _run(["git", "-C", installation.source, "checkout", "--quiet", target], installation.source.parent)
+        args = [str(installation.directory), "conversion-check", str(parent._fd), str(os.getpid()), record["request_id"]]
+        if wrong_head:
+            with pytest.raises(UpdateError, match="required Git revision"):
+                entry.main(args)
+            assert calls == []
+        else:
+            assert entry.main(args) == 0
+            assert calls == [(record["request_id"], adapter)]
+        parent._assert_locked()

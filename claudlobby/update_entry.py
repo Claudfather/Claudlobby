@@ -127,6 +127,37 @@ def _authorize_initialization(store, scope, package):
     return {"directory": str(directory), "revision": package.source_revision}
 
 
+def _authorize_conversion(store, package):
+    """Explicit local operator ancestry over verified original native evidence."""
+    from .commands.operator_context import require_operator_context
+    from .update_conversion import read_sealed_baseline
+    from .update_operation import conversion_baseline
+    from .supervision_inventory import Adapter, collect_enrollment, is_unit_template, _catalog
+    require_operator_context()
+    record = store.load()
+    baseline = (conversion_baseline(store, package) if record is not None and record.get('conversion_scope')
+                else read_sealed_baseline(store.root, package=package))
+    adapter = Adapter(package)
+    manager, domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    if (manager, domain) != (baseline.manager, baseline.domain):
+        raise UpdateError("sealed conversion requires its original native manager domain")
+    inventory = collect_enrollment(store.root, baseline.declarations, adapter=adapter,
+                                   historical_release=baseline.release).require_complete()
+    checked = 0
+    for unit in inventory.units:
+        if not unit.installed or is_unit_template(unit.target):
+            continue
+        checked += 1
+        if adapter.call('svc_activation_assert_external', unit.installed[0].path,
+                        unit.target, str(os.getpid())).returncode != 0:
+            raise UpdateError('sealed conversion requires a proven external local operator')
+    if not checked:
+        raise UpdateError('sealed conversion has no native ancestry evidence')
+    return {'directory': str(baseline.install_directory), 'revision': package.source_revision,
+            'conversion_scope': {'selection': baseline.selection, 'selector_sha256': baseline.selector_sha256,
+                                 'evidence': baseline.evidence}}
+
+
 def _render_paths(store, record, package):
     """Select original manifest paths with candidate resources, without a second composer."""
     from .active_config import read_current_config
@@ -134,9 +165,13 @@ def _render_paths(store, record, package):
     scope = record.get("initialization_scope")
     if scope is not None:
         manifests = _initialization_scope(scope)["manifests"]
+    elif record.get('conversion_scope') is not None:
+        from .update_operation import conversion_baseline
+        baseline = conversion_baseline(store, package)
+        manifests = [str(baseline.contexts[name].paths.fleet_yaml) for name in sorted(baseline.contexts)]
     else:
         current = read_current_config(store.root, installation=store.installation)
-        manifests = [item["manifest"] for item in current["fleets"].values()]
+        manifests = [item['manifest'] for item in current['fleets'].values()]
     paths = [Paths(store.root, package=package, fleet_dir=(None if Path(manifest).parent == store.root
               else Path(manifest).parent)) for manifest in manifests]
     if any(str(paths_item.fleet_yaml) != manifest for paths_item, manifest in zip(paths, manifests)):
@@ -147,15 +182,18 @@ def _render_paths(store, record, package):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Private updater application stage")
     parser.add_argument("installation")
-    parser.add_argument("stage", choices=["authorize", "retire-render", "render", "prepare", "quiesce", "quiet", "publish", "restore"])
+    parser.add_argument("stage", choices=["authorize", "retire-render", "render", "prepare", "conversion-check", "quiesce", "quiet", "publish", "restore"])
     parser.add_argument("lock_fd", type=int)
     parser.add_argument("parent_pid", type=int)
     parser.add_argument("request_id")
     parser.add_argument("runtime_fd", type=int, nargs="?")
     parser.add_argument("--initialization-scope")
+    parser.add_argument("--convert-sealed", action="store_true")
     args = parser.parse_args(argv)
     if args.initialization_scope is not None and args.stage != "authorize":
         raise UpdateError("initialization consent is accepted only at operator authorization")
+    if args.convert_sealed and (args.stage != "authorize" or args.initialization_scope is not None):
+        raise UpdateError("sealed conversion consent is accepted only at local authorization")
     proposed = (_initialization_scope(json.loads(args.initialization_scope))
                 if args.initialization_scope is not None else None)
     installation = read_installation(Path(args.installation))
@@ -179,7 +217,7 @@ def main(argv=None):
             expected_python = Path(record["candidate_python"])
         else:
             expected = (_head(installation) if args.stage == "authorize" else
-                        record["before"] if args.stage in {"prepare", "quiesce", "quiet"} else record["target"])
+                        record["before"] if args.stage in {"prepare", "conversion-check", "quiesce", "quiet"} else record["target"])
             if source != installation.source or _head(installation) != expected:
                 raise UpdateError("application stage source differs from required Git revision")
             expected_python = installation.environment / "bin/python"
@@ -197,7 +235,10 @@ def main(argv=None):
             if record is not None:
                 _check_initialization_intent(record, proposed)
             pending = record is not None and (record["phase"] != "done" or record.get("health_errors"))
-            scope = proposed if proposed is not None else (record.get("initialization_scope") if pending else None)
+            scope = proposed if proposed is not None else (record.get('initialization_scope') if pending else None)
+            if args.convert_sealed or pending and record.get('conversion_scope') is not None:
+                print(json.dumps(_authorize_conversion(store, package)))
+                return 0
             if scope is not None:
                 print(json.dumps(_authorize_initialization(store, scope, package)))
                 return 0
@@ -226,6 +267,8 @@ def main(argv=None):
             update_operation.prepare_operation(store, rendered, Adapter(get_resources(installation=installation)),
                 Path(record["native_install_directory"]), Path(record["host_interpreter"]), record["request_id"],
                 initialize=record.get("initialization_scope") is not None)
+        elif args.stage == "conversion-check":
+            update_operation.check_conversion_before_retirement(store, Adapter(get_resources(installation=installation)))
         elif args.stage == "quiesce":
             update_operation.quiesce_operation(store, Adapter(get_resources(installation=installation)))
         elif args.stage == "quiet":

@@ -219,9 +219,12 @@ def test_initialize_prepares_null_previous_without_creating_schema_or_identities
         assert render is rendered and identities is None
         return {"fingerprint": "initial", "identities": None, "units": [], "supervision": supervision}
     monkeypatch.setattr(operation, "snapshot_from_plan", snapshot)
-    monkeypatch.setattr(operation, "validate_candidate_consumers", lambda previous, *_:
-                        events.append(("candidate", previous)))
-    def freeze(previous, _adapter, directory, *, candidate_snapshot, rendered):
+    def validate(previous, *_, baseline):
+        assert baseline is None
+        events.append(("candidate", previous))
+    monkeypatch.setattr(operation, "validate_candidate_consumers", validate)
+    def freeze(previous, _adapter, directory, *, candidate_snapshot, rendered, baseline):
+        assert baseline is None
         assert previous is None and rendered.fingerprint == "render"
         assert candidate_snapshot["identities"] is None
         return []
@@ -274,10 +277,11 @@ def test_existing_update_includes_added_native_consumer_in_original_scope(initia
     monkeypatch.setattr(operation, "read_current_config", lambda *_a, **_k: previous)
     monkeypatch.setattr(operation, "read_registry_identity_bindings", lambda *_a, **_k: {})
     monkeypatch.setattr(operation, "snapshot_from_plan", lambda *_a, **_k: candidate)
-    monkeypatch.setattr(operation, "validate_candidate_consumers", lambda *_: None)
+    monkeypatch.setattr(operation, "validate_candidate_consumers", lambda *_, baseline: None if baseline is None else pytest.fail("unexpected conversion baseline"))
     monkeypatch.setattr(operation, "_schema", lambda *_: operation.SQL_SCHEMA_VERSION)
     added = {"kind": "added", "target": "new.service", "phase": "producers"}
-    def freeze(current, native, directory, *, candidate_snapshot, rendered):
+    def freeze(current, native, directory, *, candidate_snapshot, rendered, baseline):
+        assert baseline is None
         assert current == previous and candidate_snapshot == candidate
         assert rendered.fingerprint == "render"
         return [added]
@@ -555,3 +559,58 @@ def test_committing_owned_database_refuses_retired_changed_source(initial_store,
     monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must not re-attest'))
     with pytest.raises((owner_source.SourceNeedsBinding, owner_source.SourceDenied)):
         operation._fresh_root(store, store.load(), committed=True)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_conversion_last_check_reuses_original_evidence_and_native_scope(monkeypatch, changed):
+    from claudlobby.update_services import consumer_scope
+    data = record()
+    original = [{"target": "original.timer", "saved_native": "enabled loaded inactive"}]
+    data["scope"] = consumer_scope(original)
+    data["native_install_directory"] = "/units"
+    store = Store(data)
+    baseline = object()
+    calls = []
+    monkeypatch.setattr(operation, "conversion_baseline", lambda s, package: calls.append("baseline") or baseline)
+    rendered = SimpleNamespace(check_inputs=lambda: calls.append("inputs"))
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: rendered)
+    def freeze(current, adapter, directory, **kwargs):
+        assert current is None and directory == Path("/units")
+        assert kwargs == {"candidate_snapshot": data["candidate_config"], "rendered": rendered, "baseline": baseline}
+        calls.append("native")
+        return [{**original[0], "saved_native": "disabled loaded inactive"}] if changed else original
+    monkeypatch.setattr(operation, "freeze_service_intent", freeze)
+    if changed:
+        with pytest.raises(UpdateError, match="native intent changed"):
+            operation.check_conversion_before_retirement(store, SimpleNamespace(package=object()))
+    else:
+        operation.check_conversion_before_retirement(store, SimpleNamespace(package=object()))
+    assert calls == ["baseline", "inputs", "native"]
+    assert store.history == []  # Inspection cannot replace the original operation.
+
+
+@pytest.mark.parametrize("state", ["enabled loaded inactive", "disabled loaded inactive"])
+def test_conversion_last_check_allows_scheduled_finish_but_preserves_enrollment(monkeypatch, state):
+    from claudlobby.update_services import consumer_scope
+    original = {"target": "job.service", "scheduled": True, "saved_native": "enabled loaded active",
+                "restore_native": "enabled loaded inactive", "properties": [["UnitFileState", "enabled"],
+                ["LoadState", "loaded"], ["ActiveState", "active"]]}
+    data = record()
+    data.update(scope=consumer_scope([original]), consumers={"job.service": {"intent": original}},
+                native_install_directory="/units")
+    store = Store(data)
+    observed = deepcopy(original)
+    observed["saved_native"] = state
+    observed["properties"][-1][1] = "inactive"
+    if state.startswith("disabled"):
+        observed["properties"][0][1] = "disabled"
+    monkeypatch.setattr(operation, "conversion_baseline", lambda *_: object())
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: SimpleNamespace(check_inputs=lambda: None))
+    monkeypatch.setattr(operation, "freeze_service_intent", lambda *args, **kwargs: [observed])
+    if state.startswith("disabled"):
+        with pytest.raises(UpdateError, match="native intent changed"):
+            operation.check_conversion_before_retirement(store, SimpleNamespace(package=object()))
+    else:
+        operation.check_conversion_before_retirement(store, SimpleNamespace(package=object()))
+    assert store.history == []
+    assert store.load()["consumers"]["job.service"]["intent"] == original

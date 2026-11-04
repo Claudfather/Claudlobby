@@ -30,7 +30,19 @@ New configuration commits before consumer startup. A failed consumer remains vis
 
 The sealed-release routes (`host activate`, its resume, rollback, adoption and repair/abort modes, `config plan --release` and `migration plan`) are retired as public execution paths; this guide does not describe them as instructions. Historical release/activation/migration evidence remains inspectable with `host releases`, `host status` and `migration status`. Do not delete pending historical evidence to bypass an existing-host conversion or restore requirement.
 
-**Existing sealed hosts are not covered.** A host that was installed and activated through the sealed-release model needs an explicit, reviewed conversion onto the managed Git installation. That conversion is **not yet implemented**, and this guide offers no workaround. Until it exists, do not point `host setup`, `fleet setup` or `host update apply` at that host's data root.
+### Converting an existing sealed host
+
+Conversion is a one-time mode of the same updater, not a second activation service. It requires a separately prepared managed installation bound to the existing data root; do not run first-fleet initialization against that root. From its stable CLI, prepare the exact conversion without stopping consumers:
+
+```bash
+"$CLI" --root "$DATA" host update apply FULL_COMMIT --convert-sealed --prepare-only --json
+"$CLI" --root "$DATA" host update status --json
+"$CLI" --root "$DATA" config diff CONFIG_FINGERPRINT --json
+```
+
+Review the retained configuration and native consumer scope before `host update continue`. Conversion preserves the existing database, host/fleet/bot identities, native manager domain, enrollment policy and observed stopped/running state. It refuses unfinished historical operations or authored fleet/project inputs that differ from their active version; reconcile the original operation or edits rather than deleting evidence.
+
+Immediately before stopping anything, the updater rechecks the original evidence under the old admission locks and archives the exact old selector. This closes the old startup path even if the updater exits. The original update then owns continuation; do not restore the old selector by hand or replay unknown handoffs. Later updates use the ordinary Git path. This transition still requires isolated native acceptance on each supported platform before a production rollout; passing source tests is not that acceptance.
 
 ### Refreshing a skill's installed copies
 

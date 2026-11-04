@@ -32,15 +32,15 @@ def consumer_scope(rows):
     return {row["target"]: _hash(row) for row in rows}
 
 
-def validate_candidate_consumers(old_snapshot, candidate_snapshot, manager):
+def validate_candidate_consumers(old_snapshot, candidate_snapshot, manager, *, baseline=None):
     """Reject unsupported roster or placement changes before maintenance."""
     if manager not in {"Linux", "Darwin"}:
         raise UpdateError("unsupported supervision platform")
     if old_snapshot is not None and any(old_snapshot.get(key) != candidate_snapshot.get(key)
            for key in ("installation", "data_root")):
         raise UpdateError("candidate consumer installation differs")
-    def bindings(snapshot):
-        rows = [row for row in snapshot["units"] if row["platform"] == manager]
+    def bindings(units):
+        rows = [row for row in units if row["platform"] == manager]
         result = {}
         for row in rows:
             source = row["source"]
@@ -49,7 +49,15 @@ def validate_candidate_consumers(old_snapshot, candidate_snapshot, manager):
             result[source] = (row["working_directory"], row["scope"], row.get("fleet"),
                               row.get("bot"), row.get("service"))
         return result
-    old, candidate = bindings(old_snapshot) if old_snapshot is not None else {}, bindings(candidate_snapshot)
+    old = bindings(baseline.units) if baseline is not None else (bindings(old_snapshot['units']) if old_snapshot is not None else {})
+    candidate = bindings(candidate_snapshot['units'])
+    if baseline is not None:
+        old_enroll = {row["source"]: row["enroll"] for row in baseline.units if row["platform"] == manager}
+        new_enroll = {row["source"]: row["enroll"] for row in candidate_snapshot["units"] if row["platform"] == manager}
+        if old_enroll != new_enroll:
+            raise UpdateError("sealed conversion must preserve native enrollment policy")
+    if baseline is not None and (baseline.manager != manager or set(old) != set(candidate)):
+        raise UpdateError('sealed conversion must preserve the exact native consumer roster')
     if set(old) - set(candidate):
         raise UpdateError("candidate removes native consumers; removal is unsupported in this update")
     if any(old[key] != candidate[key] for key in old):
@@ -71,13 +79,26 @@ def _check(snapshot):
         raise UpdateError(f"native definition changed: {snapshot['path']}")
 
 
-def freeze_service_intent(current_snapshot, adapter, install_directory, *, candidate_snapshot=None, rendered=None):
+def freeze_service_intent(current_snapshot, adapter, install_directory, *, candidate_snapshot=None, rendered=None, baseline=None):
     """Freeze complete current declarations and actual native disposition."""
     install_directory = Path(install_directory)
     if not install_directory.is_absolute() or install_directory.resolve() != install_directory:
         raise UpdateError("native install directory must be absolute and unredirected")
     manager = platform.system()
-    if current_snapshot is None:
+    if baseline is not None:
+        if current_snapshot is not None or baseline.install_directory != install_directory or baseline.manager != manager:
+            raise UpdateError('sealed conversion native placement differs')
+        observed_manager, observed_domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+        if (observed_manager, observed_domain) != (baseline.manager, baseline.domain):
+            raise UpdateError("sealed conversion requires its original native manager domain")
+        inventory = collect_enrollment(baseline.root, baseline.declarations, adapter=adapter,
+                                       historical_release=baseline.release).require_complete()
+        rows = inventory.payload()['units']
+        expected = {entry["source"]: entry["target"] for entry in baseline.placements}
+        observed = {row["declaration"]["source"]: row["target"] for row in rows}
+        if expected != observed:
+            raise UpdateError("sealed conversion inventory differs from historical native targets")
+    elif current_snapshot is None:
         if candidate_snapshot is None or rendered is None:
             raise UpdateError("initial native preparation requires exact candidate render")
         rows = []
@@ -143,7 +164,7 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
         if len(row["installed"]) > 1:
             raise UpdateError("consumer has multiple installed definitions")
     if candidate_snapshot is not None:
-        validate_candidate_consumers(current_snapshot, candidate_snapshot, manager)
+        validate_candidate_consumers(current_snapshot, candidate_snapshot, manager, baseline=baseline)
         if rendered is None:
             raise UpdateError("candidate native additions require exact staged bytes")
         old_sources = {row["declaration"]["source"] for row in rows}
@@ -233,6 +254,14 @@ def observe_quiet(store, key, adapter):
     return evidence
 
 
+def native_state_matches(row, observed):
+    """Keep enrollment/load fixed while scheduled work may finish between observations."""
+    if row["scheduled"]:
+        before, after = row["saved_native"].split(), observed.split()
+        return before[:2] == after[:2] and len(after) == 3 and after[2] in {"active", "activating", "inactive", "failed"}
+    return observed == row["saved_native"]
+
+
 def quiesce_consumer(store, key, adapter):
     record, progress, row = _row(store, key)
     if row.get("kind") == "added":
@@ -250,12 +279,7 @@ def quiesce_consumer(store, key, adapter):
         _check(row["installed"][0])
         _native(adapter, row, "svc_activation_assert_external", _file(row), key, str(os.getpid()))
         observed = _native(adapter, row, "svc_activation_snapshot", _file(row), key)
-        if row["scheduled"]:
-            before, after = row["saved_native"].split(), observed.split()
-            same = before[:2] == after[:2] and len(after) == 3 and after[2] in {"active", "activating", "inactive", "failed"}
-        else:
-            same = observed == row["saved_native"]
-        if not same:
+        if not native_state_matches(row, observed):
             raise UpdateError("native state drifted before stop")
         if row["bot_binding"]:
             session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], _file(row), key)

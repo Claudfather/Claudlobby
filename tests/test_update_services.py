@@ -600,3 +600,34 @@ def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_
     assert observed.details["socket_state"] == "refused"
     assert observed.details["coverage"] == "named-unit-and-supplied-witnesses-only"
     assert path.exists()  # observation never unlinks a socket
+
+
+@pytest.mark.parametrize("enroll", [False, True])
+def test_conversion_preserves_dormant_rows_and_refuses_enrollment_toggle(enroll):
+    row = {"platform": "Linux", "source": "/generated/example.timer", "enroll": enroll,
+           "working_directory": "/root", "scope": "fleet", "fleet": "example", "bot": None}
+    baseline = SimpleNamespace(manager="Linux", units=(row,))
+    candidate = {"units": [deepcopy(row)]}
+    services.validate_candidate_consumers(None, candidate, "Linux", baseline=baseline)
+    candidate["units"][0]["enroll"] = not enroll
+    with pytest.raises(UpdateError, match="preserve native enrollment policy"):
+        services.validate_candidate_consumers(None, candidate, "Linux", baseline=baseline)
+
+
+@pytest.mark.parametrize("defect", ["domain", "target"])
+def test_conversion_refuses_cross_domain_or_retargeted_inventory_before_freezing(tmp_path, monkeypatch, defect):
+    baseline = SimpleNamespace(root=tmp_path, manager="Darwin", domain="gui/123", install_directory=tmp_path,
+                               declarations=(), release=object(),
+                               placements=({"source": "/generated/example.plist", "target": "gui/123/example"},))
+    monkeypatch.setattr(services.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(services, "_catalog", lambda _: ("Darwin", "user/123" if defect == "domain" else "gui/123", [], [], []))
+    adapter = SimpleNamespace(read=lambda _: "catalog")
+    calls = []
+    def collect(*args, **kwargs):
+        calls.append("inventory")
+        return SimpleNamespace(require_complete=lambda: SimpleNamespace(payload=lambda: {"units": [
+            {"declaration": {"source": "/generated/example.plist"}, "target": "user/123/example"}]}))
+    monkeypatch.setattr(services, "collect_enrollment", collect)
+    with pytest.raises(UpdateError, match="original native manager domain|historical native targets"):
+        services.freeze_service_intent(None, adapter, tmp_path, baseline=baseline)
+    assert calls == ([] if defect == "domain" else ["inventory"])

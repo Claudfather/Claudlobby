@@ -20,14 +20,14 @@ from .activation_identity import (read_registry_identity_bindings, identity_bind
                                   preflight_registry_scan, scan_registry)
 from .config_install import prepare_publication, apply_publication
 from .config_plan import read_rendered
-from .git_update import UpdateError, _git, _head, _sync
+from .git_update import UpdateError, _git, _head, _sync, assert_conversion_retired
 from .installation import install_launcher, install_updater
 from .plane.db import db_file, connect_ro
 from .runtime_versions import SQL_SCHEMA_VERSION
 from .supervision_inventory import _catalog
 from .update_services import (
     freeze_service_intent, consumer_scope, validate_candidate_consumers,
-    quiesce_consumer, observe_quiet, restore_consumer,
+    quiesce_consumer, observe_quiet, restore_consumer, native_state_matches,
 )
 
 
@@ -132,6 +132,33 @@ def _fresh_root(store, record=None, *, committed=False):
             inspect_source(root)  # No re-attestation on an interrupted completion.
 
 
+def conversion_baseline(store, package, *, require_authored=True):
+    """Re-read only the exact original sealed evidence of this current operation."""
+    from .update_conversion import read_sealed_baseline
+    from .config_plan import path_state
+    record = store.load()
+    scope = record.get('conversion_scope') if record is not None else None
+    if scope is None:
+        raise UpdateError('sealed conversion has no original scope')
+    retirement = record.get('conversion_selector')
+    archived = None
+    if retirement is not None:
+        path = Path(retirement['path'])
+        if path.exists() and not (store.state / 'selected-release.json').exists():
+            archived = {key: retirement[key] for key in ('path', 'sha256')}
+    baseline = read_sealed_baseline(store.root, package=package,
+        expected_selection=scope['selection'], archived_selector=archived)
+    if baseline.selector_sha256 != scope['selector_sha256'] or baseline.evidence != scope['evidence']:
+        raise UpdateError('original sealed conversion evidence changed')
+    if require_authored:
+        for sources in baseline.plan.effects['fleet_sources'].values():
+            for item in sources.values():
+                path = Path(item['path'])
+                if path_state(path, source=True) != baseline.plan.inputs[str(path)]['state']:
+                    raise UpdateError('authored configuration differs from the frozen sealed baseline; review it before conversion')
+    return baseline
+
+
 def prepare_operation(store, rendered, adapter, install_directory, interpreter, request_id, *, initialize=False):
     """Prepare immutable inputs/dependencies; explicit initialization writes no schema here."""
     store._assert_locked()
@@ -149,6 +176,9 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
     elif initialize and existing is not None:
         raise UpdateError("initialization refuses prior update recovery evidence")
     rendered.check_inputs()
+    baseline = conversion_baseline(store, adapter.package) if existing is not None and existing.get('conversion_scope') else None
+    if baseline is not None and initialize:
+        raise UpdateError('sealed conversion cannot initialize existing storage')
     if initialize:
         if not rendered.fleets:
             raise UpdateError("initialization requires a frozen first-team fleet")
@@ -157,18 +187,26 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
         preflight_registry_scan(context_from_plan(rendered, fleet, package=adapter.package)
                                 for fleet in rendered.fleets)
         identities = None
+    elif baseline is not None:
+        current = None
+        identities = read_registry_identity_bindings(rendered, package=adapter.package)
+        if identities != baseline.identities:
+            raise UpdateError('sealed conversion cannot change existing identities')
     else:
         current = read_current_config(store.root, installation=store.installation)
         identities = read_registry_identity_bindings(rendered, package=adapter.package)
     manager, domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
     if manager != platform.system():
         raise UpdateError("native manager differs from current host")
-    placement = {"manager": manager, "domain": domain, "directory": str(install_directory)}
+    placement = {'manager': manager, 'domain': baseline.domain if baseline is not None else domain,
+                 'directory': str(install_directory)}
+    if baseline is not None and (baseline.manager != manager or baseline.domain != domain or baseline.install_directory != install_directory):
+        raise UpdateError('sealed conversion cannot change native placement')
     if current is not None and current.get("supervision") not in (None, placement):
         raise UpdateError("native install directory differs from committed placement")
     candidate = snapshot_from_plan(rendered, store.installation, rendered.revision,
                                    identities=identities, supervision=placement)
-    validate_candidate_consumers(current, candidate, platform.system())
+    validate_candidate_consumers(current, candidate, platform.system(), baseline=baseline)
     if current is not None and current["identities"] != candidate["identities"]:
         raise UpdateError("identity changes require an explicit configuration scope")
     schema = _schema(store, rendered.revision, initialize=True) if initialize else _schema(store, rendered.revision)
@@ -179,7 +217,7 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
             raise UpdateError("prepared effective configuration changed")
     else:
         rows = freeze_service_intent(current, adapter, install_directory,
-                                     candidate_snapshot=candidate, rendered=rendered)
+                                     candidate_snapshot=candidate, rendered=rendered, baseline=baseline)
         scope = consumer_scope(rows)
         record = store.prepare(rendered.revision, config_fingerprint=rendered.fingerprint,
                                scope=scope, request_id=request_id)
@@ -223,12 +261,41 @@ def _checkpoint(store, key, adapter):
     store.save(record)
 
 
+def check_conversion_before_retirement(store, adapter):
+    """Read-only last check while the old selector and both legacy EX locks remain."""
+    record = _operation(store, "quiesce")
+    baseline = conversion_baseline(store, adapter.package)
+    rendered = read_rendered(store.root, record["config_fingerprint"])
+    rendered.check_inputs()
+    rows = freeze_service_intent(None, adapter, Path(record["native_install_directory"]),
+                                 candidate_snapshot=record["candidate_config"], rendered=rendered, baseline=baseline)
+    # Scheduled one-shots can finish while legacy EX drains. Use exactly the
+    # stop owner's state rule, then compare every other binding byte unchanged.
+    from copy import deepcopy
+    rows = deepcopy(rows)
+    for row in rows:
+        original = record["consumers"].get(row["target"], {}).get("intent")
+        if original is not None and original.get("scheduled") and row.get("scheduled"):
+            if not native_state_matches(original, row["saved_native"]):
+                raise UpdateError("sealed conversion native intent changed since preview; original selector retained")
+            row["saved_native"] = original["saved_native"]
+            row["restore_native"] = original["restore_native"]
+            row["properties"] = [(key, dict(original["properties"])[key] if key == "ActiveState" else value)
+                                 for key, value in row["properties"]]
+    if consumer_scope(rows) != record["scope"]:
+        raise UpdateError("sealed conversion native intent changed since preview; original selector retained")
+
+
 def quiesce_operation(store, adapter):
     """Schedules first; keep the recorder available until all bots save/stop."""
     record = _operation(store, "quiesce")
     store.verify_dependencies()
     if record.get("initialize", False):
         _fresh_root(store)
+    elif record.get('conversion_scope') is not None:
+        assert_conversion_retired(store)
+        if not any(item.get('stop') or item.get('park') for item in record['consumers'].values()):
+            conversion_baseline(store, adapter.package)
     elif read_current_config(store.root, installation=store.installation)["fingerprint"] != record["previous_config"]:
         raise UpdateError("effective configuration changed before quiescence")
     if not any(item.get("stop") for item in record["consumers"].values()):
@@ -253,6 +320,8 @@ def assert_operation_quiet(store, adapter):
     """Caller holds EX; capture proof and native quiet are freshly rechecked."""
     from .bot_operations import verify_checkpoint_after_stop
     record = _operation(store, "quiesce")
+    if record.get('conversion_scope') is not None:
+        assert_conversion_retired(store)
     for key, progress in record["consumers"].items():
         row = progress["intent"]
         if progress.get("stop") != "done":
@@ -394,8 +463,10 @@ def publish_operation(store):
         actual_schema = _schema(store, record["target"])
     if actual_schema != record["sql_schema"]:
         raise UpdateError("Plane schema changed before publication")
-    rendered = read_rendered(store.root, record["config_fingerprint"])
-    if record["phase"] in {"environment", "publish"}:
+    if record.get('conversion_scope') is not None:
+        assert_conversion_retired(store)
+    rendered = read_rendered(store.root, record['config_fingerprint'])
+    if record['phase'] in {'environment', 'publish'}:
         record["phase"] = "publish"
         store.save(record)
         apply_publication(rendered, store)

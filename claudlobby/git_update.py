@@ -248,6 +248,111 @@ def _check_initialization_intent(record, proposed):
         raise UpdateError("initialization differs from the original frozen operation")
 
 
+def _conversion_scope(value):
+    """Frozen historical evidence for one explicit local conversion, never admission."""
+    if (not isinstance(value, dict) or set(value) != {'selection', 'selector_sha256', 'evidence'}
+            or not isinstance(value['selection'], dict)
+            or set(value['selection']) != {'schema', 'activation_id', 'release_id', 'plan_id'}
+            or type(value['selection']['schema']) is not int or value['selection']['schema'] != 1
+            or not isinstance(value['selection']['activation_id'], str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,95}', value['selection']['activation_id'])
+            or not isinstance(value['selection']['release_id'], str)
+            or not re.fullmatch(r'r-[0-9a-f]{64}', value['selection']['release_id'])
+            or not isinstance(value['selection']['plan_id'], str)
+            or not re.fullmatch(r'p-[0-9a-f]{64}', value['selection']['plan_id'])
+            or not isinstance(value['selector_sha256'], str) or not _SHA.fullmatch(value['selector_sha256']) or not isinstance(value['evidence'], dict)
+            or not value['evidence'] or any(not isinstance(key, str) or not key
+                or not Path(key).is_absolute() or str(Path(key)) != key or '..' in Path(key).parts
+                or not isinstance(digest, str) or not _SHA.fullmatch(digest)
+                for key, digest in value['evidence'].items())):
+        raise UpdateError('sealed conversion scope is invalid')
+    return deepcopy(value)
+
+
+def _conversion_archive(store):
+    record = store.load()
+    scope = _conversion_scope(record['conversion_scope'])
+    path = store.work / ('sealed-selector-' + record['request_id'] + '.json')
+    return {'path': str(path), 'sha256': scope['selector_sha256']}
+
+
+def assert_conversion_retired(store):
+    """Old authority stays durably closed even when the coordinator has died."""
+    record = store.load()
+    descriptor = _conversion_archive(store)
+    if record.get('conversion_selector') != {**descriptor, 'retired': True}:
+        raise UpdateError('sealed selector retirement has not completed')
+    path = _plain(Path(descriptor['path']))
+    selected = store.state / 'selected-release.json'
+    if (selected.exists() or selected.is_symlink() or not path.is_file() or path.is_symlink()
+            or _digest(path.read_bytes()) != descriptor['sha256']
+            or json.loads(path.read_bytes()) != record['conversion_scope']['selection']):
+        raise UpdateError('sealed selector retirement evidence changed')
+    return descriptor
+
+
+def _retire_conversion_selector(store):
+    record = store.load()
+    descriptor = _conversion_archive(store)
+    if record.get('conversion_selector') is None:
+        record['conversion_selector'] = {**descriptor, 'retired': False}
+        store.save(record)  # Intent survives death before the rename.
+    elif record['conversion_selector'] not in ({**descriptor, 'retired': False}, {**descriptor, 'retired': True}):
+        raise UpdateError('sealed selector retirement intent changed')
+    selected = _plain(store.state / 'selected-release.json')
+    archived = _plain(Path(descriptor['path']))
+    if selected.exists():
+        if (selected.is_symlink() or not selected.is_file() or archived.exists() or archived.is_symlink()
+                or _digest(selected.read_bytes()) != descriptor['sha256']
+                or json.loads(selected.read_bytes()) != record['conversion_scope']['selection']):
+            raise UpdateError('selected sealed baseline changed before retirement')
+        os.rename(selected, archived)
+        _sync(store.state)
+        _sync(store.work)
+    if (not archived.is_file() or archived.is_symlink()
+            or _digest(archived.read_bytes()) != descriptor['sha256']):
+        raise UpdateError('archived sealed selector is unavailable')
+    record['conversion_selector'] = {**descriptor, 'retired': True}
+    store.save(record)
+    assert_conversion_retired(store)
+
+
+@contextmanager
+def _conversion_fence(store):
+    """Drain the old admission protocol, then retire it before any stop/effect."""
+    record = store.load()
+    if record is None or record.get('conversion_scope') is None:
+        yield
+        return
+    held = []
+    try:
+        for name in ('activation-pending.lock', 'activation.lock'):
+            path = _plain(store.state / name)
+            flags = os.O_RDWR | os.O_NOFOLLOW
+            if name == 'activation-pending.lock':
+                flags |= os.O_CREAT
+            fd = os.open(path, flags, 0o600)
+            held.append(fd)
+            linked, opened = path.lstat(), os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+                    or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise UpdateError('historical admission lock changed')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise UpdateError('old activation or admitted work is still running; continue the same conversion') from exc
+        if os.path.lexists(store.state / "selected-release.json"):
+            # The old coordinator may have changed recovery/native evidence
+            # since preview. Validate under its drained exclusion, before
+            # retiring the selector that its original recovery still needs.
+            _application_stage(store, "conversion-check")
+        _retire_conversion_selector(store)
+        yield
+    finally:
+        for fd in reversed(held):
+            os.close(fd)
+
+
 def _validate(installation, record):
     try:
         if (type(record) is not dict or type(record["schema"]) is not int or record["schema"] != 1
@@ -267,6 +372,9 @@ def _validate(installation, record):
         if type(record.get("finalized", True)) is not bool:
             raise ValueError()
         uuid.UUID(record["request_id"])
+        conversion = record.get("conversion_scope")
+        if conversion is not None and (_conversion_scope(conversion) != conversion or record.get("initialization_scope") is not None):
+            raise ValueError()
         initialization = record.get("initialization_scope")
         if initialization is not None and _initialization_scope(initialization) != initialization:
             raise ValueError()
@@ -366,7 +474,8 @@ class UpdateStore:
         if current is not None and current["phase"] == "done" and record["phase"] == "prepare" and current.get("health_errors"):
             raise UpdateError("prior consumer health/unknown-effect evidence must be reconciled")
         if current is not None and not (current["phase"] == "done" and record["phase"] == "prepare"):
-            if (current.get("initialization_scope") != record.get("initialization_scope")
+            if (current.get("conversion_scope") != record.get("conversion_scope")
+                    or current.get("initialization_scope") != record.get("initialization_scope")
                     or "initialize" in current and current["initialize"] != record.get("initialize")):
                 raise UpdateError("frozen initialization intent changed")
             for key in ("request_id", "before", "target"):
@@ -390,10 +499,13 @@ class UpdateStore:
         return self.finalize_prepare(config_fingerprint=config_fingerprint, scope=scope)
 
     def prepare_target(self, target_commit, *, request_id, lock_path="requirements-runtime.lock",
-                       initialization_scope=None):
+                       initialization_scope=None, conversion_scope=None):
         """Freeze Git/dependency inputs before candidate environment and rendering."""
         self._assert_locked()
         current = self.load()
+        conversion_scope = _conversion_scope(conversion_scope) if conversion_scope is not None else None
+        if conversion_scope is not None and initialization_scope is not None:
+            raise UpdateError("initialization and sealed conversion are distinct scopes")
         initialization_scope = (_initialization_scope(initialization_scope)
                                 if initialization_scope is not None else None)
         if current is not None and initialization_scope is not None:
@@ -424,6 +536,8 @@ class UpdateStore:
                   "git_complete": False,
                   "dependencies": {"path": lock_path, "before": _digest(old_lock), "target": _digest(new_lock),
                                    "prepared": old_lock == new_lock, "receipt_sha256": None}}
+        if conversion_scope is not None:
+            record["conversion_scope"] = conversion_scope
         if initialization_scope is not None:
             record["initialization_scope"] = initialization_scope
         _validate(self.installation, record)
@@ -648,10 +762,10 @@ raise SystemExit(update_entry.main(sys.argv[2:]))
 """
 
 
-def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None, initialization=None):
+def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None, initialization=None, convert_sealed=False):
     """One fixed private stage in a fresh verified application process."""
     store._assert_locked()
-    if stage not in {"authorize", "retire-render", "render", "prepare", "quiesce", "quiet", "publish", "restore"}:
+    if stage not in {"authorize", "retire-render", "render", "prepare", "conversion-check", "quiesce", "quiet", "publish", "restore"}:
         raise UpdateError("unknown application update stage")
     record = store.load()
     source = _plain(source if source is not None else store.installation.source)
@@ -668,6 +782,10 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
         if stage != "authorize":
             raise UpdateError("initialization consent is accepted only at operator authorization")
         args.extend(["--initialization-scope", json.dumps(_initialization_scope(initialization), sort_keys=True)])
+    if convert_sealed:
+        if stage != 'authorize' or initialization is not None:
+            raise UpdateError('sealed conversion is accepted only at local authorization')
+        args.append('--convert-sealed')
     clean = {key: value for key, value in os.environ.items()
              if not key.startswith(("PYTHON", "GIT_", "BASH_FUNC_")) and key not in {"BASH_ENV", "ENV"}}
     clean.update(CLAUDLOBBY_INSTALLATION=str(store.installation.directory),
@@ -831,7 +949,13 @@ def _independent_quiet(store):
 
 
 def run_prepared_update(store):
-    """Run one finalized operation; no mutable application survives cutover."""
+    """Run the same operation under both old and current fences during conversion."""
+    store._assert_locked()
+    with _conversion_fence(store):
+        return _run_prepared_update(store)
+
+
+def _run_prepared_update(store):
     store._assert_locked()
     record = store.load()
     if record is None or not record.get("finalized", True) or record["phase"] == "prepare":
@@ -1071,7 +1195,7 @@ def _require_expected_request(record, expected_request_id):
         raise UpdateError(f"original update request {expected_request_id} is no longer current")
 
 
-def _prepare_update_locked(store, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False):
+def _prepare_update_locked(store, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False, convert_sealed=False):
     """Use the held update lock for canonical preparation; never dispatch native work."""
     store._assert_locked()
     installation = store.installation
@@ -1083,8 +1207,15 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
         _check_initialization_intent(record, proposed)
     if not pending and proposed is not None and (record is not None or target is None):
         raise UpdateError("initialization requires a fresh operation and one frozen target")
-    initial_scope = record.get("initialization_scope") if pending else proposed
-    if prepare_only and (initial_scope is None or (record is not None and (
+    initial_scope = record.get('initialization_scope') if pending else proposed
+    conversion = convert_sealed or bool(pending and record.get('conversion_scope'))
+    if conversion and initial_scope is not None:
+        raise UpdateError('sealed conversion cannot use initialization scope')
+    if convert_sealed and pending and record.get('conversion_scope') is None:
+        raise UpdateError('continue the original operation before requesting conversion')
+    if convert_sealed and not prepare_only:
+        raise UpdateError('sealed conversion requires --prepare-only; review then continue its original request')
+    if prepare_only and (initial_scope is None and not conversion or (record is not None and (
             record["phase"] not in {"prepare", "quiesce"}
             or record.get("job_support") is not None
             or record.get("updater_job") is not None
@@ -1103,7 +1234,8 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
         try:
             stable["_check_maintenance"](installation)
             authorized = (_application_stage(store, "authorize", initialization=initial_scope)
-                          if initial_scope is not None else _application_stage(store, "authorize"))
+                          if initial_scope is not None else (_application_stage(store, "authorize", convert_sealed=True)
+                          if conversion else _application_stage(store, "authorize")))
         finally:
             os.close(runtime)
         if not pending:
@@ -1113,7 +1245,9 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
                 return record
             if record is not None:
                 _application_stage(store, "retire-render")
-            intent = {"initialization_scope": initial_scope} if initial_scope is not None else {}
+            intent = {'initialization_scope': initial_scope} if initial_scope is not None else {}
+            if conversion:
+                intent['conversion_scope'] = _conversion_scope(authorized['conversion_scope'])
             store.prepare_target(target, request_id=str(uuid.uuid4()), **intent)
         record = store.load()
         if record["phase"] == "prepare":
@@ -1127,13 +1261,13 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
     return record
 
 
-def _apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False):
+def _apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False, convert_sealed=False):
     """The single operator route; always continue the original frozen operation."""
     dispatch = None
     with UpdateStore(installation) as store:
         record = _prepare_update_locked(store, target=target, initialization=initialization,
                                          prepare_only=prepare_only, expected_request_id=expected_request_id,
-                                         from_prepared_remote=from_prepared_remote)
+                                         from_prepared_remote=from_prepared_remote, convert_sealed=convert_sealed)
         if record is None or (target is None and record["phase"] == "done" and not record.get("health_errors")):
             return {"update": record, "dispatch": "nothing_pending"}
         if prepare_only:
@@ -1157,19 +1291,23 @@ def _apply_or_continue(installation, *, target=None, initialization=None, prepar
 
 
 
-def apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False):
+def apply_or_continue(installation, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False, convert_sealed=False):
     """Prepare/dispatch once, or attach read-only to the active original job."""
     if type(prepare_only) is not bool:
         raise UpdateError("prepare-only must be an explicit boolean")
     if type(from_prepared_remote) is not bool:
         raise UpdateError("prepared-remote resolution must be an explicit boolean")
-    if from_prepared_remote and (initialization is not None or prepare_only
+    if type(convert_sealed) is not bool:
+        raise UpdateError("conversion must be an explicit boolean")
+    if convert_sealed and (initialization is not None or not prepare_only):
+        raise UpdateError("sealed conversion requires --prepare-only and no initialization scope")
+    if from_prepared_remote and (initialization is not None or prepare_only and not convert_sealed
             or target is not None and (not isinstance(target, str) or not _COMMIT.fullmatch(target))):
         raise UpdateError("remote update apply takes only an optional full Git commit")
     try:
         return _apply_or_continue(installation, target=target, initialization=initialization,
                                   prepare_only=prepare_only, expected_request_id=expected_request_id,
-                                  from_prepared_remote=from_prepared_remote)
+                                  from_prepared_remote=from_prepared_remote, convert_sealed=convert_sealed)
     except UpdateBusyError:
         if prepare_only:
             raise UpdateBusyError("another update is active; inspect its original operation") from None
@@ -1235,9 +1373,13 @@ def main(argv=None):
     parser.add_argument("update", choices=["update"])
     parser.add_argument("action", nargs="?", choices=["status", "recovery", "apply", "continue"], default="status")
     parser.add_argument("target", nargs="?")
+    parser.add_argument("--convert-sealed", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args(argv)
     if Path(args.root) != installation.data_root:
         raise UpdateError("updater data root differs from the recorded installation")
+    if (args.convert_sealed or args.prepare_only) and (args.action != "apply" or not (args.convert_sealed and args.prepare_only)):
+        raise UpdateError("conversion preview requires apply --convert-sealed --prepare-only")
     if args.action in {"status", "recovery"}:
         if args.target is not None:
             raise UpdateError("read-only update inspection takes no target")
@@ -1250,7 +1392,8 @@ def main(argv=None):
         if args.action == "continue" and args.target is not None:
             raise UpdateError("continue uses the existing frozen target")
         result = apply_or_continue(installation, target=args.target,
-                                   from_prepared_remote=args.action == "apply")
+                                   from_prepared_remote=args.action == "apply",
+                                   convert_sealed=args.convert_sealed, prepare_only=args.prepare_only)
     print(json.dumps(result, sort_keys=True))
     return 0
 

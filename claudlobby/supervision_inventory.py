@@ -738,7 +738,8 @@ def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path:
 def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...], *,
                        package: PackageResources | None = None, runner=None,
                        bootstrap_empty: bool = False, legacy_source: bool = False,
-                       adapter=None, only_names: frozenset[str] | None = None) -> EnrollmentInventory:
+                       adapter=None, only_names: frozenset[str] | None = None,
+                       historical_release=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -755,6 +756,17 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     binding and stability without unrelated host timer activity vetoing it.
     """
     data_root = data_root.resolve(strict=True)
+    historical_identity = None
+    if historical_release is not None:
+        from .releases import release_path
+        if (bootstrap_empty or legacy_source
+                or historical_release.directory != release_path(data_root, historical_release.release_id)):
+            raise InventoryError("historical inventory requires this root's exact sealed evidence")
+        historical_identity = {
+            'CLAUDLOBBY_ROOT': str(data_root), 'CLAUDLOBBY_RELEASE_ID': historical_release.release_id,
+            'CLAUDLOBBY_NATIVE_DIR': str(historical_release.native_path),
+            'CLAUDLOBBY_CLI': str(historical_release.cli_path),
+            'CLAUDLOBBY_ARTIFACT_ID': historical_release.inputs.artifact_id}
     if (type(bootstrap_empty) is not bool or type(legacy_source) is not bool
             or bootstrap_empty and (declarations or legacy_source)):
         raise InventoryError("bootstrap inventory must have no original declarations")
@@ -776,7 +788,12 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     for declaration in declarations:
         name = declaration.source.name
         env = dict(declaration.environment)
-        if installation is not None:
+        if historical_identity is not None:
+            invalid_identity = (declaration.release_id != historical_release.release_id
+                or any(env.get(key) != value for key, value in historical_identity.items())
+                or not env.get('CLAUDLOBBY_LIBRARY_DIR')
+                or not Path(env['CLAUDLOBBY_LIBRARY_DIR']).is_relative_to(historical_release.directory))
+        elif installation is not None:
             identity = {
                 "CLAUDLOBBY_ROOT": str(data_root),
                 "CLAUDLOBBY_INSTALLATION": str(installation.directory),
