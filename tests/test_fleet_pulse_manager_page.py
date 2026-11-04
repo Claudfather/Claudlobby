@@ -137,8 +137,10 @@ class Fleet:
         return self.pages.read_text().splitlines() if self.pages.exists() else []
 
     def sweep(self, **env):
+        (self.root / ".claudlobby-harness-root").write_text(str(self.root.resolve()))
         result = subprocess.run(
-            ["bash", str(self.lib / "fleet-pulse.sh"), F],
+            [sys.executable, str(REPO / "harness/compose.py"), "--root", str(self.root),
+             "--fleet", F, "--pulse", "--native-dir", str(self.lib)],
             env={"PATH": f"{self.bin}:/usr/local/bin:/usr/bin:/bin", "HOME": str(self.root / "home"),
                  "LANG": "C.UTF-8", "CLAUDLOBBY_ROOT": str(self.root), "FLEET_NAME": F,
                  "TMUX_TMPDIR": str(self.tmux), "BROWSER_SCAN_PROC": str(self.proc),
