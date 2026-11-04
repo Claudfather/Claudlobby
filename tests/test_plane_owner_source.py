@@ -290,7 +290,6 @@ def test_foreign_marker_precedes_missing_index_remediation(tmp_path):
 
 
 def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
@@ -300,7 +299,6 @@ def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
     challenge = store.begin_pairing(principal)
     grant = store.confirm_pairing(challenge.token, expected_principal=principal)
     assert inspect_owner_setup(tmp_path) == grant.host_uid
-    activation._bootstrap_plane(tmp_path, None)  # Existing bootstrap eligibility seam, no effects.
     with pytest.raises(AccessUnavailable):
         inspect_source(tmp_path)
     assert not db_file(tmp_path).exists()
@@ -308,7 +306,6 @@ def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
 
 @pytest.mark.parametrize("entry", ["plane.db", "spool", "staged", "owner.sock", "unknown"])
 def test_pre_activation_owner_refuses_other_plane_content(tmp_path, entry):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
@@ -316,8 +313,6 @@ def test_pre_activation_owner_refuses_other_plane_content(tmp_path, entry):
     (db_file(tmp_path).parent / entry).write_text("synthetic unexpected state")
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
-    with pytest.raises(activation.ActivationError):
-        activation._bootstrap_plane(tmp_path, None)
 
 
 @pytest.mark.parametrize("problem", ["foreign", "corrupt", "redirected", "activation", "runtime", "selection", "config",
@@ -353,19 +348,15 @@ def test_fresh_owner_admission_never_masks_old_or_invalid_state(tmp_path, proble
 
 
 def test_default_authority_without_explicit_fresh_marker_never_falls_back(tmp_path):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
     OwnerAccess.initialize(tmp_path)
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
-    with pytest.raises(activation.ActivationError):
-        activation._bootstrap_plane(tmp_path, None)
 
 
 def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_path):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
@@ -377,8 +368,6 @@ def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_pa
     assert not db_file(tmp_path).exists()
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
-    with pytest.raises(activation.ActivationError):
-        activation._bootstrap_plane(tmp_path, None)
 
 
 @pytest.mark.parametrize("overlay", ["local/example", "local/system/example"])

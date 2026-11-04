@@ -148,7 +148,7 @@ def test_host_job_reads_effective_host_override_without_fleet_merge(tmp_path, ov
     assert main(["--root", str(tmp_path), "host", "job", "show", "claude-update", "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["data"]["job"] == load_host_jobs()["claude-update"]
-    assert "config plan" in shown["data"]["enrollment_hint"]
+    assert "host update apply" in shown["data"]["enrollment_hint"]
 
     assert main(["--root", str(tmp_path), "host", "job", "show", "claude-update"]) == 0
     lines = capsys.readouterr().out.splitlines()
