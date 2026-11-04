@@ -29,24 +29,33 @@ from claudlobby.doctor import (
     run_doctor,
 )
 from tests.package_fixtures import source_package
+from tests.fixtures.current_runtime import current_runtime  # noqa: F401
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
 
 
-def test_generated_host_doctor_only_checks_its_fleet(tmp_path, monkeypatch):
+def test_generated_host_doctor_only_checks_its_fleet(current_runtime, monkeypatch):
     from types import SimpleNamespace
-    from claudlobby import context, doctor
+    from claudlobby import doctor
     from claudlobby.commands import host_doctor
+    from claudlobby.paths import load_lib_module
+    from claudlobby.active_config import read_current_config
+    import shutil
 
-    root = tmp_path / "data"
+    root, installation, rendered, host = current_runtime
     own = root / "local" / "own"
     own.mkdir(parents=True)
-    (root / "fleet.yaml").write_text(
-        "fleet:\n  name: rootfleet\n  manager: rootbot\n  bots:\n    rootbot:\n      expertise: [software-engineering]\n")
     (own / "fleet.yaml").write_text(
         "fleet:\n  name: own\n  manager: worker\n  bots:\n    worker:\n      expertise: [software-engineering]\n")
-    monkeypatch.setattr(context, "get_resources", source_package)
+    # The fixture's first publication is complete; prepare the next one in its
+    # existing private render slot rather than replacing a pending render.
+    shutil.rmtree(rendered.directory)
+    fixture = load_lib_module(REPO / "harness", "compose.py")
+    fixture.publish_fixture(installation, "own")
+    snapshot = read_current_config(root, installation=installation,
+                                   revision=host.package.source_revision)
+    assert set(snapshot["fleets"]) == {"example", "own"}
     monkeypatch.setenv("FLEET_NAME", "own")
     checked = []
     monkeypatch.setattr(doctor, "run_doctor", lambda fleet, paths, **_:

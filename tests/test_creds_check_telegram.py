@@ -24,6 +24,7 @@ from pathlib import Path
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec
 from tests.fixtures.provider_status import STATUS_PAGE_ARM
 from tests.test_maintenance_jobs import _native_fixture
+from tests.package_fixtures import git_package
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -254,14 +255,15 @@ def test_selected_check_uses_reviewed_roster_not_mutable_manifest(tmp_path):
     # make this one-shot probe a residue bot or another declared bot.
     (fleet_root / "fleet.yaml").write_text(
         "fleet:\n  name: f\n  bots:\n    bot2:\n      expertise: [x]\n")
-    release_id = "r-" + "a" * 64
-    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": release_id,
+    installation = git_package(f["root"]).installation
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_NATIVE_ADMITTED": "1",
            "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
-           "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+           "CLAUDLOBBY_CLI": str(installation.cli),
            "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f"}
     result = subprocess.run(
         ["bash", str(f["native"] / "creds-check.sh"),
-         "--selected-release", release_id, "--fleet", "f",
+         "--admitted-runtime", "--fleet", "f",
          "--fleet-root", str(fleet_root),
          "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "bot1"],
         capture_output=True, text=True, env=env, timeout=60)
@@ -282,16 +284,17 @@ def test_selected_check_takes_its_alert_sender_from_the_activated_roster(tmp_pat
     fleet_root = f["root"] / "local" / "f"
     (fleet_root / "fleet.yaml").write_text(
         "fleet:\n  name: f\n  bots:\n    bot2:\n      expertise: [x]\n")
-    release_id = "r-" + "a" * 64
-    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": release_id,
+    installation = git_package(f["root"]).installation
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_NATIVE_ADMITTED": "1",
            "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
-           "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+           "CLAUDLOBBY_CLI": str(installation.cli),
            "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f",
            # The activated fleet chat, which the selected CLI passes from the plan.
            "TELEGRAM_GROUP_CHAT_ID": "-1001234567890"}
     result = subprocess.run(
         ["bash", str(f["native"] / "creds-check.sh"),
-         "--selected-release", release_id, "--fleet", "f",
+         "--admitted-runtime", "--fleet", "f",
          "--fleet-root", str(fleet_root),
          "--bots-dir", str(fleet_root / "runtime" / "bots"),
          "--bot", "bot1", "--bot", "bot2"],
@@ -309,10 +312,10 @@ def test_selected_timer_delegates_to_selected_cli_before_probing(tmp_path):
     called = tmp_path / "called"
     cli = tmp_path / "selected-cli"
     _write_exec(cli, f'#!/bin/bash\nprintf "%s\\n" "$@" > "{called}"\n')
-    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": "r-" + "a" * 64,
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(git_package(f["root"]).installation.directory),
            "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
            "CLAUDLOBBY_CLI": str(cli),
-           "FLEET_ROOT": str(f["root"] / "local" / "f")}
+           "FLEET_ROOT": str(f["root"] / "local" / "f"), "CLAUDLOBBY_FLEET": "f"}
     result = subprocess.run(["bash", str(f["native"] / "creds-check.sh"), "f"],
                             capture_output=True, text=True, env=env, timeout=10)
     assert result.returncode == 0, result.stderr

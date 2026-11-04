@@ -332,9 +332,9 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
 ):
     from claudlobby import credential_check as check
     from claudlobby.config import BotConfig, FleetConfig
-    from claudlobby.config_plan import path_state
     from claudlobby.paths import Paths
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
+    from claudlobby.runtime_admission import GitCurrentRuntime
 
     root = tmp_path / "root"
     fleet_root = root / "local" / "f"
@@ -345,8 +345,10 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
     other_root.mkdir(parents=True)
     other_manifest = other_root / "fleet.yaml"
     other_manifest.write_text("fleet: {name: g}\n")
-    paths = Paths(root=root, fleet_dir=fleet_root, package=source_package())
-    other_paths = Paths(root=root, fleet_dir=other_root, package=source_package())
+    package = git_package(root)
+    package = replace(package, native=package.runtime_native)
+    paths = Paths(root=root, fleet_dir=fleet_root, package=package)
+    other_paths = Paths(root=root, fleet_dir=other_root, package=package)
     fleet = FleetConfig(name="f", manager="manager", service_prefix="test",
                         bots={name: BotConfig(bot_id=name, name=name, expertise=["x"])
                               for name in ("manager", "worker")})
@@ -355,30 +357,22 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
                               bots={"manager": BotConfig(bot_id="manager", name="manager",
                                                          expertise=["x"])})
     other_destination = SimpleNamespace(paths=other_paths, fleet=other_fleet)
-    release_id = "r-" + "a" * 64
-    release = SimpleNamespace(release_id=release_id, native_path=paths.lib)
-    plan = SimpleNamespace(
-        effects={"fleet_sources": {"f": {"fleet": {"path": str(manifest)}},
-                                   "g": {"fleet": {"path": str(other_manifest)}}}},
-        inputs={str(path): {"state": path_state(path, source=True)}
-                for path in (manifest, other_manifest)},
-        frozen_input=lambda source, required: (
-            Path(source["path"]), Path(source["path"]).read_bytes()))
+    release = GitCurrentRuntime(paths.package.installation, paths.package.source_revision,
+        "c" * 64, {"fleets": {"f": {"manifest": str(manifest), "fleet": manifest.read_text()},
+                              "g": {"manifest": str(other_manifest), "fleet": other_manifest.read_text()}}})
 
     @contextmanager
     def admitted(root, expected_release=None):
         yield release
 
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release_id)
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
+    monkeypatch.delenv("CLAUDLOBBY_ARTIFACT_ID", raising=False)
     monkeypatch.setattr(check, "mutation_admission", admitted)
-    monkeypatch.setattr(check, "read_selection", lambda root: {
-        "release_id": release_id, "plan_id": "p"})
-    monkeypatch.setattr(check, "read_plan", lambda root, plan_id: plan)
     monkeypatch.setattr(check, "native_environment", lambda paths, current: {
         "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(paths.fleet_config_dir),
         "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
         "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
-        "CLAUDLOBBY_RELEASE_ID": release_id})
+        "CLAUDLOBBY_INSTALLATION": str(paths.package.installation.directory)})
     calls = []
 
     def run(argv, **kwargs):
@@ -395,7 +389,9 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
     monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
         destination, SimpleNamespace(bot_id="manager")))
     result = check.check_credentials(root=root, fleet="f")
-    assert result.fleet == "f" and result.release_id == release_id
+    assert result.fleet == "f" and result.release_id is None
+    assert result.source_revision == release.revision
+    assert result.config_fingerprint == release.config_fingerprint
     argv, kwargs = calls[0]
     assert argv == [str(paths.lib / "creds-check.sh"), "--admitted-runtime",
                     "--fleet", "f", "--fleet-root", str(fleet_root),
@@ -457,8 +453,8 @@ def test_selected_credential_check_probes_the_activated_roster_after_a_fleet_yam
     changes the file on disk and nothing the probe is given."""
     from claudlobby import credential_check as check
     from claudlobby.active_config import context_from_plan
-    from claudlobby.config_plan import path_state
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
+    from claudlobby.runtime_admission import GitCurrentRuntime
 
     root = tmp_path.resolve() / "root"
     fleet_root = root / "local" / "f"
@@ -471,23 +467,21 @@ def test_selected_credential_check_probes_the_activated_roster_after_a_fleet_yam
         fleets=["f"], data_root=root,
         effects={"fleet_sources": {"f": {"fleet": frozen, "projects": projects}},
                  "fleet_manifests": {"f": str(manifest)}},
-        inputs={str(manifest): {"state": path_state(manifest, source=True)}},
         frozen_input=lambda item, required=False: (
             (manifest, ACTIVATED_FLEET.encode()) if item is frozen
             else (fleet_root / "projects.yaml", None)))
-    package = source_package()
-    release_id = "r-" + "a" * 64
-    release = SimpleNamespace(release_id=release_id, native_path=package.native)
+    package = git_package(root)
+    package = replace(package, native=package.runtime_native)
+    release = GitCurrentRuntime(package.installation, package.source_revision, "c" * 64,
+        {"fleets": {"f": {"manifest": str(manifest), "fleet": ACTIVATED_FLEET}}})
 
     @contextmanager
     def admitted(root, expected_release=None):
         yield release
 
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release_id)
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
+    monkeypatch.delenv("CLAUDLOBBY_ARTIFACT_ID", raising=False)
     monkeypatch.setattr(check, "mutation_admission", admitted)
-    monkeypatch.setattr(check, "read_selection", lambda root: {
-        "release_id": release_id, "plan_id": "p"})
-    monkeypatch.setattr(check, "read_plan", lambda root, plan_id: plan)
     # The timer's scope: no generated bot origin, and a destination read from the
     # plan's frozen bytes on each call.
     monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
@@ -496,7 +490,7 @@ def test_selected_credential_check_probes_the_activated_roster_after_a_fleet_yam
         "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(paths.fleet_config_dir),
         "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
         "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
-        "CLAUDLOBBY_RELEASE_ID": release_id})
+        "CLAUDLOBBY_INSTALLATION": str(package.installation.directory)})
     calls = []
 
     def run(argv, **kwargs):

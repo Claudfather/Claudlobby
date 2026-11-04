@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import stat
 import subprocess
 
 from .context import native_environment
@@ -47,8 +48,13 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
         if manifest != destination.paths.fleet_yaml:
             raise CredentialCheckError("fleet source differs from its committed configuration")
         try:
-            source_changed = (manifest.is_symlink() or manifest.resolve() != manifest
-                              or manifest.read_bytes() != frozen["fleet"].encode())
+            source_changed = manifest.is_symlink() or manifest.resolve() != manifest
+            if not source_changed:
+                expected = frozen["fleet"].encode()
+                fd = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as source:
+                    source_changed = (not stat.S_ISREG(os.fstat(source.fileno()).st_mode)
+                                      or source.read(len(expected) + 1) != expected)
         except OSError:
             source_changed = True
         if destination.paths.runtime_bots.resolve() != destination.paths.runtime_bots:

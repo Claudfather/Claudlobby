@@ -20,6 +20,7 @@ is public.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -209,8 +210,9 @@ class TestRenderedBytes:
     DIGEST = re.compile(r"^export FLEET_MANIFEST_SHA256=.*$", re.M)
 
     def _render(self, fleet_dir: Path) -> dict[str, dict[str, str]]:
+        from tests.package_fixtures import git_package
         fleet = load_test_fleet(fleet_dir)
-        paths = make_paths(fleet_dir)
+        paths = replace(make_paths(fleet_dir), package=git_package(fleet_dir))
         out = {}
         for bot in fleet.bots.values():
             files = render_bot_files(bot, fleet, paths)

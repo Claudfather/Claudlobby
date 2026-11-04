@@ -14,6 +14,7 @@ from tests.plane_setup import initialize_plane
 
 import json
 import pytest
+import shutil
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.uptime import compute_metrics, entries_from_plane
 from tests.plane_fixtures import _stdlib_readers
+from tests.conftest import constructed_env
 from tests.test_plane_keepalive_door import CLI, LIB, _replay_pending, _rig, _tick
 
 FLEET = "kfleet"
@@ -46,9 +48,29 @@ def _manifest(root: Path):
 
 
 def _cli(root: Path, *args, env=None):
-    base = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"}
-    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", FLEET, *args],
+    base = constructed_env(CLAUDLOBBY_ROOT=str(root), HOME=str(root), PATH="/usr/bin:/bin")
+    cli = root.parent / (".harness-installation-" + root.name) / "bin/claudlobby"
+    return subprocess.run([str(cli), "--root", str(root), "--fleet", FLEET, *args],
                           capture_output=True, text=True, timeout=180, env={**base, **(env or {})})
+
+
+@pytest.fixture
+def uptime_runtime(tmp_path):
+    """Commit the real private roster, with no enrollment or native start."""
+    root = tmp_path
+    _manifest(root)
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
+    installation = root.parent / (".harness-installation-" + root.name)
+    try:
+        prepared = subprocess.run([sys.executable, str(LIB.parents[1] / "harness/compose.py"),
+                                   "--root", str(root), "--fleet", FLEET, "--prepare-runtime"],
+                                  capture_output=True, text=True, timeout=180,
+                                  env=constructed_env(HOME=str(root)))
+        assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+        assert (installation / "bin/claudlobby").is_file()
+        yield root
+    finally:
+        shutil.rmtree(installation, ignore_errors=True)
 
 
 def _await(root: Path, sql: str, want, *, timeout=30):
@@ -191,9 +213,8 @@ def test_uptime_metrics_from_the_plane(tmp_path):
     assert with_down["uptime_pct"] <= expected["uptime_pct"] and with_down["restart_count"] == 1   # DOWN adds no uptime
 
 
-def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
-    root = tmp_path
-    _manifest(root)
+def test_fleet_uptime_reads_the_plane_and_refuses_without_it(uptime_runtime):
+    root = uptime_runtime
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     bot = root / "local" / FLEET / "runtime" / "bots" / "b1"
     bot.mkdir(parents=True); (bot / "bot.conf").write_text('BOT_NAME="b1"\n')
@@ -218,13 +239,12 @@ def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
     assert refused_result["data"] == {} and "plane.db" in refused_result["error"]["message"]  # never an empty table
 
 
-def test_fleet_uptime_says_what_it_measured_even_with_no_rows(tmp_path):
+def test_fleet_uptime_says_what_it_measured_even_with_no_rows(uptime_runtime):
     """#891: with no bot rows the text path still prints its coverage line (the
     `No bots found` path #1742's review noted is gone; this pins it), and the JSON
     says what `uptime_pct` divides by. The plane holds the fleet (a plane that
     never saw it is refused as the wrong root); the runtime has no bot dirs."""
-    root = tmp_path
-    _manifest(root)
+    root = uptime_runtime
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (root / "local" / FLEET / "runtime" / "bots").mkdir(parents=True)
     initialize_plane(root)

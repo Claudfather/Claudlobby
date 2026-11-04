@@ -553,8 +553,9 @@ assert all(not bot.channels and not bot.remote_control for bot in fleet.bots.val
     # No sys.path or resource injection: these imports must come from the
     # installed wheel while the working directory and data root are unrelated.
     _run([python, "-I", "-B", "-c", """
-import importlib.metadata, pathlib, plistlib, shlex, sys
+import importlib.metadata, pathlib, sys
 import claudlobby
+from claudlobby.activation_state import ActivationError
 from claudlobby.context import resolve_context
 from claudlobby.composer import compose_fleet
 from claudlobby.plane.owner_access import VerifiedReader
@@ -574,20 +575,17 @@ assert context.paths.package == resources
 assert context.fleet.manager == 'manager'
 assert all(bot.channels == [] for bot in context.fleet.bots.values())
 assert context.paths.find_library_file('expertise', 'orchestration') == resources.library / 'expertise/orchestration.md'
-outputs = compose_fleet(context.fleet, context.paths)
-assert set(outputs) == {'manager', 'worker'}
-for bot_id, directory in outputs.items():
-    assert directory.is_relative_to(root)
-    assert (directory / 'CLAUDE.md').stat().st_size > 0
-    conf = (directory / 'bot.conf').read_text()
-    for key, value in {'CLAUDLOBBY_ROOT': root, 'CLAUDLOBBY_NATIVE_DIR': resources.native,
-                       'CLAUDLOBBY_CLI': cli}.items():
-        assert f'export {key}={shlex.quote(str(value))}' in conf
-    unit = plistlib.loads((directory / f'com.installed-smoke.{bot_id}.plist').read_bytes())
-    assert unit['ProgramArguments'] == [str(resources.native / 'start-bot.sh'), str(directory)]
-    assert unit['EnvironmentVariables']['CLAUDLOBBY_CLI'] == str(cli)
-    assert unit['EnvironmentVariables']['CLAUDLOBBY_ROOT'] == str(root)
-assert (outputs['worker'] / '.claude/skills/installed-smoke').resolve() == root / 'library/skills/installed-smoke'
+# Wheel resources still support inspection and authoring, but cannot create a
+# second native runtime outside the managed Git installation.
+try:
+    compose_fleet(context.fleet, context.paths)
+except ActivationError as error:
+    assert str(error) == 'native unit generation requires a managed Git installation'
+else:
+    raise AssertionError('wheel-only composition admitted a native runtime')
+assert not list(context.paths.runtime_bots.rglob('bot.conf'))
+assert not list(context.paths.runtime_bots.rglob('*.plist'))
+assert not list(context.paths.runtime_bots.rglob('*.service'))
 """, data, package, cli, *dependencies], outside)
     assert _asset_hashes(package) == immutable_before
     assert not any((data / name).exists() for name in (".git", "pyproject.toml", "claudlobby", "lib"))
