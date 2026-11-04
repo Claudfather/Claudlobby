@@ -821,3 +821,70 @@ svc_activation_pause "$file" gui/123/example 'unchanged loaded inactive' 123 bot
     else:
         assert observed == ["external", "bootout", "private-stop"], outcome.stderr
         assert outcome.returncode == (3 if defect else 0), outcome.stderr
+
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+@pytest.mark.parametrize("endpoint", ["absent", "refused", "live", "regular", "symlink", "foreign", "permission"])
+def test_deenrolled_bot_freeze_requires_positive_private_endpoint_quiet(tmp_path_factory, monkeypatch, endpoint, manager):
+    import plistlib
+    from types import SimpleNamespace
+    directory = tmp_path_factory.mktemp("sq")
+    socket_dir = directory / ("tmux-" + str(os.getuid()))
+    socket_dir.mkdir()
+    path = socket_dir / "b"
+    content = plistlib.dumps({"Label": "b", "ProgramArguments": ["/bin/true"],
+                             "EnvironmentVariables": {"TMUX_TMPDIR": str(directory)}})
+    if manager == "Linux":
+        content = ("[Service]\nEnvironment=TMUX_TMPDIR=" + str(directory) + "\n").encode()
+    generated = directory / ("b.service" if manager == "Linux" else "b.plist")
+    generated.write_bytes(content)
+    absent_installed = directory / "native" / generated.name
+    assert generated.exists() and not absent_installed.exists()
+    row = {"target": "b.service" if manager == "Linux" else "gui/123/b", "installed": [], "properties": [
+           ["UnitFileState", "not-found" if manager == "Linux" else "unchanged"],
+           ["LoadState", "not-found" if manager == "Linux" else "unloaded"], ["ActiveState", "inactive"]],
+           "generated": {"path": str(generated), "content": {"base64": base64.b64encode(content).decode()}},
+           "declaration": {"source": str(generated), "scope": "bot", "service": None,
+                           "working_directory": str(directory)}}
+    monkeypatch.setattr(services.platform, "system", lambda: manager)
+    monkeypatch.setattr(services, "current_git_declarations", lambda *_: ())
+    inventory = SimpleNamespace(payload=lambda: {"units": [deepcopy(row)]})
+    monkeypatch.setattr(services, "collect_enrollment", lambda *args, **kwargs: SimpleNamespace(require_complete=lambda: inventory))
+    class Adapter:
+        def call(self, function, *args, **kwargs):
+            pytest.fail("inventory already proves native absence; generated files are not installed native targets")
+    server = None
+    if endpoint in {"refused", "live", "foreign"}:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        if endpoint == "live":
+            server.listen(1)
+        else:
+            server.close()
+    elif endpoint == "regular":
+        path.write_text("foreign file")
+    elif endpoint == "symlink":
+        path.symlink_to(directory / "absent")
+    if endpoint in {"foreign", "permission"}:
+        original = Path.lstat
+        def lstat(actual, *args, **kwargs):
+            if actual == path:
+                if endpoint == "permission":
+                    raise PermissionError("unreadable endpoint")
+                info = original(actual, *args, **kwargs)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+            return original(actual, *args, **kwargs)
+        monkeypatch.setattr(Path, "lstat", lstat)
+    try:
+        if endpoint in {"absent", "refused"}:
+            rows = services.freeze_service_intent({"data_root": str(directory)}, Adapter(), directory)
+            assert rows[0]["disposition"] == "uninstalled" and rows[0]["installed"] == []
+        else:
+            with pytest.raises(runtime.RuntimeEvidenceError, match="socket"):
+                services.freeze_service_intent({"data_root": str(directory)}, Adapter(), directory)
+        if endpoint != "absent" and endpoint != "permission":
+            assert path.is_symlink() or path.exists()  # Proof never unlinks retained endpoints.
+    finally:
+        if server is not None:
+            server.close()

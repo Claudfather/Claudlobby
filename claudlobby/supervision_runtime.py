@@ -75,6 +75,33 @@ def unit_start_budget(file: Path, content: bytes) -> int:
     return 30 + delay
 
 
+def assert_private_endpoint_quiet(socket_path: Path, *, target: str) -> str:
+    """Prove only this owned endpoint absent/refused; never signal or unlink it."""
+    socket_path = Path(socket_path)
+    if not socket_path.is_absolute():
+        raise RuntimeEvidenceError("quiescence", target, "socket witness must be absolute")
+    try:
+        info = socket_path.lstat()
+    except FileNotFoundError:
+        socket_state = "absent"
+    except OSError as exc:
+        raise RuntimeEvidenceError("quiescence", target, "socket observation unavailable") from exc
+    else:
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeEvidenceError("quiescence", target, "socket witness is foreign or not a socket")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            try:
+                probe.connect(str(socket_path))
+            except ConnectionRefusedError:
+                socket_state = "refused"
+            except OSError as exc:
+                raise RuntimeEvidenceError("quiescence", target, "socket observation unavailable") from exc
+            else:
+                raise RuntimeEvidenceError("quiescence", target, "known socket still accepts connections")
+    return socket_state
+
+
 def assert_quiescent(adapter: Adapter, *, installed_file: Path, target: str,
                      socket_path: Path | None = None, known_pids: tuple[int, ...] = (),
                      known_cgroup: str = "", settle_s: int = 0) -> RuntimeEvidence:
@@ -106,30 +133,8 @@ def assert_quiescent(adapter: Adapter, *, installed_file: Path, target: str,
         except OSError as exc:
             raise RuntimeEvidenceError("quiescence", target, "PID observation unavailable") from exc
         raise RuntimeEvidenceError("quiescence", target, f"known process {pid} remains")
-    socket_state = "not-supplied"
-    if socket_path is not None:
-        socket_path = Path(socket_path)
-        if not socket_path.is_absolute():
-            raise RuntimeEvidenceError("quiescence", target, "socket witness must be absolute")
-        try:
-            info = socket_path.lstat()
-        except FileNotFoundError:
-            socket_state = "absent"
-        except OSError as exc:
-            raise RuntimeEvidenceError("quiescence", target, "socket observation unavailable") from exc
-        else:
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-                raise RuntimeEvidenceError("quiescence", target, "socket witness is foreign or not a socket")
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                probe.settimeout(0.5)
-                try:
-                    probe.connect(str(socket_path))
-                except ConnectionRefusedError:
-                    socket_state = "refused"
-                except OSError as exc:
-                    raise RuntimeEvidenceError("quiescence", target, "socket observation unavailable") from exc
-                else:
-                    raise RuntimeEvidenceError("quiescence", target, "known socket still accepts connections")
+    socket_state = (assert_private_endpoint_quiet(socket_path, target=target)
+                    if socket_path is not None else "not-supplied")
     return RuntimeEvidence("quiescent", target, {
         "native": observed, "known_pids": list(known_pids), "known_cgroup": known_cgroup,
         "socket_path": str(socket_path) if socket_path is not None else None,
