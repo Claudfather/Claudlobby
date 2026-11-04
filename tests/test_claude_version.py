@@ -509,12 +509,14 @@ def test_a_real_eval_refuses_when_its_claude_cannot_run(tmp_path):
     assert "COVERAGE_AB_RESULT" not in r.stdout
 
 
-def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path, built_test_cli):
+def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path):
     """A dry run makes no model call, so a runnable claude on PATH is not part of
     its evidence and must not become its pin."""
-    r = _eval(
-        tmp_path, healthy("2.1.281"), "--dry-run", "--experiment", "coverage-honesty",
-        "--reps", "1", CLAUDLOBBY_CLI=built_test_cli,
+    binary = _stub(tmp_path, "claude", healthy("2.1.281"))
+    pin = _shell_function("ab-comms-eval.sh", "pin_claude_version")
+    r = _bash(
+        tmp_path, f'{pin}DRY_RUN=1; pin_claude_version; printf "claude=%s" "$CLAUDE_VER"',
+        PATH=f"{binary.parent}{os.pathsep}{os.environ['PATH']}",
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0, out[-1500:]
