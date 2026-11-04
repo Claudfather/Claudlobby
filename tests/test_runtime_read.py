@@ -1,6 +1,5 @@
 """Selected session evidence and bounded native log reads stay distinct."""
 
-from pathlib import Path
 from types import SimpleNamespace
 import json
 
@@ -9,20 +8,32 @@ import pytest
 from claudlobby.command_result import CommandFailure, execute
 from claudlobby.commands import runtime_read
 from claudlobby.fleet_operations import FleetBotObservation, FleetReconcileResult
+from claudlobby.paths import Paths
+from tests.package_fixtures import git_package
 
-
-LIB = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
 
 
 def _context(tmp_path):
     root = tmp_path / "data-root"
     source = tmp_path / "external-fleet"
     source.mkdir()
+    root.mkdir()
     (source / "fleet.yaml").write_text("fleet:\n  name: example\n")
     return SimpleNamespace(
         fleet=SimpleNamespace(name="example", bots={"lead": object(), "worker": object()}),
-        paths=SimpleNamespace(root=root, source_dir=source, lib=LIB),
+        paths=Paths(root=root, fleet_dir=source, package=git_package(root)),
     )
+
+
+@pytest.fixture
+def log_runtime(monkeypatch):
+    from claudlobby import active_config
+    stamp = active_config.RuntimeReadStamp("git", source_revision="a" * 40, config_fingerprint="b" * 64)
+    def selected(root, *, package):
+        assert package.installation.data_root == root
+        return stamp
+    monkeypatch.setattr(active_config, "runtime_read_stamp", selected)
+    return stamp
 
 
 def _args(command, bot=None, lines=10):
@@ -69,17 +80,18 @@ def test_session_reports_selected_native_absence_and_unknown_without_pid_scan(mo
     assert runtime_read.dispatch(_args("bot.session", "worker")).data["bot"]["state"] == "indeterminate"
 
 
-def test_logs_use_external_selected_fleet_and_disclose_missing_per_bot(monkeypatch, tmp_path, capsys):
+def test_logs_use_external_selected_fleet_and_disclose_missing_per_bot(monkeypatch, tmp_path, capsys, log_runtime):
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
-    monkeypatch.setattr(runtime_read, "_log_release", lambda _context: "selected-release")
     bot_dir = context.paths.source_dir / "runtime/bots/lead/logs"
     bot_dir.mkdir(parents=True)
     (bot_dir / "startup.log").write_text("one\ntwo\nthree\n")
     args = _args("fleet.logs", lines=2)
     assert execute(args.public_command, lambda: runtime_read.dispatch(args), json_output=True) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["schema_version"] == 1 and result["release_id"] == "selected-release"
+    assert result["schema_version"] == 1 and result["release_id"] is None
+    assert result["data"]["source_revision"] == log_runtime.source_revision
+    assert result["data"]["config_fingerprint"] == log_runtime.config_fingerprint
     items = {item["bot"]: item for item in result["data"]["items"]}
     assert items["lead"]["status"] == "read" and "two\nthree" in items["lead"]["text"]
     assert "one" not in items["lead"]["text"]
@@ -89,10 +101,9 @@ def test_logs_use_external_selected_fleet_and_disclose_missing_per_bot(monkeypat
     assert missing.value.error.code == "not_found"
 
 
-def test_log_source_symlink_refuses_and_lines_are_bounded(monkeypatch, tmp_path):
+def test_log_source_symlink_refuses_and_lines_are_bounded(monkeypatch, tmp_path, log_runtime):
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
-    monkeypatch.setattr(runtime_read, "_log_release", lambda _context: "selected-release")
     bot_dir = context.paths.source_dir / "runtime/bots/lead/logs"
     bot_dir.mkdir(parents=True)
     secret = tmp_path / "secret.log"
@@ -115,10 +126,9 @@ def test_log_source_symlink_refuses_and_lines_are_bounded(monkeypatch, tmp_path)
     assert bounded.value.error.code == "unavailable"
 
 
-def test_large_line_refuses_without_returning_a_partial_tail(monkeypatch, tmp_path):
+def test_large_line_refuses_without_returning_a_partial_tail(monkeypatch, tmp_path, log_runtime):
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
-    monkeypatch.setattr(runtime_read, "_log_release", lambda _context: "selected-release")
     bot_dir = context.paths.source_dir / "runtime/bots/lead/logs"
     bot_dir.mkdir(parents=True)
     log = bot_dir / "startup.log"
@@ -131,24 +141,24 @@ def test_large_line_refuses_without_returning_a_partial_tail(monkeypatch, tmp_pa
     assert runtime_read.dispatch(_args("bot.logs", "lead", lines=1)).data["items"][0]["text"].endswith("short")
 
 
-def test_logs_refuse_a_different_executing_release_before_reading(monkeypatch, tmp_path):
-    from claudlobby import activation_state, context as context_owner
+def test_logs_refuse_unavailable_committed_git_context_before_reading(monkeypatch, tmp_path):
+    from claudlobby import active_config
+    from claudlobby.config_plan import PlanError
 
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
-    monkeypatch.setattr(activation_state, "read_selection", lambda _root:
-                        {"release_id": "selected-release"})
-    monkeypatch.setattr(context_owner, "native_environment", lambda _paths:
-                        {"CLAUDLOBBY_RELEASE_ID": "other-release"})
+    def unavailable(*_args, **_kwargs):
+        raise PlanError("executing Git revision differs from committed configuration")
+    monkeypatch.setattr(active_config, "runtime_read_stamp", unavailable)
+    monkeypatch.setattr(runtime_read, "_tail", lambda *_args, **_kwargs: pytest.fail("logs read before Git provenance"))
     with pytest.raises(CommandFailure) as mismatch:
         runtime_read.dispatch(_args("bot.logs", "lead"))
-    assert mismatch.value.error.code == "release_mismatch"
+    assert mismatch.value.error.code == "conflict"
 
 
-def test_incomplete_log_preserves_other_files_and_discloses_decode_replacement(monkeypatch, tmp_path):
+def test_incomplete_log_preserves_other_files_and_discloses_decode_replacement(monkeypatch, tmp_path, log_runtime):
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
-    monkeypatch.setattr(runtime_read, "_log_release", lambda _context: "selected-release")
     logs = context.paths.source_dir / "runtime/bots/lead/logs"
     logs.mkdir(parents=True)
     (logs / "large.jsonl").write_text("x" * 170000 + "\n")

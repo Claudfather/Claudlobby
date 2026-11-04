@@ -53,19 +53,21 @@ def inspect_permission_notification(ctx, request_id, permission, decision):
 
 
 def decide_and_notify_permission(ctx, package, request_id, permission_id, *, decision,
-                                 scope_sha256, reason, release_id=None, admit_read=None,
-                                 admit_notification=None):
+                                 scope_sha256, reason, release_id=None, source_revision=None,
+                                 config_fingerprint=None, admit_read=None, admit_notification=None):
     """Canonical decision first, then one durable notice to its original requester.
 
     The caller holds runtime admission and authenticates the human. A replay or
     receipt read only inspects notification evidence; a crash gap never sends.
     """
     from .message_context import resolve_message_route
-    from .task_permissions import decide_permission
+    from .task_permissions import decide_permission, permission_runtime_fields
     from .application_messages import deliver_bound_message
 
+    runtime = permission_runtime_fields(release_id=release_id, source_revision=source_revision,
+                                        config_fingerprint=config_fingerprint)
     result = decide_permission(ctx, request_id, permission_id, decision=decision,
-        scope_sha256=scope_sha256, reason=reason, release_id=release_id, admit_read=admit_read)
+        scope_sha256=scope_sha256, reason=reason, **runtime, admit_read=admit_read)
     if not result.replayed:
         try:
             permission = result.permission
@@ -75,7 +77,8 @@ def decide_and_notify_permission(ctx, package, request_id, permission_id, *, dec
             if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
                     or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
                     or route.peer != permission.requester or route.caller_fleet_uid is not None
-                    or release_id is not None and route.release_id != release_id):
+                    or runtime and permission_runtime_fields(release_id=route.release_id,
+                        source_revision=route.revision, config_fingerprint=route.config_fingerprint) != runtime):
                 raise ValueError("permission notification route changed")
             if admit_notification is not None:
                 admit_notification()

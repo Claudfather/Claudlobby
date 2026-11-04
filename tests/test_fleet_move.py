@@ -9,12 +9,14 @@ import pytest
 from claudlobby.__main__ import main
 from claudlobby.supervision_inventory import Adapter
 from tests.test_supervision_inventory import Observations
+from tests.package_fixtures import git_package
 
 
 def _cold(tmp_path, monkeypatch):
     from claudlobby import resources, supervision_inventory
 
     observations = Observations(tmp_path)
+    observations.package = git_package(observations.root)
     source = observations.root / "local" / "alpha"
     source.mkdir(parents=True)
     (source / "fleet.yaml").write_text(
@@ -75,10 +77,9 @@ def test_cold_move_refuses_unsafe_layout_without_rename(tmp_path, monkeypatch, c
     if hazard == "runtime":
         (source / "runtime").mkdir()
     elif hazard == "selection":
-        from claudlobby import activation_state
-        monkeypatch.setattr(activation_state, "read_selection", lambda root: {"release_id": "selected"})
-        # This case isolates the cold-host refusal; ancestry has its own owner tests.
-        monkeypatch.setattr("claudlobby.commands.operator_context.require_operator_context", lambda root: None)
+        state = obs.root / "state"
+        state.mkdir()
+        (state / "config.json").write_text('{"schema": 1}\n')
     elif hazard == "redirected":
         real = tmp_path / "elsewhere"
         source.rename(real)

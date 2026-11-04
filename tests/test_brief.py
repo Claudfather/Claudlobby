@@ -50,7 +50,7 @@ from claudlobby.brief import (
 )
 from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — selected activation and short paths
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — selected activation and short paths
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_task_write_cli import _call, active  # noqa: F401 — real selected activation fixture
 from claudlobby.paths import Paths
@@ -1103,7 +1103,7 @@ def _report_viewer(active, monkeypatch, capsys):
     for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
                        "FLEET_NAME": "example", "BOT_ID": "manager",
                        "BOT_DIR": str(root / "runtime/bots/manager"),
-                       "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+                       "CLAUDLOBBY_INSTALLATION": str(release.directory)}.items():
         monkeypatch.setenv(key, value)
     return lambda *argv, expected=0: _call(capsys, root, *argv, expected=expected)
 
@@ -1388,7 +1388,7 @@ class TestBootCLI:
         assert main(["--root", str(root), "--json", "brief"]) == 0
         envelope = json.loads(capsys.readouterr().out)
         assert envelope["schema_version"] == 1 and envelope["command"] == "brief"
-        assert envelope["request_id"] is None and envelope["release_id"] == release.release_id
+        assert envelope["request_id"] is None and envelope["release_id"] == None
         assert envelope["data"]["viewer_selection"] == "manager_default"
         assert envelope["data"]["brief"]["schema"] == 2
         assert envelope["data"]["brief"]["bot"] == "manager"
@@ -1454,17 +1454,17 @@ class TestBootCLI:
         assert after == before
 
         # #1973: refusals name a remedy, and only the selection race is retryable.
-        from claudlobby import activation_state
-        real_read = activation_state.read_selection
+        from claudlobby import active_config
+        real_stamp = active_config.runtime_read_stamp
         reads = []
 
-        def racing(path):
+        def racing(path, **kwargs):
             reads.append(path)
-            value = real_read(path)
-            return value if len(reads) == 1 else {**value, "release_id": "r-" + "e" * 64}
+            value = real_stamp(path, **kwargs)
+            return value if len(reads) == 1 else replace(value, config_fingerprint="e" * 64)
 
         with monkeypatch.context() as patch:
-            patch.setattr(activation_state, "read_selection", racing)
+            patch.setattr(active_config, "runtime_read_stamp", racing)
             assert main(["--root", str(root), "--json", "brief"]) == 4
         raced = json.loads(capsys.readouterr().out)["error"]
         assert raced["retryable"] is True and raced["hint"] == "retry the same read"
@@ -1483,7 +1483,7 @@ class TestBootCLI:
         assert main(["--root", str(root), "--json", "brief"]) == 4
         mismatched = json.loads(capsys.readouterr().out)
         assert mismatched["error"]["code"] == "conflict"
-        assert mismatched["data"] == {} and mismatched["release_id"] == release.release_id
+        assert mismatched["data"] == {} and mismatched["release_id"] == None
 
 
 class TestUnlistableBotsDir:
@@ -1646,156 +1646,12 @@ def test_unresolved_history_alone_prevents_no_work_claim(paths: Paths):
     assert "unresolved history" in boot and "no open tasks for this bot" not in boot
 
 
-@pytest.fixture
-def startup_brief(active, monkeypatch):
-    """Real selected/journal/identity inputs, with only native time progression controlled."""
-    from claudlobby import activation_state, brief, env_tiers
-    from claudlobby.commands import brief_read
-    from claudlobby.paths import load_lib_module
-
-    root, release = active
-    selected = activation_state.read_selection(root)
-    original = activation_state.read_activation(root, selected["activation_id"]).body
-    original = json.loads(json.dumps(original))
-
-    def write(body):
-        activation_state._write(activation_state._record_path(root, selected["activation_id"]),
-                                {"record": body, "sha256": activation_state._digest(body)})
-
-    pending = {**original, "status": "activating",
-               "completed": list(activation_state.STEPS[:activation_state.STEPS.index("bots_started")]),
-               "pending": "bots_started"}
-    write(pending)
-    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **kw: {})
-    monkeypatch.setattr(brief, "load_dispatch_doors",
-                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
-    return root, release, selected, original, pending, write, brief_read
-
-
-def test_startup_wait_admits_one_brief_only_after_active(startup_brief, monkeypatch, capsys):
-    from claudlobby import active_config, activation_identity, activation_state, brief, context
-    from claudlobby.__main__ import main
-
-    root, release, selected, original, pending, write, reader = startup_brief
-    package = context.get_resources()
-    with pytest.raises(activation_state.ActivationError, match="incomplete"):
-        active_config.load_active_context(root, "example", package=package)
-    with pytest.raises(activation_state.ActivationError, match="incomplete"):
-        activation_identity.read_selected_identity_bindings(root, "example", package=package)
-    builds, sleeps = [], []
-    real_build = brief.build_brief
-
-    def build(*a, **kw):
-        assert activation_state.read_activation(root, selected["activation_id"]).status == "active"
-        builds.append(True)
-        return real_build(*a, **kw)
-
-    class Clock:
-        @staticmethod
-        def monotonic():
-            return len(sleeps)
-
-        @staticmethod
-        def sleep(seconds):
-            assert not builds and seconds == 1
-            sleeps.append(seconds)
-            write(original)
-
-    monkeypatch.setattr(reader, "time", Clock)
-    monkeypatch.setattr(brief, "build_brief", build)
-    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "120"]) == 0
-    result = json.loads(capsys.readouterr().out)
-    assert result["release_id"] == release.release_id and result["data"]["brief"]["bot"] == "manager"
-    assert builds == [True] and sleeps == [1]
-
-
-def test_startup_wait_deadline_has_no_brief_or_queries(startup_brief, monkeypatch, capsys):
-    from claudlobby import brief
-    from claudlobby.__main__ import main
-
-    root, release, selected, original, pending, write, reader = startup_brief
-    sleeps = []
-    monkeypatch.setattr(brief, "build_brief", lambda *a, **kw: pytest.fail("brief before active"))
-
-    class Clock:
-        @staticmethod
-        def monotonic():
-            return len(sleeps)
-
-        @staticmethod
-        def sleep(seconds):
-            sleeps.append(seconds)
-
-    monkeypatch.setattr(reader, "time", Clock)
-    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "1"]) == 8
-    result = json.loads(capsys.readouterr().out)
-    assert result["data"] == {} and result["release_id"] == release.release_id
-    assert result["error"]["retryable"] is False and "still incomplete" in result["error"]["message"]
-    assert sleeps == [1]
-
-
-@pytest.mark.parametrize("damage", ["early", "bindings", "origin", "package"])
-def test_startup_wait_invalid_preflight_never_sleeps(startup_brief, monkeypatch, capsys, damage):
-    from claudlobby import active_config
-    from claudlobby.__main__ import main
-
-    root, release, selected, original, pending, write, reader = startup_brief
-    if damage == "early":
-        write({**pending, "completed": pending["completed"][:-1], "pending": "ingest_started"})
-    elif damage == "bindings":
-        write({**pending, "identity_bindings": None})
-    elif damage == "package":
-        real = active_config._selected_plan
-        monkeypatch.setattr(active_config, "_selected_plan", lambda root, package: real(root, source_package()))
-    else:
-        for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example", "BOT_ID": "worker",
-                           "BOT_DIR": str(root / "wrong-bot")}.items():
-            monkeypatch.setenv(key, value)
-    monkeypatch.setattr(reader.time, "sleep", lambda *a: pytest.fail("invalid context was waited on"))
-    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "120"]) in (4, 7)
-    result = json.loads(capsys.readouterr().out)
-    assert result["data"] == {} and result["error"]["retryable"] is False
-
-
-@pytest.mark.parametrize("damage", ["selection", "bindings", "terminal", "intent"])
-def test_startup_wait_changed_observation_stops_without_brief(startup_brief, monkeypatch, capsys, damage):
-    from claudlobby import activation_state, brief
-    from claudlobby.__main__ import main
-
-    root, release, selected, original, pending, write, reader = startup_brief
-    sleeps = []
-    monkeypatch.setattr(brief, "build_brief", lambda *a, **kw: pytest.fail("changed startup served work"))
-
-    class Clock:
-        @staticmethod
-        def monotonic():
-            return len(sleeps)
-
-        @staticmethod
-        def sleep(seconds):
-            assert not sleeps
-            sleeps.append(seconds)
-            if damage == "selection":
-                activation_state._write(root / "state/selected-release.json",
-                                        {**selected, "activation_id": "different"})
-            elif damage == "bindings":
-                write({**pending, "identity_bindings": None})
-            elif damage == "terminal":
-                write({**pending, "status": "rolled_back"})
-            else:
-                write({**pending, "intent": {**pending["intent"], "plan_id": "different"}})
-
-    monkeypatch.setattr(reader, "time", Clock)
-    assert main(["--root", str(root), "--json", "brief", "--startup-wait", "120"]) == 4
-    result = json.loads(capsys.readouterr().out)
-    assert result["data"] == {} and result["error"]["retryable"] is False and sleeps == [1]
-
-
 def test_startup_wait_bounds_and_boot_rejection_precede_observation(monkeypatch, capsys):
     from claudlobby.__main__ import main
-    from claudlobby.commands import brief_read
+    from claudlobby import operation_context
 
-    monkeypatch.setattr(brief_read, "_wait_for_startup", lambda *a: pytest.fail("invalid wait observed startup"))
+    monkeypatch.setattr(operation_context, "resolve_operation_scope",
+                        lambda **kw: pytest.fail("invalid wait observed runtime"))
     for args in (["--startup-wait", "0"], ["--startup-wait", "301"],
                  ["--startup-wait", "-1"], ["--boot", "--startup-wait", "120"]):
         assert main(["--json", "brief", *args]) == 2
@@ -1806,3 +1662,56 @@ def test_startup_wait_bounds_and_boot_rejection_precede_observation(monkeypatch,
             main(["--json", "brief", "--startup-wait", value])
         assert rejected.value.code == 2
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
+
+@pytest.mark.parametrize("change_during_read", [False, True])
+def test_git_brief_uses_shared_current_stamp(active, monkeypatch, capsys, change_during_read):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from claudlobby import active_config, brief, context, env_tiers
+    from claudlobby.paths import load_lib_module
+    from tests.test_task_read_cli import _use_git_current
+
+    root, _ = active
+    root, package, snapshot = _use_git_current(
+        (root, SimpleNamespace(package=context.get_resources())), monkeypatch)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(
+                            source_package().native, "dispatch-overdue.py"))
+    monkeypatch.setattr(env_tiers, "resolve", lambda *args, **kwargs: {})
+    original = brief.build_brief
+
+    def build(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if change_during_read:
+            changed = deepcopy(snapshot)
+            changed["fleets"]["example"]["fleet"] += "\n# approved change\n"
+            changed["fingerprint"] = active_config._fingerprint(changed)
+            active_config.publish_current_config(changed, installation=package.installation,
+                                                 expected_previous=snapshot["fingerprint"])
+        return result
+
+    monkeypatch.setattr(brief, "build_brief", build)
+    result = _call(capsys, root, "brief", "--startup-wait", "120",
+                   expected=4 if change_during_read else 0)
+    assert result["release_id"] is None
+    if change_during_read:
+        assert result["error"]["retryable"] is True
+    else:
+        assert result["data"]["source_revision"] == snapshot["revision"]
+        assert result["data"]["config_fingerprint"] == snapshot["fingerprint"]
+        assert result["data"]["brief"]["reports"]["cursor"] is None
+
+
+@pytest.mark.parametrize("damage", ["missing_config", "origin"])
+def test_git_startup_brief_refuses_uncommitted_or_wrong_origin_before_queries(active, monkeypatch, capsys, damage):
+    from claudlobby import active_config, brief
+    root, installation = active
+    if damage == "missing_config":
+        active_config._snapshot_path(root).unlink()
+    else:
+        for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example", "BOT_ID": "worker",
+                           "BOT_DIR": str(root / "wrong-bot")}.items():
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(brief, "build_brief", lambda *a, **kw: pytest.fail("unadmitted startup queried work"))
+    result = _call(capsys, root, "brief", "--startup-wait", "120", expected=4)
+    assert result["data"] == {} and result["error"]["retryable"] is False

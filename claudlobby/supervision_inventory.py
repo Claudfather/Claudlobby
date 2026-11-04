@@ -1,13 +1,12 @@
-"""Read-only enrollment evidence for coordinated activation, never enrollment.
+"""Read-only enrollment evidence for the Git updater, never enrollment.
 
 Declarations must come from the reviewed current generated-config manifest,
-not candidate renders substituted for the running release. Exact byte equality
+not candidate renders substituted for the running configuration. Exact byte equality
 binds argv and environment to that manifest; the native ownership reader remains
 the sole parser of unit WorkingDirectory. A matching name is never ownership.
-For explicit first adoption, generated and installed snapshots may differ:
-the frozen installed bytes define the original launch binding, while both
-snapshots and the declared owner remain checked. Sealed releases still require
-generated and installed bytes to match.
+Generated and installed snapshots may differ during an update: the frozen
+installed bytes define the original launch binding, while both snapshots and
+the declared owner remain checked.
 
 Unknown observations are blockers, not empty inventories. Darwin print and
 print-disabled grammar is based on read-only macOS 26.1 observations, not a
@@ -36,6 +35,57 @@ from xml.parsers.expat import ExpatError
 from .resources import PackageResources, get_resources
 
 
+def _target(manager, domain, source):
+    name = Path(source).name
+    return domain + "/" + name.removesuffix(".plist") if manager == "Darwin" else name
+
+
+def _wanted_by(content, source, paired_services):
+    """Only the compositor's shipped Install grammar has publication authority."""
+    if source.suffix == ".plist":
+        return None
+    wanted, section, seen = [], "", False
+    for raw in content.decode("utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            if section == "Install":
+                if seen:
+                    raise InventoryError("duplicate Install section is unsupported")
+                seen = True
+        elif section == "Install":
+            key, separator, value = line.partition("=")
+            if separator != "=" or key.strip() != "WantedBy":
+                raise InventoryError("unsupported unit Install semantics")
+            wanted.append(value.strip())
+    expected = ([] if source.name in paired_services or is_unit_template(source.name) else
+                ["timers.target" if source.suffix == ".timer" else "default.target"])
+    if wanted != expected or not expected and seen:
+        raise InventoryError("unit Install target differs from its persistent service/timer role")
+    return expected[0] if expected else None
+
+
+def _enablement(entry, wanted_by, prior):
+    from .config_plan import path_state
+    if wanted_by is None:
+        return None
+    installed = Path(entry["installed"])
+    link = installed.parent / (wanted_by + ".wants") / installed.name
+    if link.parent.resolve() != link.parent:
+        raise InventoryError("enablement directory is redirected")
+    before = path_state(link)
+    node = before["node"]
+    if node["kind"] != "absent":
+        if (not entry["original"] or node["kind"] != "symlink"
+                or before["resolved"] != str(installed)):
+            raise InventoryError("unowned or misdirected native enablement link")
+    elif entry["original"] and dict(prior["properties"]).get("UnitFileState") == "enabled":
+        raise InventoryError("original persistent enablement link is missing")
+    return {"path": str(link), "target": str(installed), "before": before,
+            "create": not entry["original"], "wanted_by": wanted_by}
+
 class InventoryError(ValueError):
     """Coverage or binding could not be proved; activation must not continue."""
 
@@ -56,11 +106,12 @@ class Adapter:
         "svc_activation_pause", "svc_activation_resume", "svc_activation_reload",
         "svc_activation_clear_runtime_mask",
         "svc_activation_start", "svc_activation_quiet", "svc_activation_bot_fence",
-        "svc_activation_bot_ready", "svc_activation_handoff",
+        "svc_activation_bot_ready", "svc_activation_handoff", "svc_bot_native_session",
         "svc_activation_stop_private_server",
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
         "svc_bot_control_exact",
         "svc_host_job_run_exact",
+        "svc_update_job_enroll_exact", "svc_update_job_run_exact", "svc_update_job_exec",
     })
 
     def __init__(self, package: PackageResources | None = None, *, runner=None,
@@ -373,7 +424,7 @@ def systemd_show_blocks(text: str) -> list[dict[str, str]]:
     return [_key_values(block.splitlines()) for block in text.split("\n\n") if block.strip()]
 
 
-def _properties(text, *, foreign=False):
+def _properties(text, *, foreign=False, parked=False):
     result = _key_values(text.splitlines())
     required = {"Id", "LoadState", "ActiveState", "UnitFileState", "FragmentPath",
                 "DropInPaths", "NeedDaemonReload", "Triggers", "TriggeredBy"}
@@ -390,8 +441,15 @@ def _properties(text, *, foreign=False):
                   and result.get("FragmentPath") == ""
                   and (foreign or all(result.get(key) == "" for key in (
                       "WorkingDirectory", "Environment", "DropInPaths", "UnitFileState"))))
+        # Parsing is not acceptance. Exact parked ownership or an owned quiet
+        # runtime mask is proved below before a declared missing definition is used.
+        parked_shape = (parked and result.get("LoadState") == "not-found"
+                        and result.get("FragmentPath") == "" and result.get("DropInPaths") == "")
+        masked_shape = (result.get("LoadState") == "masked" and result.get("ActiveState") in {"inactive", "failed"}
+                        and result.get("UnitFileState") == "masked-runtime" and result.get("DropInPaths") == "")
         if (service_fields - result.keys() == {"ExecStart"}
-                and (absent or foreign and result.get("LoadState") == "loaded")):
+                and (absent or parked_shape or masked_shape
+                     or foreign and result.get("LoadState") in {"loaded", "not-found", "masked"})):
             result["ExecStart"] = ""
         required |= service_fields
     if not required <= result.keys() or not result.keys() <= allowed:
@@ -409,6 +467,22 @@ def _environment(text):
     return result
 
 
+def _native_working_directory(value: str, *, systemd=False) -> Path | None:
+    """Read native cwd metadata without resolving a relative name in this process.
+
+    systemctl serializes its ignore-missing flag as `!` before an absolute
+    directory. Keep raw properties intact; normalize only the path comparison.
+    """
+    if not value:
+        return None
+    if systemd and value.startswith("!/"):
+        value = value[1:]
+    path = Path(value)
+    if not path.is_absolute():
+        raise InventoryError("native working directory is relative or unsupported")
+    return path.resolve()
+
+
 def runtime_mask(path: str | Path, name: str) -> bool:
     """This user's exact `mask --runtime` link for NAME, to /dev/null.
 
@@ -424,100 +498,6 @@ def runtime_mask(path: str | Path, name: str) -> bool:
     except OSError:
         return False
     return runtime.is_absolute() and node == runtime / name and owners == {os.getuid()} and target == "/dev/null"
-
-
-def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
-    """Bind existing source-only user-systemd units to the candidate roster.
-
-    The source is the old compositor output, not the candidate's staged bytes.
-    Inventory subsequently proves exact installed bytes and effective native
-    identity before the shared adoption coordinator can pause anything.
-    """
-    from .config_units import planned_units
-
-    plan.check_fresh()
-    result, services, timers = [], {}, []
-    planned = tuple(declaration for declaration, _ in planned_units(plan, "Linux"))
-    for declaration in planned:
-        source = declaration.source
-        if not source.exists() and not source.is_symlink():
-            continue
-        if not source.is_file() or source.is_symlink():
-            raise InventoryError("legacy generated Linux unit is not a regular source")
-        try:
-            content = source.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise InventoryError("legacy generated Linux unit cannot be read") from exc
-        section = None
-        fields = {}
-        for raw in content.splitlines():
-            line = raw.strip()
-            if not line or line.startswith(("#", ";")):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line[1:-1]
-                continue
-            key, separator, value = line.partition("=")
-            if not separator or not section or raw.rstrip().endswith("\\"):
-                raise InventoryError("legacy generated Linux unit has ambiguous syntax")
-            fields.setdefault((section, key.strip()), []).append(value.strip())
-        selected = {"CLAUDLOBBY_ROOT": str(plan.data_root)}
-        if declaration.scope in ("fleet", "bot"):
-            fleet_root = dict(declaration.environment).get("FLEET_ROOT")
-            if not fleet_root or not Path(fleet_root).is_absolute():
-                raise InventoryError("legacy Linux unit has no declared fleet root")
-            selected["FLEET_ROOT"] = fleet_root
-        if declaration.scope == "fleet":
-            selected["CLAUDLOBBY_FLEET"] = declaration.fleet
-        if declaration.service:
-            if (fields.get(("Timer", "Unit"), [declaration.service]) != [declaration.service]
-                    or any(group == "Service" for group, _ in fields)):
-                raise InventoryError("legacy Linux timer has a different service owner")
-            # The paired service supplies the environment and working directory.
-            timers.append((len(result), declaration.service))
-            result.append(replace(declaration, release_id="", environment=tuple(sorted(selected.items()))))
-            continue
-        if fields.get(("Service", "WorkingDirectory")) != [str(declaration.working_directory)]:
-            raise InventoryError("legacy Linux service has a different working directory")
-        environment = {}
-        for value in fields.get(("Service", "Environment"), ()):
-            try:
-                assignments = shlex.split(value)
-            except ValueError as exc:
-                raise InventoryError("legacy Linux service environment is ambiguous") from exc
-            for assignment in assignments:
-                key, separator, item = assignment.partition("=")
-                if not separator or key in environment:
-                    raise InventoryError("legacy Linux service environment is ambiguous")
-                environment[key] = item
-        if "FLEET_ROOT" in selected and "FLEET_ROOT" not in environment:
-            # Old compositor units predate FLEET_ROOT. Only its absence is
-            # legacy; a present different value still refuses below. The fleet
-            # owner is then CLAUDLOBBY_FLEET (fleet) or the exact unshared bot
-            # working directory (bot), and the returned declaration claims
-            # only assignments the source really carries.
-            if declaration.scope == "bot" and (
-                    declaration.working_directory.resolve() == Path(plan.data_root).resolve()
-                    or sum(item.working_directory.resolve() == declaration.working_directory.resolve()
-                           for item in planned if not item.service) != 1):
-                raise InventoryError("legacy Linux bot without fleet root has no unique working directory")
-            del selected["FLEET_ROOT"]
-        if any(environment.get(key) != value for key, value in selected.items()):
-            raise InventoryError("legacy Linux service has a different root or fleet owner")
-        if declaration.scope == "bot":
-            if not environment.get("TMUX_TMPDIR"):
-                raise InventoryError("legacy Linux bot has no tmux owner")
-            selected["TMUX_TMPDIR"] = environment["TMUX_TMPDIR"]
-        services[declaration.source.name] = tuple(sorted(selected.items()))
-        result.append(replace(declaration, release_id="", environment=services[declaration.source.name]))
-    for index, service in timers:
-        # A timer binds exactly the environment proven for its paired service.
-        if service in services:
-            result[index] = replace(result[index], environment=services[service])
-    if not result:
-        raise InventoryError("no reviewed legacy Linux unit sources were found")
-    plan.check_fresh()
-    return tuple(result)
 
 
 def _darwin_disabled(text: str) -> dict[str, str]:
@@ -781,7 +761,8 @@ def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path:
 def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...], *,
                        package: PackageResources | None = None, runner=None,
                        bootstrap_empty: bool = False, legacy_source: bool = False,
-                       adapter=None, only_names: frozenset[str] | None = None) -> EnrollmentInventory:
+                       adapter=None, only_names: frozenset[str] | None = None,
+                       historical_release=None, historical_parked=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -798,6 +779,26 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     binding and stability without unrelated host timer activity vetoing it.
     """
     data_root = data_root.resolve(strict=True)
+    historical_identity = None
+    historical_parked = historical_parked or {}
+    if not isinstance(historical_parked, dict) or historical_parked and historical_release is None:
+        raise InventoryError("parked native evidence requires a verified sealed baseline")
+    parked_by_name = {}
+    for path, retained in historical_parked.items():
+        name = Path(path).name
+        if name in parked_by_name or retained["snapshot"]["path"] != path or retained["target"] != name:
+            raise InventoryError("parked native evidence has ambiguous paths or targets")
+        parked_by_name[name] = retained
+    if historical_release is not None:
+        from .releases import release_path
+        if (bootstrap_empty or legacy_source
+                or historical_release.directory != release_path(data_root, historical_release.release_id)):
+            raise InventoryError("historical inventory requires this root's exact sealed evidence")
+        historical_identity = {
+            'CLAUDLOBBY_ROOT': str(data_root), 'CLAUDLOBBY_RELEASE_ID': historical_release.release_id,
+            'CLAUDLOBBY_NATIVE_DIR': str(historical_release.native_path),
+            'CLAUDLOBBY_CLI': str(historical_release.cli_path),
+            'CLAUDLOBBY_ARTIFACT_ID': historical_release.inputs.artifact_id}
     if (type(bootstrap_empty) is not bool or type(legacy_source) is not bool
             or bootstrap_empty and (declarations or legacy_source)):
         raise InventoryError("bootstrap inventory must have no original declarations")
@@ -809,22 +810,45 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         raise InventoryError("empty generated manifest is not deletion authority")
     if bootstrap_empty:
         _require_no_selection(data_root)
+        if (data_root / "state/config.json").exists() or (data_root / "state/config.json").is_symlink():
+            raise InventoryError("bootstrap requires no committed configuration")
     adapter = adapter if adapter is not None else Adapter(package, runner=runner)
+    installation = getattr(getattr(adapter, "package", package), "installation", None)
+    if installation is not None and (installation.data_root != data_root or legacy_source):
+        raise InventoryError("Git inventory requires its recorded data root and current declarations")
     expected = {}
     for declaration in declarations:
         name = declaration.source.name
         env = dict(declaration.environment)
+        if historical_identity is not None:
+            invalid_identity = (declaration.release_id != historical_release.release_id
+                or any(env.get(key) != value for key, value in historical_identity.items())
+                or not env.get('CLAUDLOBBY_LIBRARY_DIR')
+                or not Path(env['CLAUDLOBBY_LIBRARY_DIR']).is_relative_to(historical_release.directory))
+        elif installation is not None:
+            identity = {
+                "CLAUDLOBBY_ROOT": str(data_root),
+                "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+                "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+                "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library"),
+                "CLAUDLOBBY_CLI": str(installation.cli),
+            }
+            invalid_identity = (declaration.release_id != ""
+                                or any(env.get(key) != value for key, value in identity.items())
+                                or bool(env.get("CLAUDLOBBY_ARTIFACT_ID") or env.get("CLAUDLOBBY_RELEASE_ID")))
+        elif legacy_source:
+            invalid_identity = declaration.release_id != ""
+        else:
+            invalid_identity = not declaration.release_id or not all(env.get(key) for key in (
+                "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI", "CLAUDLOBBY_ARTIFACT_ID"))
         if (name in expected or not _NAME.fullmatch(name) or not name.endswith(_SUFFIXES)
                 or not declaration.source.is_absolute() or not declaration.working_directory.is_absolute()
                 or declaration.scope not in ("host", "fleet", "bot")
-                or (declaration.release_id != "" if legacy_source else not declaration.release_id)
+                or invalid_identity
                 or (declaration.scope in ("fleet", "bot") and not declaration.fleet)
                 or (declaration.scope == "bot" and not declaration.bot)
                 or len(env) != len(declaration.environment)
                 or env.get("CLAUDLOBBY_ROOT") != str(data_root)
-                or not legacy_source and not all(env.get(key) for key in (
-                    "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI",
-                    "CLAUDLOBBY_ARTIFACT_ID"))
                 or not legacy_source and declaration.scope in ("fleet", "bot")
                 and not env.get("FLEET_ROOT")):
             raise InventoryError(f"ambiguous or incomplete declaration: {name}")
@@ -864,6 +888,34 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     anchors = {str(owner) for owner in owners}
     anchors.update(anchor for declaration in declarations for key, anchor in declaration.environment
                    if key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"))
+    # This deterministic name only routes validation. Exemption requires the
+    # independent job owner's exact files, placement and effective native argv.
+    independent_name = None
+    if installation is not None:
+        from .update_job import update_job_label
+        independent_name = update_job_label(installation) + (".service" if manager == "Linux" else ".plist")
+    independent_targets = {}
+
+    def independent_updater(name, *, native_target=None, observed_properties=None):
+        if name != independent_name:
+            return False
+        # Import at use time: update_job consumes the inventory parsers, while
+        # its own fixed independent job must never become a fleet consumer.
+        from .update_job import _definition, _observe
+        snapshots = installed.get(name, ())
+        if len(snapshots) != 1:
+            raise InventoryError("independent updater has no unique installed definition")
+        native_target = native_target if native_target is not None else independent_targets.get(name)
+        job = _definition(installation, adapter, Path(snapshots[0].path).parent, native_target=native_target)
+        if (job.manager != manager or str(job.installed) != snapshots[0].path
+                or native_target is not None and job.target != native_target):
+            raise InventoryError("independent updater native placement differs")
+        if manager == "Darwin" and observed_properties is None:
+            observed_properties = _darwin_print(adapter.read("svc_inventory_properties", job.target), job.target)
+        _observe(job, installation, adapter, observed_properties=observed_properties)
+        independent_targets[name] = job.target
+        return True
+
     properties = {}
     disabled = {}
     if manager == "Linux":
@@ -877,12 +929,12 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 continue
             try:
                 props = _properties(adapter.read("svc_inventory_properties", name),
-                                    foreign=name not in expected)
+                                    foreign=name not in expected, parked=name in parked_by_name)
                 if (props["Id"] != name and
                         (name in expected or not _SYSTEMD_NAME.fullmatch(props["Id"]))):
                     raise InventoryError("native identity is an unproved alias")
                 properties[name] = props
-            except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+            except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
     else:
         disabled = _darwin_disabled(adapter.read("svc_inventory_disabled", domain))
@@ -903,6 +955,10 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 return None
             if observed.returncode:
                 raise InventoryError(f"svc_inventory_properties failed ({observed.returncode}): {observed.stderr.strip()}")
+            if name == independent_name:
+                props = _darwin_print(observed.stdout, target)
+                independent_updater(name, native_target=target, observed_properties=props)
+                return props
             if name in expected:
                 return _darwin_print(observed.stdout, target)
             foreign = _darwin_foreign_print(observed.stdout, target, anchors, owners)
@@ -920,16 +976,24 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 properties[name] = observed_props
                 if name in expected and observed_props["ActiveState"] != loaded[name]:
                     raise InventoryError("launchd list/print activity changed")
-            except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+            except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
 
     def related_properties(props):
         env = _environment(props.get("Environment", ""))
-        cwd = props.get("WorkingDirectory", "")
+        cwd = _native_working_directory(props.get("WorkingDirectory", ""), systemd=manager == "Linux")
         return (env.get("CLAUDLOBBY_ROOT") == str(data_root)
-                or bool(cwd and (Path(cwd).resolve() in owners or Path(cwd).resolve().is_relative_to(data_root))))
+                or cwd is not None and (cwd in owners or cwd.is_relative_to(data_root)))
 
     for name in sorted(names - set(expected)):
+        if name == independent_name:
+            try:
+                independent_updater(name)
+            except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                issues.append(f"{name}: independent updater binding is unproved: {exc}")
+            else:
+                foreign.extend(saved.path for saved in installed.get(name, ()))
+            continue  # never add it to units, quiet scope or deletion authority
         props = properties.get(name, {})
         template = template_of_instance(name)
         if manager == "Linux" and template in expected:
@@ -1029,6 +1093,23 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         props = properties.get(name, {})
         try:
             generated = FileSnapshot.read(declaration.source)
+            retained = parked_by_name.get(name)
+            if retained is not None:
+                before = retained["snapshot"]
+                if (manager != "Linux" or os.path.lexists(before["path"])
+                        or before["link"] is not None or before["sha256"] != generated.sha256
+                        or base64.b64decode(before["content"]["base64"], validate=True) != generated.content):
+                    raise InventoryError("parked definition differs from its exact generated owner")
+            masked = (manager == "Linux" and props.get("LoadState") == "masked"
+                      and props.get("UnitFileState") == "masked-runtime")
+            if masked:
+                if (len(sources) != 1 or sources[0].link != "/dev/null" or not runtime_mask(sources[0].path, name)
+                        or props.get("FragmentPath") not in {sources[0].path, "/dev/null"}
+                        or props.get("DropInPaths") or props.get("ActiveState") not in {"inactive", "failed"}):
+                    raise InventoryError("declared runtime mask is not exact and quiet")
+                from .supervision_runtime import assert_quiescent
+                assert_quiescent(adapter, installed_file=declaration.source, target=name)
+                sources = ()  # The mask is observed_files evidence, never an installed definition.
             if len(sources) > 1:
                 raise InventoryError("multiple installed definitions shadow one another")
             binding = expected[declaration.service] if declaration.service else declaration
@@ -1046,7 +1127,24 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             elif manager == "Linux":
                 if not props:
                     raise InventoryError("missing effective native properties")
-                if sources:
+                if masked:
+                    pass  # Exact owned mask and native quiet were proved above.
+                elif retained is not None:
+                    before = retained["snapshot"]
+                    if (sources or props.get("FragmentPath") not in {"", before["path"], before["resolved"]}
+                            or props.get("LoadState") not in {"loaded", "not-found"}
+                            or props.get("DropInPaths") or props.get("NeedDaemonReload") not in {"yes", "no"}
+                            or props.get("ActiveState") not in {"active", "inactive", "failed", "activating"}):
+                        raise InventoryError("parked effective native ownership differs")
+                    # systemd can discard a parked definition's binding while
+                    # its exited launcher/private session remains alive. Only
+                    # the proved old journal permits that absence; present
+                    # binding fields must still match, never ambient defaults.
+                    if (props.get("WorkingDirectory") and _native_working_directory(props["WorkingDirectory"], systemd=True) != declaration.working_directory.resolve()
+                            or props.get("Environment") and any(_environment(props["Environment"]).get(k) != v
+                                                              for k, v in declaration.environment)):
+                        raise InventoryError("parked native data/fleet/release identity differs")
+                elif sources:
                     if (props["FragmentPath"] != sources[0].path or props["LoadState"] != "loaded"
                             or props["DropInPaths"] or props["NeedDaemonReload"] != "no"):
                         raise InventoryError("effective definition is missing, masked, overridden or stale")
@@ -1055,7 +1153,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     if declaration.service:
                         if props["Triggers"].split() != [declaration.service] or not installed.get(declaration.service):
                             raise InventoryError("timer activates a different service")
-                    elif (Path(props["WorkingDirectory"]).resolve() != declaration.working_directory.resolve()
+                    elif (_native_working_directory(props["WorkingDirectory"], systemd=True) != declaration.working_directory.resolve()
                           or any(_environment(props["Environment"]).get(key) != value for key, value in declaration.environment)
                           or "FLEET_ROOT" in _environment(props["Environment"]).keys() - dict(declaration.environment).keys()):
                         raise InventoryError("loaded data/fleet/release identity differs")
@@ -1095,7 +1193,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                         fresh_loaded = _catalog(adapter.read("svc_inventory_catalog"))[4]
                         if name in fresh_loaded:
                             raise InventoryError("new loaded ownership is unobservable")
-                except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+                except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                     issues.append(f"{name}: new loaded ownership is unknown: {exc}")
         elif only_names is None and updated != catalog:
             raise InventoryError("installed/loaded catalog changed during inventory")
@@ -1115,6 +1213,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 raise InventoryError("launchd disabled overrides changed during inventory")
         if bootstrap_empty:
             _require_no_selection(data_root)
+            if (data_root / "state/config.json").exists() or (data_root / "state/config.json").is_symlink():
+                raise InventoryError("committed configuration appeared during bootstrap inventory")
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:
         issues.append(str(exc))
     return EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,

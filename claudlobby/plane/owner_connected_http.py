@@ -129,7 +129,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             setup_only=True
         return {"version": 1, "state": "setup_only" if setup_only else "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
             ("setup_profile" if setup_only else "read_profile"): (
-                {"version": 1, "profile": "first-team-setup-v1", "host_uid": admission.owner.host_uid}
+                {"version": 2, "profile": "first-team-setup-v2", "host_uid": admission.owner.host_uid}
                 if setup_only else owner_read_profile(admission.owner.host_uid)),
             "session_context": {"issuer": binding.issuer, "subject": binding.subject,
                 "workspace_id": binding.workspace_id, "binding_revision": binding.revision,

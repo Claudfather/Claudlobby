@@ -18,7 +18,7 @@
 # Needs `claude` and the selected claudlobby CLI. Native callers use the public
 # command; this packaged script receives the selected plan scope from it.
 #
-# Usage: reload-fleet.sh --selected-release ID --fleet NAME --bots-dir DIR
+# Usage: reload-fleet.sh --admitted-runtime --fleet NAME --bots-dir DIR
 #                        [--plugin NAME]... [--bot NAME]...
 set -euo pipefail
 
@@ -29,56 +29,25 @@ install_error_trap ""
 
 own_tool_path   # timer PATH is minimal, and stale units predate #802 (#805)
 
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+
 # Fleet timers append their fleet name to the script command. Route that
-# historical native entry into the public selected-release admission before
+# historical native entry into the public runtime admission before
 # doing any refresh work; the public adapter re-enters with frozen scope below.
 if [ "$#" -eq 1 ] && [ "${1#--}" = "$1" ]; then
     [ "$1" = "${CLAUDLOBBY_FLEET:-}" ] || {
         echo "reload-fleet: timer fleet context differs" >&2; exit 2;
     }
-    [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
-        echo "reload-fleet: timer native owner differs" >&2; exit 2;
-    }
-    [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] || {
-        echo "reload-fleet: timer has no selected release" >&2; exit 2;
-    }
-    # shellcheck source=cli-context.sh
-    . "$LIB_DIR/cli-context.sh"
-    _claudlobby_require_root || exit $?
-    _claudlobby_require_cli || exit $?
+    _claudlobby_runtime_bound || { echo "reload-fleet: timer runtime is unbound" >&2; exit 2; }
+    _claudlobby_require_native "$LIB_DIR" || exit $?
     exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" --fleet "$1" fleet reload
 fi
 
-FLEET="" BOTS_DIR="" SELECTED_RELEASE=""
-PLUGINS=() BOTS=()
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --selected-release|--fleet|--bots-dir|--plugin|--bot)
-            [ "$#" -ge 2 ] || { echo "reload-fleet: missing $1 value" >&2; exit 2; }
-            case "$1" in
-                --selected-release) SELECTED_RELEASE="$2" ;;
-                --fleet) FLEET="$2" ;;
-                --bots-dir) BOTS_DIR="$2" ;;
-                --plugin) PLUGINS+=("$2") ;;
-                --bot) BOTS+=("$2") ;;
-            esac
-            shift 2 ;;
-        *) echo "reload-fleet: unexpected argument $1" >&2; exit 2 ;;
-    esac
-done
-case "${CLAUDLOBBY_ROOT:-}:${CLAUDLOBBY_NATIVE_DIR:-}:${CLAUDLOBBY_CLI:-}:$BOTS_DIR" in
-    /*:/*:/*:/*) ;;
-    *) echo "reload-fleet: selected root, native owner, CLI and bots directory required" >&2; exit 2 ;;
-esac
-if [ "$LIB_DIR" != "$CLAUDLOBBY_NATIVE_DIR" ] || [ "$SELECTED_RELEASE" != "${CLAUDLOBBY_RELEASE_ID:-}" ] \
-        || [ -z "$SELECTED_RELEASE" ] || [ -z "$FLEET" ] \
-        || [ "$FLEET" != "${CLAUDLOBBY_FLEET:-}" ]; then
-    echo "reload-fleet: selected native or fleet context differs" >&2
-    exit 2
-fi
-for _bot in ${BOTS[@]+"${BOTS[@]}"}; do
-    case "$_bot" in ''|.|..|*/*) echo "reload-fleet: invalid selected bot" >&2; exit 2 ;; esac
-done
+_claudlobby_parse_runtime_scope reload "$LIB_DIR" "$@" || exit $?
+FLEET="$_CL_RUNTIME_FLEET" BOTS_DIR="$_CL_RUNTIME_BOTS_DIR"
+PLUGINS=(${_CL_RUNTIME_PLUGINS[@]+"${_CL_RUNTIME_PLUGINS[@]}"})
+BOTS=(${_CL_RUNTIME_BOTS[@]+"${_CL_RUNTIME_BOTS[@]}"})
 export CLAUDLOBBY_FLEET="$FLEET"
 mkdir -p "${CLAUDLOBBY_ROOT}/state"
 LOG="${CLAUDLOBBY_ROOT}/state/reload-fleet.log"

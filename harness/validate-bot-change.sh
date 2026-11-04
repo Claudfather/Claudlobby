@@ -76,7 +76,7 @@ export FLEET_PULSE_ESCALATION_CHAT_ID="-100999"
 # ...and its declared sender (#1771): an escalation chat with no partner is
 # refused, so without this no alert in the harness would even be attempted.
 export FLEET_PULSE_ESCALATION_STATE_DIR="/nonexistent/escalation-sender"
-vsock() { printf 'tmux-%s' "$1"; }
+vsock() { if [ "$1" = valrb ] || [ "$1" = valmp ]; then printf 'tmux.%s' "$1"; else printf 'tmux-%s' "$1"; fi; }
 tmux() {
     local i sock=""
     local -a a=("$@")
@@ -100,6 +100,7 @@ BUSY="valbusy"
 SBOT="valsubmit"
 MBOT="valmarker"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate.XXXXXX")"
+ROOT="$(cd "$ROOT" && pwd -P)"
 # #586: a per-run tmux namespace. Concurrent runs (parallel reviews, pytest)
 # otherwise share ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/ and collide on the fixed
 # per-session socket names (tmux-<name>) — duplicate-session aborts, and one
@@ -159,6 +160,14 @@ if [ ! -x "$VAL_PY" ]; then
     exit 2
 fi
 export PLANE_EMIT_CLI="$VAL_CLI" CLAUDLOBBY_CLI="$VAL_CLI"
+# The source-only helper commits this run's authored fixture before the public
+# pulse owner admits it. No native service is installed by fixture preparation.
+val_pulse() {  # <private-native-collaborators> <fleet>
+    local native="$1" fleet="$2" root="$CLAUDLOBBY_ROOT"
+    printf '%s\n' "$(cd "$root" && pwd -P)" > "$root/.claudlobby-harness-root"
+    "$VAL_PY" "$VAL_REPO/harness/compose.py" --root "$root" --fleet "$fleet" \
+        --record-plane --pulse --native-dir "$native"
+}
 # This is a source harness: these selected assets belong to its isolated export.
 export CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
 # This directory was just allocated by mktemp and belongs to this run. A
@@ -584,6 +593,9 @@ cleanup() {
     for _d in ${VAL_PRIVATE_PLANE_SOCKDIRS:-}; do rm -rf "$_d" 2>/dev/null || true; done
     [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
     [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
+    for _root in "$ROOT" "${RB_ROOT:-}" "${BP_ROOT:-}"; do
+        [ -n "$_root" ] && rm -rf "$(dirname "$_root")/.harness-installation-${_root##*/}"
+    done
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
@@ -675,7 +687,7 @@ mkdir -p "$BOT_DIR/projects/wip-untracked/node_modules"
 printf 'x\n' > "$BOT_DIR/projects/wip-untracked/node_modules/x.js"
 
 # --- Observe: run the real pulse against the scratch fleet ---
-CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" val_pulse "$LIB_DIR" "$FLEET" >/dev/null 2>&1 || true
 
 # --- Assert ---
 pass=0; fail=0; refused=0
@@ -780,7 +792,7 @@ touch "$OR_DIR/data/.spawn"   # respawned just now, i.e. after the dispatch
 tmux new-session -d -s valaged 'sleep 600'
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0001 "$((now - 600))" "$((now - 10))" "y"
 
-CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" val_pulse "$LIB_DIR" "$FLEET" >/dev/null 2>&1 || true
 
 # Scope the match to overdue_dispatch specifically: the orphan DOES get a
 # dispatch_orphaned event in this same file, and a bare task-id grep would
@@ -809,7 +821,7 @@ or_ev=$(val_events "$ROOT" "$FLEET" "$OR_BOT" dispatch_orphaned | grep -c 't-835
 harness_check "#835 the orphan is recorded once as dispatch_orphaned" "$r"
 
 # Latched on id-set membership, so a second sweep must not re-record it.
-CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" val_pulse "$LIB_DIR" "$FLEET" >/dev/null 2>&1 || true
 or_ev2=$(val_events "$ROOT" "$FLEET" "$OR_BOT" dispatch_orphaned | grep -c 't-835-0002' || true)
 [ "${or_ev2:-0}" -eq 1 ] && r=yes || r=no
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
@@ -950,7 +962,7 @@ while [ "$ua_i" -lt 6 ]; do
 done
 ua_report valunsix "$((now - 10800))" completed t-1024-0605
 
-CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" val_pulse "$LIB_DIR" "$FLEET" >/dev/null 2>&1 || true
 ua_fired() { val_events "$ROOT" "$FLEET" "$1" worker_unassigned | grep -q '"type":"worker_unassigned"'; }
 
 ua_fired valunfire && r=yes || r=no
@@ -985,16 +997,29 @@ cp "$BOT_DIR/bot.conf" "$ROOT/reload-original-bot.conf"
 sed "s/^BOT_SERVICE=\"\"$/BOT_SERVICE=\"tmux-$BOT\"/" "$BOT_DIR/bot.conf" > "$ROOT/reload-bot.conf"
 grep -qx "BOT_SERVICE=\"tmux-$BOT\"" "$ROOT/reload-bot.conf"
 mv "$ROOT/reload-bot.conf" "$BOT_DIR/bot.conf"
-RF_ARGS=(--selected-release harness-selected --fleet "$FLEET"
-         --bots-dir "$ROOT/local/$FLEET/runtime/bots" --bot "$BOT"
-         --plugin claudna@Claudfather)
+# This scene selects the one bot its old frozen callback scope named. Other
+# scenes have deliberately incomplete hand-written bot.confs; they are outside
+# this reload's authored roster.
+cp "$ROOT/local/$FLEET/fleet.yaml" "$ROOT/reload-original-fleet.yaml"
+printf 'fleet:\n  name: %s\n  manager: %s\n  bots:\n    %s: {expertise: [testing], channels: []}\n' \
+    "$FLEET" "$BOT" "$BOT" > "$ROOT/local/$FLEET/fleet.yaml"
+# Cache availability was an always-successful collaborator of this plugin
+# reload scene. Keep it private when the public owner supplies its real CLI.
+RF_LIB="$ROOT/reload-lib"
+mkdir -p "$RF_LIB"
+for _rf_script in "$LIB_DIR"/*; do
+    [ "${_rf_script##*/}" = check-npx-cache.sh ] || ln -s "$_rf_script" "$RF_LIB/${_rf_script##*/}"
+done
+printf '#!/bin/bash\nexit 0\n' > "$RF_LIB/check-npx-cache.sh"
+chmod +x "$RF_LIB/check-npx-cache.sh"
+RF_CLI="$("$VAL_PY" "$VAL_REPO/harness/compose.py" --root "$ROOT" --fleet "$FLEET" --prepare-runtime --record-plane --native-dir "$RF_LIB")"
+RF_ARGS=(--root "$ROOT" --fleet "$FLEET" fleet reload)
 
 # Happy path: plugin refresh succeeds -> .reload-pending marks the running bot.
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" \
-    CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" CLAUDLOBBY_RELEASE_ID=harness-selected \
+CLAUDLOBBY_ROOT="$ROOT" CLAUDE_BIN="$STUB_BIN/claude" \
     CLAUDLOBBY_FLEET="$FLEET" PATH="$STUB_BIN:$PATH" \
-    "$LIB_DIR/reload-fleet.sh" "${RF_ARGS[@]}" >/dev/null 2>&1 || true
+    "$RF_CLI" "${RF_ARGS[@]}" >/dev/null 2>&1 || true
 [ -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 harness_check "reload-fleet marks a running bot with .reload-pending (happy path)" "$r"
 
@@ -1002,10 +1027,9 @@ harness_check "reload-fleet marks a running bot with .reload-pending (happy path
 printf '#!/bin/bash\necho boom >&2; exit 1\n' > "$STUB_BIN/claude"
 chmod +x "$STUB_BIN/claude"
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" \
-    CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" CLAUDLOBBY_RELEASE_ID=harness-selected \
+CLAUDLOBBY_ROOT="$ROOT" CLAUDE_BIN="$STUB_BIN/claude" \
     CLAUDLOBBY_FLEET="$FLEET" PATH="$STUB_BIN:$PATH" \
-    "$LIB_DIR/reload-fleet.sh" "${RF_ARGS[@]}" >/dev/null 2>&1 || true
+    "$RF_CLI" "${RF_ARGS[@]}" >/dev/null 2>&1 || true
 val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q '"type":"reload_failed"' && r=yes || r=no
 harness_check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
@@ -1021,19 +1045,26 @@ harness_check "reload-fleet does not half-reload (no marker when download fails)
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
 printf '#!/bin/bash\ncase " $* " in *" plugin update "*) echo "plugin update: refreshing"; exec sleep 30 ;; esac\nexit 0\n' > "$STUB_BIN/claude"
 chmod +x "$STUB_BIN/claude" "$STUB_BIN/claudlobby"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" \
-    CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" CLAUDLOBBY_RELEASE_ID=harness-selected \
+CLAUDLOBBY_ROOT="$ROOT" CLAUDE_BIN="$STUB_BIN/claude" \
     CLAUDLOBBY_FLEET="$FLEET" PATH="$STUB_BIN:$PATH" \
     "$VAL_PY" -I -B -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$LIB_DIR/reload-fleet.sh" "${RF_ARGS[@]}" >/dev/null 2>&1 &
+    "$RF_CLI" "${RF_ARGS[@]}" >/dev/null 2>&1 &
 RF_PID=$!
 for _i in $(seq 1 150); do
     grep -q 'plugin update: refreshing' "$ROOT/state/reload-fleet.log" 2>/dev/null && break
     sleep 0.2
 done
-kill -TERM "$RF_PID" 2>/dev/null || true
-wait "$RF_PID" 2>/dev/null || true
+# Interrupt the same native callback this scene tested before the public
+# owner was introduced. Keep its collecting parent alive while the callback's
+# EXIT trap records and delivers the failure; then reap its orphaned step.
+RF_NATIVE_PID="$(sed -n 's/.*reload-fleet\[[^]]*\] pid \([0-9][0-9]*\) step: claude plugin update.*/\1/p' "$ROOT/state/reload-fleet.log" | tail -1)"
+kill -TERM "${RF_NATIVE_PID:?native reload step did not record its pid}" 2>/dev/null || true
+for _i in $(seq 1 100); do
+    [ -e "$ROOT/state/reload-fleet.inflight/$FLEET.$RF_NATIVE_PID" ] || break
+    sleep 0.1
+done
 kill -KILL -- "-$RF_PID" 2>/dev/null || true
+wait "$RF_PID" 2>/dev/null || true
 val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q 'killed during step: claude plugin update' && r=yes || r=no
 harness_check "#1924 reload-fleet killed mid-step raises reload_failed naming the step" "$r"
 mgr_pane=$(tmux capture-pane -J -t "$MGR" -p 2>/dev/null || true)
@@ -1042,6 +1073,7 @@ harness_check "#1924 reload-fleet killed mid-step alerts the manager" "$r"
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claudlobby"
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
 mv "$ROOT/reload-original-bot.conf" "$BOT_DIR/bot.conf"
+mv "$ROOT/reload-original-fleet.yaml" "$ROOT/local/$FLEET/fleet.yaml"
 
 # ===========================================================================
 # F2(b) consolidated activation — keepalive performs the live reload at idle.
@@ -1175,7 +1207,7 @@ printf '%s' "$heldb_pane" | grep -q '/reload' && r=no || r=yes
 harness_check "#2070 no /reload keystroke went into the held box" "$r"
 
 val_plane_ready "$ROOT" "$F2070"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" "$LIB_DIR/fleet-pulse.sh" "$F2070" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" val_pulse "$LIB_DIR" "$F2070" >/dev/null 2>&1 || true
 heldb_ev=$(val_events "$ROOT" "$F2070" "$HELDB")
 printf '%s' "$heldb_ev" | grep -q '"type":"input_held"' && r=yes || r=no
 harness_check "#2070 fleet-pulse emits input_held for the held bot" "$r"
@@ -1245,7 +1277,7 @@ STUB
 chmod +x "$_f997_lib/tg-post.sh"
 f997_sweep() {
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F997" FLEET_PULSE_PUSH_BOX_TICKS=1 \
-        "$_f997_lib/fleet-pulse.sh" "$F997" >/dev/null 2>&1 || true
+        val_pulse "$_f997_lib" "$F997" >/dev/null 2>&1 || true
 }
 val_plane_ready "$ROOT" "$F997"
 f997_sweep
@@ -1557,14 +1589,15 @@ submits=$(wc -l < "$SUBMIT_LOG")
 [ "$submits" -eq 2 ] && r=yes || r=no
 harness_check "send_reload_command fires no spurious Enter on clean submit (verify scoped to prompt)" "$r"
 
-# === Scenario 2: lossless restart — age-gated resume injection on start ===
+# === Scenario 2: fresh native startup with authored startup prompt ===
 # Drive the REAL start-bot.sh against a throwaway bot whose `claude` is a stub
 # injected via CLAUDE_BIN (prints the readiness string, then `cat` so send-keys
 # echo into the pane), with plugin management off (empty FLEET_PLUGINS_REQUIRED)
 # so the start is hermetic and fast — no real auth, MCP, or plugin network call.
-# A fresh session.md -> /claudna:session resume is sent BEFORE STARTUP_PROMPT; a
-# stale one -> resume skipped (clean start).
+# The stub is a fresh provider session; native continuation is covered by the
+# exact-session lifecycle tests and never sends a model-written handoff.
 RB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-rb.XXXXXX")"
+RB_ROOT="$(cd "$RB_ROOT" && pwd -P)"
 val_initialize_plane "$RB_ROOT"
 val_start_fixture_daemon "$RB_ROOT"
 RB_PLANE_SOCKET="$VAL_LAST_PLANE_SOCKET"
@@ -1576,39 +1609,34 @@ mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
 # before the resume injection ever fires. Pinning HOME keeps the scenario hermetic.
 RB_HOME="$RB_ROOT/home"
 mkdir -p "$RB_HOME/.claude"
-# Seed the session-resume CAPABILITY (#1163). start-bot now injects the resume
-# command only when the skill it names can actually resolve, so this hermetic
-# HOME — which has no plugins at all — would otherwise skip the injection and
-# take the age-gate checks below down with it. They are testing the AGE gate;
-# the capability has to be present for that to be what they measure.
-RB_PLUGIN_DIR="$RB_HOME/.claude/plugins/cache/ValMarketplace/claudna"
-mkdir -p "$RB_PLUGIN_DIR"
 printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' > "$RB_HOME/.claude/settings.json"
 cat > "$RB_ROOT/bin/claude" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 exec $VAL_BOX
 STUB
 chmod +x "$RB_ROOT/bin/claude"
+printf '%s\n' "$RB_ROOT" > "$RB_ROOT/.claudlobby-harness-root"
+# Render the real unit declarations into the private committed fixture, without
+# enrolling them. start-bot's native-session door reads those exact bindings.
+printf 'fleet:\n  name: %s\n  manager: valrb\n  service_prefix: tmux\n  bots:\n    valrb: {expertise: [testing]}\n' "$FLEET" > "$RB_ROOT/local/$FLEET/fleet.yaml"
+RB_CLI="$("$VAL_PY" "$VAL_REPO/harness/compose.py" --root "$RB_ROOT" --fleet "$FLEET" --bot valrb --prepare-runtime --record-plane)"
 cat > "$RB_DIR/bot.conf" <<CONF
-CLAUDLOBBY_CLI="$VAL_CLI"
+CLAUDLOBBY_CLI="$RB_CLI"
+CLAUDLOBBY_INSTALLATION="$(dirname "$(dirname "$RB_CLI")")"
 CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
 CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
 FLEET_ROOT="$RB_ROOT/local/$FLEET"
 BOT_NAME="valrb"
 BOT_ID="valrb"
 BOT_LABEL="valrb"
-BOT_SERVICE=""
+BOT_SERVICE="tmux.valrb"
 MANAGER_TMUX="$MGR"
 STARTUP_PROMPT="ZZZ_STARTUPMARK"
 FLEET_PLUGINS_REQUIRED=""
 CONF
 RB_SESSION="$(tmux_session_name "$RB_DIR")"
-
-_run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
-    local iso
-    if [ "$1" = fresh ]; then iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; else iso="2020-01-01T00:00:00Z"; fi
-    printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "$iso" \
-        > "$RB_DIR/.claude/session.md"
+_run_startbot() {  # <fresh|stale> compatibility labels for captured evidence
     tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
     sleep 0.3
     TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 CLAUDE_BIN="$RB_ROOT/bin/claude" \
@@ -1617,23 +1645,15 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
     sleep 1
     tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true
 }
-
-val_scenario "validate-bot-change: lossless restart (resume on start, age-gated)"
-_lossless_fail_before=$fail
-# #997: a session's start removes keepalive's markers about the last session's
-# pane (data/.held, data/.unknown) and keeps data/.limit, which is the account's.
+val_scenario "validate-bot-change: fresh native startup"
 mkdir -p "$RB_DIR/data"
 for _m997 in .held .unknown .limit; do printf '1700000000\n' > "$RB_DIR/data/$_m997"; done
 pane_fresh="$(_run_startbot fresh)"
 [ ! -e "$RB_DIR/data/.held" ] && [ ! -e "$RB_DIR/data/.unknown" ] && [ -e "$RB_DIR/data/.limit" ] && r=yes || r=no
 harness_check "#997 start-bot.sh starts a session without the last one's pane markers (.held, .unknown), keeping .limit" "$r"
 rm -f "$RB_DIR/data/.limit"
-printf '%s' "$pane_fresh" | grep -q '/claudna:session resume' && r=yes || r=no
-harness_check "fresh session.md -> /claudna:session resume injected on start" "$r"
-_rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session resume' | head -1 | cut -d: -f1 || true)"
-_sln="$(printf '%s\n' "$pane_fresh" | grep -n 'ZZZ_STARTUPMARK' | head -1 | cut -d: -f1 || true)"
-{ [ -n "$_rln" ] && [ -n "$_sln" ] && [ "$_rln" -lt "$_sln" ]; } && r=yes || r=no
-harness_check "resume keystroke precedes STARTUP_PROMPT in the pane" "$r"
+printf '%s' "$pane_fresh" | grep -q 'ZZZ_STARTUPMARK' && r=yes || r=no
+harness_check "fresh native session receives the authored STARTUP_PROMPT" "$r"
 # #2158: on Linux the real start-bot.sh starts the session under the bot's own
 # child subreaper, which adopts the tmux server, and leaves with the session.
 if [ "$_OS" = Linux ]; then
@@ -1654,190 +1674,6 @@ if [ "$_OS" = Linux ]; then
     fi
     harness_check "the subreaper leaves once its session is gone (#2158)" "$r"
 fi
-printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes
-harness_check "stale session.md -> resume injection skipped (clean start)" "$r"
-grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-harness_check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
-
-# --- #1163: no resume CAPABILITY -> skip, and skip LOUDLY -------------------
-# The other half of the gate. A fleet running plugins.include_defaults:false has
-# no session provider, and the old code fired an unresolvable slash command into
-# every pane on every boot. The failure this must never become is the SILENT one
-# — a bot that quietly stops resuming and says nothing — so both the log line
-# and the event are asserted, not just the absence of the keystroke.
-rm -rf "$RB_PLUGIN_DIR"
-rm -f "$RB_DIR/logs/startup.log"
-pane_nocap="$(_run_startbot fresh)"
-printf '%s' "$pane_nocap" | grep -q '/claudna:session resume' && r=no || r=yes
-harness_check "no resume capability -> unresolvable command NOT injected" "$r"
-grep -q 'RESUME SKIP.*no resume capability' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-harness_check "  ...and the skip is recorded in startup.log with its reason" "$r"
-grep -q 'provider-absent' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-harness_check "  ...naming WHICH capability was missing (not just that one was)" "$r"
-val_events "$RB_ROOT" "$FLEET" valrb resume_skipped | grep -q '"type":"resume_skipped"' && r=yes || r=no
-harness_check "  ...and emits resume_skipped so a silent degradation is visible" "$r"
-printf '%s' "$pane_nocap" | grep -q 'ZZZ_STARTUPMARK' && r=yes || r=no
-harness_check "  ...while STARTUP_PROMPT still reaches the pane (boot not broken)" "$r"
-mkdir -p "$RB_PLUGIN_DIR"
-
-# --- #2666: a stale per-directory plugin entry keeps the one-prompt start ----
-# The production registry shape: the user entry first, then an older local
-# entry for this bot directory. Claude Code loads the first entry that applies,
-# so the resume Skill is callable and start-bot must take the skill bootstrap.
-# These checks stop at the branch taken: the bootstrap is taller than the 80x24
-# pane start-bot creates, and the stand-in streams its box with no rule under
-# it, so its prompt line scrolls out of view and the send withholds the Enter.
-# The opt-in real-claude runs below (#2669) check the submit.
-for _v2666 in 2.0.0 1.0.0; do
-    mkdir -p "$RB_PLUGIN_DIR/$_v2666/.claude-plugin" "$RB_PLUGIN_DIR/$_v2666/skills/session"
-    printf '{"name":"claudna"}\n' > "$RB_PLUGIN_DIR/$_v2666/.claude-plugin/plugin.json"
-    printf -- '---\nname: session\n---\nResume.\n' > "$RB_PLUGIN_DIR/$_v2666/skills/session/SKILL.md"
-done
-cat > "$RB_HOME/.claude/plugins/installed_plugins.json" <<JSON
-{"version": 2, "plugins": {"claudna@ValMarketplace": [
-  {"scope": "user", "version": "2.0.0", "installPath": "$RB_PLUGIN_DIR/2.0.0"},
-  {"scope": "local", "projectPath": "$RB_DIR", "version": "1.0.0", "installPath": "$RB_PLUGIN_DIR/1.0.0"}]}}
-JSON
-printf '{"enabledPlugins":{"claudna@ValMarketplace":true}}\n' > "$RB_DIR/.claude/settings.local.json"
-mkdir -p "$RB_DIR/.claude/skills/fleet-ops"
-cp "$VAL_REPO/library/skills/fleet-ops/bootstrap.md" "$RB_DIR/.claude/skills/fleet-ops/bootstrap.md"
-rm -f "$RB_DIR/logs/startup.log"
-CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh >/dev/null
-grep -q 'STARTUP mode=skill-bootstrap' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-harness_check "#2666 stale local plugin entry after the user entry -> skill bootstrap on start" "$r"
-grep -q 'literal-compatibility' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
-harness_check "  ...and no literal resume command is injected" "$r"
-# --- #2669: STARTUP_BOOTSTRAP_ENABLED=0 keeps the literal start ---------------
-rm -f "$RB_DIR/logs/startup.log"
-STARTUP_BOOTSTRAP_ENABLED=0 CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh >/dev/null
-grep -q 'literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0\]' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-harness_check "#2669 STARTUP_BOOTSTRAP_ENABLED=0 -> the literal start, its log line naming the switch" "$r"
-grep -q 'STARTUP mode=skill-bootstrap' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
-harness_check "  ...and no one-prompt bootstrap" "$r"
-# --- #2669: a real claude takes the one-prompt bootstrap at 80x24 -------------
-# Opt-in, VAL_REAL_CLAUDE=<a Claude Code binary>: the stand-in cannot draw a box
-# taller than the pane the way Claude Code does. Each run boots that binary on
-# this throwaway bot through the real start-bot.sh, in the 80x24 pane it
-# creates, at the production send budgets, with a throwaway config past
-# onboarding and trust and no credentials (ANTHROPIC_BASE_URL is a closed port,
-# so nothing is spent), then reads the session transcript.
-# Claude Code draws the box two ways (measured, 2.1.316), and each run line
-# names the one it saw: in the alternate screen (alt=1) the box keeps its
-# prompt line in view and scrolls inside; in the normal screen (alt=0) a box
-# taller than the pane loses it, the #2669 case. A credential-less session
-# took the normal screen with Claude Code's nonessential traffic on and the
-# alternate screen with it off, so odd runs leave it on, as production does,
-# and even runs turn it off.
-# VAL_REAL_CLAUDE_RUNS runs (default 4) expect the bootstrap as ONE user record,
-# whole and unframed, and no NOT SUBMITTED line; one more, with
-# STARTUP_BOOTSTRAP_ENABLED=0, expects the literal start: the startup prompt as
-# its own record, and no bootstrap.
-_real2669() {  # $1 = run number; prints "<transcript verdict> alt=<alternate_on>"
-    local cfg="$RB_ROOT/real2669" quiet="" verdict=absent alt i=0 limit=20
-    rm -rf "$cfg"; mkdir -p "$cfg"
-    [ $(( $1 % 2 )) -eq 0 ] && quiet="CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 "
-    python3 -I -c '
-import json, sys
-cfg, cwd, version = sys.argv[1:]
-project = {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True,
-           "allowedTools": [], "history": []}
-json.dump({"hasCompletedOnboarding": True, "lastOnboardingVersion": version, "theme": "dark",
-           "cachedGrowthBookFeatures": {"tengu_virtual_pancake": True},
-           "projects": {cwd: project}}, open(cfg + "/.claude.json", "w"))
-' "$cfg" "$(cd "$RB_DIR" && pwd -P)" "$CLAUDE_VERSION"
-    printf '#!/bin/bash\nexec env -i PATH="$PATH" HOME="$HOME" TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 CLAUDE_CONFIG_DIR=%q ANTHROPIC_BASE_URL=http://127.0.0.1:9 DISABLE_AUTOUPDATER=1 %s%q "$@"\n' \
-        "$cfg" "$quiet" "$VAL_REAL_CLAUDE" > "$RB_ROOT/bin/claude"
-    rm -f "$RB_DIR/logs/startup.log"
-    ( unset PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_SHOWN_TICKS PANE_SEND_SETTLE_S
-      CLAUDE_CONFIG_DIR="$RB_HOME/.claude" _run_startbot fresh ) >/dev/null 2>&1 || true
-    alt="$(tmux display-message -p -t "$RB_SESSION" '#{alternate_on}' 2>/dev/null)" || alt=""
-    # start-bot returns once its sends settled: a send it did not submit gets
-    # one transcript read, not a wait.
-    grep -qE 'NOT (SUBMITTED|SENT)' "$RB_DIR/logs/startup.log" 2>/dev/null && limit=1
-    while [ "$i" -lt "$limit" ]; do
-        verdict="$(python3 -I -c '
-import glob, json, sys
-texts = []
-for path in glob.glob(sys.argv[1] + "/projects/*/*.jsonl"):
-    for line in open(path, errors="replace"):
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if record.get("type") == "user":
-            content = (record.get("message") or {}).get("content")
-            if isinstance(content, list):
-                content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-        elif record.get("type") == "attachment" and (record.get("attachment") or {}).get("type") == "queued_command":
-            content = str(record["attachment"].get("prompt"))
-        else:
-            continue
-        if isinstance(content, str) and content:
-            texts.append(content)
-def kind(t):
-    if "FLEET_STARTUP_BOOTSTRAP_V1" in t:
-        whole = t.startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1") and "ZZZ_STARTUPMARK\nFLEET_STARTUP_INSTRUCTIONS_END" in t
-        return "framed" if "<pasted_content" in t else ("bootstrap" if whole else "partial")
-    return "startup" if "ZZZ_STARTUPMARK" in t else "other"
-print(" ".join(kind(t) for t in texts) or "absent")
-' "$cfg" 2>/dev/null)" || verdict=unreadable
-        case " $verdict " in *' bootstrap '*|*' framed '*|*' partial '*|*' startup '*|' unreadable ') break ;; esac
-        i=$((i + 1))
-        [ "$i" -lt "$limit" ] && sleep 1
-    done
-    tmux capture-pane -t "$RB_SESSION" -p > "$cfg/pane.txt" 2>/dev/null || true
-    tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
-    printf '%s alt=%s\n' "$verdict" "${alt:-?}"
-}
-if [ -n "${VAL_REAL_CLAUDE:-}" ] && measure_claude_version "$VAL_REAL_CLAUDE"; then
-    cp "$RB_ROOT/bin/claude" "$RB_ROOT/bin/claude.stub"
-    _n2669=0; _ok2669=0
-    while [ "$_n2669" -lt "${VAL_REAL_CLAUDE_RUNS:-4}" ]; do
-        _n2669=$((_n2669 + 1))
-        _v2669="$(_real2669 "$_n2669")"
-        _s2669=sent
-        grep -q 'STARTUP mode=skill-bootstrap' "$RB_DIR/logs/startup.log" 2>/dev/null || _s2669=no-bootstrap
-        grep -qE 'NOT (SUBMITTED|SENT)' "$RB_DIR/logs/startup.log" 2>/dev/null && _s2669=unsent
-        printf '  real claude %s, 80x24, run %s: transcript [%s], startup.log %s\n' \
-            "$CLAUDE_VERSION" "$_n2669" "$_v2669" "$_s2669"
-        if [ "${_v2669% alt=*}" = bootstrap ] && [ "$_s2669" = sent ]; then
-            _ok2669=$((_ok2669 + 1))
-        else
-            tail -n 8 "$RB_ROOT/real2669/pane.txt" 2>/dev/null | sed 's/^/      | /' || true
-        fi
-    done
-    [ "$_ok2669" = "$_n2669" ] && r=yes || r=no
-    harness_check "#2669 real claude at 80x24: $_ok2669 of $_n2669 bootstraps submitted, one whole record each" "$r"
-    _v2669="$(STARTUP_BOOTSTRAP_ENABLED=0 _real2669 1)"
-    printf '  real claude %s, 80x24, STARTUP_BOOTSTRAP_ENABLED=0: transcript [%s]\n' "$CLAUDE_VERSION" "$_v2669"
-    case " ${_v2669% alt=*} " in *' bootstrap '*|*' framed '*|*' partial '*) r=no ;; *' startup '*) r=yes ;; *) r=no ;; esac
-    grep -q 'literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0\]' "$RB_DIR/logs/startup.log" 2>/dev/null || r=no
-    harness_check "#2669 real claude, switch off: the literal start, the startup prompt its own record" "$r"
-    mv "$RB_ROOT/bin/claude.stub" "$RB_ROOT/bin/claude"
-else
-    printf '  #2669 real-claude runs skipped: set VAL_REAL_CLAUDE to a Claude Code binary\n'
-fi
-rm -rf "$RB_PLUGIN_DIR/2.0.0" "$RB_PLUGIN_DIR/1.0.0" "$RB_HOME/.claude/plugins/installed_plugins.json" \
-    "$RB_DIR/.claude/settings.local.json" "$RB_DIR/.claude/skills/fleet-ops"
-
-# Surface hermeticity evidence when the lossless checks fail (e.g. a CI runner
-# where this scenario fails but a dev host passes): start-bot.sh's stderr is
-# otherwise swallowed to a file we discard, hiding WHY the resume block did not
-# run. Gated on failure so a passing run stays quiet.
-if [ "$fail" -gt "$_lossless_fail_before" ]; then
-    echo "  --- DIAGNOSTIC: lossless checks failed; dumping start-bot evidence ---"
-    echo "  [tmux] $(tmux -V 2>&1)"
-    echo "  [start-bot fresh stdout+stderr]"
-    sed 's/^/    /' "$RB_ROOT/startbot.fresh.out" 2>/dev/null || echo "    (none)"
-    echo "  [start-bot stale stdout+stderr]"
-    sed 's/^/    /' "$RB_ROOT/startbot.stale.out" 2>/dev/null || echo "    (none)"
-    echo "  [startup.log]"
-    sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
-    echo "  [fresh pane]"; printf '%s\n' "$pane_fresh" | sed 's/^/    /'
-    echo "  [stale pane]"; printf '%s\n' "$pane_stale" | sed 's/^/    /'
-    echo "  ----------------------------------------------------------------"
-fi
-
 # === Scenario 2a: the staged fleet link is what start-bot launches (#1768) ===
 # The REAL start-bot.sh with NO CLAUDE_BIN, and the link an armed claude-update
 # leaves at $CLAUDLOBBY_ROOT/state/bin/claude. The session AND the plugin step
@@ -1849,6 +1685,7 @@ RB_STAGED="$RB_ROOT/staged/claude.exe"
 mkdir -p "$RB_ROOT/staged" "$RB_ROOT/state/bin"
 cat > "$RB_STAGED" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 if [ "\${1:-}" = plugin ]; then echo "\$*" >> "$RB_ROOT/staged-plugin-argv.log"; exit 0; fi
 echo ZZZ_STAGED_LINK_LAUNCHED
 exec $VAL_BOX
@@ -1898,6 +1735,7 @@ harness_check "ready verdict -> no rc_timeout event (no false alarm, #751)" "$r"
 # no_bridge -> the probe times out and emits the now-true-positive rc_timeout.
 cat > "$RB_ROOT/bin/claude" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 exec $VAL_BOX
 STUB
 chmod +x "$RB_ROOT/bin/claude"
@@ -2175,6 +2013,7 @@ _CH_LOGDIR="$_CH_CACHE/claude-cli-nodejs/$_CH_SLUG/mcp-logs-plugin-telegram-tele
 # Then 2b-bis's production-shaped poller tree, under this process.
 cat > "$_CH_BIN/claude" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 sleep 1
 _d="\$(cat "$_CH_BIN/decision" 2>/dev/null || true)"
 if [ "\$_d" != none ]; then
@@ -2314,6 +2153,7 @@ _esc_pages="$ROOT/esc-pages.log"
 : > "$_esc_pages"
 cat > "$_esc_lib/tg-post.sh" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 printf '%s\n' "\$1" >> "$_esc_pages"
 STUB
 chmod +x "$_esc_lib/tg-post.sh"
@@ -2339,7 +2179,7 @@ esc_run() {  # <fleet>
     val_replayed "$ROOT"   # the sweep reads the rows written before it from the plane
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$1" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
-        "$_esc_lib/fleet-pulse.sh" "$1" >/dev/null 2>&1 || true
+        val_pulse "$_esc_lib" "$1" >/dev/null 2>&1 || true
 }
 
 # Positive: 2 bots TIMEOUT within the window (== default threshold) -> page fires.
@@ -2399,12 +2239,14 @@ val_link_plane_shim "$_st_lib"
 : > "$_st_pages"
 cat > "$_st_lib/tg-post.sh" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 printf '%s\n' "\$1" >> "$_st_pages"
 STUB
 # A unit's state is $ST_UNITS/<label> (ACTIVE=, SUB=); a unit with no state
 # file reads as one systemd cannot find. is-active and show are all the sweep asks.
 cat > "$_st_bin/systemctl" <<'STUB'
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 a=("$@"); [ "${a[0]:-}" = "--user" ] && a=("${a[@]:1}")
 verb="${a[0]:-}"; a=("${a[@]:1}")
 props=","; value=0; unit=""
@@ -2463,7 +2305,7 @@ st_run() {
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_st_fleet" HOME="$_st_home" ST_UNITS="$_st_units" \
         PATH="$_st_bin:$PATH" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
-        "$_st_lib/fleet-pulse.sh" "$_st_fleet" >/dev/null 2>&1 || true
+        val_pulse "$_st_lib" "$_st_fleet" >/dev/null 2>&1 || true
 }
 st_count() {  # <bot> <type>: how many of the bot's rows are of that type
     val_events "$ROOT" "$_st_fleet" "$1" "$2" | grep -c "\"type\":\"$2\"" || true
@@ -2539,16 +2381,19 @@ fi
 val_scenario "validate-bot-change: marketplace registration (#596: positional + verified + loud)"
 _mp_fail_before=$fail
 MP_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valmp"
-mkdir -p "$MP_DIR/.claude" "$MP_DIR/logs"
+mkdir -p "$MP_DIR/.claude" "$MP_DIR/logs" "$MP_DIR/data"
+printf '    valmp: {expertise: [testing]}\n' >> "$RB_ROOT/local/$FLEET/fleet.yaml"
+"$VAL_PY" "$VAL_REPO/harness/compose.py" --root "$RB_ROOT" --fleet "$FLEET" --bot valmp --prepare-runtime --record-plane >/dev/null
 cat > "$MP_DIR/bot.conf" <<CONF
-CLAUDLOBBY_CLI="$VAL_CLI"
+CLAUDLOBBY_CLI="$RB_CLI"
+CLAUDLOBBY_INSTALLATION="$(dirname "$(dirname "$RB_CLI")")"
 CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
 CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
 FLEET_ROOT="$RB_ROOT/local/$FLEET"
 BOT_NAME="valmp"
 BOT_ID="valmp"
 BOT_LABEL="valmp"
-BOT_SERVICE=""
+BOT_SERVICE="tmux.valmp"
 MANAGER_TMUX="$MGR"
 FLEET_PLUGINS_REQUIRED="demo@valmarket"
 FLEET_PLUGINS_MARKETPLACES="valmarket=github:ExampleOrg/example-plugins valmarketbad=github:ExampleOrg/does-not-exist"
@@ -2556,6 +2401,7 @@ CONF
 MP_SESSION="$(tmux_session_name "$MP_DIR")"
 cat > "$RB_ROOT/bin/claude" <<STUB
 #!/bin/bash
+if [ "\${1:-}" = --version ]; then echo '2.1.281 (Claude Code)'; exit 0; fi
 if [ "\$1" = plugin ]; then
     printf '%s\n' "\$*" >> "$RB_ROOT/plugin-argv.log"
     if [ "\$2" = marketplace ] && [ "\$3" = add ]; then
@@ -2699,7 +2545,7 @@ sleep 1
 
 val_plane_ready "$ROOT" "$F2"   # the readers declared for this fleet too (its manifest is kept)
 # Run 1: seeds IDLEK pane hash/ts; health-checks declared bots.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" val_pulse "$LIB_DIR" "$F2" >/dev/null 2>&1 || true
 
 # Make IDLEK idle (.idle newer than .last-tool-call) and backdate its pane ts so
 # the next sweep sees elapsed >= 300 without a real 5-minute wait.
@@ -2707,7 +2553,7 @@ touch "$F2_BOTS/$IDLEK/data/.last-tool-call"; sleep 1; touch "$F2_BOTS/$IDLEK/da
 _now415=$(date +%s); printf '%s' "$((_now415 - 400))" > "$ROOT/state/pulse/$IDLEK.pane_ts"
 
 # Run 2: IDLEK pane unchanged + elapsed 400 would trip pane_stuck — idle-guard must suppress.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" val_pulse "$LIB_DIR" "$F2" >/dev/null 2>&1 || true
 
 # Each read sits right before its own check. A refusal holds for the rest of
 # the scenario, so a check that comes before a read that could not run is
@@ -2785,7 +2631,7 @@ fleet:
 YAML
 
 # Run 3: seed pane hashes/ts for the new bots.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" val_pulse "$LIB_DIR" "$F2" >/dev/null 2>&1 || true
 
 # Mark BUSYM "working" (fresh marker, no .idle) and backdate both busy bots past
 # the 300s pane threshold; BUSYP stays marker-less (its esc-to-interrupt pane is
@@ -2796,7 +2642,7 @@ printf '%s' "$((_n611 - 400))" > "$ROOT/state/pulse/$BUSYM.pane_ts"
 printf '%s' "$((_n611 - 400))" > "$ROOT/state/pulse/$BUSYP.pane_ts"
 
 # Run 4: the sweep where pane_stuck would trip for the busy bots + the summary runs.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" val_pulse "$LIB_DIR" "$F2" >/dev/null 2>&1 || true
 
 val_events "$ROOT" "$F2" "$BUSYM" pane_stuck | grep -q '"type":"pane_stuck"' && r=no || r=yes
 harness_check "pane_stuck NOT fired for a working bot (fresh .last-tool-call, mid-tool-call)" "$r"
@@ -3034,7 +2880,7 @@ CLAUDLOBBY_ROOT="$_prev_root"
 # the nested bot (no live session -> session_missing), proving resolve_bots_dir
 # and the nested fleet.yaml discovery both fire through a production script.
 val_plane_ready "$ROOT" "$NF"   # resolves the NESTED fleet dir; its manifest is kept
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$NF" "$LIB_DIR/fleet-pulse.sh" "$NF" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$NF" val_pulse "$LIB_DIR" "$NF" >/dev/null 2>&1 || true
 val_events "$ROOT" "$NF" "$NBOT" session_missing | grep -q '"type":"session_missing"' && r=yes || r=no
 harness_check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_missing fired)" "$r"
 
@@ -3396,7 +3242,7 @@ LBUNIT
     LB_SAMPLES="$BP_ROOT/longboot-samples.txt"
     cl_pulse() {
         CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" CLAUDLOBBY_FLEET="$CL_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
-            "$LIB_DIR/fleet-pulse.sh" "$CL_FLEET" >/dev/null 2>&1 || true
+            val_pulse "$LIB_DIR" "$CL_FLEET" >/dev/null 2>&1 || true
     }
     # The loop fleet's ONE pulse runs from this sampler, at >=20s: late enough
     # that the crash probe has looped (it restarts every ~2s), early enough that
@@ -3427,7 +3273,7 @@ LBUNIT
 
     bp_pulse() {
         CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" CLAUDLOBBY_FLEET="$BP_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
-            "$LIB_DIR/fleet-pulse.sh" "$BP_FLEET" >/dev/null 2>&1 || true
+            val_pulse "$LIB_DIR" "$BP_FLEET" >/dev/null 2>&1 || true
     }
 
     # --- State 1: activating (ExecStartPre — the boot stagger, held by its gate) ---
@@ -4189,6 +4035,7 @@ rm -rf "$GA_ROOT"
 # of the real script running with a real environment, not of a fixture.
 # =============================================================================
 SW_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sw.XXXXXX")"
+SW_ROOT="$(cd "$SW_ROOT" && pwd -P)"
 (cd "$SW_ROOT" && pwd -P) > "$SW_ROOT/.claudlobby-harness-root"
 cat > "$SW_ROOT/fleet.yaml" <<'SWEOF'
 fleet:
@@ -4298,7 +4145,8 @@ harness_check "  ...and a fleet that says nothing carries nothing (the door owns
 # the operator looks, with the line that flips them.
 # This scenario has its own fleet. Do not inherit the main harness fleet's
 # generated selector when asking about this scratch host's declarations.
-env -u FLEET_NAME -u CLAUDLOBBY_FLEET "$VAL_CLI" --root "$SW_ROOT" host doctor --switches \
+SW_CLI="$("$VAL_PY" "$VAL_REPO/harness/compose.py" --root "$SW_ROOT" --fleet sw-validate --prepare-runtime)"
+env -u FLEET_NAME -u CLAUDLOBBY_FLEET CLAUDLOBBY_ROOT="$SW_ROOT" "$SW_CLI" --root "$SW_ROOT" host doctor --switches \
     > "$SW_ROOT/sw.txt" 2>&1 || true
 r=yes
 for _k in update-siblings claudna-harvest code-audit-sweep; do
@@ -4881,7 +4729,7 @@ val_backdate "$F3_BOTS/$SCTL/data/.last-tool-call" 90000
 rm -f "$F3_BOTS/$SCTL/data/.idle"
 touch "$F3_BOTS/$SCTL/data/.spawn"
 
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" "$LIB_DIR/fleet-pulse.sh" "$F3" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" val_pulse "$LIB_DIR" "$F3" >/dev/null 2>&1 || true
 
 s_ctl_ev=$(val_events "$ROOT" "$F3" "$SCTL")
 s_idle_ev=$(val_events "$ROOT" "$F3" "$SIDLE")
@@ -5369,10 +5217,11 @@ from claudlobby.plane.registry_emit import run_generate_scan
 from claudlobby.session_export import export_bot
 sys.path.insert(0,sys.argv[2])
 from tests.plane_setup import initialize_plane
+from tests.package_fixtures import git_package
 root=Path(sys.argv[1]);repo=Path(sys.argv[2])
 (root/"fleet.yaml").write_text("fleet:\n  name: summary-probe\n  service_prefix: com.summary-probe\n  manager: lead\n  bots:\n    lead: {expertise: [orchestration], channels: []}\n")
 (root/".env").write_text("SESSION_EXPORT_ENABLED=0\n")
-fleet,merged=load_fleet(root/"fleet.yaml");paths=Paths(root=root,package=get_resources())
+fleet,merged=load_fleet(root/"fleet.yaml");paths=Paths(root=root,package=git_package(root))
 os.environ["PLANE_EMIT_DISABLED"]="1"
 compose_fleet(fleet,paths)
 compose_fleet_timers(fleet,paths,merged)
@@ -5416,10 +5265,10 @@ r=no; "$VAL_PY" -c 'import json, sys; s = json.load(open(sys.argv[1])); m = s.ge
     "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
 harness_check "#1388 composed settings keep Claude Code's own autocompact window and block its offer" "$r"
 r=yes
-for _se_retired in SESSION_""DIGEST transcript-""digest plane-session-""start; do
+for _se_retired in SESSION_""DIGEST transcript-""digest; do
     grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true
 done
-harness_check "#2145 composed bot has no retired summary or SessionStart hook" "$r"
+harness_check "#2145 composed bot has no retired model-summary hook" "$r"
 r=no; grep -q '^Environment=SESSION_EXPORT_ENABLED=0$' "$SE_ROOT/runtime/fleet/timers/com.summary-probe.session-export.service" && r=yes
 harness_check "#2145 session-export fleet opt-out reaches its closed unit environment" "$r"
 SE_OFF=$(SESSION_EXPORT_ENABLED=0 "$VAL_CLI" --root "$SE_ROOT" _session-export-tick summary-probe)

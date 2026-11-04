@@ -9,15 +9,21 @@ from claudlobby.command_result import CommandFailure
 from claudlobby.commands.operator_context import require_operator_context
 
 
-def test_selected_bot_ancestry_refuses_even_without_bot_environment(monkeypatch, tmp_path):
+def test_current_bot_ancestry_refuses_even_without_bot_environment(monkeypatch, tmp_path):
     from claudlobby import activation_state, config_plan, config_units, context, supervision_inventory
 
     installed = tmp_path / "worker.service"
     installed.write_text("[Service]\n")
     monkeypatch.setattr(activation_state, "read_selection", lambda _root: {"plan_id": "plan"})
     monkeypatch.setattr(config_plan, "read_plan", lambda *_: object())
-    monkeypatch.setattr(context, "resolve_paths", lambda **_: SimpleNamespace(package=object()))
-    monkeypatch.setattr(config_units, "current_declarations", lambda *_: (object(),))
+    package = SimpleNamespace(installation=object(), source_revision="a" * 40)
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: SimpleNamespace(package=package))
+    from claudlobby import active_config
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(tmp_path / "installation"))
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: pytest.fail(
+        "historical sealed selection must not gate Git operator commands"))
+    monkeypatch.setattr(active_config, "read_current_config", lambda *_a, **_k: {})
+    monkeypatch.setattr(config_units, "current_git_declarations", lambda *_: (object(),))
     monkeypatch.setattr(supervision_inventory, "_catalog", lambda _text: ("Linux", "", [], set(), {}))
     inventory = SimpleNamespace(units=(SimpleNamespace(installed=(SimpleNamespace(path=installed),),
                                                        target="worker.service"),),
@@ -27,7 +33,7 @@ def test_selected_bot_ancestry_refuses_even_without_bot_environment(monkeypatch,
 
     class Native:
         def __init__(self, _package):
-            pass
+            self.package = _package
 
         def read(self, function):
             assert function == "svc_inventory_catalog"

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 import base64
 import binascii
 from datetime import datetime, timezone
@@ -32,7 +30,7 @@ def _cursor(scope: dict, after: tuple[int, str]) -> str:
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
-def _after(token: str | None, scope: dict, release_id: str) -> tuple[int, str] | None:
+def _after(token: str | None, scope: dict, release_id: str | None) -> tuple[int, str] | None:
     if token is None:
         return None
     try:
@@ -117,9 +115,10 @@ def _item(row: dict) -> dict:
 
 
 def _read(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_state import ActivationError
+    from ..activation_identity import read_current_identity_bindings
     from ..brief import plane_session
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import (
@@ -148,11 +147,11 @@ def _read(args) -> CommandOutput:
             raise CommandFailure("conflict", "seed configuration has no report history")
         if origin is not None and (origin.bot_id is None or origin.fleet.name != destination.fleet.name):
             raise CommandFailure("conflict", "generated report viewer differs from the selected fleet")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active report selection is unavailable")
-        release_id = selected["release_id"]
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        release_id = selected.release_id
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):
@@ -194,11 +193,9 @@ def _read(args) -> CommandOutput:
                         and args.status is None and since is None)
             cursor_identity = {"host_uid": bindings["host_uid"],
                                "fleet_uid": bindings["fleet_uid"], "viewer_uid": viewer_uid,
-                               "release_id": release_id,
-                               "activation_id": selected["activation_id"],
-                               "plan_id": selected["plan_id"]} if eligible else None
+                               **selected.cursor_scope} if eligible else None
             scope = {"fleet_uid": bindings["fleet_uid"], "viewer_uid": viewer_uid,
-                     "release_id": release_id, "author": args.bot, "status": args.status,
+                     "release_id": release_id, **selected.provenance, "author": args.bot, "status": args.status,
                      "since": since, "unacknowledged": args.unacknowledged,
                      "prior_seq": prior_seq, "prior_ack_event": prior_ack_seq}
             after = None if eligible else _after(args.cursor, scope, release_id)
@@ -236,9 +233,8 @@ def _read(args) -> CommandOutput:
                 ack_cursor = None
             items = [_item(row) for row in page]
             lines = tuple(_line(item) for item in items)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active report selection changed during read', release_id=release_id)
-        return CommandOutput({"fleet": destination.fleet.name, "viewer": viewer,
+        selected.check(destination.paths.root, package=destination.paths.package, message='active report selection changed during read')
+        return CommandOutput({**selected.provenance, "fleet": destination.fleet.name, "viewer": viewer,
                               "viewer_uid": viewer_uid,
                               "items": items, "next_cursor": next_cursor,
                               "ack_cursor": ack_cursor, "ack_available": ack_cursor is not None},

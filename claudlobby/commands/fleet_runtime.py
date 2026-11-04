@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
+from ..runtime_admission import runtime_provenance
 from .bot_runtime import lifecycle_notes
 
 
@@ -42,7 +43,7 @@ def dispatch(args) -> CommandOutput:
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "tick": "completed", "bot_health": "not_asserted",
                     "summary_path": str(result.summary_path), "summary": result.summary,
-                    "stderr_tail": result.stderr_tail}
+                    "stderr_tail": result.stderr_tail, **runtime_provenance(result)}
             lines = (f"{result.fleet}: pulse tick completed; inspect the summary and events "
                      "for bot health.", result.summary.rstrip())
         elif action == "reload":
@@ -56,14 +57,14 @@ def dispatch(args) -> CommandOutput:
                     "plugins_refreshed": list(result.plugins_refreshed),
                     "bots_marked": list(result.bots_marked),
                     "bots_marked_count": len(result.bots_marked),
-                    "configuration_changed": False, "enrollment_changed": False}
+                    "configuration_changed": False, "enrollment_changed": False, **runtime_provenance(result)}
             lines = (f"{result.fleet}: refreshed {len(result.plugins_refreshed)} plugin(s); "
                      f"marked {len(result.bots_marked)} running bot(s) for idle reload.",)
         elif action == "reconcile":
             result = reconcile_fleet(root=root, fleet=args.fleet)
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "bots": [asdict(bot) for bot in result.bots],
-                    "source": "selected configuration and native inventory"}
+                    "source": "selected configuration and native inventory", **runtime_provenance(result)}
             lines = tuple(f"{result.fleet}/{bot.bot}: {bot.state} "
                           f"(declared={bot.declared}, enrolled={bot.enrolled}, "
                           f"native={bot.native_active}, session={bot.session})"
@@ -73,7 +74,7 @@ def dispatch(args) -> CommandOutput:
                                        workers_only=bool(getattr(args, "workers", False)))
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "requested": result.action, "workers_only": result.workers_only,
-                    "completed": [asdict(bot) for bot in result.completed], "failed_bot": None}
+                    "completed": [asdict(bot) for bot in result.completed], "failed_bot": None, **runtime_provenance(result)}
             # under each bot, what bot start or stop prints about its record (#2243)
             lines = tuple(line for bot in result.completed for line in (
                 f"{bot.fleet}/{bot.bot}: {bot.state}; readiness={bot.readiness}",
@@ -84,6 +85,7 @@ def dispatch(args) -> CommandOutput:
         data["failed_bot"] = exc.bot
         data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
         data["release_id"] = exc.release_id
+        data.update(runtime_provenance(exc))
         raise CommandFailure("unavailable" if exc.effect_attempted or exc.unavailable else "conflict",
                              str(exc), data=data, release_id=exc.release_id,
                              hint="inspect the failed bot before resuming the remaining sweep"

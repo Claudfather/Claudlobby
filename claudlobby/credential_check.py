@@ -5,13 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import stat
 import subprocess
 
-from .activation_state import read_selection
-from .config_plan import PlanError, path_state, read_plan
 from .context import native_environment
 from .operation_context import resolve_operation_scope
-from .runtime_admission import mutation_admission
+from .runtime_admission import mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
 
 class CredentialCheckError(RuntimeError):
@@ -23,11 +22,13 @@ class CredentialCheckError(RuntimeError):
 @dataclass(frozen=True)
 class CredentialCheckResult:
     fleet: str
-    release_id: str
+    release_id: str | None
     state_path: Path
     fleet_source_changed: bool = False
     checks: str = "tick_completed"
     health: str = "unobserved"
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult:
@@ -36,36 +37,32 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
         destination, origin = resolve_operation_scope(root=root, fleet=fleet)
         if origin is not None and origin.bot_id != destination.fleet.manager:
             raise CredentialCheckError("only the selected fleet manager may check its credentials")
+        bound_runtime_release(destination.paths.package, generated=origin is not None)
         native = destination.paths.lib / "creds-check.sh"
-        if native != release.native_path / "creds-check.sh":
+        if native != destination.paths.package.runtime_native / "creds-check.sh":
             raise CredentialCheckError("credential probe differs from the selected release")
 
-        # The roster, manager and chat are the activated plan's frozen
-        # fleet.yaml (resolve_operation_scope), and the probe is handed that
-        # roster for each read it makes, the alert sender's included. An edit
-        # made since is not live until it is activated, so the probe runs on
-        # the activated roster and the result says the source has changed. It
-        # used to stop here, every day until the next activation (#2515).
-        selected = read_selection(root)
-        if selected is None or selected["release_id"] != release.release_id:
-            raise CredentialCheckError("credential check has no stable selected fleet")
-        plan = read_plan(root, selected["plan_id"])
-        source = plan.effects["fleet_sources"][destination.fleet.name]["fleet"]
-        manifest, _ = plan.frozen_input(source, required=True)
+        # Pending authored edits do not replace the committed roster or alert scope.
+        frozen = release.snapshot["fleets"][destination.fleet.name]
+        manifest = Path(frozen["manifest"])
         if manifest != destination.paths.fleet_yaml:
-            raise CredentialCheckError("fleet source is not where the activated plan read it")
+            raise CredentialCheckError("fleet source differs from its committed configuration")
         try:
-            source_changed = path_state(manifest, source=True) != plan.inputs[str(manifest)]["state"]
-        except PlanError:
-            # Activation fingerprinted this source, so one that cannot be
-            # fingerprinted now (unreadable, a link loop) has changed as well.
+            source_changed = manifest.is_symlink() or manifest.resolve() != manifest
+            if not source_changed:
+                expected = frozen["fleet"].encode()
+                fd = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as source:
+                    source_changed = (not stat.S_ISREG(os.fstat(source.fileno()).st_mode)
+                                      or source.read(len(expected) + 1) != expected)
+        except OSError:
             source_changed = True
         if destination.paths.runtime_bots.resolve() != destination.paths.runtime_bots:
             raise CredentialCheckError("fleet bot runtime is redirected")
 
         state_path = root / "state/creds-check" / f"{destination.fleet.name}.json"
         log_path = root / "state/logs/creds-check.log"
-        env = {**os.environ, **native_environment(destination.paths),
+        env = {**os.environ, **native_environment(destination.paths, current=release),
                "CLAUDLOBBY_FLEET": destination.fleet.name,
                "CLAUDLOBBY_CREDS_LOG": str(log_path),
                "CLAUDLOBBY_CREDS_STATE": str(state_path)}
@@ -73,7 +70,7 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
             env["TELEGRAM_GROUP_CHAT_ID"] = str(destination.fleet.telegram_group_chat_id)
         else:
             env.pop("TELEGRAM_GROUP_CHAT_ID", None)
-        command = [str(native), "--selected-release", release.release_id,
+        command = [str(native), "--admitted-runtime",
                    "--fleet", destination.fleet.name,
                    "--fleet-root", str(destination.paths.fleet_config_dir),
                    "--bots-dir", str(destination.paths.runtime_bots)]
@@ -90,5 +87,5 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
             # happened. Never auto-retry a possibly delivered alert.
             raise CredentialCheckError(f"credential probe outcome is unverified; inspect {state_path} "
                                        f"and {log_path}", effect_attempted=True)
-        return CredentialCheckResult(destination.fleet.name, release.release_id, state_path,
-                                     fleet_source_changed=source_changed)
+        return CredentialCheckResult(destination.fleet.name, runtime_release_id(release), state_path,
+                                     fleet_source_changed=source_changed, **runtime_provenance(release))

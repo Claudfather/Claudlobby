@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
-import os
-import re
 from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
@@ -21,7 +17,8 @@ def _request(value: str) -> str:
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
+    from ..active_config import runtime_read_stamp
     from ..automation_state import AutomationStateError, mutate, pause_input, record_input, status
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
@@ -30,7 +27,7 @@ def dispatch(args) -> CommandOutput:
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
     from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
-    from .checkin import _scope
+    from .checkin import _scope, _runtime_hint
 
     try:
         if args.seed:
@@ -47,9 +44,9 @@ def dispatch(args) -> CommandOutput:
         if action == "status":
             result = status(destination.paths.root, destination.fleet.name, bot,
                             configured=config is not None)
-            if read_selection(destination.paths.root) != selected:
-                raise selection_read_conflict('active automation selection changed during read')
-            return CommandOutput(result, release_id=selected["release_id"],
+            selected.check(destination.paths.root, package=destination.paths.package,
+                           message='active automation selection changed during read')
+            return CommandOutput({**result, **selected.provenance}, release_id=selected.release_id,
                                  lines=(f"{bot}: eligible={result['eligible']}; "
                                         f"reason={result['ineligible_reason'] or '-'}; "
                                         f"runs={result['runs_recorded']}",))
@@ -63,18 +60,22 @@ def dispatch(args) -> CommandOutput:
                    if action == "record" else {})
         actor = (f"bot:{destination.fleet.name}/{origin.bot_id}" if origin is not None
                  else _local_operator_alias())
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
-        if origin is not None and (not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
-            raise CommandFailure("release_mismatch", "generated automation caller lacks a bound release")
+        from .message_write import _bound_release
+        from ..runtime_admission import runtime_route_matches
+        bound_release = _bound_release(destination.paths.package, generated=origin is not None)
         with mutation_admission(destination.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            if release.release_id != selected["release_id"] or read_selection(destination.paths.root) != selected:
-                raise CommandFailure("release_mismatch", "selected automation release changed")
+            if (not runtime_route_matches(release, selected, package=destination.paths.package)
+                    or runtime_read_stamp(destination.paths.root, package=destination.paths.package) != selected):
+                raise CommandFailure("release_mismatch", "selected automation release changed",
+                                     data=selected.provenance,
+                                     hint=("inspect the current configuration and claudlobby host update status"
+                                           if selected.kind == "git" else None))
             result = mutate(destination.paths.root, destination.fleet.name, bot, action,
                             actor=actor, request_id=request_id, payload=payload,
                             target_repo=config.target_repo)
         return CommandOutput({"fleet": destination.fleet.name, "bot": bot, **result,
-                              "request_persisted": True}, release_id=selected["release_id"],
+                              "request_persisted": True, **selected.provenance}, release_id=selected.release_id,
                              lines=(f"{bot}: {action}; recording={result['recording']}; "
                                     f"eligible={result['state']['eligible']}",))
     except CommandFailure:
@@ -83,7 +84,7 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure(exc.code, str(exc)) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from automation caller",
-                             hint=exc.hint) from exc
+                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid automation root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

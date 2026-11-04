@@ -290,7 +290,6 @@ def test_foreign_marker_precedes_missing_index_remediation(tmp_path):
 
 
 def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
@@ -300,7 +299,6 @@ def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
     challenge = store.begin_pairing(principal)
     grant = store.confirm_pairing(challenge.token, expected_principal=principal)
     assert inspect_owner_setup(tmp_path) == grant.host_uid
-    activation._bootstrap_plane(tmp_path, None)  # Existing bootstrap eligibility seam, no effects.
     with pytest.raises(AccessUnavailable):
         inspect_source(tmp_path)
     assert not db_file(tmp_path).exists()
@@ -308,7 +306,6 @@ def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
 
 @pytest.mark.parametrize("entry", ["plane.db", "spool", "staged", "owner.sock", "unknown"])
 def test_pre_activation_owner_refuses_other_plane_content(tmp_path, entry):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
@@ -316,11 +313,10 @@ def test_pre_activation_owner_refuses_other_plane_content(tmp_path, entry):
     (db_file(tmp_path).parent / entry).write_text("synthetic unexpected state")
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
-    with pytest.raises(activation.ActivationError):
-        activation._bootstrap_plane(tmp_path, None)
 
 
-@pytest.mark.parametrize("problem", ["foreign", "corrupt", "redirected", "activation", "runtime", "selection", "workspace_schema", "connected_schema"])
+@pytest.mark.parametrize("problem", ["foreign", "corrupt", "redirected", "activation", "runtime", "selection", "config",
+                                    "restored-backup.json", "restored-backup", "migrations", "workspace_schema", "connected_schema"])
 def test_fresh_owner_admission_never_masks_old_or_invalid_state(tmp_path, problem):
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
@@ -336,8 +332,9 @@ def test_fresh_owner_admission_never_masks_old_or_invalid_state(tmp_path, proble
         old = store.path.with_name("private-copy")
         store.path.rename(old)
         store.path.symlink_to(old)
-    elif problem == "selection":
-        (tmp_path / "state/selected-release.json").write_text("invalid")
+    elif problem in {"selection", "config", "restored-backup.json", "restored-backup", "migrations"}:
+        marker = {"selection": "selected-release.json", "config": "config.json"}.get(problem, problem)
+        (tmp_path / "state" / marker).write_text("invalid")
     elif problem in {"workspace_schema", "connected_schema"}:
         with sqlite3.connect(store.path) as conn:
             conn.execute("CREATE TABLE " + problem.split("_")[0] + "_metadata(singleton,version)")
@@ -351,19 +348,15 @@ def test_fresh_owner_admission_never_masks_old_or_invalid_state(tmp_path, proble
 
 
 def test_default_authority_without_explicit_fresh_marker_never_falls_back(tmp_path):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
     OwnerAccess.initialize(tmp_path)
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
-    with pytest.raises(activation.ActivationError):
-        activation._bootstrap_plane(tmp_path, None)
 
 
 def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_path):
-    from claudlobby import activation
     from claudlobby.plane.owner_access import OwnerAccess
     from claudlobby.plane.owner_source import inspect_owner_setup
     ensure_host_uid(tmp_path / "state")
@@ -375,8 +368,6 @@ def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_pa
     assert not db_file(tmp_path).exists()
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
-    with pytest.raises(activation.ActivationError):
-        activation._bootstrap_plane(tmp_path, None)
 
 
 @pytest.mark.parametrize("overlay", ["local/example", "local/system/example"])
@@ -397,3 +388,86 @@ def test_fresh_owner_refuses_retained_overlay_runtime_without_manifest(tmp_path,
         (runtime / "retained").write_text("old installation")
     with pytest.raises(AccessUnavailable):
         inspect_owner_setup(tmp_path)
+
+
+def test_first_fleet_source_completion_without_owner_storage_is_noop(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('absent owner must not bind'))
+    monkeypatch.setattr(owner_source, 'inspect_source', lambda *_: pytest.fail('absent owner must not inspect'))
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert not OwnerAccess(tmp_path).path.exists()
+    assert not db_file(tmp_path).exists()
+
+
+def test_first_fleet_source_completion_resumes_after_binding_before_retirement(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    host = ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    initialize_plane(tmp_path)
+    retire = OwnerAccess.retire_first_fleet
+    monkeypatch.setattr(OwnerAccess, 'retire_first_fleet',
+        lambda _: (_ for _ in ()).throw(OSError('interrupted before retirement')))
+    with pytest.raises(OSError, match='before retirement'):
+        owner_source.complete_first_fleet_source(tmp_path)
+    assert access.first_fleet_pending()
+    assert inspect_source(tmp_path) == host
+    monkeypatch.setattr(OwnerAccess, 'retire_first_fleet', retire)
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert not access.first_fleet_pending() and read_host_uid(tmp_path / 'state') == host
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('retired owner must only inspect'))
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert inspect_source(tmp_path) == host
+
+
+@pytest.mark.parametrize('defect', ['unbound', 'foreign'])
+def test_retired_first_fleet_completion_never_reattests_changed_source(tmp_path, monkeypatch, defect):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    initialize_plane(tmp_path)
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert not access.first_fleet_pending()
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        if defect == 'unbound':
+            conn.execute('DROP TABLE owner_source_binding')
+        else:
+            conn.execute('UPDATE owner_source_binding SET host_uid=?', ('host_' + 'f' * 32,))
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must not re-attest'))
+    with pytest.raises((SourceNeedsBinding, SourceDenied)):
+        owner_source.complete_first_fleet_source(tmp_path)
+    assert not access.first_fleet_pending()
+
+
+def test_first_fleet_completion_refuses_pending_owner_after_writers_started(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    initialize_plane(tmp_path)
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('writers already admitted'))
+    with pytest.raises(SourceUnavailable, match='before recorder writers'):
+        owner_source.complete_first_fleet_source(tmp_path, writers_started=True)
+    assert access.first_fleet_pending()
+
+
+@pytest.mark.parametrize('marker', ['config.json', 'selected-release.json', 'restored-backup.json',
+                                    'restored-backup', 'migrations'])
+def test_fresh_owner_refuses_redirected_committed_or_recovery_evidence_without_recorder(tmp_path, monkeypatch, marker):
+    from claudlobby import activation_state
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    before = access.path.read_bytes()
+    path = tmp_path / 'state' / marker
+    path.symlink_to(tmp_path / 'missing-evidence')
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('fresh gate must not select legacy runtime'))
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must not attest absent recorder'))
+    assert not db_file(tmp_path).exists()
+    with pytest.raises(SourceUnavailable, match='fresh owner setup unavailable'):
+        owner_source.inspect_owner_setup(tmp_path)
+    assert access.path.read_bytes() == before and access.first_fleet_pending()
+    assert path.is_symlink()

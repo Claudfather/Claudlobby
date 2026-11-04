@@ -25,7 +25,7 @@ from claudlobby.composer import compose_bot, compose_claude_md
 from claudlobby.config import load_fleet
 from claudlobby.defaults import (NON_ENTITY_FOLDERS, REGISTRY, TIER_TESTS, Disposition,
                                  Tier, resolve)
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -435,7 +435,7 @@ def _coordinator_fleet(fleet_dir: Path):
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
 
 
 class TestLeafManagerCheckinDefault:

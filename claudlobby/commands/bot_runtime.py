@@ -61,6 +61,8 @@ def dispatch(args) -> CommandOutput:
                                      running=running, restart=action == "restart",
                                      ceiling=ceiling, reason=reason)
     except BotLifecycleError as exc:
+        if exc.source_revision is not None:
+            data.update(source_revision=exc.source_revision, config_fingerprint=exc.config_fingerprint)
         if exc.busy:
             raise CommandFailure("conflict", str(exc), data=data, retryable=True,
                                  hint="retry after the running bot lifecycle operation finishes") from exc

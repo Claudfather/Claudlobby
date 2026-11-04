@@ -14,7 +14,7 @@ import sqlite3
 from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
-from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_checkin_cli import active as checkin_active  # noqa: F401 — check-in CLI fixture
 from tests.test_checkins_cli import _record
 from tests.test_message_read_cli import _communication, _generated
@@ -65,8 +65,8 @@ ASG_ED = "asg_" + _hex("ed555799", "3")
 
 def test_task_and_assignment_show_resolve_a_prefix_and_never_guess(active, capsys):  # noqa: F811
     root, host = active
-    from claudlobby.activation_identity import read_selected_identity_bindings
-    fleet_uid = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
+    from claudlobby.activation_identity import read_current_identity_bindings
+    fleet_uid = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
     with sqlite3.connect(db_file(root)) as conn:
         _task(conn, TASK, fleet_uid=fleet_uid)
         conn.execute("UPDATE work_items SET project_key=NULL, workstream_id=NULL WHERE fleet_uid=?", (fleet_uid,))

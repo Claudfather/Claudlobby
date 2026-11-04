@@ -34,7 +34,7 @@ knowledge corpus is Claudron's. The local rules:
 ## Architecture
 
 ```
-fleet.yaml          →  config plan + host activate  →  runtime/bots/<name>/
+fleet.yaml          →  managed Git host update  →  runtime/bots/<name>/
 library/                                         ├── CLAUDE.md      (composed instructions)
   expertise/                                     ├── bot.conf       (env vars, sourced at startup)
   skills/                                        ├── .mcp.json      (MCP server config)
@@ -69,7 +69,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 
 Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet. The canonical `claudlobby task admit` / `task assign` commands record work; `assignment deliver` sends the committed assignment, and `assignment progress|block|return|complete|fail` records a linked worker report. `message send` and `fleet reports submit` handle ordinary and unlinked communication.
 
-**Changing a running fleet:** when a change reaches a bot depends on **when the artifact is read, not its file type** (#1310). Read **once at session start** (composed `CLAUDE.md` text, `bot.conf` env, `.mcp.json`): a running bot sees it from its next restart, so a canary window exists. Read **on demand, per use** (skill symlinks, hook scripts, `claudlobby/_runtime_scripts/`): live on every bot once activation publishes it, with **no canary window**. Composed `settings.local.json` permissions apply from the next tool call, so they too have no canary window. See [`documentation/fleet-update-lifecycle.md`](documentation/fleet-update-lifecycle.md) before assuming a merged change is in force.
+**Changing a running fleet:** read timing, not file type, determines when a change reaches a bot (#1310). `CLAUDE.md`, `bot.conf` and `.mcp.json` are read at session start; changes wait for restart. Skills, hooks and runtime scripts are read on demand; publication reaches running bots immediately. Composed permissions apply at the next tool call. Validate in an independent installation before publication; see [fleet-update-lifecycle](documentation/fleet-update-lifecycle.md).
 
 **Defaults (ruled 2026-09-07):** a job or door is **ON by default** unless it *deletes data, spends money, mutates operator source, sends outbound to people at scale, or has no deployment gate*. The registry is the list: `claudlobby/switches.py` gives each opt-in's reason, and `claudlobby host doctor --switches` prints the live table and the line that arms each. A door turned off no-ops **loudly**.
 
@@ -91,7 +91,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls
 - `supervisor-caller.py` — kernel ancestry check for the adapter, so a bot cannot stop its own coordinator
 - `bot-unit-owner.py` — reads a unit's working directory for the adapter without running it
-- `runtime-admission.sh` — startup and watchdog release check, and the activation lock
+- `runtime-admission.sh` — startup and watchdog installation check, and the current update fence
 - `rolling-restart.sh` — restart bots one at a time, each gated on a fresh Telegram `BRIDGE_READY`
 - `weekly-worker-restart.sh` — weekly lossless restart of workers (not managers) onto the staged binary (opt-in)
 - `reload-fleet.sh` — daily plugin refresh for the selected fleet, then marks running bots for an idle `/reload` (no restart; never changes authored config)
@@ -242,7 +242,7 @@ Each library category has its own format. Check the category's `README.md` for s
 2. Use YAML frontmatter with `title:` and `description:` fields
 3. Add an H1 heading (`# Title`) matching the frontmatter title — the loader strips it to avoid duplication in composed output
 4. Use `{{BOT_NAME}}`, `{{FLEET_NAME}}`, `{{CLAUDLOBBY_ROOT}}` Jinja2 placeholders where appropriate
-5. Stage a configuration plan in the independent canary root and verify the intended bot's rendered CLAUDE.md before operator activation.
+5. In an independent canary installation, inspect the bot's rendered CLAUDE.md before starting it.
 6. Commit to a branch, PR, review
 
 **Heading levels matter.** The template renders library content inside `##`/`###` sections. The loader runs `_demote_headings` to shift all headings down. An H1 (`#`) in your file becomes H2 in the output. If you start with H3, it becomes H4 — which may be too deep.
@@ -251,8 +251,8 @@ Each library category has its own format. Check the category's `README.md` for s
 
 1. Edit Python source in `claudlobby/`
 2. In a disposable checkout with private HOME/TMPDIR, install the dev dependencies, prepare resources with `.venv/bin/python tests/prepare_resources.py --disposable-checkout "$PWD"`, then run the affected existing tests (details below).
-3. Test against your local fleet: `claudlobby --fleet <name> config validate` then stage `config plan --release RELEASE_ID` and inspect `config diff PLAN_ID`
-4. Run `claudlobby --fleet <name> config diff` to verify no unintended rendered drift
+3. Review authored changes and run `config validate` in an independent canary installation.
+4. Apply the reviewed commit with `host update apply FULL_COMMIT`; inspect status and behavior. First installation follows the getting-started guide.
 5. Commit to a branch, PR, review
 
 **Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite can go red, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
@@ -271,10 +271,10 @@ Any change to **what a brand-new user is told to run** — `README.md`, `documen
 
 ### Never hand-edit generated output
 
-Files in `runtime/bots/<name>/` are composed from a configuration plan. Hand-edits are overwritten by activation. To change a bot's config:
+Files in `runtime/bots/<name>/` are composed by the Git updater. Hand-edits are overwritten when the updater publishes generated output. To change a bot's config:
 
 1. Edit `fleet.yaml` (fleet-level config) or `library/<category>/` (content)
-2. Stage `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`, then have the operator run `host activate PLAN_ID --install-directory PATH`
+2. Review and validate authored changes in an independent canary, then operator `host update apply FULL_COMMIT`. Inspect `host update status`; continue interruptions with the original request. `config diff` checks published drift, not unapplied source.
 3. If the bot drifted during a session (`claudlobby config diff --bot <name>` shows changed files), review the changes and edit their authored source in `library/`
 
 ### Every PR body: a Rollout check
@@ -290,11 +290,12 @@ Entries go in `changelog.d/<head branch, each / as ->.md`, never in `CHANGELOG.m
 ```bash
 # Composition
 claudlobby config validate  # check fleet.yaml against library
-claudlobby config plan --release <RELEASE_ID>  # stage all declared host fleets
-claudlobby config diff [<PLAN_ID>]  # rendered drift, or a staged plan's paths and digests
-claudlobby host activate <PLAN_ID> --install-directory <PATH>  # operator applies the staged host
+claudlobby config diff [<FINGERPRINT>]  # current rendered drift, or the pending render
+claudlobby host update apply [FULL_COMMIT]  # fetch the trusted source and apply one host update
+claudlobby host update status  # original operation and consumer progress
+claudlobby host update continue  # continue the same request
 claudlobby library list  # available building blocks
-claudlobby bot create --interactive  # author a bot; stage and activate separately
+claudlobby bot create --interactive  # author a bot; this does not start it
 
 # Operations
 claudlobby bot start <bot>  # start a declared bot through the lifecycle owner
@@ -337,7 +338,7 @@ python3 -m venv .venv
 ./.venv/bin/pytest  # run test suite (unsandboxed)
 ```
 
-Use `--fleet <name>` for fleet reads and authoring. Configuration plans and activation cover the whole host; see `canary-rollout` for isolated validation.
+Use `--fleet` for fleet reads/authoring; updates cover the installation. Validate in independent roots. Existing sealed hosts require reviewed conversion. Git roster moves/removal remain unsupported.
 
 ## Python Package Structure
 

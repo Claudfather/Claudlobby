@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from ..command_result import CommandFailure, CommandOutput, selection_read_conflict
+from ..command_result import CommandFailure, CommandOutput
 
 
 def dispatch(args) -> CommandOutput:
     from ..active_config import ActivationError
-    from ..activation_state import read_selection
     from ..compactions import record_compactions
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
@@ -27,13 +26,24 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
-    from .checkin import _scope
+    from ..runtime_admission import ReleaseMismatch
+    from .checkin import _scope, _runtime_hint
 
     try:
-        destination, _origin, selected, _bindings = _scope(args)
+        destination, origin, selected, _bindings = _scope(args)
         root = destination.paths.root
-        data = record_compactions(destination.paths, destination.fleet,
-                                  emit=lambda raws: emit_api.emit_batch(root, raws))
+        from ..runtime_admission import mutation_admission, RuntimeIdentity, runtime_route_matches
+        from .message_write import _bound_release
+        bound = _bound_release(destination.paths.package, generated=origin is not None)
+        with mutation_admission(root, identity=RuntimeIdentity.current(), expected_release=bound) as current:
+            if not runtime_route_matches(current, selected, package=destination.paths.package):
+                raise CommandFailure("release_mismatch", "current compaction runtime changed",
+                                     data=selected.provenance)
+            selected.check(root, package=destination.paths.package)
+            def emit(raws):
+                selected.check(root, package=destination.paths.package)
+                return emit_api.emit_batch(root, raws)
+            data = record_compactions(destination.paths, destination.fleet, emit=emit)
         lines = (f"{data['fleet']}: {data['recorded']} compaction(s) recorded"
                  + (f"; not recorded: {data['error']}" if data["error"] else "") + ".",
                  *(f"{row['bot']}: {row['rows']} row(s), {row['recorded']} new, "
@@ -41,14 +51,18 @@ def dispatch(args) -> CommandOutput:
                    + (f", skipped {row['skipped_bytes']}" if row["skipped_bytes"] else "")
                    + (f"; unread: {row['reason']}" if row["reason"] else "")
                    for row in data["bots"]))
-        if read_selection(root) != selected:
-            raise selection_read_conflict("active compaction selection changed during the pass")
+        selected.check(root, package=destination.paths.package,
+                       message="active compaction selection changed during the pass")
+        data.update(selected.provenance)
         if data["error"]:
             raise CommandFailure("unavailable", f"compactions not recorded: {data['error']}",
-                                 data=data, release_id=selected["release_id"])
-        return CommandOutput(data, release_id=selected["release_id"], lines=lines)
+                                 data=data, release_id=selected.release_id)
+        return CommandOutput(data, release_id=selected.release_id, lines=lines)
     except CommandFailure:
         raise
+    except ReleaseMismatch as exc:
+        raise CommandFailure("release_mismatch", "selected runtime differs from compaction caller",
+                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid compaction root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

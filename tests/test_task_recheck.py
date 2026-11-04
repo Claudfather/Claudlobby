@@ -10,7 +10,7 @@ from claudlobby import message_operations, operation_context
 from claudlobby.__main__ import main
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold, tmp_path  # noqa: F401 — active fixture dependencies
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — active fixture dependencies
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_write_cli import _call, active  # noqa: F401 — shared private activated fixture
 from tests.test_task_state import (_assignment, _deadline_fact, _read, _task,  # noqa: F401 — reducer rows
@@ -241,3 +241,61 @@ def test_a_moved_deadline_restarts_the_age_clock_as_a_reassign_did(conn):  # noq
     noon = datetime(2026, 9, 3, 12, tzinfo=timezone.utc)   # 60 h after dispatch, 13 h after the move
     assert not _due(task, noon, 48 * 3600)
     assert _due(task, noon + timedelta(hours=36), 48 * 3600)
+
+
+
+def test_git_recheck_preview_and_uncertain_original_request_are_not_retargeted(active, monkeypatch, capsys):
+    import json
+    from claudlobby import active_config
+    from tests.test_task_permissions import _git_cli
+    from claudlobby.request_queries import read_request
+    root, package, snapshot = _git_cli(active, monkeypatch)
+    task_id = _admit(capsys, root, 'Synthetic Git recheck')
+    preview = _recheck(capsys, root, dry_run=True)
+    assert preview['release_id'] is None and preview['data']['task_ids'] == [task_id]
+    assert preview['data']['config_fingerprint'] == snapshot['fingerprint']
+    calls = []
+    strict = message_operations.send_committed_native_attempt
+    def send_once(*args, **kwargs):
+        def native(*_args, **options):
+            calls.append(options['body'])
+            return TransportOutcome('submitted', 'sha256:' + 'a' * 64, 99, 0)
+        return strict(*args, transport=native, **kwargs)
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt', send_once)
+    monkeypatch.setattr(message_operations, 'read_recipient_box', lambda *a, **k: None)
+    request_id = str(uuid4())
+    first = _recheck(capsys, root, request_id, expected=5)
+    assert first['data']['source_revision'] == snapshot['revision'] and len(calls) == 1
+    from claudlobby.activation_identity import read_current_identity_bindings
+    fleet_uid = read_current_identity_bindings(root, 'example', package=package)['fleet_uid']
+    original = read_request(root, fleet_uid, request_id)
+    assert original.route.release_id is None and original.route.config_fingerprint == snapshot['fingerprint']
+    again = _recheck(capsys, root, request_id, expected=5)
+    assert again['data']['replayed'] and len(calls) == 1
+    changed = json.loads(json.dumps(snapshot))
+    changed['fleets']['example']['fleet'] += '\n# New effective input\n'
+    changed['fingerprint'] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    # Provenance changes do not replace the original same-party native request.
+    # Its unverified notification remains unknown and cannot license a resend.
+    recovered = _recheck(capsys, root, request_id, expected=5)
+    assert recovered['error']['code'] == 'notification_failed'
+    assert recovered['data']['replayed'] and recovered['data']['notification'] == 'unknown'
+    assert read_request(root, fleet_uid, request_id) == original and len(calls) == 1
+
+
+def test_git_recheck_refuses_route_from_another_config_before_recording(active, monkeypatch, capsys):
+    from dataclasses import replace
+    from claudlobby import message_context
+    from tests.test_task_permissions import _git_cli
+    root, package, snapshot = _git_cli(active, monkeypatch)
+    _admit(capsys, root, 'Synthetic route mismatch')
+    calls = []
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt', lambda *a, **k: calls.append(1))
+    resolve = message_context.resolve_message_route
+    monkeypatch.setattr(message_context, 'resolve_message_route',
+                        lambda *a, **k: replace(resolve(*a, **k), config_fingerprint='f' * 64))
+    request_id = str(uuid4())
+    _recheck(capsys, root, request_id, expected=4)
+    assert not calls and not list((root / 'state/requests').rglob(request_id + '.json'))

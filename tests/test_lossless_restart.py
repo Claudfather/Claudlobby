@@ -1,20 +1,7 @@
-"""Lossless-restart age gate + manager detection (lib-common.sh helpers).
+"""Native fresh/resume startup and retained explicit handoff/manager helpers.
 
-These back Mechanism 2 of the fleet update lifecycle:
-
-- ``iso_to_epoch`` / ``session_md_handoff_epoch`` / ``should_resume_session`` —
-  the F6 age gate that decides whether ``start-bot.sh`` resumes from a
-  ``session.md`` handoff or clean-starts a stale one. It keys off the doc-level
-  ``last_updated`` ISO-8601 UTC frontmatter field (robust to file touches the
-  way mtime is not), falling back to mtime only for legacy artifacts.
-- ``bot_is_manager`` — the F5 guard ``weekly-worker-restart.sh`` uses to skip
-  managers (and ``update-claude-code.sh`` to address failure notifications).
-  Managers carry ``MANAGER_TMUX == BOT_ID``, and an older compose left an
-  inline comment on that line which ``bot_conf_get`` must drop; getting this
-  wrong bounces a manager.
-
-CI runs pytest only, so these bash helpers are exercised here via subprocess —
-without this wrapper the logic would be untested in CI.
+Automatic context continuity uses an exact native session. Optional authored
+handoff commands still share provider resolution and timestamp parsing.
 """
 
 from __future__ import annotations
@@ -59,139 +46,36 @@ def _session_md(tmp_path: Path, name: str, last_updated: str | None) -> Path:
     return f
 
 
-class TestStartupBootstrap:
-    """Exercise the launcher's actual injection block, with an inert sender."""
+class TestNativeStartup:
+    """Run the actual startup injection branch without a model or native service."""
 
-    @pytest.mark.parametrize("mode", ["plugin", "local", "cache-only", "disabled-skill",
-                                      "disabled-plugin", "ambiguous", "native", "opaque",
-                                      "empty", "stale", "missing", "absent", "stale-local",
-                                      "skill-file-missing", "corrupt",
-                                      pytest.param("unreadable", marks=pytest.mark.skipif(
-                                          os.geteuid() == 0, reason="root reads a mode-000 file")),
-                                      "managed-first", "foreign-first", "switch-off"])
-    def test_skill_bootstrap_and_literal_compatibility(self, tmp_path, mode):
-        bot, account = tmp_path / "bot", tmp_path / "selected account"
-        skills = bot / ".claude/skills"
-        (skills / "fleet-ops").mkdir(parents=True)
-        shutil.copy2(REPO_ROOT / "library/skills/fleet-ops/bootstrap.md", skills / "fleet-ops/bootstrap.md")
-        install = account / "plugins/cache/market/provider/1.0.0"
-        (install / ".claude-plugin").mkdir(parents=True)
-        (install / ".claude-plugin/plugin.json").write_text('{"name":"provider"}')
-        skill = install / "skills/session"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("---\nname: session\n" + (
-            "disable-model-invocation: true\n" if mode == "disabled-skill" else "") + "argument-hint: '[handoff|resume] [--auto]'\n---\nResume.\n")
-        # Shape grounded in installed clauDNA 0.34.7: registry v2 user entry,
-        # plugin.json name, skills/session/SKILL.md name and argument-hint.
-        # Provider/path identifiers are synthetic; see startup-one-prompt receipt.
-        entries = [{"scope": "user", "version": "1.0.0", "installPath": str(install)}]
-        plugins = {"provider@market": entries}
-        enabled = {"provider@market": mode != "disabled-plugin"}
-        if mode == "ambiguous":
-            # A real tie: two enabled plugins share the name, each with its own install.
-            mirror = account / "plugins/cache/mirror/provider/1.0.0"
-            shutil.copytree(install, mirror)
-            plugins["provider@mirror"] = [{"scope": "user", "version": "1.0.0", "installPath": str(mirror)}]
-            enabled["provider@mirror"] = True
-        elif mode in {"stale-local", "skill-file-missing", "managed-first"}:
-            # Two entries apply and Claude Code loads the FIRST in registry
-            # order. Each case breaks the install it must not read, so a wrong
-            # choice flips the verdict.
-            other = install.parent / "0.9.0"
-            shutil.copytree(install, other)
-            stale = {"scope": "local", "projectPath": str(bot), "version": "0.9.0", "installPath": str(other)}
-            refusing = "---\nname: session\ndisable-model-invocation: true\n---\nResume.\n"
-            if mode == "stale-local":
-                # The production shape: the user entry first, then a stale entry
-                # for this directory whose Skill would refuse.
-                (other / "skills/session/SKILL.md").write_text(refusing)
-                entries.append(stale)
-            elif mode == "skill-file-missing":
-                # The entry for this directory first: it loads and has no Skill
-                # file, though the later user entry has one.
-                (other / "skills/session/SKILL.md").unlink()
-                entries.insert(0, stale)
-            else:
-                # A managed entry applies as a user entry does.
-                (other / "skills/session/SKILL.md").write_text(refusing)
-                entries[0]["scope"] = "managed"
-                entries.append({"scope": "user", "version": "0.9.0", "installPath": str(other)})
-        elif mode == "foreign-first":
-            # An entry recorded for another directory can apply through a shared
-            # git root, which the script does not model: the loaded install is unknown.
-            entries.insert(0, {"scope": "local", "projectPath": str(tmp_path / "elsewhere"),
-                               "version": "1.0.0", "installPath": str(install)})
-        if mode != "cache-only":
-            registry = account / "plugins/installed_plugins.json"
-            registry.write_text("{not json" if mode == "corrupt" else json.dumps({
-                "version": 2, "plugins": plugins}))
-            if mode == "unreadable":
-                registry.chmod(0)
-        (bot / ".claude/settings.local.json").write_text(json.dumps({"enabledPlugins": enabled}))
-        command = "/provider:session resume --auto --note 'keep spaces'"
-        if mode == "local":
-            local = skills / "restore"
-            local.mkdir()
-            (local / "SKILL.md").write_text("---\nname: restore\n---\nResume.\n")
-            command = "/restore resume --auto"
-        elif mode == "native": command = "/compact"
-        elif mode == "opaque": command = "Restore my custom context"
-        elif mode == "empty": command = ""
-        elif mode == "absent": command = "/absent:session resume --auto"
-        if mode != "missing":
-            stamp = datetime.now(timezone.utc) - timedelta(hours=25 if mode == "stale" else 1)
-            _session_md(bot / ".claude", "session.md", _iso(stamp))
-        startup = "Authored startup: preserve $literal, `text`, ! and\nsecond line."
+    @pytest.mark.parametrize("mode", ["fresh", "resume"])
+    @pytest.mark.parametrize("startup", ["", "Authored $literal, `text`, ! and\nsecond line."])
+    def test_only_fresh_session_receives_authored_startup(self, tmp_path, mode, startup):
         sends, log, errors = (tmp_path / name for name in ("sends", "startup.log", "errors"))
         source = START_BOT.read_text()
-        block = "# Resume prior context" + source.split("# Resume prior context", 1)[1].split("# Mark bot as idle", 1)[0]
-        script = '''
+        block = source[source.index('if [ "$_native_mode" = fresh ]; then'):].split("# Mark bot as idle", 1)[0]
+        script = r'''
 . "$1"
 set -Eeuo pipefail
-trap 'printf "ERR\\n" >> "$ERRORS"' ERR
-pane_send_verified() { printf '%s\\0' "$3" >> "$SENDS"; }
+trap 'printf "ERR\n" >> "$ERRORS"' ERR
+pane_send_verified() { printf '%s\0' "$3" >> "$SENDS"; }
 inject_stamp() { printf stamp; }
 boot_send_settled() { :; }
 emit_fleet_event() { :; }
 ''' + block
-        env = {**os.environ, "BOT_DIR": str(bot), "CLAUDE_CONFIG_DIR": str(account),
-               "SESSION_RESUME_COMMAND": command, "STARTUP_PROMPT": startup,
-               "_NATIVE_ADMISSION_PYTHON": sys.executable, "TMUX_SOCKET": "private",
-               "TMUX_SESSION": "worker", "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1",
+        env = {**os.environ, "BOT_DIR": str(tmp_path), "TMUX_SOCKET": "private", "TMUX_SESSION": "worker",
+               "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1", "_native_mode": mode,
+               "STARTUP_PROMPT": startup, "SESSION_RESUME_COMMAND": "/unavailable:session resume --auto",
                "SENDS": str(sends), "ERRORS": str(errors)}
-        # The startup-bootstrap switch (#2669): an exact 0 keeps the literal
-        # start for a proven Skill.
-        env.pop("STARTUP_BOOTSTRAP_ENABLED", None)
-        if mode == "switch-off":
-            env["STARTUP_BOOTSTRAP_ENABLED"] = "0"
         result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stderr
         assert not errors.exists()
-        payloads = sends.read_bytes().decode().rstrip("\0").split("\0")
-        bootstrap = mode in {"plugin", "local", "stale-local", "managed-first"}
-        assert ("STARTUP mode=skill-bootstrap" in (log.read_text() if log.exists() else "")) == bootstrap
-        assert ("startup-bootstrap: OFF here (STARTUP_BOOTSTRAP_ENABLED=0)" in result.stderr) == (mode == "switch-off")
-        if mode == "switch-off":
-            assert "[available; literal-compatibility; STARTUP_BOOTSTRAP_ENABLED=0]: " + command in log.read_text()
-        if bootstrap:
-            assert len(payloads) == 1
-            assert payloads[0].startswith("set +H; FLEET_STARTUP_BOOTSTRAP_V1")
-            slash_name = "/restore" if mode == "local" else "/provider:session"
-            assert "\n\n" + slash_name + "\n\n" in payloads[0]
-            call = json.loads(next(line for line in payloads[0].splitlines()
-                                   if line.startswith('{"skill":')))
-            assert "stop and report" in payloads[0]
-            assert "Do not continue to startup" in payloads[0]
-            assert "do not reproduce the Skill by another route" in payloads[0]
-            assert call == {"skill": "restore" if mode == "local" else "provider:session",
-                            "args": "resume --auto" if mode == "local" else "resume --auto --note 'keep spaces'"}
-            assert "FLEET_STARTUP_INSTRUCTIONS_BEGIN\n" + startup + "\nFLEET_STARTUP_INSTRUCTIONS_END" in payloads[0]
-        elif mode in {"empty", "stale", "missing", "absent"}:
-            assert payloads == ["set +H; " + startup]
-        else:
-            assert payloads == [command, "set +H; " + startup]
-
+        payloads = sends.read_bytes().decode().rstrip("\0").split("\0") if sends.exists() else []
+        assert payloads == (["set +H; " + startup] if mode == "fresh" and startup else [])
+        if mode == "resume":
+            assert "NATIVE RESUME" in log.read_text()
 
     @pytest.mark.parametrize("complete", [True, False])
     def test_boot_classifier_requires_authored_instructions_in_bootstrap(self, tmp_path, complete):
@@ -218,42 +102,6 @@ class TestIsoToEpoch:
         out, rc = _run('iso_to_epoch "$2"', "")
         assert rc != 0
         assert out == ""
-
-
-class TestShouldResumeSession:
-    """F6 age gate: resume from a fresh checkpoint, clean-start a stale one."""
-
-    def test_fresh_resumes(self, tmp_path):
-        f = _session_md(
-            tmp_path, "fresh.md", _iso(datetime.now(timezone.utc) - timedelta(hours=1))
-        )
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 0  # resume
-
-    def test_stale_skips(self, tmp_path):
-        f = _session_md(
-            tmp_path, "stale.md", _iso(datetime.now(timezone.utc) - timedelta(hours=25))
-        )
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 1  # skip -> clean start
-
-    def test_ancient_skips(self, tmp_path):
-        f = _session_md(tmp_path, "ancient.md", "2020-01-01T00:00:00Z")
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 1
-
-    def test_missing_skips(self, tmp_path):
-        _, rc = _run(
-            'should_resume_session "$2" "$3"', str(tmp_path / "nope.md"), "86400"
-        )
-        assert rc == 1
-
-    def test_legacy_no_field_uses_mtime(self, tmp_path):
-        # A freshly written legacy file (no last_updated) falls back to mtime,
-        # which is "now" -> fresh -> resume.
-        f = _session_md(tmp_path, "legacy.md", None)
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 0
 
 
 class TestHandoffEpoch:
@@ -334,45 +182,6 @@ class TestSessionResumeCapability:
         out, rc = self._status("/someplugin:session resume --auto", config_dir=cfg)
         assert rc == 1, "an unresolvable command must not be injected"
         assert out == "provider-absent:someplugin", "the skip must name the reason"
-
-    @pytest.mark.parametrize("provider, injected", [(None, False), ("someplugin", True)])
-    def test_startup_resume_capability_has_no_errtrap_and_sends_only_when_available(
-            self, tmp_path, provider, injected):
-        # Exercise the real startup branch under macOS Bash 3.2 errtrace.
-        # Guarding the assignment with an outer if still fired ERR inside it.
-        source = START_BOT.read_text()
-        start = "# Resume prior context"
-        branch = start + source.split(start, 1)[1].split("# Mark bot as idle", 1)[0]
-        bot = tmp_path / "bot"
-        (bot / ".claude").mkdir(parents=True)
-        session = _session_md(bot / ".claude", "session.md", _iso(datetime.now(timezone.utc)))
-        cfg = self._plugin_home(tmp_path, provider)
-        sends, errors, log = (tmp_path / name for name in ("sends", "errors", "boot.log"))
-        script = '''
-. "$1"
-set -Eeuo pipefail
-trap 'printf "ERR\\n" >> "$5"' ERR
-SEND_MARKER="$4"
-pane_send_verified() { printf "send\\n" >> "$SEND_MARKER"; }
-inject_stamp() { printf stamp; }
-emit_fleet_event() { :; }
-_SESSION_MD="$2"; _RESUME_MAX_AGE_S=86400
-SESSION_RESUME_COMMAND="/someplugin:session resume --auto"
-STARTUP_PROMPT=""
-boot_send_settled() { :; }
-BOT_DIR="$3"; LOG="$6"; TMUX_SOCKET=x; TMUX_SESSION=x
-_PANE_READY_TICKS_BOOT=1
-''' + branch
-        result = subprocess.run(
-            ["/bin/bash", "-c", script, "_", str(LIB_COMMON), str(session),
-             str(bot), str(sends), str(errors), str(log)],
-            capture_output=True, text=True, timeout=15,
-            env={"PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": cfg},
-        )
-        assert result.returncode == 0, result.stderr
-        assert not errors.exists(), errors.read_text() if errors.exists() else ""
-        assert sends.exists() is injected
-        assert ("RESUME — injecting" if injected else "RESUME SKIP") in log.read_text()
 
     def test_empty_command_disables_injection(self, tmp_path):
         cfg = self._plugin_home(tmp_path, "someplugin")

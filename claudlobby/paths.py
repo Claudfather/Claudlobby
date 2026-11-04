@@ -352,6 +352,9 @@ class Paths:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, Path(value).expanduser().resolve())
+        installation = getattr(self.package, "installation", None)
+        if installation is not None and self.root != installation.data_root:
+            raise ValueError("selected installation belongs to a different persistent data root")
 
     # --- immutable package base ---
 
@@ -441,6 +444,8 @@ class Paths:
             self.package.library, self.package.voices, self.package.templates,
             self.package.seeds, self.package.native, self.release_store,
         ]
+        if self.package.installation is not None:
+            roots.append(self.package.installation.directory)
         if self.release_store.is_dir():
             roots.extend(child for child in self.release_store.iterdir() if child.is_dir())
         return tuple(dict.fromkeys([self.release_store, *(path.resolve() for path in roots)]))

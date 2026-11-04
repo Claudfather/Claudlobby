@@ -306,3 +306,44 @@ test('permission decisions retain exact intent without reason and recover a late
   restored.accept(original,{...receipt,notification});assert.equal(restored.pending.length,0);
  }
 });
+
+for (const kind of ['nudge','feedback']) test(`Git ${kind} freezes original runtime through reload and cross-update receipt`,()=>{
+ const runtime={release_id:null,source_revision:'1'.repeat(40),config_fingerprint:'2'.repeat(64)};
+ const c={...nudgeContext,...runtime,actions:[kind]},t={...nudgeTarget,...runtime};
+ assert.equal(kind==='nudge'?validNudgeContext(c):validFeedbackContext(c),true);
+ const saved=storage(),state=new ActionState(saved),request=state.prepare(c,t,'Original reason',nudgeId);
+ const sent=state.beginPrepared(c,request,prepared(request)),restored=new ActionState(saved);
+ assert.deepEqual(restored.pending[0].target,t);
+ const updated={...c,source_revision:'3'.repeat(40),config_fingerprint:'4'.repeat(64)};
+ const updatedTarget={...t,source_revision:updated.source_revision,config_fingerprint:updated.config_fingerprint};
+ assert.throws(()=>new ActionState(storage()).prepare(updated,t,'Reason',nudgeId),/unavailable/);
+ assert.throws(()=>restored.prepare(updated,updatedTarget,'Reason','22222222-2222-4222-8222-222222222222'),/original receipt/);
+ assert.throws(()=>restored.accept(sent,{...nudgeReceipt(sent),target:updatedTarget}),/does not match/);
+ restored.accept(restored.pending[0],nudgeReceipt(sent));assert.equal(restored.pending.length,0);
+ for(const bad of [{...t,release_id:nudgeContext.release_id},{...t,source_revision:undefined},
+   {...t,source_revision:'1'.repeat(39)},{...t,config_fingerprint:undefined},
+   {...nudgeTarget,source_revision:runtime.source_revision,config_fingerprint:runtime.config_fingerprint}])
+   assert.throws(()=>new ActionState(storage()).prepare(c,bad,'Reason',nudgeId),/unavailable/);
+ for(const bad of [{...c,release_id:nudgeContext.release_id},{...c,config_fingerprint:null}])
+   assert.equal(validNudgeContext({...bad,actions:['nudge']}),false);
+});
+
+test('Git permission runtime survives persistence and requires exact original receipt',()=>{
+ const runtime={release_id:null,source_revision:'1'.repeat(40),config_fingerprint:'2'.repeat(64)};
+ const p={permission_id:'perm_'+'1'.repeat(32),task_id:'wi_'+'2'.repeat(32),request_event_id:'ev_'+'3'.repeat(32),assignment_id:null,
+  requester:{uid:'actor_'+'4'.repeat(32),alias:'Lead'},scope:{action:'merge',target:'example/repo#1',constraints:'Reviewed commit'},
+  scope_sha256:'a'.repeat(64),reason:'Ready',state:'pending',decided_by:null,decision_reason:null};
+ const c={version:2,room:'web',scope:{workspace:'example',host:'host_'+'5'.repeat(32),fleet:'web',viewer:'grant'},
+  simulation:false,actions:['permission'],...runtime,task_id:p.task_id,permissions:[p],has_more:false};
+ const t={permission_id:p.permission_id,task_id:p.task_id,scope_sha256:p.scope_sha256,...runtime};
+ const saved=storage(),s=new ActionState(saved),request=s.prepare(c,t,'Approve reviewed change',nudgeId,'approve');
+ s.beginPrepared(c,request,prepared(request));const restored=new ActionState(saved),original=restored.pending[0];
+ assert.deepEqual(original.target,t);
+ const next={...runtime,source_revision:'3'.repeat(40)};
+ assert.throws(()=>new ActionState(storage()).prepare({...c,...next},t,'Reason',nudgeId,'approve'),/changed/);
+ const receipt={...original,status:'recorded',execution:'not_requested',notification:'not_requested',permission:{...p,state:'approved',
+  decided_by:{uid:'actor_'+'7'.repeat(32),alias:'Owner'},decision_reason:'Approved'}};
+ assert.throws(()=>restored.accept(original,{...receipt,target:{...t,...next}}),/does not match/);
+ restored.accept(original,receipt);assert.equal(restored.pending.length,0);
+ assert.throws(()=>s.prepare(c,{...t,release_id:'r-'+'6'.repeat(64)},'Reason',nudgeId,'approve'),/changed/);
+});

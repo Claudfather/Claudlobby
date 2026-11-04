@@ -42,117 +42,49 @@ def _shell_lines(doc: Path) -> list[str]:
 
 
 class TestDocumentedInstallPath:
-    """The install commands the docs hand a user must work on a stock host."""
+    """Docs distinguish preparation, credentials and explicit native startup."""
 
-    def test_cold_host_docs_use_setup_then_activation(self):
-        # `lib/setup-fleet` is retired with `lib/setup-system`: `fleet setup`
-        # validates before it activates, so no doc may chain the old wrapper
-        # after a validate (#1681's quickstart shape).
+    def test_onboarding_uses_one_git_preparation_and_original_update_route(self):
         for doc in (README, GETTING_STARTED, SETUP_SKILL):
             text = doc.read_text()
             assert "host setup" in text and "fleet setup" in text, doc
-            assert "lib/setup-system" not in text and "host-timers" not in text, doc
-            assert "lib/setup-fleet" not in text, doc
+            assert "--plan-only" in text and "host update continue" in text, doc
+            assert not any(flag in text for flag in
+                           ("--guided", "--wheelhouse", "--dependency-lock", "claudlobby-install.pyz")), doc
+        commands = "\n".join(command for _, command in _commands(GETTING_STARTED.read_text()))
+        assert "-m claudlobby.bootstrap" in commands
+        for flag in ("--installation", "--root", "--remote", "--ref", "--interpreter"):
+            assert flag in commands
+        assert "--install-directory" in commands and "host update status" in commands
 
-    @pytest.mark.parametrize(
-        "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
-    )
-    def test_no_bare_pip_invocation(self, doc: Path):
-        """`pip ...` as a command is not portable — Homebrew ships pip3 only.
-
-        A stock macOS has no `pip` on PATH at all, so a doc line starting with
-        `pip install` dies with 'command not found' before PEP 668 even gets a
-        say. `python3 -m pip` works anywhere `python3` does.
-        """
-        offenders = [
-            line
-            for line in _shell_lines(doc)
-            if re.match(r"^(sudo\s+)?pip3?\s+install\b", line)
-        ]
-        assert not offenders, (
-            f"{doc.name} tells users to run bare pip:\n  "
-            + "\n  ".join(offenders)
-            + "\nUse 'python3 -m pip install' (or a venv interpreter) instead."
-        )
-
-    @pytest.mark.parametrize(
-        "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
-    )
-    def test_install_is_accompanied_by_a_venv(self, doc: Path):
-        """Any doc that installs the package must first create a virtualenv.
-
-        Homebrew python (macOS) and Debian/Raspberry Pi system python are both
-        externally-managed under PEP 668 and refuse an install into the
-        interpreter. Those are the two hosts this project targets first, so an
-        install instruction without a venv is a blocker, not a style nit.
-        """
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name)
+    def test_no_bare_or_system_pip_install(self, doc):
         lines = _shell_lines(doc)
-        installs_package = any(re.search(r"(?:-m\s+)?pip\s+install\b", ln) for ln in lines)
-        if not installs_package:
-            # The README delegates assembly to the canonical walkthrough.
-            assert doc == README and "documentation/getting-started.md" in doc.read_text()
-            lines = _shell_lines(GETTING_STARTED)
-            assert any(re.search(r"-m\s+pip\s+install\b", ln) for ln in lines)
+        assert not [line for line in lines if re.match(r"^(sudo\s+)?pip3?\s+install\b", line)]
+        if doc in (README, GETTING_STARTED):
+            assert not [line for line in lines if "pip install" in line]
 
-        assert any("venv" in ln for ln in lines), (
-            f"{doc.name} installs the package but never creates a venv. "
-            "PEP 668 makes that install fail on both supported host families."
-        )
+    def test_python_probe_creates_and_runs_an_independent_environment(self):
+        commands = "\n".join(command for _, command in _commands(GETTING_STARTED.read_text()))
+        assert "-m venv" in commands and '"$PROBE/venv/bin/python"' in commands
+        assert "sys.prefix != sys.base_prefix" in commands
+        assert "ssl" in commands and "resolve(strict=True)" in commands
+        assert "sys.version_info >= (3, 10)" in commands
+        assert not [line for line in _shell_lines(GETTING_STARTED) if re.search(r"\bexit\b", line)]
 
-    def test_walkthrough_probes_a_real_venv_and_never_exits_the_pasting_shell(self):
-        """`import venv` passes on Debian without python3-venv; only creating
-        one proves ensurepip. Snippets are pasted into an interactive shell, so
-        `exit` would close the operator's terminal instead of stopping a block.
-        """
-        lines = _shell_lines(GETTING_STARTED)
-        assert not [ln for ln in lines if re.search(r"\bexit\b", ln)]
-        assert not [ln for ln in lines if re.search(r"\bimport [\w, ]*\bvenv\b", ln)]
-        assert any(re.search(r'-m venv "\$PROBE/', ln) for ln in lines)
-        assert '"$PROBE/venv/bin/python" -I -c' in GETTING_STARTED.read_text()
-        text = GETTING_STARTED.read_text()
-        assert "python3-venv" in text and "`jq`" in text
-        assert "Path(sys.executable).resolve(strict=True)" in text
-        assert "sys.version_info >= (3, 10)" in text
-        assert "sys.version_info[:2] == (3, 11)" in text
-        assert "import encodings, plistlib, ssl, sys" in text
-        assert '--interpreter "$PYTHON"' in text
-        assert 'PYTHON="$(command -v python3)"' not in text
-        skill = SETUP_SKILL.read_text()
-        assert "#prove-the-python-executable-once" in skill
-        assert "exact operator-provided bundle path" in skill
-        assert "Do not search Downloads or protected directories" in skill
-        assert "obtain that explicit choice before building" in skill
-
-    def test_every_entry_point_agrees_on_the_first_run_template(self):
-        """Browser first-team is the default; the seed remains an operator option.
-
-        Keep every entry point linked to the same browser guide while preserving
-        the explicitly chosen seed's installed-package copy contract below.
-        """
+    def test_credentials_and_startup_are_separate_gates(self):
+        text = GETTING_STARTED.read_text().lower()
+        assert text.index("credential gate") < text.index("## 2.")
+        assert text.index("agent-start gate") < text.index("## 3.")
         for source in (README, GETTING_STARTED, SETUP_SKILL):
-            text = source.read_text()
-            assert "first-team-setup.md" in text, source
-            assert "fleet.yaml.seed" in text and "operator" in text.lower(), source
-        skill = SETUP_SKILL.read_text()
-        assert "default `/setup` route" in skill
-        assert "Do not infer a request for the Telegram seed" in skill
-        walkthrough = GETTING_STARTED.read_text()
-        assert "Browser route: assembly is complete." in walkthrough
-        assert walkthrough.index("Browser route: assembly is complete.") < walkthrough.index("## 3. Author the first fleet")
-        first_team = (REPO_ROOT / "documentation" / "first-team-setup.md").read_text()
-        assert '"$PYTHON" -I "$INSTALLER" --root "$DATA" --guided' in first_team
-        assert "Save this command to resume local setup:" in first_team
-        assert '"$RELEASE_CLI" --root "$DATA" host owner setup' in first_team
-        assert first_team.index("## Run the guided installer") < first_team.index(
-            "## Before approving local access"
-        )
-        assert "Do not type `INITIALIZE`" in first_team
-        assert "python3.11 -c" not in first_team
-        # The executable copy uses the installed package path, including when
-        # the operator is still in the source checkout after building it.
-        walkthrough = GETTING_STARTED.read_text()
-        assert 'cp "$SEEDS/fleet.yaml.seed" "$WORK/fleet.yaml"' in walkthrough
-        assert 'SEEDS=$("$WORK/bootstrap/bin/python" -I -c' in walkthrough
+            text = source.read_text().lower()
+            assert "telegram" in text and "operator" in text
+            assert "first-team-setup.md" in text
+        first_team = (REPO_ROOT / "documentation/first-team-setup.md").read_text()
+        assert "--template revenue-web-app" in first_team and "--plan-only" in first_team
+        assert "host update continue" in first_team
+        assert "not completed cold-host acceptance" in first_team
+        assert "--guided" not in first_team
 
 
 

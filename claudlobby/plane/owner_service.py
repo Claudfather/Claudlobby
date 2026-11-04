@@ -1,4 +1,4 @@
-"""Private owner serving through the existing host unit and activation owners."""
+"""Private owner serving through committed configuration and native enrollment."""
 
 from contextvars import ContextVar
 from functools import wraps
@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from ..activation_state import ActivationRefusal
+from ..activation_state import ActivationError, ActivationRefusal
 
 
 def service_command(root, cli, config):
@@ -37,7 +37,7 @@ def service_command(root, cli, config):
 
 
 def unit_socket(unit):
-    """Recognize only the sealed CLI's exact host-owner command."""
+    """Recognize only the bound CLI's exact host-owner command."""
     prefix = (str(Path(unit.argv[0]).with_name("claudlobby")), "--root", str(unit.root),
               "host", "owner", "serve")
     if unit.command[:6] != prefix:
@@ -67,16 +67,19 @@ def preflight(starts, *, managed=()):
 
 def managed_listeners(source_plan, inventory):
     """Use the selected plan and verified enrollment, never a label alone."""
-    from ..runtime_admission import parse_unit_argv
+    from ..installation import parse_git_unit_argv
 
     if source_plan is None:
         return set()
     installed = {str(unit.declaration.source) for unit in inventory.units if unit.installed}
     result = set()
-    for item in source_plan.effects.get("units", ()):
+    if not isinstance(source_plan,dict):
+        raise ActivationRefusal("managed owner listeners require committed Git configuration")
+    items = source_plan["units"]
+    for item in items:
         if item["source"] not in installed or not item["enroll"] or item["admission"] is None:
             continue  # a unit template (#2522) has no admission and listens on nothing
-        unit = parse_unit_argv(item["admission"]["argv"])
+        unit = parse_git_unit_argv(item["admission"]["argv"])
         path = unit_socket(unit)
         if path is not None:
             result.add((unit.unit, path))
@@ -88,8 +91,9 @@ def managed_listeners(source_plan, inventory):
 _ACTION_PROCESS = ContextVar('owner_action_process', default=None)
 _ACTION_SELECTORS = ('BOT_ID', 'BOT_NAME', 'BOT_DIR', 'BOT_SERVICE', 'FLEET_ROOT',
                      'FLEET_NAME', 'CLAUDLOBBY_FLEET', 'CLAUDLOBBY_TIMER_CONTEXT')
-_ACTION_IDENTITY = ('CLAUDLOBBY_ROOT', 'CLAUDLOBBY_RELEASE_ID', 'CLAUDLOBBY_CLI',
-                    'CLAUDLOBBY_NATIVE_DIR', 'CLAUDLOBBY_ARTIFACT_ID')
+_GIT_ACTION_IDENTITY = ('CLAUDLOBBY_ROOT', 'CLAUDLOBBY_INSTALLATION', 'CLAUDLOBBY_CLI',
+                        'CLAUDLOBBY_NATIVE_DIR', 'CLAUDLOBBY_LIBRARY_DIR')
+_ACTION_MARKERS = ('CLAUDLOBBY_ROOT', 'CLAUDLOBBY_RELEASE_ID', 'CLAUDLOBBY_INSTALLATION')
 
 
 def _action_context(root, package):
@@ -97,8 +101,14 @@ def _action_context(root, package):
 
     if any(key in os.environ for key in _ACTION_SELECTORS):
         raise AccessDenied('generated_context_refused')
+    if package.installation is None:
+        raise AccessDenied('managed_installation_required')
+    keys = _GIT_ACTION_IDENTITY
+    if any(key in os.environ for key in
+            ('CLAUDLOBBY_RELEASE_ID', 'CLAUDLOBBY_ARTIFACT_ID')):
+        raise AccessDenied('generated_context_refused')
     return (root, package.native, package.artifact_id,
-            tuple((key, os.environ.get(key)) for key in _ACTION_IDENTITY))
+            tuple((key, os.environ.get(key)) for key in keys))
 
 
 def check_action_process(root, package):
@@ -109,50 +119,69 @@ def check_action_process(root, package):
     proof = _ACTION_PROCESS.get()
     if proof is not None and proof != context:
         raise AccessDenied('generated_context_refused')
-    if any(key in os.environ for key in _ACTION_IDENTITY[:2]) and proof != context:
+    if any(key in os.environ for key in _ACTION_MARKERS) and proof != context:
         raise AccessDenied('generated_context_refused')
+
+
+def action_runtime_identity(package):
+    """Retain current Git provenance; transitional sealed callers keep their binding."""
+    from ..runtime_admission import RuntimeIdentity
+    from .owner_access import AccessDenied
+
+    identity = RuntimeIdentity.current()
+    if (package.installation is None or identity.installation != package.installation
+            or identity.native != package.native or identity.source_revision != package.source_revision
+            or identity.artifact_id != package.artifact_id):
+        raise AccessDenied('generated_context_refused')
+    return identity
+
+
+# One provenance comparison for CLI and owner adapters; this grants no action.
+from ..runtime_admission import runtime_route_matches as action_runtime_matches
 
 
 def admitted_action(method):
     """Admit direct operators as before; positively prove generated owner service."""
     @wraps(method)
     def invoke(self, *args, **kwargs):
-        from ..activation_state import ActivationError, read_selection
-        from ..config_plan import PlanError, read_plan
-        from ..config_units import planned_units
-        from ..runtime_admission import RuntimeIdentity, mutation_admission, parse_unit_argv
+        from ..config_plan import PlanError
+        from ..config_units import current_git_declarations
+        from ..runtime_admission import GitCurrentRuntime, mutation_admission
+        from ..installation import parse_git_unit_argv
         from ..supervision_inventory import Adapter, FileSnapshot, InventoryError, _catalog, collect_enrollment
         from .owner_access import AccessDenied
 
         context = _action_context(self.root, self.package)
         # No environment exception: even matching root/release needs native
         # enrollment and positive ancestry. Foreground calls keep their contract.
-        if not any(key in os.environ for key in _ACTION_IDENTITY[:2]):
+        if not any(key in os.environ for key in _ACTION_MARKERS):
             return method(self, *args, **kwargs)
         try:
-            identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native,
-                                       self.package.artifact_id)
-            expected = (str(self.root), os.environ.get('CLAUDLOBBY_RELEASE_ID'),
-                        str(identity.cli), str(identity.native), identity.artifact_id)
-            if (not expected[1] or tuple(value for _, value in context[3]) != expected):
+            identity = action_runtime_identity(self.package)
+            installation = self.package.installation
+            expected = (str(self.root), str(installation.directory), str(identity.cli),
+                        str(identity.native), str(installation.source / 'library'))
+            if not expected[1] or tuple(value for _, value in context[3]) != expected:
                 raise AccessDenied('generated_context_refused')
-            with mutation_admission(self.root, identity=identity, expected_release=expected[1]):
-                selected = read_selection(self.root)
-                plan = read_plan(self.root, selected['plan_id'])
+            with mutation_admission(self.root, identity=identity) as current:
                 adapter = Adapter(self.package)
                 manager = _catalog(adapter.read('svc_inventory_catalog'))[0]
+                if not isinstance(current, GitCurrentRuntime) or current.installation != installation:
+                    raise AccessDenied('generated_context_refused')
+                metadata = {item['source']: item for item in current.snapshot['units']}
+                units = [(declaration, metadata[str(declaration.source)]) for declaration in
+                         current_git_declarations(current.snapshot, manager)]
                 owners = []
-                for declaration, item in planned_units(plan, manager):
+                for declaration, item in units:
                     if item['admission'] is None:
                         continue  # a unit template (#2522) has no admission and is never the owner
-                    unit = parse_unit_argv(item['admission']['argv'])
+                    unit = parse_git_unit_argv(item['admission']['argv'])
                     if (item['enroll'] and declaration.scope == 'host'
                             and declaration.fleet is None and declaration.bot is None
                             and declaration.service is None and unit.phase == 'producers'
                             and unit.mode == 'exec' and unit.root == self.root
-                            and unit.release_id == expected[1]
                             and tuple(dict(declaration.environment).get(key)
-                                      for key in _ACTION_IDENTITY) == expected
+                                      for key, _ in context[3]) == expected
                             and unit.command[:6] == (str(identity.cli), '--root',
                                 str(self.root), 'host', 'owner', 'serve')
                             and unit_socket(unit) is not None):

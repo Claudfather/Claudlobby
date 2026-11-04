@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from contextlib import closing
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import sqlite3
 import stat
@@ -80,9 +77,13 @@ def _offline(args) -> CommandOutput:
     return CommandOutput(data, lines=(f"{verdict} (unknown={data['unknown_count']})", *findings))
 
 
+def _runtime_hint():
+    return "inspect the current configuration and claudlobby host update status"
+
+
 def _scope(args):
-    from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import read_selection
+    from ..activation_identity import read_current_identity_bindings
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import OperationContextError, resolve_operation_scope
@@ -103,26 +104,23 @@ def _scope(args):
     if destination.paths.seed:
         raise CommandFailure("conflict", "seed configuration has no active check-in selection")
     root = shlex.quote(str(destination.paths.root))
-    restage = (f"run claudlobby --root {root} config plan --release RELEASE_ID "
-               "(host releases lists the IDs), then host activate the reviewed plan")
-    selected = read_selection(destination.paths.root)
+    restage = f"inspect claudlobby --root {root} host update status and its current configuration"
+    selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
     if selected is None:
         raise CommandFailure("conflict", "active check-in selection is unavailable",
-                             hint=f"inspect claudlobby --root {root} host releases; pass this "
-                                  f"host's --root, or {restage}")
-    bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+                             hint=restage)
+    bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                package=destination.paths.package)
-    if read_selection(destination.paths.root) != selected:
-        raise selection_read_conflict('active check-in selection changed during read', hint='retry the same command')
+    selected.check(destination.paths.root, package=destination.paths.package,
+                   message='active check-in selection changed during read')
     if (bindings["manager"] != destination.fleet.manager
             or set(bindings["bots"]) != set(destination.fleet.bots)):
         raise CommandFailure("conflict", "active check-in scope differs from frozen bindings",
-                             hint=f"fleet bots or manager changed after activation; {restage}")
+                             hint="current fleet bots or manager differ; " + restage)
     return destination, origin, selected, bindings
 
 
 def _read(args) -> CommandOutput:
-    from ..activation_state import read_selection
     from ..commands.checkins import _since, collect_checkins, summarize
     from ..plane.db import connect_ro, db_file
     from ..plane.schema_state import require_current_schema
@@ -177,8 +175,8 @@ def _read(args) -> CommandOutput:
             conn, destination.fleet.name,
             lease_days=destination.fleet.workstreams.lease_days)["workstreams"],
             int(datetime.now(timezone.utc).timestamp()))
-    if read_selection(destination.paths.root) != selected:
-        raise selection_read_conflict('active check-in selection changed during read')
+    selected.check(destination.paths.root, package=destination.paths.package,
+                   message='active check-in selection changed during read')
     if args.public_command == "checkin.show":
         ids = sorted({(row["checkin_ref"] or "").split("checkin:", 1)[-1] for row in rows})
         if prefix and len(rows) > PREFIX_SCAN_LIMIT:
@@ -199,7 +197,7 @@ def _read(args) -> CommandOutput:
         data = {"fleet": destination.fleet.name, "decision": row, "current_workstream_waits": waits}
         lines = note_prefix(data, (f"{row['checkin_id']}\t{row['actor']}\t{row['action']}",),
                             args.checkin_id, ids[0])
-        return CommandOutput(data, release_id=selected["release_id"], lines=lines)
+        return CommandOutput({**data, **selected.provenance}, release_id=selected.release_id, lines=lines)
     data = {"fleet": destination.fleet.name, "bot": args.bot,
             "since": None if args.last else since.isoformat(), "limit": args.limit,
             "items": rows, "current_workstream_waits": waits,
@@ -216,11 +214,11 @@ def _read(args) -> CommandOutput:
         lines += tuple(f"workstream wait {item['id']} on={item['waiting_on'] or 'unknown'} "
                        f"age_seconds={item['age_seconds'] if item['age_seconds'] is not None else 'unknown'} "
                        f"note={item['note'] or ''}" for item in waits)
-    return CommandOutput(data, release_id=selected["release_id"], lines=lines)
+    return CommandOutput({**data, **selected.provenance}, release_id=selected.release_id, lines=lines)
 
 
 def _record(args) -> CommandOutput:
-    from ..activation_state import read_selection
+    from ..active_config import runtime_read_stamp
     from ..checkin_operations import record_checkin, validate_content
     from ..operation_context import resolve_task_mutation_context
     from ..plane.ids import derive_uid
@@ -236,30 +234,30 @@ def _record(args) -> CommandOutput:
     checkin_id = derive_uid("ck", f"checkin:v1:{bindings['host_uid']}:{bindings['fleet_uid']}:{request_id}")
     validate_content(decision, selection_file, checkin_id=checkin_id)
     if args.dry_run:
-        return CommandOutput({"validated": True, "checkin_id": None, "recording": "not_attempted"},
-                             release_id=selected["release_id"],
+        return CommandOutput({"validated": True, "checkin_id": None, "recording": "not_attempted", **selected.provenance},
+                             release_id=selected.release_id,
                              lines=("Check-in input valid; nothing recorded.",))
-    bound_release = None
-    if origin is not None:
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-        if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-            raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+    from .message_write import _bound_release
+    from ..runtime_admission import runtime_route_matches, runtime_release_id
+    bound_release = _bound_release(destination.paths.package, generated=origin is not None)
     with mutation_admission(destination.paths.root, identity=RuntimeIdentity.current(),
                             expected_release=bound_release) as release:
-        if release.release_id != selected["release_id"] or read_selection(destination.paths.root) != selected:
+        if (not runtime_route_matches(release, selected, package=destination.paths.package)
+                or runtime_read_stamp(destination.paths.root, package=destination.paths.package) != selected):
             raise CommandFailure("release_mismatch", "selected check-in release changed",
-                                 retryable=origin is None,
+                                 retryable=origin is None, data=selected.provenance,
                                  hint="retry the same --request-id" if origin is None else
-                                 "a generated caller stays on its bound release; "
-                                 "inspect claudlobby host releases")
+                                 ("inspect the current configuration and claudlobby host update status"
+                                  if selected.kind == "git" else
+                                  "a generated caller stays on its bound release; inspect claudlobby host releases"))
         ctx = resolve_task_mutation_context(root=destination.paths.root,
                                             fleet=destination.fleet.name,
                                             package=destination.paths.package)
         if ctx.host_uid != bindings["host_uid"] or ctx.fleet_uid != bindings["fleet_uid"]:
             raise CommandFailure("conflict", "check-in mutation identity differs from active selection")
         result = record_checkin(ctx, selected, decision, selection_file, request_id=request_id)
-    data = {"fleet": destination.fleet.name, **asdict(result)}
-    return CommandOutput(data, release_id=release.release_id,
+    data = {"fleet": destination.fleet.name, **asdict(result), **selected.provenance}
+    return CommandOutput(data, release_id=runtime_release_id(release),
                          lines=(f"{result.checkin_id}\t{result.actor}\t"
                                 f"recording={result.recording}\treplayed={result.replayed}",))
 
@@ -299,7 +297,7 @@ def dispatch(args) -> CommandOutput:
                              data={**(exc.data or {}), **data}) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint) from exc
+                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid check-in root or fleet selector",
                              hint=str(exc)) from exc
@@ -309,13 +307,13 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError, BotNotFoundError) as exc:
         # Authored scope causes name selectors and identities, not config values.
         raise CommandFailure("conflict", "active check-in scope is incomplete",
-                             hint=f"{exc}; inspect claudlobby host releases") from exc
+                             hint=_runtime_hint()) from exc
     except TaskStateError as exc:
         raise CommandFailure("conflict", "check-in history cannot be interpreted safely",
                              hint="inspect claudlobby host doctor") from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched",
-                             hint="inspect claudlobby host releases") from exc
+                             hint=_runtime_hint()) from exc
     except (PendingMigrationError, DowngradeError) as exc:
         raise CommandFailure("unavailable", "Plane schema is not current for this CLI") from exc
     except ReceiptError as exc:

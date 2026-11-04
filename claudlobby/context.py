@@ -53,32 +53,42 @@ def generated_selectors(*, fleet: str | None = None, bot: str | None = None,
     return fleet, bot
 
 
-def native_environment(paths: Paths) -> dict[str, str]:
+def native_environment(paths: Paths, *, current=None) -> dict[str, str]:
     """Resolved locations passed to native children and generated supervision.
 
     Native hot paths consume this context without starting Python or guessing
-    mutable storage from their installed script directory.
+    mutable storage from their installed script directory. Supplying the caller
+    held admission validates full current provenance and marks private re-entry;
+    that marker is routing, never authority.
     """
-    cli = selected_cli()
+    if current is not None:
+        from .active_config import runtime_read_stamp
+        from .activation_state import ActivationError
+        from .runtime_admission import GitCurrentRuntime, runtime_route_matches
+        stamp = runtime_read_stamp(paths.root, package=paths.package)
+        if not isinstance(current, GitCurrentRuntime):
+            raise ActivationError("native execution requires a managed Git current runtime")
+        native = current.installation.native
+        if (stamp is None or not runtime_route_matches(current, stamp, package=paths.package)
+                or native != paths.package.runtime_native
+                or isinstance(current, GitCurrentRuntime) and current.installation.data_root != paths.root):
+            raise ActivationError("native child differs from the admitted current runtime")
+    installation = paths.package.installation
+    cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     result = {
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),
-        "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
-        "CLAUDLOBBY_LIBRARY_DIR": str(paths.base_library),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.package.runtime_native),
+        "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.runtime_library),
         "CLAUDLOBBY_CLI": str(cli),
-        "CLAUDLOBBY_ARTIFACT_ID": paths.package.artifact_id,
     }
-    # Composition can run from an explicit development package, but a sealed
-    # candidate binds generated callers to its complete release (dependencies
-    # included), not merely the source/resource artifact identity.
-    if cli.is_relative_to(paths.release_store):
-        from .releases import read_release
-        release_id = cli.relative_to(paths.release_store).parts[0]
-        release = read_release(paths.root, release_id, verify_files=False)
-        if (release.cli_path != cli or release.native_path != paths.lib
-                or release.inputs.artifact_id != paths.package.artifact_id):
-            raise ValueError("selected CLI and package do not belong to the same sealed release")
-        result["CLAUDLOBBY_RELEASE_ID"] = release_id
+    if installation is not None:
+        result["CLAUDLOBBY_INSTALLATION"] = str(installation.directory)
+    else:
+        result["CLAUDLOBBY_ARTIFACT_ID"] = paths.package.artifact_id
+    if current is not None:
+        import sys
+        result.update(CLAUDLOBBY_NATIVE_ADMITTED="1", CLAUDLOBBY_NATIVE_PYTHON=sys.executable)
     return result
 
 
@@ -88,8 +98,8 @@ def resolve_paths(
 ) -> Paths:
     """Resolve host/fleet paths without requiring a fleet for host commands.
 
-    Production always reads the installed package. Explicit injection is for
-    callers such as isolated test/source harnesses, never a discovery fallback.
+    Resources come from the explicit installation or installed package.
+    The working directory is never a resource discovery fallback.
     """
     return Paths.detect(root, fleet, seed=seed,
                         package=package if package is not None else get_resources())

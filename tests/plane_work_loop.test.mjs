@@ -12,7 +12,8 @@ const controller = source.replaceAll('from "./action-state.js"', `from "${new UR
   .replaceAll('from "./permission-panel.js"', `from "${new URL('../claudlobby/plane/ui/permission-panel.js', import.meta.url)}"`)
   .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const { mountWorkLoop, conversationTaskLink } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
-const transportSource = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const transportSource = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const { createOwnerTransport } = await import(`data:text/javascript;base64,${Buffer.from(transportSource).toString('base64')}`);
 const context = { version: 1, room: 'web', simulation: true,
   scope: { workspace: 'example', host: 'workshop', fleet: 'web', viewer: 'owner' },

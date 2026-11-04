@@ -26,11 +26,11 @@ import pytest
 from claudlobby.composer import _reconcile_fleet_job_units, compose_fleet_timers
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _write(root: Path, body: str) -> Path:

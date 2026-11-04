@@ -55,16 +55,23 @@ set -euo pipefail
 # An activated timer enters the selected CLI first. The CLI holds mutation
 # admission and supplies the reviewed fleet path and roster on re-entry below;
 # a direct source-only invocation retains the historical private probe path.
-if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] && [ -z "${CLAUDLOBBY_ROOT:-}" ]; then
-    echo "creds-check: selected timer has no data root" >&2
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+if [ "${1:-}" = "--selected-release" ]; then
+    echo "legacy release execution is retired; use the managed Git CLI" >&2
+    exit 2
+fi
+if _claudlobby_runtime_bound && [ -z "${CLAUDLOBBY_ROOT:-}" ]; then
+    echo "creds-check: current timer has no data root" >&2
     exit 2
 fi
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ "${1:-}" != "--selected-release" ] && [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]; then
+if [ "${1:-}" != "--admitted-runtime" ] && _claudlobby_runtime_bound; then
     _cc_timer_fleet="${1:-${CLAUDLOBBY_FLEET:-}}"
-    [ -n "$_cc_timer_fleet" ] && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] \
-        && [ -n "${CLAUDLOBBY_CLI:-}" ] && [ -n "${FLEET_ROOT:-}" ] || {
+    _claudlobby_require_native "$LIB_DIR" || exit $?
+    [ -n "$_cc_timer_fleet" ] && [ "$_cc_timer_fleet" = "${CLAUDLOBBY_FLEET:-}" ] \
+        && [ -n "${FLEET_ROOT:-}" ] && [ "$#" -le 1 ] || {
         echo "creds-check: selected timer context is incomplete" >&2
         exit 2
     }
@@ -79,34 +86,15 @@ fi
 # fleet; other checks are fleet-agnostic.
 FLEET_ARG="${1:-${CLAUDLOBBY_FLEET:-}}"
 SELECTED_BOTS=""
-if [ "${1:-}" = "--selected-release" ]; then
-    FLEET_ARG=""
-    _cc_release="" _cc_fleet_root="" _cc_bots_dir=""
-    while [ "$#" -gt 0 ]; do
-        [ "$#" -ge 2 ] || { echo "creds-check: incomplete selected scope" >&2; exit 2; }
-        case "$1" in
-            --selected-release) _cc_release="$2" ;;
-            --fleet) FLEET_ARG="$2" ;;
-            --fleet-root) _cc_fleet_root="$2" ;;
-            --bots-dir) _cc_bots_dir="$2" ;;
-            --bot)
-                [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || {
-                    echo "creds-check: invalid selected bot" >&2; exit 2;
-                }
-                SELECTED_BOTS="${SELECTED_BOTS}${SELECTED_BOTS:+$'\n'}$2" ;;
-            *) echo "creds-check: unknown selected scope field" >&2; exit 2 ;;
-        esac
-        shift 2
+_cc_admitted=0
+if [ "${1:-}" = "--admitted-runtime" ]; then
+    _claudlobby_parse_runtime_scope credentials "$LIB_DIR" "$@" || exit $?
+    _cc_admitted=1
+    FLEET_ARG="$_CL_RUNTIME_FLEET"
+    _cc_fleet_root="$_CL_RUNTIME_FLEET_ROOT" _cc_bots_dir="$_CL_RUNTIME_BOTS_DIR"
+    for _cc_bot in ${_CL_RUNTIME_BOTS[@]+"${_CL_RUNTIME_BOTS[@]}"}; do
+        SELECTED_BOTS="${SELECTED_BOTS}${SELECTED_BOTS:+$'\n'}$_cc_bot"
     done
-    [ -n "$FLEET_ARG" ] && [ -n "$SELECTED_BOTS" ] && [ -n "$_cc_release" ] \
-        && [[ "$_cc_fleet_root" = /* ]] && [[ "$_cc_bots_dir" = /* ]] \
-        && [ "$_cc_release" = "${CLAUDLOBBY_RELEASE_ID:-}" ] \
-        && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] \
-        && [ "$_cc_fleet_root" = "${FLEET_ROOT:-}" ] \
-        && [ "$_cc_bots_dir" = "$_cc_fleet_root/runtime/bots" ] || {
-        echo "creds-check: selected scope differs from its release context" >&2
-        exit 2
-    }
 fi
 
 # shellcheck source=lib-common.sh
@@ -154,12 +142,13 @@ TG_POST="$LIB_DIR/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
 # the source of truth for runtime credentials. Parse it safely before any check.
-if [ -n "${_cc_release:-}" ]; then
+if [ "$_cc_admitted" -eq 1 ]; then
     # A tier cannot redirect a selected probe after its paths were checked.
     readonly CLAUDLOBBY_ROOT FLEET_ROOT FLEET_ARG LIB_DIR \
-        CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_NATIVE_DIR CLAUDLOBBY_CLI \
+        CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_INSTALLATION CLAUDLOBBY_NATIVE_ADMITTED \
+        CLAUDLOBBY_NATIVE_DIR CLAUDLOBBY_CLI \
         CLAUDLOBBY_CREDS_LOG CLAUDLOBBY_CREDS_STATE \
-        _cc_release _cc_fleet_root _cc_bots_dir SELECTED_BOTS LOG STATE
+        _cc_admitted _cc_fleet_root _cc_bots_dir SELECTED_BOTS LOG STATE
     # A selected check must see the same tier cascade as a boot, never an
     # ambient token from the operator shell that a bot would not receive.
     unset BOT_ID BOT_NAME BOT_DIR BOT_SERVICE TELEGRAM_BOT_TOKEN TELEGRAM_STATE_DIR
@@ -860,4 +849,4 @@ for fn in "${CHECKS[@]}"; do
 done
 
 log "tick complete (${#CHECKS[@]} checks)"
-[ -z "${_cc_release:-}" ] || printf 'tick-complete\n'
+[ "$_cc_admitted" -eq 0 ] || printf 'tick-complete\n'

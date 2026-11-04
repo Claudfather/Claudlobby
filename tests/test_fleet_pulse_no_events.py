@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,6 @@ from tests.conftest import _scrubbed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FLEET_PULSE = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
 
 # --- end-to-end: the pulse survives a no-events bot ---------------------------
 
@@ -71,7 +71,7 @@ def pulse_fleet(tmp_path):
     # Only the 2-space `bots:` block and 4-space bot keys are read
     # (parse_fleet_bots).
     (root / "local" / fleet / "fleet.yaml").write_text(
-        "fleet:\n  manager: aaa-idle\n  bots:\n    aaa-idle:\n    zzz-logged:\n"
+        "fleet:\n  name: pulsefleet\n  manager: aaa-idle\n  bots:\n    aaa-idle: {expertise: [testing]}\n    zzz-logged: {expertise: [testing]}\n"
     )
 
     (root / "tmux").mkdir()
@@ -101,8 +101,10 @@ def _run_pulse(root: Path, fleet: str, extra_env: dict) -> subprocess.CompletedP
         TMUX_TMPDIR=_tmux_env(root)["TMUX_TMPDIR"],
         **{"CLAUDLOBBY_ROOT": str(root), **extra_env},
     )
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
     return subprocess.run(
-        ["bash", str(FLEET_PULSE), fleet],
+        [sys.executable, str(REPO_ROOT / "harness/compose.py"), "--root", str(root),
+         "--fleet", fleet, "--pulse", "--record-plane"],
         capture_output=True,
         text=True,
         env=env,

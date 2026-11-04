@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -15,17 +16,16 @@ import time
 
 import pytest
 
-from claudlobby import activation, activation_handoffs, bot_operations, context
+from claudlobby import bot_operations, context, active_config, native_session
 from claudlobby.__main__ import main
-from claudlobby.activation_enrollment import selected_bot_entry
-from claudlobby.activation_runtime import RuntimeEvidenceError
+from claudlobby.supervision_runtime import RuntimeEvidenceError
 from claudlobby.config_plan import ConfigPlanBuilder
-from claudlobby.config_units import planned_units
+from claudlobby.config_units import current_git_declarations
 from tests.conftest import constructed_env
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — real short-root activation fixtures
-from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_self_restart_handoff import _checkpointed, _stamp
+from tests.test_git_composition import candidate  # noqa: F401 — lightweight Git composition fixture
 
 
 def test_private_control_uses_one_exact_native_send(tmp_path):
@@ -177,50 +177,13 @@ def test_lifecycle_lock_contention_is_a_retryable_conflict(tmp_path, monkeypatch
     assert public.value.data["native_outcome"] == "unattempted"
 
 
-def test_selected_bot_placement_survives_removal_of_installed_unit(cold):  # noqa: F811
-    root, _, plan, host = cold
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    entry = selected_bot_entry(root, "example", "worker", "Linux")
-    installed_unit = Path(entry["installed"])
-    assert installed_unit.is_file() and entry["target"] == "com.example.worker.service"
-    installed_unit.unlink()
-    assert selected_bot_entry(root, "example", "worker", "Linux") == entry
-
-
-def test_background_caller_uses_selected_same_uid_gui_domain(tmp_path, monkeypatch):
-    from claudlobby.supervision_inventory import Adapter, InventoryError
-
-    source = tmp_path / "generated" / "com.example.worker.plist"
-    source.parent.mkdir()
-    source.write_text("private reviewed unit")
-    installed = tmp_path / "LaunchAgents" / source.name
-    installed.parent.mkdir()
-    target = f"gui/{os.getuid()}/com.example.worker"
-    entry = {"target": target, "source": str(source), "installed": str(installed)}
-    monkeypatch.setattr(bot_operations, "selected_bot_entry", lambda *_: entry)
-    declaration = SimpleNamespace(scope="bot", fleet="example", bot="worker", source=source)
-    monkeypatch.setattr(bot_operations, "current_declarations", lambda *_: (declaration,))
-    monkeypatch.setattr(bot_operations, "planned_units", lambda *_: ((declaration, {"enroll": True,
-                                                                                   "sha256": "private"}),))
-    monkeypatch.setattr(bot_operations, "validate_unit_admission", lambda *_: None)
-    calls = []
-    def runner(command, **kwargs):
-        calls.append(command)
-        domain = f"gui/{os.getuid()}" if command[0] == "/bin/launchctl" else f"user/{os.getuid()}"
-        return subprocess.CompletedProcess(command, 0,
-            f"manager\tDarwin\ndomain\t{domain}\ndirectory\t{installed.parent}\nPID Status Label\n", "")
-    adapter = Adapter(source_package(), runner=runner)
-    wrapped = bot_operations._selected_adapter(tmp_path, "example", "worker", adapter)
-    manager, got, selected, _ = bot_operations._selected_unit(
-        tmp_path, SimpleNamespace(blob=lambda _: b"private"), object(), adapter.package,
-        wrapped, "example", "worker")
-    assert manager == "Darwin" and got is declaration and selected == entry
-    assert calls[0][0] == "/bin/bash"
-    assert calls[1][:3] == ["/bin/launchctl", "asuser", str(os.getuid())]
-    wrapped.call("svc_bot_enroll_exact", source, installed, target)
-    assert calls[-1][:3] == ["/bin/launchctl", "asuser", str(os.getuid())]
-    with pytest.raises(InventoryError, match="not owned"):
-        adapter.in_selected_gui(f"gui/{os.getuid() + 1}/com.example.worker")
+def test_current_bot_placement_survives_removal_of_installed_unit(git_bot_binding):
+    case=git_bot_binding
+    binding=bot_operations._current_bot_binding(case.root,case.current,case.destination,"lead",case.adapter)
+    installed=Path(binding.entry["installed"])
+    installed.write_bytes(binding.declaration.source.read_bytes())
+    installed.unlink()
+    assert bot_operations._current_bot_binding(case.root,case.current,case.destination,"lead",case.adapter).entry==binding.entry
 
 
 def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
@@ -273,7 +236,8 @@ def test_a_late_handoff_is_read_against_the_request_the_door_recorded(tmp_path):
     older = f"---\nlast_updated: {stamp(asked - 3600)}\n---\nolder context\n"
     write(older, asked - 3600)
     assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "no_request_recorded")
-    assert bot_operations._record_handoff_request(bot_dir, asked)
+    # Old second-resolution receipts remain readable after the shared writer changes.
+    (bot_dir / "data/.handoff-request").write_text(json.dumps({"requested_at": stamp(asked)}))
     # Not written since: also what a turn that ends without writing it leaves (#963).
     assert bot_operations.handoff_state(bot_dir)[:2] == ("pending", "not_written_since_request")
     handoff.unlink()
@@ -285,7 +249,7 @@ def test_a_late_handoff_is_read_against_the_request_the_door_recorded(tmp_path):
     assert (saved.requested_at, saved.written_at) == (stamp(asked), stamp(now))
 
     # Activation's reference refresh rewrites the file over the old capture.
-    handoff.write_bytes(activation_handoffs._refresh_envelope(bot_dir, stamp(now)) + older.encode())
+    handoff.write_bytes(bot_operations._refresh_envelope(bot_dir, stamp(now)) + older.encode())
     assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "capture_predates_request")
     foreign = tmp_path / "foreign.md"
     foreign.write_text(f"---\nlast_updated: {stamp(now)}\n---\nnew context\n")
@@ -347,7 +311,7 @@ def _handoff_below_envelope(tmp_path, envelope, capture_age, written_age):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     if capture_age is None:
         handoff = bot_dir / ".claude/session.md"
-        handoff.write_bytes(activation_handoffs._refresh_envelope(bot_dir, _stamp(now), field=envelope)
+        handoff.write_bytes(bot_operations._refresh_envelope(bot_dir, _stamp(now), field=envelope)
                             + b"older context, no frontmatter\n")
     else:
         handoff, _ = _checkpointed(bot_dir, refreshed=now, captured=now - timedelta(seconds=capture_age),
@@ -429,11 +393,17 @@ if sys.argv[4] == '1':
             time.sleep(1)
         return real_select(*args)
     b.select.select = late_select
-b.read_selection = lambda _: {'release_id': 'selected'}
+from contextlib import contextmanager
+from types import SimpleNamespace
+@contextmanager
+def admitted(*args, **kwargs):
+    yield SimpleNamespace(revision='a'*40, config_fingerprint='b'*64)
+b.mutation_admission = admitted
+b.RuntimeIdentity.current = staticmethod(lambda: object())
 def restart(**kwargs):
     kwargs['_on_lock']()
     (bot_dir / 'native-effect').write_text('attempted')
-    return b.BotLifecycleResult('fleet', 'bot', 'selected', 'unit', 'running', True,
+    return b.BotLifecycleResult('fleet', 'bot', None, 'unit', 'running', True,
                                 'session_ready', 'captured')
 b.set_bot_running = restart
 b._schedule_self_restart(root=root, fleet='fleet', bot='bot', ceiling=None,
@@ -472,35 +442,33 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
     ``exec_start_pre`` seals the worker's systemd unit with that
     ExecStartPre line, the way the compositor renders a boot stagger.
     """
-    root, release, plan, host = cold
-    # Add the real selected bot.conf output absent from the general activation
-    # fixture. Its other sealed inputs/units remain unchanged.
-    builder = ConfigPlanBuilder(root, plan.release_id, plan.release_seal, plan.fleets,
-                                effects=deepcopy(plan.effects))
-    builder.inputs = deepcopy(plan.inputs)
-    builder.contents = {path.name: path.read_bytes() for path in (plan.directory / "files").iterdir()}
-    builder.changes = {change.target: change for change in plan.changes}
-    builder.file(root / "runtime/bots/worker/bot.conf",
-                 b"BOT_ID=worker\nBOT_NAME=worker\nFLEET_NAME=example\n"
-                 b"BOT_SERVICE=com.example.worker\nTMUX_SOCKET=com.example.worker\n")
+    root, installation, plan, host = cold
+    package = host.package
+    # This helper starts as the local operator. Generated-origin cases below
+    # supply their own complete carriers explicitly.
+    for name in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR",
+                 "BOT_SERVICE", "FLEET_ROOT", "CLAUDLOBBY_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    # The shared fixture has already published generated Git units/config; this
+    # helper adds only each test's native observations and optional boot stagger.
     if exec_start_pre is not None:
-        # Seal the worker's unit with this ExecStartPre line, as a staggered
-        # bot's composed unit carries it; the unit digest moves with its bytes.
-        (unit,) = [unit for unit in builder.effects["units"]
-                   if unit["source"].endswith("/com.example.worker.service")]
-        staggered = builder.contents[unit["sha256"]].replace(
-            b"[Service]\n", f"[Service]\nExecStartPre={exec_start_pre}\n".encode(), 1)
-        unit["sha256"] = hashlib.sha256(staggered).hexdigest()
-        builder.contents[unit["sha256"]] = staggered
-        change = builder.changes[unit["source"]]
-        builder.changes[unit["source"]] = replace(change, after={**change.after, "sha256": unit["sha256"]})
-    plan = builder.seal()
-    host.plan = plan
-    host.by_name = {decl.source.name: (decl, item) for decl, item in planned_units(plan, "Linux")}
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    package = replace(source_package(), native=release.native_path,
-                      artifact_id=release.inputs.artifact_id)
+        snapshot=deepcopy(host.snapshot)
+        unit=next(item for item in snapshot["units"] if item["source"].endswith("/com.example.worker.service"))
+        source=Path(unit["source"])
+        content=source.read_bytes().replace(b"[Service]\n",f"[Service]\nExecStartPre={exec_start_pre}\n".encode(),1)
+        source.write_bytes(content)
+        unit["sha256"]=hashlib.sha256(content).hexdigest()
+        for output in snapshot["owned_outputs"]:
+            if output["target"]==str(source):output["state"]["sha256"]=unit["sha256"]
+        snapshot["fingerprint"]=active_config._fingerprint(snapshot)
+        active_config.publish_current_config(snapshot,installation=installation,
+                                             expected_previous=host.snapshot["fingerprint"])
+        host.snapshot=snapshot
     monkeypatch.setattr(context, "get_resources", lambda: package)
+    for declaration in current_git_declarations(host.snapshot,"Linux"):
+        if declaration.scope=="bot":
+            (host.directory/declaration.source.name).write_bytes(declaration.source.read_bytes())
+            host.states[declaration.source.name]="enabled loaded active"
 
     class Native:
         def __init__(self):
@@ -516,16 +484,23 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
             self.target = "com.example.worker.service"
             self.manager = "Linux"
             self.enroll_needs_s = 0
+            self.native_pid = 4242
+            self.native_idle = True
 
         def call(self, function, *args, timeout=30):
             self.calls.append(function)
             target = self.target
             if function == "svc_inventory_catalog":
-                return host.call(function, *args, timeout=timeout)
+                value=f"manager\tLinux\ndirectory\t{host.directory}\n"
+                value+="".join(f"installed\t{path.name}\n" for path in sorted(host.directory.iterdir()))
+                value+="".join(f"loaded\t{name}\n" for name in sorted(host.states))
+                return subprocess.CompletedProcess([function],0,value,"")
             if function == "svc_inventory_state":
                 value = host.states.get(args[1], "not-found not-found inactive")
             elif function == "svc_bot_session_observe":
                 value = self.session
+            elif function == "svc_bot_native_session":
+                value = f"{self.native_pid}\t1700000000\t{'idle' if self.native_idle else 'unready'}"
             elif function == "svc_activation_quiet":
                 value = "inactive\tno-cgroup-witness"
             elif function == "svc_activation_bot_fence":
@@ -561,6 +536,11 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
                     # systemctl blocks through the unit's ExecStartPre: the
                     # adapter kills the client at its budget, the job runs on.
                     raise subprocess.TimeoutExpired([function], timeout)
+                # The native launch callback confirms the exact retained UUID;
+                # no Claude process or model is launched by this adapter.
+                self.native_pid += 1
+                from tests.test_native_session import retain_native_session
+                retain_native_session(bot_directory, "com.example.worker", private_tmpdir, account, self)
                 value = ""
             else:
                 raise AssertionError(f"unexpected native call: {function}")
@@ -574,6 +554,16 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
 
     native = Native()
     monkeypatch.setattr(bot_operations, "Adapter", lambda _: native)
+    bot_directory = root / "runtime/bots/worker"
+    declaration = next(row for row in current_git_declarations(host.snapshot, "Linux")
+                       if row.scope == "bot" and row.bot == "worker")
+    selected, account = native_session._context(package, root, bot_directory, "com.example.worker")
+    spec = bot_operations.build_supervision_spec(selected.fleet.bots["worker"], selected.fleet, selected.paths)
+    private_tmpdir = Path(spec.environment["TMUX_TMPDIR"])
+    monkeypatch.setattr(native_session, "require_provider", lambda _: None)
+    from tests.test_native_session import retain_native_session
+    retain_native_session(bot_directory, "com.example.worker", private_tmpdir, account, native)
+    native.calls.clear()  # Fixture establishment is not an operator lifecycle action.
 
     def observed(_root, _declarations, _adapter, target, installed_path):
         assert target == native.target
@@ -583,20 +573,65 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
 
     monkeypatch.setattr(bot_operations, "_observed", observed)
     monkeypatch.setattr(bot_operations, "assert_quiescent", lambda *a, **kw: None)
+    # A real recent-skip is backed by an actual owned capture. Tests which
+    # exercise missing/stale saves replace or remove it explicitly.
+    checkpoint = root / "runtime/bots/worker/.claude/session.md"
+    checkpoint.parent.mkdir(exist_ok=True)
+    now = datetime.now(timezone.utc)
+    checkpoint.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
 
     def call(*argv, expected=0, use_root=True):
         root_flag = ["--root", str(root)] if use_root else []
-        assert main([*root_flag, "--json", *argv]) == expected
+        actual = main([*root_flag, "--json", *argv])
         result = json.loads(capsys.readouterr().out)
+        assert actual == expected, json.dumps(result, indent=2)
         assert result["ok"] is (expected == 0)
         return result
-    return SimpleNamespace(root=root, release=release, plan=plan, host=host,
-                           native=native, call=call)
+    return SimpleNamespace(root=root, installation=installation, plan=plan, host=host,
+                           native=native, call=call, private_tmpdir=private_tmpdir, account=account)
+
+
+@pytest.mark.parametrize("manager, active", [
+    ("Linux", "active"), ("Linux", "inactive"), ("Darwin", "inactive"),
+])
+def test_restart_preserves_native_disabled_intent_before_any_effect(cold, monkeypatch, capsys, manager, active):
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    native = worker.native
+    native.manager = manager
+    if manager == "Darwin":
+        from claudlobby.operation_context import resolve_operation_scope
+        destination,_=resolve_operation_scope(root=worker.root,fleet="example")
+        original=bot_operations._current_bot_binding(worker.root,
+            bot_operations.GitCurrentRuntime(worker.installation,worker.host.snapshot["revision"],
+                worker.host.snapshot["fingerprint"],worker.host.snapshot),
+            destination,"worker",native)
+        native.target=f"user/{os.getuid()}/com.example.worker"
+        monkeypatch.setattr(bot_operations,"_current_bot_binding",lambda *_a,**_k:replace(
+            original,manager=manager,entry={**original.entry,"target":native.target}))
+    worker.host.states[native.target] = f"disabled loaded {active}"
+    def observed(_root, _declarations, _adapter, target, installed_path):
+        assert target == native.target and installed_path.exists()
+        key = "UnitFileState" if manager == "Linux" else "EnabledState"
+        return SimpleNamespace(installed=(SimpleNamespace(path=str(installed_path)),),
+                               properties=(("ActiveState", active), (key, "disabled")))
+    monkeypatch.setattr(bot_operations, "_observed", observed)
+    refused = worker.call("bot", "restart", "worker", expected=4)
+    assert "disabled; use bot start" in refused["error"]["message"]
+    assert native.actions == []
+    assert set(native.calls) <= {"svc_inventory_catalog"}
+
+    # Explicit start remains the deliberate enable/enroll door. An inactive
+    # bot has no live context to checkpoint, and start may enroll it normally.
+    if manager == "Linux" and active == "inactive":
+        native.session = "absent"
+        result = worker.call("bot", "start", "worker")["data"]
+        assert result["changed"] is True and native.actions == ["start"]
+        assert worker.host.states[native.target] == "enabled loaded active"
 
 
 def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatch, capsys):  # noqa: F811
     worker = _worker_cli(cold, monkeypatch, capsys)
-    root, release, plan, host, native, call = (worker.root, worker.release, worker.plan,
+    root, installation, plan, host, native, call = (worker.root, worker.installation, worker.plan,
                                                worker.host, worker.native, worker.call)
 
     healthy = call("bot", "start", "worker")["data"]
@@ -628,7 +663,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/manager"))
     monkeypatch.setenv("FLEET_ROOT", str(root))
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
     implicit = call("bot", "handoff", "worker", use_root=False)["data"]
     explicit = call("--fleet", "example", "bot", "handoff", "worker", use_root=False)["data"]
     assert implicit == explicit == skipped
@@ -641,13 +676,20 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert call("bot", "compact", "worker", expected=4)["error"]["code"] == "conflict"
     assert native.calls.count("svc_bot_control_exact") == before_control
     for key in ("FLEET_NAME", "BOT_ID", "BOT_DIR", "FLEET_ROOT",
-                "CLAUDLOBBY_ROOT", "CLAUDLOBBY_RELEASE_ID"):
+                "CLAUDLOBBY_ROOT"):
         monkeypatch.delenv(key)
     native.explicit_handoff = ""  # the old native rc0 is not proof of a handoff
     unknown = call("bot", "handoff", "worker", expected=6)
     assert unknown["error"]["code"] == "unavailable" and native.actions == []
     assert unknown["data"]["handoff"] == "unknown"
     assert unknown["data"]["reason"] == "unverified"
+    before_retry = native.calls.count("svc_activation_handoff")
+    pending = call("bot", "handoff", "worker", expected=6)
+    assert pending["data"]["reason"] == "pending"
+    assert native.calls.count("svc_activation_handoff") == before_retry
+    # The first request genuinely completes before a distinct ordinary save.
+    now = datetime.now(timezone.utc)
+    _checkpointed(root / "runtime/bots/worker", refreshed=now, captured=now, field=None)
     native.explicit_handoff = "handoff-timeout"
     native.handoff_rc = 3
     timed_out = call("bot", "handoff", "worker", expected=6)
@@ -656,6 +698,8 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert timed_out["data"]["reason"] == "timeout"
     assert "do not automatically resend" in timed_out["error"]["hint"]
     assert native.actions == []
+    now = datetime.now(timezone.utc)
+    _checkpointed(root / "runtime/bots/worker", refreshed=now, captured=now, field=None)
     native.handoff_rc = 0
     native.explicit_handoff = "handoff-saved"
     saved = call("bot", "handoff", "worker")["data"]
@@ -697,7 +741,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
         monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
         monkeypatch.setenv("FLEET_ROOT", str(root))
         monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots" / caller))
-        monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+        monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
         refused = call("bot", "stop", target, expected=4)
         assert refused["error"]["code"] == "conflict"
         assert native.actions == ["start", "stop", "start"]
@@ -705,22 +749,21 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     # launchd's selected launcher has exited, but its exact private tmux
     # session is still ready. Native inactive alone must not trigger a restart.
     for key in ("BOT_ID", "FLEET_NAME", "BOT_DIR", "FLEET_ROOT",
-                "CLAUDLOBBY_ROOT", "CLAUDLOBBY_RELEASE_ID"):
+                "CLAUDLOBBY_ROOT"):
         monkeypatch.delenv(key)
-    selected_unit_original = bot_operations._selected_unit
-    selected_adapter_original = bot_operations._selected_adapter
-    native.manager = "Darwin"
-    native.target = f"gui/501/com.example.worker"
-    host.states[native.target] = "unchanged loaded inactive"
-    declaration, item = next((decl, item) for decl, item in planned_units(plan, "Linux")
-                             if decl.bot == "worker" and item["enroll"])
-    entry = dict(selected_bot_entry(root, "example", "worker", "Linux"))
-    entry["target"] = native.target
-    monkeypatch.setattr(bot_operations, "_selected_unit",
-                            lambda *_: ("Darwin", declaration, entry, (declaration,)))
-    # This branch simulates Darwin over the Linux host catalog; its selected
-    # domain binding is covered by the separate Background-to-GUI test.
-    monkeypatch.setattr(bot_operations, "_selected_adapter", lambda _r, _f, _b, adapter: adapter)
+    original_binding = bot_operations._current_bot_binding
+    from claudlobby.operation_context import resolve_operation_scope
+    destination,_=resolve_operation_scope(root=root,fleet="example")
+    current_runtime=bot_operations.GitCurrentRuntime(installation,host.snapshot["revision"],
+        host.snapshot["fingerprint"],host.snapshot)
+    binding=original_binding(root,current_runtime,destination,"worker",native)
+    native.manager="Darwin"
+    native.target=f"gui/{os.getuid()}/com.example.worker"
+    host.states[native.target]="unchanged loaded inactive"
+    # Native tuple behavior is isolated here; exact Darwin domain/placement
+    # admission uses the real current binding in the dedicated tests below.
+    monkeypatch.setattr(bot_operations,"_current_bot_binding",lambda *_a,**_k:replace(
+        binding,manager="Darwin",entry={**binding.entry,"target":native.target}))
     native.session = "ready"
     current = call("bot", "start", "worker")["data"]
     assert current["state"] == "running" and current["changed"] is False
@@ -749,9 +792,10 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     bounced = call("bot", "restart", "worker")["data"]
     assert bounced["state"] == "running" and bounced["changed"] is True
     assert bounced["readiness"] == "bridge_ready"
-    assert bounced["handoff"] == "attempted"
-    assert native.calls.index("svc_bot_session_observe") < native.calls.index("svc_activation_handoff")
-    assert native.calls.index("svc_activation_handoff") < native.calls.index("svc_activation_bot_fence")
+    assert bounced["handoff"] == "native_session"
+    assert "svc_activation_handoff" not in native.calls
+    assert native.calls.index("svc_bot_session_observe") < native.calls.index("svc_bot_native_session")
+    assert native.calls.index("svc_bot_native_session") < native.calls.index("svc_activation_bot_fence")
     assert native.calls.index("svc_activation_bot_fence") < native.calls.index("svc_bot_enroll_exact")
     assert native.calls.index("svc_bot_enroll_exact") < native.calls.index("svc_activation_bot_ready")
     assert native.actions == ["start", "stop", "start", "stop", "start", "start"]
@@ -766,16 +810,17 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
     monkeypatch.setenv("FLEET_ROOT", str(root))
     monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/manager"))
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
     manager_bounce = call("bot", "restart", "worker")["data"]
     assert manager_bounce["changed"] is True
     assert native.actions[-2:] == ["start", "start"]
-    assert call("bot", "restart", "manager", expected=4)["error"]["code"] == "conflict"
+    # The self restart now schedules its existing witness without a model
+    # handoff precondition. Its child owns native identity/quiet validation.
     with monkeypatch.context() as patch:
         patch.setattr(bot_operations, "_schedule_self_restart", lambda **kwargs:
-                      bot_operations.BotLifecycleResult("example", "manager", release.release_id,
+                      bot_operations.BotLifecycleResult("example", "manager", None,
                                                        "", "requested", False, "not_checked",
-                                                       "captured", "request-1", "/private/startup.log"))
+                                                       "native_session", "request-1", "/private/startup.log"))
         before_self = len(native.actions)
         requested = call("bot", "restart", "manager")["data"]
         assert requested["state"] == "requested"
@@ -784,10 +829,13 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
         assert requested["request_id"] == "request-1"
         assert len(native.actions) == before_self
 
-    native.handoff_rc = 3
-    incomplete_handoff = call("bot", "restart", "worker")["data"]
-    assert incomplete_handoff["handoff"] == "unavailable"
-    assert incomplete_handoff["readiness"] == "bridge_ready"
+    native.native_pid += 1  # A different pane cannot consume the retained identity.
+    before_incomplete = len(native.actions)
+    call("bot", "restart", "worker", expected=6)
+    assert len(native.actions) == before_incomplete
+    native.native_pid -= 1
+    # Restoring the original native observation permits the same exact session;
+    # no model save was requested and no conflicting identity was adopted.
     assert call("bot", "restart", "worker", "--ceiling", "0", expected=2)["error"]["code"] == "invalid_argument"
     before = len(native.actions)
     assert call("bot", "restart", "worker", "--ceiling", "37")["data"]["readiness"] == "bridge_ready"
@@ -814,9 +862,8 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert call("bot", "restart", "worker", expected=4)["error"]["code"] == "conflict"
     assert len(native.actions) == before_bad_scope
 
-    # The admitted one-shot child uses the same selected lifecycle path but
-    # consumes the handoff already written by its own pane. It must never send
-    # another handoff keystroke to the pane it is about to terminate.
+    # The admitted one-shot child uses the same selected lifecycle path and
+    # native receipt. It must never send a model handoff to the pane it stops.
     worker_dir = root / "runtime/bots/worker"
     (worker_dir / ".claude").mkdir(exist_ok=True)
     now = datetime.now(timezone.utc)
@@ -830,12 +877,11 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     native.calls.clear()
     self_bounce = bot_operations.set_bot_running(root=root, fleet="example", bot="worker",
                                                  running=True, restart=True, _self_child=True)
-    assert self_bounce.handoff == "captured" and self_bounce.readiness == "bridge_ready"
+    assert self_bounce.handoff == "native_session" and self_bounce.readiness == "bridge_ready"
     assert "svc_activation_handoff" not in native.calls
     for key in ("FLEET_ROOT", "FLEET_NAME", "BOT_ID", "BOT_DIR"):
         monkeypatch.delenv(key)
-    monkeypatch.setattr(bot_operations, "_selected_unit", selected_unit_original)
-    monkeypatch.setattr(bot_operations, "_selected_adapter", selected_adapter_original)
+    monkeypatch.setattr(bot_operations,"_current_bot_binding",original_binding)
     native.manager = "Linux"
     native.target = "com.example.worker.service"
     native.readiness = "bridge-ready"
@@ -856,7 +902,7 @@ def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold
     records its request; `bot handoff BOT --check` reads the handoff file
     against it later, sends nothing and takes no lifecycle lock."""
     worker = _worker_cli(cold, monkeypatch, capsys)
-    root, release, native, call = worker.root, worker.release, worker.native, worker.call
+    root, installation, native, call = worker.root, worker.installation, worker.native, worker.call
     handoff = root / "runtime/bots/worker/.claude/session.md"
     handoff.parent.mkdir(exist_ok=True)
     older = time.time() - 3600
@@ -887,9 +933,128 @@ def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold
     monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
     monkeypatch.setenv("FLEET_ROOT", str(root))
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
     refused = call("bot", "handoff", "manager", "--check", expected=4)
     assert refused["error"]["code"] == "conflict"
+
+
+def test_live_restart_refuses_unconfirmed_native_identity(cold, monkeypatch, capsys):
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    receipt = native_session.read(bot_dir)
+    receipt["pending"] = True
+    native_session._write(bot_dir, receipt, expected=native_session.read(bot_dir))
+    failed = worker.call("bot", "restart", "worker", expected=6)
+    assert failed["error"]["code"] == "unavailable"
+    assert worker.native.actions == []
+    assert "svc_activation_bot_fence" not in worker.native.calls
+    assert "svc_activation_handoff" not in worker.native.calls
+
+
+def test_planned_restart_waits_for_native_idle_and_resumes_exact_session(cold, monkeypatch, capsys):
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    original = native_session.read(bot_dir)
+    worker.native.native_idle = False
+    waits = []
+    def become_idle(seconds):
+        waits.append(seconds)
+        worker.native.native_idle = True
+    monkeypatch.setattr(bot_operations.time, "sleep", become_idle)
+    worker.native.calls.clear()
+    resumed = bot_operations.set_bot_running(root=worker.root, fleet="example", bot="worker",
+                                             running=True, restart=True)
+    assert waits and resumed.handoff == "native_session" and resumed.state == "running"
+    current = native_session.read(bot_dir)
+    assert current["session_id"] == original["session_id"]
+    assert current["process"] != original["process"] and current["pending"] is False
+    assert worker.native.actions == ["start"]
+    assert "svc_activation_handoff" not in worker.native.calls
+    assert not (bot_dir / "data/.handoff-request").exists()
+
+
+@pytest.mark.parametrize("receipt_state", ["pending", "unknown", "malformed", pytest.param(
+    "unreadable", marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files"))])
+def test_native_restart_preserves_independent_optional_handoff(cold, monkeypatch, capsys, receipt_state):
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    native_before = native_session.read(bot_dir)
+    request = bot_operations._new_handoff_request(bot_dir)
+    request["native_result"] = ({"marker": "handoff-timeout", "returncode": 3}
+                                if receipt_state == "unknown" else None)
+    assert bot_operations._write_handoff_request(bot_dir, request)
+    path = bot_dir / "data/.handoff-request"
+    if receipt_state == "malformed":
+        path.write_bytes(b"{unreadable as JSON\n")
+    original = path.read_bytes()
+    if receipt_state in {"pending", "unknown"}:
+        refused = worker.call("bot", "handoff", "worker", expected=6)
+        assert refused["data"]["reason"] == "pending"
+        assert path.read_bytes() == original
+    worker.native.calls.clear()
+    before = path.stat()
+    # Keep a read-only descriptor so unchanged bytes can be checked while the
+    # optional receipt remains inaccessible by path throughout continuation.
+    with path.open("rb") as retained:
+        if receipt_state == "unreadable":
+            path.chmod(0)
+        try:
+            proof = bot_operations.save_planned_checkpoint(
+                bot_dir, "com.example.worker", str(worker.private_tmpdir),
+                worker.native, operation_id="update-one")
+            assert proof["session"]["session_id"] == native_before["session_id"]
+            restarted = worker.call("bot", "restart", "worker")["data"]
+            assert restarted["state"] == "running" and restarted["handoff"] == "native_session"
+            current = native_session.confirm(bot_dir, expected=proof["session"])
+            assert current["process"] != native_before["process"]
+            bot_operations.retire_planned_checkpoint(bot_dir, proof)
+            retained.seek(0)
+            assert retained.read() == original
+            after = path.stat()
+            assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+            assert stat.S_IMODE(after.st_mode) == (0 if receipt_state == "unreadable"
+                                                  else stat.S_IMODE(before.st_mode))
+        finally:
+            if receipt_state == "unreadable":
+                path.chmod(stat.S_IMODE(before.st_mode))
+    assert path.read_bytes() == original
+    assert "svc_activation_handoff" not in worker.native.calls
+    assert worker.native.actions == ["start"]
+
+
+def test_stopped_native_checkpoint_retains_prefix_and_exact_identity(cold, monkeypatch, capsys):
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    proof = bot_operations.save_planned_checkpoint(bot_dir, "com.example.worker", str(worker.private_tmpdir),
+                                                  worker.native, operation_id="update-one")
+    assert json.loads(json.dumps(proof)) == proof and proof["operation_id"] == "update-one"
+    transcript = Path(proof["session"]["transcript"])
+    transcript.write_bytes(transcript.read_bytes() + b"SessionEnd appended after stop\n")
+    bot_operations.verify_checkpoint_after_stop(bot_dir, proof)
+    native_session.launch(bot_dir, "com.example.worker", worker.private_tmpdir, worker.account)
+    with pytest.raises(native_session.NativeSessionError, match="not confirmed"):
+        bot_operations.retire_planned_checkpoint(bot_dir, proof)
+    from tests.test_native_session import retain_native_session
+    worker.native.native_pid += 1
+    retain_native_session(bot_dir, "com.example.worker", worker.private_tmpdir, worker.account, worker.native)
+    bot_operations.retire_planned_checkpoint(bot_dir, proof)
+    changed = native_session.read(bot_dir)
+    changed["session_id"] = "00000000-0000-4000-8000-000000000099"
+    native_session._write(bot_dir, changed, expected=native_session.read(bot_dir))
+    with pytest.raises(native_session.NativeSessionError, match="differs"):
+        bot_operations.retire_planned_checkpoint(bot_dir, proof)
+
+
+@pytest.mark.parametrize("session, expected", [("absent", 0), ("unknown", 6)])
+def test_restart_distinguishes_dead_session_recovery_from_unknown_live_state(
+        cold, monkeypatch, capsys, session, expected):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.native.session = session
+    result = worker.call("bot", "restart", "worker", expected=expected)
+    assert "svc_activation_handoff" not in worker.native.calls
+    assert worker.native.actions == (["start"] if session == "absent" else [])
+    if session == "absent":
+        assert result["data"]["handoff"] == "not_applicable"
 
 
 def test_a_staggered_unit_restarts_and_starts_within_its_boot_delay(cold, monkeypatch, capsys):  # noqa: F811
@@ -1090,8 +1255,16 @@ def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, c
     data = worker.root / "runtime/bots/worker/data"
     worker.call("bot", "stop", "worker")
     rows.clear()
-    data.chmod(0o500)
-    try:
+    original_unlink = Path.unlink
+    stop_record = data / ".stopped"
+    def deny_only_stop_record(path, *args, **kwargs):
+        if path == stop_record:
+            raise PermissionError("stop record removal refused")
+        return original_unlink(path, *args, **kwargs)
+    # Native continuation must still write its mandatory receipt; isolate the
+    # existing stop-record cleanup failure instead of denying all bot data writes.
+    with monkeypatch.context() as denied:
+        denied.setattr(Path, "unlink", deny_only_stop_record)
         started = worker.call("bot", "start", "worker")["data"]
         assert started["state"] == "running" and started["changed"] is True
         assert started["stop_record_kept"] is True and started["recording"] == "committed"
@@ -1102,8 +1275,6 @@ def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, c
         assert main(["--root", str(worker.root), "bot", "start", "worker"]) == 0
         out = capsys.readouterr().out
         assert "could not remove this bot's stop record" in out, out
-    finally:
-        data.chmod(0o700)
     again = worker.call("bot", "start", "worker")["data"]
     assert "stop_record_kept" not in again and not (data / ".stopped").exists()
 
@@ -1115,3 +1286,174 @@ def test_fresh_self_handoff_keeps_300_s_unless_the_activation_passes_a_wider_win
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned session handoff"):
         bot_operations._fresh_self_handoff(bot_dir)
     assert 399 <= bot_operations._fresh_self_handoff(bot_dir, max_age_s=900) <= 402
+
+
+@pytest.fixture
+def git_bot_binding(candidate, monkeypatch):
+    """Real committed unit hashes and bot.conf; no native manager is invoked."""
+    from claudlobby import active_config
+    from claudlobby.composer import compose_launchd_plist, compose_systemd_unit
+    from claudlobby.config_plan import path_state
+    from claudlobby.config_units import unit_family
+    from claudlobby.runtime_admission import GitCurrentRuntime
+
+    installation, paths, fleet, _ = candidate
+    from claudlobby.paths import Paths
+    paths = Paths(installation.data_root, package=replace(paths.package, native=installation.native))
+    bot = fleet.bots["lead"]
+    bot_dir = paths.bot_runtime("lead")
+    bot_dir.mkdir(parents=True)
+    configuration = bot_dir / "bot.conf"
+    configuration.write_text("# committed bot context\n")
+    configuration.chmod(0o600)
+    files = {"com.example.lead.service": (compose_systemd_unit(bot, fleet, paths).encode(), 0o644),
+             "com.example.lead.plist": (compose_launchd_plist(bot, fleet, paths).encode(), 0o644)}
+    for name, (content, mode) in files.items():
+        path = bot_dir / name
+        path.write_bytes(content)
+        path.chmod(mode)
+    (installation.data_root / "state").mkdir()
+    directory = installation.data_root / "native-user"
+    directory.mkdir()
+    snapshot = {"installation": str(installation.directory), "data_root": str(installation.data_root),
+                "revision": paths.package.source_revision, "fingerprint": "b" * 64,
+                "supervision": {"manager": "Linux", "domain": "", "directory": str(directory)},
+                "units": unit_family(files, destination=bot_dir, scope="bot", phase="bots",
+                                     fleet="example", bot="lead"),
+                "owned_outputs": [{"target": str(configuration), "state": path_state(configuration)["node"]}]}
+    current = GitCurrentRuntime(installation, snapshot["revision"], snapshot["fingerprint"], deepcopy(snapshot))
+    monkeypatch.setattr(active_config, "read_current_config", lambda *_args, **_kwargs: snapshot)
+    destination = SimpleNamespace(paths=paths, fleet=fleet)
+    adapter = SimpleNamespace(package=paths.package, read=lambda function:
+        f"manager\tLinux\ndirectory\t{directory}\n")
+    return SimpleNamespace(root=installation.data_root, current=current, snapshot=snapshot,
+                           destination=destination, adapter=adapter, directory=directory,
+                           configuration=configuration)
+
+
+def test_git_current_bot_binding_retains_deenrolled_placement_and_honest_provenance(git_bot_binding):
+    case = git_bot_binding
+    binding = bot_operations._current_bot_binding(case.root, case.current, case.destination,
+                                                  "lead", case.adapter)
+    binding.verify_configuration()
+    assert binding.entry == {"source": str(binding.declaration.source),
+                             "target": "com.example.lead.service",
+                             "installed": str(case.directory / "com.example.lead.service")}
+    assert not Path(binding.entry["installed"]).exists()  # A deliberate stop retains placement authority.
+    result = bot_operations._bot_result(bot_operations.BotLifecycleResult, case.current,
+        "example", "lead", bot_operations._release_id(case.current), binding.entry["target"],
+        "stopped", False, "not_running")
+    assert result.release_id is None
+    assert result.source_revision == case.current.revision
+    assert result.config_fingerprint == case.current.config_fingerprint
+
+
+@pytest.mark.parametrize("drift", ["snapshot", "unit", "configuration", "redirected", "manager", "duplicate"])
+def test_git_current_bot_binding_refuses_changed_or_ambiguous_context(git_bot_binding, drift):
+    case = git_bot_binding
+    current = case.current
+    if drift == "snapshot":
+        case.snapshot["fingerprint"] = "c" * 64
+    elif drift == "unit":
+        Path(next(unit["source"] for unit in case.snapshot["units"] if unit["platform"] == "Linux")).write_text("changed")
+    elif drift == "configuration":
+        case.configuration.write_text("uncommitted context")
+    elif drift == "redirected":
+        (case.directory / "com.example.lead.service").symlink_to(case.configuration)
+    elif drift == "manager":
+        case.snapshot["supervision"]["manager"] = "Darwin"
+        current = replace(current, snapshot=deepcopy(case.snapshot))
+    else:
+        case.snapshot["units"].append(deepcopy(case.snapshot["units"][0]))
+        current = replace(current, snapshot=deepcopy(case.snapshot))
+    with pytest.raises((bot_operations.BotLifecycleError, ValueError)):
+        binding = bot_operations._current_bot_binding(case.root, current, case.destination,
+                                                      "lead", case.adapter)
+        binding.verify_configuration()
+
+
+def test_git_current_bot_without_committed_placement_cannot_guess_start_destination(git_bot_binding, monkeypatch):
+    case = git_bot_binding
+    case.snapshot.pop("supervision")
+    current = replace(case.current, snapshot=deepcopy(case.snapshot))
+    inventory = SimpleNamespace(units=[SimpleNamespace(
+        declaration=SimpleNamespace(source=case.destination.paths.bot_runtime("lead") / "com.example.lead.service"),
+        installed=())])
+    inventory.require_complete = lambda: inventory
+    monkeypatch.setattr(bot_operations, "collect_enrollment", lambda *_args, **_kwargs: inventory)
+    with pytest.raises(bot_operations.BotLifecycleError, match="placement is unavailable"):
+        bot_operations._current_bot_binding(case.root, current, case.destination, "lead", case.adapter)
+
+
+def test_git_handoff_check_reports_committed_provenance_without_sealed_selection(git_bot_binding, monkeypatch):
+    case = git_bot_binding
+    monkeypatch.setattr(bot_operations, "resolve_operation_scope", lambda **_: (case.destination, None))
+    result = bot_operations.check_handoff(root=case.root, fleet="example", bot="lead")
+    assert result.release_id is None
+    assert result.source_revision == case.current.revision
+    assert result.config_fingerprint == case.current.config_fingerprint
+    assert result.reason == "no_request_recorded"
+
+
+def test_self_restart_refuses_changed_committed_provenance_before_admitted_callback(git_bot_binding, monkeypatch):
+    from contextlib import contextmanager
+    case = git_bot_binding
+    @contextmanager
+    def admitted(*_args, **_kwargs):
+        yield case.current
+    monkeypatch.setattr(bot_operations, "mutation_admission", admitted)
+    monkeypatch.setattr(bot_operations, "resolve_operation_scope", lambda **_: pytest.fail("provenance drift escaped"))
+    with pytest.raises(bot_operations.BotLifecycleError, match="configuration changed"):
+        bot_operations.set_bot_running(root=case.root, fleet="example", bot="lead", running=True,
+            restart=True, _self_child=True, identity=object(),
+            _expected_provenance=(None, {"source_revision": "0" * 40, "config_fingerprint": "0" * 64}),
+            _on_lock=lambda: pytest.fail("caller admitted before provenance check"))
+
+
+@pytest.mark.parametrize("committed, caller, switch", [
+    ("gui", "gui", False), ("gui", "user", True), ("user", "user", False),
+])
+def test_git_bot_binding_uses_exact_committed_darwin_domain(git_bot_binding, committed, caller, switch):
+    case = git_bot_binding
+    uid = os.getuid()
+    case.snapshot["supervision"].update(manager="Darwin", domain=f"{committed}/{uid}")
+    current = replace(case.current, snapshot=deepcopy(case.snapshot))
+    switches = []
+    class Native:
+        package = case.adapter.package
+        def __init__(self, domain):
+            self.domain = domain
+        def read(self, function):
+            assert function == "svc_inventory_catalog"
+            return (f"manager\tDarwin\ndomain\t{self.domain}\ndirectory\t{case.directory}\n"
+                    "PID\tStatus\tLabel\n")
+        def in_selected_gui(self, target):
+            switches.append(target)
+            return Native(f"gui/{uid}")
+    binding = bot_operations._current_bot_binding(case.root, current, case.destination,
+                                                  "lead", Native(f"{caller}/{uid}"))
+    assert binding.entry["target"] == f"{committed}/{uid}/com.example.lead"
+    assert binding.entry["installed"] == str(case.directory / "com.example.lead.plist")
+    assert switches == ([f"gui/{uid}/com.example.lead"] if switch else [])
+
+
+def test_git_bot_binding_refuses_gui_caller_for_committed_user_domain(git_bot_binding):
+    case = git_bot_binding
+    uid = os.getuid()
+    case.snapshot["supervision"].update(manager="Darwin", domain=f"user/{uid}")
+    current = replace(case.current, snapshot=deepcopy(case.snapshot))
+    adapter = SimpleNamespace(package=case.adapter.package, read=lambda _:
+        f"manager\tDarwin\ndomain\tgui/{uid}\ndirectory\t{case.directory}\nPID\tStatus\tLabel\n",
+        in_selected_gui=lambda _: pytest.fail("committed user target silently changed to GUI"))
+    with pytest.raises(bot_operations.BotLifecycleError, match="domain differs"):
+        bot_operations._current_bot_binding(case.root, current, case.destination, "lead", adapter)
+
+
+@pytest.mark.parametrize("tail",[("move","worker","--to","other"),("remove","worker","--purge")])
+def test_unsupported_git_roster_changes_refuse_before_all_effects(tmp_path,capsys,tail):
+    before=tuple(tmp_path.iterdir())
+    assert main(["--root",str(tmp_path),"--fleet","example","--json","bot",*tail])==4
+    result=json.loads(capsys.readouterr().out)
+    assert result["data"]=={"native_outcome":"unattempted","changed":False}
+    assert "Git roster changes are not yet supported" in result["error"]["message"]
+    assert tuple(tmp_path.iterdir())==before

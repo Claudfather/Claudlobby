@@ -39,7 +39,16 @@ def _terminal(root):
     if not sys.stdin.isatty():
         raise CommandFailure("conflict", "owner changes require an interactive operator terminal")
     from .operator_context import require_operator_context
-    require_operator_context(root)
+    from ..resources import get_resources
+    package = get_resources()
+    if package.installation is not None and not os.path.lexists(root / "state/config.json"):
+        # Cold ancestry has no declared consumers; positively prove the fresh
+        # root before using the same cold operator gate as fleet setup.
+        from ..plane.owner_source import fresh_owner_setup
+        fresh_owner_setup(root, allow_absent=True)
+        require_operator_context()
+    else:
+        require_operator_context(root)
     try:
         # A terminal is not seekable: buffered r+ would require seeks between
         # reading and writing. FileIO keeps this duplex console unbuffered.
@@ -91,14 +100,14 @@ def _active_owner(store):
 
 def _grant_preview(paths, store, fleet, actor_alias, release):
     """Read current frozen/recorded identities; never register at preview."""
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..operation_context import _MissingHumanIdentity, bind_task_context, resolve_operation_scope
 
     owner = _active_owner(store)
     selected, origin = resolve_operation_scope(root=paths.root, fleet=fleet, package=paths.package)
     if origin is not None:
         raise CommandFailure("conflict", "owner grants require a local operator")
-    bindings = read_selected_identity_bindings(paths.root, selected.fleet.name, package=paths.package)
+    bindings = read_current_identity_bindings(paths.root, selected.fleet.name, package=paths.package)
     ctx = None
     try:
         ctx = bind_task_context(selected, operator_alias=actor_alias)
@@ -119,7 +128,10 @@ def _grant_preview(paths, store, fleet, actor_alias, release):
             ctx.host_uid != bindings["host_uid"] or ctx.fleet_uid != bindings["fleet_uid"]
             or {name: bot.uid for name, bot in ctx.bots.items()} != bindings["bots"])):
         raise CommandFailure("conflict", "active and recorded owner identities differ")
-    return {"owner": owner, "release": release.release_id, "fleet": selected.fleet.name,
+    from ..runtime_admission import GitCurrentRuntime
+    provenance = ({"revision": release.revision, "config_fingerprint": release.config_fingerprint}
+                  if isinstance(release, GitCurrentRuntime) else {"release": release.release_id})
+    return {"owner": owner, **provenance, "fleet": selected.fleet.name,
             "bindings": bindings, "actor_alias": actor_alias,
             "actor_uid": ctx.caller.uid if ctx is not None else None}
 
@@ -157,7 +169,7 @@ def _prepare_action_approval(args, paths, store, terminal):
                        "Registration alone does not grant owner actions.\n")
         _approve(terminal, "REGISTER")
         with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                                expected_release=preview["release"]) as release:
+                                expected_release=preview.get("release")) as release:
             _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
             resolve_task_mutation_context(root=paths.root, fleet=preview["fleet"],
                                           operator_alias=args.actor, package=paths.package)
@@ -199,7 +211,7 @@ def _allow_actions(args, paths, store, terminal):
                    "The selected approvals are saved together; matching approvals and prepared requests stay valid.\n")
     _approve(terminal, "ALLOW-ACTIONS")
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                            expected_release=preview["release"]) as release:
+                            expected_release=preview.get("release")) as release:
         ctx = _approved_action_context(args, paths, store, preview, release)
         actions = tuple({"messages": "message", "nudges": "nudge", "feedback": "feedback"}[capability]
                         for capability in args.capabilities)
@@ -237,7 +249,7 @@ def _allow_action(args, paths, store, terminal, action):
     label, _, allow_word, _ = _ACTION_LABELS[action]
     _approve(terminal, allow_word)
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                            expected_release=preview["release"]) as release:
+                            expected_release=preview.get("release")) as release:
         ctx = _approved_action_context(args, paths, store, preview, release)
         allow = {"message": store.allow_messages, "nudge": store.allow_nudges,
                  "feedback": store.allow_feedback, "permission": store.allow_permissions}[action]
@@ -280,7 +292,7 @@ def _grant_errors(action):
     try:
         yield
     except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "owner grant requires this installation's active sealed runtime") from exc
+        raise CommandFailure("release_mismatch", "owner grant requires this installation's current runtime") from exc
     except OperationContextError as exc:
         raise CommandFailure(exc.code, f"owner {action} identities could not be bound; verify the active fleet and actor") from exc
     except ActivationError as exc:
@@ -305,14 +317,12 @@ def _grant_errors(action):
 def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     from ..plane.owner_setup import OwnerSetup
     from ..plane.owner_source import fresh_owner_setup
-    from .host import _operator_shell
-    from .releases import _release, _executing_release
-    _operator_shell(paths.root)
+    from ..plane.owner_setup import managed_setup
+    from .operator_context import require_operator_context
+    require_operator_context()
     setup = OwnerSetup(store)
     fresh_owner_setup(paths.root)
-    if _executing_release(paths.root) != args.release:
-        raise CommandFailure("release_mismatch", "setup approval requires this release's sealed CLI")
-    release = _release(paths.root, args.release)
+    managed_setup(paths.root)
     # Native search-path observation only; no enrollment or start.
     from ..supervision_inventory import Adapter, _catalog
     _, _, directories, _, _ = _catalog(Adapter(paths.package).read("svc_inventory_catalog"))
@@ -320,16 +330,14 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     if directory not in directories:
         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
-        fleet=args.target_fleet, repository=args.repository, release_id=args.release,
-        release_seal=release.seal_sha256, install_directory=str(directory))
+        fleet=args.target_fleet, repository=args.repository, install_directory=str(directory))
     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
-        "The browser may author its goal, inspect a frozen plan and explicitly launch it.\n"
+        "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
     terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
     _approve(terminal, "ALLOW-SETUP")
     fresh_owner_setup(paths.root)
-    if _release(paths.root, args.release).seal_sha256 != grant.release_seal:
-        raise CommandFailure("conflict", "setup release changed during approval")
+    managed_setup(paths.root, grant)
     setup.allow(grant, expected_retained=expected_retained)
     return CommandOutput({"state": "allowed"}, lines=("One first-team setup approved.",))
 
@@ -376,21 +384,23 @@ def _confirm_workspace(store, terminal, owner):
 
 
 def _initialize_first_owner(paths, terminal):
-    from .releases import _executing_release, _release
+    from ..plane.owner_setup import managed_setup
     from ..plane.owner_source import fresh_owner_setup
-    release_id = _executing_release(paths.root)
-    if release_id is None:
-        raise CommandFailure("release_mismatch", "fresh owner preparation requires the sealed assembled release CLI")
-    _release(paths.root, release_id)
+    try:
+        package = managed_setup(paths.root)
+    except AccessDenied as exc:
+        raise CommandFailure("release_mismatch", "fresh owner preparation requires this data root's managed Git CLI") from exc
     fresh_owner_setup(paths.root, allow_absent=True)
     terminal.write("Prepare a new host identity and owner authority before its first team.\n"
                    "This grants no activation, private reads or fleet actions.\n")
     _approve(terminal, "INITIALIZE")
+    if managed_setup(paths.root) != package:
+        raise CommandFailure("conflict", "managed installation changed during approval")
     fresh_owner_setup(paths.root, allow_absent=True)
     from ..plane.ids import ensure_host_uid
     ensure_host_uid(paths.root / "state")
     OwnerAccess.initialize(paths.root, before_first_fleet=True)
-    return CommandOutput({"state": "initialized"}, lines=("Pre-activation owner authority is initialized.",))
+    return CommandOutput({"state": "initialized"}, lines=("First-team owner authority is initialized.",))
 
 
 def _confirm_owner(paths, store, terminal):
@@ -448,7 +458,7 @@ def dispatch(args):
             from ..plane.owner_setup import OwnerSetup
             state = OwnerSetup(store).retained_state()
             return CommandOutput(asdict(state), lines=(f"First-team setup approval: {state.state}.",
-                *(() if state.launch_id is None else (f"Original launch: {state.launch_id}; plan {state.launch_plan}.",))))
+                *(() if state.launch_id is None else (f"Original request: {state.launch_id}; configuration {state.launch_plan}.",))))
         if args.owner_action == "workspace-status":
             state, binding = store.workspace().status()
             return CommandOutput({"state": state, "effective_active": state == "active",
@@ -477,10 +487,9 @@ def dispatch(args):
         with _terminal(paths.root) as terminal:
             if args.owner_action in {"allow-setup", "revoke-setup"}:
                 from ..plane.owner_setup import OwnerSetup
-                from ..plane.owner_source import fresh_owner_setup
-                from .host import _operator_shell
-                from .releases import _release, _executing_release
-                _operator_shell(paths.root)
+                if args.owner_action == "revoke-setup":
+                    from .operator_context import require_operator_context
+                    require_operator_context()
                 setup = OwnerSetup(store)
                 if args.owner_action == "allow-setup":
                     return _allow_setup(args, paths, store, terminal)
@@ -489,7 +498,7 @@ def dispatch(args):
                 terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
                 _approve(terminal, "REVOKE-SETUP")
                 setup.revoke(grant)
-                return CommandOutput({"state": "revoked"}, lines=("Setup approval revoked; started activation is not undone.",))
+                return CommandOutput({"state": "revoked"}, lines=("Setup approval revoked; a started update is not undone.",))
             if args.owner_action == "initialize-connected":
                 return _initialize_connected(store, terminal, prepare_workspace=args.prepare_workspace)
             if args.owner_action == "allow-actions":

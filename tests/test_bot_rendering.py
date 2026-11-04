@@ -22,7 +22,7 @@ from claudlobby.config import (
     ToolPermissionsConfig,
 )
 from claudlobby.paths import Paths
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 
 
 def _tree(root):
@@ -55,7 +55,7 @@ def render_case(tmp_path):
         bots={"worker": bot, "manager": BotConfig("manager", "manager", [])},
         system_defaults=SystemDefaultsConfig(enabled=False), human_telegram_id="human",
     )
-    return bot, fleet, Paths(root=root, package=source_package())
+    return bot, fleet, Paths(root=root, package=git_package(root))
 
 
 def test_render_preserves_state_and_compose_writes_the_same_artifacts(render_case):

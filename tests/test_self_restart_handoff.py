@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from claudlobby import activation_handoffs, bot_operations
-from claudlobby.activation_state import ActivationRefusal
+from claudlobby import bot_operations
 
 
 def _stamp(moment: datetime) -> str:
@@ -32,12 +31,12 @@ def _checkpointed(bot_dir: Path, *, refreshed: datetime, captured: datetime,
     handoff = bot_dir / ".claude" / "session.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     envelope = (b"" if field is None
-                else activation_handoffs._refresh_envelope(bot_dir, _stamp(refreshed), field=field))
+                else bot_operations._refresh_envelope(bot_dir, _stamp(refreshed), field=field))
     capture = (f"---\ncwd: {bot_dir}\nlast_updated: {_stamp(captured)}\nschema_version: 2\n---\n\n"
                "## Activity\n- a checkpoint below the envelope\n").encode()
-    section = (activation_handoffs._BEGIN + b'\n```json\n{"previous_handoff": '
+    section = (b"<!-- claudlobby first-adoption canonical references begin -->" + b'\n```json\n{"previous_handoff": '
                b'"existing file present (fresh capture unverified)"}\n```\n'
-               + activation_handoffs._END + b"\n")
+               + b"<!-- claudlobby first-adoption canonical references end -->" + b"\n")
     handoff.write_bytes(envelope + capture + b"\n\n" + section)
     return handoff, capture
 
@@ -61,7 +60,8 @@ def test_a_fresh_capture_passes_under_any_recognised_envelope(tmp_path, field, h
     _, capture = _checkpointed(bot_dir, refreshed=now - timedelta(hours=hours), captured=now, field=field)
     bot_operations._fresh_self_handoff(bot_dir)
     bot_operations._fresh_self_handoff(bot_dir, observed_capture=True)
-    assert activation_handoffs._handoff_file(bot_dir, tmp_path)[1] == capture
+    path=bot_dir/".claude/session.md"
+    assert bot_operations._strip_envelope(path.read_bytes(),bot_dir,path).startswith(capture)
 
 
 @pytest.mark.parametrize("field, hours", SHAPES)
@@ -86,7 +86,7 @@ def test_an_envelope_over_a_capture_with_no_frontmatter_of_its_own_refuses(tmp_p
     handoff = bot_dir / ".claude" / "session.md"
     handoff.parent.mkdir(parents=True)
     now = datetime.now(timezone.utc)
-    handoff.write_bytes(activation_handoffs._refresh_envelope(bot_dir, _stamp(now), field="last_updated")
+    handoff.write_bytes(bot_operations._refresh_envelope(bot_dir, _stamp(now), field="last_updated")
                         + b"Handoff notes with no frontmatter of their own\n")
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned") as refused:
         bot_operations._fresh_self_handoff(bot_dir)
@@ -101,16 +101,16 @@ def test_a_malformed_envelope_refuses_and_the_refusal_names_it(tmp_path):
     now = datetime.now(timezone.utc)
     handoff, _ = _checkpointed(bot_dir, refreshed=now - timedelta(hours=25), captured=now)
     edited = handoff.read_bytes().replace(
-        b"\nschema_version: 2\n---\n" + activation_handoffs._REFRESH_BEGIN,
+        b"\nschema_version: 2\n---\n" + bot_operations._REFRESH_BEGIN,
         f"\nlast_updated: {_stamp(now)}\nschema_version: 2\n---\n".encode()
-        + activation_handoffs._REFRESH_BEGIN, 1)
+        + bot_operations._REFRESH_BEGIN, 1)
     assert edited.count(b"\nlast_updated: ") == 2
     handoff.write_bytes(edited)
     with pytest.raises(bot_operations.BotLifecycleError,
                        match="reference refresh envelope at its top is malformed"):
         bot_operations._fresh_self_handoff(bot_dir)
-    with pytest.raises(ActivationRefusal, match="existing canonical reference refresh is malformed"):
-        activation_handoffs._handoff_file(bot_dir, tmp_path)
+    with pytest.raises(ValueError, match="existing canonical reference refresh is malformed"):
+        bot_operations._strip_envelope(handoff.read_bytes(),bot_dir,handoff)
 
 
 def test_a_character_cut_by_the_read_limit_does_not_refuse(tmp_path):

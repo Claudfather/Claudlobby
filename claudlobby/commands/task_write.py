@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 
+from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
 from ..task_operations import UNSPECIFIED_ASSIGNMENT
 from ..application_tasks import (_reference, _request_id, _text, _committed_notification,
@@ -140,9 +141,9 @@ def _report_envelope(result, route, report) -> str:
             f"Assignment: {result.assignment_id}\nReport: {report.to_body()}")
 
 
-def _task_output(result, *, fleet_name, release_id, notification_data=None):
+def _task_output(result, *, fleet_name, release_id, notification_data=None, provenance=None):
     outcome = task_outcome(result, fleet_name=fleet_name, release_id=release_id,
-                           notification_data=notification_data)
+                           notification_data=notification_data, provenance=provenance)
     data = outcome.data
     lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
              f"recording={data['recording']}\tdelivery={result.delivery}\t"
@@ -179,7 +180,6 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
@@ -188,9 +188,10 @@ def dispatch(args) -> CommandOutput:
     from ..paths import InvalidPathSelector
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
-    from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_provenance, runtime_route_matches)
+    from .message_write import _bound_release
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
                                    complete, escalate, fail, progress, reassign,
                                    reschedule, return_assignment, withdraw)
@@ -207,23 +208,19 @@ def dispatch(args) -> CommandOutput:
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if args.public_command == "task.feedback" and (origin is not None or any(
                 key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE",
-                                               "CLAUDLOBBY_RELEASE_ID"))):
-            # Fleet timers and host update children can have no bot origin.
-            # Their fleet/service/release carriers cannot borrow a human; the
-            # timer marker is also refused defensively, even when empty.
+                                               "CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_NATIVE_ADMITTED"))):
+            # Fleet timers and admitted native children can have no bot origin.
+            # These routing carriers cannot borrow a human; marker presence is
+            # refused defensively even when empty, never used as action authority.
             raise CommandFailure("conflict", "task feedback requires an explicit local human caller")
         fleet_name = selected.fleet.name
         if selected.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
-        bound_release = None
-        if origin is not None:
-            bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-            if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-                raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+        bound_release = _bound_release(selected.paths.package, generated=origin is not None)
         root = selected.paths.root
         with mutation_admission(root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
+            release_id = runtime_release_id(release)
             ctx = (bind_task_context(selected, operator_alias=args.actor)
                    if args.public_command == "task.feedback" else
                    resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
@@ -236,7 +233,7 @@ def dispatch(args) -> CommandOutput:
                                               fleet=selected.fleet.name,
                                               package=selected.paths.package,
                                               caller_context=ctx if origin is None else None)
-                if (route.release_id != release_id or route.host_uid != ctx.host_uid
+                if (not runtime_route_matches(release, route) or route.host_uid != ctx.host_uid
                         or route.selected_fleet_uid != ctx.fleet_uid
                         or route.caller_fleet_uid != ctx.caller_fleet_uid
                         or route.caller != ctx.caller
@@ -275,7 +272,7 @@ def dispatch(args) -> CommandOutput:
             else:
                 result = accept(ctx, args.request_id, values["assignment_id"])
         return _task_output(result, fleet_name=fleet_name, release_id=release_id,
-                            notification_data=notification_data)
+                            notification_data=notification_data, provenance=runtime_provenance(release))
     except CommandFailure:
         raise
     except TaskRecordingError as exc:
@@ -302,9 +299,7 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError, MessageContextError, BotNotFoundError,
             TaskStateError) as exc:
         raise CommandFailure("conflict", "active task scope or state is incomplete",
-                             hint=f"{exc}; inspect claudlobby host releases" if isinstance(exc, ActivationError) else None,
+                             hint="inspect claudlobby host update status" if isinstance(exc, ActivationError) else None,
                              release_id=release_id) from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid task root or fleet selector") from exc

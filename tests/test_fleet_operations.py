@@ -13,16 +13,33 @@ from claudlobby import fleet_operations as fleet
 from claudlobby import fleet_pulse
 from claudlobby.bot_operations import BotLifecycleError, BotLifecycleResult
 from claudlobby.config import FleetPulseConfig
+from claudlobby.installation import Installation
+from claudlobby.runtime_admission import GitCurrentRuntime
 from tests.ingest_listener import short_socket_dir
 
 
 def _scope(tmp_path, *, origin=None):
     selected_fleet = SimpleNamespace(name="example", manager="manager",
                                      bots={bot: object() for bot in ("manager", "worker-b", "worker-a")})
-    package = SimpleNamespace(native=tmp_path / "native")
+    package = SimpleNamespace(native=tmp_path / "native",installation=Installation(tmp_path.parent/"managed",tmp_path),source_revision="a"*40)
     destination = SimpleNamespace(fleet=selected_fleet,
                                   paths=SimpleNamespace(root=tmp_path, package=package))
-    return destination, origin, {"release_id": "selected-release", "plan_id": "selected-plan"}
+    return destination, origin, GitCurrentRuntime(package.installation,"a"*40,"b"*64,{})
+
+
+def _bindings(monkeypatch,destination,current,*,directory,tmux_dir=None,per_bot=False):
+    from claudlobby import active_config
+    monkeypatch.setattr(active_config,"read_current_config",lambda *_a,**_k:current.snapshot)
+    declarations=tuple(SimpleNamespace(source=directory/(bot+".service"),scope="bot",fleet="example",bot=bot)
+                       for bot in destination.fleet.bots)
+    def bound(root,admitted,selected,bot,adapter):
+        assert admitted is current
+        bot_dir=directory/bot if per_bot else directory
+        return SimpleNamespace(adapter=adapter,manager="Linux",declarations=declarations,
+            entry={"target":bot+".service","installed":str(directory/(bot+".service"))},
+            spec=SimpleNamespace(bot_dir=bot_dir,label="private",environment={"TMUX_TMPDIR":str(tmux_dir or directory)}),
+            verify_configuration=lambda:None)
+    monkeypatch.setattr(fleet,"_current_bot_binding",bound)
 
 
 def test_fleet_stop_is_serial_and_retains_partial_persistent_outcomes(tmp_path, monkeypatch):
@@ -65,14 +82,15 @@ def test_manager_origin_requires_workers_before_any_fleet_effect(tmp_path, monke
     assert calls == ["worker-a", "worker-b"] and len(done.completed) == 2
 
 
-def test_fleet_restart_skips_de_enrolled_bot_and_continues(tmp_path, monkeypatch):
+@pytest.mark.parametrize("skip_reason", ["de_enrolled", "disabled"])
+def test_fleet_restart_skips_deliberately_stopped_bot_and_continues(tmp_path, monkeypatch, skip_reason):
     destination, origin, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, origin, selected))
     calls = []
     def restart(**kwargs):
         calls.append(kwargs["bot"])
         if kwargs["bot"] == "worker-a":
-            raise BotLifecycleError("bot is de-enrolled; use bot start", skip_reason="de_enrolled",
+            raise BotLifecycleError("use bot start", skip_reason=skip_reason,
                                     release_id="selected-release", target="worker-a-unit")
         if kwargs["bot"] == "manager":
             raise BotLifecycleError("bot native state is failed; use bot stop, then bot start")
@@ -83,7 +101,7 @@ def test_fleet_restart_skips_de_enrolled_bot_and_continues(tmp_path, monkeypatch
                                    workers_only=True)
     assert calls == ["worker-a", "worker-b"]
     assert [(row.bot, row.state, row.changed, row.reason) for row in done.completed] == [
-        ("worker-a", "skipped", False, "de_enrolled"), ("worker-b", "running", True, None)]
+        ("worker-a", "skipped", False, skip_reason), ("worker-b", "running", True, None)]
     # Only restart skips; any other refusal still stops the sweep honestly.
     calls.clear()
     with pytest.raises(fleet.FleetLifecycleError) as failed:
@@ -107,7 +125,6 @@ def test_generated_worker_cannot_mutate_selected_fleet(tmp_path, monkeypatch):
     destination, _, selected = _scope(tmp_path)
     worker = SimpleNamespace(fleet=destination.fleet, bot_id="worker-a")
     monkeypatch.setattr(fleet, "resolve_operation_scope", lambda **_k: (destination, worker))
-    monkeypatch.setattr(fleet, "read_selection", lambda _root: selected)
     with pytest.raises(fleet.FleetLifecycleError, match="manager"):
         fleet.set_fleet_running(root=tmp_path, fleet="example", action="start", workers_only=True)
 
@@ -122,7 +139,8 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
                               release_id="selected-release")
     destination = SimpleNamespace(fleet=SimpleNamespace(name="example", manager="manager",
                                                         fleet_pulse=FleetPulseConfig(timeout_s=450)),
-                                  paths=SimpleNamespace(root=tmp_path, lib=native))
+                                  paths=SimpleNamespace(root=tmp_path, lib=native,
+                                                        package=SimpleNamespace(installation=Installation(tmp_path.parent/"managed",tmp_path), runtime_native=native)))
 
     @contextmanager
     def admitted(root, **kwargs):
@@ -130,19 +148,19 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
         yield release
 
     monkeypatch.setattr(fleet_pulse, "mutation_admission", admitted)
-    monkeypatch.setattr(fleet_pulse, "native_environment", lambda _paths: {})
+    monkeypatch.setattr(fleet_pulse, "native_environment", lambda _paths, current: {"CLAUDLOBBY_NATIVE_ADMITTED": "1"})
     monkeypatch.setattr(fleet_pulse, "resolve_operation_scope",
                         lambda **_kwargs: (destination, None))
     called = []
 
     def run(command, env, **kwargs):
-        called.append((command, env["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"], kwargs))
+        called.append((command, env["CLAUDLOBBY_PRIVATE_PULSE_RUNTIME"], kwargs))
         return "worker DOWN\n", "watchdog dark\n", 0
 
     monkeypatch.setattr(fleet_pulse, "_sweep", run)
     result = fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
     # fleet.yaml's cap and the summary path reach the sweep (#2059)
-    assert called == [([str(native / "fleet-pulse.sh"), "example"], "selected-release",
+    assert called == [([str(native / "fleet-pulse.sh"), "example"], "1",
                        {"timeout_s": 450, "summary_path": tmp_path / "state/pulse/example.pulse-summary.txt"})]
     assert result.summary == "worker DOWN\n"
     assert result.stderr_tail == "watchdog dark\n"
@@ -211,12 +229,7 @@ def test_selected_private_pulse_refuses_direct_entry(tmp_path):
 def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monkeypatch):
     destination, _, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
-    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
-    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
-    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
-        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
-    monkeypatch.setattr(fleet, "build_supervision_spec", lambda _b, _f, _p: SimpleNamespace(
-        bot_dir=tmp_path, label="private", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    _bindings(monkeypatch,destination,selected,directory=tmp_path)
     observed = {"worker-a": (False, "inactive", "absent"),
                 "worker-b": (True, "active", "absent"),
                 "manager": (True, "active", "ready")}
@@ -260,17 +273,12 @@ def test_reconcile_reads_a_cleanly_stopped_session_absent_only_by_the_quiet_proo
     connections) reads that as absent; anything less stays unknown."""
     destination, _, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
-    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
-    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
-    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
-        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
     tmux_dir = short_socket_dir("sq-")
     stale = tmux_dir / f"tmux-{os.getuid()}" / "private"
     stale.parent.mkdir()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(str(stale))  # bound, never listening: what a clean tmux exit leaves
-    monkeypatch.setattr(fleet, "build_supervision_spec", lambda _b, _f, _p: SimpleNamespace(
-        bot_dir=tmp_path, label="private", environment={"TMUX_TMPDIR": str(tmux_dir)}))
+    _bindings(monkeypatch,destination,selected,directory=tmp_path,tmux_dir=tmux_dir)
     unit = SimpleNamespace(declaration=SimpleNamespace(scope="bot", fleet="example", bot="worker-a",
                                                        working_directory=tmp_path),
                            target="worker-a.service", installed=(),
@@ -328,12 +336,7 @@ def test_reconcile_reads_a_recorded_stop_as_stopped(tmp_path, monkeypatch):
     no record the states are unchanged."""
     destination, _, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
-    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
-    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
-    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
-        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
-    monkeypatch.setattr(fleet, "build_supervision_spec", lambda bot, _f, _p: SimpleNamespace(
-        bot_dir=tmp_path / bot, label="private", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    _bindings(monkeypatch,destination,selected,directory=tmp_path,per_bot=True)
     observed = {"worker-a": (True, "absent"), "worker-b": (True, "unknown"),
                 "manager": (False, "absent")}
     destination.fleet.bots = {bot: bot for bot in observed}
@@ -388,3 +391,72 @@ def test_fleet_lifecycle_lines_carry_what_each_bot_start_says(tmp_path, monkeypa
     assert first == "example/worker-a: running; readiness=bridge_ready"
     assert note.startswith("example/worker-a: ") and "could not remove this bot's stop record" in note
     assert last == "example/worker-b: running; readiness=bridge_ready"
+
+
+# Reuse the existing real generated Git unit/bot.conf fixture; native effects
+# remain explicit adapter observations and are never sent to a host manager.
+from tests.test_git_composition import candidate  # noqa: F401
+from tests.test_bot_operations import git_bot_binding  # noqa: F401
+
+
+class _GitStoppedNative:
+    def __init__(self, case):
+        self.package, self.directory, self.calls = case.adapter.package, case.directory, []
+        self.foreign = False
+
+    def read(self, function, *args):
+        self.calls.append((function, args))
+        if function == 'svc_inventory_catalog':
+            return f'manager\tLinux\ndirectory\t{self.directory}\n'
+        assert function == 'svc_inventory_properties'
+        return '\n'.join(f'{key}={value}' for key, value in {
+            'Id':args[0], 'LoadState':'not-found', 'ActiveState':'inactive', 'UnitFileState':'',
+            'FragmentPath':'', 'DropInPaths':'', 'NeedDaemonReload':'no', 'Triggers':'', 'TriggeredBy':'',
+            'WorkingDirectory':'', 'Environment':'', 'ExecStart':''}.items())
+
+    def call(self, function, *args, timeout=30):
+        self.calls.append((function, args))
+        if function == 'svc_bot_unit_owned_by':
+            return subprocess.CompletedProcess([], 1 if self.foreign else 0, '', '')
+        assert function == 'svc_bot_session_observe'
+        return subprocess.CompletedProcess([], 0, 'absent\n', '')
+
+
+def test_git_reconcile_preserves_stopped_intent_without_historical_selection(git_bot_binding, monkeypatch):
+    from claudlobby.stop_record import write_stop
+    case = git_bot_binding
+    (case.root / 'state/selected-release.json').write_text('malformed obsolete selection\n')
+    monkeypatch.setattr(fleet, 'resolve_operation_scope', lambda **_kw: (case.destination, None))
+    native = _GitStoppedNative(case)
+    bot_dir = case.destination.paths.bot_runtime('lead')
+    (bot_dir / 'data').mkdir()
+    write_stop(bot_dir, by='operator', request_id='stopped-intent', reason='Retain intentional stop')
+    result = fleet.reconcile_fleet(root=case.root, fleet='example', adapter=native)
+    row, = result.bots
+    assert (row.bot, row.enrolled, row.session, row.state) == ('lead', False, 'absent', 'stopped')
+    assert result.release_id is None and result.source_revision == case.current.revision
+    assert result.config_fingerprint == case.current.config_fingerprint
+    assert not (case.directory / 'com.example.lead.service').exists()
+    native.foreign = True
+    with pytest.raises(fleet.InventoryError, match='foreign or unknown'):
+        fleet.reconcile_fleet(root=case.root, fleet='example', adapter=native)
+
+
+@pytest.mark.parametrize('skip_reason', ['de_enrolled', 'disabled'])
+def test_git_fleet_restart_delegates_frozen_current_scope_and_skips_stopped_bot(git_bot_binding, monkeypatch, skip_reason):
+    case = git_bot_binding
+    monkeypatch.setattr(fleet, 'resolve_operation_scope', lambda **_kw: (case.destination, None))
+    calls = []
+    def restart(**kwargs):
+        calls.append(kwargs)
+        assert kwargs['_expected_provenance'] == (None, {'source_revision':case.current.revision,
+                                                        'config_fingerprint':case.current.config_fingerprint})
+        raise BotLifecycleError('deliberately stopped', skip_reason=skip_reason, target='com.example.lead.service',
+                                source_revision=case.current.revision, config_fingerprint=case.current.config_fingerprint)
+    monkeypatch.setattr(fleet, 'set_bot_running', restart)
+    result = fleet.set_fleet_running(root=case.root, fleet='example', action='restart')
+    assert len(calls) == 1 and calls[0]['running'] and calls[0]['restart']
+    assert result.release_id is None and result.source_revision == case.current.revision
+    assert [(row.bot, row.state, row.changed) for row in result.completed] == [('lead', 'skipped', False)]
+    assert result.completed[0].config_fingerprint == case.current.config_fingerprint
+    assert result.completed[0].reason == skip_reason

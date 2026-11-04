@@ -64,7 +64,7 @@ def _run(code, *argv, tmp_path):
     (("bot", "create", "--help"), "--expertise"),
     (("bot", "handoff", "--help"), "BOT"),
     (("plane", "view", "--help"), "--host"),
-    (("host", "setup", "--help"), "--wheel"),
+    (("host", "setup", "--help"), "--installation"),
     (("fleet", "setup", "--help"), "--install-directory"),
     (("migration", "data", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),

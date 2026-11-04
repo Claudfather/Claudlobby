@@ -1,8 +1,6 @@
 """Dependency-light registration for release preparation and diagnosis."""
 
-from argparse import BooleanOptionalAction
 from importlib import import_module
-from uuid import uuid4
 
 from ..command_result import execute
 
@@ -11,14 +9,13 @@ def _dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".releases", __package__).dispatch(args),
                    json_output=args.json,
-                   request_id=str(uuid4()) if args.public_command == "config.plan" else None)
+                   request_id=None)
 
 
 def _dispatch_host(args):
-    args.activation_id = (getattr(args, "resume", None) or str(uuid4())) if args.public_command == "host.activate" else None
     return execute(args.public_command,
                    lambda: import_module(".host", __package__).dispatch(args),
-                   json_output=args.json, request_id=args.activation_id)
+                   json_output=args.json, request_id=None)
 
 
 def _dispatch_backup(args):
@@ -198,79 +195,6 @@ def register_release_subparsers(sub):
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
     status = _route(hosts, "status", "host.status", "Inspect recorded state and passive cold-host prerequisites; no setup effects")
     status.set_defaults(func=_dispatch_host)
-    activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
-    activate.description = ("First activation requires explicit global --root. "
-                            "Use --adopt-existing only for an unsealed, already running estate. "
-                            "--resume ID can fix forward supported recorded bootstrap, pause/quiesce, "
-                            "and candidate-start stages with durable receipts. It never repeats a "
-                            "recorded bot handoff or start; a handoff or start begun without a "
-                            "recorded result requires manual recovery evidence.")
-    activate.set_defaults(func=_dispatch_host)
-    activate.add_argument("plan_id", metavar="PLAN_ID")
-    activate.add_argument("--install-directory", required=True, metavar="PATH",
-                          help="Absolute native user-unit directory; verified against the OS adapter's search paths")
-    activate.add_argument("--preserve-bot-state", action="store_true",
-                          help="Selected release upgrades only: restart witnessed live bots and keep absent servers stopped")
-    activate.add_argument("--forward-recovery", action=BooleanOptionalAction, default=None,
-                          help="Selected upgrades only: bind recovery to this exact sealed target; resume the same "
-                               "candidate, not old-source rollback. Backup is retained, never automatically restored. "
-                               "On --resume, omission keeps the recorded mode; an explicit change refuses")
-    activate.add_argument("--handoff-max-age", type=int, metavar="SECONDS",
-                          help="Upgrades and adoptions: how old (300 to 72000 s, default 300) a bot's saved handoff "
-                               "may be and still count, so a bot that saved and stayed idle is not asked for a new "
-                               "one. A new run first refuses, before its lock, naming each running bot whose save is "
-                               "older. Recorded with the activation: --resume keeps it, and an explicit change refuses")
-    activate.add_argument("--adopt-existing", action="store_true",
-                          help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
-    activate.add_argument("--resume", metavar="ACTIVATION_ID",
-                          help="Fix forward the same recorded activation at a supported step with required evidence")
-    repair = _route(hosts, "repair-start", "host.repair-start",
-                    "Archive one verified-dead bot's unresolved activation start")
-    repair.description = ("Operator only. Starts nothing. Requires the selected pending bots_started "
-                          "activation, the named bot's start without a result, identical frozen unit "
-                          "bytes and an inactive unit with no private tmux server. The attempt and its "
-                          "evidence stay in the activation record; then run the sealed candidate's "
-                          "host activate --resume once to start that bot again.")
-    repair.set_defaults(func=_dispatch_host)
-    repair.add_argument("repair_activation_id", metavar="ACTIVATION_ID")
-    repair.add_argument("--fleet", dest="repair_fleet", required=True, metavar="FLEET")
-    repair.add_argument("--bot", required=True, metavar="BOT")
-    repair.add_argument("--reason", required=True, metavar="TEXT")
-    reset = _route(hosts, "repair-after-reset", "host.repair-after-reset",
-                   "Archive every verified-dead candidate start after a host reset")
-    reset.description = ("Operator only. Starts nothing. For a host that reset or lost power while "
-                         "its selected activation was pending ingest_started, bots_started, verified "
-                         "or producers_resumed. Requires every recorded start's unit inactive with "
-                         "identical frozen bytes, every published candidate unit quiet, no private bot "
-                         "tmux server, and the plane socket down. Archives those starts and reopens "
-                         "ingest_started; then run the sealed candidate's host activate --resume once "
-                         "to start every candidate again.")
-    reset.set_defaults(func=_dispatch_host)
-    reset.add_argument("reset_activation_id", metavar="ACTIVATION_ID")
-    reset.add_argument("--reason", required=True, metavar="TEXT")
-    abort = _route(hosts, "abort-adoption", "host.abort-adoption",
-                   "Abort an unsealed first adoption stopped while pausing producers")
-    abort.description = ("Operator-only, from a sealed release CLI. Restores only the original producer "
-                         "files and native states of a Linux first adoption with no completed step, "
-                         "handoff, start, selection or migration. Not general rollback: bots, ingest, "
-                         "selection and SQL are untouched.")
-    abort.set_defaults(func=_dispatch_host)
-    abort.add_argument("abort_activation_id", metavar="ACTIVATION_ID")
-    abort.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
-    abort.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
-                       help="Plane user_version from the operator's retained pre-activation preflight")
-    abort_upgrade = _route(hosts, "abort-upgrade", "host.abort-upgrade",
-                           "Abort a selected-release upgrade before bot or ingest quiescence")
-    abort_upgrade.description = ("Operator-only, from a sealed release CLI, including an unselected repair "
-                                 "release. Restores frozen producer files/native states and any parked bot "
-                                 "unit files before a bot stop is attempted. Requires unchanged source selection, bots, ingest and "
-                                 "SQL; retains all handoff receipts. Not general rollback.")
-    abort_upgrade.set_defaults(func=_dispatch_host)
-    abort_upgrade.add_argument("abort_activation_id", metavar="ACTIVATION_ID")
-    abort_upgrade.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
-    abort_upgrade.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
-                               help="Plane user_version from the retained pre-activation preflight")
-
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
     explain = configs.add_parser("explain", help="Explain environment tiers or supported fleet/bot scalar sources without values")
@@ -290,22 +214,13 @@ def register_release_subparsers(sub):
                           help="With --warn-baseline, record warning categories to FILE")
     validate.add_argument("--json", action="store_true", help="One schema-1 result object")
     validate.set_defaults(func=_dispatch_config_validate, public_command="config.validate")
-    plan = _route(configs, "plan", "config.plan", "Stage all declared host fleets using a sealed candidate")
-    plan.add_argument("--release", required=True, metavar="ID")
-    plan.add_argument("--fleet-path", action="append", default=[], metavar="PATH",
-                      help="Explicit external fleet directory or fleet.yaml; repeatable")
     diff = _route(configs, "diff", "config.diff", "Inspect staged changes or current rendered drift without secret bytes")
-    diff.add_argument("plan_id", nargs="?", metavar="PLAN_ID",
-                      help="Staged plan to inspect; omit for current rendered drift")
+    diff.add_argument("fingerprint", nargs="?", metavar="FINGERPRINT",
+                      help="Pending Git render fingerprint; omit for committed output drift")
     diff.add_argument("--bot", metavar="BOT", help="Limit current drift to one declared bot")
 
-    migration = sub.add_parser("migration", help="Preview data migration and inspect recorded progress")
+    migration = sub.add_parser("migration", help="Inspect historical migration evidence or run explicit data converters")
     migrations = migration.add_subparsers(dest="migration_command", required=True)
-    plan = _route(migrations, "plan", "migration.plan", "Read-only migration inventory; repeat under quiescence")
-    plan.add_argument("--source-release", required=True, metavar="ID")
-    plan.add_argument("--target-release", required=True, metavar="ID")
-    plan.add_argument("--initialize-empty", action="store_true",
-                      help="Record explicit initialization intent only when both DB and WAL are absent")
     status = _route(migrations, "status", "migration.status", "Actual SQL version and recorded activation evidence")
     status.add_argument("--activation", metavar="ID", help="Inspect one named host activation")
     from ._migration_parsers import register_converter_subparsers

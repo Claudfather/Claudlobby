@@ -23,7 +23,6 @@ def _context(args):
     from ..context import BotNotFoundError
     from ..operation_context import OperationContextError, resolve_operation_scope
     from ..paths import InvalidPathSelector
-    from ..releases import ReleaseError
 
     if args.seed:
         raise CommandFailure("conflict", "runtime reads require a selected host, not seed configuration")
@@ -33,8 +32,6 @@ def _context(args):
         raise CommandFailure("not_found", "generated bot is not declared in the selected fleet") from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected release or executing package differs") from exc
     except (ActivationError, PlanError, OperationContextError, ValueError) as exc:
         raise CommandFailure("conflict", "selected fleet configuration or caller origin is incomplete") from exc
     except OSError as exc:
@@ -50,7 +47,6 @@ def _session(args, context) -> CommandOutput:
     from ..config_plan import PlanError
     from ..fleet_operations import FleetLifecycleError, reconcile_fleet
     from ..operation_context import OperationContextError
-    from ..releases import ReleaseError
     from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
 
@@ -61,7 +57,7 @@ def _session(args, context) -> CommandOutput:
         raise CommandFailure("unavailable" if exc.unavailable else "conflict",
                              "private session or native enrollment could not be established",
                              release_id=exc.release_id) from exc
-    except (ReleaseMismatch, ReleaseError) as exc:
+    except (ReleaseMismatch) as exc:
         raise CommandFailure("release_mismatch", "executing native package differs from the selected release") from exc
     except (ActivationError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete") from exc
@@ -72,29 +68,19 @@ def _session(args, context) -> CommandOutput:
         raise CommandFailure("unavailable", "declared bot is missing from selected native observation",
                              release_id=result.release_id)
     data = {"fleet": result.fleet, "bot": asdict(bot),
+            "source_revision":result.source_revision,"config_fingerprint":result.config_fingerprint,
             "meaning": "native enrollment and private session observed; no transcript or caller PID read"}
     line = (f"{result.fleet}/{bot.bot}: {bot.state}; native={bot.native_active}; "
             f"session={bot.session}; enrolled={str(bot.enrolled).lower()}")
     return CommandOutput(data, release_id=result.release_id, lines=(line,))
 
 
-def _log_release(context) -> str:
-    from ..activation_state import ActivationError, read_selection
-    from ..context import native_environment
-
+def _log_runtime(context):
+    from ..active_config import runtime_read_stamp
     try:
-        selected = read_selection(context.paths.root)
-    except ActivationError as exc:
-        raise CommandFailure("conflict", "selected release state cannot be read") from exc
-    if not selected:
-        raise CommandFailure("conflict", "log reads require an active selected release")
-    try:
-        executing = native_environment(context.paths).get("CLAUDLOBBY_RELEASE_ID")
+        return runtime_read_stamp(context.paths.root, package=context.paths.package)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise CommandFailure("release_mismatch", "executing native package cannot be bound to the selected release") from exc
-    if executing != selected["release_id"]:
-        raise CommandFailure("release_mismatch", "executing native package differs from the selected release")
-    return executing
+        raise CommandFailure("conflict", "log reads require this installation's committed Git configuration") from exc
 
 
 def _tail(context, bot: str, lines: int, timeout: float) -> dict:
@@ -104,7 +90,8 @@ def _tail(context, bot: str, lines: int, timeout: float) -> dict:
     command = [str(script), "--fleet", context.fleet.name,
                "--fleet-dir", str(context.paths.source_dir),
                "--bot", bot, "--lines", str(lines)]
-    env = {**os.environ, "CLAUDLOBBY_ROOT": str(context.paths.root)}
+    from ..context import native_environment
+    env = {**os.environ, **native_environment(context.paths)}
     try:
         with subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, start_new_session=True) as process:
@@ -152,7 +139,8 @@ def _logs(args, context) -> CommandOutput:
     lines = args.lines
     if lines < 1 or lines > 200:
         raise CommandFailure("invalid_argument", "--lines must be between 1 and 200")
-    release_id = _log_release(context)
+    current = _log_runtime(context)
+    release_id = None
     bots = [args.bot_id] if args.public_command == "bot.logs" else sorted(context.fleet.bots)
     if len(bots) > 64:
         raise CommandFailure("unavailable", "fleet has too many bots for one bounded log read",
@@ -165,7 +153,9 @@ def _logs(args, context) -> CommandOutput:
         items.append(_tail(context, bot, lines, remaining) if remaining > 0 else
                      {"bot": bot, "status": "unavailable", "text": None})
     data = {"fleet": context.fleet.name, "items": items,
-            "lines_per_file": lines, "source": "selected native tail-fleet.sh", "next_cursor": None}
+            "lines_per_file": lines, "source": "current native tail-fleet.sh", "next_cursor": None,
+            **current.provenance}
+    current.check(context.paths.root,package=context.paths.package)
     if sum(len((item["text"] or "").encode("utf-8")) for item in items) > _MAX_LOG_BYTES:
         raise CommandFailure("unavailable", "selected log output exceeds the bounded result",
                              data={"fleet": context.fleet.name, "lines_per_file": lines},

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import _scrubbed_env, _write_exec
+from tests.package_fixtures import git_package
 
 LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 LINK_REL = Path("state/bin/claude")
@@ -245,14 +246,15 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
         CALL_LOG=str(tmp_path / "calls.log"),
         CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
         CLAUDLOBBY_NATIVE_DIR=str(libdir),
-        CLAUDLOBBY_RELEASE_ID="selected",
+        CLAUDLOBBY_INSTALLATION=str(git_package(root).installation.directory),
+        CLAUDLOBBY_NATIVE_ADMITTED="1",
         CLAUDLOBBY_FLEET="test",
         PATH=f"{bindir}:{os.environ['PATH']}",
         TMUX_TMPDIR=str(tmp_path / "no-tmux"),
     )
     env.pop("CLAUDE_BIN", None)
     r = subprocess.run(
-        ["bash", str(libdir / "reload-fleet.sh"), "--selected-release", "selected",
+        ["bash", str(libdir / "reload-fleet.sh"), "--admitted-runtime",
          "--fleet", "test", "--bots-dir", str(root / "runtime/bots"),
          "--bot", "tbot", "--plugin", "somepkg@Somewhere"],
         env=env,

@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-import os
-import re
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import (
@@ -24,10 +23,12 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..report_operations import AckError, ack_reports
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
-    from .message_write import _request_id
+    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_route_matches)
+    from .message_write import _request_id, _bound_release
 
     release_id = None
+    provenance = {}
     try:
         request_id = _request_id(args.request_id)
         if args.seed:
@@ -36,26 +37,25 @@ def dispatch(args) -> CommandOutput:
         if (destination.paths.seed or origin is None or origin.bot_id is None
                 or origin.fleet.name != destination.fleet.name):
             raise CommandFailure("conflict", "report ACK requires a generated viewer in its own fleet")
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-        if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-            raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+        bound_release = _bound_release(destination.paths.package, generated=True)
         with mutation_admission(destination.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
-            selected = read_selection(destination.paths.root)
-            if selected is None or selected["release_id"] != release_id:
+            selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
+            release_id = runtime_release_id(release)
+            provenance = selected.provenance if selected is not None else {}
+            if selected is None or not runtime_route_matches(release, selected, package=destination.paths.package):
                 raise CommandFailure("release_mismatch", "report selection differs from this caller",
                                      release_id=release_id)
             ctx = bind_task_context(destination, origin=origin)
             result = ack_reports(ctx, selected, args.through, request_id=request_id)
-        return CommandOutput(asdict(result), release_id=release_id,
+        return CommandOutput({**asdict(result), **selected.provenance}, release_id=release_id,
                              lines=(f"Acknowledged {result.count} reports through ingest "
                                     f"{result.acked_through_seq} for {result.viewer}.",))
     except CommandFailure:
         raise
     except AckError as exc:
         raise CommandFailure(exc.code, str(exc),
-                             data=asdict(exc.result) if exc.result is not None else {},
+                             data={**(asdict(exc.result) if exc.result is not None else {}), **provenance},
                              release_id=release_id) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",

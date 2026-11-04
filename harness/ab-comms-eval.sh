@@ -888,13 +888,16 @@ pass=0; fail=0
 # makes no model call, so no binary is part of its evidence and its pin says so.
 # Neither mode runs a cell (each experiment prints its opt-in line), so the pin
 # stays unset and set -u stops anything that reaches for it.
-if [ "$DRY_RUN" = 1 ]; then
-    CLAUDE_VER="dry-run"
-elif [ "${AB_EVAL_REAL:-0}" = 1 ]; then
-    measure_claude_version claude \
-        || die "a real run pins the claude version its cells run, and it could not be measured: $CLAUDE_VERSION_WHY"
-    CLAUDE_VER="$CLAUDE_VERSION"
-fi
+pin_claude_version() {
+    if [ "$DRY_RUN" = 1 ]; then
+        CLAUDE_VER="dry-run"
+    elif [ "${AB_EVAL_REAL:-0}" = 1 ]; then
+        measure_claude_version claude \
+            || die "a real run pins the claude version its cells run, and it could not be measured: $CLAUDE_VERSION_WHY"
+        CLAUDE_VER="$CLAUDE_VERSION"
+    fi
+}
+pin_claude_version
 
 # Coverage-honesty experiment (#866) dispatches here — cov_main exits.
 if [ "$EXPERIMENT" = "coverage-honesty" ]; then

@@ -25,16 +25,15 @@ host:
       enroll: true
 ```
 
-then stage with `config plan`, inspect `config diff`, and apply with
-`host activate` from the sealed release. On Linux, inspect the enrolled
+then apply the reviewed commit with `host update apply FULL_COMMIT` using the
+stable installation CLI, and inspect it with `host update status` ([Managed Git delivery](../fleet-update-lifecycle.md#managed-git-delivery)). On Linux, inspect the enrolled
 timer with `systemctl --user list-timers | grep vault-sync`.
 
 Arm **one** host, watch `vault.sync_ok` for a week, then arm the second.
 `claudlobby host doctor --switches` lists the job either way, so the off state is
 visible rather than merely documented.
 
-**Backout:** set `enroll: false`, stage and inspect a new plan, then
-`host activate` removes the unit.
+**Backout limitation:** the current Git updater refuses removal of an already declared native unit. Setting `enroll: false` alone does not stop an installed timer. Keep its original configuration and use an explicitly reviewed operator stop until unit removal is supported; do not treat a refused update as a completed backout.
 
 **If you arm this once the engine carries `sync --check`, read the first few
 `vault.state` samples yourself and confirm they carry the verdict you expect

@@ -15,6 +15,16 @@ from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable, Owner
 from claudlobby.plane.workspace_assertion import WorkspaceAttestation
 from tests.test_host_owner import terminal
 
+# Synthetic owner databases have no native operator ancestry. Keep the real PTY,
+# consent prompts and authority writes; only supply that external fixture fact.
+_LOCAL_OPERATOR_FIXTURE = """
+import sys
+from claudlobby.commands import operator_context
+operator_context.require_operator_context = lambda root=None: None
+from claudlobby.__main__ import main
+raise SystemExit(main(sys.argv[1:]))
+"""
+
 OWNER = PrincipalRef("tailscale:controlplane.tailscale.com", "1001")
 OTHER = PrincipalRef("tailscale:controlplane.tailscale.com", "1002")
 ISSUER = "https://accounts.example.test"
@@ -251,7 +261,7 @@ def test_real_terminal_confirms_and_refuses_without_issuing_authority(local):
         rc, output = _command(access.root, "confirm-workspace", [
             ("Paste the workspace approval code (hidden):", p.nonce),
             ("Type BIND-WORKSPACE", answer),
-        ])
+        ], bootstrap=_LOCAL_OPERATOR_FIXTURE)
         assert rc == expected_rc, output
         assert p.nonce not in output
         clock[0] = time.time()

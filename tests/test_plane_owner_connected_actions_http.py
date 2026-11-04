@@ -13,13 +13,13 @@ from claudlobby import message_operations
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.owner_browser import create_owner_browser_app
+from claudlobby.plane.owner_task_action_protocol import runtime_fields
 from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
 from claudlobby.plane.workspace_assertion import WorkspaceAttestation
 from claudlobby.plane.session_assertion import SessionAttestation
 from tests.deadline_clock import bounded, move_clock, status
 from tests.test_plane_owner_feedback import gateway  # noqa: F401
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_owner_workspace import OWNER, ISSUER, ORIGIN
 from tests.test_plane_two_fleets import _Sampler
@@ -66,7 +66,7 @@ def context(fixture,kind):
 
 def row(fixture,kind):
     c=context(fixture,kind);target={"recipient":c["recipients"][0]["id"],"task_id":None}
-    if kind!="message":target.update(task_id=fixture[4]["task_id"],assignment_id=None,release_id=c["release_id"])
+    if kind!="message":target.update(task_id=fixture[4]["task_id"],assignment_id=None,**runtime_fields(c))
     return {**({"version":2} if kind!="message" else {}),"request_id":str(uuid4()),"kind":kind,
         "scope":c["scope"],"target":target,"submitted_at":"2026-10-10T01:00:00.000Z"}
 

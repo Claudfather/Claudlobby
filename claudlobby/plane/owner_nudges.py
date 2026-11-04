@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from ..activation_identity import read_selected_identity_bindings
+from ..activation_identity import read_current_identity_bindings
 from ..active_config import resolve_active_context
 from ..application_result import ApplicationOutcome
 from ..application_tasks import nudge_bound_task
@@ -22,8 +22,9 @@ from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
 from ..operation_context import bind_task_context
 from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
-from ..runtime_admission import RuntimeIdentity, mutation_admission
-from .owner_service import admitted_action, check_action_process
+from ..runtime_admission import mutation_admission, runtime_route_matches
+from .owner_service import admitted_action, check_action_process, action_runtime_identity
+from .owner_task_action_protocol import runtime_fields, same_runtime
 from .ids import ID_PATTERNS, read_host_uid
 from .owner_action_authorization import action_authorization
 from .owner_access import AccessDenied, OwnerNudgeGrant, VerifiedReader
@@ -69,7 +70,7 @@ class OwnerNudges:
         if not isinstance(fleet, str) or not fleet:
             raise AccessDenied("fleet_required")
         selected = resolve_active_context(root=self.root, fleet=fleet, package=self.package)
-        bindings = read_selected_identity_bindings(self.root, fleet, package=self.package)
+        bindings = read_current_identity_bindings(self.root, fleet, package=self.package)
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
         if (ctx.host_uid != self.host_uid or ctx.fleet_uid != grant.fleet_uid
                 or bindings["host_uid"] != self.host_uid or bindings["fleet_uid"] != grant.fleet_uid
@@ -96,8 +97,9 @@ class OwnerNudges:
     @admitted_action
     def nudge(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
               task_id: str, manager_uid: str, expected_assignment_id: str | None,
-              expected_release_id: str, request_id: str, reason: str,
-              expected_grant: OwnerNudgeGrant) -> ApplicationOutcome:
+              expected_release_id: str | None, request_id: str, reason: str,
+              expected_grant: OwnerNudgeGrant, expected_source_revision: str | None = None,
+              expected_config_fingerprint: str | None = None) -> ApplicationOutcome:
         """Commit one nudge then notify; keep its UUID after any uncertain result.
 
         The caller must supply its selected assignment (None means queued),
@@ -107,16 +109,19 @@ class OwnerNudges:
         self._authorize(reader, fleet_uid, expected_grant)
         if not isinstance(reason, str) or len(reason) > 2000:
             raise ValueError("nudge reason requires at most 2000 characters")
-        if not isinstance(expected_release_id, str) or not re.fullmatch(r"r-[0-9a-f]{64}", expected_release_id):
-            raise ValueError("selected release ID required")
-        identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native,
-                                   self.package.artifact_id)
+        expected = {"release_id": expected_release_id}
+        if expected_source_revision is not None or expected_config_fingerprint is not None:
+            expected.update(source_revision=expected_source_revision,
+                            config_fingerprint=expected_config_fingerprint)
+        runtime_fields(expected)
+        identity = action_runtime_identity(self.package)
         with mutation_admission(self.root, identity=identity, expected_release=expected_release_id) as release:
             grant, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
             manager = self._target(ctx, task_id, manager_uid)
             route = resolve_message_route(ctx.context.fleet.manager, root=self.root, fleet=fleet,
                                           package=self.package, caller_context=ctx)
-            if (route.release_id != release.release_id or route.host_uid != self.host_uid
+            if (not runtime_route_matches(release, route, package=self.package)
+                        or not same_runtime(route, expected) or route.host_uid != self.host_uid
                     or route.selected_fleet_uid != fleet_uid or route.peer_fleet_uid != fleet_uid
                     or route.caller != ctx.caller or route.peer != manager or route.manager != manager):
                 raise AccessDenied("nudge_route_changed")

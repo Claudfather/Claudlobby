@@ -308,13 +308,17 @@ class TestSelectedCoverage:
         import pytest
         from claudlobby.command_result import CommandFailure
         from claudlobby.commands import checkin, usage_read
-        from claudlobby import activation_state
+        from claudlobby import active_config
 
         fleet, paths = self._fleet(tmp_path, "gone")
-        selected = {"release_id": "r1"}
+        from claudlobby.active_config import RuntimeReadStamp
+        from tests.package_fixtures import git_package
+        paths.package = git_package(tmp_path)
+        stamp = RuntimeReadStamp("git", source_revision=paths.package.source_revision,
+                                 config_fingerprint="c" * 64)
         monkeypatch.setattr(checkin, "_scope", lambda _args: (
-            SimpleNamespace(paths=paths, fleet=fleet), None, selected, None))
-        monkeypatch.setattr(activation_state, "read_selection", lambda _root: selected)
+            SimpleNamespace(paths=paths, fleet=fleet), None, stamp, None))
+        monkeypatch.setattr(active_config, "runtime_read_stamp", lambda *_args, **_kw: stamp)
         for command, extra in (("fleet.usage", {}), ("bot.usage", {"bot_id": "gone"})):
             with pytest.raises(CommandFailure) as caught:
                 usage_read.dispatch(SimpleNamespace(since="24h", public_command=command, **extra))

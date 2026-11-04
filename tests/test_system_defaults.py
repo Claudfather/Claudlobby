@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from pathlib import Path
 from textwrap import dedent
 
@@ -27,7 +28,7 @@ from claudlobby.config import (
     _merge_system_into_defaults,
     load_fleet,
 )
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -498,7 +499,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         merged = _default_merged()
 
@@ -631,7 +632,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     @staticmethod
     def _channel_bot(bot_id, chat=None):
@@ -650,7 +651,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
@@ -687,7 +688,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
@@ -709,7 +710,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
@@ -734,7 +735,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
@@ -756,7 +757,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
@@ -774,7 +775,7 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
@@ -1012,7 +1013,7 @@ class TestJobsComposition:
 
         root = tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, fleet_yaml))
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_fleet_timers(fleet, paths, merged)
 
     def test_byte_identical_units_no_override(self, tmp_path):
@@ -1076,7 +1077,7 @@ fleet:
 
         root = tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
 
         gen_dir = compose_fleet_timers(fleet, paths, merged)
         gen = {f.name: f.read_text() for f in sorted(gen_dir.iterdir())}
@@ -1098,7 +1099,7 @@ class TestComposeHostTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     @pytest.mark.parametrize(
         "job,script,schedule",
@@ -1130,7 +1131,11 @@ class TestComposeHostTimers:
 
         svc_text = svc.read_text()
         # Host scope: no fleet arg on ExecStart, no CLAUDLOBBY_FLEET env.
-        assert f"ExecStart={paths.package.native / script}" in svc_text.splitlines()
+        command = shlex.split(next(line.removeprefix("ExecStart=") for line in svc_text.splitlines()
+                                   if line.startswith("ExecStart=")))
+        assert command == [str(paths.package.installation.cli), "--root", str(paths.root),
+                           "_native", "--unit", f"claudlobby-{job}", "--phase", "producers",
+                           "--mode", "oneshot", "--", str(paths.package.runtime_native / script)]
         assert "CLAUDLOBBY_FLEET" not in svc_text
 
         timer_text = timer.read_text()
@@ -1175,7 +1180,9 @@ class TestComposeHostTimers:
         fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
         svc_text = (timers_dir / "com.test.data-sweep.service").read_text()
-        assert "data-sweep.sh --purge test-fleet" in svc_text
+        command = shlex.split(next(line.removeprefix("ExecStart=") for line in svc_text.splitlines()
+                                   if line.startswith("ExecStart=")))
+        assert command[-3:] == [str(paths.package.runtime_native / "data-sweep.sh"), "--purge", "test-fleet"]
 
     def test_fleet_units_knobs_match_declarations(self, tmp_path):
         # Guard: persistent/randomized_delay appear in a fleet unit IFF the
@@ -1212,7 +1219,7 @@ class TestDormantManifest:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         # manager-checkin (PR4 task 3, #1569) is leaf-manager-gated: a fleet
         # with no leaf manager composes no unit for it at all, which would
         # make this class's dormancy-manifest assertions about that job
@@ -1348,7 +1355,7 @@ fleet:
 
         root = root if root is not None else tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, fleet_yaml))
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_fleet_timers(fleet, paths, merged)
 
     def test_a_fleet_with_no_leaf_manager_composes_no_manager_checkin_unit(
@@ -1517,7 +1524,7 @@ def _coordinator_for_opt_out_tests(fleet_dir: Path):
         "    coord:\n      expertise: [orchestration]\n      manages: [lead]\n"
     )
     fleet, _md = load_fleet(manifest)
-    return fleet, Paths(root=root, fleet_dir=root, package=source_package())
+    return fleet, Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 class TestLeafManagerCheckinOptOut:
@@ -1554,7 +1561,7 @@ class TestLeafManagerCheckinOptOut:
         )
         (fleet_dir / "fleet.yaml").write_text(text)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
         # the opt-out is the ONLY thing that changed — lead is still a leaf
         # manager; it is simply not EQUIPPED, because the default that would
         # equip it is switched off fleet-wide.
@@ -1576,7 +1583,7 @@ class TestLeafManagerCheckinOptOut:
         _write_checkin_library_for_opt_out_tests(fleet_dir)
         coordinator, coordinator_paths = _coordinator_for_opt_out_tests(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
         assert fleet.leaf_manager_bots() == {"lead"}
 
         lead_got = self._checkin_state(fleet, paths, "lead")
@@ -1603,11 +1610,11 @@ def startup_delay_units(tmp_path_factory):
     base = tmp_path_factory.mktemp("startup-delay")
     root = base / "claudlobby"
     fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
-    fleet_timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), merged)
+    fleet_timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=git_package(root)), merged)
     host = base / "host"
     host.mkdir()
     (host / "lib").mkdir()
-    return fleet_timers, compose_host_timers(Paths(root=host, fleet_dir=host, package=source_package()))
+    return fleet_timers, compose_host_timers(Paths(root=host, fleet_dir=host, package=git_package(host)))
 
 
 class TestTimerStartupDelay:
@@ -1699,7 +1706,7 @@ fleet:
 
         root = tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, self.OVERRIDE.format(delay=1800)))
-        timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), merged)
+        timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=git_package(root)), merged)
         lines = (timers / "com.test.task-recheck.timer").read_text().splitlines()
         # 1800 s into each six hours: minute 30.
         assert any(line.startswith("OnCalendar=*-*-* 00/6:30:") for line in lines), lines

@@ -19,13 +19,12 @@ from claudlobby import config_staging, config_units
 from claudlobby.composer import compose_fleet_timers, compose_systemd_unit
 from claudlobby.config import load_fleet
 from claudlobby.config_plan import PlanError
-from claudlobby.config_units import planned_units
 from claudlobby.context import native_environment
 from claudlobby.paths import Paths
 from claudlobby.runtime_admission import unit_systemd_environment
 from claudlobby.supervision_inventory import InventoryError, UnitDeclaration
-from tests.package_fixtures import source_package
-from tests.test_config_staging import staging_case  # noqa: F401
+from tests.package_fixtures import git_package
+from tests.test_config_staging import staging_case, _units  # noqa: F401
 from tests.test_supervision_inventory import Observations
 
 PREFIX = "com.test"
@@ -73,7 +72,7 @@ def _compose(root: Path, body: str = _FLEET):
     root.mkdir(parents=True, exist_ok=True)
     (root / "fleet.yaml").write_text(dedent(body))
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    paths = Paths(root=root, fleet_dir=root, package=git_package(root))
     return fleet, paths, compose_fleet_timers(fleet, paths, merged)
 
 
@@ -183,19 +182,30 @@ def test_a_fleet_that_stops_composing_job_units_loses_its_failure_template(tmp_p
 # The plan manifest: the template is a Linux unit with no plist and no admission
 # ---------------------------------------------------------------------------
 def test_the_staged_plan_declares_the_template_for_linux_only(staging_case):
-    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    plan = config_staging.render_git_configuration([staging_case.paths], revision=staging_case.package.source_revision)
     name = "com.primary.job-failed@.service"
-    linux = [(d, item) for d, item in planned_units(plan, "Linux") if d.source.name == name]
+    linux = [(d, item) for d, item in _units(staging_case, plan, "Linux") if d.source.name == name]
     assert len(linux) == 1
-    assert not [d for d, _ in planned_units(plan, "Darwin") if "job-failed" in d.source.name]
+    assert not [d for d, _ in _units(staging_case, plan, "Darwin") if "job-failed" in d.source.name]
     declaration, item = linux[0]
     assert (item["enroll"], item["phase"], item["admission"], item["service"], item["scope"],
             item["fleet"]) == (True, "producers", None, None, "fleet", "primary")
-    jobs = [item for d, item in planned_units(plan, "Linux")
+    jobs = [item for d, item in _units(staging_case, plan, "Linux")
             if d.scope == "fleet" and d.source.suffix == ".service" and "@" not in d.source.name]
-    assert jobs and all((job["environment"], job["working_directory"])
-                        == (item["environment"], item["working_directory"]) for job in jobs)
-    assert item["environment"]["CLAUDLOBBY_RELEASE_ID"] == staging_case.release.release_id
+    assert jobs
+    # The template enters fleet notify directly and carries native identity,
+    # scheduler PATH, fleet selector and the shared Plane opt-out. Ordinary
+    # fleet timer services additionally carry the configured Telegram group.
+    shared = {**native_environment(staging_case.paths),
+              "PATH": item["environment"]["PATH"], "CLAUDLOBBY_FLEET": "primary",
+              "PLANE_EMIT_DISABLED": "1"}
+    assert shared["PATH"]
+    assert item["environment"] == shared
+    assert shared["CLAUDLOBBY_INSTALLATION"] == str(staging_case.package.installation.directory)
+    for job in jobs:
+        assert job["working_directory"] == item["working_directory"] == str(staging_case.root)
+        assert job["environment"] == {**shared, "TELEGRAM_GROUP_CHAT_ID": "-10042"}
+    assert "TELEGRAM_GROUP_CHAT_ID" not in item["environment"]
     assert declaration.service is None and declaration.fleet == "primary"
 
 
@@ -209,23 +219,24 @@ def _template_bytes(environment: dict, working: str, cli: str | None = None) -> 
 
 
 def test_template_units_claims_only_the_identity_its_own_bytes_spell(tmp_path):
-    environment = {"CLAUDLOBBY_ROOT": "/data", "CLAUDLOBBY_CLI": "/data/state/releases/r-1/venv/bin/claudlobby"}
-    family = {"working_directory": "/data", "environment": environment}
+    environment = {"CLAUDLOBBY_ROOT": "/data", "CLAUDLOBBY_CLI": "/installation/bin/claudlobby",
+                   "CLAUDLOBBY_INSTALLATION": "/installation"}
+    family = {"working_directory": "/data", "environment": environment, "platform": "Linux"}
     content = _template_bytes(environment, "/data")
     # By module attribute, so that on a tree without it only this test fails.
     template_units = config_units.template_units
     [item] = template_units({TEMPLATE: (content, 0o644)}, [family, dict(family)], destination=tmp_path,
-                            scope="fleet", release_id="r-1", fleet="alpha")
+                            scope="fleet", fleet="alpha")
     assert item["source"] == str(tmp_path / TEMPLATE) and item["platform"] == "Linux"
     assert (item["environment"], item["working_directory"], item["admission"]) == (environment, "/data", None)
-    other = {"working_directory": "/data", "environment": {**environment, "CLAUDLOBBY_CLI": "/elsewhere"}}
+    other = {**family, "environment": {**environment, "CLAUDLOBBY_CLI": "/elsewhere"}}
     for families, scope in (([], "fleet"), ([family, other], "fleet"), ([family], "host")):
         with pytest.raises(PlanError, match="one fleet identity"):
             template_units({TEMPLATE: (content, 0o644)}, families, destination=tmp_path,
-                           scope=scope, release_id="r-1", fleet="alpha")
-    with pytest.raises(PlanError, match="differs from its fleet identity"):
+                           scope=scope, fleet="alpha")
+    with pytest.raises(PlanError, match="differs from its"):
         template_units({TEMPLATE: (content, 0o644)}, [other], destination=tmp_path,
-                       scope="fleet", release_id="r-1", fleet="alpha")
+                       scope="fleet", fleet="alpha")
 
 
 # ---------------------------------------------------------------------------

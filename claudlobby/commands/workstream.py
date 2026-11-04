@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from dataclasses import asdict
-import os
 import re
 import sqlite3
 from uuid import UUID
@@ -86,24 +83,23 @@ def _read(args, destination, selected, bindings):
         registry = session.pr.workstream_registry(
             session.conn, destination.fleet.name,
             lease_days=destination.fleet.workstreams.lease_days)
-    from ..activation_state import read_selection
 
-    if read_selection(destination.paths.root) != selected:
-        raise selection_read_conflict('active workstream selection changed during read')
+    selected.check(destination.paths.root, package=destination.paths.package,
+                   message='active workstream selection changed during read')
     entries = registry["workstreams"]
     if args.workstream_action == "show":
         row = entries.get(_id(args.id))
         if row is None:
             raise CommandFailure("not_found", "workstream is not live in selected fleet")
-        return CommandOutput({"fleet": destination.fleet.name, "workstream": row},
-                             release_id=selected["release_id"], lines=(format_show(row),))
+        return CommandOutput({"fleet": destination.fleet.name, "workstream": row, **selected.provenance},
+                             release_id=selected.release_id, lines=(format_show(row),))
     return CommandOutput({"fleet": destination.fleet.name, "workstreams": entries,
-                          "updated": registry["updated"]}, release_id=selected["release_id"],
+                          "updated": registry["updated"], **selected.provenance}, release_id=selected.release_id,
                          lines=(format_list(entries),))
 
 
 def _write(args, destination, origin, selected, bindings):
-    from ..activation_state import read_selection
+    from ..active_config import runtime_read_stamp
     from ..operation_context import resolve_task_mutation_context
     from ..runtime_admission import RuntimeIdentity, mutation_admission
     from ..workstream_operations import apply
@@ -112,26 +108,29 @@ def _write(args, destination, origin, selected, bindings):
     data = _inputs(args, destination)
     if args.dry_run:
         return CommandOutput({"validated": True, "recording": "not_attempted",
-                              "workstream_ids": [], "scope_state": "not_checked"},
-                             release_id=selected["release_id"],
+                              "workstream_ids": [], "scope_state": "not_checked", **selected.provenance},
+                             release_id=selected.release_id,
                              lines=("Workstream input valid; no request or fact recorded.",))
-    bound_release = None
-    if origin is not None:
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-        if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-            raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+    from .message_write import _bound_release
+    from ..runtime_admission import runtime_release_id, runtime_route_matches
+    bound_release = _bound_release(destination.paths.package, generated=origin is not None)
     with mutation_admission(destination.paths.root, identity=RuntimeIdentity.current(),
                             expected_release=bound_release) as release:
-        if release.release_id != selected["release_id"] or read_selection(destination.paths.root) != selected:
-            raise CommandFailure("release_mismatch", "selected workstream release changed")
+        if (not runtime_route_matches(release, selected, package=destination.paths.package)
+                or runtime_read_stamp(destination.paths.root, package=destination.paths.package) != selected):
+            raise CommandFailure("release_mismatch", "selected workstream release changed",
+                                 data=selected.provenance,
+                                 hint=("inspect the current configuration and claudlobby host update status"
+                                       if selected.kind == "git" else None))
         ctx = resolve_task_mutation_context(root=destination.paths.root,
                                             fleet=destination.fleet.name,
                                             package=destination.paths.package)
         if ctx.host_uid != bindings["host_uid"] or ctx.fleet_uid != bindings["fleet_uid"]:
             raise CommandFailure("conflict", "workstream identity differs from active selection")
+        selected.check(destination.paths.root, package=destination.paths.package)
         result = apply(ctx, args.workstream_action, data, request_id=request_id)
-    return CommandOutput({"fleet": destination.fleet.name, **asdict(result)},
-                         release_id=release.release_id,
+    return CommandOutput({"fleet": destination.fleet.name, **asdict(result), **selected.provenance},
+                         release_id=runtime_release_id(release),
                          lines=(f"{args.workstream_action}: {', '.join(result.workstream_ids) or '(none)'}; "
                                 f"recording={result.recording}; replayed={result.replayed}",))
 
@@ -148,6 +147,7 @@ def dispatch(args) -> CommandOutput:
     from ..request_receipts import ReceiptError
     from ..runtime_admission import ReleaseMismatch
     from ..workstream_operations import WorkstreamError
+    from .checkin import _runtime_hint
 
     try:
         destination, origin, selected, bindings = _scope(args)
@@ -162,7 +162,7 @@ def dispatch(args) -> CommandOutput:
     except WorkstreamError as exc:
         raise CommandFailure(exc.code, str(exc)) from exc
     except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from caller", hint=exc.hint) from exc
+        raise CommandFailure("release_mismatch", "selected release differs from caller", hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid workstream root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

@@ -869,7 +869,7 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
 """
     app = bot.github_app
     if app:
-        app_helper = paths.lib / "git-credential-github-app"
+        app_helper = paths.package.runtime_native / "git-credential-github-app"
         # One fork for every scoped-vs-generic artifact below: None = all of
         # github.com. App tokens are HTTPS-only either way, which is what the
         # insteadOf rewrites are for.
@@ -1565,7 +1565,7 @@ def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> s
 # ----------------------------------------------------------------------
 
 
-def _scheduler_tool_path() -> str:
+def _scheduler_tool_path(paths: Paths | None = None) -> str:
     """PATH for composed timer units so their jobs can resolve fleet tools.
 
     systemd and launchd hand a scheduled job a minimal PATH that excludes
@@ -1585,8 +1585,10 @@ def _scheduler_tool_path() -> str:
     cannot override its CLI. Other tool directories preserve their ordering.
     """
     home = Path.home()
+    installation = paths.package.installation if paths is not None else None
+    cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     segments = [
-        str(selected_cli().parent),
+        str(cli.parent),
         "/usr/local/bin",
         "/usr/bin",
         "/bin",
@@ -2393,16 +2395,22 @@ PUBLIC_WRITE_GUARD_MATCHER = "Bash|mcp__.*github.*"
 
 
 @functools.cache
-def _brief_cli_probe() -> tuple[str | None, str]:
+def _brief_cli_probe(installation=None, source: Path | None = None) -> tuple[str | None, str]:
     """Certify and pin the selected release CLI, never a stale PATH entry."""
     try:
-        exe = str(selected_cli())
+        exe = str(selected_cli(installation=installation) if installation is not None else selected_cli())
     except RuntimeError as exc:
         return None, str(exc)
     try:
-        r = subprocess.run(
-            [exe, "brief", "--help"], capture_output=True, text=True, timeout=15
-        )
+        # Probe candidate code, but emit the stable destination. The active
+        # installation may still be running the previous commit during render.
+        argv = [exe, "brief", "--help"]
+        if installation is not None:
+            argv = [sys.executable, "-I", "-B", "-c",
+                    "import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); "
+                    "runpy.run_module('claudlobby',run_name='__main__')",
+                    str(source), "brief", "--help"]
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"probing `claudlobby brief --help` failed: {e}"
     if r.returncode != 0:
@@ -3259,7 +3267,9 @@ def compose_settings_local(
     # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
     bot_hooks = bot.hooks
     if bot.brief_on_start:
-        exe, why = _brief_cli_probe()
+        installation = paths.package.installation
+        exe, why = (_brief_cli_probe(installation, paths.package.system_yaml.parent.parent)
+                    if installation is not None else _brief_cli_probe())
         if exe is None:
             raise ValueError(
                 f"bot {bot.bot_id}: brief.on_start is set but the installed "
@@ -3282,6 +3292,14 @@ def compose_settings_local(
         bot_hooks = _with_heavy_slot_hook(bot_hooks)
     if bot.public_write_guard:
         bot_hooks = _with_public_write_guard_hook(bot_hooks)
+    # Native continuation metadata is lifecycle state, independent of optional
+    # model skills/brief hooks. The hook is silent and never requests a turn.
+    installation = paths.package.installation
+    if installation is not None:
+        bot_hooks = {key: list(value) for key, value in bot_hooks.items()}
+        capture = shlex.join([str(installation.cli), "--root", str(paths.root), "_native-session", "capture",
+                              str(bot_dir), f"{fleet.service_prefix}.{bot.bot_id}", _TMUX_TMPDIR])
+        bot_hooks.setdefault("SessionStart", []).append({"command": capture, "timeout": 10})
     hooks = _compose_hooks(bot_hooks)
     # No vault, no hooks: an explicit `claudron_session_loop: true` with no
     # `claudron_vault_path` has no address to render. The engine refuses to
@@ -4367,7 +4385,7 @@ def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, p
 
     The instance calls the selected CLI directly, not through the unit-start
     wrapper, whose argv names exactly one unit: `fleet notify` takes its own
-    admission, bound to the release in CLAUDLOBBY_RELEASE_ID. ``%i`` is the
+    admission, bound to the committed Git runtime. ``%i`` is the
     failed unit's name. The template has no OnFailure= of its own: an instance
     whose alert fails stays failed, and fleet-pulse reports it (#2532). It has
     no [Install] section: only OnFailure= starts it.
@@ -4388,7 +4406,7 @@ def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, p
         "Type=oneshot",
         f"WorkingDirectory={paths.root}",
         *(unit_systemd_environment(key, value) for key, value in environment.items()),
-        unit_systemd_environment("PATH", _scheduler_tool_path()),
+        unit_systemd_environment("PATH", _scheduler_tool_path(paths)),
         unit_systemd_environment("CLAUDLOBBY_FLEET", fleet_name),
         # The plane switch lines every fleet job unit carries (job_baseline_env).
         *(unit_systemd_environment(key, value) for key, value in (plane_env or {}).items()),
@@ -4462,6 +4480,22 @@ def _write_service_units(
 
     environment = native_environment(paths)
     command = None
+    resident_cli = {
+        "plane-daemon": ("plane-daemon.sh", "serve", (("PLANE_SOCKET", "--socket"),
+                                                     ("PLANE_DRAIN_INTERVAL", "--drain-interval"))),
+        "plane-view": ("plane-view.sh", "view", (("PLANE_VIEW_HOST", "--host"),
+                                               ("PLANE_VIEW_PORT", "--port"))),
+    }
+    if name in resident_cli:
+        launcher, verb, options = resident_cli[name]
+        if _native_script_argv(script, environment) == [str(paths.package.runtime_native / launcher)]:
+            # A shell wrapper would re-enter the ordinary CLI and hold its
+            # reader lock for the daemon lifetime. Direct admitted CLI exec
+            # releases startup exclusion before the resident process runs.
+            command = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"], "plane", verb]
+            for key, flag in options:
+                if environment.get(key):
+                    command.extend([flag, environment[key]])
     if owner_config is not None:
         from .plane.owner_service import service_command
         command = service_command(paths.root, environment["CLAUDLOBBY_CLI"], owner_config)
@@ -4477,8 +4511,9 @@ def _write_service_units(
     argv = wrap_unit_argv(environment, unit=service_name,
                           phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
                           argv=command if command is not None else _native_script_argv(script, environment))
-    exec_start = unit_systemd_command(argv) if command is not None or "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
-    tool_path = _scheduler_tool_path()
+    guarded = "CLAUDLOBBY_INSTALLATION" in environment
+    exec_start = unit_systemd_command(argv) if command is not None or guarded else script_expanded
+    tool_path = _scheduler_tool_path(paths)
 
     # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
     # one exit line is the only record of a stale-daemon exit (a process that
@@ -4636,12 +4671,13 @@ def _write_timer_units(
             argv.append(fleet_name)
         argv.extend(exec_args or [])
     argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
-    if "CLAUDLOBBY_RELEASE_ID" in environment or (fleet_name and name == _FLEET_PULSE_JOB):
+    if ("CLAUDLOBBY_INSTALLATION" in environment
+            or (fleet_name and name == _FLEET_PULSE_JOB)):
         exec_start = unit_systemd_command(argv)
 
     # Compute the tool PATH once so systemd and launchd emit an identical value
     # (see _scheduler_tool_path, #798); the parity test asserts they match.
-    tool_path = _scheduler_tool_path()
+    tool_path = _scheduler_tool_path(paths)
 
     # --- systemd service unit ---
     service_lines = [

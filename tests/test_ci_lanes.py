@@ -373,11 +373,13 @@ def test_the_linux_311_lane_runs_on_push_to_main_only():
     assert set(others.values()) <= {None, "always()"}, others
 
 
-def test_the_release_rehearsal_still_runs_on_every_pull_request():
-    """It ran in pytest, which no longer runs on pull requests, so it runs in
-    one Linux 3.10 shard as well."""
-    steps = [s for s in _steps(UBUNTU_SHARDS) if "release_assembly_smoke.py" in s.get("run", "")]
+def test_the_git_installation_rehearsal_runs_on_every_pull_request():
+    """The real prepare-only proof runs once in the required Python 3.10 shards."""
+    steps = [s for s in _steps(UBUNTU_SHARDS) if "git_installation_smoke.py" in s.get("run", "")]
     assert len(steps) == 1 and steps[0]["if"] == "matrix.group == 1", steps
+    assert "--disposable-root" in steps[0]["run"]
+    assert "--wheel" not in steps[0]["run"]
+    assert not any("release_assembly_smoke.py" in s.get("run", "") for s in _steps(UBUNTU_SHARDS))
 
 
 def test_a_run_needs_no_more_macos_jobs_than_the_account_runs_at_once():

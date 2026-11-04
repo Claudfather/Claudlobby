@@ -8,7 +8,7 @@ import pytest
 
 from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable, OwnerAccess, _digest
 from claudlobby.plane.session_assertion import SessionAttestation
-from tests.test_plane_owner_workspace import local, proposed, OWNER, OTHER, USER, ORIGIN, call
+from tests.test_plane_owner_workspace import local, proposed, OWNER, OTHER, USER, ORIGIN, call, _LOCAL_OPERATOR_FIXTURE
 from tests.test_host_owner import terminal
 
 
@@ -258,9 +258,9 @@ def test_combined_cli_owner_change_during_confirmation_refuses(local, monkeypatc
 def test_real_private_terminal_initialization_and_refusal(local):
     from tests.test_host_owner_terminal import _command
     access, _, _, _ = local
-    rc, text = _command(access.root, "initialize-connected", [("Type INITIALIZE-CONNECTED", "NO")])
+    rc, text = _command(access.root, "initialize-connected", [("Type INITIALIZE-CONNECTED", "NO")], bootstrap=_LOCAL_OPERATOR_FIXTURE)
     assert rc == 4 and "No binding, session or action grant" in text
-    rc, text = _command(access.root, "initialize-connected", [("Type INITIALIZE-CONNECTED", "INITIALIZE-CONNECTED")])
+    rc, text = _command(access.root, "initialize-connected", [("Type INITIALIZE-CONNECTED", "INITIALIZE-CONNECTED")], bootstrap=_LOCAL_OPERATOR_FIXTURE)
     assert rc == 0 and "storage initialized" in text
     with sqlite3.connect(access.path) as conn:
         assert conn.execute("SELECT count(*) FROM connected_sessions").fetchone()[0] == 0
@@ -268,7 +268,7 @@ def test_real_private_terminal_initialization_and_refusal(local):
     rc, text = _command(access.root, "initialize-connected", [
         ("Type INITIALIZE-WORKSPACE", "INITIALIZE-WORKSPACE"),
         ("Type INITIALIZE-CONNECTED", "INITIALIZE-CONNECTED"),
-    ], args=("--prepare-workspace",), on_prompt=lambda _: (
+    ], bootstrap=_LOCAL_OPERATOR_FIXTURE, args=("--prepare-workspace",), on_prompt=lambda _: (
         access.path.read_bytes() == before or pytest.fail("storage changed before consent completed")))
     assert rc == 0 and "workspace authority and connected read-session storage" in text
     assert access.path.read_bytes() == before

@@ -23,6 +23,9 @@ def _command(root, action, dialogue, *, args=(), bootstrap=None, on_prompt=None)
     tail = ["--root", str(root), "host", "owner", action, *args]
     argv = [_PYTHON, "-c", bootstrap, *tail] if bootstrap else [_PYTHON, "-m", "claudlobby", *tail]
     env = constructed_env()
+    if bootstrap == _RUNTIME_FIXTURE:
+        # Carry only the explicit private installation, never ambient bot/auth state.
+        env['CLAUDLOBBY_INSTALLATION'] = os.environ['CLAUDLOBBY_INSTALLATION']
     pid, fd = pty.fork()
     if pid == 0:
         os.execve(_PYTHON, argv, env)
@@ -68,23 +71,23 @@ def _command(root, action, dialogue, *, args=(), bootstrap=None, on_prompt=None)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="owner local console requires a POSIX terminal")
-def test_initialize_pair_revoke_through_actual_cli_terminal(tmp_path):
-    ensure_host_uid(tmp_path / "state")
-    store = OwnerAccess(tmp_path)
-    code, output = _command(tmp_path, "initialize", [("Type INITIALIZE", "INITIALIZE")])
+def test_initialize_pair_revoke_through_actual_cli_terminal(active):
+    root, _ = active
+    store = OwnerAccess(root)
+    code, output = _command(root, "initialize", [("Type INITIALIZE", "INITIALIZE")], bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert store.current_grant() is None
     principal = PrincipalRef("test-verifier", "human-001")
     challenge = store.begin_pairing(principal)
-    code, output = _command(tmp_path, "confirm", [
+    code, output = _command(root, "confirm", [
         ("Paste the browser pairing code (hidden):", challenge.token),
         ("Type PAIR", "PAIR"),
-    ])
+    ], bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert principal.subject in output and challenge.token not in output
     assert store.current_grant().principal == principal
     session = store.open_session(principal)
-    code, output = _command(tmp_path, "revoke", [("Type REVOKE", "REVOKE")])
+    code, output = _command(root, "revoke", [("Type REVOKE", "REVOKE")], bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert not store.current_grant().active
     with pytest.raises(AccessDenied):
@@ -92,23 +95,22 @@ def test_initialize_pair_revoke_through_actual_cli_terminal(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="owner local console requires a POSIX terminal")
-def test_attest_existing_source_through_actual_cli_terminal(tmp_path):
+def test_attest_existing_source_through_actual_cli_terminal(active):
     from claudlobby.plane.owner_source import inspect_source
-    from tests.test_plane_two_fleets import _seed
 
-    _seed(tmp_path)
-    OwnerAccess.initialize(tmp_path)
-    code, output = _command(tmp_path, "bind-source", [("Type BIND", "BIND")])
+    root, _ = active
+    OwnerAccess.initialize(root)
+    code, output = _command(root, "bind-source", [("Type BIND", "BIND")], bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert "including imported records" in output
-    inspect_source(tmp_path)
+    inspect_source(root)
 
 
 # Only release/native-manager identity, which includes the operator shell's
 # unit ancestry, is a fixture; terminal approval, CLI dispatch, active config,
 # mutation admission, Plane registration and authority writes are real. This is
 # not a sealed installed CLI or live bot canary.
-from tests.test_activation import cold, tmp_path  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 
@@ -117,15 +119,16 @@ import sys
 from pathlib import Path
 from dataclasses import replace
 from claudlobby import context
-from claudlobby.activation_state import read_selection
-from claudlobby.releases import read_release
+from claudlobby.installation import read_installation
+from claudlobby.resources import get_resources
 from claudlobby.runtime_admission import RuntimeIdentity
-from tests.package_fixtures import source_package
 root = Path(sys.argv[sys.argv.index('--root') + 1])
-release = read_release(root, read_selection(root)['release_id'], verify_files=False)
-package = replace(source_package(), native=release.native_path, artifact_id=release.inputs.artifact_id)
+installation = read_installation(Path(__import__('os').environ['CLAUDLOBBY_INSTALLATION']))
+assert installation.data_root == root
+package = get_resources(installation=installation)
 context.get_resources = lambda: package
-RuntimeIdentity.current = classmethod(lambda cls: RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id))
+RuntimeIdentity.current = classmethod(lambda cls: RuntimeIdentity(
+    installation.cli, installation.native, '', installation, package.source_revision))
 from claudlobby.commands import operator_context
 operator_context.require_operator_context = lambda root=None: None
 from claudlobby.__main__ import main
@@ -156,12 +159,12 @@ def test_ordinary_message_registration_grant_revoke_through_actual_terminal(acti
         bootstrap=_RUNTIME_FIXTURE, on_prompt=inspect)
     assert code == 0, output
     assert "ordinary messages only" in output and observed[0] in output
-    from claudlobby.activation_identity import read_selected_identity_bindings
-    fleet = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
+    from claudlobby.activation_identity import read_current_identity_bindings
+    fleet = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
     grant = store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
     assert grant.actor_uid == observed[0]
-    (root / "state/selected-release.json").unlink()
-    code, output = _command(root, "revoke-messages", [("Type REVOKE-MESSAGES", "REVOKE-MESSAGES")], args=("--fleet-uid", fleet))
+    assert not (root / "state/selected-release.json").exists()
+    code, output = _command(root, "revoke-messages", [("Type REVOKE-MESSAGES", "REVOKE-MESSAGES")], args=("--fleet-uid", fleet), bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert fleet in output and observed[0] in output
     assert store.current_grant() == owner
@@ -214,7 +217,7 @@ def test_terminal_owner_revision_change_before_allow_refuses(active):
 
 @pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
 def test_nudge_registration_and_independent_grant_through_actual_terminal(active):
-    from claudlobby.activation_identity import read_selected_identity_bindings
+    from claudlobby.activation_identity import read_current_identity_bindings
     root, host = active
     store = OwnerAccess.initialize(root)
     principal = PrincipalRef("test-verifier", "human-001")
@@ -226,14 +229,14 @@ def test_nudge_registration_and_independent_grant_through_actual_terminal(active
         bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert "selected-task nudges only" in output
-    fleet = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
+    fleet = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
     grant = store.current_nudge_grant(expected_owner=owner, fleet_uid=fleet)
     assert grant.actor_alias == "human:terminal-nudge"
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
-    (root / "state/selected-release.json").unlink()
+    assert not (root / "state/selected-release.json").exists()
     code, output = _command(root, "revoke-nudges", [("Type REVOKE-NUDGES", "REVOKE-NUDGES")],
-                            args=("--fleet-uid", fleet))
+                            args=("--fleet-uid", fleet), bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     with pytest.raises(AccessDenied, match="nudges_not_allowed"):
         store.current_nudge_grant(expected_owner=owner, fleet_uid=fleet)
@@ -242,7 +245,7 @@ def test_nudge_registration_and_independent_grant_through_actual_terminal(active
 @pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
 @pytest.mark.parametrize("capability,kind", [("feedback", "feedback"), ("permissions", "permission")])
 def test_action_registration_and_independent_grant_through_actual_terminal(active, capability, kind):
-    from claudlobby.activation_identity import read_selected_identity_bindings
+    from claudlobby.activation_identity import read_current_identity_bindings
     root, host = active
     store = OwnerAccess.initialize(root)
     principal = PrincipalRef("test-verifier", "human-001")
@@ -254,14 +257,14 @@ def test_action_registration_and_independent_grant_through_actual_terminal(activ
         bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     assert ("task-linked comments" if capability == "feedback" else "approve, decline and revoke") in output
-    fleet = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
+    fleet = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
     grant = getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)
     assert grant.actor_alias == "human:terminal-feedback"
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
-    (root / "state/selected-release.json").unlink()
+    assert not (root / "state/selected-release.json").exists()
     code, output = _command(root, "revoke-" + capability, [("Type REVOKE-" + capability.upper(), "REVOKE-" + capability.upper())],
-                            args=("--fleet-uid", fleet))
+                            args=("--fleet-uid", fleet), bootstrap=_RUNTIME_FIXTURE)
     assert code == 0, output
     with pytest.raises(AccessDenied, match=capability + "_not_allowed"):
         getattr(store, "current_" + kind + "_grant")(expected_owner=owner, fleet_uid=fleet)
@@ -274,10 +277,14 @@ def test_guided_setup_initial_consent_cancellation_over_real_terminal(tmp_path):
     bootstrap = """import sys
 from pathlib import Path
 from types import SimpleNamespace
-from claudlobby.commands import releases, host_owner_setup
+from dataclasses import replace
+from claudlobby.commands import host_owner_setup
+from claudlobby import resources
+from claudlobby.installation import Installation
 from claudlobby.__main__ import main
-releases._executing_release=lambda _: 'r-'+'a'*64
-releases._release=lambda *_: SimpleNamespace(release_id='r-'+'a'*64,seal_sha256='b'*64,cli_path=Path(sys.executable).with_name('claudlobby'))
+root=Path(sys.argv[sys.argv.index('--root')+1])
+package=replace(resources.get_resources(), installation=Installation(root.parent/'installation',root),source_revision='a'*40)
+resources.get_resources=lambda:package
 host_owner_setup._native_directories=lambda _: (Path(sys.argv[sys.argv.index('--install-directory')+1]),)
 raise SystemExit(main(sys.argv[1:]))
 """

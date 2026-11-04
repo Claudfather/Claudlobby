@@ -17,13 +17,18 @@ value the format cannot carry (design doc §6.6's idiom table):
   * `launchd_environment_extra` + `stdout_log` + `stderr_log` — launchd-only
     idiom. The systemd unit has no `EnvironmentVariables`/`StandardOutPath`/
     `StandardErrorPath` lines at all.
-  * `stop_command` / `stop_post_command` / `description` — the systemd unit
-    carries these (`ExecStop`/`ExecStopPost`, `Description=`); the plist has
-    no stop hook and no description field. PR B's adapter (`svc_disenroll`)
-    is what performs the same teardown on launchd; that adapter does not
-    exist yet in this task, so the plist side of the round trip is filled
-    from `fallback` and the presence of the stop hook is instead asserted
-    directly against the rendered systemd text (`TestFormatSpecificAllowances`).
+  * `stop_command` / `description` — the systemd unit carries these
+    (`ExecStop`, `Description=`); the plist has no stop hook and no
+    description field. `stop_post_command` (the `.tmux-env` cleanup) is in
+    neither unit text any more: explicit supervisor teardown (`supervisor.sh`)
+    owns it on both platforms, so both readers fill it from `fallback`, and
+    its absence from the rendered text is asserted directly
+    (`TestFormatSpecificAllowances`).
+
+Generated commands now go through the stable managed-Git entry, so the
+ExecStart line is a quoted argv (systemd's `"..."` syntax with `\\`, `\"`,
+`%%` and `$$` escapes) and an `Environment=` assignment is quoted whole when
+its value is not plain. `spec_from_systemd` decodes both.
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.config import BotConfig, FleetConfig, TeamConfig
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 from claudlobby.supervision import (
     RETIRED_IN_PR_B,
@@ -71,7 +76,7 @@ def _fixture_paths(tmp_path) -> Paths:
     for bot_id in _BOT_IDS:
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
     (root / "lib").mkdir()
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 # ----------------------------------------------------------------------
@@ -119,32 +124,60 @@ def parse_launchd_plist(text: str) -> dict:
 # ----------------------------------------------------------------------
 
 _EXEC_STOP_RE = re.compile(r"^/bin/sh -c '(.*)'$")
-_EXEC_STOP_POST_RE = re.compile(r"^/bin/(.*)$")
+_QUOTED_WORD_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _LABEL_FROM_STOP_COMMAND_RE = re.compile(r"tmux -L (\S+) kill-server")
+
+
+def _systemd_unquote(word: str) -> str:
+    """Inverse of installation.unit_systemd_command's per-word escaping."""
+    return re.sub(
+        r'\\(.)|%%|\$\$',
+        lambda m: m.group(1) if m.group(1) is not None else m.group(0)[0],
+        word,
+    )
+
+
+def _systemd_argv(command: str) -> list[str]:
+    """A fully quoted ExecStart line back into its argv."""
+    words = _QUOTED_WORD_RE.findall(command)
+    assert " ".join(f'"{w}"' for w in words) == command, command
+    return [_systemd_unquote(w) for w in words]
+
+
+def _systemd_environment_assignment(line: str) -> tuple[str, str]:
+    """One `Environment=` value: bare `K=V`, or `"K=V"` quoted whole with
+    `%` doubled (unit_systemd_environment)."""
+    if line.startswith('"'):
+        match = _QUOTED_WORD_RE.fullmatch(line)
+        assert match, line
+        line = re.sub(r"\\(.)", r"\1", match.group(1))
+    key, value = line.split("=", 1)
+    return key, value.replace("%%", "%")
 
 
 def spec_from_systemd(parsed: dict, fallback: SupervisionSpec) -> SupervisionSpec:
     """Rebuilds a spec from a parsed systemd unit. `launchd_environment_extra`,
     `stdout_log` and `stderr_log` are launchd-only idiom the unit carries no
-    lines for at all, so those three come from `fallback` (the spec that
-    built the text) rather than being parsed."""
+    lines for at all, and `stop_post_command` is owned by explicit supervisor
+    teardown rather than any unit directive, so those come from `fallback`
+    (the spec that built the text) rather than being parsed."""
     unit = parsed["Unit"]
     service = parsed["Service"]
     (description,) = unit["Description"]
     (working_dir_raw,) = service["WorkingDirectory"]
     (exec_start,) = service["ExecStart"]
     (exec_stop,) = service["ExecStop"]
-    (exec_stop_post,) = service["ExecStopPost"]
+    assert "ExecStopPost" not in service
     (restart,) = service["Restart"]
 
-    launcher_str, *launcher_args = exec_start.split(" ")
+    launcher_str, *launcher_args = _systemd_argv(exec_start)
     stop_command = _EXEC_STOP_RE.match(exec_stop).group(1)
-    stop_post_command = _EXEC_STOP_POST_RE.match(exec_stop_post).group(1)
+    stop_post_command = fallback.stop_post_command
     label = _LABEL_FROM_STOP_COMMAND_RE.search(stop_command).group(1)
 
     environment: dict[str, str] = {}
     for line in service.get("Environment", []):
-        key, value = line.split("=", 1)
+        key, value = _systemd_environment_assignment(line)
         environment[key] = value
 
     working_dir = Path(working_dir_raw)
@@ -202,23 +235,33 @@ def spec_from_launchd(parsed: dict, fallback: SupervisionSpec) -> SupervisionSpe
 
 
 class TestSupervisionRoundtrip:
-    def test_selected_release_context_survives_both_renderers(self, tmp_path, monkeypatch):
-        from claudlobby import context
-
-        selected = tmp_path / "release" / "bin" / "claudlobby"
-        monkeypatch.setattr(context, "selected_cli", lambda: selected)
+    def test_selected_release_context_survives_both_renderers(self, tmp_path):
+        """The managed Git installation's context, not an ambient interpreter's,
+        reaches both unit formats: the stable installation CLI is the launcher,
+        the committed native entry follows it, and no release or artifact
+        selector is carried."""
         fleet = _fixture_fleet()
         paths = _fixture_paths(tmp_path)
+        installation = paths.package.installation
+        assert installation is not None
         spec = build_supervision_spec(fleet.bots["lead"], fleet, paths)
         expected = {
             "CLAUDLOBBY_ROOT": str(paths.root),
             "FLEET_ROOT": str(paths.fleet_config_dir),
-            "CLAUDLOBBY_NATIVE_DIR": str(paths.package.native),
-            "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.library),
-            "CLAUDLOBBY_CLI": str(selected),
-            "CLAUDLOBBY_ARTIFACT_ID": paths.package.artifact_id,
+            "CLAUDLOBBY_NATIVE_DIR": str(paths.package.runtime_native),
+            "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.runtime_library),
+            "CLAUDLOBBY_CLI": str(installation.cli),
+            "CLAUDLOBBY_INSTALLATION": str(installation.directory),
         }
         assert expected.items() <= spec.environment.items()
+        assert not {"CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID"} & spec.environment.keys()
+        bot_dir = paths.bot_runtime("lead")
+        assert spec.launcher == installation.cli
+        assert spec.launcher_args == (
+            "--root", str(paths.root), "_native", "--unit", spec.label,
+            "--phase", "bots", "--mode", "exec", "--",
+            str(paths.package.runtime_native / "start-bot.sh"), str(bot_dir),
+        )
         assert spec_from_systemd(parse_systemd_unit(render_systemd_unit(spec)), spec) == spec
         assert spec_from_launchd(parse_launchd_plist(render_launchd_plist(spec)), spec) == spec
 
@@ -277,7 +320,16 @@ class TestFormatSpecificAllowances:
         plist = render_launchd_plist(spec)
 
         assert f"ExecStop=/bin/sh -c '{spec.stop_command}'" in unit
-        assert f"ExecStopPost=/bin/{spec.stop_post_command}" in unit
+        # The .tmux-env cleanup is no unit directive on either platform: a raw
+        # ExecStopPost would also run after a refused ExecStart, so explicit
+        # supervisor teardown owns it. The spec still carries the command.
+        directives = [
+            ln for ln in unit.splitlines() if ln.strip() and not ln.startswith("#")
+        ]
+        assert not any(ln.startswith("ExecStopPost=") for ln in directives)
+        assert not any(".tmux-env" in ln for ln in directives)
+        assert spec.stop_post_command == f"rm -f {spec.bot_dir}/.tmux-env"
+        assert "Explicit supervisor teardown" in unit
         # No stop hook of any shape reaches the plist: neither the tmux
         # kill-server invocation nor the .tmux-env cleanup appears in it.
         assert "kill-server" not in plist

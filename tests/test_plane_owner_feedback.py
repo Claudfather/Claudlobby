@@ -1,4 +1,4 @@
-"""Owner feedback over private activation/Plane, with a synthetic native receiver.
+"""Owner feedback over private committed Git/Plane, with a synthetic native receiver.
 
 No installed CLI, browser authentication, real bot or native delivery is claimed.
 """
@@ -26,9 +26,7 @@ from claudlobby.request_receipts import ReceiptBusy, ReceiptConflict, RequestSto
 from claudlobby.runtime_admission import ReleaseMismatch
 from claudlobby.task_queries import TaskNotFoundError, TaskQueryError
 from claudlobby.task_state import TaskStateError
-from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
 from tests.conftest import constructed_env
@@ -37,9 +35,9 @@ from tests.conftest import constructed_env
 @pytest.fixture
 def gateway(active, monkeypatch):  # noqa: F811
     root, host = active
-    _human(monkeypatch, host.release)
-    package = replace(source_package(), native=host.release.native_path,
-                      artifact_id=host.release.inputs.artifact_id)
+    _human(monkeypatch, host.installation)
+    package = host.package
+    monkeypatch.delenv("CLAUDLOBBY_INSTALLATION", raising=False)
     ctx = operation_context.resolve_task_mutation_context(
         root=root, fleet="example", operator_alias="human:paired-owner", package=package)
     access = OwnerAccess.initialize(root)
@@ -54,7 +52,9 @@ def gateway(active, monkeypatch):  # noqa: F811
     adapter = OwnerFeedback(root, package=package)
     options = dict(fleet="example", fleet_uid=ctx.fleet_uid, task_id=task.task_id,
         manager_uid=ctx.bots[ctx.context.fleet.manager].uid, request_id=str(uuid4()), expected_grant=grant)
-    selection = dict(expected_assignment_id=None, expected_release_id=host.release.release_id)
+    selection = dict(expected_assignment_id=None, expected_release_id=None,
+                     expected_source_revision=host.snapshot["revision"],
+                     expected_config_fingerprint=host.snapshot["fingerprint"])
     monkeypatch.setattr(operation_context, "_local_operator_alias",
                         lambda: pytest.fail("owner feedback must not use the OS account"))
     return adapter, reader, ctx, options, selection
@@ -130,7 +130,7 @@ def test_feedback_comment_survives_native_whitespace_normalization(gateway, monk
     # Run the shipped sanitizer, not a Python model of its normalization.
     result = subprocess.run(['/bin/bash', '-c',
         'source "$1"; sanitize_tmux_input "$2"', 'feedback-sanitizer',
-        str(source_package().native / 'lib-common.sh'), calls[0][1]],
+        str(gateway[0].package.native / 'lib-common.sh'), calls[0][1]],
         env=constructed_env(), capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.split(' Comment: ', 1)[1]) == authored
@@ -236,7 +236,7 @@ def test_generated_carriers_refuse_submit_and_retained_inspection(gateway, monke
         assert len(calls) == 1
     with sqlite3.connect(db_file(adapter.root)) as conn:
         before = conn.execute("SELECT count(*) FROM communications").fetchone()[0]
-    value = selection["expected_release_id"] if carrier == "CLAUDLOBBY_RELEASE_ID" else "synthetic-carrier"
+    value = "r-" + "0" * 64 if carrier == "CLAUDLOBBY_RELEASE_ID" else "synthetic-carrier"
     monkeypatch.setenv(carrier, "" if empty else value)
     with pytest.raises(AccessDenied, match="generated_context_refused"):
         if operation == "submit":
@@ -543,3 +543,56 @@ def test_feedback_grant_rotation_preserves_message_and_nudge_authority(gateway):
     assert adapter.access.authorize_nudge(reader.token, reader.principal, **scope) == nudge
     with pytest.raises(AccessDenied, match='feedback_binding_changed'):
         adapter.inspect(reader, **options)
+
+
+def _git_gateway(gateway, monkeypatch):
+    """Use committed Git config with the existing private Plane and identity rows."""
+    from claudlobby import active_config
+    old, reader, ctx, options, _ = gateway
+    package = old.package
+    snapshot = active_config.read_current_config(old.root, installation=package.installation,
+                                                 revision=package.source_revision)
+    selected = dict(expected_assignment_id=None, expected_release_id=None,
+                    expected_source_revision=snapshot['revision'], expected_config_fingerprint=snapshot['fingerprint'])
+    return type(old)(old.root, package=package), reader, ctx, options, selected
+
+
+@pytest.fixture
+def git_gateway(gateway, monkeypatch):
+    return _git_gateway(gateway, monkeypatch)
+
+
+@pytest.mark.parametrize('received', [True, False])
+def test_git_feedback_retains_original_receipt_across_update(git_gateway, monkeypatch, received):
+    from claudlobby import active_config, activation_state
+    adapter, reader, ctx, options, selected = git_gateway
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('sealed selection read'))
+    calls, repairs = receiver(monkeypatch, received=received)
+    if received:
+        invoke(git_gateway)
+    else:
+        with pytest.raises(CommandFailure):
+            invoke(git_gateway)
+    original = adapter.inspect(reader, **options).request
+    assert original.route.release_id is None
+    assert original.route.revision == selected['expected_source_revision']
+    snapshot = active_config.read_current_config(adapter.root, installation=adapter.package.installation)
+    updated = {**snapshot, 'revision': 'b' * 40}
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=adapter.package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    from claudlobby.runtime_admission import RuntimeIdentity
+    adapter.package = replace(adapter.package, source_revision=updated['revision'])
+    identity = RuntimeIdentity(adapter.package.installation.cli, adapter.package.native, '',
+                               adapter.package.installation, updated['revision'])
+    monkeypatch.setattr(RuntimeIdentity, 'current', lambda: identity)
+    observed = adapter.inspect(reader, **options)
+    assert observed.request == original
+    assert len(calls) == 1 and not repairs
+
+
+def test_git_feedback_rejects_wrong_selected_config_before_effect(git_gateway, monkeypatch):
+    calls, _ = receiver(monkeypatch)
+    with pytest.raises(AccessDenied):
+        invoke(git_gateway, expected_config_fingerprint='f' * 64)
+    assert not calls

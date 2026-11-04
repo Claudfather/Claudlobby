@@ -23,8 +23,8 @@ from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
 from ..operation_context import bind_task_context
 from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
-from ..runtime_admission import RuntimeIdentity, mutation_admission
-from .owner_service import admitted_action, check_action_process
+from ..runtime_admission import mutation_admission
+from .owner_service import admitted_action, check_action_process, action_runtime_identity, action_runtime_matches
 from .ids import read_host_uid
 from .owner_action_authorization import action_authorization
 from .owner_access import AccessDenied, OwnerMessageGrant, VerifiedReader
@@ -120,14 +120,13 @@ class OwnerMessages:
         if not isinstance(text, str) or len(text) > 2000:
             raise ValueError("message requires at most 2000 characters")
         body = MessageBody.from_input(text)
-        identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native,
-                                   self.package.artifact_id)
+        identity = action_runtime_identity(self.package)
         with mutation_admission(self.root, identity=identity) as release:
             grant, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
             target = self._target(ctx, recipient_uid)
             route = resolve_message_route(target, root=self.root, fleet=ctx.context.fleet.name,
                                           package=self.package, caller_context=ctx)
-            if (route.release_id != release.release_id or route.host_uid != self.host_uid
+            if (not action_runtime_matches(release, route) or route.host_uid != self.host_uid
                     or route.selected_fleet_uid != fleet_uid or route.peer_fleet_uid != fleet_uid
                     or route.caller != ctx.caller or route.peer.uid != recipient_uid):
                 raise AccessDenied("message_route_changed")

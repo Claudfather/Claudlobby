@@ -1,4 +1,4 @@
-import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
+import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
 import { createPermissionPanel } from "./permission-panel.js";
 import { esc, ago, stateBlock } from "./panel-state.js";
 
@@ -636,7 +636,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (assignment === null ? !unassigned.includes(task.state) : !live.includes(task.state) || !assignment || assignment.task_id !== task.task_id
         || !live.includes(assignment.state) || assignment.terminal_event !== null) return null;
     const result = { recipient: leadId(value), task_id: task.task_id,
-      assignment_id: assignment === null ? null : assignment.assignment_id, release_id: value.release_id };
+      assignment_id: assignment === null ? null : assignment.assignment_id, ...runtimeFields(value) };
     return validTaskActionTarget(result) ? result : null;
   }
   function updateDetailActions() {

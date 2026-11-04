@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -821,7 +822,7 @@ def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
     override (the TestTaskRecheckTimer shape in tests/test_composer.py)."""
     from claudlobby.composer import compose_fleet_timers
     from claudlobby.config import load_fleet
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "r"
@@ -830,8 +831,16 @@ def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
         (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     (root / "fleet.yaml").write_text(_CHECKIN_FLEET + extra)
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    paths = Paths(root=root, fleet_dir=root, package=git_package(root))
     return compose_fleet_timers(fleet, paths, merged)
+
+
+def _checkin_command(service: str) -> tuple[str, ...]:
+    from claudlobby.installation import parse_git_unit_argv
+
+    command, = [line.removeprefix("ExecStart=") for line in service.splitlines()
+                if line.startswith("ExecStart=")]
+    return parse_git_unit_argv(shlex.split(command)).command
 
 
 def _dormant_entries(timers_dir: Path) -> list[str]:
@@ -864,14 +873,18 @@ def test_arming_the_job_takes_it_out_of_the_dormant_manifest(tmp_path):
     # Not just present: composed from the REAL system.yaml job (script +
     # fleet argument), not a fleet-only stub the override happened to create
     # with no script of its own.
-    assert "claudlobby/_runtime_scripts/manager-checkin.sh checkin-fleet" in service.read_text()
+    command = _checkin_command(service.read_text())
+    assert len(command) == 2 and command[1] == "checkin-fleet"
+    assert command[0].endswith("/claudlobby/_runtime_scripts/manager-checkin.sh")
     assert "com.checkin.manager-checkin" not in _dormant_entries(timers)
 
 
 def test_the_unit_execs_the_trigger_with_the_fleet_as_its_argument(tmp_path):
     timers = _checkin_timers(tmp_path)
     service = (timers / "com.checkin.manager-checkin.service").read_text()
-    assert "claudlobby/_runtime_scripts/manager-checkin.sh checkin-fleet" in service
+    command = _checkin_command(service)
+    assert len(command) == 2 and command[1] == "checkin-fleet"
+    assert command[0].endswith("/claudlobby/_runtime_scripts/manager-checkin.sh")
 
 
 def test_the_beat_is_fifteen_minutes(tmp_path):
@@ -896,4 +909,4 @@ def test_the_arm_line_is_the_enroll_carrier():
 
     s = sw.by_key("manager-checkin")
     assert "defaults.jobs.manager-checkin.enroll: true" in s.arm
-    assert "host activate PLAN_ID" in s.arm
+    assert "host update apply FULL_COMMIT_SHA" in s.arm

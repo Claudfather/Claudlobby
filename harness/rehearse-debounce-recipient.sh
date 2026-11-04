@@ -4,7 +4,7 @@
 #
 # A marker changing shape is not the property. The property is a human-facing
 # push arriving in the session that exists NOW, so this drives the real
-# fleet-pulse.sh against a real (throwaway) bot whose real condition is still
+# public fleet pulse against a real (throwaway) bot whose real condition is still
 # unresolved, restarts the real manager session, and counts what that session
 # was submitted.
 #
@@ -37,12 +37,15 @@ if [ -n "${INPUT_BOX_START_DELAY:-}" ]; then
 fi
 
 ROOT="$(mktemp -d)"
+ROOT="$(cd "$ROOT" && pwd -P)"
 FLEET="rdr$$"
 MGR_SOCK="rdrm$$"
 MGR="mgr$$"
 BOTS="$ROOT/local/$FLEET/runtime/bots"
 export TMUX_TMPDIR="$ROOT/tmx"
 mkdir -p "$TMUX_TMPDIR" "$BOTS/w1"
+printf '%s\n' "$ROOT" > "$ROOT/.claudlobby-harness-root"
+mkdir -p "$ROOT/home"
 
 pass=0; fail=0
 check () { # <label> <expected> <actual>
@@ -52,6 +55,7 @@ check () { # <label> <expected> <actual>
 cleanup () {
     tmux -L "$MGR_SOCK" kill-server 2>/dev/null || true
     rm -rf "$ROOT"
+    rm -rf "$(dirname "$ROOT")/.harness-installation-${ROOT##*/}"
 }
 trap cleanup EXIT
 
@@ -106,10 +110,11 @@ stop_manager () { (. "$LIB_DIR/lib-common.sh" && harness_box_down "$MGR_SOCK" "$
 push_count ()    { grep -c "\\[FLEET-PULSE\\].*$1" "$MGR_LOG" || true; }
 
 run_pulse () {
-    env CLAUDLOBBY_ROOT="$ROOT" TMUX_TMPDIR="$TMUX_TMPDIR" \
+    env -u PLANE_EMIT_DISABLED -u PLANE_SOCKET CLAUDLOBBY_ROOT="$ROOT" HOME="$ROOT/home" TMUX_TMPDIR="$TMUX_TMPDIR" \
         FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         TELEGRAM_GROUP_CHAT_ID="" FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" \
-        bash "$LIB_DIR/fleet-pulse.sh" "$FLEET" >"$ROOT/pulse.log" 2>&1 || true
+        python3 "$REPO/harness/compose.py" --root "$ROOT" --fleet "$FLEET" --record-plane --pulse \
+        >"$ROOT/pulse.log" 2>&1 || true
 }
 
 echo "=== #831 rehearsal: does a FLEET-PULSE alert survive a manager restart? ==="

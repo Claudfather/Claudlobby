@@ -507,6 +507,7 @@ def _pulse_lib(tmp_path, capture):
 
 
 def _pulse(root, libdir, *, scratch_plane_env, serve=True, **extra):
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
     env = _door_env(root, TMUX_TMPDIR=str(root / "tmux"),
                     PATH=os.environ.get("PATH", "/usr/bin:/bin"),
                     FLEET_PULSE_ESCALATION_CHAT_ID="-1001234567890",
@@ -516,7 +517,8 @@ def _pulse(root, libdir, *, scratch_plane_env, serve=True, **extra):
         with _serving(root, scratch_plane_env) as sock:
             return _pulse(root, libdir, scratch_plane_env=scratch_plane_env, serve=False,
                           PLANE_SOCKET=str(sock), **extra)
-    return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), F], capture_output=True,
+    return subprocess.run([sys.executable, str(REPO / "harness/compose.py"), "--root", str(root),
+                           "--fleet", F, "--pulse", "--record-plane", "--native-dir", str(libdir)], capture_output=True,
                           text=True, timeout=300, env=env)
 
 

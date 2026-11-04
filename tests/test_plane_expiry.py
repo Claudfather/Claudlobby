@@ -4,7 +4,7 @@ assignments (a fresh one and a completed one are untouched); the event
 removes the card from ATTENTION_SQL and TASK_STATUS_SQL says `expired`;
 a second run is a no-op (idempotent by construction); dry-run emits
 nothing; the launcher self-gates; the composer stamps the arming flag.
-Public expiry requires an active selected release and filters to its fleets.
+Public expiry requires committed Git configuration and filters to its fleets.
 """
 
 from __future__ import annotations
@@ -161,20 +161,51 @@ def _selected_sweep(monkeypatch, root, *, dry_run=False):
 
     @contextmanager
     def admitted(*_args, **_kwargs):
-        yield SimpleNamespace(release_id="selected-release", seal_sha256="selected-seal")
+        from claudlobby.runtime_admission import GitCurrentRuntime
+        from tests.package_fixtures import git_package
+
+        yield GitCurrentRuntime(git_package(root).installation,
+                                "a" * 40, "b" * 64, {"fleets": {F: {}}})
 
     monkeypatch.setattr(plane_expire, "mutation_admission", admitted)
     monkeypatch.setattr(plane_expire, "resolve_paths", lambda **_kwargs:
                         SimpleNamespace(root=root))
     monkeypatch.setattr(plane_expire.RuntimeIdentity, "current", classmethod(
         lambda cls: SimpleNamespace()))
-    monkeypatch.setattr("claudlobby.activation_state.read_selection",
-                        lambda _root: {"plan_id": "selected-plan"})
-    monkeypatch.setattr("claudlobby.config_plan.read_plan", lambda *_args:
-                        SimpleNamespace(release_id="selected-release", release_seal="selected-seal",
-                                        fleets=(F,)))
     return plane_expire.dispatch(SimpleNamespace(root=root, fleet=None, seed=False,
                                                   after_days=None, dry_run=dry_run))
+
+
+def test_git_expiry_uses_admitted_fleet_roster_and_preserves_unknown_outcome(tmp_path, monkeypatch):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_expire
+    root = _root(tmp_path)
+    _seed(root)
+    _dispatch(root, "d", expected_by=NOW - timedelta(days=10), fleet="parked-fleet")
+    dry = _selected_sweep(monkeypatch, root, dry_run=True)
+    assert dry.release_id is None
+    assert dry.data["source_revision"] == "a" * 40
+    assert dry.data["config_fingerprint"] == "b" * 64
+    assert dry.data["fleets"] == [F]
+    assert dry.data["candidates"] == 1 and dry.data["skipped_unselected"] == 1
+    emit = plane_expire.emit_batch
+    def unknown(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic I/O failure")
+    monkeypatch.setattr(plane_expire, "emit_batch", unknown)
+    with pytest.raises(CommandFailure) as failed:
+        _selected_sweep(monkeypatch, root)
+    assert failed.value.error.code == "commit_unknown"
+    assert failed.value.data["recording"] == "unknown"
+    assert failed.value.data["config_fingerprint"] == "b" * 64
+    assert failed.value.data["event_ids"] and "expired" not in failed.value.data
+    # The fake emitter failed before commit. Resolve that fact before a fresh sweep.
+    with closing(connect(db_path(root))) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='expired'").fetchone()[0] == 0
+    monkeypatch.setattr(plane_expire, "emit_batch", emit)
+    live = _selected_sweep(monkeypatch, root)
+    assert live.data["expired"] == 1 and live.data["recording"] == "committed"
+    assert _selected_sweep(monkeypatch, root).data["expired"] == 0
 
 
 def test_selected_dry_run_then_live(tmp_path, monkeypatch):
@@ -296,7 +327,7 @@ def test_launcher_runs_with_no_flag_at_all(tmp_path):
 def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     import yaml
     from claudlobby.composer import compose_host_timers
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -319,7 +350,7 @@ def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="1", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     assert "Environment=PLANE_EXPIRE_ENABLED=1" in (
         out / "claudlobby-plane-expire.service").read_text()
     assert "PLANE_EXPIRE" not in (out / "claudlobby-plane-prune.service").read_text()
@@ -332,7 +363,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     would keep firing with no way to tell why (#1383's class, inverted)."""
     import yaml  # noqa: F401 — mirrors the fixture above
     from claudlobby.composer import compose_host_timers
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -347,7 +378,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="0", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     assert "Environment=PLANE_EXPIRE_ENABLED=0" in (
         out / "claudlobby-plane-expire.service").read_text()
 

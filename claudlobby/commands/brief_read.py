@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
@@ -11,6 +9,7 @@ import shlex
 import sqlite3
 import time
 
+from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
 
 
@@ -18,7 +17,7 @@ def _viewer(context, origin, bindings, requested, *, release_id, restage):
     if (bindings["manager"] != context.fleet.manager
             or set(bindings["bots"]) != set(context.fleet.bots)):
         raise CommandFailure("conflict", "active brief identities differ from frozen fleet",
-                             hint=f"fleet bots or manager changed after activation; {restage}",
+                             hint=f"current fleet bots or manager differ; {restage}",
                              release_id=release_id)
     if origin is not None and (origin.fleet.name != context.fleet.name
                                or origin.bot_id not in context.fleet.bots):
@@ -34,74 +33,6 @@ def _viewer(context, origin, bindings, requested, *, release_id, restage):
     if origin is not None:
         return origin.bot_id, "generated"
     return bindings["manager"], "manager_default"
-
-
-def _startup_phase(record):
-    """Only the selected candidate's late native startup may be waited on."""
-    from ..activation_state import ActivationError, STEPS
-
-    if record.status == "active":
-        return
-    completed = record.body.get("completed")
-    if (record.status != "activating" or "adoption_abort" in record.body
-            or "upgrade_abort" in record.body or not isinstance(completed, list)
-            or completed != list(STEPS[:len(completed)])
-            or not STEPS.index("bots_started") <= len(completed) < len(STEPS)
-            or record.body.get("pending") not in (None, STEPS[len(completed)])):
-        raise ActivationError("selected configuration is not in late startup")
-
-
-def _wait_for_startup(args):
-    """Observe sealed startup once, then poll only selection/journal; never admit work."""
-    from ..active_config import _selected_context, _selected_plan
-    from ..activation_identity import _selected_bindings
-    from ..activation_state import ActivationError, read_activation, read_selection
-    from ..context import resolve_paths
-    from ..operation_context import _selected_task_contexts
-
-    snapshots = {}
-
-    def observe(*, root=None, fleet=None, bot=None, package=None):
-        paths = resolve_paths(root=root, package=package)
-        if paths.root not in snapshots:
-            selected, record, plan = _selected_plan(paths.root, paths.package)
-            _startup_phase(record)
-            snapshots[paths.root] = (selected, record, plan, paths.package)
-        selected, record, plan, package = snapshots[paths.root]
-        context = _selected_context(plan, fleet, bot=bot, package=package)
-        _selected_bindings(plan, record, context.fleet.name, package=package)
-        return context
-
-    context, origin = _selected_task_contexts(root=args.root, fleet=args.fleet,
-                                             package=None, _resolver=observe)
-    if len(snapshots) != 1:
-        raise ActivationError("startup brief caller and destination belong to different hosts")
-    selected, initial, plan, package = snapshots[context.paths.root]
-    bindings = _selected_bindings(plan, initial, context.fleet.name, package=package)
-    _viewer(context, origin, bindings, args.bot, release_id=selected["release_id"],
-            restage="inspect claudlobby host releases")
-    deadline = time.monotonic() + args.startup_wait
-    record = initial
-    while True:
-        if read_selection(context.paths.root) != selected:
-            raise CommandFailure("conflict", "brief startup selection changed while waiting",
-                                 release_id=selected["release_id"])
-        previous = record
-        record = read_activation(context.paths.root, selected["activation_id"])
-        if (record.body["intent"] != initial.body["intent"]
-                or record.body.get("identity_bindings") != initial.body.get("identity_bindings")
-                or record.body.get("completed", [])[:len(previous.body["completed"])]
-                   != previous.body["completed"]):
-            raise ActivationError("selected startup intent or identity bindings changed")
-        _startup_phase(record)
-        if record.status == "active":
-            return context.paths.root, selected
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise CommandFailure("timeout", "brief startup wait expired; selected activation is still incomplete",
-                                 hint="remain idle; inspect claudlobby host releases; no work was read",
-                                 release_id=selected["release_id"])
-        time.sleep(min(1.0, remaining))
 
 
 @contextmanager
@@ -146,37 +77,32 @@ def dispatch(args) -> CommandOutput:
 
         usage_window = _window(args.usage_since)
 
-    from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_identity import read_current_identity_bindings
+    from ..active_config import runtime_read_stamp
     from ..brief import (BriefIdentityMismatch, boot_provenance, build_brief,
                          format_boot_brief, format_brief)
     from ..config_plan import PlanError
-    from ..context import BotNotFoundError
+    from ..context import BotNotFoundError, resolve_paths
     from ..env_tiers import ResolverUnavailable, resolve as resolve_env_tiers
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      resolve_operation_scope)
     from ..paths import InvalidPathSelector
-    from ..releases import ReleaseError
 
     release_id = None
-    releases = "inspect claudlobby host releases"
+    releases = "inspect claudlobby host update status"
     try:
-        waited_selection = _wait_for_startup(args) if startup_wait is not None else None
         context, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if context.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no operational brief")
         root = shlex.quote(str(context.paths.root))
-        restage = (f"run claudlobby --root {root} config plan --release RELEASE_ID "
-                   "(host releases lists the IDs), then host activate the reviewed plan")
-        selection = read_selection(context.paths.root)
-        if waited_selection is not None and waited_selection != (context.paths.root, selection):
-            raise CommandFailure("conflict", "brief startup selection changed before admitted read")
-        if selection is None:
+        restage = f"inspect claudlobby --root {root} host update status"
+        stamp = runtime_read_stamp(context.paths.root, package=context.paths.package)
+        if stamp is None:
             raise CommandFailure("conflict", "active brief selection is unavailable",
-                                 hint=f"inspect claudlobby --root {root} host releases; pass this "
+                                 hint=f"inspect claudlobby --root {root} host update status; pass this "
                                       f"host's --root, or {restage}")
-        release_id = selection["release_id"]
-        bindings = read_selected_identity_bindings(context.paths.root, context.fleet.name,
+        release_id = stamp.release_id
+        bindings = read_current_identity_bindings(context.paths.root, context.fleet.name,
                                                    package=context.paths.package)
         viewer, source = _viewer(context, origin, bindings, args.bot,
                                  release_id=release_id, restage=restage)
@@ -204,9 +130,9 @@ def dispatch(args) -> CommandOutput:
                 selected_identity=selected_identity)).rstrip("\n"),)
                      if args.boot else (f"Brief viewer: bot:{context.fleet.name}/{viewer} ({source})",
                                         format_brief(brief).rstrip("\n")))
-        if read_selection(context.paths.root) != selection:
-            raise selection_read_conflict('active brief selection changed during read', release_id=release_id)
-        return CommandOutput({"brief": brief, "viewer_selection": source},
+        stamp.check(context.paths.root, package=context.paths.package,
+                    message="active brief selection changed during read")
+        return CommandOutput({"brief": brief, "viewer_selection": source, **stamp.provenance},
                              release_id=release_id, lines=lines)
     except CommandFailure:
         raise
@@ -220,8 +146,8 @@ def dispatch(args) -> CommandOutput:
         # Authored scope causes name selectors and identities, not config values.
         raise CommandFailure("conflict", "generated brief context conflicts with active fleet",
                              hint=f"{exc}; compare CLAUDLOBBY_ROOT, FLEET_NAME and BOT_ID with "
-                                  f"the active fleet ({releases}); a bot added since activation "
-                                  "needs config plan, then host activate",
+                                  f"the active fleet ({releases}); a bot added since the current update "
+                                  "needs a reviewed Git configuration update",
                              release_id=release_id) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid brief root or fleet selector",
@@ -239,9 +165,6 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "active brief scope or identities are incomplete",
                              hint=f"{message}; {releases}",
                              release_id=release_id) from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected brief release is unavailable or mismatched",
-                             hint=releases, release_id=release_id) from exc
     except PlanError as exc:
         # e.g. "select --fleet from the active fleets" on a multi-fleet host.
         raise CommandFailure("conflict", "active brief configuration is incomplete",

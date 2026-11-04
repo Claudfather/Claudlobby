@@ -25,7 +25,7 @@ from claudlobby.config import (
     _coerce_fleet_pulse,
     load_fleet,
 )
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 _FLEET = """\
@@ -55,7 +55,7 @@ _NO_BLOCK = """\
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _write(root: Path, body: str) -> Path:
