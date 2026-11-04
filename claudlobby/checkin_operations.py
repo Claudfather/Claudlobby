@@ -79,10 +79,10 @@ def validate_content(decision: dict, selection: dict | None, *, checkin_id: str)
     return data
 
 
-def record_checkin(ctx, selected: dict, decision: dict, selection: dict | None, *,
+def record_checkin(ctx, selected, decision: dict, selection: dict | None, *,
                    request_id: str) -> CheckinResult:
-    """Commit the exact decision first; caller holds selected-release admission."""
-    from .activation_state import read_selection
+    """Commit the exact decision first; caller holds current runtime admission."""
+    from .active_config import RuntimeReadStamp, runtime_read_stamp
     from .plane import PLANE_SCHEMA_VERSION
     from .plane.emit_api import emit_batch, validate_item
     from .plane.ids import derive_uid
@@ -98,7 +98,8 @@ def record_checkin(ctx, selected: dict, decision: dict, selection: dict | None, 
                          and ctx.caller_fleet_uid == ctx.fleet_uid)
     local_human = (ctx.caller_fleet_uid is None
                    and re.fullmatch(r"human:[^\s:/]+", ctx.caller.alias) is not None)
-    if (not isinstance(selected, dict) or read_selection(root) != selected
+    if (not isinstance(selected, RuntimeReadStamp)
+            or runtime_read_stamp(root, package=ctx.context.paths.package) != selected
             or not (generated_manager or local_human)):
         raise CheckinError("conflict", "check-in caller differs from selected manager or local human")
     try:
@@ -166,7 +167,7 @@ def record_checkin(ctx, selected: dict, decision: dict, selection: dict | None, 
             elif previous.intent.stages[0].facts[0] != fact:
                 raise CheckinError("conflict", "unrecorded check-in attempt does not rebuild exactly",
                                    hint=inspect)
-            if read_selection(root) != selected:
+            if runtime_read_stamp(root, package=ctx.context.paths.package) != selected:
                 raise CheckinError("conflict", "active check-in selection changed", retryable=True,
                                    hint="retry the same --request-id")
             store.begin_attempt()

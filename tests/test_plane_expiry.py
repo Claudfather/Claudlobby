@@ -156,12 +156,18 @@ def test_public_huge_horizon_refuses_before_native_or_storage(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def _selected_sweep(monkeypatch, root, *, dry_run=False):
+def _selected_sweep(monkeypatch, root, *, dry_run=False, git=False):
     from claudlobby.commands import plane_expire
 
     @contextmanager
     def admitted(*_args, **_kwargs):
-        yield SimpleNamespace(release_id="selected-release", seal_sha256="selected-seal")
+        if git:
+            from claudlobby.installation import Installation
+            from claudlobby.runtime_admission import GitCurrentRuntime
+            yield GitCurrentRuntime(Installation(root.parent / "installation", root),
+                                    "a" * 40, "b" * 64, {"fleets": {F: {}}})
+        else:
+            yield SimpleNamespace(release_id="selected-release", seal_sha256="selected-seal")
 
     monkeypatch.setattr(plane_expire, "mutation_admission", admitted)
     monkeypatch.setattr(plane_expire, "resolve_paths", lambda **_kwargs:
@@ -175,6 +181,38 @@ def _selected_sweep(monkeypatch, root, *, dry_run=False):
                                         fleets=(F,)))
     return plane_expire.dispatch(SimpleNamespace(root=root, fleet=None, seed=False,
                                                   after_days=None, dry_run=dry_run))
+
+
+def test_git_expiry_uses_admitted_fleet_roster_and_preserves_unknown_outcome(tmp_path, monkeypatch):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_expire
+    root = _root(tmp_path)
+    _seed(root)
+    _dispatch(root, "d", expected_by=NOW - timedelta(days=10), fleet="parked-fleet")
+    dry = _selected_sweep(monkeypatch, root, dry_run=True, git=True)
+    assert dry.release_id is None
+    assert dry.data["source_revision"] == "a" * 40
+    assert dry.data["config_fingerprint"] == "b" * 64
+    assert dry.data["fleets"] == [F]
+    assert dry.data["candidates"] == 1 and dry.data["skipped_unselected"] == 1
+    emit = plane_expire.emit_batch
+    def unknown(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic I/O failure")
+    monkeypatch.setattr(plane_expire, "emit_batch", unknown)
+    with pytest.raises(CommandFailure) as failed:
+        _selected_sweep(monkeypatch, root, git=True)
+    assert failed.value.error.code == "commit_unknown"
+    assert failed.value.data["recording"] == "unknown"
+    assert failed.value.data["config_fingerprint"] == "b" * 64
+    assert failed.value.data["event_ids"] and "expired" not in failed.value.data
+    # The fake emitter failed before commit. Resolve that fact before a fresh sweep.
+    with closing(connect(db_path(root))) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='expired'").fetchone()[0] == 0
+    monkeypatch.setattr(plane_expire, "emit_batch", emit)
+    live = _selected_sweep(monkeypatch, root, git=True)
+    assert live.data["expired"] == 1 and live.data["recording"] == "committed"
+    assert _selected_sweep(monkeypatch, root, git=True).data["expired"] == 0
 
 
 def test_selected_dry_run_then_live(tmp_path, monkeypatch):

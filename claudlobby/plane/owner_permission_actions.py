@@ -9,11 +9,11 @@ import re
 from uuid import UUID
 
 from ..activation_identity import read_selected_identity_bindings
-from ..active_config import resolve_active_context
+from ..active_config import resolve_active_context, runtime_read_stamp
 from ..operation_context import bind_task_context, OperationContextError
 from ..request_queries import read_request
 from ..request_receipts import ReceiptConflict
-from ..runtime_admission import RuntimeIdentity, mutation_admission
+from ..runtime_admission import mutation_admission
 from ..application_permissions import decide_and_notify_permission, inspect_permission_notification
 from ..task_permissions import (list_task_permissions,
                                permission_decision_digest, read_permission)
@@ -23,7 +23,8 @@ from .ids import ID_PATTERNS
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
 from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
-from .owner_service import admitted_action, check_action_process
+from .owner_service import admitted_action, check_action_process, action_runtime_identity
+from .owner_task_action_protocol import runtime_fields, same_runtime
 from .owner_action_binding import check_owner_binding
 from .owner_source import admit_source, inspect_source
 
@@ -44,8 +45,6 @@ class OwnerPermissionActions:
         host = inspect_source(self.root)
         access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
-        if self.package.installation is not None:
-            raise AccessUnavailable("current Git task-action target adapter is not yet connected")
         bindings = read_selected_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_permission(reader.token, reader.principal,
             host_uid=host, fleet_uid=bindings["fleet_uid"])
@@ -53,10 +52,9 @@ class OwnerPermissionActions:
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
         check_owner_binding(ctx, host=host, bindings=bindings, grant=grant,
                             refusal="permission_binding_changed")
-        from ..activation_state import read_selection
-        selection = read_selection(self.root)
-        if selection is None:
-            raise AccessUnavailable("active release unavailable")
+        stamp = runtime_read_stamp(self.root, package=self.package)
+        if stamp is None:
+            raise AccessUnavailable("active runtime unavailable")
         binding = scope_binding(access, reader, host)
         scope = {"workspace": _opaque(scope_inputs([str(self.root), host], binding)),
             "host": host, "fleet": room,
@@ -64,7 +62,7 @@ class OwnerPermissionActions:
                 reader.principal.namespace, reader.principal.subject, grant.owner.revision,
                 grant.generation, grant.actor_uid, grant.actor_alias], binding))}
         return {"version": 2, "room": room, "scope": scope, "simulation": False,
-                "actions": ["permission"], "release_id": selection["release_id"]}, grant, ctx
+                "actions": ["permission"], **runtime_fields(stamp)}, grant, ctx
 
     def _recheck(self, reader, context, grant, *, release=False):
         fresh, current, _ = self._context(reader, context["room"])
@@ -86,7 +84,9 @@ class OwnerPermissionActions:
                 if row is None:
                     raise ReceiptConflict("decision event does not belong to this permission")
                 # The full history above proved this fact's canonical receipt.
-                return permission, json.loads(row["detail"]).get("release_id")
+                # Compare the decision's ORIGINAL committed provenance. A
+                # later Git update must not relabel or invalidate this receipt.
+                return permission, runtime_fields(json.loads(row["detail"]))
             return list_task_permissions(conn, task_id, **options)
 
     def context(self, reader, payload):
@@ -110,10 +110,10 @@ class OwnerPermissionActions:
         _exact(payload["scope"], {"workspace", "host", "fleet", "viewer"})
         for value in payload["scope"].values():
             _text(value)
-        _exact(payload["target"], {"permission_id", "task_id", "scope_sha256", "release_id"})
+        runtime = runtime_fields(payload["target"])
+        _exact(payload["target"], {"permission_id", "task_id", "scope_sha256"} | set(runtime))
         for key, pattern in {"permission_id": r"perm_[0-9a-f]{32}",
-                "task_id": ID_PATTERNS["work_item"], "scope_sha256": r"[0-9a-f]{64}",
-                "release_id": r"r-[0-9a-f]{64}"}.items():
+                "task_id": ID_PATTERNS["work_item"], "scope_sha256": r"[0-9a-f]{64}"}.items():
             value = payload["target"][key]
             if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
                 raise AccessDenied("invalid_action_body")
@@ -133,7 +133,7 @@ class OwnerPermissionActions:
     def _digest(payload):
         try:
             return permission_decision_digest(payload["target"]["permission_id"],
-                payload["target"]["scope_sha256"], payload["body"], release_id=payload["target"]["release_id"])
+                payload["target"]["scope_sha256"], payload["body"], **runtime_fields(payload["target"]))
         except TaskQueryError as exc:
             raise AccessDenied("invalid_action_body") from exc
 
@@ -141,7 +141,7 @@ class OwnerPermissionActions:
         context, grant, ctx = self._context(reader, payload["scope"]["fleet"])
         if context["scope"] != payload["scope"]:
             raise AccessDenied("action_scope_mismatch")
-        if release and context["release_id"] != payload["target"]["release_id"]:
+        if release and not same_runtime(context, payload["target"]):
             raise AccessDenied("permission_selection_changed")
         permission = self._read(context, grant, permission_id=payload["target"]["permission_id"])
         if (permission.task_id != payload["target"]["task_id"]
@@ -182,18 +182,19 @@ class OwnerPermissionActions:
         conflict = False
         if action == "send":
             try:
-                identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native, self.package.artifact_id)
+                identity = action_runtime_identity(self.package)
                 with mutation_admission(self.root, identity=identity,
-                        expected_release=payload["target"]["release_id"]):
+                        expected_release=payload["target"]["release_id"]) as admitted_runtime:
                     current, fresh, ctx, _ = self._bind(reader, payload, release=True)
-                    if fresh != grant or current != context:
+                    if (not same_runtime(admitted_runtime, payload["target"])
+                            or fresh != grant or current != context):
                         raise AccessDenied("permission_binding_changed")
                     def admitted(conn):
                         admit_source(conn, ctx.host_uid)
                         self._recheck(reader, context, grant, release=True)
                     decide_and_notify_permission(ctx, self.package, payload["request_id"], permission.permission_id,
                         decision=payload["decision"], scope_sha256=payload["target"]["scope_sha256"],
-                        reason=payload["body"], admit_read=admitted, release_id=payload["target"]["release_id"],
+                        reason=payload["body"], admit_read=admitted, **runtime_fields(payload["target"]),
                         admit_notification=lambda: self._recheck(reader, context, grant, release=True))
             except (AccessDenied, AccessUnavailable):
                 raise
@@ -215,10 +216,10 @@ class OwnerPermissionActions:
                         and len(retained.stages[0].expected_facts) == 1
                         and retained.stages[0].proof is not None
                         and retained.stages[0].proof.status == "committed"):
-                    observed, recorded_release = self._read(context, grant, permission_id=permission.permission_id,
+                    observed, recorded_runtime = self._read(context, grant, permission_id=permission.permission_id,
                         decision_event_id=retained.stages[0].expected_facts[0].event_id)
-                    if recorded_release != payload["target"]["release_id"]:
-                        raise ReceiptConflict("permission receipt belongs to another release")
+                    if not same_runtime(recorded_runtime, payload["target"]):
+                        raise ReceiptConflict("permission receipt belongs to another runtime")
                     status, current_permission = "recorded", observed.as_dict()
         except (AccessDenied, AccessUnavailable):
             raise

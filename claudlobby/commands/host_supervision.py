@@ -33,7 +33,8 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "selected fleet or release cannot be verified") from exc
     except OSError as exc:
         raise CommandFailure("unavailable", "orphan units cannot be inspected") from exc
-    data = {"fleet": result.fleet, "bot": args.bot, "dry_run": result.dry_run,
+    from ..runtime_admission import runtime_provenance
+    data = {**runtime_provenance(result), "fleet": result.fleet, "bot": args.bot, "dry_run": result.dry_run,
             "paths": [str(path) for path in result.paths], "count": len(result.paths)}
     verb = "would reap" if result.dry_run else "reaped"
     lines = tuple(f"{verb} orphan unit: {path}" for path in result.paths)

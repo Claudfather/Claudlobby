@@ -252,7 +252,9 @@ def test_host_job_run_requires_selected_enabled_unit_and_reports_only_request(tm
     assert calls == []
 
 
-def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform,domain_kind", [("Linux", ""), ("Darwin", "user"), ("Darwin", "gui")])
+def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path, monkeypatch, platform, domain_kind):
+    import os
     from dataclasses import replace
     import plistlib
     from claudlobby.config_units import unit_family
@@ -260,6 +262,7 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
     from claudlobby.runtime_admission import GitCurrentRuntime, wrap_unit_argv, unit_systemd_command, unit_systemd_environment
     from claudlobby.supervision_inventory import FileSnapshot
 
+    domain = f"{domain_kind}/{os.getuid()}" if domain_kind else ""
     root, directory = tmp_path / "data", tmp_path / "units"
     root.mkdir(); directory.mkdir()
     installation = Installation(tmp_path / "installation", root)
@@ -283,10 +286,10 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
     rows = unit_family(files, destination=generated, scope="host", phase="producers", release_id="")
     for name, (content, mode) in files.items():
         (generated / name).write_bytes(content); (generated / name).chmod(mode)
-        if not name.endswith(".plist"):
-            (directory / name).write_bytes(content); (directory / name).chmod(mode)
+        (directory / name).write_bytes(content); (directory / name).chmod(mode)
     current = GitCurrentRuntime(installation, "a" * 40, "b" * 64,
-                               {"installation": str(installation.directory), "data_root": str(root), "units": rows})
+                               {"installation": str(installation.directory), "data_root": str(root), "units": rows,
+                                "supervision": {"manager": platform, "domain": domain, "directory": str(directory)}})
     @contextmanager
     def admitted(*args, **kwargs):
         yield current
@@ -300,13 +303,14 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
         def __init__(self): self.package = package
         def read(self, function):
             assert function == "svc_inventory_catalog"
-            return f"manager\tLinux\ndirectory\t{directory}\n"
+            return (f"manager\t{platform}\ndomain\t{domain}\ndirectory\t{directory}\n"
+                    + ("PID\tStatus\tLabel\n" if platform == "Darwin" else ""))
         def call(self, function, *args, **kwargs):
             calls.append((function, args))
             return subprocess.CompletedProcess([], 0, "invoking\nrun-requested\n", "")
     def inventory(root, declarations, **kwargs):
-        assert kwargs["only_names"] == frozenset({stem + ".service", stem + ".timer"})
-        units = [SimpleNamespace(declaration=d, target=d.source.name,
+        assert kwargs["only_names"] == frozenset({stem + ".plist"} if platform == "Darwin" else {stem + ".service", stem + ".timer"})
+        units = [SimpleNamespace(declaration=d, target=domain + "/" + d.source.stem if platform == "Darwin" else d.source.name,
             installed=(FileSnapshot.read(directory / d.source.name),), properties=(("LoadState", "loaded"),))
             for d in declarations]
         return SimpleNamespace(require_complete=lambda: SimpleNamespace(units=units))
@@ -314,11 +318,18 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
     result = host_run.run_host_job(root, "plane-prune", adapter=Native())
     assert result.release_id is None and result.revision == current.revision
     assert result.config_fingerprint == current.config_fingerprint
-    assert calls == [("svc_host_job_run_exact", (str(directory / (stem + ".service")), stem + ".service"))]
+    suffix = ".plist" if platform == "Darwin" else ".service"
+    target = domain + "/" + stem if platform == "Darwin" else stem + suffix
+    assert calls == [("svc_host_job_run_exact", (str(directory / (stem + suffix)), target))]
     calls.clear()
     with pytest.raises(host_run.HostJobError, match="not packaged"):
         host_run.run_host_job(root, "prune", adapter=Native())
-    next(row for row in rows if row["source"].endswith(".service"))["enroll"] = False
+    if platform == "Darwin" and domain_kind == "user":
+        current.snapshot["supervision"]["domain"] = f"gui/{os.getuid()}"
+        with pytest.raises(host_run.HostJobError, match="GUI.*unavailable"):
+            host_run.run_host_job(root, "plane-prune", adapter=Native())
+        current.snapshot["supervision"]["domain"] = domain
+    next(row for row in rows if row["source"].endswith(".plist" if platform == "Darwin" else ".service"))["enroll"] = False
     with pytest.raises((host_run.HostJobError, ValueError)):
         host_run.run_host_job(root, "plane-prune", adapter=Native())
     assert calls == []

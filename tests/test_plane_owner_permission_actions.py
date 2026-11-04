@@ -276,23 +276,91 @@ def test_native_owner_permission_proof_does_not_admit_bot_or_timer_selectors(nat
     assert denied.status_code == 403 and counts(adapter) == before
 
 
-@pytest.mark.parametrize('kind', ['nudge', 'feedback', 'permission'])
-def test_git_task_target_context_refuses_before_advertising_sealed_actions(permissions_http, kind):
-    from claudlobby.installation import Installation
-    from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable
-    from claudlobby.plane.owner_nudge_actions import OwnerNudgeActions
-    from claudlobby.plane.owner_feedback_actions import OwnerFeedbackActions
-    from claudlobby.plane.owner_permission_actions import OwnerPermissionActions
+@pytest.fixture
+def git_permissions(permissions_http, monkeypatch):
+    """Existing private authority/Plane, with real Git config and synthetic admission."""
+    from contextlib import contextmanager
+    from claudlobby import active_config, context, runtime_admission
+    from claudlobby.plane import owner_permission_actions
+    from tests.test_plane_owner_feedback import _git_gateway
+    _, gateway, reader, ctx, permission, grant, _ = permissions_http
+    # This action resolves a native destination, so reuse the full Git fixture's
+    # stable launcher and CLI binding rather than the read-only snapshot helper.
+    gateway, _, _, _, _ = _git_gateway((gateway, reader, ctx, {}, None), monkeypatch)
+    root = gateway.root
+    owner = owner_permission_actions.OwnerPermissionActions(root, package=gateway.package)
+    monkeypatch.setattr(context, 'get_resources', lambda: owner.package)
+    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: runtime_admission.RuntimeIdentity(
+        owner.package.installation.cli, owner.package.native, owner.package.artifact_id,
+        owner.package.installation, owner.package.source_revision))
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs['expected_release'] is None
+        current = active_config.read_current_config(root, installation=owner.package.installation,
+                                                    revision=owner.package.source_revision)
+        yield runtime_admission.GitCurrentRuntime(owner.package.installation, current['revision'],
+                                                  current['fingerprint'], current)
+    monkeypatch.setattr(owner_permission_actions, 'mutation_admission', admitted)
+    return owner, reader, ctx, permission, grant
 
-    _, adapter, reader, _, _, _, _ = permissions_http
-    installation = Installation(adapter.root.parent / 'git-installation', adapter.root)
-    package = replace(adapter.package, installation=installation, native=installation.native,
-                      artifact_id='', source_revision='a' * 40)
-    owner = {'nudge': OwnerNudgeActions, 'feedback': OwnerFeedbackActions,
-             'permission': OwnerPermissionActions}[kind](adapter.root, package=package)
-    before = counts(adapter)
-    with pytest.raises(AccessUnavailable, match='current Git task-action target adapter is not yet connected'):
-        owner._context(reader, 'example')
+
+def _git_proposal(fixture):
+    from claudlobby.plane.owner_task_action_protocol import runtime_fields
+    owner, reader, _, permission, _ = fixture
+    context = owner.context(reader, {'kind':'permission', 'room':'example', 'task_id':permission.task_id})
+    assert context['actions'] == ['permission'] and context['release_id'] is None
+    return {'version':2, 'kind':'permission', 'scope':context['scope'], 'request_id':str(uuid4()),
+        'decision':'approve', 'target':{'permission_id':permission.permission_id,
+            'task_id':permission.task_id, 'scope_sha256':permission.scope.digest, **runtime_fields(context)}}
+
+
+def test_git_permission_receipt_keeps_original_runtime_across_update_without_notification_replay(git_permissions, monkeypatch):
+    import json
+    from claudlobby import active_config
+    owner, reader, ctx, permission, grant = git_permissions
+    calls = native_receiver(monkeypatch)
+    proposal = _git_proposal(git_permissions)
+    row = owner.prepare(reader, {**proposal, 'body':'Reviewed exact Git scope'})
+    sent = owner.operation('send', reader, {**row, 'body':'Reviewed exact Git scope'})
+    assert sent['status'] == 'recorded' and sent['permission']['state'] == 'approved'
+    assert sent['permission']['decided_by']['uid'] == grant.actor_uid
+    assert sent['execution'] == 'not_requested' and sent['notification'] == 'received'
+    assert len(calls) == 1
+    assert owner.operation('send', reader, {**row, 'body':'Reviewed exact Git scope'}) == sent
+    current = active_config.read_current_config(owner.root, installation=owner.package.installation)
+    changed = json.loads(json.dumps(current))
+    changed['revision'] = 'b' * 40
+    changed['fingerprint'] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=owner.package.installation,
+                                         expected_previous=current['fingerprint'])
+    owner.package = replace(owner.package, source_revision=changed['revision'])
+    before = counts(owner)
+    recovered = owner.operation('receipt', reader, row)
+    assert recovered['status'] == 'recorded' and recovered['target'] == row['target']
+    assert recovered['permission']['state'] == 'approved'
+    assert counts(owner) == before and len(calls) == 1
+    forged = {**row, 'target':{**row['target'], 'source_revision':changed['revision'],
+                              'config_fingerprint':changed['fingerprint']}}
+    assert owner.operation('receipt', reader, forged)['status'] == 'unknown'
+    assert counts(owner) == before and len(calls) == 1
+
+
+@pytest.mark.parametrize('defect', ['revision', 'fingerprint', 'mixed', 'partial'])
+def test_git_permission_runtime_mismatch_refuses_before_decision(git_permissions, monkeypatch, defect):
+    from claudlobby.plane.owner_access import AccessDenied
+    owner, reader, _, _, _ = git_permissions
+    calls = native_receiver(monkeypatch)
+    proposal = _git_proposal(git_permissions)
+    target = dict(proposal['target'])
+    if defect == 'revision':
+        target['source_revision'] = 'c' * 40
+    elif defect == 'fingerprint':
+        target['config_fingerprint'] = 'd' * 64
+    elif defect == 'mixed':
+        target['release_id'] = 'r-' + 'e' * 64
+    else:
+        target.pop('config_fingerprint')
+    before = counts(owner)
     with pytest.raises(AccessDenied):
-        owner._context(replace(reader, token='unverified-session'), 'example')
-    assert counts(adapter) == before
+        owner.prepare(reader, {**proposal, 'target':target, 'body':'Not recorded'})
+    assert counts(owner) == before and calls == []

@@ -543,3 +543,76 @@ def test_feedback_grant_rotation_preserves_message_and_nudge_authority(gateway):
     assert adapter.access.authorize_nudge(reader.token, reader.principal, **scope) == nudge
     with pytest.raises(AccessDenied, match='feedback_binding_changed'):
         adapter.inspect(reader, **options)
+
+
+def _git_gateway(gateway, monkeypatch):
+    """Use committed Git config with the existing private Plane and identity rows."""
+    from pathlib import Path
+    import sys
+    from claudlobby import active_config, activation_state, context, runtime_admission
+    from claudlobby.config_plan import read_plan
+    from claudlobby.installation import Installation, write_installation, install_launcher
+    from claudlobby.resources import selected_cli
+
+    old, reader, ctx, options, _ = gateway
+    selection = activation_state.read_selection(old.root)
+    plan = read_plan(old.root, selection['plan_id'])
+    retained = activation_state.read_activation(old.root, selection['activation_id']).body['identity_bindings']
+    installation = Installation(old.root.parent / 'git-installation', old.root)
+    write_installation(installation)
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    package = replace(old.package, installation=installation, native=installation.native,
+                      artifact_id='', source_revision='a' * 40)
+    identities = {key: retained[key] for key in ('schema', 'host_uid', 'fleets')}
+    effective = replace(plan, changes=(), effects={**plan.effects, 'units': []})
+    snapshot = active_config.snapshot_from_plan(effective, installation, package.source_revision, identities=identities)
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    identity = runtime_admission.RuntimeIdentity(installation.cli, installation.native, '', installation, package.source_revision)
+    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: identity)
+    monkeypatch.setattr(context, 'selected_cli', selected_cli)
+    for key in ('CLAUDLOBBY_INSTALLATION', 'CLAUDLOBBY_ROOT', 'CLAUDLOBBY_RELEASE_ID'):
+        monkeypatch.delenv(key, raising=False)
+    selected = dict(expected_assignment_id=None, expected_release_id=None,
+                    expected_source_revision=snapshot['revision'], expected_config_fingerprint=snapshot['fingerprint'])
+    return type(old)(old.root, package=package), reader, ctx, options, selected
+
+
+@pytest.fixture
+def git_gateway(gateway, monkeypatch):
+    return _git_gateway(gateway, monkeypatch)
+
+
+@pytest.mark.parametrize('received', [True, False])
+def test_git_feedback_retains_original_receipt_across_update(git_gateway, monkeypatch, received):
+    from claudlobby import active_config, activation_state
+    adapter, reader, ctx, options, selected = git_gateway
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('sealed selection read'))
+    calls, repairs = receiver(monkeypatch, received=received)
+    if received:
+        invoke(git_gateway)
+    else:
+        with pytest.raises(CommandFailure):
+            invoke(git_gateway)
+    original = adapter.inspect(reader, **options).request
+    assert original.route.release_id is None
+    assert original.route.revision == selected['expected_source_revision']
+    snapshot = active_config.read_current_config(adapter.root, installation=adapter.package.installation)
+    updated = {**snapshot, 'revision': 'b' * 40}
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=adapter.package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    from claudlobby.runtime_admission import RuntimeIdentity
+    adapter.package = replace(adapter.package, source_revision=updated['revision'])
+    identity = RuntimeIdentity(adapter.package.installation.cli, adapter.package.native, '',
+                               adapter.package.installation, updated['revision'])
+    monkeypatch.setattr(RuntimeIdentity, 'current', lambda: identity)
+    observed = adapter.inspect(reader, **options)
+    assert observed.request == original
+    assert len(calls) == 1 and not repairs
+
+
+def test_git_feedback_rejects_wrong_selected_config_before_effect(git_gateway, monkeypatch):
+    calls, _ = receiver(monkeypatch)
+    with pytest.raises(AccessDenied):
+        invoke(git_gateway, expected_config_fingerprint='f' * 64)
+    assert not calls

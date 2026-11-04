@@ -4,7 +4,7 @@ import {ActionState} from '../claudlobby/plane/ui/action-state.js';
 import {readFile} from 'node:fs/promises';
 const read = name => readFile(new URL('../claudlobby/plane/ui/'+name,import.meta.url),'utf8');
 const uri = text => `data:text/javascript;base64,${Buffer.from(text).toString('base64')}`;
-const ownerURL = uri(await read('owner-api-client.js'));
+const ownerURL = uri((await read('owner-api-client.js')).replace('"./action-state.js"',JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href)));
 const actionsURL = uri((await read('connected-actions.js')).replace('"./action-state.js"',JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href)));
 const carrierURL = uri((await read('connected-read-client.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
 const adapterURL = uri((await read('two-source-read.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)));
@@ -1005,4 +1005,29 @@ test('workspace document permits eight exact saved computers and refuses a ninth
     const rejected=harness({references:bad});rejected.mount();await rejected.api.checkAccount();await flush();
     assert.notEqual(rejected.api.snapshot().phase,'ready');rejected.api.dispose();
   }
+});
+
+test('connected Git provenance survives qualification and old receipt inspection after source update',async()=>{
+ const h=harness({count:1});await h.api.checkAccount();await h.api.act(0,'connect');await h.api.jget('/api/overview');
+ const runtime={release_id:null,source_revision:'1'.repeat(40),config_fingerprint:'2'.repeat(64)};
+ let current={...runtime};
+ const door=refs[0].endpoint_origin+'/api/owner/connected/actions/';
+ h.overrides.set(door+'context',init=>{const input=JSON.parse(init.body);return reply(200,{
+  version:2,room:input.room,simulation:false,scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:input.room,viewer:'a-nudge-grant1'},
+  recipients:[{id:'actor_'+'c'.repeat(32),label:'Lead',lead:true}],actions:['nudge'],...current});});
+ const room=sourceA+' / team',c=await h.api.nudgeContext(room),state=new ActionState({getItem:()=>null,setItem(){}});
+ assert.deepEqual({release_id:c.release_id,source_revision:c.source_revision,config_fingerprint:c.config_fingerprint},runtime);
+ const target={recipient:c.recipients[0].id,task_id:sourceA+'::'+wi,assignment_id:null,...runtime};
+ const request=state.prepare(c,target,'Reason',id(90));
+ const sending=state.beginPrepared(c,request,await h.api.prepareAction(request));
+ assert.equal(state.accept(sending,await h.api.sendAction(sending)),'recorded');
+ current={...runtime,source_revision:'3'.repeat(40),config_fingerprint:'4'.repeat(64)};
+ await h.api.nudgeContext(room);
+ const before=h.calls.length;
+ await assert.rejects(h.api.prepareAction(request),/unknown/);assert.equal(h.calls.length,before);
+ const original=state.pending[0],result=await h.api.actionReceipt(original);
+ assert.deepEqual(result.target,target);assert.equal(state.accept(original,result),'delivered');
+ const receiptCall=h.calls.filter(c=>c.url===door+'receipt').at(-1),raw=JSON.parse(receiptCall.init.body);
+ assert.deepEqual(raw.target,{...target,recipient:'actor_'+'c'.repeat(32),task_id:wi});
+ assert.equal(state.pending.length,0);h.api.dispose();
 });

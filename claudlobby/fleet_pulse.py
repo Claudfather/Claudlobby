@@ -17,7 +17,7 @@ import time
 from .config import FLEET_PULSE_TIMEOUT_RANGE
 from .context import native_environment
 from .operation_context import resolve_operation_scope
-from .runtime_admission import UNIT_STARTED_ENV, mutation_admission
+from .runtime_admission import UNIT_STARTED_ENV, mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
 
 class FleetPulseError(RuntimeError):
@@ -30,10 +30,12 @@ class FleetPulseError(RuntimeError):
 @dataclass(frozen=True)
 class FleetPulseResult:
     fleet: str
-    release_id: str
+    release_id: str | None
     summary_path: Path
     summary: str
     stderr_tail: str
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 # A tick's cap. Scaled by load per CPU up to MAX_CAP_S, which keeps a run and
@@ -176,14 +178,14 @@ def pulse_fleet(*, root: Path, fleet: str | None) -> FleetPulseResult:
         if origin is not None and (origin.fleet.name != destination.fleet.name
                                    or origin.bot_id != destination.fleet.manager):
             raise FleetPulseError("only the selected fleet manager may pulse its fleet", code="conflict")
+        bound_runtime_release(destination.paths.package, generated=origin is not None)
         native = destination.paths.lib / "fleet-pulse.sh"
-        if native != release.native_path / "fleet-pulse.sh":
+        if native != destination.paths.package.runtime_native / "fleet-pulse.sh":
             raise FleetPulseError("pulse owner differs from the selected release",
                                   code="release_mismatch")
-        env = {**os.environ, **native_environment(destination.paths),
+        env = {**os.environ, **native_environment(destination.paths, current=release),
                "CLAUDLOBBY_FLEET": destination.fleet.name,
-               "CLAUDLOBBY_NATIVE_PYTHON": str(release.cli_path.parent / "python"),
-               "CLAUDLOBBY_PRIVATE_PULSE_RELEASE": release.release_id}
+               "CLAUDLOBBY_PRIVATE_PULSE_RUNTIME": "1"}
         summary_path = (destination.paths.root / "state/pulse" /
                         f"{destination.fleet.name}.pulse-summary.txt")
         pulse = destination.fleet.fleet_pulse
@@ -196,5 +198,5 @@ def pulse_fleet(*, root: Path, fleet: str | None) -> FleetPulseResult:
         if returncode:
             raise FleetPulseError("private fleet pulse failed; inspect its events and state/pulse summary",
                                   effect_attempted=True)
-        return FleetPulseResult(destination.fleet.name, release.release_id, summary_path,
-                                summary, stderr_tail)
+        return FleetPulseResult(destination.fleet.name, runtime_release_id(release), summary_path,
+                                summary, stderr_tail, **runtime_provenance(release))

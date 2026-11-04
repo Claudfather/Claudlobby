@@ -284,3 +284,127 @@ def test_permission_discovery_does_not_invent_decisions_or_hide_unknowns(estate,
     # A bounded canonical list explicitly discloses that older requests exist.
     monkeypatch.setattr("claudlobby.plane.view.list_task_permissions", lambda *a, **k: ((), True))
     assert card()["attention_reason"] == ["permission_unavailable"]
+
+
+def test_git_permission_decision_provenance_survives_replay_and_legacy_digest_is_unchanged(estate):
+    import json
+    from claudlobby.request_receipts import semantic_digest
+    ctx, conn, worker, human, task = _setup(estate)
+    permission = _request(worker, task)
+    reason = 'Reviewed original Git runtime'
+    base = dict(permission_id=permission.permission_id, scope_sha256=permission.scope.digest, reason=reason)
+    assert permissions.permission_decision_digest(**base) == semantic_digest(base)
+    release = 'r-' + 'c' * 64
+    assert permissions.permission_decision_digest(**base, release_id=release) == semantic_digest({**base, 'release_id': release})
+    runtime = dict(release_id=None, source_revision='a' * 40, config_fingerprint='b' * 64)
+    request = str(uuid4())
+    result = permissions.decide_permission(human, request, permission.permission_id, decision='approve',
+        scope_sha256=permission.scope.digest, reason=reason, **runtime)
+    assert result.permission.state == 'approved' and result.execution == 'not_requested'
+    row = conn.execute("SELECT detail FROM events WHERE emitter=? AND event='permission_approved'",
+                       (permissions.EMITTER,)).fetchone()
+    detail = json.loads(row[0])
+    assert {key: detail[key] for key in runtime} == runtime
+    assert permissions.decide_permission(human, request, permission.permission_id, decision='approve',
+        scope_sha256=permission.scope.digest, reason=reason, **runtime).replayed
+    with pytest.raises(ReceiptConflict):
+        permissions.decide_permission(human, request, permission.permission_id, decision='approve',
+            scope_sha256=permission.scope.digest, reason=reason,
+            **{**runtime, 'source_revision': 'd' * 40})
+    assert permissions.read_permission(conn, permission.permission_id, root=ctx.root,
+        host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid).state == 'approved'
+
+
+@pytest.mark.parametrize('runtime', [
+    {'release_id': 'r-' + 'c' * 64, 'source_revision': 'a' * 40, 'config_fingerprint': 'b' * 64},
+    {'source_revision': 'a' * 40}, {'config_fingerprint': 'b' * 64},
+])
+def test_permission_digest_refuses_mixed_or_partial_git_provenance(runtime):
+    from claudlobby.task_queries import TaskQueryError
+    with pytest.raises(TaskQueryError):
+        permissions.permission_decision_digest('perm_' + '1' * 32, '2' * 64, 'Reviewed', **runtime)
+
+
+def _git_cli(active, monkeypatch):
+    """Commit private Git config and use real local admission, with synthetic process identity."""
+    from pathlib import Path
+    import sys
+    from types import SimpleNamespace
+    from claudlobby import context, runtime_admission
+    from claudlobby.installation import write_installation, install_launcher
+    from tests.test_task_read_cli import _use_git_current
+    root, _ = active
+    root, package, snapshot = _use_git_current((root, SimpleNamespace(package=context.get_resources())), monkeypatch)
+    write_installation(package.installation)
+    install_launcher(package.installation, interpreter=Path(sys.executable).resolve())
+    package = replace(package, native=package.installation.native)
+    monkeypatch.setattr(context, 'get_resources', lambda: package)
+    monkeypatch.setattr(context, 'selected_cli', lambda *, installation: installation.cli)
+    identity = runtime_admission.RuntimeIdentity(package.installation.cli, package.native, '',
+                                                 package.installation, package.source_revision)
+    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: identity)
+    return root, package, snapshot
+
+
+@pytest.mark.parametrize('change_during_approval', [False, True])
+def test_git_permission_cli_binds_full_runtime_across_terminal_approval(active, monkeypatch, capsys, tmp_path,
+                                                                      change_during_approval):
+    from contextlib import contextmanager
+    from io import StringIO
+    import json
+    from claudlobby import active_config, message_operations
+    from claudlobby.commands import host_owner
+    from tests.test_task_write_cli import _call
+    from tests.test_plane_owner_messages import native_receiver
+    root, package, snapshot = _git_cli(active, monkeypatch)
+    calls = native_receiver(monkeypatch)
+    monkeypatch.setattr(message_operations, 'read_recipient_box', lambda *a, **k: None)
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Synthetic Git scope',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    scope_file = tmp_path / 'scope.json'
+    scope_file.write_text(json.dumps({'action': SCOPE.action, 'target': SCOPE.target, 'constraints': SCOPE.constraints}))
+    generated = {'FLEET_NAME': 'example', 'BOT_ID': 'manager', 'CLAUDLOBBY_ROOT': str(root),
+                 'FLEET_ROOT': str(root), 'BOT_DIR': str(root / 'runtime/bots/manager')}
+    for key, value in generated.items():
+        monkeypatch.setenv(key, value)
+    requested = _call(capsys, root, 'task', 'permission', 'request', task_id, '--scope-file', str(scope_file),
+                       '--reason', 'Ready', '--request-id', str(uuid4()))['data']
+    for key in generated:
+        monkeypatch.delenv(key)
+    permission_id = requested['permission_id']
+    shown = _call(capsys, root, 'task', 'permission', 'show', permission_id)
+    assert shown['release_id'] is None
+    assert shown['data']['config_fingerprint'] == snapshot['fingerprint']
+    @contextmanager
+    def terminal(_root):
+        stream = StringIO()
+        def answer(_cap):
+            if change_during_approval:
+                changed = json.loads(json.dumps(snapshot))
+                changed['fleets']['example']['fleet'] += '\n# Changed during confirmation\n'
+                changed['fingerprint'] = active_config._fingerprint(changed)
+                active_config.publish_current_config(changed, installation=package.installation,
+                                                     expected_previous=snapshot['fingerprint'])
+            return 'APPROVE\n'
+        stream.readline = answer
+        yield stream
+    monkeypatch.setattr(host_owner, '_terminal', terminal)
+    request_id = str(uuid4())
+    result = _call(capsys, root, 'task', 'permission', 'approve', permission_id,
+        '--scope-sha256', requested['scope_sha256'], '--reason', 'Reviewed', '--request-id', request_id,
+        expected=4 if change_during_approval else 0)
+    if change_during_approval:
+        assert not calls
+        assert not list((root / 'state/requests').rglob(request_id + '.json'))
+        assert 'confirmation' in result['error']['message']
+    else:
+        assert result['release_id'] is None and result['data']['state'] == 'approved' and len(calls) == 1
+        from claudlobby.plane.db import connect_ro, db_file
+        with connect_ro(db_file(root)) as conn:
+            detail = json.loads(conn.execute("SELECT detail FROM events WHERE event='permission_approved'").fetchone()[0])
+        assert detail['release_id'] is None and detail['source_revision'] == snapshot['revision']
+        assert detail['config_fingerprint'] == snapshot['fingerprint']
+        for key, value in generated.items():
+            monkeypatch.setenv(key, value)
+        checked = _call(capsys, root, 'task', 'permission', 'check', permission_id, '--scope-file', str(scope_file))
+        assert checked['data']['allowed'] and checked['data']['source_revision'] == snapshot['revision']

@@ -136,7 +136,7 @@ def test_each_row_is_emitted_once_across_passes(tmp_path):
     assert _pre(plane) == [250174, 348328]
     # A lost cursor reads the rows again under the same ids: the plane holds
     # each one once.
-    (paths.fleet_state / rec.CURSOR_FILE).unlink()
+    (paths.fleet_state / _recorder().CURSOR_FILE).unlink()
     rec.record_compactions(paths, fleet, emit=plane)
     assert len(plane.sent) == 4 and len(plane.stored) == 2
 
@@ -310,7 +310,7 @@ def test_events_land_on_the_plane_once_and_read_back_as_fleet_events(tmp_path):
         return emit_batch(tmp_path, raws, conn_factory=lambda: connect(db_file(tmp_path)))
 
     rec.record_compactions(paths, fleet, emit=plane)
-    (paths.fleet_state / rec.CURSOR_FILE).unlink()      # read the row a second time
+    (paths.fleet_state / _recorder().CURSOR_FILE).unlink()      # read the row a second time
     rec.record_compactions(paths, fleet, emit=plane)
     rows = [json.loads(line) for line in read_fleet_events(tmp_path).splitlines()
             if '"type":"compaction"' in line]
@@ -320,7 +320,8 @@ def test_events_land_on_the_plane_once_and_read_back_as_fleet_events(tmp_path):
                                "post_tokens": 17666, "session": "s1"}
 
 
-def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("admission_mismatch", [False, True])
+def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, monkeypatch, admission_mismatch):
     from claudlobby import activation_state
     from claudlobby.commands import checkin
 
@@ -329,11 +330,32 @@ def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, mo
     d = _transcripts(tmp_path, paths, "b")
     write_jsonl(d / "s1.jsonl", [_boundary("2026-10-06T20:00:00Z", 2, 2, "u1")])
     selected = {"release_id": "r1"}
+    from contextlib import contextmanager
+    from claudlobby.active_config import RuntimeReadStamp
+    from claudlobby import runtime_admission
+    from tests.package_fixtures import source_package
+    paths.package = source_package()
+    stamp = RuntimeReadStamp("sealed", selection=selected)
+    @contextmanager
+    def admitted(*args, **kwargs):
+        if admission_mismatch:
+            raise runtime_admission.ReleaseMismatch(tmp_path, "r1", "different")
+        yield SimpleNamespace(release_id="r1")
+    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
+    monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", lambda: None)
     monkeypatch.setattr(checkin, "_scope", lambda _args: (
-        SimpleNamespace(paths=paths, fleet=fleet), None, selected, None))
+        SimpleNamespace(paths=paths, fleet=fleet), None, stamp, None))
     monkeypatch.setattr(activation_state, "read_selection", lambda _root: selected)
     plane = Plane()
     monkeypatch.setattr("claudlobby.plane.emit_api.emit_batch", lambda root, raws: plane(raws))
+    if admission_mismatch:
+        from claudlobby.command_result import CommandFailure
+        with pytest.raises(CommandFailure) as failure:
+            door.dispatch(SimpleNamespace(public_command="fleet.compactions.record"))
+        assert failure.value.error.code == "release_mismatch"
+        assert _pre(plane) == []
+        assert not (paths.fleet_state / _recorder().CURSOR_FILE).exists()
+        return
     out = door.dispatch(SimpleNamespace(public_command="fleet.compactions.record"))
     assert [row["bot"] for row in out.data["bots"]] == ["b", "gone"]
     assert _bot(out.data, "gone")["reason"] == "transcript_directory_missing_or_untrusted"

@@ -21,18 +21,7 @@ def _request_id(value: str) -> str:
     raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
 
 
-def _bound_release(package, *, generated):
-    """Generated Git callers bind installation; sealed callers bind a release."""
-    if package.installation is not None:
-        if any(key in os.environ for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")):
-            raise CommandFailure("release_mismatch", "Git caller cannot claim sealed runtime provenance")
-        return None
-    if "CLAUDLOBBY_INSTALLATION" in os.environ:
-        raise CommandFailure("release_mismatch", "sealed caller cannot claim a Git installation")
-    bound = os.environ.get("CLAUDLOBBY_RELEASE_ID") if generated else None
-    if generated and (not bound or not re.fullmatch(r"r-[0-9a-f]{64}", bound)):
-        raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
-    return bound
+from ..runtime_admission import bound_runtime_release as _bound_release
 
 
 def _body(args):

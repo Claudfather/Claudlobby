@@ -1,7 +1,7 @@
 """Serial selected-fleet lifecycle and read-only supervision reconciliation.
 
-Each mutation delegates to the single-bot owner, which admits the selected
-release, proves native effects, and makes a stopped bot stay de-enrolled.
+Each mutation delegates to the single-bot owner, which admits the current
+runtime, proves native effects, and preserves stopped or disabled intent.
 """
 
 from __future__ import annotations
@@ -11,12 +11,14 @@ import os
 from pathlib import Path
 
 from .activation_enrollment import selected_bot_entry
-from .activation_runtime import assert_quiescent
+from .supervision_runtime import assert_quiescent
 from .activation_state import ActivationError, read_selection
-from .bot_operations import BotLifecycleError, BotLifecycleResult, _selected_adapter, set_bot_running
+from .bot_operations import (BotLifecycleError, BotLifecycleResult, _selected_adapter,
+                             _current_bot_binding, set_bot_running)
 from .config_plan import read_plan
 from .config_units import current_declarations
 from .operation_context import resolve_operation_scope
+from .runtime_admission import GitCurrentRuntime, runtime_provenance
 from .stop_record import read_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, collect_enrollment
@@ -27,22 +29,26 @@ class FleetLifecycleError(RuntimeError):
 
     def __init__(self, reason: str, *, completed=(), bot: str | None = None,
                  effect_attempted: bool = False, unavailable: bool = False,
-                 release_id: str | None = None):
+                 release_id: str | None = None, source_revision: str | None = None,
+                 config_fingerprint: str | None = None):
         self.completed = tuple(completed)
         self.bot = bot
         self.effect_attempted = effect_attempted
         self.unavailable = unavailable
         self.release_id = release_id
+        self.source_revision, self.config_fingerprint = source_revision, config_fingerprint
         super().__init__(reason)
 
 
 @dataclass(frozen=True)
 class FleetLifecycleResult:
     fleet: str
-    release_id: str
+    release_id: str | None
     action: str
     workers_only: bool
     completed: tuple[BotLifecycleResult, ...]
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,8 +65,10 @@ class FleetBotObservation:
 @dataclass(frozen=True)
 class FleetReconcileResult:
     fleet: str
-    release_id: str
+    release_id: str | None
     bots: tuple[FleetBotObservation, ...]
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 def _scope(root: Path, fleet: str | None, *, mutating: bool):
@@ -68,10 +76,21 @@ def _scope(root: Path, fleet: str | None, *, mutating: bool):
     if mutating and origin is not None and (origin.fleet.name != destination.fleet.name
                                             or origin.bot_id != destination.fleet.manager):
         raise FleetLifecycleError("only the selected fleet manager may operate its fleet")
+    package = destination.paths.package
+    if getattr(package, "installation", None) is not None:
+        from .active_config import read_current_config
+        snapshot = read_current_config(destination.paths.root, installation=package.installation,
+                                       revision=package.source_revision)
+        current = GitCurrentRuntime(package.installation, snapshot["revision"], snapshot["fingerprint"], snapshot)
+        return destination, origin, current
     selected = read_selection(destination.paths.root)
     if selected is None:
         raise ActivationError("fleet lifecycle requires an active selected release")
     return destination, origin, selected
+
+
+def _release_id(current):
+    return None if isinstance(current, GitCurrentRuntime) else current["release_id"]
 
 
 def _targets(destination, *, workers_only: bool) -> tuple[str, ...]:
@@ -91,34 +110,37 @@ def set_fleet_running(*, root: Path, fleet: str | None, action: str,
         # witnesses only that one bot, not a fleet sweep. Refuse before effects.
         raise FleetLifecycleError("manager-origin fleet lifecycle requires --workers; "
                                   "run the full sweep from an operator process",
-                                  release_id=selected["release_id"])
+                                  release_id=_release_id(selected), **runtime_provenance(selected))
     completed = []
     for bot in _targets(destination, workers_only=workers_only):
         try:
             result = set_bot_running(root=destination.paths.root, fleet=destination.fleet.name,
                                      bot=bot, running=action != "stop",
-                                     restart=action == "restart")
+                                     restart=action == "restart",
+                                     **({"_expected_provenance": (None, runtime_provenance(selected))}
+                                        if isinstance(selected, GitCurrentRuntime) else {}))
         except BotLifecycleError as exc:
-            if (action == "restart" and exc.skip_reason == "de_enrolled"
+            if (action == "restart" and exc.skip_reason in {"de_enrolled", "disabled"}
                     and not exc.effect_attempted):
                 # Like the native rolling/weekly restart doors, a deliberately
-                # stopped bot stays stopped; the sweep continues past it.
+                # stopped or disabled bot stays untouched; continue past it.
                 completed.append(BotLifecycleResult(
-                    destination.fleet.name, bot, exc.release_id or selected["release_id"],
-                    exc.target or "", "skipped", False, "not_checked", reason="de_enrolled"))
+                    destination.fleet.name, bot, exc.release_id or _release_id(selected),
+                    exc.target or "", "skipped", False, "not_checked", reason=exc.skip_reason,
+                    **runtime_provenance(selected)))
                 continue
             raise FleetLifecycleError("fleet lifecycle stopped at an unverified bot",
                                       completed=completed, bot=bot,
                                       effect_attempted=exc.effect_attempted,
                                       unavailable=exc.unavailable,
-                                      release_id=exc.release_id or selected["release_id"]) from exc
+                                      release_id=exc.release_id or _release_id(selected), **runtime_provenance(selected)) from exc
         except Exception as exc:
             raise FleetLifecycleError("fleet lifecycle stopped at unavailable bot evidence",
                                       completed=completed, bot=bot, unavailable=True,
-                                      release_id=selected["release_id"]) from exc
+                                      release_id=_release_id(selected), **runtime_provenance(selected)) from exc
         completed.append(result)
-    return FleetLifecycleResult(destination.fleet.name, selected["release_id"], action,
-                                workers_only, tuple(completed))
+    return FleetLifecycleResult(destination.fleet.name, _release_id(selected), action,
+                                workers_only, tuple(completed), **runtime_provenance(selected))
 
 
 def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
@@ -127,18 +149,33 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
     destination, _, selected = _scope(root, fleet, mutating=False)
     if bot is not None and bot not in destination.fleet.bots:
         raise FleetLifecycleError("bot is not declared in the selected fleet")
-    plan = read_plan(destination.paths.root, selected["plan_id"])
-    if plan.release_id != selected["release_id"]:
-        raise FleetLifecycleError("selected fleet plan differs from selected release")
-    adapter = adapter or Adapter(destination.paths.package)
-    if adapter.package.native != destination.paths.package.native:
-        raise FleetLifecycleError("fleet native adapter differs from selected release")
-    adapter = _selected_adapter(destination.paths.root, destination.fleet.name,
-                                destination.fleet.manager, adapter)
-    catalog = adapter.read("svc_inventory_catalog")
-    from .supervision_inventory import _catalog
-    platform, _, _, _, _ = _catalog(catalog)
-    declarations = current_declarations(plan, platform)
+    bindings = {}
+    if isinstance(selected, GitCurrentRuntime):
+        # The single-bot owner already binds committed placement, native domain,
+        # generated bytes and bot.conf. Reconciliation uses those same checks.
+        for name in ((bot,) if bot is not None else _targets(destination, workers_only=False)):
+            try:
+                binding = _current_bot_binding(destination.paths.root, selected, destination, name, adapter)
+                binding.verify_configuration()
+            except (BotLifecycleError, ValueError, OSError) as exc:
+                raise FleetLifecycleError("fleet reconciliation has unavailable committed bot evidence",
+                                          bot=name, unavailable=True, **runtime_provenance(selected)) from exc
+            bindings[name] = binding
+            adapter = binding.adapter
+        declarations = next(iter(bindings.values())).declarations
+        platform = next(iter(bindings.values())).manager
+    else:
+        plan = read_plan(destination.paths.root, selected["plan_id"])
+        if plan.release_id != _release_id(selected):
+            raise FleetLifecycleError("selected fleet plan differs from selected release")
+        adapter = adapter or Adapter(destination.paths.package)
+        if adapter.package.native != destination.paths.package.native:
+            raise FleetLifecycleError("fleet native adapter differs from selected release")
+        adapter = _selected_adapter(destination.paths.root, destination.fleet.name,
+                                    destination.fleet.manager, adapter)
+        from .supervision_inventory import _catalog
+        platform, _, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+        declarations = current_declarations(plan, platform)
     bot_names = frozenset(declaration.source.name for declaration in declarations
                           if declaration.scope == "bot" and declaration.fleet == destination.fleet.name
                           and (bot is None or declaration.bot == bot))
@@ -147,7 +184,8 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
     completed = []
     for bot in ((bot,) if bot is not None else _targets(destination, workers_only=False)):
         try:
-            entry = selected_bot_entry(destination.paths.root, destination.fleet.name, bot, platform)
+            entry = (bindings[bot].entry if bindings else
+                     selected_bot_entry(destination.paths.root, destination.fleet.name, bot, platform))
             units = [unit for unit in inventory.units if unit.declaration.scope == "bot"
                      and unit.declaration.fleet == destination.fleet.name
                      and unit.declaration.bot == bot]
@@ -156,8 +194,8 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
                     or units[0].installed and units[0].installed[0].path != entry["installed"]):
                 raise InventoryError("selected bot placement differs from native inventory")
             unit = units[0]
-            spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet,
-                                          destination.paths)
+            spec = (bindings[bot].spec if bindings else
+                    build_supervision_spec(destination.fleet.bots[bot], destination.fleet, destination.paths))
             if spec.bot_dir != unit.declaration.working_directory:
                 raise InventoryError("selected bot directory differs from native inventory")
             observation = adapter.call("svc_bot_session_observe", spec.bot_dir, spec.label,
@@ -198,5 +236,12 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
             raise FleetLifecycleError("fleet reconciliation stopped at unavailable bot evidence",
                                       completed=completed, bot=bot,
                                       unavailable=True,
-                                      release_id=selected["release_id"]) from exc
-    return FleetReconcileResult(destination.fleet.name, selected["release_id"], tuple(completed))
+                                      release_id=_release_id(selected), **runtime_provenance(selected)) from exc
+    if isinstance(selected, GitCurrentRuntime):
+        from .active_config import read_current_config
+        if read_current_config(destination.paths.root, installation=selected.installation,
+                               revision=selected.revision) != selected.snapshot:
+            raise FleetLifecycleError("committed fleet configuration changed during reconciliation",
+                                      completed=completed, unavailable=True, **runtime_provenance(selected))
+    return FleetReconcileResult(destination.fleet.name, _release_id(selected), tuple(completed),
+                                **runtime_provenance(selected))

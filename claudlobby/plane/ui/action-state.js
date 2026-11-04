@@ -5,8 +5,8 @@ const FIELDS = ["workspace", "host", "fleet", "viewer"];
 const bounded = value => typeof value === "string" && value.length > 0 && value.length <= 240;
 export const scopeKey = scope => JSON.stringify(FIELDS.map(key => scope?.[key]));
 const targetKey = (target, version) => JSON.stringify(target?.permission_id
-  ? [target.permission_id, target.task_id, target.scope_sha256, target.release_id] : version === 2
-  ? [target?.recipient, target?.task_id, target?.assignment_id, target?.release_id]
+  ? [target.permission_id, target.task_id, target.scope_sha256, ...runtimeKey(target)] : version === 2
+  ? [target?.recipient, target?.task_id, target?.assignment_id, ...runtimeKey(target)]
   : [target?.recipient, target?.task_id || ""]);
 export const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target, row.version), ...(row.kind === "permission" ? [row.decision] : [])]);
 const validScope = scope => scope && FIELDS.every(key => bounded(scope[key]));
@@ -24,10 +24,29 @@ const canonicalPart = (value, prefix) => {
   return match && match[0] === value ? { source: match[1] || "" } : null;
 };
 const release = value => typeof value === "string" && /^r-[0-9a-f]{64}$/.test(value);
+// Runtime provenance identifies intent; it never supplies an action grant.
+export function runtimeFields(value) {
+  if (!value || !Object.hasOwn(value, "release_id")) return null;
+  const revision = Object.hasOwn(value, "source_revision"), fingerprint = Object.hasOwn(value, "config_fingerprint");
+  if (release(value.release_id) && !revision && !fingerprint) return {release_id:value.release_id};
+  if (value.release_id === null && revision && fingerprint
+      && typeof value.source_revision === "string" && /^[0-9a-f]{40}$/.test(value.source_revision)
+      && typeof value.config_fingerprint === "string" && /^[0-9a-f]{64}$/.test(value.config_fingerprint))
+    return {release_id:null, source_revision:value.source_revision, config_fingerprint:value.config_fingerprint};
+  return null;
+}
+const runtimeKey = value => value?.release_id === null
+  ? [null, value.source_revision, value.config_fingerprint] : [value?.release_id];
+export const sameRuntime = (left, right) => !!runtimeFields(left) && !!runtimeFields(right)
+  && JSON.stringify(runtimeKey(left)) === JSON.stringify(runtimeKey(right));
+const runtimeTarget = (value, keys) => {
+  const runtime = runtimeFields(value);
+  return runtime && exact(value, [...keys, ...Object.keys(runtime)]);
+};
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const timestamp = value => bounded(value) && /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
 export function validTaskActionTarget(target) {
-  if (!exact(target, ["recipient", "task_id", "assignment_id", "release_id"]) || !release(target.release_id)) return false;
+  if (!runtimeTarget(target, ["recipient", "task_id", "assignment_id"])) return false;
   const task = canonicalPart(target.task_id, "wi"), actor = canonicalPart(target.recipient, "actor");
   const assignment = target.assignment_id === null ? task : canonicalPart(target.assignment_id, "asg");
   return !!(task && actor && assignment && task.source === actor.source && task.source === assignment.source);
@@ -44,7 +63,7 @@ const logicalKey = row => row.kind === "permission"
   ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.recipient, row.target.task_id]) : rowKey(row);
 export function validTaskActionContext(context, kind = context?.actions?.[0]) {
   return taskKinds.has(kind) && context?.version === 2 && context.simulation === false && validScope(context.scope)
-    && exact(context.scope, FIELDS) && bounded(context.room) && context.scope.fleet === context.room && release(context.release_id)
+    && exact(context.scope, FIELDS) && bounded(context.room) && context.scope.fleet === context.room && !!runtimeFields(context)
     && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === kind
     && Array.isArray(context.recipients) && context.recipients.length === 1
     && !!canonicalPart(context.recipients[0].id, "actor") && bounded(context.recipients[0].label) && context.recipients[0].lead === true
@@ -58,9 +77,9 @@ const digest = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value
 const text = (value, cap) => typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= cap;
 const sameSource = (...values) => values.every(v => v && v.source === values[0]?.source);
 export function validPermissionTarget(target) {
-  return exact(target, ["permission_id", "task_id", "scope_sha256", "release_id"])
+  return runtimeTarget(target, ["permission_id", "task_id", "scope_sha256"])
     && sameSource(canonicalPart(target.permission_id, "perm"), canonicalPart(target.task_id, "wi"))
-    && digest(target.scope_sha256) && release(target.release_id);
+    && digest(target.scope_sha256);
 }
 export function validPermissionRecord(value) {
   const task = canonicalPart(value?.task_id, "wi"), permission = canonicalPart(value?.permission_id, "perm");
@@ -78,7 +97,7 @@ export function validPermissionRecord(value) {
 export function validPermissionContext(context) {
   const task = canonicalPart(context?.task_id, "wi"), host = canonicalPart(context?.scope?.host, "host");
   return context?.version === 2 && context.simulation === false && exact(context.scope, FIELDS) && validScope(context.scope)
-    && bounded(context.room) && context.room === context.scope.fleet && release(context.release_id)
+    && bounded(context.room) && context.room === context.scope.fleet && !!runtimeFields(context)
     && sameSource(task, host) && (!task.source || context.room.startsWith(task.source + " / "))
     && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === "permission"
     && typeof context.has_more === "boolean" && Array.isArray(context.permissions) && context.permissions.length <= 50
@@ -169,7 +188,7 @@ export class ActionState {
       request_id: row.request_id, kind: row.kind,
       scope: Object.fromEntries(FIELDS.map(key => [key, row.scope[key]])),
       target: { recipient: row.target.recipient, task_id: row.target.task_id,
-        ...(row.version === 2 ? { assignment_id: row.target.assignment_id, release_id: row.target.release_id } : {}) },
+        ...(row.version === 2 ? { assignment_id: row.target.assignment_id, ...runtimeFields(row.target) } : {}) },
       submitted_at: row.submitted_at };
   }
 
@@ -217,7 +236,7 @@ export class ActionState {
       const permission = context.permissions?.find(p => p.permission_id === target?.permission_id);
       if (!validPermissionContext(context) || !validPermissionTarget(target) || !permission
           || permission.task_id !== target.task_id || permission.scope_sha256 !== target.scope_sha256
-          || target.release_id !== context.release_id || !["approve", "decline", "revoke"].includes(decision)
+          || !sameRuntime(target, context) || !["approve", "decline", "revoke"].includes(decision)
           || permission.state !== (decision === "revoke" ? "approved" : "pending"))
         throw new Error("This permission changed. Refresh its details before deciding.");
       if (!text(body, 2048) || /[\u0000-\u0008\u000b-\u001f]/.test(body)
@@ -230,7 +249,7 @@ export class ActionState {
       return request;
     }
     if (!validTaskActionContext(context) || !validTaskActionTarget(target)
-        || target.recipient !== context.recipients[0].id || target.release_id !== context.release_id)
+        || target.recipient !== context.recipients[0].id || !sameRuntime(target, context))
       throw new Error("This task action is unavailable. Refresh the task and select it again.");
     if (typeof body !== "string" || !body.trim() || body.length > 2000 || body.includes("\u0000") || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body))
       throw new Error(context.actions[0] === "feedback" ? "Enter a comment of up to 2,000 characters." : "Enter a reason of up to 2,000 characters.");

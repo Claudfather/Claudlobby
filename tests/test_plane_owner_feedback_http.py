@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from claudlobby import task_operations
+from claudlobby.plane.owner_task_action_protocol import runtime_fields, same_runtime
 from claudlobby.message_payload import MessageBody
 from claudlobby.plane import owner_feedback_actions
 from claudlobby.plane.db import db_file
@@ -52,7 +53,7 @@ def selection(fixture, assignment_id=None):
     return {'version': 2, 'request_id': str(uuid4()), 'kind': 'feedback',
         'scope': capability['scope'], 'target': {'recipient': capability['recipients'][0]['id'],
             'task_id': options['task_id'], 'assignment_id': assignment_id,
-            'release_id': capability['release_id']}, 'submitted_at': '2026-10-10T01:00:00.000Z'}
+            **runtime_fields(capability)}, 'submitted_at': '2026-10-10T01:00:00.000Z'}
 
 
 def prepared(fixture, assignment_id=None, body='Comment on selected work'):
@@ -608,3 +609,57 @@ def test_feedback_regrant_keeps_original_message_and_nudge_receipts(feedback_htt
         assert post(client, 'receipt', message).json() == {'version':1,**message,'status':'delivered'}
         assert post(client, 'receipt', prepared_nudge).json() == {**prepared_nudge,'status':'delivered'}
     assert len(message_calls) == len(nudge_calls) == 1
+
+
+@pytest.mark.parametrize('value', [
+    {'release_id': None},
+    {'release_id': None, 'source_revision': 'a' * 40},
+    {'release_id': None, 'config_fingerprint': 'b' * 64},
+    {'release_id': 'r-' + 'c' * 64, 'source_revision': None},
+    {'release_id': 'r-' + 'c' * 64, 'source_revision': 'a' * 40, 'config_fingerprint': 'b' * 64},
+    {'release_id': None, 'source_revision': 'A' * 40, 'config_fingerprint': 'b' * 64},
+])
+def test_task_action_runtime_fields_reject_partial_or_mixed_provenance(value):
+    with pytest.raises(AccessDenied):
+        runtime_fields(value)
+
+
+def test_task_action_runtime_fields_accept_canonical_current_objects():
+    from pathlib import Path
+    from claudlobby.active_config import RuntimeReadStamp
+    from claudlobby.installation import Installation
+    from claudlobby.runtime_admission import GitCurrentRuntime
+    wire = {'release_id': None, 'source_revision': 'a' * 40, 'config_fingerprint': 'b' * 64}
+    current = GitCurrentRuntime(Installation(Path('/synthetic/install'), Path('/synthetic/root')),
+                                'a' * 40, 'b' * 64, {})
+    assert runtime_fields(current) == wire
+    assert same_runtime(current, RuntimeReadStamp('git', source_revision='a' * 40, config_fingerprint='b' * 64))
+    assert not same_runtime(current, {**wire, 'config_fingerprint': 'c' * 64})
+
+
+def test_git_feedback_http_context_prepare_and_receipt_keep_original_target(gateway, monkeypatch):
+    from tests.test_plane_owner_feedback import _git_gateway
+    from claudlobby import active_config
+    fixture = feedback_http.__wrapped__(_git_gateway(gateway, monkeypatch))
+    app, client, adapter, reader, ctx, options, selected = fixture
+    calls, _ = receiver(monkeypatch, received=False)
+    payload = prepared(fixture)
+    assert payload['target']['release_id'] is None
+    assert payload['target']['source_revision'] == selected['expected_source_revision']
+    before = counts(adapter)
+    refused = post(client, 'send', {**payload, 'target': {**payload['target'], 'config_fingerprint': 'f' * 64},
+                                    'body': 'Comment on selected work'})
+    assert refused.status_code != 200 and counts(adapter) == before and not calls
+    sent = post(client, 'send', {**payload, 'body': 'Comment on selected work'})
+    assert sent.status_code == 200, sent.text
+    snapshot = active_config.read_current_config(adapter.root, installation=adapter.package.installation)
+    updated = {**snapshot, 'fingerprint': ''}
+    # Change a committed input without changing the task, party or native target.
+    updated['fleets']['example']['fleet'] += '\n# Synthetic updated fleet input\n'
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=adapter.package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    inspected = post(client, 'receipt', payload)
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()['target'] == payload['target']
+    assert len(calls) == 1

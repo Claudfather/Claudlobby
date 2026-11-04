@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from claudlobby import task_operations
+from claudlobby.plane.owner_task_action_protocol import runtime_fields, same_runtime
 from claudlobby.plane import owner_nudge_actions
 from claudlobby.plane.db import db_file
 from claudlobby.plane.owner_browser import COOKIE_NAME, create_owner_browser_app
@@ -51,7 +52,7 @@ def selection(fixture, assignment_id=None):
     return {'version': 2, 'request_id': str(uuid4()), 'kind': 'nudge',
         'scope': capability['scope'], 'target': {'recipient': capability['recipients'][0]['id'],
             'task_id': options['task_id'], 'assignment_id': assignment_id,
-            'release_id': capability['release_id']}, 'submitted_at': '2026-10-10T01:00:00.000Z'}
+            **runtime_fields(capability)}, 'submitted_at': '2026-10-10T01:00:00.000Z'}
 
 
 def prepared(fixture, assignment_id=None, body='Check selected work'):
@@ -375,3 +376,31 @@ def test_adapter_entry_refusal_never_marks_not_started(nudge_http, monkeypatch):
     assert result.status_code==403 and result.json()=={'state':'denied'}
     assert post(client,'receipt',row).json()['status']=='delivered'
     assert len(calls)==1
+
+
+def test_git_nudge_http_binds_target_and_keeps_original_receipt(gateway, monkeypatch):
+    from tests.test_plane_owner_feedback import _git_gateway
+    from claudlobby import active_config
+    fixture = nudge_http.__wrapped__(_git_gateway(gateway, monkeypatch))
+    app, client, adapter, reader, ctx, options, selected = fixture
+    calls, _ = receiver(monkeypatch, received=False)
+    body = 'Synthetic Git nudge'
+    payload = prepared(fixture, body=body)
+    assert payload['target']['release_id'] is None
+    assert payload['target']['source_revision'] == selected['expected_source_revision']
+    before = counts(adapter)
+    refused = post(client, 'send', {**payload, 'target': {**payload['target'], 'config_fingerprint': 'f' * 64},
+                                    'body': body})
+    assert refused.status_code != 200 and counts(adapter) == before and not calls
+    sent = post(client, 'send', {**payload, 'body': body})
+    assert sent.status_code == 200, sent.text
+    snapshot = active_config.read_current_config(adapter.root, installation=adapter.package.installation)
+    updated = {**snapshot}
+    updated['fleets']['example']['fleet'] += '\n# Synthetic updated fleet input\n'
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=adapter.package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    inspected = post(client, 'receipt', payload)
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()['target'] == payload['target']
+    assert len(calls) == 1

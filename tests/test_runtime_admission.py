@@ -116,6 +116,25 @@ def git_current(tmp_path, monkeypatch):
     return installation, snapshot
 
 
+@pytest.mark.parametrize("explicit_identity", [False, True])
+def test_git_admission_routes_actual_identity_without_environment_selector(git_current, monkeypatch,
+                                                                         explicit_identity):
+    from claudlobby import runtime_admission
+    installation, snapshot = git_current
+    identity = RuntimeIdentity.current()
+    monkeypatch.delenv("CLAUDLOBBY_INSTALLATION")
+    # Model the already identified executing runtime, not an environment claim.
+    monkeypatch.setattr(RuntimeIdentity, "current", lambda: identity)
+    (installation.data_root / "state/selected-release.json").write_text("historical unreadable pointer\n")
+    options = {"identity": identity} if explicit_identity else {}
+    with mutation_admission(installation.data_root, **options) as current:
+        assert isinstance(current, runtime_admission.GitCurrentRuntime)
+        assert current.installation == installation
+        assert current.revision == snapshot["revision"]
+        assert current.config_fingerprint == snapshot["fingerprint"]
+    assert not (installation.data_root / "state/activation.lock").exists()
+
+
 def test_git_current_admission_returns_configuration_and_preserves_launcher_lock(git_current):
     from claudlobby.installation import _runtime_lock, native_start_fence, InstallationError
     from claudlobby.runtime_admission import GitCurrentRuntime

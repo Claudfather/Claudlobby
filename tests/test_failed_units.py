@@ -173,3 +173,56 @@ def test_an_adapter_that_cannot_read_refuses(selected):
     with pytest.raises(InventoryError, match="no user manager"):
         read_failed_units(Path("/root"), adapter=adapter)
     assert adapter.calls == [("svc_inventory_failed",)]
+
+
+from tests.test_git_composition import candidate  # noqa: F401
+from tests.test_bot_operations import git_bot_binding  # noqa: F401
+
+
+class _GitFailedNative(FakeAdapter):
+    def __init__(self, case, text):
+        super().__init__(text)
+        self.package, self.directory = case.adapter.package, case.directory
+
+    def read(self, function, *args):
+        self.calls.append((function, *args))
+        if function == 'svc_inventory_catalog':
+            return f'manager\tLinux\ndirectory\t{self.directory}\n'
+        assert function == 'svc_inventory_failed'
+        return self.text
+
+
+def test_git_failed_units_use_committed_ownership_and_do_not_silence_alerts_for_drift(git_bot_binding, monkeypatch):
+    case = git_bot_binding
+    (case.root / 'state/selected-release.json').write_text('malformed obsolete selection\n')
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('historical selection read'))
+    monkeypatch.setattr(config_plan, 'read_plan', lambda *_: pytest.fail('historical plan read'))
+    monkeypatch.setattr(config_units, 'current_git_declarations', lambda *_: pytest.fail('global generated drift veto'))
+    source = next(Path(item['source']) for item in case.snapshot['units'] if item['platform'] == 'Linux')
+    source.write_text('drift must not suppress another failed-unit alert\n')
+    native = _GitFailedNative(case, _systemd(_unit('com.example.lead.service', 'failed', 'failed', 'exit-code', 2),
+                                            _unit('com.example.foreign.service', 'failed', 'failed', 'exit-code', 1)))
+    result = read_failed_units(case.root, adapter=native)
+    assert result['release_id'] is None and result['source_revision'] == case.current.revision
+    assert result['config_fingerprint'] == case.current.config_fingerprint
+    assert [(row['unit'], row['scope'], row['fleet'], row['bot']) for row in result['units']] == [
+        ('com.example.lead.service', 'bot', 'example', 'lead')]
+    assert result['declared'] == 1
+    assert native.calls == [('svc_inventory_catalog',), ('svc_inventory_failed',)]
+
+
+@pytest.mark.parametrize('drift', ['native', 'directory', 'manager'])
+def test_git_failed_unit_observation_refuses_wrong_adapter_or_placement(git_bot_binding, monkeypatch, drift):
+    from dataclasses import replace
+    case = git_bot_binding
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('historical selection read'))
+    native = _GitFailedNative(case, _systemd())
+    if drift == 'native':
+        native.package = replace(native.package, native=case.directory)
+    elif drift == 'directory':
+        case.snapshot['supervision']['directory'] = str(case.directory.parent / 'other-native')
+    else:
+        case.snapshot['supervision']['manager'] = 'Darwin'
+    with pytest.raises(InventoryError, match='differs'):
+        read_failed_units(case.root, adapter=native)
+    assert ('svc_inventory_failed',) not in native.calls

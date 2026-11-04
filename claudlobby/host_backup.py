@@ -1,6 +1,6 @@
 """Owner-managed recovery bundles, without credentials or restored authority.
 
-The SQLite owner makes the consistent copy; activation owns starting it. A
+The SQLite owner makes the consistent copy; explicit initialization owns starting it. A
 bundle is a private directory with a last-written manifest, suitable for an
 owner's existing off-host copy tool. Nothing is uploaded or scheduled here.
 """
@@ -33,6 +33,7 @@ EXCLUSIONS = (
     "installed releases, generated units and activation journals",
 )
 MARKER = "state/restored-backup.json"
+RECOVERY = "state/restored-backup"
 
 
 def _json(value):
@@ -92,22 +93,12 @@ def _configuration_path(name):
             and not any(p.startswith(".env") for p in parts))
 
 
-def _source_files(plan):
-    """Frozen manifests, plus unchanged reviewed overlays; never crawl state/HOME."""
-    from .config import host_override_path
-
-    files = {}
-    sources = plan.effects.get("fleet_sources")
-    if not isinstance(sources, dict) or set(sources) != set(plan.fleets):
-        raise ActivationRefusal("backup requires a plan with retained fleet configuration")
-
-    def capture(path, destination):
-        recorded = plan.inputs.get(str(path))
-        if recorded is None or path_state(path, source=True) != recorded["state"]:
-            raise ActivationRefusal("backup configuration changed since activation; review and activate it first")
-        node = recorded["state"]["node"]
-        if node["kind"] == "absent":
-            return
+def _capture_source(path, destination, files, *, expected=None):
+    """Copy one explicit authored input, never links or credential facilities."""
+    before = path_state(path, source=True)
+    if expected is not None and before != expected:
+        raise ActivationRefusal("backup configuration changed since activation; review and activate it first")
+    if before["node"]["kind"] != "absent":
         # Do not dereference a link into an unrelated credential or vault tree.
         def walk(source, target):
             info = source.lstat()
@@ -119,8 +110,25 @@ def _source_files(plan):
             else:
                 raise ActivationRefusal("backup refuses linked, special or credential files in configuration overlays")
         walk(path, destination)
-        if path_state(path, source=True) != recorded["state"]:
-            raise ActivationRefusal("backup configuration changed while being copied")
+    if path_state(path, source=True) != before:
+        raise ActivationRefusal("backup configuration changed while being copied")
+    return before
+
+
+def _source_files(plan):
+    """Frozen manifests, plus unchanged reviewed overlays; never crawl state/HOME."""
+    from .config import host_override_path
+
+    files = {}
+    sources = plan.effects.get("fleet_sources")
+    if not isinstance(sources, dict) or set(sources) != set(plan.fleets):
+        raise ActivationRefusal("backup requires a plan with retained fleet configuration")
+
+    def capture(path, destination):
+        recorded = plan.inputs.get(str(path))
+        if recorded is None:
+            raise ActivationRefusal("backup requires retained configuration provenance")
+        _capture_source(path, destination, files, expected=recorded["state"])
 
     for name, item in sorted(sources.items()):
         manifest, content = plan.frozen_input(item["fleet"], required=True)
@@ -146,11 +154,100 @@ def _source_files(plan):
     return files
 
 
-def create_backup(root: Path, destination: Path) -> dict:
+def _git_source_files(root, snapshot):
+    """Observed authoring is separate from the committed effective snapshot."""
+    from .config import host_override_path
+
+    files, inputs = {}, {}
+    for item in snapshot["fleets"].values():
+        manifest = Path(item["manifest"])
+        try:
+            relative = manifest.relative_to(root)
+        except ValueError as exc:
+            raise ActivationRefusal("backup currently requires fleet configuration inside the host data root") from exc
+        for name in ("fleet.yaml", "projects.yaml", "library", "voices", "templates"):
+            source = manifest.parent / name
+            inputs[source] = _capture_source(source, relative.parent / name, files)
+    override = host_override_path()
+    inputs[override] = _capture_source(override, Path("host-system.yaml"), files)
+    return files, inputs
+
+
+def _write_bundle(root, destination, metadata, sources, *, schema_version, recovery=None, recheck=None):
+    """One SQLite/staging/hash/publication mechanism for both runtime variants."""
+    with tempfile.TemporaryDirectory(prefix=".claudlobby-backup-", dir=destination.parent) as temporary:
+        staging = Path(temporary) / "bundle"
+        staging.mkdir(mode=0o700)
+        database = staging / "plane.db"
+        conn = connect_ro(db_file(root))
+        try:
+            conn.execute("BEGIN")
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version != schema_version:
+                raise ActivationRefusal("backup database differs from the current runtime schema")
+            _backup(conn, database)
+        finally:
+            conn.close()
+        for name, (content, mode) in sources.items():
+            if not _configuration_path(name):
+                raise ActivationRefusal("backup configuration is outside supported root/local fleet paths")
+            _write(staging / "configuration" / name, content, mode=mode)
+        for name, content in (recovery or {}).items():
+            _write(staging / "recovery" / name, content)
+        paths = [database, *(staging / "configuration" / name for name in sources),
+                 *(staging / "recovery" / name for name in (recovery or {}))]
+        manifest = {**metadata, "source_root": str(root), "host_uid": read_host_uid(root / "state"),
+                    "database_schema": version, "exclusions": list(EXCLUSIONS),
+                    "files": {str(p.relative_to(staging)): {
+                        "sha256": _file_digest(p), "mode": stat.S_IMODE(p.stat().st_mode)} for p in paths}}
+        if recheck is not None:
+            recheck()
+        _write(staging / "manifest.json", _json(manifest))
+        _publish(staging, destination)
+        return manifest
+
+
+def create_backup(root: Path, destination: Path, *, package=None) -> dict:
     """Export accepted database state and the selected configuration, without stopping bots."""
     root, destination = Path(root).resolve(), Path(destination).absolute()
     if destination.resolve() != destination or destination.is_relative_to(root):
         raise ActivationRefusal("backup destination must be outside the host root and contain no links")
+    from .resources import get_resources
+    package = package if package is not None else get_resources()
+    if package.installation is not None:
+        from .active_config import read_current_config
+        from .git_update import read_update
+        from .installation import _runtime_lock
+        from .runtime_versions import SQL_SCHEMA_VERSION
+
+        installation = package.installation
+        fd = _runtime_lock(installation)
+        try:
+            snapshot = read_current_config(root, installation=installation, revision=package.source_revision)
+            update = read_update(installation)
+            recovery = {}
+            for name, record in (("config.json", snapshot), ("update.json", update)):
+                if record is not None:
+                    path = root / "state" / name
+                    _private_file(path)
+                    content = path.read_bytes()
+                    if json.loads(content) != record:
+                        raise ActivationRefusal("backup recovery evidence changed while being copied")
+                    recovery[name] = content
+            sources, inputs = _git_source_files(root, snapshot)
+            def recheck():
+                if (read_current_config(root, installation=installation, revision=package.source_revision) != snapshot
+                        or read_update(installation) != update
+                        or any(path_state(path, source=True) != before for path, before in inputs.items())
+                        or any((root / "state" / name).read_bytes() != content for name, content in recovery.items())):
+                    raise ActivationRefusal("backup configuration or recovery evidence changed while being copied")
+            return _write_bundle(root, destination, {
+                "schema": 2, "runtime_kind": "git", "release_id": None, "plan_id": None,
+                "source_revision": snapshot["revision"], "config_fingerprint": snapshot["fingerprint"],
+                "configuration_provenance": "authored_at_backup"}, sources,
+                schema_version=SQL_SCHEMA_VERSION, recovery=recovery, recheck=recheck)
+        finally:
+            os.close(fd)
     # Serialize against activation, not normal SQLite writers. The backup API
     # reads one transaction while the selected plan remains fixed.
     with locked_activation(root):
@@ -168,35 +265,43 @@ def create_backup(root: Path, destination: Path) -> dict:
         release = read_release(root, selected["release_id"])
         if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
             raise ActivationRefusal("backup selected configuration and release disagree")
-        sources = _source_files(plan)
-        host_uid = read_host_uid(root / "state")
-        with tempfile.TemporaryDirectory(prefix=".claudlobby-backup-", dir=destination.parent) as temporary:
-            staging = Path(temporary) / "bundle"
-            staging.mkdir(mode=0o700)
-            database = staging / "plane.db"
-            conn = connect_ro(db_file(root))
-            try:
-                conn.execute("BEGIN")
-                version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version != release.compatibility.schema.write:
-                    raise ActivationRefusal("backup database differs from the selected release schema")
-                _backup(conn, database)
-            finally:
-                conn.close()
-            for name, (content, mode) in sources.items():
-                if not _configuration_path(name):
-                    raise ActivationRefusal("backup configuration is outside supported root/local fleet paths")
-                _write(staging / "configuration" / name, content, mode=mode)
-            paths = [database, *(staging / "configuration" / name for name in sources)]
-            manifest = {"schema": 1, "source_root": str(root), "host_uid": host_uid,
-                        "release_id": release.release_id, "plan_id": plan.plan_id,
-                        "database_schema": version, "exclusions": list(EXCLUSIONS),
-                        "files": {str(p.relative_to(staging)): {
-                            "sha256": _file_digest(p), "mode": stat.S_IMODE(p.stat().st_mode)} for p in paths}}
-            _write(staging / "manifest.json", _json(manifest))
-            # Never replace a previous backup. The destination is owner-selected.
-            _publish(staging, destination)
-            return manifest
+        return _write_bundle(root, destination, {"schema": 1, "release_id": release.release_id,
+                             "plan_id": plan.plan_id}, _source_files(plan),
+                             schema_version=release.compatibility.schema.write)
+
+
+def _git_provenance(value):
+    return (value.get("runtime_kind") == "git" and value.get("release_id") is None
+            and value.get("plan_id") is None and isinstance(value.get("source_revision"), str)
+            and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["source_revision"])
+            and isinstance(value.get("config_fingerprint"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", value["config_fingerprint"])
+            and value.get("configuration_provenance") == "authored_at_backup")
+
+
+def _inspect_git_evidence(bundle, manifest):
+    """Archived evidence grants no authority and never reads its former host."""
+    from .active_config import _fingerprint
+    from .git_update import _validate
+    from .installation import Installation
+
+    try:
+        config = json.loads((bundle / "recovery/config.json").read_bytes())
+        if (not isinstance(config, dict) or config.get("schema") != 1
+                or config.get("data_root") != manifest["source_root"]
+                or config.get("revision") != manifest["source_revision"]
+                or config.get("fingerprint") != manifest["config_fingerprint"]
+                or config["fingerprint"] != _fingerprint(config)):
+            raise ActivationRefusal("backup committed configuration evidence differs from its provenance")
+        installation = Installation(Path(config["installation"]), Path(config["data_root"]))
+        identities = config.get("identities")
+        if (config.get("source") != str(installation.source) or identities is not None
+                and (not isinstance(identities, dict) or identities.get("host_uid") != manifest["host_uid"])):
+            raise ActivationRefusal("backup committed configuration belongs to another host")
+        if "recovery/update.json" in manifest["files"]:
+            _validate(installation, json.loads((bundle / "recovery/update.json").read_bytes()))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ActivationRefusal("backup Git recovery evidence is invalid or unsupported") from exc
 
 
 def inspect_backup(bundle: Path) -> dict:
@@ -204,21 +309,26 @@ def inspect_backup(bundle: Path) -> dict:
     bundle = Path(bundle).absolute()
     _private_file(bundle / "manifest.json")
     manifest = json.loads((bundle / "manifest.json").read_bytes())
-    if (not isinstance(manifest, dict) or set(manifest) != {
-            "schema", "source_root", "host_uid", "release_id", "plan_id", "database_schema", "exclusions", "files"}
-            or manifest.get("schema") != 1
-            or not isinstance(manifest.get("release_id"), str)
-            or not re.fullmatch(r"r-[0-9a-f]{64}", manifest["release_id"])
+    fields = {"schema", "source_root", "host_uid", "release_id", "plan_id", "database_schema", "exclusions", "files"}
+    git = isinstance(manifest, dict) and manifest.get("schema") == 2
+    if git:
+        fields |= {"runtime_kind", "source_revision", "config_fingerprint", "configuration_provenance"}
+    if (not isinstance(manifest, dict) or set(manifest) != fields
+            or not (git and _git_provenance(manifest) or manifest.get("schema") == 1
+                and isinstance(manifest.get("release_id"), str)
+                and re.fullmatch(r"r-[0-9a-f]{64}", manifest["release_id"]))
             or not isinstance(manifest.get("host_uid"), str)
             or not re.fullmatch(r"host_[0-9a-f]{32}", manifest["host_uid"])
             or type(manifest.get("database_schema")) is not int
-            or not isinstance(manifest.get("files"), dict) or "plane.db" not in manifest["files"]):
+            or not isinstance(manifest.get("files"), dict) or "plane.db" not in manifest["files"]
+            or git and "recovery/config.json" not in manifest["files"]):
         raise ActivationRefusal("backup manifest is incomplete or unsupported")
     expected = {"manifest.json"}
     for name, recorded in manifest["files"].items():
         relative = PurePosixPath(name)
         if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
-                or name != "plane.db" and (len(relative.parts) < 2 or relative.parts[0] != "configuration"
+                or name != "plane.db" and not (git and name in {"recovery/config.json", "recovery/update.json"})
+                and (len(relative.parts) < 2 or relative.parts[0] != "configuration"
                     or not _configuration_path(name.removeprefix("configuration/")))):
             raise ActivationRefusal("backup contains an unsupported file path")
         if (not isinstance(recorded, dict) or set(recorded) != {"sha256", "mode"}
@@ -234,6 +344,8 @@ def inspect_backup(bundle: Path) -> dict:
     actual = {str(p.relative_to(bundle)) for p in bundle.rglob("*") if not p.is_dir()}
     if actual != expected:
         raise ActivationRefusal("backup contains unlisted files")
+    if git:
+        _inspect_git_evidence(bundle, manifest)
     return manifest
 
 
@@ -244,12 +356,28 @@ def restore_status(root: Path) -> dict | None:
         return None
     _private_file(path)
     marker = json.loads(path.read_bytes())
-    if (not isinstance(marker, dict) or marker.get("schema") != 1
+    git = isinstance(marker, dict) and marker.get("schema") == 2
+    if (not isinstance(marker, dict) or not (git and _git_provenance(marker) or marker.get("schema") == 1
+                and isinstance(marker.get("release_id"), str)
+                and re.fullmatch(r"r-[0-9a-f]{64}", marker["release_id"]))
             or marker.get("replaces_retired_host") is not True
-            or marker.get("host_uid") != read_host_uid(root / "state")
-            or not isinstance(marker.get("release_id"), str)
-            or not re.fullmatch(r"r-[0-9a-f]{64}", marker["release_id"])):
+            or marker.get("host_uid") != read_host_uid(root / "state")):
         raise ActivationRefusal("restored backup marker is invalid")
+    if git:
+        recovery = marker.get("recovery_files")
+        if (not isinstance(recovery, dict) or "config.json" not in recovery
+                or set(recovery) - {"config.json", "update.json"}):
+            raise ActivationRefusal("restored Git recovery evidence is invalid")
+        for name, digest in recovery.items():
+            path = root / RECOVERY / name
+            _private_file(path)
+            if _file_digest(path) != digest:
+                raise ActivationRefusal("restored Git recovery evidence changed")
+        return {"release_id": None, "host_uid": marker["host_uid"], "runtime_kind": "git",
+                "source_revision": marker["source_revision"], "config_fingerprint": marker["config_fingerprint"],
+                "configuration_provenance": "authored_at_backup", "runtime_reinstallation_required": True,
+                "update_resumed": False, "access_restored": False,
+                "external_work_reconciliation": "operator_required"}
     return {"release_id": marker["release_id"], "host_uid": marker["host_uid"],
             "access_restored": False, "external_work_reconciliation": "operator_required"}
 
@@ -262,11 +390,17 @@ def restore_backup(bundle: Path, root: Path, *, replacing_retired_host: bool) ->
     if root.resolve() != root or os.path.lexists(root):
         raise ActivationRefusal("restore requires a new absolute data root without links")
     manifest = inspect_backup(bundle)
+    if manifest["schema"] == 2:
+        from .runtime_versions import SQL_SCHEMA_VERSION
+        if manifest["database_schema"] != SQL_SCHEMA_VERSION:
+            raise ActivationRefusal("Git restore requires code matching the recorded database schema")
     with tempfile.TemporaryDirectory(prefix=".claudlobby-restore-", dir=root.parent) as temporary:
         staging = Path(temporary) / "host"
         staging.mkdir(mode=0o700)
         for name, recorded in manifest["files"].items():
-            target = db_file(staging) if name == "plane.db" else staging / name.removeprefix("configuration/")
+            target = (db_file(staging) if name == "plane.db" else
+                      staging / RECOVERY / name.removeprefix("recovery/") if name.startswith("recovery/") else
+                      staging / name.removeprefix("configuration/"))
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             with (bundle / name).open("rb") as source, target.open("xb") as output:
                 os.chmod(target, recorded["mode"])
@@ -295,6 +429,11 @@ def restore_backup(bundle: Path, root: Path, *, replacing_retired_host: bool) ->
                   "database_sha256": _file_digest(db_file(staging)),
                   "backup_sha256": hashlib.sha256(_json(manifest)).hexdigest(),
                   "replaces_retired_host": True, "exclusions": list(EXCLUSIONS)}
+        if manifest["schema"] == 2:
+            marker.update({key: manifest[key] for key in ("schema", "runtime_kind", "plan_id",
+                "source_revision", "config_fingerprint", "configuration_provenance")})
+            marker["recovery_files"] = {name.removeprefix("recovery/"): item["sha256"]
+                for name, item in manifest["files"].items() if name.startswith("recovery/")}
         _write(staging / MARKER, _json(marker))
         _publish(staging, root)
         return marker
@@ -307,6 +446,8 @@ def restored_bootstrap(root: Path, release) -> bool:
         return False
     restore_status(root)
     marker = json.loads(marker_path.read_bytes())
+    if marker["schema"] == 2:
+        raise ActivationRefusal("Git restore requires reviewed initialization; archived configuration and update cannot resume")
     if (marker.get("schema") != 1 or marker.get("replaces_retired_host") is not True
             or marker.get("host_uid") != read_host_uid(root / "state")
             or marker.get("release_id") != release.release_id):

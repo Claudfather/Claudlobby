@@ -16,13 +16,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-# A selected release enters this private sweep only through `fleet pulse`.
-# Source-tree fixture calls have no release binding and remain testable.
-if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] && \
-    [ "${CLAUDLOBBY_PRIVATE_PULSE_RELEASE:-}" != "$CLAUDLOBBY_RELEASE_ID" ]; then
-    echo "fleet-pulse: use claudlobby fleet pulse for the selected release" >&2
-    exit 3
-fi
+# Public admission owns this private sweep; source-only probes remain usable.
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+_claudlobby_require_pulse_runtime "$LIB_DIR" "${1:-}" || exit $?
 
 fleet="${1:?Usage: fleet-pulse.sh <fleet-name>}"
 # The fleet is this sweep's carrier for every door it runs (emit_fleet_event
@@ -1592,7 +1589,7 @@ _failed_units() {
     if [ "$_rc" -ne 0 ]; then
         _why=$(tail -n 1 "$_err" 2>/dev/null | cut -c1-200 || true)
         echo "fleet-pulse: failed-units read refused (rc=$_rc): ${_why} - no unit judged this sweep and no key touched" >&2
-        if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] && [ -n "$_ESCALATION_CHAT_ID" ]; then
+        if _claudlobby_runtime_bound && [ -n "$_ESCALATION_CHAT_ID" ]; then
             debounce_notify "$state_dir" "$fleet" failed_units_reader_refused _units_page \
                 "FLEET ALERT: the failed-units read for ${fleet} is refused - a failed job unit cannot be seen until it reads again. (${_why})" \
                 "" "$_RENOTIFY_AFTER_S" || true

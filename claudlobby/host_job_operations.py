@@ -38,8 +38,8 @@ class HostJobRun:
     config_fingerprint: str | None = None
 
 
-def _run_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None) -> HostJobRun:
-    """Use committed family/enrollment, never pending host override authoring."""
+def _bind_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None = None):
+    """Read one committed, enrolled job binding without starting it."""
     root, installation = current.installation.data_root, current.installation
     packaged_jobs = (_load_system_defaults().get("host") or {}).get("jobs") or {}
     if name not in packaged_jobs:
@@ -49,6 +49,11 @@ def _run_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None)
             or adapter.package.source_revision != current.revision):
         raise HostJobError("host job adapter differs from the current installation")
     manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    placement = current.snapshot.get("supervision")
+    if placement is None:
+        raise HostJobError("host job requires committed native placement")
+    if manager != placement["manager"]:
+        raise HostJobError("host job adapter differs from committed native manager")
     declarations = current_git_declarations(current.snapshot, manager)
     metadata = {item["source"]: item for item in current.snapshot["units"]}
     # Prefixes are frozen in the committed labels. Use the existing label codec
@@ -74,10 +79,16 @@ def _run_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None)
     admission = metadata[str(service.source)]["admission"]
     if admission is None or admission["mode"] != "oneshot":
         raise HostJobError("host job run requires a scheduled oneshot job")
-    if manager == "Darwin" and domain == f"user/{os.getuid()}":
-        # An explicit operator may reach its already enrolled GUI LaunchAgent.
-        adapter = adapter.in_selected_gui(f"gui/{os.getuid()}/{stem}")
+    if (manager == "Darwin" and placement["domain"] == f"gui/{os.getuid()}"
+            and domain == f"user/{os.getuid()}"):
+        # Select only the committed GUI domain, never guess another placement.
+        if not hasattr(adapter, "in_selected_gui"):
+            raise HostJobError("committed GUI host job adapter is unavailable")
+        adapter = adapter.in_selected_gui(f"{placement['domain']}/{stem}")
         manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    if (manager != placement["manager"] or domain != placement["domain"]
+            or Path(placement["directory"]) not in directories):
+        raise HostJobError("host job adapter differs from committed native placement")
     inventory = collect_enrollment(root, tuple(selected), adapter=adapter,
                                    only_names=frozenset(wanted)).require_complete()
     if len(inventory.units) != len(wanted):
@@ -85,12 +96,17 @@ def _run_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None)
     target = installed = None
     for unit in inventory.units:
         if (len(unit.installed) != 1 or dict(unit.properties).get("LoadState") != "loaded"
-                or Path(unit.installed[0].path).parent not in directories):
+                or Path(unit.installed[0].path).parent != Path(placement["directory"])):
             raise HostJobError("host job is not installed at its committed placement", unavailable=True)
         if unit.declaration.source == service.source:
             target, installed = unit.target, unit.installed[0].path
     if target is None:
         raise HostJobError("host job service placement is unavailable", unavailable=True)
+    return adapter, service, target, installed
+
+
+def _run_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None) -> HostJobRun:
+    adapter, _service, target, installed = _bind_git_job(current, name, adapter)
     return _request_job(adapter, name, target, installed, revision=current.revision,
                         config_fingerprint=current.config_fingerprint)
 

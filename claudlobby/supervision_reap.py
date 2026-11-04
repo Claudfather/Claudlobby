@@ -9,7 +9,10 @@ import stat
 
 from .freshbox import _orphan_unit_files, reap_orphan_units
 from .operation_context import resolve_operation_scope
-from .runtime_admission import mutation_admission
+from .context import resolve_paths
+from .active_config import runtime_read_stamp
+from .runtime_admission import (RuntimeIdentity, mutation_admission, runtime_release_id,
+                                runtime_route_matches, runtime_provenance, bound_runtime_release)
 
 
 class SupervisionReapError(RuntimeError):
@@ -19,15 +22,21 @@ class SupervisionReapError(RuntimeError):
 @dataclass(frozen=True)
 class SupervisionReapResult:
     fleet: str
-    release_id: str
+    release_id: str | None
     dry_run: bool
     paths: tuple[Path, ...]
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 def reap_selected_orphans(*, root: Path, fleet: str | None, bot: str | None,
                           dry_run: bool) -> SupervisionReapResult:
     """Preview or remove only stale units beneath declared, owned bot directories."""
-    with mutation_admission(root, expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
+    package = resolve_paths(root=root).package
+    expected = bound_runtime_release(package, generated=False)
+    if package.installation is None:
+        expected = os.environ.get("CLAUDLOBBY_RELEASE_ID")  # Retained sealed expectation.
+    with mutation_admission(root, identity=RuntimeIdentity.current(), expected_release=expected) as release:
         destination, origin = resolve_operation_scope(root=root, fleet=fleet)
         # Fleet timer carriers resolve to origin=None after scope validation;
         # they are still generated callers, not an operator shell.
@@ -36,6 +45,9 @@ def reap_selected_orphans(*, root: Path, fleet: str | None, bot: str | None,
         if bot is not None and bot not in destination.fleet.bots:
             raise SupervisionReapError(f"bot is not declared in the selected fleet: {bot}")
         paths = destination.paths
+        stamp = runtime_read_stamp(root, package=paths.package)
+        if stamp is None or not runtime_route_matches(release, stamp, package=paths.package):
+            raise SupervisionReapError("orphan reap runtime differs from current configuration")
         if paths.runtime_bots.resolve() != paths.runtime_bots:
             raise SupervisionReapError("selected bot runtime is redirected")
         bots = ([destination.fleet.bots[bot]] if bot is not None
@@ -50,10 +62,14 @@ def reap_selected_orphans(*, root: Path, fleet: str | None, bot: str | None,
                 continue  # A declared bot need not have been generated yet.
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
                 raise SupervisionReapError("selected bot directory is not owned")
+        if runtime_read_stamp(root, package=paths.package) != stamp:
+            raise SupervisionReapError("current configuration changed before orphan reap")
         if dry_run:
             found = [unit for selected_bot in bots
                      for unit in _orphan_unit_files(selected_bot, destination.fleet, paths)]
         else:
             found = reap_orphan_units(destination.fleet, paths, bots)
-        return SupervisionReapResult(destination.fleet.name, release.release_id, dry_run,
-                                     tuple(found))
+        if runtime_read_stamp(root, package=paths.package) != stamp:
+            raise SupervisionReapError("current configuration changed during orphan reap")
+        return SupervisionReapResult(destination.fleet.name, runtime_release_id(release), dry_run,
+                                     tuple(found), **runtime_provenance(release))

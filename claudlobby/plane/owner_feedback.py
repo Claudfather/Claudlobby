@@ -22,8 +22,9 @@ from ..message_queries import (MessageNotFoundError, MessageUnavailableError,
 from ..operation_context import bind_task_context
 from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
-from ..runtime_admission import RuntimeIdentity, mutation_admission
-from .owner_service import admitted_action, check_action_process
+from ..runtime_admission import mutation_admission, runtime_route_matches
+from .owner_service import admitted_action, check_action_process, action_runtime_identity
+from .owner_task_action_protocol import runtime_fields, same_runtime
 from .ids import ID_PATTERNS, read_host_uid
 from .owner_action_authorization import action_authorization
 from .owner_access import AccessDenied, OwnerFeedbackGrant, VerifiedReader
@@ -101,8 +102,9 @@ class OwnerFeedback:
     @admitted_action
     def submit(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
               task_id: str, manager_uid: str, expected_assignment_id: str | None,
-              expected_release_id: str, request_id: str, text: str,
-              expected_grant: OwnerFeedbackGrant) -> ApplicationOutcome:
+              expected_release_id: str | None, request_id: str, text: str,
+              expected_grant: OwnerFeedbackGrant, expected_source_revision: str | None = None,
+              expected_config_fingerprint: str | None = None) -> ApplicationOutcome:
         """Record a comment then attempt its first notification; retain the UUID.
 
         Assignment None explicitly selects unassigned or terminal work. Actor,
@@ -114,17 +116,20 @@ class OwnerFeedback:
         if not isinstance(text, str) or len(text) > 2000:
             raise ValueError("feedback requires at most 2000 characters")
         body = MessageBody.from_input(text)
-        if not isinstance(expected_release_id, str) or not re.fullmatch(r"r-[0-9a-f]{64}", expected_release_id):
-            raise ValueError("selected release ID required")
+        expected = {"release_id": expected_release_id}
+        if expected_source_revision is not None or expected_config_fingerprint is not None:
+            expected.update(source_revision=expected_source_revision,
+                            config_fingerprint=expected_config_fingerprint)
+        runtime_fields(expected)
         try:
-            identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native,
-                                       self.package.artifact_id)
+            identity = action_runtime_identity(self.package)
             with mutation_admission(self.root, identity=identity, expected_release=expected_release_id) as release:
                 grant, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
                 manager = self._target(ctx, task_id, manager_uid)
                 route = resolve_message_route(ctx.context.fleet.manager, root=self.root, fleet=fleet,
                                               package=self.package, caller_context=ctx)
-                if (route.release_id != release.release_id or route.host_uid != self.host_uid
+                if (not runtime_route_matches(release, route, package=self.package)
+                        or not same_runtime(route, expected) or route.host_uid != self.host_uid
                         or route.selected_fleet_uid != fleet_uid or route.peer_fleet_uid != fleet_uid
                         or route.caller != ctx.caller or route.peer != manager or route.manager != manager):
                     raise AccessDenied("feedback_route_changed")

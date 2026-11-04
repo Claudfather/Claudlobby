@@ -609,6 +609,43 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
                            native=native, call=call)
 
 
+@pytest.mark.parametrize("manager, active", [
+    ("Linux", "active"), ("Linux", "inactive"), ("Darwin", "inactive"),
+])
+def test_restart_preserves_native_disabled_intent_before_any_effect(cold, monkeypatch, capsys, manager, active):
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    native = worker.native
+    native.manager = manager
+    if manager == "Darwin":
+        declaration, _ = next((decl, item) for decl, item in planned_units(worker.plan, "Linux")
+                              if decl.bot == "worker" and item["enroll"])
+        entry = dict(selected_bot_entry(worker.root, "example", "worker", "Linux"))
+        native.target = f"user/{os.getuid()}/com.example.worker"
+        entry["target"] = native.target
+        monkeypatch.setattr(bot_operations, "_selected_unit",
+                            lambda *_: (manager, declaration, entry, (declaration,)))
+        monkeypatch.setattr(bot_operations, "_selected_adapter", lambda _r, _f, _b, adapter: adapter)
+    worker.host.states[native.target] = f"disabled loaded {active}"
+    def observed(_root, _declarations, _adapter, target, installed_path):
+        assert target == native.target and installed_path.exists()
+        key = "UnitFileState" if manager == "Linux" else "EnabledState"
+        return SimpleNamespace(installed=(SimpleNamespace(path=str(installed_path)),),
+                               properties=(("ActiveState", active), (key, "disabled")))
+    monkeypatch.setattr(bot_operations, "_observed", observed)
+    refused = worker.call("bot", "restart", "worker", expected=4)
+    assert "disabled; use bot start" in refused["error"]["message"]
+    assert native.actions == []
+    assert set(native.calls) <= {"svc_inventory_catalog"}
+
+    # Explicit start remains the deliberate enable/enroll door. An inactive
+    # bot has no live context to checkpoint, and start may enroll it normally.
+    if manager == "Linux" and active == "inactive":
+        native.session = "absent"
+        result = worker.call("bot", "start", "worker")["data"]
+        assert result["changed"] is True and native.actions == ["start"]
+        assert worker.host.states[native.target] == "enabled loaded active"
+
+
 def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatch, capsys):  # noqa: F811
     worker = _worker_cli(cold, monkeypatch, capsys)
     root, release, plan, host, native, call = (worker.root, worker.release, worker.plan,

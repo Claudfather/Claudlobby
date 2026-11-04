@@ -64,9 +64,20 @@ def _script_host(tmp_path: Path):
     return root, bots, calls, env, args
 
 
+def _binding(env, args, kind):
+    if kind == "git":
+        env = {key: value for key, value in env.items() if key != "CLAUDLOBBY_RELEASE_ID"}
+        env.update(CLAUDLOBBY_INSTALLATION=str(Path(env["CLAUDLOBBY_ROOT"]).parent / "installation"),
+                   CLAUDLOBBY_NATIVE_ADMITTED="1")
+        args = (args[0], "--admitted-runtime", *args[3:])
+    return env, args
+
+
 @pytest.mark.parametrize("with_plugin", [True, False])
-def test_selected_reload_only_marks_running_selected_bot(tmp_path, with_plugin):
+@pytest.mark.parametrize("kind", ["sealed", "git"])
+def test_selected_reload_only_marks_running_selected_bot(tmp_path, with_plugin, kind):
     root, bots, calls, env, args = _script_host(tmp_path)
+    env, args = _binding(env, args, kind)
     if not with_plugin:
         # Live macOS canary: Bash 3.2 nounset rejects an empty array expansion.
         index = args.index("--plugin")
@@ -83,8 +94,10 @@ def test_selected_reload_only_marks_running_selected_bot(tmp_path, with_plugin):
     assert "plugin refresh OK" in (root / "state/reload-fleet.log").read_text()
 
 
-def test_timer_entry_dispatches_selected_public_command_only(tmp_path):
+@pytest.mark.parametrize("kind", ["sealed", "git"])
+def test_timer_entry_dispatches_selected_public_command_only(tmp_path, kind):
     root, bots, calls, env, args = _script_host(tmp_path)
+    env, args = _binding(env, args, kind)
     result = subprocess.run((args[0], "demo"), env=env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 2  # the fake CLI exits 2 after recording argv
     assert calls.read_text().splitlines() == [f"CLI --root {root} --fleet demo fleet reload"]
@@ -197,3 +210,17 @@ def test_session_cleanup_kills_a_live_group_and_tolerates_a_gone_one(monkeypatch
 
     monkeypatch.setattr(os, "killpg", eperm)
     _kill_session(live)  # what the macOS runner answered for an already-killed group
+
+
+@pytest.mark.parametrize("marker", [None, "0"])
+def test_git_reload_requires_boolean_recursion_marker_before_effect(tmp_path, marker):
+    root, bots, calls, env, args = _script_host(tmp_path)
+    env, args = _binding(env, args, "git")
+    if marker is None:
+        env.pop("CLAUDLOBBY_NATIVE_ADMITTED")
+    else:
+        env["CLAUDLOBBY_NATIVE_ADMITTED"] = marker
+    result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 2
+    assert not calls.exists() and not (root / "state/reload-fleet.log").exists()
+    assert not (bots / "lead/data/.reload-pending").exists()

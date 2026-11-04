@@ -1236,7 +1236,14 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                             skip_reason="de_enrolled",
                                             release_id=_release_id(release), **_provenance(release),
                                             target=entry["target"])
-                native_state = dict(unit.properties).get("ActiveState")
+                properties = dict(unit.properties)
+                if (manager == "Linux" and properties.get("UnitFileState") == "disabled"
+                        or manager == "Darwin" and properties.get("EnabledState") == "disabled"):
+                    raise BotLifecycleError("bot native unit is disabled; use bot start",
+                                            skip_reason="disabled",
+                                            release_id=_release_id(release), **_provenance(release),
+                                            target=entry["target"])
+                native_state = properties.get("ActiveState")
                 if native_state in {"failed", "activating"} and manager == "Linux":
                     raise BotLifecycleError(f"bot native state is {native_state}; use bot stop, then bot start")
                 if native_state not in {"active", "inactive"}:

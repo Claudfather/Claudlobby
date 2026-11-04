@@ -516,7 +516,7 @@ raise SystemExit(update_entry.main(sys.argv[2:]))
 def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None):
     """One fixed private stage in a fresh verified application process."""
     store._assert_locked()
-    if stage not in {"authorize", "render", "prepare", "quiesce", "quiet", "publish", "restore"}:
+    if stage not in {"authorize", "retire-render", "render", "prepare", "quiesce", "quiet", "publish", "restore"}:
         raise UpdateError("unknown application update stage")
     record = store.load()
     source = _plain(source if source is not None else store.installation.source)
@@ -928,8 +928,8 @@ def _apply_or_continue(installation, *, target=None):
             if not pending:
                 if target is None:
                     return {"update": record, "dispatch": "nothing_pending"}
-                if record is not None and record["target"] == target:
-                    return {"update": record, "dispatch": "complete"}
+                if record is not None:
+                    _application_stage(store, "retire-render")
                 store.prepare_target(target, request_id=str(uuid.uuid4()))
             record = store.load()
             if record["phase"] == "prepare":

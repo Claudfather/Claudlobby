@@ -59,6 +59,19 @@ def _context(args):
 
 
 def _release(context):
+    if context.paths.package.installation is not None:
+        from ..active_config import runtime_read_stamp
+        stamp = runtime_read_stamp(context.paths.root, package=context.paths.package)
+        stamp.check(context.paths.root, package=context.paths.package)
+        return {"runtime_kind": "git", **stamp.provenance,
+                "executing_source_revision": context.paths.package.source_revision,
+                "running_source_revision": None,
+                "executing_release_id": None, "executing_artifact_id": None,
+                "context_release_id": None, "context_release_state": "not_applicable",
+                "selected_release_id": None, "activation_status": None,
+                "selection_state": "current_config", "context_matches_selection": None,
+                "executing_matches_selection": None, "running_release": "unknown",
+                "operational_admission": "not_checked", "diagnosis_command": "host update status"}
     from ..activation_state import ActivationError, read_activation, read_selection
     from .releases import _executing_release
 

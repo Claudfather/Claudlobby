@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from ..command_result import CommandFailure, CommandOutput
+from ..runtime_admission import runtime_provenance
 
 
 def dispatch(args) -> CommandOutput:
@@ -44,6 +45,7 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, ReleaseError, ValueError) as exc:
         raise CommandFailure("conflict", "selected repository scope cannot be verified",
                              data=data) from exc
+    data.update(runtime_provenance(result))
     rows = [{"repository": name, "status": status} for name, status in result.repositories]
     data.update(release_id=result.release_id, repositories=rows,
                 native_outcome="partial" if any(row["status"] in

@@ -9,8 +9,9 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args):
     from .. import switches
-    from ..activation_state import read_selection
-    from ..config_plan import read_plan
+    from ..active_config import runtime_read_stamp, read_current_config, load_active_context
+    from ..config_plan import read_plan, PlanError
+    from ..activation_state import ActivationError
     from ..context import declared_paths, generated_selectors, load_context, resolve_paths
     from ..doctor import format_report, run_doctor
     from ._helpers import _load_env
@@ -19,7 +20,9 @@ def dispatch(args):
         raise CommandFailure("invalid_argument", "host doctor requires host data, not the seed")
     try:
         fleet_selector, _ = generated_selectors(fleet=args.fleet)
-        paths = resolve_paths(root=args.root, fleet=fleet_selector)
+        paths = resolve_paths(root=args.root)
+        if paths.package.installation is None:
+            paths = resolve_paths(root=args.root, fleet=fleet_selector)
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "invalid host doctor fleet selector") from exc
     if args.markdown:
@@ -28,15 +31,26 @@ def dispatch(args):
         blocks = {name: switches.format_markdown(**kw) for name, kw in switches.DOC_BLOCKS.items()}
         return CommandOutput({"documentation": blocks}, lines=tuple(
             f"--- {name}\n{body}" for name, body in blocks.items()))
-    selected = read_selection(paths.root)
-    external = (read_plan(paths.root, selected["plan_id"]).effects["fleet_manifests"].values()
-                if selected else ())
-    scopes = [paths] if fleet_selector else declared_paths(paths.root, paths.package, external=external)
-    if not scopes and not args.switches:
-        raise CommandFailure("not_found", "no fleet declarations; run fleet setup first")
+    try:
+        stamp = runtime_read_stamp(paths.root, package=paths.package)
+        if paths.package.installation is not None:
+            snapshot = read_current_config(paths.root, installation=paths.package.installation,
+                                           revision=paths.package.source_revision)
+            names = [fleet_selector] if fleet_selector else list(snapshot["fleets"])
+            contexts = [load_active_context(paths.root, name, package=paths.package) for name in names]
+            scopes = [(context.paths, context.fleet) for context in contexts]
+        else:
+            selected = stamp.selection if stamp else None
+            external = (read_plan(paths.root, selected["plan_id"]).effects["fleet_manifests"].values()
+                        if selected else ())
+            declared = [paths] if fleet_selector else declared_paths(paths.root, paths.package, external=external)
+            scopes = [(scope, load_context(scope).fleet if scope.fleet_yaml.is_file() else None) for scope in declared]
+        if not scopes and not args.switches:
+            raise CommandFailure("not_found", "no fleet declarations; run fleet setup first")
+    except (ActivationError, PlanError, OSError) as exc:
+        raise CommandFailure("conflict", "current doctor configuration cannot be read") from exc
     items, lines, failed = [], [], False
-    for scope in scopes or [paths]:
-        fleet = load_context(scope).fleet if scope.fleet_yaml.is_file() else None
+    for scope, fleet in scopes or [(paths, None)]:
         previous = dict(os.environ)
         try:
             _load_env(scope)
@@ -65,7 +79,12 @@ def dispatch(args):
                      " bot ownership; inspect browser usage separately")
     data = {"root": str(paths.root), "fleets": items, "has_failures": failed,
             "platform_limitations": platform_limitations}
+    if stamp is not None:
+        stamp.check(paths.root, package=paths.package, message="current configuration changed during diagnosis")
+        data.update(stamp.provenance)
+        if stamp.kind == "git":
+            data["running_source_revision"] = None
     if failed:
         raise CommandFailure("unavailable", "host doctor found failed checks", data=data,
                              hint="\n".join(lines))
-    return CommandOutput(data, selected["release_id"] if selected else None, tuple(lines))
+    return CommandOutput(data, stamp.release_id if stamp else None, tuple(lines))

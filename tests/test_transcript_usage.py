@@ -312,8 +312,12 @@ class TestSelectedCoverage:
 
         fleet, paths = self._fleet(tmp_path, "gone")
         selected = {"release_id": "r1"}
+        from claudlobby.active_config import RuntimeReadStamp
+        from tests.package_fixtures import source_package
+        paths.package = source_package()
+        stamp = RuntimeReadStamp("sealed", selection=selected)
         monkeypatch.setattr(checkin, "_scope", lambda _args: (
-            SimpleNamespace(paths=paths, fleet=fleet), None, selected, None))
+            SimpleNamespace(paths=paths, fleet=fleet), None, stamp, None))
         monkeypatch.setattr(activation_state, "read_selection", lambda _root: selected)
         for command, extra in (("fleet.usage", {}), ("bot.usage", {"bot_id": "gone"})):
             with pytest.raises(CommandFailure) as caught:

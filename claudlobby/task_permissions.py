@@ -187,17 +187,30 @@ def list_task_permissions(conn, task_id, *, root, host_uid, fleet_uid):
     return tuple(items[:50]), len(items) > 50 or len(rows) > 1000
 
 
-def permission_decision_digest(permission_id, scope_sha256, reason, *, release_id=None):
+def permission_runtime_fields(*, release_id=None, source_revision=None, config_fingerprint=None):
+    """Immutable decision provenance; omitted CLI metadata keeps its old digest."""
+    if source_revision is None and config_fingerprint is None:
+        if release_id is None:
+            return {}
+        if not isinstance(release_id, str) or not re.fullmatch(r"r-[0-9a-f]{64}", release_id):
+            raise TaskQueryError("permission decision requires a canonical release")
+        return {"release_id": release_id}
+    if (release_id is not None or not isinstance(source_revision, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", source_revision)
+            or not isinstance(config_fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", config_fingerprint)):
+        raise TaskQueryError("permission decision requires exact Git runtime provenance")
+    return {"release_id": None, "source_revision": source_revision, "config_fingerprint": config_fingerprint}
+
+
+def permission_decision_digest(permission_id, scope_sha256, reason, *, release_id=None,
+                               source_revision=None, config_fingerprint=None):
     """One semantic contract for CLI decisions and browser receipt recovery."""
     _id(permission_id, _PERMISSION_ID, "reference")
     if not isinstance(scope_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", scope_sha256):
         raise TaskQueryError("permission decision requires the displayed scope digest")
     _text(reason, "reason", 2048)
-    extra = {}
-    if release_id is not None:
-        if not isinstance(release_id, str) or not re.fullmatch(r"r-[0-9a-f]{64}", release_id):
-            raise TaskQueryError("permission decision requires a canonical release")
-        extra["release_id"] = release_id
+    extra = permission_runtime_fields(release_id=release_id, source_revision=source_revision,
+                                     config_fingerprint=config_fingerprint)
     return semantic_digest(dict(permission_id=permission_id, scope_sha256=scope_sha256, reason=reason, **extra))
 
 
@@ -237,13 +250,15 @@ def _permission_snapshot(conn, permission_id, *, root, host_uid, fleet_uid):
                     _text(data["reason"], "reason", 2048), "pending")
             elif permission is not None:
                 if (set(data) not in ({"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason"},
-                                     {"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason", "release_id"})
+                                     {"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason", "release_id"},
+                                     {"operation_request_id", "permission_id", "request_event_id", "scope_sha256", "reason",
+                                      "release_id", "source_revision", "config_fingerprint"})
                         or data["request_event_id"] != permission.request_event_id
                         or data["scope_sha256"] != permission.scope.digest
                         or not re.fullmatch(r"human:[^\s:/]+", actor.alias)):
                     raise ValueError
-                if "release_id" in data and (not isinstance(data["release_id"], str)
-                        or not re.fullmatch(r"r-[0-9a-f]{64}", data["release_id"])):
+                runtime = {key: data[key] for key in ("release_id", "source_revision", "config_fingerprint") if key in data}
+                if permission_runtime_fields(**runtime) != runtime:
                     raise ValueError
                 transition = next((pair for pair in _DECISIONS.values()
                                    if row["event"] == "permission_" + pair[1]), None)
@@ -325,7 +340,8 @@ def _event(ctx, request_id, permission_id, event, data, previous):
 
 def decide_permission(ctx: TaskOperationContext, request_id: str, permission_id: str, *,
                       decision: str, scope_sha256: str, reason: str,
-                      admit_read=None, release_id=None) -> PermissionResult:
+                      admit_read=None, release_id=None, source_revision=None,
+                      config_fingerprint=None) -> PermissionResult:
     """Record an authenticated human decision for the displayed exact scope.
 
     The terminal/browser boundary authenticates the human; a bot or provenance
@@ -338,7 +354,9 @@ def decide_permission(ctx: TaskOperationContext, request_id: str, permission_id:
         raise TaskConflictError("permission decisions require an authenticated human caller")
     if decision not in _DECISIONS:
         raise TaskQueryError("permission decision must be approve, decline or revoke")
-    semantic = permission_decision_digest(permission_id, scope_sha256, reason, release_id=release_id)
+    runtime = permission_runtime_fields(release_id=release_id, source_revision=source_revision,
+                                        config_fingerprint=config_fingerprint)
+    semantic = permission_decision_digest(permission_id, scope_sha256, reason, **runtime)
     operation = "task.permission." + decision
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store, _reader(ctx) as conn:
         previous = _existing(store, ctx, operation, semantic)
@@ -360,7 +378,7 @@ def decide_permission(ctx: TaskOperationContext, request_id: str, permission_id:
                 raw = _event(ctx, request_id, permission_id, next_state,
                     dict(permission_id=permission_id, request_event_id=permission.request_event_id,
                          scope_sha256=scope_sha256, reason=reason,
-                         **({"release_id": release_id} if release_id is not None else {})), previous)
+                         **runtime), previous)
                 receipt = _prepare(store, ctx, operation, semantic, (raw,), permission.task_id,
                                    permission.assignment_id)
             _commit(store, ctx, conn, receipt, (raw,), check, admit_read=admit_read)

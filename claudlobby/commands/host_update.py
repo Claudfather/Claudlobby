@@ -10,6 +10,7 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
+    from ..config_plan import PlanError
     from ..env_tiers import ResolverUnavailable
     from ..host_update_operations import HostUpdateError, run_host_update
     from ..paths import InvalidPathSelector
@@ -35,7 +36,11 @@ def dispatch(args) -> CommandOutput:
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "host update requires the selected executable",
                              data=data) from exc
-    except (ActivationError, ReleaseError, InvalidPathSelector, ResolverUnavailable, RuntimeError) as exc:
+    except (ActivationError, PlanError, ReleaseError, InvalidPathSelector, ResolverUnavailable, RuntimeError) as exc:
         raise CommandFailure("conflict", "selected host update scope cannot be verified", data=data) from exc
-    return CommandOutput(asdict(result), result.release_id,
+    data = asdict(result)
+    if result.source_revision is None:
+        data.pop("source_revision")
+        data.pop("config_fingerprint")
+    return CommandOutput(data, result.release_id,
                          (f"{action} update tick completed; inspect its log for per-target outcomes.",))

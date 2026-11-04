@@ -15,10 +15,100 @@ from .git_update import UpdateError, UpdateStore, _head, _verify_inherited_lock,
 from .installation import read_installation
 
 
+def _retire_completed_render(store):
+    """Persist exact cleanup intent before removing completed owned render files."""
+    from .config_plan import read_rendered
+    import hashlib
+    import re
+    import stat
+
+    store._assert_locked()
+    record = store.load()
+    if record is None or record["phase"] != "done" or record.get("health_errors"):
+        raise UpdateError("pending update render must be retained")
+    directory = store.work / "render"
+    if directory.is_symlink() or directory.resolve() != directory:
+        raise UpdateError("completed render directory is redirected")
+    intent = record.get("render_retirement")
+    if intent is None:
+        if not directory.exists():
+            return
+        rendered = read_rendered(store.root, record["config_fingerprint"])
+        if rendered.revision != record["target"]:
+            raise UpdateError("completed render belongs to another target")
+        if {path.name for path in directory.iterdir()} != {"render.json", "files"}:
+            raise UpdateError("completed render includes unknown scratch; retained")
+        files = directory / "files"
+        if files.is_symlink() or not files.is_dir() or files.resolve() != files:
+            raise UpdateError("completed render content directory is redirected")
+        referenced = set()
+        def collect(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "sha256" and isinstance(item, str):
+                        referenced.add(item)
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+        collect(rendered.payload())
+        paths = [directory / "render.json"]
+        for path in files.iterdir():
+            if path.name not in referenced or path.is_symlink() or not path.is_file():
+                raise UpdateError("completed render includes unknown content; retained")
+            rendered.blob(path.name)
+            paths.append(path)
+        intent = {"fingerprint": record["config_fingerprint"],
+                  "directories": {"": stat.S_IMODE(directory.stat().st_mode),
+                                  "files": stat.S_IMODE(files.stat().st_mode)},
+                  "files": {str(path.relative_to(directory)): {
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "mode": stat.S_IMODE(path.stat().st_mode)} for path in paths}}
+        record["render_retirement"] = intent
+        store.save(record)
+    # This narrowly recorded set survives deletion of the original manifest or
+    # any blob. Missing owned paths are complete; changed or foreign paths refuse.
+    if (not isinstance(intent, dict) or set(intent) != {"fingerprint", "directories", "files"}
+            or intent["fingerprint"] != record["config_fingerprint"]
+            or not isinstance(intent["directories"], dict) or set(intent["directories"]) != {"", "files"}
+            or not isinstance(intent["files"], dict) or "render.json" not in intent["files"]):
+        raise UpdateError("completed render cleanup intent changed")
+    for name, mode in intent["directories"].items():
+        if type(mode) is not int or mode < 0 or mode > 0o777:
+            raise UpdateError("completed render cleanup directory mode is invalid")
+        path = directory / name
+        if os.path.lexists(path) and (path.is_symlink() or not path.is_dir()
+                or path.resolve() != path or stat.S_IMODE(path.stat().st_mode) != mode):
+            raise UpdateError("completed render cleanup directory changed")
+    for name, saved in intent["files"].items():
+        if (name != "render.json" and re.fullmatch(r"files/[0-9a-f]{64}", name) is None
+                or not isinstance(saved, dict) or set(saved) != {"sha256", "mode"}
+                or not isinstance(saved["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", saved["sha256"]) is None
+                or type(saved["mode"]) is not int or not 0 <= saved["mode"] <= 0o777):
+            raise UpdateError("completed render cleanup file intent changed")
+        path = directory / name
+        if os.path.lexists(path) and (path.is_symlink() or not path.is_file()
+                or stat.S_IMODE(path.stat().st_mode) != saved["mode"]
+                or hashlib.sha256(path.read_bytes()).hexdigest() != saved["sha256"]):
+            raise UpdateError("completed render cleanup file changed")
+    if not directory.exists():
+        return
+    if any(path.name not in {"render.json", "files"} for path in directory.iterdir()):
+        raise UpdateError("completed render includes unknown scratch; retained")
+    files = directory / "files"
+    if files.exists() and any("files/" + path.name not in intent["files"] for path in files.iterdir()):
+        raise UpdateError("completed render includes unknown content; retained")
+    for name in sorted(intent["files"]):
+        (directory / name).unlink(missing_ok=True)
+    if files.exists():
+        files.rmdir()
+    directory.rmdir()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Private updater application stage")
     parser.add_argument("installation")
-    parser.add_argument("stage", choices=["authorize", "render", "prepare", "quiesce", "quiet", "publish", "restore"])
+    parser.add_argument("stage", choices=["authorize", "retire-render", "render", "prepare", "quiesce", "quiet", "publish", "restore"])
     parser.add_argument("lock_fd", type=int)
     parser.add_argument("parent_pid", type=int)
     parser.add_argument("request_id")
@@ -66,6 +156,9 @@ def main(argv=None):
             if placement is None:
                 raise UpdateError("current configuration has no committed native placement")
             print(json.dumps({"directory": placement["directory"], "revision": snapshot["revision"]}))
+            return 0
+        if args.stage == "retire-render":
+            _retire_completed_render(store)
             return 0
         from .supervision_inventory import Adapter
         from . import update_operation

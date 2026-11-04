@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-const source = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const source = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
 const { createOwnerTransport } = await load(source);
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
@@ -1491,4 +1492,20 @@ test('context refusal with expired or unknown read session is not an action-only
     assert.equal(h.calls.filter(c=>c.url.endsWith('/context')).length,1);
     h.controls.dispose();
   }
+});
+
+test('owner Git task action wire keeps exact provenance and rejects mixed target before fetch',async()=>{
+ const runtime={release_id:null,source_revision:'1'.repeat(40),config_fingerprint:'2'.repeat(64)};
+ const c={...nudgeContext,...runtime},metadata={...nudgeMetadata,target:{...nudgeMetadata.target,...runtime}};
+ const {semantic_sha256,...pre}=metadata,response={...metadata,status:'recorded'};
+ const h=harness([ready,ok(c),ok(metadata),ok(response),ok(response)]);await h.controls.ready;
+ assert.deepEqual(await h.api.nudgeContext('synthetic'),c);
+ assert.deepEqual(await h.api.prepareAction({...pre,body:'Reason'}),metadata);
+ await h.api.sendAction({...metadata,body:'Reason'});await h.api.actionReceipt(metadata);
+ const bodies=h.calls.slice(2).map(call=>JSON.parse(call.options.body));
+ assert.deepEqual(bodies,[{...pre,body:'Reason'},{...metadata,body:'Reason'},metadata]);
+ const before=h.calls.length;
+ for(const target of [{...metadata.target,release_id:nudgeContext.release_id},{...metadata.target,source_revision:undefined}])
+  await assert.rejects(h.api.prepareAction({...pre,target,body:'Reason'}),/Unsupported/);
+ assert.equal(h.calls.length,before);
 });

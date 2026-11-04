@@ -53,12 +53,25 @@ def generated_selectors(*, fleet: str | None = None, bot: str | None = None,
     return fleet, bot
 
 
-def native_environment(paths: Paths) -> dict[str, str]:
+def native_environment(paths: Paths, *, current=None) -> dict[str, str]:
     """Resolved locations passed to native children and generated supervision.
 
     Native hot paths consume this context without starting Python or guessing
-    mutable storage from their installed script directory.
+    mutable storage from their installed script directory. Supplying the caller
+    held admission validates full current provenance and marks private re-entry;
+    that marker is routing, never authority.
     """
+    if current is not None:
+        from .active_config import runtime_read_stamp
+        from .activation_state import ActivationError
+        from .runtime_admission import GitCurrentRuntime, runtime_route_matches
+        stamp = runtime_read_stamp(paths.root, package=paths.package)
+        native = (current.installation.native if isinstance(current, GitCurrentRuntime)
+                  else current.native_path)
+        if (stamp is None or not runtime_route_matches(current, stamp, package=paths.package)
+                or native != paths.package.runtime_native
+                or isinstance(current, GitCurrentRuntime) and current.installation.data_root != paths.root):
+            raise ActivationError("native child differs from the admitted current runtime")
     installation = paths.package.installation
     cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     result = {
@@ -83,6 +96,9 @@ def native_environment(paths: Paths) -> dict[str, str]:
                 or release.inputs.artifact_id != paths.package.artifact_id):
             raise ValueError("selected CLI and package do not belong to the same sealed release")
         result["CLAUDLOBBY_RELEASE_ID"] = release_id
+    if current is not None:
+        import sys
+        result.update(CLAUDLOBBY_NATIVE_ADMITTED="1", CLAUDLOBBY_NATIVE_PYTHON=sys.executable)
     return result
 
 

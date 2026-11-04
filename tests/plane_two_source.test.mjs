@@ -3,7 +3,8 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, fleetStatusCounts, aggregateFleetStatusCopy, aggregateFleetStatusCounts, connectionLabel } from '../claudlobby/plane/ui/workspace-display.js';
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
-const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const ownerText = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
 const { createOwnerReadHandle } = await import(ownerURL);
 const adapterText = await readFile(new URL('../claudlobby/plane/ui/two-source-read.js', import.meta.url), 'utf8');

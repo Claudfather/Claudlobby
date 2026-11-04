@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from claudlobby.config import (
     BotConfig,
     FleetConfig,
@@ -500,9 +502,13 @@ def test_selected_orphan_reap_is_operator_only_and_confined_to_declared_fleet(
     origin = None
 
     @contextmanager
-    def admitted(_root, expected_release=None):
+    def admitted(_root, expected_release=None, identity=None):
         yield SimpleNamespace(release_id="r-selected")
 
+    from claudlobby.active_config import RuntimeReadStamp
+    stamp = RuntimeReadStamp("sealed", selection={"release_id": "r-selected"})
+    monkeypatch.setattr(supervision_reap, "runtime_read_stamp", lambda *args, **kwargs: stamp)
+    monkeypatch.setattr(supervision_reap.RuntimeIdentity, "current", lambda: None)
     monkeypatch.setattr(supervision_reap, "mutation_admission", admitted)
     monkeypatch.setattr(supervision_reap, "resolve_operation_scope",
                         lambda **kwargs: (destination, origin))
@@ -1235,3 +1241,60 @@ class TestGithubAppFreshbox:
         finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
         include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
         assert include and all(f.severity == "fail" for f in include), finds
+
+
+from tests.test_activation import cold, tmp_path  # noqa: F401 — private selected root
+from tests.test_releases import installed  # noqa: F401 — cold dependency
+from tests.test_task_read_cli import active  # noqa: F401 — retained fleet identities
+
+
+@pytest.mark.parametrize("mismatch", [None, "admitted_runtime", "before_effect"])
+def test_git_orphan_reap_uses_current_binding_and_same_confined_predicate(active, monkeypatch, mismatch):
+    from contextlib import contextmanager
+    from dataclasses import replace
+    from claudlobby import active_config, supervision_reap
+    from claudlobby.runtime_admission import GitCurrentRuntime
+    from tests.test_task_read_cli import _use_git_current
+
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    context = active_config.load_active_context(root, "example", package=package)
+    bot_dir = context.paths.bot_runtime("worker")
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    retained = bot_dir / f"{context.fleet.service_prefix}.worker.plist"
+    retained.write_text("<plist/>")
+    stale = bot_dir / "worker.plist"
+    stale.write_text("<plist/>")
+    foreign = root / "local/other/runtime/bots/worker/worker.plist"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("<plist/>")
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs["expected_release"] is None
+        yield GitCurrentRuntime(package.installation, snapshot["revision"],
+                                "f" * 64 if mismatch == "admitted_runtime" else snapshot["fingerprint"], snapshot)
+    monkeypatch.setattr(supervision_reap, "mutation_admission", admitted)
+    monkeypatch.setattr(supervision_reap.RuntimeIdentity, "current", lambda: None)
+    if mismatch == "before_effect":
+        read = supervision_reap.runtime_read_stamp
+        calls = []
+        def changed(*args, **kwargs):
+            stamp = read(*args, **kwargs)
+            calls.append(True)
+            return stamp if len(calls) == 1 else replace(stamp, config_fingerprint="f" * 64)
+        monkeypatch.setattr(supervision_reap, "runtime_read_stamp", changed)
+    if mismatch:
+        with pytest.raises(supervision_reap.SupervisionReapError, match="runtime differs|changed before"):
+            supervision_reap.reap_selected_orphans(root=root, fleet="example", bot="worker", dry_run=False)
+        assert stale.exists() and retained.exists() and foreign.exists()
+        return
+    preview = supervision_reap.reap_selected_orphans(root=root, fleet="example", bot="worker", dry_run=True)
+    assert preview.paths == (stale,) and stale.exists()
+    assert preview.release_id is None and preview.source_revision == snapshot["revision"]
+    assert preview.config_fingerprint == snapshot["fingerprint"]
+    from types import SimpleNamespace
+    from claudlobby.commands import host_supervision
+    applied = host_supervision.dispatch(SimpleNamespace(public_command="host.supervision.reap-orphans",
+        root=root, fleet="example", bot="worker", seed=False, dry_run=False))
+    assert applied.release_id is None and applied.data["count"] == 1
+    assert applied.data["config_fingerprint"] == snapshot["fingerprint"]
+    assert not stale.exists() and retained.exists() and foreign.exists()

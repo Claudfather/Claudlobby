@@ -27,6 +27,7 @@ from tests.conftest import constructed_env
 from tests.plane_setup import initialize_plane
 from tests.test_config_plan import proposal  # noqa: F401 — selected release fixture
 from tests.test_releases import installed  # noqa: F401 — dependency of proposal
+from tests.test_runtime_admission import git_current  # noqa: F401 — private Git installation
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -196,7 +197,8 @@ def test_cli_prune_dry_run_and_unselected_live_refusal(tmp_path, test_cli):
     assert empty.returncode == 7
 
 
-def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposal, test_cli, monkeypatch):
+@pytest.mark.parametrize("runtime", ["sealed", "git"])
+def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposal, test_cli, monkeypatch, runtime, request):
     from claudlobby.command_result import CommandFailure
     from claudlobby.commands.plane_maintenance import prune, spool
     from claudlobby.plane import retention
@@ -205,9 +207,13 @@ def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposa
     from tests.test_runtime_admission import _active, _identity
 
     builder, _, _ = proposal
-    plan = builder.seal()
-    _active(plan)
-    root = builder.root
+    if runtime == "git":
+        installation, _snapshot = request.getfixturevalue("git_current")
+        root = installation.data_root
+    else:
+        plan = builder.seal()
+        _active(plan)
+        root = builder.root
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     _sample(root)
@@ -218,7 +224,8 @@ def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposa
     assert body["data"]["dry_run"] is True and _counts(root)[0] == 1
 
     monkeypatch.setenv("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED", "1")
-    monkeypatch.setattr(RuntimeIdentity, "current", classmethod(lambda cls: _identity(builder)))
+    if runtime == "sealed":
+        monkeypatch.setattr(RuntimeIdentity, "current", classmethod(lambda cls: _identity(builder)))
     stale = "r-stale"
     monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", stale)
     name = "ev_" + "c" * 32 + ".json"

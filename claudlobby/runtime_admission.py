@@ -256,6 +256,22 @@ class GitCurrentRuntime:
     snapshot: dict
 
 
+def bound_runtime_release(package, *, generated):
+    """Generated Git callers bind installation; sealed callers bind a release."""
+    from .command_result import CommandFailure
+
+    if package.installation is not None:
+        if any(key in os.environ for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")):
+            raise CommandFailure("release_mismatch", "Git caller cannot claim sealed runtime provenance")
+        return None
+    if "CLAUDLOBBY_INSTALLATION" in os.environ:
+        raise CommandFailure("release_mismatch", "sealed caller cannot claim a Git installation")
+    bound = os.environ.get("CLAUDLOBBY_RELEASE_ID") if generated else None
+    if generated and (not bound or not re.fullmatch(r"r-[0-9a-f]{64}", bound)):
+        raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+    return bound
+
+
 def runtime_release_id(current):
     """Git admission has no sealed release identity."""
     return None if isinstance(current, GitCurrentRuntime) else current.release_id
@@ -394,8 +410,9 @@ def mutation_admission(root: Path, *, identity: RuntimeIdentity | None = None,
     This guard is not authentication between trusted local callers.
     """
     root = Path(root).expanduser().resolve()
+    identity = identity if identity is not None else RuntimeIdentity.current()
     if ("CLAUDLOBBY_INSTALLATION" in os.environ
-            or identity is not None and identity.installation is not None):
+            or identity.installation is not None):
         with _git_mutation_admission(root, identity, expected_release) as current:
             yield current
         return
@@ -415,7 +432,7 @@ def mutation_admission(root: Path, *, identity: RuntimeIdentity | None = None,
         info, linked = os.fstat(fd), lock.lstat()
         if (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino):
             raise ActivationError("host activation lock was replaced")
-        yield _selected_active(root, identity or RuntimeIdentity.current(), expected_release)
+        yield _selected_active(root, identity, expected_release)
     finally:
         os.close(fd)
 

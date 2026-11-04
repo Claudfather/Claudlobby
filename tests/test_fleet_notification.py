@@ -47,7 +47,7 @@ def test_public_notification_refuses_worker_and_foreign_fleet_before_effect(
     manager_origin = SimpleNamespace(fleet=context.fleet, bot_id="manager")
     monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, manager_origin))
     monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
-    with pytest.raises(operation.FleetNotificationError, match="bound selected release"):
+    with pytest.raises(CommandFailure, match="bound release"):
         operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
                                event="disk_high", message="Disk nearly full", identity=object())
     foreign = SimpleNamespace(fleet=SimpleNamespace(name="foreign"), bot_id="manager")
@@ -69,7 +69,7 @@ def test_recording_outage_still_uses_exact_configured_carriers(private_alert, mo
     def admitted(*args, **kwargs):
         yield SimpleNamespace(release_id="selected", native_path=package.native)
     monkeypatch.setattr(operation, "mutation_admission", admitted)
-    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "native_environment", lambda paths, current: {})
     monkeypatch.setattr(operation, "_transport", lambda *_: manager)
     monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: {})
     def recorder(*args, **kwargs):
@@ -110,7 +110,7 @@ def test_committed_notify_event_is_visible_to_selected_fleet_reader(private_aler
     initialize_plane(context.paths.root)
     monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
     monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
-    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "native_environment", lambda paths, current: {})
     monkeypatch.setattr(operation, "_transport", lambda *_: manager)
     monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: {})
     @contextmanager
@@ -212,7 +212,7 @@ def test_notify_escalates_to_the_target_the_pulse_unit_carries(
     def admitted(*args, **kwargs):
         yield SimpleNamespace(release_id="selected", native_path=package.native)
     monkeypatch.setattr(operation, "mutation_admission", admitted)
-    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "native_environment", lambda paths, current: {})
     monkeypatch.setattr(operation, "_transport", lambda *_: manager)
     monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: _env_copy(tmp_path))
     result = operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
@@ -290,7 +290,7 @@ def _notify_with(context, package, manager, monkeypatch, *, tiers=None,
     def admitted(*args, **kwargs):
         yield SimpleNamespace(release_id="selected", native_path=package.native)
     monkeypatch.setattr(operation, "mutation_admission", admitted)
-    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "native_environment", lambda paths, current: {})
     monkeypatch.setattr(operation, "_transport", lambda *_: manager)
     monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: dict(tiers or {}))
     return operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",

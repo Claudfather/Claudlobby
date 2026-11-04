@@ -132,6 +132,51 @@ class BotStatus:
         return self.service_sub == _SVC_UNDETERMINED
 
 
+def _current_service_observations(fleet, paths, bots):
+    """Exact current Git native bindings; missing evidence stays undetermined."""
+    from .active_config import read_current_config
+    from .config_units import current_git_declarations
+    from .supervision_inventory import collect_enrollment
+
+    unknown = {bot: (False, _SVC_UNDETERMINED, None) for bot in bots}
+    try:
+        snapshot = read_current_config(paths.root, installation=paths.package.installation,
+                                       revision=paths.package.source_revision)
+        placement = snapshot.get("supervision")
+        manager = placement["manager"] if placement else platform.system()
+        declarations = current_git_declarations(snapshot, manager)
+        selected = {bot: [row for row in declarations if row.fleet == fleet.name and row.bot == bot
+                         and row.scope == "bot" and row.source.suffix in {".service", ".plist"}]
+                    for bot in bots}
+        if any(len(rows) != 1 for rows in selected.values()):
+            return unknown
+        names = frozenset(rows[0].source.name for rows in selected.values())
+        inventory = collect_enrollment(paths.root, declarations, package=paths.package,
+                                       only_names=names).require_complete()
+        if inventory.manager != manager:
+            return unknown
+        result = dict(unknown)
+        for bot, rows in selected.items():
+            units = [unit for unit in inventory.units if unit.declaration == rows[0]]
+            if len(units) != 1:
+                continue
+            unit = units[0]
+            if placement:
+                expected = str(Path(placement["directory"]) / rows[0].source.name)
+                if any(saved.path != expected for saved in unit.installed):
+                    continue
+                if manager == "Darwin" and unit.target.rsplit("/", 1)[0] != placement["domain"]:
+                    continue
+            props = dict(unit.properties)
+            state = props.get("ActiveState")
+            if state not in {"active", "inactive", "failed", "activating", "deactivating"}:
+                continue
+            result[bot] = (state == "active", state, bool(unit.installed))
+        return result
+    except (OSError, ValueError, RuntimeError):
+        return unknown
+
+
 def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
     """Live bot session names across every per-bot tmux server.
 
@@ -143,11 +188,22 @@ def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
     """
     alive: set[str] = set()
     for bot_id in (fleet.bots if bots is None else bots):
+        environment = None
         try:
-            socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
-                f"{fleet.service_prefix}.{bot_id}"
-            )
-        except ValueError:
+            if paths.package.installation is not None:
+                from .supervision import build_supervision_spec
+                spec = build_supervision_spec(fleet.bots[bot_id], fleet, paths)
+                socket = spec.label
+                environment = {**os.environ, "TMUX_TMPDIR": spec.environment["TMUX_TMPDIR"]}
+            else:
+                socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
+                    f"{fleet.service_prefix}.{bot_id}"
+                )
+        except (ValueError, OSError, RuntimeError) as exc:
+            if paths.package.installation is not None:
+                continue  # A missing committed target is not a guessed socket.
+            if not isinstance(exc, ValueError):
+                raise
             # SSOT resolver fail-fasts on a misconfigured bot when FLEET_NAME is
             # set; fall back to the canonical service-name socket so one bad bot
             # doesn't blank the whole dashboard.
@@ -156,7 +212,7 @@ def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
             out = subprocess.run(
                 ["tmux", "-L", socket, "has-session", "-t", bot_id],
                 capture_output=True,
-                timeout=5,
+                timeout=5, **({"env": environment} if environment is not None else {}),
             )
             if out.returncode == 0:
                 alive.add(bot_id)
@@ -359,6 +415,8 @@ def collect_fleet_status(
     from .utilization import compute_bot_utilization, fleet_heartbeat_series
     bots = list(fleet.bots) if only is None else [only]
     tmux_sessions = _check_tmux_sessions(fleet, paths, bots)
+    current_services = (_current_service_observations(fleet, paths, bots)
+                        if paths.package.installation is not None else None)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
 
@@ -425,8 +483,10 @@ def collect_fleet_status(
 
         # service supervision — key off the BOT_SERVICE label the installer
         # names the unit after (com.<fleet>.<bot>), not the bare bot id.
-        label = _read_service_label(bot_dir)
-        if is_linux:
+        label = _read_service_label(bot_dir) if current_services is None else ""
+        if current_services is not None:
+            bs.service_active, bs.service_sub, _ = current_services[bot_id]
+        elif is_linux:
             bs.service_active, bs.service_sub = _check_systemd_service(bot_id, label)
         elif label:
             bs.service_active, bs.service_sub = _check_launchd_service(bot_id, label)
@@ -460,7 +520,10 @@ def collect_fleet_status(
         # installed unit file (svc_is_registered) and the stop door's record. A
         # missing unit with no record is never `stopped` (the sweep calls it
         # unit_missing), nor is a bot whose session is still up.
-        if label and not bs.tmux_alive and not unit_installed(label, system=platform.system()):
+        unenrolled = not bs.tmux_alive and (
+            current_services[bot_id][2] is False if current_services is not None
+            else bool(label) and not unit_installed(label, system=platform.system()))
+        if unenrolled:
             record = read_stop(bot_dir)
             if record is not None:
                 bs.state = "stopped"

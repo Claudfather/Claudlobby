@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
+from ..runtime_admission import runtime_provenance
 
 
 def _reconcile(args) -> CommandOutput:
@@ -70,12 +71,15 @@ def _check(args) -> CommandOutput:
     lines = [f"{result.fleet}: credential probe tick completed; inspect "
              f"{result.state_path} for provider status."]
     if result.fleet_source_changed:
-        lines.append(f"{result.fleet}: fleet.yaml has changed since activation; this run probed "
-                     "the activated roster, and the change is probed once it is activated.")
+        lines.append((f"{result.fleet}: fleet.yaml differs from current configuration; this run probed "
+                      "the committed roster. Apply the authored change through host update."
+                      if runtime_provenance(result) else
+                      f"{result.fleet}: fleet.yaml has changed since activation; this run probed "
+                      "the activated roster, and the change is probed once it is activated."))
     return CommandOutput({"fleet": result.fleet, "native_outcome": result.checks,
                           "credential_health": result.health,
                           "fleet_source_changed": result.fleet_source_changed,
-                          "state_path": str(result.state_path)}, result.release_id,
+                          "state_path": str(result.state_path), **runtime_provenance(result)}, result.release_id,
                          tuple(lines))
 
 

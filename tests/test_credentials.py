@@ -369,11 +369,12 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
     def admitted(root, expected_release=None):
         yield release
 
+    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release_id)
     monkeypatch.setattr(check, "mutation_admission", admitted)
     monkeypatch.setattr(check, "read_selection", lambda root: {
         "release_id": release_id, "plan_id": "p"})
     monkeypatch.setattr(check, "read_plan", lambda root, plan_id: plan)
-    monkeypatch.setattr(check, "native_environment", lambda paths: {
+    monkeypatch.setattr(check, "native_environment", lambda paths, current: {
         "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(paths.fleet_config_dir),
         "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
         "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
@@ -396,7 +397,7 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
     result = check.check_credentials(root=root, fleet="f")
     assert result.fleet == "f" and result.release_id == release_id
     argv, kwargs = calls[0]
-    assert argv == [str(paths.lib / "creds-check.sh"), "--selected-release", release_id,
+    assert argv == [str(paths.lib / "creds-check.sh"), "--admitted-runtime",
                     "--fleet", "f", "--fleet-root", str(fleet_root),
                     "--bots-dir", str(paths.runtime_bots),
                     "--bot", "manager", "--bot", "worker"]
@@ -482,6 +483,7 @@ def test_selected_credential_check_probes_the_activated_roster_after_a_fleet_yam
     def admitted(root, expected_release=None):
         yield release
 
+    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release_id)
     monkeypatch.setattr(check, "mutation_admission", admitted)
     monkeypatch.setattr(check, "read_selection", lambda root: {
         "release_id": release_id, "plan_id": "p"})
@@ -490,7 +492,7 @@ def test_selected_credential_check_probes_the_activated_roster_after_a_fleet_yam
     # plan's frozen bytes on each call.
     monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
         context_from_plan(plan, kwargs["fleet"], package=package), None))
-    monkeypatch.setattr(check, "native_environment", lambda paths: {
+    monkeypatch.setattr(check, "native_environment", lambda paths, current: {
         "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(paths.fleet_config_dir),
         "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
         "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),

@@ -29,7 +29,11 @@ def test_operator_update_uses_selected_native_and_host_switch(tmp_path, monkeypa
         yield release
 
     monkeypatch.setattr(updates, "mutation_admission", admitted)
-    monkeypatch.setattr(updates, "resolve_paths", lambda **kwargs: SimpleNamespace(lib=native))
+    monkeypatch.setattr(updates, "resolve_paths", lambda **kwargs: SimpleNamespace(lib=native,
+        package=SimpleNamespace(installation=None, runtime_native=native)))
+    monkeypatch.setattr(updates, "native_environment", lambda paths, current: {
+        "CLAUDLOBBY_CLI": str(release.cli_path), "CLAUDLOBBY_NATIVE_DIR": str(native),
+        "CLAUDLOBBY_NATIVE_ADMITTED": "1"})
     monkeypatch.setattr(updates, "resolve_env_tiers", lambda paths: {
         "CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED": SimpleNamespace(value="0")})
     monkeypatch.setenv("CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED", "1")
@@ -43,14 +47,14 @@ def test_operator_update_uses_selected_native_and_host_switch(tmp_path, monkeypa
     result = updates.run_host_update(root, "runtime")
     assert result.outcome == "tick_completed"
     argv, kwargs = calls.pop()
-    assert argv == [str(native / "update-claude-code.sh"), "--selected-release", "r-selected"]
+    assert argv == [str(native / "update-claude-code.sh"), "--admitted-runtime"]
     assert kwargs["env"]["CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED"] == "0"
     assert kwargs["env"]["CLAUDLOBBY_CLI"] == str(release.cli_path)
     assert kwargs["timeout"] == 3600
 
     updates.run_host_update(root, "siblings", dry_run=True)
     argv, kwargs = calls.pop()
-    assert argv == [str(native / "update-siblings.sh"), "--selected-release", "r-selected",
+    assert argv == [str(native / "update-siblings.sh"), "--admitted-runtime",
                     "--dry-run"]
     assert "CLAUDLOBBY_FLEET" not in kwargs["env"]
 
@@ -72,7 +76,11 @@ def test_repo_pull_requires_declared_bot_and_selected_native(tmp_path, monkeypat
         assert selected_root == root and expected_release is None
         yield release
 
-    paths = SimpleNamespace(lib=native, bot_runtime=lambda bot: bot_dir)
+    paths = SimpleNamespace(lib=native, bot_runtime=lambda bot: bot_dir,
+                            package=SimpleNamespace(installation=None, runtime_native=native))
+    monkeypatch.setattr(repos, "native_environment", lambda paths, current: {
+        "CLAUDLOBBY_NATIVE_DIR": str(native), "CLAUDLOBBY_CLI": str(release.cli_path),
+        "CLAUDLOBBY_NATIVE_ADMITTED": "1"})
     context = SimpleNamespace(paths=paths, fleet=SimpleNamespace(name="demo", bots={"alex": object()}))
     monkeypatch.setattr(repos, "mutation_admission", admitted)
     monkeypatch.setattr(repos, "resolve_active_context", lambda **kwargs: context)
@@ -138,7 +146,11 @@ def test_scheduled_siblings_require_effective_and_selected_enrollment(tmp_path, 
         yield release
 
     monkeypatch.setattr(updates, "mutation_admission", admitted)
-    monkeypatch.setattr(updates, "resolve_paths", lambda **kwargs: SimpleNamespace(lib=native))
+    monkeypatch.setattr(updates, "resolve_paths", lambda **kwargs: SimpleNamespace(lib=native,
+        package=SimpleNamespace(installation=None, runtime_native=native)))
+    monkeypatch.setattr(updates, "native_environment", lambda paths, current: {
+        "CLAUDLOBBY_CLI": str(release.cli_path), "CLAUDLOBBY_NATIVE_DIR": str(native),
+        "CLAUDLOBBY_NATIVE_ADMITTED": "1"})
     monkeypatch.setattr(updates, "selected_phase_entries", lambda *a: [])
     monkeypatch.setattr(updates.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("updater ran without selected enrollment")))
@@ -211,3 +223,60 @@ def test_selected_timer_enters_public_owner_before_any_update(tmp_path, script, 
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 2
     assert not called.exists()
+
+
+@pytest.mark.parametrize('committed_switch', ['1', '0', ''])
+def test_git_scheduled_host_update_uses_shared_binding_and_exact_committed_switch(tmp_path, monkeypatch,
+                                                                              committed_switch):
+    from dataclasses import replace
+    from claudlobby import host_update_operations as updates
+    from claudlobby.installation import Installation
+    from claudlobby.runtime_admission import GitCurrentRuntime
+    from tests.package_fixtures import source_package
+    root = tmp_path / 'data'
+    installation = Installation(tmp_path / 'installation', root)
+    package = replace(source_package(), installation=installation, native=installation.native,
+                      artifact_id='', source_revision='a' * 40)
+    paths = SimpleNamespace(package=package)
+    current = GitCurrentRuntime(installation, 'a' * 40, 'b' * 64, {})
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs['expected_release'] is None
+        yield current
+    monkeypatch.setattr(updates, 'mutation_admission', admitted)
+    monkeypatch.setattr(updates, 'resolve_paths', lambda **kwargs: paths)
+    monkeypatch.setattr(updates, 'native_environment', lambda actual, *, current: {
+        'CLAUDLOBBY_ROOT': str(root), 'CLAUDLOBBY_INSTALLATION': str(installation.directory),
+        'CLAUDLOBBY_NATIVE_DIR': str(installation.native), 'CLAUDLOBBY_CLI': str(installation.cli),
+        'CLAUDLOBBY_NATIVE_ADMITTED': '1'})
+    monkeypatch.setattr(updates, 'load_host_jobs', lambda: pytest.fail('pending host job override read'))
+    monkeypatch.setattr(updates, 'selected_phase_entries', lambda *a: pytest.fail('sealed placement read'))
+    flag = 'CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED'
+    bindings = []
+    def bind(runtime, name):
+        assert runtime is current
+        bindings.append(name)
+        return None, SimpleNamespace(environment=((flag, committed_switch),)), 'exact-target', 'exact-file'
+    monkeypatch.setattr(updates, '_bind_git_job', bind)
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs['env']))
+        return subprocess.CompletedProcess(argv, 0, '', '')
+    monkeypatch.setattr(updates.subprocess, 'run', run)
+    monkeypatch.delenv('CLAUDLOBBY_RELEASE_ID', raising=False)
+    monkeypatch.delenv('CLAUDLOBBY_ARTIFACT_ID', raising=False)
+    monkeypatch.setenv(flag, 'wrong')
+    with pytest.raises(updates.HostUpdateError, match='switch differs'):
+        updates.run_host_update(root, 'runtime', scheduled=True)
+    assert not calls
+    monkeypatch.setenv(flag, committed_switch)
+    result = updates.run_host_update(root, 'runtime', scheduled=True)
+    assert result.release_id is None and result.source_revision == current.revision
+    assert result.config_fingerprint == current.config_fingerprint
+    assert calls[0][0] == [str(installation.native / 'update-claude-code.sh'), '--admitted-runtime']
+    assert calls[0][1][flag] == committed_switch and calls[0][1]['CLAUDLOBBY_NATIVE_ADMITTED'] == '1'
+    assert 'CLAUDLOBBY_RELEASE_ID' not in calls[0][1]
+    assert bindings == ['claude-update', 'claude-update']
+    updates.run_host_update(root, 'siblings', dry_run=True, scheduled=True)
+    assert bindings[-1] == 'update-siblings'
+    assert calls[-1][0] == [str(installation.native / 'update-siblings.sh'), '--admitted-runtime', '--dry-run']
