@@ -779,8 +779,35 @@ svc_bot_native_session() (
     case "$inspect" in
         '') printf '%s\t%s\t%s\n' "$pane" "$created" "$idle" ;;
         start)
-            started=$(LC_ALL=C TZ=UTC ps -p "$pane" -o lstart=) || return 3
-            started="${started#"${started%%[! ]*}"}"
+            case "$_OS" in
+                Darwin)
+                    started=$(LC_ALL=C TZ=UTC ps -p "$pane" -o lstart=) || return 3
+                    started="${started#"${started%%[! ]*}"}" ;;
+                Linux)
+                    started=$("${CLAUDLOBBY_NATIVE_PYTHON-python3}" -I -B - "$pane" <<'PY'
+import os
+from pathlib import Path
+import re
+import sys
+try:
+    process = Path("/proc") / sys.argv[1]
+    if process.stat().st_uid != os.getuid():
+        raise ValueError()
+    raw = (process / "stat").read_text()
+    ticks = raw.rsplit(")", 1)[1].split()[19]
+    machine = Path("/etc/machine-id").read_text().strip()
+    namespace = os.readlink(process / "ns/pid")
+    if (not ticks.isdigit() or not re.fullmatch(r"[0-9a-f]{32}", machine)
+            or not re.fullmatch(r"pid:\[[0-9]+\]", namespace)
+            or (process / "stat").read_text().rsplit(")", 1)[1].split()[19] != ticks):
+        raise ValueError()
+    print(ticks + ":linux:" + machine + ":" + namespace)
+except (OSError, ValueError, IndexError):
+    sys.exit(3)
+PY
+                    ) || return 3 ;;
+                *) return 3 ;;
+            esac
             [ -n "$started" ] || return 3
             printf '%s\t%s\t%s\t%s:%s\n' "$pane" "$created" "$idle" "$_OS" "$started" ;;
         *) return 3 ;;

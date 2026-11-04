@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import tempfile
@@ -58,7 +59,7 @@ def read(bot_dir):
         fields = {"schema", "session_id", "transcript", "account", "cwd", "label", "tmpdir", "process", "pending", "checkpoint"}
         if (set(value) not in (fields, fields | {"provider_start"})
                 or "provider_start" in value and (not isinstance(value["provider_start"], str)
-                    or not value["provider_start"].startswith("Darwin:")
+                    or not value["provider_start"].startswith(("Darwin:", "Linux:"))
                     or len(value["provider_start"]) > 128
                     or any(c in value["provider_start"] for c in "\r\n\t"))
                 or value["schema"] != 1 or not _uuid(value["session_id"])
@@ -182,16 +183,20 @@ def _provider_session(bot_dir, account, current):
         if (type(identity["pid"]) is not int or identity["pid"] != pid
                 or not _uuid(identity["sessionId"]) or identity["cwd"] != str(bot_dir)
                 or identity["kind"] != "interactive" or identity["entrypoint"] != "cli"
-                or not isinstance(identity["procStart"], str)):
+                or not isinstance(identity["procStart"], str)
+                or not isinstance(identity["pidDomain"], str)):
             raise ValueError()
     except (ValueError, TypeError, KeyError) as exc:
         raise NativeSessionError("native provider PID record does not bind this interactive bot") from exc
-    # Only the Darwin shape/currentness contract has native capture evidence.
-    # Existing valid native receipts remain supported on either platform.
-    if identity["pidDomain"] != "darwin" or not current["process_start"].startswith("Darwin:"):
-        raise NativeSessionError("pre-feature session adoption requires verified provider process metadata; Linux shape is not yet verified")
-    if current["process_start"] != "Darwin:" + identity["procStart"]:
-        raise NativeSessionError("native provider PID record belongs to another process start")
+    if current["process_start"].startswith("Darwin:") and identity["pidDomain"] == "darwin":
+        expected = "Darwin:" + identity["procStart"]
+    elif (current["process_start"].startswith("Linux:") and identity["procStart"].isdigit()
+            and re.fullmatch(r"linux:[0-9a-f]{32}:pid:\[[0-9]+\]", identity["pidDomain"])):
+        expected = "Linux:" + identity["procStart"] + ":" + identity["pidDomain"]
+    else:
+        raise NativeSessionError("native provider PID domain or process-start shape is unavailable")
+    if current["process_start"] != expected:
+        raise NativeSessionError("native provider PID record belongs to another process start or domain")
     return identity
 
 
@@ -230,8 +235,8 @@ def checkpoint(bot_dir, label, tmpdir, adapter, *, operation_id, account=None):
     adopting = original is None or "provider_start" in original
     value = None if original is None else _binding(original, bot_dir, label, tmpdir, account)
     current = observe(adapter, bot_dir, label, tmpdir, process_start=adopting)
-    if adopting and not current["process_start"].startswith("Darwin:"):
-        raise NativeSessionError("pre-feature session adoption requires verified provider process metadata; Linux shape is not yet verified")
+    if adopting and not current["process_start"].startswith(("Darwin:", "Linux:")):
+        raise NativeSessionError("native provider process domain is unsupported")
     if original is not None and (value["pending"] or value["process"] != current["process"]
             or adopting and value["provider_start"] != current["process_start"]):
         raise NativeSessionError("native session is not the recorded process")

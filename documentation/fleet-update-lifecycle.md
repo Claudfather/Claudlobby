@@ -614,9 +614,11 @@ retain their provider-process provenance until a validated SessionStart hook
 confirms continuation. Later checkpoint attempts re-read the same PID record,
 including a same-process `/clear`, and the stop owner performs a final
 currentness check before its native action. This does not make external terminal
-input atomic with a stop. This automatic
-adoption is verified for Darwin; the Linux provider-record shape still needs
-native evidence and currently refuses. Existing malformed receipts are never
+input atomic with a stop. Darwin binds provider process start to UTC native process time. Linux binds it
+to `/proc/PID/stat` start ticks and the exact machine-ID/PID-namespace domain
+recorded by Claude. Missing or mismatched kernel evidence refuses. The Linux
+record shape has read-only native evidence; a full Linux update trial remains
+a separate acceptance step. Existing malformed receipts are never
 replaced through adoption. Already stopped older bots remain stopped; selecting
 their historical conversation for a later start is outside this slice. No path
 guesses the newest transcript or silently falls back to model handoff. Native continuation does not read or change optional handoff

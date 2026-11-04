@@ -3,8 +3,10 @@
 The SessionStart payload shape is from Claude Code 2.1.318 captures retained in
 native-resume-proof/hooks (startup and resume, tools-disabled print probe).
 IDs/paths below are synthetic. This is shape evidence, not interactive acceptance.
-The provider PID record is from the sanitized live Darwin capture retained in
-native-session-adoption-20261104/sanitized-darwin-shape.json (Claude 2.1.318).
+Provider PID records are grounded in native-session-adoption-20261104's
+sanitized-darwin-shape.json (Claude 2.1.318) and sanitized-linux-shape.json
+(Claude 2.1.316). The Linux capture matched kernel start ticks, machine ID and
+process PID namespace; it was read-only evidence, not update acceptance.
 """
 from copy import deepcopy
 import json
@@ -21,6 +23,8 @@ from claudlobby.isolation import transcript_slug
 
 SID = "00000000-0000-4000-8000-000000000001"
 OTHER = "00000000-0000-4000-8000-000000000002"
+LINUX_DOMAIN = "linux:00000000000000000000000000000000:pid:[4026531836]"
+LINUX_START = "12345678"
 
 
 def session_start(bot, account, sid, *, source="startup"):
@@ -78,9 +82,13 @@ def provider_record(bot, account, adapter, sid):
     """Author the captured provider shape at its exact PID filename."""
     path = account / "sessions" / (str(adapter.pid) + ".json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"pid": adapter.pid, "sessionId": sid, "cwd": str(bot),
+    value = {"pid": adapter.pid, "sessionId": sid, "cwd": str(bot),
         "startedAt": 1793790000000, "procStart": "Wed Nov  4 12:20:00 2026",
-        "version": "2.1.318", "kind": "interactive", "entrypoint": "cli", "pidDomain": "darwin"}))
+        "version": "2.1.318", "kind": "interactive", "entrypoint": "cli", "pidDomain": "darwin"}
+    if adapter.kernel_start.startswith("Linux:"):
+        _, ticks, domain = adapter.kernel_start.split(":", 2)
+        value.update(procStart=ticks, pidDomain=domain, version="2.1.316")
+    path.write_text(json.dumps(value))
     return path
 
 
@@ -91,6 +99,14 @@ def older(bound):
     (b.bot / "data/.spawn").touch()
     b.provider = provider_record(b.bot, b.account, b.adapter, b.receipt["session_id"])
     b.adapter.calls.clear()
+    return b
+
+
+@pytest.fixture
+def older_linux(older):
+    b = older
+    b.adapter.kernel_start = "Linux:" + LINUX_START + ":" + LINUX_DOMAIN
+    b.provider = provider_record(b.bot, b.account, b.adapter, b.receipt["session_id"])
     return b
 
 
@@ -227,6 +243,44 @@ def test_absent_receipt_adopts_exact_pane_pid_despite_newer_decoy_and_optional_h
     assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
 
 
+def test_linux_adoption_matches_exact_pid_start_machine_and_namespace_then_resumes(older_linux):
+    b = older_linux
+    decoy = b.provider.with_name(str(b.adapter.pid + 1) + ".json")
+    decoy.write_text(json.dumps({**json.loads(b.provider.read_bytes()), "pid": b.adapter.pid + 1, "sessionId": OTHER}))
+    proof = native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original-linux")
+    assert proof["session"]["session_id"] == b.receipt["session_id"]
+    assert proof["session"]["provider_start"] == b.adapter.kernel_start
+    assert native.read(b.bot) == proof["session"]
+    native.verify_live(b.bot, proof, b.adapter)
+    native.verify(b.bot, proof)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", b.receipt["session_id"])
+    assert native.read(b.bot)["provider_start"] == b.adapter.kernel_start
+    b.adapter.pid += 2
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, b.receipt["session_id"], source="resume"), caller=123)
+    assert "provider_start" not in native.confirm(b.bot, expected=proof["session"])
+    assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
+
+
+@pytest.mark.parametrize("drift", ["machine-id", "pid-namespace", "start-ticks"])
+def test_linux_adoption_refuses_mismatched_provider_kernel_binding_without_receipt(older_linux, drift):
+    b = older_linux
+    value = json.loads(b.provider.read_bytes())
+    if drift == "machine-id":
+        value["pidDomain"] = "linux:" + "1" * 32 + ":pid:[4026531836]"
+    elif drift == "pid-namespace":
+        value["pidDomain"] = "linux:" + "0" * 32 + ":pid:[4026531837]"
+    else:
+        value["procStart"] = str(int(LINUX_START) + 1)
+    b.provider.write_text(json.dumps(value))
+    before = b.provider.read_bytes()
+    with pytest.raises(native.NativeSessionError):
+        native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original-linux")
+    assert not (b.bot / "data" / native.NAME).exists()
+    assert b.provider.read_bytes() == before and (b.bot / "data/.spawn").exists()
+    assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
+
+
 @pytest.mark.parametrize("drift", ["stale-start", "cwd", "account", "pid"])
 def test_absent_receipt_refuses_provider_drift_without_publishing_or_waiting(older, monkeypatch, drift):
     b = older
@@ -343,15 +397,16 @@ def test_absent_receipt_waits_for_idle_then_adopts_in_same_operation(older, monk
     assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
 
 
-def test_native_observer_reports_actual_kernel_start_in_utc_without_starting_processes(tmp_path):
+def test_native_observer_reports_actual_kernel_start_without_starting_processes(tmp_path):
+    import sys
     from tests.conftest import constructed_env
 
     bot, tmpdir = tmp_path / "worker", tmp_path / "tmux"
     bot.mkdir(); tmpdir.mkdir()
     (bot / "bot.conf").write_text(f'BOT_SERVICE="example.worker"\nTMUX_TMPDIR="{tmpdir}"\n')
     scripts = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
-    # Only tmux queries are substituted; ps reads this already-running pytest
-    # process. No session, native service, or provider is launched.
+    # Only tmux queries are substituted; the kernel observation reads this
+    # already-running pytest process. No session, service or provider starts.
     snippet = r'''
 fixture_tmux() {
     case "$3" in
@@ -365,13 +420,19 @@ export TMUX_BIN=fixture_tmux
 . "$1/supervisor.sh"
 svc_bot_native_session "$2" example.worker "$3" '' start
 '''
-    env = constructed_env(FIXTURE_PID=str(os.getpid()), LC_ALL="C", TZ="Pacific/Honolulu")
+    env = constructed_env(FIXTURE_PID=str(os.getpid()), LC_ALL="C", TZ="Pacific/Honolulu",
+                          CLAUDLOBBY_NATIVE_PYTHON=sys.executable)
     result = subprocess.run(["/bin/bash", "-c", snippet, "observer-fixture", str(scripts), str(bot), str(tmpdir)],
                             env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     pid, generation, _idle, kernel_start = result.stdout.strip().split("\t")
-    expected = subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="],
-                                      env={**env, "TZ": "UTC"}, text=True).strip()
+    if os.uname().sysname == "Linux":
+        process = Path("/proc") / str(os.getpid())
+        ticks = (process / "stat").read_text().rsplit(")", 1)[1].split()[19]
+        expected = ticks + ":linux:" + Path("/etc/machine-id").read_text().strip() + ":" + os.readlink(process / "ns/pid")
+    else:
+        expected = subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="],
+                                          env={**env, "TZ": "UTC"}, text=True).strip()
     assert pid == str(os.getpid()) and generation == "1700000000"
     assert kernel_start == os.uname().sysname + ":" + expected
 
