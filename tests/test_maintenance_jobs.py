@@ -234,7 +234,8 @@ class TestReloadFleetNpxPreflight:
             CLAUDLOBBY_ROOT=str(root),
             CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
             CLAUDLOBBY_NATIVE_DIR=str(libdir),
-            CLAUDLOBBY_RELEASE_ID="selected",
+            CLAUDLOBBY_INSTALLATION=str(tmp_path / "installation"),
+            CLAUDLOBBY_NATIVE_ADMITTED="1",
             CLAUDLOBBY_FLEET="test",
             CALL_LOG=str(tmp_path / "calls.log"),
             PATH=f"{bindir}:{os.environ['PATH']}",
@@ -244,7 +245,7 @@ class TestReloadFleetNpxPreflight:
 
     def _run_reload(self, root, env, plugins):
         r = subprocess.run(
-            ["bash", str(root / "lib" / "reload-fleet.sh"), "--selected-release", "selected",
+            ["bash", str(root / "lib" / "reload-fleet.sh"), "--admitted-runtime",
              "--fleet", "test", "--bots-dir", str(root / "runtime/bots"), "--bot", "tbot",
              *(part for plugin in plugins for part in ("--plugin", plugin))],
             env=env,
@@ -445,14 +446,15 @@ class TestReloadFailureReasonIsTheRealError:
             'export TELEGRAM_GROUP_CHAT_ID="-100123"\n'
         )
         r = subprocess.run(
-            ["bash", str(libdir / "reload-fleet.sh"), "--selected-release", "selected",
+            ["bash", str(libdir / "reload-fleet.sh"), "--admitted-runtime",
              "--fleet", "test", "--bots-dir", str(root / "runtime/bots"),
              "--bot", "tbot", "--plugin", "alpha@Src"],
             env=_scrubbed_env(
                 CLAUDLOBBY_ROOT=str(root),
                 CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
                 CLAUDLOBBY_NATIVE_DIR=str(libdir),
-                CLAUDLOBBY_RELEASE_ID="selected",
+                CLAUDLOBBY_INSTALLATION=str(tmp_path / "installation"),
+                CLAUDLOBBY_NATIVE_ADMITTED="1",
                 CLAUDLOBBY_FLEET="test",
                 PATH=f"{bindir}:{sysbin or '/usr/bin:/bin:/usr/sbin:/sbin'}",
                TG_CAPTURE=str(tmp_path / "tg-capture"),
