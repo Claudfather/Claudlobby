@@ -18,7 +18,7 @@ from .config_units import current_git_declarations, staged_git_declarations
 from .git_update import UpdateError, _sync
 from .supervision_inventory import (
     FileSnapshot, collect_enrollment, is_unit_template, validate_darwin_unit,
-    _environment, _darwin_source, _catalog,
+    _environment, _darwin_source, _catalog, _wanted_by, _enablement,
 )
 from .supervision_runtime import _call, assert_quiescent, assert_native_absent, unit_start_budget
 
@@ -438,7 +438,6 @@ def observe_added_absence(row, adapter):
 
 
 def _freeze_added(snapshot, adapter, directory, declaration, item, content, paired):
-    from .activation_enrollment import _wanted_by, _enablement
     from .stop_record import read_stop
     from .supervision_inventory import _darwin_disabled
     import plistlib

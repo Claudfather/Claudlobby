@@ -1,32 +1,28 @@
-"""Generated message routes use selected activation, even without Plane."""
+"""Generated message routes use committed Git configuration, even without Plane."""
 
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import json
 
 import pytest
 
-from claudlobby import activation, activation_state as state
-from claudlobby.activation_identity import read_selected_identity_bindings
-from claudlobby.config_plan import ConfigPlanBuilder, PlanError
+from claudlobby import active_config
+from claudlobby.activation_state import ActivationError
+from claudlobby.activation_identity import read_current_identity_bindings
+from claudlobby.config_plan import PlanError
 from claudlobby.message_context import MessageContextError, resolve_message_route
 from claudlobby.plane.db import db_file
 from claudlobby.plane.ids import derive_uid, ensure_host_uid
-from claudlobby.releases import seal_release
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — real activation and short socket root
-from tests.test_releases import installed  # noqa: F401 — dependency of cold and two_fleet
-from tests.test_runtime_admission import _active
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — committed configuration and short socket root
 
 
 @pytest.fixture
 def selected(cold, monkeypatch):  # noqa: F811 — pytest fixture parameter
-    root, release, plan, host = cold
+    root, _, _, host = cold
     for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR", "FLEET_ROOT"):
         monkeypatch.delenv(key, raising=False)
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    package = replace(source_package(), native=release.native_path,
-                      artifact_id=release.inputs.artifact_id)
+    package = host.package
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
     monkeypatch.setenv("FLEET_NAME", "example")
     monkeypatch.setenv("BOT_ID", "manager")
@@ -38,67 +34,50 @@ def selected(cold, monkeypatch):  # noqa: F811 — pytest fixture parameter
 
 
 @pytest.fixture
-def two_fleet(installed, monkeypatch):  # noqa: F811 — pytest fixture parameter
-    root, inputs, paths, _, directory = installed
-    release = seal_release(root, inputs, paths)
-    package = replace(source_package(), native=release.native_path,
-                      artifact_id=inputs.artifact_id)
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
-                                ("origin", "other"),
-                                effects={"fleet_manifests": {}, "fleet_sources": {}})
-    for name in ("origin", "other"):
-        fleet_dir = root / "local" / name
+def two_fleet(cold, monkeypatch):  # noqa: F811
+    root, installation, _, host = cold
+    package = host.package
+    snapshot = deepcopy(host.snapshot)
+    snapshot['fleets'] = {}
+    for name in ('origin', 'other'):
+        fleet_dir = root / 'local' / name
         fleet_dir.mkdir(parents=True)
-        manifest = fleet_dir / "fleet.yaml"
-        manifest.write_text(json.dumps({"fleet": {
-            "name": name, "manager": "manager", "service_prefix": name,
-            "system_defaults": False, "bots": {
-                bot: {"expertise": ["software-engineering"], "channels": []}
-                for bot in ("manager", "worker")},
-        }}))
-        projects = fleet_dir / "projects.yaml"
-        builder.effects["fleet_manifests"][name] = str(manifest)
-        builder.effects["fleet_sources"][name] = {
-            "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
-            "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
-        }
-    plan = builder.seal()
-    _active(plan)
-
-    # The plan, selection, activation record and binding reader are real. The
-    # fixture supplies well-formed retained IDs directly because the native
-    # bootstrap harness covers only one fleet; this does not exercise registry
-    # enrollment, and no Plane is opened by the route.
-    host_uid = ensure_host_uid(root / "state")
+        manifest = fleet_dir / 'fleet.yaml'
+        content = json.dumps({'fleet': {
+            'name': name, 'manager': 'manager', 'service_prefix': name,
+            'system_defaults': False, 'bots': {
+                bot: {'expertise': ['software-engineering'], 'channels': []}
+                for bot in ('manager', 'worker')}}})
+        manifest.write_text(content)
+        snapshot['fleets'][name] = {'manifest': str(manifest), 'fleet': content, 'projects': None}
+    # Route reads need retained identities, not a registry enrollment or native
+    # start. Commit these distinct, well-formed parties through the real owner.
     fleets = {}
-    for name in plan.fleets:
-        bots = {bot: derive_uid("actor", f"fixture:{name}/{bot}")
-                for bot in ("manager", "worker")}
-        fleets[name] = {"fleet_uid": derive_uid("fleet", f"fixture:{name}"),
-                        "manager": "manager", "manager_uid": bots["manager"],
-                        "bots": bots}
-    body = deepcopy(state.read_activation(root, "candidate").body)
-    body["identity_bindings"] = {
-        "schema": 1, "root": str(root), "plan_id": plan.plan_id,
-        "release_id": plan.release_id, "release_seal": plan.release_seal,
-        "host_uid": host_uid, "fleets": fleets,
-    }
-    journal = root / "state/activations/candidate/activation.json"
-    state._write(journal, {"record": body, "sha256": state._digest(body)})
-    monkeypatch.setattr(activation.sys, "executable", str(directory / paths.interpreter))
-    for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR", "FLEET_ROOT"):
+    for name in snapshot['fleets']:
+        bots = {bot: derive_uid('actor', f'fixture:{name}/{bot}')
+                for bot in ('manager', 'worker')}
+        fleets[name] = {'fleet_uid': derive_uid('fleet', f'fixture:{name}'),
+                        'manager': 'manager', 'manager_uid': bots['manager'], 'bots': bots}
+    snapshot['identities'] = {'schema': 1, 'host_uid': ensure_host_uid(root / 'state'), 'fleets': fleets}
+    snapshot['units'] = []
+    snapshot['owned_outputs'] = []
+    snapshot['fingerprint'] = active_config._fingerprint(snapshot)
+    active_config.publish_current_config(snapshot, installation=installation,
+                                         expected_previous=host.snapshot['fingerprint'])
+    db_file(root).rename(root / 'plane-offline')
+    for key in ('FLEET_NAME', 'CLAUDLOBBY_FLEET', 'BOT_ID', 'BOT_NAME', 'BOT_DIR', 'FLEET_ROOT'):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
-    monkeypatch.setenv("FLEET_NAME", "origin")
-    monkeypatch.setenv("BOT_ID", "manager")
-    monkeypatch.setenv("FLEET_ROOT", str(root / "local/origin"))
-    monkeypatch.setenv("BOT_DIR", str(root / "local/origin/runtime/bots/manager"))
+    monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+    monkeypatch.setenv('FLEET_NAME', 'origin')
+    monkeypatch.setenv('BOT_ID', 'manager')
+    monkeypatch.setenv('FLEET_ROOT', str(root / 'local/origin'))
+    monkeypatch.setenv('BOT_DIR', str(root / 'local/origin/runtime/bots/manager'))
     return root, package, fleets
 
 
 def test_generated_route_keeps_caller_and_peer_ids_with_plane_absent(selected):
     root, package = selected
-    bindings = read_selected_identity_bindings(root, "example", package=package)
+    bindings = read_current_identity_bindings(root, "example", package=package)
     bare = resolve_message_route("worker", package=package)
     qualified = resolve_message_route("example/worker", package=package)
     assert bare == qualified
@@ -164,11 +143,13 @@ def test_unactivated_authoring_edits_do_not_retarget_and_lost_bindings_refuse(se
     manifest.unlink()
     assert resolve_message_route("worker", package=package) == original
 
-    journal = root / "state/activations/cold/activation.json"
-    body = deepcopy(state.read_activation(root, "cold").body)
-    del body["identity_bindings"]
-    state._write(journal, {"record": body, "sha256": state._digest(body)})
-    with pytest.raises(state.ActivationError, match="differ from the selected plan"):
+    snapshot = active_config.read_current_config(root, installation=package.installation)
+    updated = deepcopy(snapshot)
+    updated['identities'] = None
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    with pytest.raises(ActivationError, match="identities are not initialized"):
         resolve_message_route("worker", package=package)
 
 
@@ -176,7 +157,7 @@ def test_unknown_or_foreign_target_bad_origin_and_package_skew_refuse(selected, 
     _, package = selected
     with pytest.raises(MessageContextError, match="not in active fleet"):
         resolve_message_route("unknown", package=package)
-    with pytest.raises(PlanError, match="complete frozen"):
+    with pytest.raises(PlanError, match="no selected frozen fleet"):
         resolve_message_route("other/worker", package=package)
     for target in ("", "/worker", "example/", "example/worker/other", "../worker"):
         with pytest.raises(MessageContextError):
@@ -191,35 +172,14 @@ def test_unknown_or_foreign_target_bad_origin_and_package_skew_refuse(selected, 
     with pytest.raises(MessageContextError, match="local human messaging requires a bound selected caller"):
         resolve_message_route("worker", package=package)
     monkeypatch.setenv("BOT_ID", "manager")
-    with pytest.raises(state.ActivationError, match="executing package differ"):
+    with pytest.raises(PlanError, match="managed Git installation"):
         resolve_message_route("worker", package=source_package())
 
 
 @pytest.fixture
-def git_selected(selected, monkeypatch):  # noqa: F811
-    from claudlobby import active_config, context, message_context
-    from claudlobby.config_plan import read_plan
-    from claudlobby.installation import Installation
-    from claudlobby.resources import selected_cli
-
-    root, old_package = selected
-    selection = state.read_selection(root)
-    plan = read_plan(root, selection['plan_id'])
-    bindings = state.read_activation(root, selection['activation_id']).body['identity_bindings']
-    installation = Installation(root.parent / 'git-installation', root)
-    installation.bin.mkdir(parents=True)
-    installation.cli.write_text('# fixture CLI\n')
-    package = replace(old_package, installation=installation, native=installation.native,
-                      artifact_id='', source_revision='a' * 40)
-    # No native-unit authority is needed to resolve a route. Preserve genuine
-    # retained identities; this fixture makes no enrollment/startup claim.
-    effective = replace(plan, changes=(), effects={**plan.effects, 'units': []})
-    identities = {key: bindings[key] for key in ('schema', 'host_uid', 'fleets')}
-    snapshot = active_config.snapshot_from_plan(effective, installation, package.source_revision, identities=identities)
-    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
-    monkeypatch.setattr(context, 'selected_cli', selected_cli)
-    monkeypatch.setattr(state, 'read_selection', lambda *_: pytest.fail('sealed selection read'))
-    return root, package, snapshot
+def git_selected(selected):
+    root, package = selected
+    return root, package, active_config.read_current_config(root, installation=package.installation)
 
 
 def test_git_route_uses_current_config_and_retained_ids_without_plane(git_selected):
@@ -243,7 +203,7 @@ def test_git_route_uses_current_config_and_retained_ids_without_plane(git_select
 def test_git_route_refuses_current_snapshot_change_during_resolution(git_selected, monkeypatch):
     from claudlobby import active_config, message_context
     root, package, snapshot = git_selected
-    original = message_context.read_selected_identity_bindings
+    original = message_context.read_current_identity_bindings
     def changed(*args, **kwargs):
         result = original(*args, **kwargs)
         updated = deepcopy(snapshot)
@@ -252,6 +212,6 @@ def test_git_route_refuses_current_snapshot_change_during_resolution(git_selecte
         active_config.publish_current_config(updated, installation=package.installation,
                                              expected_previous=snapshot['fingerprint'])
         return result
-    monkeypatch.setattr(message_context, 'read_selected_identity_bindings', changed)
+    monkeypatch.setattr(message_context, 'read_current_identity_bindings', changed)
     with pytest.raises(MessageContextError, match='selection changed'):
         resolve_message_route('worker', package=package)

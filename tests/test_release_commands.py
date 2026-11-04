@@ -2,18 +2,21 @@
 
 import builtins
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import activation_state, config_install, context, freshbox, migration_apply, resources
+from claudlobby import config_install, context, freshbox, resources
 from claudlobby import releases as release_store
 from claudlobby.commands import releases as commands
 from claudlobby.config_plan import ConfigPlanBuilder
-from claudlobby.migration_plan import build_migration_manifest
-from claudlobby.plane.migrations import SCHEMA_USER_VERSION
+from claudlobby.plane.db import db_file
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION, migrate
+from tests.test_activation_state import write_activation, write_selection
+from tests.test_migration_apply import write_migration
 from tests.test_migration_plan import releases, _database, _snapshot
 from tests.test_releases import installed, r
 
@@ -88,17 +91,11 @@ def test_host_release_diagnosis_works_without_application_dependencies(installed
     assert _snapshot(root) == before
     # Journal-only fixture: the former selection is active, but a subsequent
     # interrupted host activation blocks mutation even while its bytes verify.
-    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
-    with activation_state.locked_activation(root) as store:
-        store.prepare("previous", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
-        for step in activation_state.STEPS:
-            store.begin("previous", step)
-            if step == "selection_switched":
-                store.select("previous")
-            else:
-                store.complete("previous", step, evidence_digest="2" * 64)
-        store.prepare("interrupted", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
-        store.begin("interrupted", "producers_paused")
+    plan_id = "p-" + "b" * 64
+    write_activation(root, "previous", release_id=release.release_id, plan_id=plan_id)
+    write_selection(root, "previous", release_id=release.release_id, plan_id=plan_id)
+    write_activation(root, "interrupted", status="activating", pending="producers_paused",
+                     release_id=release.release_id, plan_id=plan_id)
     before = _snapshot(root)
     interrupted, _ = _call(capsys, ["host", "releases", "--json"], 4)
     assert interrupted["data"]["selected_activation"]["status"] == "active"
@@ -221,8 +218,6 @@ def test_converter_copy_failure_keeps_item_status_without_exception_text(monkeyp
 
 
 def test_migration_status_reads_historical_progress_without_execution(releases, capsys):
-    from claudlobby import activation_enrollment, activation_units, config_install
-
     root, _, release = releases
     _database(root).close()
     before = _snapshot(root)
@@ -231,29 +226,22 @@ def test_migration_status_reads_historical_progress_without_execution(releases, 
     assert old["data"]["database"]["user_version"] == 1
     assert old["data"]["items"] == [] and _snapshot(root) == before
 
-    # Fixture setup only: exercise the real journal owners to supply completed
-    # migration evidence, without service calls or a public apply route.
-    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
-    manifest = build_migration_manifest(root, release, release)
-    with activation_state.locked_activation(root) as store:
-        store.prepare("upgrade", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
-        for step in activation_state.STEPS[:activation_state.STEPS.index("backup_saved")]:
-            store.begin("upgrade", step)
-            store.complete("upgrade", step, evidence_digest=(
-                manifest.manifest_id[2:] if step == "queues_classified" else "2" * 64))
-        migration_apply.apply_migration(store, "upgrade", manifest)
-        for name, owner, phase in (
-            (activation_units.journal_id("upgrade", "producers"), "activation-units-v1", "producers"),
-            (activation_enrollment.journal_id("upgrade", "directories"),
-             "activation-enrollment-v1", "directories"),
-        ):
-            journal_plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (),
-                effects={"owner": owner, "activation_id": "upgrade", "phase": phase}).seal()
-            config_install.prepare_config(journal_plan, name)
+    # Fixture setup only: directly authored historical evidence (no journal
+    # writer, apply or service call); the database is advanced by its own runner.
+    write_activation(root, "upgrade", status="activating", completed=["migration_applied"],
+                     release_id=release.release_id)
+    write_migration(root, "upgrade")
+    with sqlite3.connect(db_file(root)) as conn:
+        migrate(conn)
+    for name, owner in (("units-" + "d" * 64, "activation-units-v1"),
+                        ("enrollment-" + "e" * 64, "activation-enrollment-v1")):
+        journal_plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (),
+            effects={"owner": owner, "activation_id": "upgrade"}).seal()
+        config_install.prepare_config(journal_plan, name)
     before = _snapshot(root)
     complete, _ = _call(capsys, status_argv)
     assert complete["data"]["database"]["user_version"] == SCHEMA_USER_VERSION
-    assert complete["data"]["items"][0]["recorded"]["result"]["user_version"] == SCHEMA_USER_VERSION
+    assert complete["data"]["items"][0]["recorded"]["result"]["user_version"] == 2
     assert complete["data"]["items"][0]["migration_step_completed"]
     assert complete["data"]["items"][0]["activation_status"] == "activating"
     after = _snapshot(root)

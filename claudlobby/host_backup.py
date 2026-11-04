@@ -16,12 +16,11 @@ import sqlite3
 import stat
 import tempfile
 
-from .activation_state import ActivationRefusal, locked_activation, read_activation, read_selection
-from .config_plan import path_state, read_plan
+from .activation_state import ActivationRefusal
+from .config_plan import path_state
 from .migration_apply import _backup, _file_digest
 from .plane.db import connect_ro, db_file
 from .plane.ids import read_host_uid
-from .releases import read_release
 
 
 EXCLUSIONS = (
@@ -115,43 +114,6 @@ def _capture_source(path, destination, files, *, expected=None):
     return before
 
 
-def _source_files(plan):
-    """Frozen manifests, plus unchanged reviewed overlays; never crawl state/HOME."""
-    from .config import host_override_path
-
-    files = {}
-    sources = plan.effects.get("fleet_sources")
-    if not isinstance(sources, dict) or set(sources) != set(plan.fleets):
-        raise ActivationRefusal("backup requires a plan with retained fleet configuration")
-
-    def capture(path, destination):
-        recorded = plan.inputs.get(str(path))
-        if recorded is None:
-            raise ActivationRefusal("backup requires retained configuration provenance")
-        _capture_source(path, destination, files, expected=recorded["state"])
-
-    for name, item in sorted(sources.items()):
-        manifest, content = plan.frozen_input(item["fleet"], required=True)
-        projects, project_content = plan.frozen_input(item["projects"])
-        for path in (manifest, projects):
-            recorded = plan.inputs[str(path)]["state"]
-            if recorded["node"]["kind"] == "symlink" or recorded["resolved"] != str(path):
-                raise ActivationRefusal("backup refuses linked fleet or project configuration")
-        try:
-            relative = manifest.relative_to(plan.data_root)
-        except ValueError as exc:
-            raise ActivationRefusal("backup currently requires fleet configuration inside the host data root") from exc
-        if projects != manifest.parent / "projects.yaml":
-            raise ActivationRefusal("backup fleet source locations disagree")
-        files[str(relative)] = (content, 0o600)
-        if project_content is not None:
-            files[str(relative.parent / "projects.yaml")] = (project_content, 0o600)
-        # voices/ is the pre-#2150 voice folder, a plan input only while it is
-        # read: drop it here with #2202, or every backup refuses.
-        for folder in ("library", "voices", "templates"):
-            capture(manifest.parent / folder, relative.parent / folder)
-    capture(host_override_path(), Path("host-system.yaml"))
-    return files
 
 
 def _git_source_files(root, snapshot):
@@ -248,26 +210,7 @@ def create_backup(root: Path, destination: Path, *, package=None) -> dict:
                 schema_version=SQL_SCHEMA_VERSION, recovery=recovery, recheck=recheck)
         finally:
             os.close(fd)
-    # Serialize against activation, not normal SQLite writers. The backup API
-    # reads one transaction while the selected plan remains fixed.
-    with locked_activation(root):
-        selected = read_selection(root)
-        if selected is None:
-            raise ActivationRefusal("backup requires an active selected host")
-        active = read_activation(root, selected["activation_id"])
-        if (active.status != "active" or any(active.body["intent"][key] != selected[key]
-                for key in ("plan_id", "release_id"))):
-            raise ActivationRefusal("backup refuses an incomplete activation")
-        for path in (root / "state/activations").glob("*/activation.json"):
-            if read_activation(root, path.parent.name).status not in ("active", "rolled_back"):
-                raise ActivationRefusal("backup refuses an unfinished activation")
-        plan = read_plan(root, selected["plan_id"])
-        release = read_release(root, selected["release_id"])
-        if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-            raise ActivationRefusal("backup selected configuration and release disagree")
-        return _write_bundle(root, destination, {"schema": 1, "release_id": release.release_id,
-                             "plan_id": plan.plan_id}, _source_files(plan),
-                             schema_version=release.compatibility.schema.write)
+    raise ActivationRefusal("backup creation requires a managed Git installation; historical backups remain inspectable")
 
 
 def _git_provenance(value):

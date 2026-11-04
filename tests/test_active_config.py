@@ -10,19 +10,17 @@ import pytest
 
 from claudlobby import active_config, activation_identity, activation_state, operation_context
 from claudlobby.config import load_fleet
-from claudlobby.config_plan import ConfigPlanBuilder, PlanError, RenderedConfiguration, read_plan
+from claudlobby.config_plan import ConfigPlanBuilder, PlanError, RenderedConfiguration, read_rendered
 from claudlobby.installation import Installation
-from claudlobby.releases import seal_release
 from tests.package_fixtures import source_package
-from tests.test_releases import installed
-from tests.test_runtime_admission import _active
 
 
 @pytest.fixture
-def frozen(installed):
-    root, inputs, paths, _, directory = installed
-    release = seal_release(root, inputs, paths)
-    package = replace(source_package(), native=release.native_path, artifact_id=inputs.artifact_id)
+def frozen(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    installation = Installation(tmp_path / "installation", root)
+    package = replace(source_package(), installation=installation, source_revision="a"*40, artifact_id="")
     manifest = root / "fleet.yaml"
     manifest.write_text(json.dumps({"fleet": {
         "name": "example", "manager": "manager", "service_prefix": "com.example",
@@ -32,7 +30,7 @@ def frozen(installed):
         },
     }}))
     projects = root / "projects.yaml"
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
+    builder = ConfigPlanBuilder(root, fleets=("example",),
                                effects={"fleet_manifests": {"example": str(manifest)}})
     builder.effects["fleet_sources"] = {"example": {
         "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
@@ -41,11 +39,16 @@ def frozen(installed):
     return root, manifest, projects, builder, package
 
 
+def _commit(plan, package):
+    snapshot = active_config.snapshot_from_plan(plan,package.installation,package.source_revision)
+    active_config.publish_current_config(snapshot,installation=package.installation,expected_previous=None)
+
+
 def test_active_configuration_ignores_unactivated_edits_and_removed_sources(frozen):
     root, manifest, projects, builder, package = frozen
     expected = load_fleet(manifest)
-    plan = builder.seal()
-    _active(plan)  # Real durable records only; no native lifecycle is asserted.
+    plan = builder.freeze(package.source_revision)
+    _commit(plan, package)  # Real durable records only; no native lifecycle is asserted.
     document = json.loads(manifest.read_text())
     document["fleet"]["manager"] = "worker"
     manifest.write_text(json.dumps(document))
@@ -58,9 +61,9 @@ def test_active_configuration_ignores_unactivated_edits_and_removed_sources(froz
     assert (context.fleet, context.merged_defaults) == expected
     assert context.fleet.manager == "manager" and context.fleet.projects_derived
     assert context.paths.fleet_yaml == manifest and context.bot_id == "worker"
-    with pytest.raises(PlanError, match="complete frozen"):
+    with pytest.raises(PlanError, match="no selected frozen fleet"):
         active_config.resolve_active_context(root=root, fleet="not-active", package=package)
-    with pytest.raises(activation_state.ActivationError, match="executing package differ"):
+    with pytest.raises(PlanError, match="managed Git installation"):
         active_config.resolve_active_context(root=root, package=source_package())
 
 
@@ -72,15 +75,15 @@ def test_declared_project_source_and_link_target_are_frozen_by_the_shared_parser
     # A new proposal is required when an absent source becomes present.
     with pytest.raises(PlanError, match="input changed"):
         builder.input_content(projects)
-    builder = ConfigPlanBuilder(root, builder.release_id, builder.release_seal, ("example",),
+    builder = ConfigPlanBuilder(root, fleets=("example",),
                                effects={"fleet_manifests": {"example": str(manifest)}})
     builder.effects["fleet_sources"] = {"example": {
         "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
         "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
     }}
     expected = load_fleet(manifest)
-    plan = builder.seal()
-    _active(plan)
+    plan = builder.freeze(package.source_revision)
+    _commit(plan, package)
     document = json.loads(manifest.read_text())
     document["fleet"]["manager"] = "worker"
     manifest.write_text(json.dumps(document))
@@ -102,24 +105,19 @@ def test_declared_project_source_and_link_target_are_frozen_by_the_shared_parser
     assert context.fleet.projects["declared"].validation.tier == "review"
 
 
-def test_lost_or_changed_frozen_inputs_refuse_without_source_fallback(frozen):
+def test_committed_snapshot_does_not_reread_pending_render_or_authored_fallback(frozen):
     root, manifest, projects, builder, package = frozen
-    plan = builder.seal()
-    _active(plan)
-    assert active_config.resolve_active_context(root=root, package=package).fleet.name == "example"
+    plan = builder.freeze(package.source_revision)
+    _commit(plan, package)
     digest = plan.effects["fleet_sources"]["example"]["fleet"]["sha256"]
     blob = plan.directory / "files" / digest
-    blob.write_text("changed private plan bytes")
+    blob.write_text("changed pending render bytes")
     with pytest.raises(PlanError, match="changed staged content"):
-        read_plan(root, plan.plan_id)
-    with pytest.raises(PlanError, match="changed staged content"):
-        active_config.resolve_active_context(root=root, package=package)
+        read_rendered(root, plan.fingerprint)
+    assert active_config.resolve_active_context(root=root, package=package).fleet.manager == "manager"
     blob.unlink()
-    with pytest.raises(PlanError, match="missing staged content"):
-        read_plan(root, plan.plan_id)
-    assert manifest.is_file()  # Its valid authoring copy cannot repair a sealed plan.
-    with pytest.raises(PlanError, match="missing staged content"):
-        active_config.resolve_active_context(root=root, package=package)
+    manifest.unlink()
+    assert active_config.resolve_active_context(root=root, package=package).fleet.manager == "manager"
 
 
 def test_selected_active_fleet_refuses_redirected_directory(frozen):
@@ -129,14 +127,14 @@ def test_selected_active_fleet_refuses_redirected_directory(frozen):
     manifest = fleet_dir / "fleet.yaml"
     manifest.write_bytes(original_manifest.read_bytes())
     projects = fleet_dir / "projects.yaml"
-    builder = ConfigPlanBuilder(root, builder.release_id, builder.release_seal, ("example",),
+    builder = ConfigPlanBuilder(root, fleets=("example",),
                                effects={"fleet_manifests": {"example": str(manifest)}})
     builder.effects["fleet_sources"] = {"example": {
         "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
         "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
     }}
-    plan = builder.seal()
-    _active(plan)
+    plan = builder.freeze(package.source_revision)
+    _commit(plan, package)
     assert active_config.resolve_active_context(root=root, package=package).paths.fleet_dir == fleet_dir
 
     other = root / "local" / "other"
@@ -157,7 +155,7 @@ def git_snapshot(frozen):
                       artifact_id="", content_sha256="")
     builder.file(root / "runtime/bots/worker/bot.conf", b"frozen generated bytes\n", mode=0o600)
     builder.tree(root / "runtime/bots/worker/.claude/skills", {"example/SKILL.md": (b"skill", 0o644)})
-    plan = builder.seal()
+    plan = builder.freeze(package.source_revision)
     return root, manifest, projects, plan, installation, package
 
 
@@ -179,10 +177,10 @@ def test_git_uninitialized_identity_keeps_context_readable_but_refuses_actions(g
     snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision)
     assert snapshot["identities"] is None
     active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
-    monkeypatch.setattr(activation_identity, "_selected_activation", lambda *_: pytest.fail("sealed fallback"))
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: pytest.fail("sealed fallback"))
     assert active_config.resolve_active_context(root=root, package=package).fleet.manager == "manager"
     with pytest.raises(activation_state.ActivationError, match="not initialized"):
-        activation_identity.read_selected_identity_bindings(root, "example", package=package)
+        activation_identity.read_current_identity_bindings(root, "example", package=package)
 
 
 def test_native_placement_is_part_of_the_committed_configuration(git_snapshot):
@@ -207,15 +205,15 @@ def test_git_identity_is_committed_with_frozen_roster_and_current_host(git_snaps
     assert set(identities) == {"schema", "host_uid", "fleets"}
     snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision, identities=identities)
     active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
-    monkeypatch.setattr(activation_identity, "_selected_activation", lambda *_: pytest.fail("sealed fallback"))
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: pytest.fail("sealed fallback"))
     manifest.unlink()  # Existing committed identities do not rediscover authoring or Plane.
-    selected = activation_identity.read_selected_identity_bindings(root, "example", package=package)
+    selected = activation_identity.read_current_identity_bindings(root, "example", package=package)
     assert selected == {**git_registry[0]["bindings"], "manager": "manager"}
     identities["fleets"]["example"]["bots"]["worker"] = "actor_" + "5" * 32
-    assert activation_identity.read_selected_identity_bindings(root, "example", package=package) == selected
+    assert activation_identity.read_current_identity_bindings(root, "example", package=package) == selected
     (root / "state/host-uid").write_text("host_" + "6" * 32 + "\n")
     with pytest.raises(PlanError, match="identity"):
-        activation_identity.read_selected_identity_bindings(root, "example", package=package)
+        activation_identity.read_current_identity_bindings(root, "example", package=package)
 
 
 @pytest.mark.parametrize("drift", ["host", "fleet", "manager", "bot", "ambiguous"])
@@ -297,8 +295,6 @@ def test_git_registry_scan_commits_frozen_roster_then_binds_existing_ids(
     monkeypatch.setattr(registry_emit, "activation_scan_refusal", preflight)
     monkeypatch.setattr(registry_emit, "run_generate_scan", scan)
     monkeypatch.setattr(operation_context, "bind_task_context", bind)
-    monkeypatch.setattr(activation_identity, "validate_identity_bindings", lambda *_args, **_kwargs:
-                        pytest.fail("sealed identity lookup"))
     (render.data_root / "fleet.yaml").unlink()
     contexts = [active_config.context_from_plan(render, "example", package=package)]
     rows = activation_identity.scan_registry(render, package=package, contexts=contexts)
@@ -430,7 +426,7 @@ def test_git_snapshot_commit_precedes_consumers_and_survives_startup_failure(git
 
 def test_git_snapshot_does_not_fall_back_to_legacy_or_pending_sources(git_snapshot):
     root, manifest, _, plan, installation, package = git_snapshot
-    _active(plan)
+    (root / "state/selected-release.json").write_text("historical evidence never supplies current config")
     with pytest.raises(PlanError, match="missing or invalid"):
         active_config.load_active_context(root, None, package=package)
     snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision)
@@ -467,7 +463,7 @@ def test_git_snapshot_publish_checks_previous_fingerprint(git_snapshot):
     root, _, _, plan, installation, package = git_snapshot
     first = active_config.snapshot_from_plan(plan, installation, package.source_revision)
     active_config.publish_current_config(first, installation=installation, expected_previous=None)
-    second = active_config.snapshot_from_plan(plan, installation, "b" * 40)
+    second = active_config.snapshot_from_plan(replace(plan, revision="b" * 40), installation, "b" * 40)
     with pytest.raises(PlanError, match="changed before commit"):
         active_config.publish_current_config(second, installation=installation, expected_previous=None)
     assert active_config.read_current_config(root, installation=installation) == first
@@ -507,10 +503,8 @@ def test_git_read_stamp_ignores_historical_selection_and_detects_config_change(g
         stamp.check(root, package=package)
 
 
-def test_legacy_read_stamp_retains_exact_cursor_scope(frozen, monkeypatch):
+def test_unmanaged_read_stamp_never_uses_historical_selection(frozen, monkeypatch):
     root, _, _, _, package = frozen
-    selection = {"schema": 1, "release_id": "r-example", "activation_id": "a-example", "plan_id": "p-example"}
-    monkeypatch.setattr(activation_state, "read_selection", lambda *_: selection)
-    stamp = active_config.runtime_read_stamp(root, package=package)
-    assert stamp.release_id == "r-example" and stamp.provenance == {}
-    assert stamp.cursor_scope == {key: selection[key] for key in ("release_id", "activation_id", "plan_id")}
+    monkeypatch.setattr(activation_state,"read_selection",lambda *_:pytest.fail("historical selection read"))
+    with pytest.raises(PlanError,match="managed Git installation"):
+        active_config.runtime_read_stamp(root,package=replace(package,installation=None))

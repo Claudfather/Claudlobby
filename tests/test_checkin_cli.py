@@ -10,13 +10,13 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import activation, context
+from claudlobby import context
 from claudlobby.__main__ import main
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.plane.db import db_file
 from claudlobby.isolation import transcript_slug
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — short private socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — short private socket root
 from tests.test_checkin_contract import _decision
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_sprint_selection_record import _record as selection_record
@@ -35,8 +35,7 @@ def active(cold, monkeypatch):  # noqa: F811 — fixture dependency
         "    manager:\n      expertise: [orchestration]\n"
         "      autonomous_runner: {skill: /claudna:tech-debt, cadence: 1h, target_repo: org/repo}"))
     effects = deepcopy(plan.effects)
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
-                                plan.fleets, effects=effects)
+    builder = ConfigPlanBuilder(root, fleets=plan.fleets, effects=effects)
     for path in plan.inputs:
         digest = builder.input_content(Path(path))
         if Path(path) == manifest:
@@ -48,13 +47,21 @@ def active(cold, monkeypatch):  # noqa: F811 — fixture dependency
         else:
             assert change.after["kind"] == "file"
             builder.file(target, plan.blob(change.after["sha256"]), mode=change.after["mode"])
-    plan = builder.seal()
+    # Retire only this completed fixture's owned render before preparing the
+    # changed authored inputs. This is test preparation, never a service action.
+    import shutil
+    shutil.rmtree(plan.directory)
+    plan = builder.freeze(host.package.source_revision)
+    from claudlobby import active_config
+    snapshot = active_config.snapshot_from_plan(plan, release, host.package.source_revision,
+        identities=host.snapshot["identities"], supervision=host.snapshot["supervision"])
+    active_config.publish_current_config(snapshot, installation=release,
+        expected_previous=host.snapshot["fingerprint"])
+    host.snapshot = snapshot
     for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR",
                 "FLEET_ROOT", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key, raising=False)
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    package = replace(source_package(), native=release.native_path,
-                      artifact_id=release.inputs.artifact_id)
+    package = host.package
     monkeypatch.setattr(context, "get_resources", lambda: package)
     # This fixture seals minimal native assets. Keep real reader/decoder logic
     # while selecting the private test tree's assets at the import boundary.
@@ -62,7 +69,7 @@ def active(cold, monkeypatch):  # noqa: F811 — fixture dependency
     load_module = paths.load_lib_module
     native = source_package().native
     monkeypatch.setattr(paths, "load_lib_module", lambda directory, name:
-                        load_module(native if directory == release.native_path else directory, name))
+                        load_module(native if directory == release.native else directory, name))
     monkeypatch.setattr(brief, "load_dispatch_doors", lambda selected:
                         load_module(native, "dispatch-overdue.py"))
     monkeypatch.setattr(env_tiers, "resolve", lambda paths, bot_name=None, fleet_name=None: {})
@@ -105,7 +112,7 @@ def test_automation_public_commands_use_selected_runner_and_reject_worker_routin
         generated.setenv("CLAUDLOBBY_ROOT", str(root))
         generated.setenv("FLEET_NAME", "example")
         generated.setenv("BOT_ID", "worker")
-        generated.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+        generated.setenv("CLAUDLOBBY_INSTALLATION", str(release.directory))
         refused = _call(capsys, root, "bot", "automation", "pause", "manager",
                         "--reason", "Wrong role", "--request-id", str(uuid4()), expected=4)
         assert refused["error"]["code"] == "conflict"
@@ -170,7 +177,7 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
     # A worker session cannot record the fleet's check-in.
     with monkeypatch.context() as generated:
         for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example",
-                           "BOT_ID": "worker", "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+                           "BOT_ID": "worker", "CLAUDLOBBY_INSTALLATION": str(release.directory)}.items():
             generated.setenv(key, value)
         assert _call(capsys, root, "checkin", "record", "--file", str(file), "--request-id",
                      str(uuid4()), expected=4)["error"]["code"] == "conflict"
@@ -182,7 +189,7 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
     recorded = _call(capsys, root, "checkin", "record", "--file", str(file),
                      "--request-id", request_id)
     checkin_id = recorded["data"]["checkin_id"]
-    assert recorded["request_id"] == request_id and recorded["release_id"] == release.release_id
+    assert recorded["request_id"] == request_id and recorded["release_id"] == None
     assert recorded["data"]["actor"].startswith("human:")
     assert recorded["data"]["recording"] == "committed"
     assert recorded["data"]["request_persisted"] is True

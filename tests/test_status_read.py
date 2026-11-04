@@ -9,19 +9,13 @@ from claudlobby.commands import status_read
 from claudlobby.status import BotStatus
 
 
-def _context(tmp_path):
-    from tests.package_fixtures import source_package
-    return SimpleNamespace(paths=SimpleNamespace(root=tmp_path, package=source_package(), runtime_bots=tmp_path / "runtime" / "bots"),
-                           fleet=SimpleNamespace(name="test", bots={"worker": object()}))
-
-
-def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, tmp_path):
+def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(active, monkeypatch):
     from claudlobby.commands import orientation
     from claudlobby import activation_state, status, switches
 
-    monkeypatch.setattr(orientation, "_context", lambda args: _context(tmp_path))
-    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **kwargs: _context(tmp_path).paths)
-    monkeypatch.setattr(activation_state, "read_selection", lambda root: None)
+    root, host = active
+    monkeypatch.setattr(orientation, "_context", lambda args: pytest.fail("pending authored context read"))
+    monkeypatch.setattr(activation_state, "read_selection", lambda root: pytest.fail("historical selection read"))
     resolved, scopes = [], []
     monkeypatch.setattr(switches, "resolve", lambda paths, fleet: resolved.append(1) or [])
 
@@ -31,9 +25,9 @@ def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, 
                           tmux_alive=True, plane_unreachable="Plane unavailable")]
     monkeypatch.setattr(status, "collect_fleet_status", _collect)
 
-    fleet = status_read.dispatch(SimpleNamespace(public_command="fleet.status"))
+    fleet = status_read.dispatch(SimpleNamespace(root=root, fleet=None, seed=False, public_command="fleet.status"))
     assert scopes == [None] and len(resolved) == 1
-    bot = status_read.dispatch(SimpleNamespace(public_command="bot.status", bot_id="worker"))
+    bot = status_read.dispatch(SimpleNamespace(root=root, fleet=None, seed=False, public_command="bot.status", bot_id="worker"))
     # one bot: only its own probes, and no fleet switch header it never renders
     assert scopes == [None, "worker"] and len(resolved) == 1
     for row in (fleet.data["bots"][0], bot.data["bot"]):
@@ -45,7 +39,7 @@ def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, 
     def unreadable(*args):
         raise RuntimeError("private diagnostic must not be echoed")
     monkeypatch.setattr(switches, "resolve", unreadable)
-    failed = status_read.dispatch(SimpleNamespace(public_command="fleet.status"))
+    failed = status_read.dispatch(SimpleNamespace(root=root, fleet=None, seed=False, public_command="fleet.status"))
     assert failed.data["switches_state"] == "unavailable"
     assert "switches_off" not in failed.data
     assert "switch states unavailable" in "\n".join(failed.lines).lower()
@@ -56,7 +50,7 @@ def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, 
                                    unknown=True, unknown_reason="resolver",
                                    detail=switches.RESOLVER_DETAIL)
     monkeypatch.setattr(switches, "resolve", lambda *args: [unknown])
-    unobserved = status_read.dispatch(SimpleNamespace(public_command="fleet.status"))
+    unobserved = status_read.dispatch(SimpleNamespace(root=root, fleet=None, seed=False, public_command="fleet.status"))
     assert unobserved.data["switches_state"] == "unknown"
     assert unobserved.data["switches_off"] == []
     assert unobserved.data["switches_unknown"] == [{"key": "task-recheck", "reason": "resolver"}]
@@ -64,17 +58,17 @@ def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, 
     assert "unknown" in "\n".join(unobserved.lines)
 
 
-def test_uptime_refuses_unavailable_plane_before_reporting_zero(monkeypatch, tmp_path):
+def test_uptime_refuses_unavailable_plane_before_reporting_zero(active, monkeypatch):
     from claudlobby.commands import orientation
     from claudlobby import activation_state, brief, source_state
 
-    monkeypatch.setattr(orientation, "_context", lambda args: _context(tmp_path))
-    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **kwargs: _context(tmp_path).paths)
-    monkeypatch.setattr(activation_state, "read_selection", lambda root: None)
+    root, host = active
+    monkeypatch.setattr(orientation, "_context", lambda args: pytest.fail("pending authored context read"))
+    monkeypatch.setattr(activation_state, "read_selection", lambda root: pytest.fail("historical selection read"))
     monkeypatch.setattr(source_state, "scan_dir", lambda path: (SimpleNamespace(reachable=True), []))
     monkeypatch.setattr(brief, "plane_session", lambda paths, fleet: (None, "database unavailable"))
     with pytest.raises(CommandFailure) as raised:
-        status_read.dispatch(SimpleNamespace(public_command="fleet.uptime", bot=None, window="24h"))
+        status_read.dispatch(SimpleNamespace(root=root, fleet=None, seed=False, public_command="fleet.uptime", bot=None, window="24h"))
     assert raised.value.error.code == "unavailable"
 
 
@@ -114,7 +108,7 @@ def test_git_native_status_uses_exact_inventory_placement_and_preserves_unknown(
     observed = status._current_service_observations(SimpleNamespace(name="test"), paths, ["worker"])
     assert observed["worker"] == ((True, "active", True) if evidence == "complete" else (False, status._SVC_UNDETERMINED, None))
 
-from tests.test_activation import cold, tmp_path  # noqa: F401 — private selected root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — private selected root
 from tests.test_releases import installed  # noqa: F401 — cold dependency
 from tests.test_task_read_cli import active  # noqa: F401 — real current fleet identities
 

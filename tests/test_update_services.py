@@ -355,3 +355,248 @@ def test_independent_absence_rejects_changed_native_witnesses(tmp_path, drift):
     with pytest.raises(RuntimeEvidenceError):
         assert_native_absent(native, manager="Linux", domain="user/123" if drift == "domain" else "",
                              target=target, installed_file=directory / target, search_directories=[directory])
+
+
+# Shared native contracts survive removal of the activation coordinator.
+import signal
+import socket
+import subprocess
+from claudlobby import supervision_runtime as runtime
+from claudlobby.supervision_inventory import Adapter as NativeAdapter
+
+NATIVE = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
+
+def test_high_linux_boot_rung_extends_only_its_exact_start_budget():
+    assert runtime.unit_start_budget(Path("worker.service"),
+            b"[Service]\nExecStartPre=/bin/sleep 33\n") == 63
+    assert runtime.unit_start_budget(Path("worker.service"), b"[Service]\n") == 30
+    with pytest.raises(runtime.RuntimeEvidenceError, match="unsupported published boot delay"):
+        runtime.unit_start_budget(Path("worker.service"), b"ExecStartPre=/bin/sh -c 'sleep 33'\n")
+
+
+
+def test_a_unit_start_budget_counts_only_a_linux_units_boot_delay():
+    """bot start and restart size their enroll call with it too (#2087)."""
+    assert runtime.unit_start_budget(Path("worker.service"),
+            b"[Service]\nExecStartPre=/bin/sleep 30\n") == 60
+    assert runtime.unit_start_budget(Path("worker.plist"), b"ExecStartPre=/bin/sleep 30\n") == 30
+
+
+
+def _runtime_bash(script, *args):
+    process = subprocess.Popen(["/bin/bash", "-c", script, "activation-fixture", *map(str, args)],
+                               text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=3)
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_native_exact_start_refuses_active_or_foreign_before_effect(tmp_path, manager):
+    file = tmp_path / ("worker.service" if manager == "Linux" else "worker.plist")
+    file.write_text("candidate bytes\n")
+    target = "worker.service" if manager == "Linux" else "gui/501/worker"
+    script = r'''
+. "$1/supervisor.sh"
+_OS="$2"; file="$3"; target="$4"; mode="$5"; trace="$6"; native_state="$7"
+printf '%s' initial > "$native_state"
+systemctl() {
+    printf '%s\n' "$*" >> "$trace"
+    case "$2" in
+        show)
+            phase=$(cat "$native_state"); load=loaded; active=inactive; enabled=disabled; fragment="$file"
+            if [ "$mode" = refuse ]; then fragment=/foreign.service
+            elif [ "$phase" = initial ]; then load=masked; enabled=masked-runtime; fragment=/dev/null
+            elif [ "$phase" = started ]; then active=active; fi
+            printf 'Id=%s\nLoadState=%s\nActiveState=%s\nSubState=dead\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=\nMainPID=0\nControlPID=0\n' \
+                "$target" "$load" "$active" "$enabled" "$fragment" ;;
+        unmask) printf '%s' unmasked > "$native_state" ;;
+        start) printf '%s' started > "$native_state" ;;
+    esac
+}
+launchctl() {
+    printf '%s\n' "$*" >> "$trace"
+    case "$1" in
+        manageruid) echo 501 ;; managername) echo Aqua ;;
+        list)
+            printf 'PID Status Label\n'
+            if [ "$mode" = refuse ] || [ "$(cat "$native_state")" = started ]; then
+                printf '123 0 worker\n'
+            fi ;;
+        bootstrap) printf '%s' started > "$native_state" ;;
+    esac
+}
+svc_activation_start "$file" "$target"
+'''
+    trace, native_state = tmp_path / "calls", tmp_path / "state"
+    refused = _runtime_bash(script, NATIVE, manager, file, target, "refuse", trace, native_state)
+    assert refused.returncode == 3
+    assert "start " not in trace.read_text() and "bootstrap " not in trace.read_text()
+    trace.write_text("")
+    started = _runtime_bash(script, NATIVE, manager, file, target, "allow", trace, native_state)
+    assert started.returncode == 0, started.stderr
+    assert started.stdout.strip() == "start-requested"
+    calls = trace.read_text()
+    if manager == "Linux":
+        assert "--user unmask --runtime worker.service" in calls
+        assert calls.index("unmask") < calls.index("--user start worker.service")
+    else:
+        assert f"bootstrap gui/501 {file}" in calls
+    assert "enable" not in calls and "restart" not in calls and "install" not in calls
+    assert file.read_text() == "candidate bytes\n"
+
+
+
+def test_real_restart_policy_fence_is_verified_and_ready_uses_same_marker(tmp_path):
+    bot = tmp_path / "bots/worker"
+    bot.mkdir(parents=True)
+    (bot / "bot.conf").write_text('RC_READY_TIMEOUT_S="001"\nBOT_SERVICE="fixture-worker"\n'
+                                  'TELEGRAM_BOT_HANDLE="fixture_handle"\n')
+    prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
+TMUX_BIN=fixture_tmux; export TMUX_BIN
+. "$1/supervisor.sh"; shift; "$@"'''
+    fence = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot)
+    assert fence.returncode == 0, fence.stderr
+    ceiling, token = fence.stdout.strip().split("\t")
+    assert ceiling == "121"  # actual rr_bot_ceiling, including zero-padded config
+    override = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "37")
+    assert override.returncode == 0 and override.stdout.split("\t", 1)[0] == "37"
+    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "0").returncode != 0
+    log = bot / "logs/startup.log"
+    assert token in log.read_text()
+    with log.open("a") as out:
+        out.write("BRIDGE_READY fixture\n")
+    ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    assert ready.returncode == 0 and ready.stdout.strip() == "bridge-ready"
+    missing = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", "absent-marker")
+    assert missing.returncode != 0
+    log.unlink()
+    log.mkdir()  # bridge_fence_write is best-effort; the new boundary must refuse
+    failed = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot)
+    assert failed.returncode != 0
+
+
+
+@pytest.mark.parametrize(("extra_conf", "accepted", "rejected", "readiness"), [
+    ("", "READY — non-channel bot, no poller to await",
+     "BRIDGE_READY — Telegram poller up", "session-ready"),
+    ('TELEGRAM_BOT_HANDLE="fixture_handle"\nEXPECT_NO_TOKEN=1\n',
+     "BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert",
+     "READY — non-channel bot, no poller to await", "session-ready"),
+    ('TELEGRAM_BOT_HANDLE="fixture_handle"\nEXPECT_NO_TOKEN=1\n',
+     "BRIDGE_READY — Telegram poller up",
+     "READY — non-channel bot, no poller to await", "bridge-ready"),
+    ('TELEGRAM_BOT_HANDLE="fixture_handle"\n',
+     "BRIDGE_READY — Telegram poller up",
+     "BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert",
+     "bridge-ready"),
+])
+def test_native_bot_readiness_accepts_only_configured_post_fence_outcome(
+    tmp_path, extra_conf, accepted, rejected, readiness
+):
+    bot = tmp_path / "bots/worker"
+    bot.mkdir(parents=True)
+    (bot / "bot.conf").write_text('BOT_SERVICE="fixture-worker"\n' + extra_conf)
+    log = bot / "logs/startup.log"
+    log.parent.mkdir()
+    log.write_text(accepted + "\n")  # an old boot cannot satisfy the new fence
+    prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
+TMUX_BIN=fixture_tmux; export TMUX_BIN
+. "$1/supervisor.sh"; shift; "$@"'''
+    fence = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "1")
+    assert fence.returncode == 0, fence.stderr
+    _, token = fence.stdout.strip().split("\t")
+    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token).returncode != 0
+    with log.open("a") as out:
+        out.write(rejected + "\n")
+    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token).returncode != 0
+    with log.open("a") as out:
+        out.write(accepted + "\n")
+    ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    assert ready.returncode == 0 and ready.stdout.strip() == readiness
+    no_session = _runtime_bash(prefix.replace(
+        "fixture_tmux() { [ \"$*\" = '-L fixture-worker has-session -t worker' ]; }",
+        "fixture_tmux() { return 1; }",
+    ), NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    assert no_session.returncode != 0
+
+
+
+def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, monkeypatch, request):
+    """#2493: the outcome never rests on a clock. The timeout starts only once the
+    grandchild runs, its late write waits for a gate that opens only at the drain
+    after the kill, and that drain returns only after every process holding the
+    output pipes has exited, so a stalled parent or child cannot reorder them.
+    #2507: a failing run stops at its own line and leaves no poller behind."""
+    late, gate = tmp_path / "late", tmp_path / "gate"
+    request.addfinalizer(gate.touch)  # a survivor of a failed run writes late and exits
+
+    class Gated(subprocess.Popen):
+        started = False
+
+        def communicate(self, input=None, timeout=None):
+            if timeout is None:
+                gate.touch()  # the drain: a survivor of the kill writes late before it exits
+            elif not self.started:  # once: a bounded drain must not wait on a survivor's pipe
+                assert self.stdout.readline() == "ready\n"  # the grandchild is in the group
+                self.started = True
+            return super().communicate(input, timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", Gated)
+    with pytest.raises(subprocess.TimeoutExpired):
+        NativeAdapter._run(["/bin/bash", "-c", '( echo ready; until [ -e "$2" ]; do /bin/sleep 0.01; done; '
+                            'echo late > "$1" ) & wait', "private-timeout", str(late), str(gate)],
+                           timeout=0.05, env=dict(os.environ), capture_output=True, text=True)
+    assert not late.exists()
+    assert gate.exists()  # the drain ran, else no survivor could have written late
+
+
+
+def test_quiet_settle_is_the_native_wait_and_widens_the_call_budget(tmp_path):
+    """#2227: settle_s reaches svc_activation_quiet as its wait, inside a call
+    budget that covers it; without it the native argv and budget are unchanged."""
+    calls = []
+
+    class Adapter:
+        def call(self, function, *args, timeout=30):
+            calls.append((function, args, timeout))
+            return subprocess.CompletedProcess(args, 0, "inactive\tcgroup-empty\n", "")
+
+    installed_file = tmp_path / "worker.service"
+    args = dict(installed_file=installed_file, target="worker.service")
+    runtime.assert_quiescent(Adapter(), **args)
+    runtime.assert_quiescent(Adapter(), **args, settle_s=30)
+    assert calls == [("svc_activation_quiet", (installed_file, "worker.service", ""), 30),
+                     ("svc_activation_quiet", (installed_file, "worker.service", "", "30"), 60)]
+    for bad in (-1, True, 2.5, "30"):
+        with pytest.raises(runtime.RuntimeEvidenceError, match="settle"):
+            runtime.assert_quiescent(Adapter(), **args, settle_s=bad)
+    assert len(calls) == 2  # a refused settle reaches no native call
+
+
+
+def test_quiet_known_socket_and_pid_are_required_not_inferred_from_inactive(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("qr")
+    class Adapter:
+        def call(self, *args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, "inactive\tno-cgroup-witness\n", "")
+
+    path = tmp_path / "tmux.sock"
+    args = dict(installed_file=tmp_path / "worker.service", target="worker.service", socket_path=path)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(path))
+        server.listen(1)
+        with pytest.raises(runtime.RuntimeEvidenceError, match="still accepts"):
+            runtime.assert_quiescent(Adapter(), **args)
+    with pytest.raises(runtime.RuntimeEvidenceError, match="known process"):
+        runtime.assert_quiescent(Adapter(), **args, known_pids=(os.getpid(),))
+    observed = runtime.assert_quiescent(Adapter(), **args)
+    assert observed.details["socket_state"] == "refused"
+    assert observed.details["coverage"] == "named-unit-and-supplied-witnesses-only"
+    assert path.exists()  # observation never unlinks a socket

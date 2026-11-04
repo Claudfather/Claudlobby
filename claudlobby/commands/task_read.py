@@ -12,7 +12,7 @@ from ..reference_hints import note_prefix
 
 def _read(args) -> CommandOutput:
     from ..active_config import ActivationError
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
@@ -37,7 +37,7 @@ def _read(args) -> CommandOutput:
         selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active task selection is unavailable")
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         selected.check(destination.paths.root, package=destination.paths.package, message='active task selection changed during read')
         if (bindings["manager"] != destination.fleet.manager

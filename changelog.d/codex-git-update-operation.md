@@ -31,3 +31,13 @@ release assembly module. Configuration diff reads the pending Git render or the
 committed generated-output snapshot. Existing-host conversion and native/browser
 cold-start acceptance are still required before rollout; the remaining legacy
 coordinator internals are being retired separately.
+
+### Changed — retire the sealed runtime coordinator
+
+Operational reads, actions and native units now use the managed Git installation
+and committed configuration. Remove the old activation engine, its enrollment and
+handoff implementations, and its release-based runtime admission. Historical
+activation and migration records remain read-only diagnostic evidence. Bot move
+and removal explicitly refuse without effects until the common updater supports
+roster changes; they cannot invoke the retired coordinator. Human task feedback
+also refuses admitted native maintenance children.

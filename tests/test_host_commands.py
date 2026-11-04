@@ -7,11 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import activation_state as state, resources
+from claudlobby import resources
 from claudlobby.config_install import prepare_config
 from claudlobby.config_plan import ConfigPlanBuilder
+from tests.test_activation_state import write_activation, write_selection
 from tests.test_cli_loading import _run, PARSE
 from tests.test_releases import installed, r
+from tests.fixtures.current_runtime import current_runtime, tmp_path
 
 
 def call(capsys, argv, expected=0):
@@ -28,19 +30,16 @@ def snapshot(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-def test_host_doctor_discloses_macos_reaper_native_limit(tmp_path, monkeypatch):
-    from claudlobby import activation_state, context, switches
+def test_host_doctor_discloses_macos_reaper_native_limit(current_runtime, monkeypatch):
+    root, _, _, _ = current_runtime
+    from claudlobby import switches
     from claudlobby.commands import _helpers, host_doctor
 
-    paths = SimpleNamespace(root=tmp_path, fleet_yaml=tmp_path / "fleet.yaml", package=SimpleNamespace(installation=None))
-    monkeypatch.setattr(context, "resolve_paths", lambda **_: paths)
-    monkeypatch.setattr(context, "declared_paths", lambda *a, **k: [])
-    monkeypatch.setattr(activation_state, "read_selection", lambda _: None)
     monkeypatch.setattr(_helpers, "_load_env", lambda _: None)
     monkeypatch.setattr(switches, "resolve", lambda *_: [])
     monkeypatch.setattr(switches, "format_table", lambda _: "switch table")
     monkeypatch.setattr(host_doctor.sys, "platform", "darwin")
-    result = host_doctor.dispatch(SimpleNamespace(seed=False, root=tmp_path, fleet=None,
+    result = host_doctor.dispatch(SimpleNamespace(seed=False, root=root, fleet=None,
                                                   markdown=False, switches=True, delivery=False))
     assert result.data["platform_limitations"][0]["state"] == "native_reaping_disabled"
     assert "orphan-browser-reaper: OFF on macOS" in result.lines[-1]
@@ -87,24 +86,24 @@ def test_supervision_reap_requires_an_explicit_mode_with_full_schema_command(tmp
     assert body["error"]["hint"] == "inspect claudlobby host supervision reap-orphans --help"
 
 
-def test_supervision_failed_refuses_on_a_host_with_no_selected_release(tmp_path, capsys):
+def test_supervision_failed_refuses_without_managed_git_runtime(tmp_path, capsys):
     body = call(capsys, ["--root", str(tmp_path), "--json", "host", "supervision", "failed"], expected=6)
     assert body["command"] == "host.supervision.failed"
     assert body["error"]["code"] == "unavailable"
     assert body["error"]["message"] == ("failed units cannot be read: "
-                                        "no release is selected on this host, so it owns no unit yet")
+                                        "failed-unit observation requires a managed Git installation")
 
 
 def test_supervision_failed_reports_the_read_with_full_schema_command(tmp_path, monkeypatch, capsys):
     from claudlobby import failed_units
-    data = {"release_id": "r-test", "platform": "Linux", "declared": 3, "units": [
+    data = {"release_id": None, "source_revision": "a" * 40, "platform": "Linux", "declared": 3, "units": [
         {"unit": "com.t.creds-check.service", "scope": "fleet", "fleet": "F", "bot": None, "surface": "systemd",
          "state": "failed", "detail": "ActiveState=failed SubState=failed Result=exit-code ExecMainStatus=4",
          "template": None}]}
     roots = []
     monkeypatch.setattr(failed_units, "read_failed_units", lambda root: roots.append(root) or data)
     body = call(capsys, ["--root", str(tmp_path), "--json", "host", "supervision", "failed"])
-    assert body["command"] == "host.supervision.failed" and body["release_id"] == "r-test"
+    assert body["command"] == "host.supervision.failed" and body["release_id"] is None
     assert body["data"] == data and roots == [tmp_path.resolve()]
     assert main(["--root", str(tmp_path), "host", "supervision", "failed"]) == 0
     assert capsys.readouterr().out.splitlines() == [
@@ -120,14 +119,8 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     assert absent["request_id"] is None and absent["data"]["recorded_status"] == "unselected"
     assert absent["data"]["runtime_observation"] == "unknown" and absent["data"]["bootstrap_eligibility"] == "not_checked"
     assert list(empty.iterdir()) == []
-    with state.locked_activation(root) as store:
-        store.prepare("previous", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
-        for step in state.STEPS:
-            store.begin("previous", step)
-            if step == "selection_switched":
-                store.select("previous")
-            else:
-                store.complete("previous", step, evidence_digest="2" * 64)
+    write_activation(root, "previous", release_id=release.release_id)
+    write_selection(root, "previous", release_id=release.release_id)
     journal = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (),
                                 effects={"owner": "activation-units-v1"}).seal()
     prepare_config(journal, "units-" + "a" * 64)
@@ -137,9 +130,8 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     assert active["data"]["recorded_status"] == "active" and active["data"]["runtime_observation"] == "unknown"
     assert active["data"]["upgrade_supported"] is False
     assert active["data"]["activation_errors"] == [] and snapshot(root) == before
-    with state.locked_activation(root) as store:
-        store.prepare("interrupted", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
-        store.begin("interrupted", "producers_paused")
+    write_activation(root, "interrupted", status="activating", pending="producers_paused",
+                     release_id=release.release_id)
     before = snapshot(root)
     pending = call(capsys, argv, 4)
     assert pending["data"]["recorded_status"] == "incomplete"
@@ -147,6 +139,8 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     assert pending["data"]["upgrade_supported"] is False
     assert pending["data"]["unfinished_activations"][0]["pending_step"] == "producers_paused"
     assert pending["data"]["recovery_supported"] is False
+    assert pending["data"]["recovery"] == [{"activation_id": "interrupted", "supported_step": None,
+                                            "abort_in_progress": False}]
     assert snapshot(root) == before
     assert main(["--root", str(root), "host", "status"]) == 4
     captured = capsys.readouterr()
@@ -157,6 +151,20 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     (root / "state/activations/torn").mkdir()
     torn = call(capsys, argv, 4)
     assert any(row["activation_id"] == "torn" for row in torn["data"]["activation_errors"])
+
+
+@pytest.mark.parametrize("marker", ["adoption_abort", "upgrade_abort"])
+def test_status_preserves_recorded_abort_evidence_without_offering_recovery(candidate, capsys, marker):
+    root, release, _, _ = candidate
+    write_activation(root, "aborting", status="activating", pending="producers_paused",
+                     release_id=release.release_id, **{marker: {"reason": "recorded"}})
+    before = snapshot(root)
+    result = call(capsys, ["--root", str(root), "host", "status", "--json"], 4)
+    assert result["data"]["recovery"] == [{"activation_id": "aborting", "supported_step": None,
+                                           "abort_in_progress": True}]
+    assert result["data"]["recovery_supported"] is False
+    assert "recorded abort is in progress" in result["error"]["hint"]
+    assert snapshot(root) == before
 
 
 def test_status_missing_root_reports_real_passive_facts_without_creating_it(tmp_path, capsys, monkeypatch):
@@ -398,14 +406,8 @@ def test_status_relative_non_directory_roots_keep_not_found(tmp_path, capsys, mo
 def test_status_active_recorded_diagnosis_survives_passive_storage_limit(candidate, capsys, monkeypatch, storage):
     from claudlobby import setup_observations as observations
     root, release, plan, _ = candidate
-    with state.locked_activation(root) as store:
-        store.prepare("active", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
-        for step in state.STEPS:
-            store.begin("active", step)
-            if step == "selection_switched":
-                store.select("active")
-            else:
-                store.complete("active", step, evidence_digest="2" * 64)
+    write_activation(root, "active", release_id=release.release_id)
+    write_selection(root, "active", release_id=release.release_id)
     monkeypatch.setattr(observations, "_plane_storage", lambda _: storage)
     result = call(capsys, ["--root", str(root), "host", "status", "--json"])
     assert result["data"]["recorded_status"] == "active"

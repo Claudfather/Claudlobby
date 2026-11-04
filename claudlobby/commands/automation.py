@@ -84,7 +84,7 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure(exc.code, str(exc)) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from automation caller",
-                             hint=_runtime_hint(exc.hint)) from exc
+                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid automation root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

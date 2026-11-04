@@ -28,17 +28,15 @@ import time
 from typing import NamedTuple
 from uuid import uuid4
 
-from .activation_enrollment import selected_bot_entry, _target
-from .activation_handoffs import _strip_envelope
-from .activation_runtime import assert_quiescent, unit_start_budget
-from .activation_state import ActivationError, read_selection
-from .config_plan import path_state, read_plan
-from .config_units import current_declarations, current_git_declarations, planned_units
+from .supervision_inventory import _target
+from .supervision_runtime import RuntimeEvidenceError, assert_quiescent, unit_start_budget
+from .config_plan import path_state
+from .config_units import current_git_declarations
 from .loader import parse_frontmatter
 from .operation_context import resolve_operation_scope
 from .plane.emit_api import emit_batch
 from .plane.fleet_events import fleet_event_request
-from .runtime_admission import GitCurrentRuntime, RuntimeIdentity, mutation_admission, validate_unit_admission
+from .runtime_admission import GitCurrentRuntime, RuntimeIdentity, mutation_admission
 from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
@@ -206,6 +204,46 @@ def _handoff_clock_ns(bot_dir: Path) -> int:
     return stamp
 
 
+_REFRESH_BEGIN = b"<!-- claudlobby first-adoption reference refresh begin -->"
+_REFRESH_END = b"<!-- claudlobby first-adoption reference refresh end -->"
+_TIMESTAMP = re.compile(rb"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+def _refresh_envelope(bot_dir: Path, timestamp: str, *, field: str = "references_refreshed") -> bytes:
+    """Fresh reference timestamp, explicitly separate from the old session capture.
+
+    Before #2094 the field was ``last_updated``; the reader still accepts that
+    shape, and the next write is always this one.
+    """
+    return (f"---\ncwd: {bot_dir}\n{field}: {timestamp}\nschema_version: 2\n---\n".encode()
+            + _REFRESH_BEGIN + b"\n"
+            + b"This timestamp marks a canonical task-reference refresh, not a new session capture.\n"
+            + b"The original handoff bytes below are historical and their capture freshness is unverified.\n"
+            + b"Read the canonical task and assignment IDs in the section at the end of this file.\n"
+            + _REFRESH_END + b"\n\n")
+
+
+
+def _strip_envelope(previous: bytes, bot_dir: Path, path: Path) -> bytes:
+    """Split off the refresh envelope where the refresh writes it: a frontmatter
+    followed at once by a line that is exactly _REFRESH_BEGIN (#2094). Both
+    shapes are read, ``references_refreshed`` and the ``last_updated`` written
+    before #2094. Its time is checked for shape only and never reused."""
+    if not previous.startswith(b"---\n"):
+        return previous
+    end = previous.find(b"\n---\n", 3)
+    if end < 0 or not previous.startswith(_REFRESH_BEGIN + b"\n", end + 5):
+        return previous  # the session's own frontmatter
+    head = previous[:end + 5]
+    for field in ("references_refreshed", "last_updated"):
+        found = re.search(rb"^" + field.encode() + rb": (\S+)$", head, re.M)
+        if found and _TIMESTAMP.fullmatch(found.group(1)):
+            envelope = _refresh_envelope(bot_dir, found.group(1).decode(), field=field)
+            if previous.startswith(envelope):
+                return previous[len(envelope):]
+    raise ValueError(f"existing canonical reference refresh is malformed: {path}")
+
+
 def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
     """The owned handoff file's mtime and its session capture's last_updated.
 
@@ -224,7 +262,7 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[f
             head = stream.read(8192)
         try:
             head = _strip_envelope(head, bot_dir, path)
-        except ActivationError as exc:
+        except ValueError as exc:
             raise BotLifecycleError(
                 "self restart requires a fresh owned session handoff, and the reference refresh"
                 " envelope at its top is malformed (the next activation refuses it too):"
@@ -736,13 +774,11 @@ def _operation_lock(root: Path):
 
 
 def _release_id(current):
-    return None if isinstance(current, GitCurrentRuntime) else current.release_id
+    return None
 
 
 def _provenance(current):
-    if isinstance(current, GitCurrentRuntime):
-        return {"source_revision": current.revision, "config_fingerprint": current.config_fingerprint}
-    return {}
+    return {"source_revision": current.revision, "config_fingerprint": current.config_fingerprint}
 
 
 def _bot_result(result_type, current, *args, **kwargs):
@@ -769,77 +805,64 @@ def _current_bot_binding(root, current, destination, bot, adapter=None):
     """Bind one committed bot to the same exact native lifecycle owner."""
     package = destination.paths.package
     adapter = adapter or Adapter(package)
-    if isinstance(current, GitCurrentRuntime):
-        from .active_config import read_current_config
-        if (package.installation != current.installation or package.source_revision != current.revision
-                or adapter.package.installation != current.installation
-                or adapter.package.native != current.installation.native):
-            raise BotLifecycleError("bot native adapter differs from current Git installation")
-        snapshot = read_current_config(root, installation=current.installation, revision=current.revision)
-        if snapshot != current.snapshot:
-            raise BotLifecycleError("committed bot configuration changed before operation")
-        manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
-        placement = snapshot.get("supervision")
-        if placement is not None:
-            if placement["manager"] != manager:
-                raise BotLifecycleError("committed native manager differs from this host")
-        declarations = current_git_declarations(snapshot, manager)
-        matches = [item for item in snapshot["units"] if item["platform"] == manager
-                   and item["scope"] == "bot" and item["fleet"] == destination.fleet.name
-                   and item["bot"] == bot and item["enroll"]]
-        if len(matches) != 1:
-            raise BotLifecycleError("selected bot has no unique declared native unit")
-        item = matches[0]
-        declaration = next(value for value in declarations if str(value.source) == item["source"])
-        if placement is not None:
-            selected_domain = placement["domain"]
-            if manager == "Darwin":
-                if selected_domain not in {f"gui/{os.getuid()}", f"user/{os.getuid()}"}:
-                    raise BotLifecycleError("committed native domain belongs to another user")
-                target = f"{selected_domain}/{declaration.source.stem}"
-                if selected_domain == f"gui/{os.getuid()}" and domain == f"user/{os.getuid()}":
-                    if not hasattr(adapter, "in_selected_gui"):
-                        raise BotLifecycleError("selected GUI native adapter is unavailable", unavailable=True)
-                    adapter = adapter.in_selected_gui(target)
-                    actual_manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
-                    if actual_manager != manager:
-                        raise BotLifecycleError("selected native manager changed")
-            if domain != selected_domain:
-                raise BotLifecycleError("native adapter domain differs from committed supervision; "
-                                        "invoke from the recorded domain", unavailable=True)
-        if placement is not None:
-            installed = Path(placement["directory"]) / declaration.source.name
-        else:
-            # Prototype snapshots have no placement authority after de-enrollment.
-            # Exact installed evidence can still support existing-session reads.
-            inventory = collect_enrollment(root, declarations, adapter=adapter,
-                                           only_names=frozenset({declaration.source.name})).require_complete()
-            units = [unit for unit in inventory.units if unit.declaration.source == declaration.source]
-            if len(units) != 1 or len(units[0].installed) != 1:
-                raise BotLifecycleError("current bot native placement is unavailable; explicit enrollment is required")
-            installed = Path(units[0].installed[0].path)
-        entry = {"source": str(declaration.source), "installed": str(installed),
-                 "target": _target(manager, domain, declaration.source)}
-        if (installed.parent not in directories or installed.parent.resolve() != installed.parent
-                or installed == declaration.source or installed.is_symlink()):
-            raise BotLifecycleError("selected bot native placement is redirected or ambiguous")
-        spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet, destination.paths)
-        states = [output["state"] for output in snapshot["owned_outputs"]
-                  if output["target"] == str(spec.bot_dir / "bot.conf")]
+    if not isinstance(current, GitCurrentRuntime):
+        raise BotLifecycleError("bot lifecycle requires a managed Git current runtime")
+    from .active_config import read_current_config
+    if (package.installation != current.installation or package.source_revision != current.revision
+            or adapter.package.installation != current.installation
+            or adapter.package.native != current.installation.native):
+        raise BotLifecycleError("bot native adapter differs from current Git installation")
+    snapshot = read_current_config(root, installation=current.installation, revision=current.revision)
+    if snapshot != current.snapshot:
+        raise BotLifecycleError("committed bot configuration changed before operation")
+    manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    placement = snapshot.get("supervision")
+    if placement is not None:
+        if placement["manager"] != manager:
+            raise BotLifecycleError("committed native manager differs from this host")
+    declarations = current_git_declarations(snapshot, manager)
+    matches = [item for item in snapshot["units"] if item["platform"] == manager
+               and item["scope"] == "bot" and item["fleet"] == destination.fleet.name
+               and item["bot"] == bot and item["enroll"]]
+    if len(matches) != 1:
+        raise BotLifecycleError("selected bot has no unique declared native unit")
+    item = matches[0]
+    declaration = next(value for value in declarations if str(value.source) == item["source"])
+    if placement is not None:
+        selected_domain = placement["domain"]
+        if manager == "Darwin":
+            if selected_domain not in {f"gui/{os.getuid()}", f"user/{os.getuid()}"}:
+                raise BotLifecycleError("committed native domain belongs to another user")
+            target = f"{selected_domain}/{declaration.source.stem}"
+            if selected_domain == f"gui/{os.getuid()}" and domain == f"user/{os.getuid()}":
+                if not hasattr(adapter, "in_selected_gui"):
+                    raise BotLifecycleError("selected GUI native adapter is unavailable", unavailable=True)
+                adapter = adapter.in_selected_gui(target)
+                actual_manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+                if actual_manager != manager:
+                    raise BotLifecycleError("selected native manager changed")
+        if domain != selected_domain:
+            raise BotLifecycleError("native adapter domain differs from committed supervision; "
+                                    "invoke from the recorded domain", unavailable=True)
+    if placement is not None:
+        installed = Path(placement["directory"]) / declaration.source.name
     else:
-        selected = read_selection(root)
-        if selected is None or selected["release_id"] != current.release_id:
-            raise BotLifecycleError("active selection changed before bot operation")
-        plan = read_plan(root, selected["plan_id"])
-        if plan.release_id != current.release_id or plan.release_seal != current.seal_sha256:
-            raise BotLifecycleError("active bot plan differs from selected release")
-        if adapter.package.native != current.native_path:
-            raise BotLifecycleError("bot native adapter differs from selected release")
-        adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
-        manager, declaration, entry, declarations = _selected_unit(
-            root, plan, current, package, adapter, destination.fleet.name, bot)
-        spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet, destination.paths)
-        states = [change.after for change in plan.changes if change.target == str(spec.bot_dir / "bot.conf")]
+        # Prototype snapshots have no placement authority after de-enrollment.
+        # Exact installed evidence can still support existing-session reads.
+        inventory = collect_enrollment(root, declarations, adapter=adapter,
+                                       only_names=frozenset({declaration.source.name})).require_complete()
+        units = [unit for unit in inventory.units if unit.declaration.source == declaration.source]
+        if len(units) != 1 or len(units[0].installed) != 1:
+            raise BotLifecycleError("current bot native placement is unavailable; explicit enrollment is required")
+        installed = Path(units[0].installed[0].path)
+    entry = {"source": str(declaration.source), "installed": str(installed),
+             "target": _target(manager, domain, declaration.source)}
+    if (installed.parent not in directories or installed.parent.resolve() != installed.parent
+            or installed == declaration.source or installed.is_symlink()):
+        raise BotLifecycleError("selected bot native placement is redirected or ambiguous")
+    spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet, destination.paths)
+    states = [output["state"] for output in snapshot["owned_outputs"]
+              if output["target"] == str(spec.bot_dir / "bot.conf")]
     native_label = (entry["target"].removesuffix(".service") if manager == "Linux"
                     else entry["target"].split("/")[-1])
     if (spec.bot_dir != declaration.working_directory or spec.label != declaration.source.stem
@@ -848,44 +871,6 @@ def _current_bot_binding(root, current, destination, bot, adapter=None):
     if len(states) != 1:
         raise BotLifecycleError("bot has no unique committed bot.conf")
     return _CurrentBotBinding(adapter, manager, declaration, entry, declarations, spec, states[0])
-
-
-def _selected_unit(root, plan, release, package, adapter, fleet, bot):
-    manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
-    declarations = current_declarations(plan, manager)
-    entry = selected_bot_entry(root, fleet, bot, manager)
-    selected = [(declaration, item) for declaration, item in planned_units(plan, manager)
-                if declaration.scope == "bot" and declaration.fleet == fleet
-                and declaration.bot == bot and item["enroll"]]
-    if len(selected) != 1:
-        raise BotLifecycleError("selected bot has no unique declared native unit")
-    declaration, item = selected[0]
-    target = _target(manager, domain, declaration.source)
-    installed = Path(entry["installed"])
-    if (entry["target"] != target or entry["source"] != str(declaration.source)
-            or installed.parent not in directories or installed.parent.resolve() != installed.parent
-            or installed == declaration.source or installed.is_symlink()):
-        raise BotLifecycleError("selected bot native placement is redirected or ambiguous")
-    validate_unit_admission(release, declaration, item, plan.blob(item["sha256"]))
-    return manager, declaration, entry, declarations
-
-
-def _selected_adapter(root: Path, fleet: str, bot: str, adapter):
-    """Enter the reviewed GUI bootstrap from a same-UID Background caller.
-
-    The initial catalog only identifies this caller's context. The activation
-    journal supplies the target; the wrapped catalog and every later native
-    check must then prove the selected GUI domain before any effect.
-    """
-    manager, domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
-    uid = os.getuid()
-    if manager == "Darwin" and domain == f"user/{uid}":
-        entry = selected_bot_entry(root, fleet, bot, manager)
-        if entry["target"].startswith(f"gui/{uid}/"):
-            if not hasattr(adapter, "in_selected_gui"):
-                raise BotLifecycleError("selected GUI native adapter is unavailable", unavailable=True)
-            adapter = adapter.in_selected_gui(entry["target"])
-    return adapter
 
 
 def _observed(root, declarations, adapter, target, installed):
@@ -1010,17 +995,13 @@ def check_handoff(*, root: Path, fleet: str | None, bot: str) -> BotHandoffCheck
     if bot not in destination.fleet.bots:
         raise BotLifecycleError("bot is not declared in the selected active fleet")
     package = destination.paths.package
-    if package.installation is not None:
-        from .active_config import read_current_config
-        snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
-        return BotHandoffCheck(destination.fleet.name, bot, None,
-                               *handoff_state(destination.paths.bot_runtime(bot)),
-                               source_revision=snapshot["revision"], config_fingerprint=snapshot["fingerprint"])
-    selected = read_selection(root)
-    if selected is None:
-        raise BotLifecycleError("a handoff check requires an active selected release")
-    return BotHandoffCheck(destination.fleet.name, bot, selected["release_id"],
-                           *handoff_state(destination.paths.bot_runtime(bot)))
+    if package.installation is None:
+        raise BotLifecycleError("handoff inspection requires a managed Git installation")
+    from .active_config import read_current_config
+    snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
+    return BotHandoffCheck(destination.fleet.name, bot, None,
+                           *handoff_state(destination.paths.bot_runtime(bot)),
+                           source_revision=snapshot["revision"], config_fingerprint=snapshot["fingerprint"])
 
 
 def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
@@ -1109,7 +1090,7 @@ def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempte
     try:
         assert_quiescent(adapter, installed_file=installed, target=target, socket_path=socket_path,
                          settle_s=settle_s)
-    except (ActivationError, OSError) as exc:
+    except (RuntimeEvidenceError, OSError) as exc:
         raise BotLifecycleError("bot native/session quiescence is unavailable",
                                 effect_attempted=effect_attempted, unavailable=True) from exc
 
@@ -1203,7 +1184,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                         after = _observed(root, declarations, adapter, entry["target"], installed)
                         if after.installed:
                             raise BotLifecycleError("bot unit remains installed")
-                    except (BotLifecycleError, ActivationError, InventoryError, OSError) as exc:
+                    except (BotLifecycleError, RuntimeEvidenceError, InventoryError, OSError) as exc:
                         attempted = effect_begun or (isinstance(exc, BotLifecycleError)
                                                      and exc.effect_attempted)
                         if not attempted:
@@ -1298,7 +1279,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     try:
                         assert_quiescent(adapter, installed_file=installed,
                                          target=entry["target"], socket_path=socket)
-                    except (ActivationError, OSError) as exc:
+                    except (RuntimeEvidenceError, OSError) as exc:
                         raise BotLifecycleError("stopped bot session cannot be proved quiet",
                                                 unavailable=True) from exc
                 elif manager == "Linux" and props.get("ActiveState") == "activating":
@@ -1334,7 +1315,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                                 effect_attempted=True, unavailable=True)
                 _confirm_running(adapter, installed, entry["target"], manager,
                                  session_ready=session_ready, effect_attempted=True)
-            except (BotLifecycleError, ActivationError, InventoryError, OSError) as exc:
+            except (BotLifecycleError, RuntimeEvidenceError, InventoryError, OSError) as exc:
                 raise BotLifecycleError("bot restart effect or readiness proof is incomplete" if restart
                                         else "bot start effect or readiness proof is incomplete",
                                         effect_attempted=True,

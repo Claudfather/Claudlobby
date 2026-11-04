@@ -1,4 +1,4 @@
-"""The selected release's supervised units: the failed-units read and the operator-only orphan reap."""
+"""The committed Git runtime's supervised units: the failed-units read and the operator-only orphan reap."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _failed(args) -> CommandOutput:
     except InventoryError as exc:
         raise CommandFailure("unavailable", f"failed units cannot be read: {exc}") from exc
     except (ActivationError, PlanError) as exc:
-        raise CommandFailure("conflict", "the selected release or its plan cannot be verified") from exc
+        raise CommandFailure("conflict", "the committed Git configuration cannot be verified") from exc
     except OSError as exc:
         raise CommandFailure("unavailable", "failed units cannot be read") from exc
     lines = tuple(f"{unit['state']}: {unit['unit']} ({unit['scope']}"

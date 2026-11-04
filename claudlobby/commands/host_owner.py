@@ -100,14 +100,14 @@ def _active_owner(store):
 
 def _grant_preview(paths, store, fleet, actor_alias, release):
     """Read current frozen/recorded identities; never register at preview."""
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..operation_context import _MissingHumanIdentity, bind_task_context, resolve_operation_scope
 
     owner = _active_owner(store)
     selected, origin = resolve_operation_scope(root=paths.root, fleet=fleet, package=paths.package)
     if origin is not None:
         raise CommandFailure("conflict", "owner grants require a local operator")
-    bindings = read_selected_identity_bindings(paths.root, selected.fleet.name, package=paths.package)
+    bindings = read_current_identity_bindings(paths.root, selected.fleet.name, package=paths.package)
     ctx = None
     try:
         ctx = bind_task_context(selected, operator_alias=actor_alias)

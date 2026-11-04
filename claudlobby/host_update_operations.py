@@ -7,11 +7,9 @@ import os
 from pathlib import Path
 import subprocess
 
-from .config import host_unit_name, load_host_jobs
-from .activation_enrollment import selected_phase_entries
 from .context import resolve_paths, native_environment
 from .env_tiers import resolve as resolve_env_tiers
-from .runtime_admission import (GitCurrentRuntime, mutation_admission, bound_runtime_release,
+from .runtime_admission import (mutation_admission, bound_runtime_release,
                                 runtime_release_id, runtime_provenance)
 from .host_job_operations import _bind_git_job, HostJobError
 from .supervision_inventory import InventoryError
@@ -43,27 +41,12 @@ def run_host_update(root: Path, action: str, *, dry_run: bool = False,
         paths = resolve_paths(root=root)
         bound_runtime_release(paths.package, generated=False)
         selected_service = None
-        if scheduled and isinstance(release, GitCurrentRuntime):
+        if scheduled:
             try:
                 _adapter, service, _target, _installed = _bind_git_job(release, name)
             except (HostJobError, InventoryError, ValueError, OSError) as exc:
                 raise HostUpdateError("scheduled host update has no verified committed job") from exc
             selected_service = {"environment": dict(service.environment)}
-        elif scheduled:
-            config = load_host_jobs().get(name)
-            if config is None or config.get("enroll", True) is not True:
-                raise HostUpdateError("scheduled host update is not enrolled")
-            entries = selected_phase_entries(root, "producers")
-            sources = {Path(entry["source"]).name for entry in entries}
-            stem = host_unit_name(name)
-            if not (stem + ".plist" in sources or
-                    {stem + ".service", stem + ".timer"} <= sources):
-                raise HostUpdateError("scheduled host update has no selected timer")
-            selected_service = next((entry for entry in entries if
-                                     Path(entry["source"]).name in
-                                     (stem + ".plist", stem + ".service")), None)
-            if selected_service is None:
-                raise HostUpdateError("scheduled host update has no selected service")
         env = {**os.environ, **native_environment(paths, current=release)}
         script = paths.package.runtime_native / ("update-claude-code.sh" if action == "runtime" else "update-siblings.sh")
         for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_NAME",

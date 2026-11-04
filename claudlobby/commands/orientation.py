@@ -72,35 +72,13 @@ def _release(context):
                 "selection_state": "current_config", "context_matches_selection": None,
                 "executing_matches_selection": None, "running_release": "unknown",
                 "operational_admission": "not_checked", "diagnosis_command": "host update status"}
-    from ..activation_state import ActivationError, read_activation, read_selection
-    from .releases import _executing_release
-
-    executing = _executing_release(context.paths.root)
-    expected = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-    valid_expected = bool(expected and re.fullmatch(r"r-[0-9a-f]{64}", expected))
-    result = {"executing_release_id": executing,
-              "executing_artifact_id": context.paths.package.artifact_id,
-              "context_release_id": expected if valid_expected else None,
-              "context_release_state": "valid" if valid_expected else "invalid" if expected is not None else "absent",
-              "selected_release_id": None, "activation_status": None,
-              "selection_state": "absent", "context_matches_selection": None,
-              "executing_matches_selection": None, "running_release": "unknown",
-              "operational_admission": "not_checked", "diagnosis_command": "host releases"}
-    try:
-        selected = read_selection(context.paths.root)
-        if selected:
-            record = read_activation(context.paths.root, selected["activation_id"])
-            result.update(selected_release_id=selected["release_id"],
-                          activation_status=record.status, selection_state="recorded",
-                          executing_matches_selection=(executing == selected["release_id"]
-                                                        if executing else None))
-            if result["context_release_id"]:
-                result["context_matches_selection"] = result["context_release_id"] == selected["release_id"]
-            if any(record.body["intent"][key] != selected[key] for key in ("release_id", "plan_id")):
-                result["selection_state"] = "conflict"
-    except (ActivationError, KeyError, TypeError):
-        result["selection_state"] = "unavailable"
-    return result
+    return {"runtime_kind": "unmanaged", "executing_source_revision": context.paths.package.source_revision,
+            "executing_release_id": None, "executing_artifact_id": None,
+            "context_release_id": None, "context_release_state": "not_applicable",
+            "selected_release_id": None, "activation_status": None,
+            "selection_state": "managed_installation_required", "context_matches_selection": None,
+            "executing_matches_selection": None, "running_release": "unknown",
+            "operational_admission": "unavailable", "diagnosis_command": "host setup"}
 
 
 def _composition(context):

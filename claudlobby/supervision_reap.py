@@ -34,8 +34,6 @@ def reap_selected_orphans(*, root: Path, fleet: str | None, bot: str | None,
     """Preview or remove only stale units beneath declared, owned bot directories."""
     package = resolve_paths(root=root).package
     expected = bound_runtime_release(package, generated=False)
-    if package.installation is None:
-        expected = os.environ.get("CLAUDLOBBY_RELEASE_ID")  # Retained sealed expectation.
     with mutation_admission(root, identity=RuntimeIdentity.current(), expected_release=expected) as release:
         destination, origin = resolve_operation_scope(root=root, fleet=fleet)
         # Fleet timer carriers resolve to origin=None after scope validation;

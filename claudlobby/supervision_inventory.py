@@ -1,13 +1,12 @@
-"""Read-only enrollment evidence for coordinated activation, never enrollment.
+"""Read-only enrollment evidence for the Git updater, never enrollment.
 
 Declarations must come from the reviewed current generated-config manifest,
-not candidate renders substituted for the running release. Exact byte equality
+not candidate renders substituted for the running configuration. Exact byte equality
 binds argv and environment to that manifest; the native ownership reader remains
 the sole parser of unit WorkingDirectory. A matching name is never ownership.
-For explicit first adoption, generated and installed snapshots may differ:
-the frozen installed bytes define the original launch binding, while both
-snapshots and the declared owner remain checked. Sealed releases still require
-generated and installed bytes to match.
+Generated and installed snapshots may differ during an update: the frozen
+installed bytes define the original launch binding, while both snapshots and
+the declared owner remain checked.
 
 Unknown observations are blockers, not empty inventories. Darwin print and
 print-disabled grammar is based on read-only macOS 26.1 observations, not a
@@ -35,6 +34,57 @@ from xml.parsers.expat import ExpatError
 
 from .resources import PackageResources, get_resources
 
+
+def _target(manager, domain, source):
+    name = Path(source).name
+    return domain + "/" + name.removesuffix(".plist") if manager == "Darwin" else name
+
+
+def _wanted_by(content, source, paired_services):
+    """Only the compositor's shipped Install grammar has publication authority."""
+    if source.suffix == ".plist":
+        return None
+    wanted, section, seen = [], "", False
+    for raw in content.decode("utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            if section == "Install":
+                if seen:
+                    raise InventoryError("duplicate Install section is unsupported")
+                seen = True
+        elif section == "Install":
+            key, separator, value = line.partition("=")
+            if separator != "=" or key.strip() != "WantedBy":
+                raise InventoryError("unsupported unit Install semantics")
+            wanted.append(value.strip())
+    expected = ([] if source.name in paired_services or is_unit_template(source.name) else
+                ["timers.target" if source.suffix == ".timer" else "default.target"])
+    if wanted != expected or not expected and seen:
+        raise InventoryError("unit Install target differs from its persistent service/timer role")
+    return expected[0] if expected else None
+
+
+def _enablement(entry, wanted_by, prior):
+    from .config_plan import path_state
+    if wanted_by is None:
+        return None
+    installed = Path(entry["installed"])
+    link = installed.parent / (wanted_by + ".wants") / installed.name
+    if link.parent.resolve() != link.parent:
+        raise InventoryError("enablement directory is redirected")
+    before = path_state(link)
+    node = before["node"]
+    if node["kind"] != "absent":
+        if (not entry["original"] or node["kind"] != "symlink"
+                or before["resolved"] != str(installed)):
+            raise InventoryError("unowned or misdirected native enablement link")
+    elif entry["original"] and dict(prior["properties"]).get("UnitFileState") == "enabled":
+        raise InventoryError("original persistent enablement link is missing")
+    return {"path": str(link), "target": str(installed), "before": before,
+            "create": not entry["original"], "wanted_by": wanted_by}
 
 class InventoryError(ValueError):
     """Coverage or binding could not be proved; activation must not continue."""
@@ -425,100 +475,6 @@ def runtime_mask(path: str | Path, name: str) -> bool:
     except OSError:
         return False
     return runtime.is_absolute() and node == runtime / name and owners == {os.getuid()} and target == "/dev/null"
-
-
-def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
-    """Bind existing source-only user-systemd units to the candidate roster.
-
-    The source is the old compositor output, not the candidate's staged bytes.
-    Inventory subsequently proves exact installed bytes and effective native
-    identity before the shared adoption coordinator can pause anything.
-    """
-    from .config_units import planned_units
-
-    plan.check_fresh()
-    result, services, timers = [], {}, []
-    planned = tuple(declaration for declaration, _ in planned_units(plan, "Linux"))
-    for declaration in planned:
-        source = declaration.source
-        if not source.exists() and not source.is_symlink():
-            continue
-        if not source.is_file() or source.is_symlink():
-            raise InventoryError("legacy generated Linux unit is not a regular source")
-        try:
-            content = source.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise InventoryError("legacy generated Linux unit cannot be read") from exc
-        section = None
-        fields = {}
-        for raw in content.splitlines():
-            line = raw.strip()
-            if not line or line.startswith(("#", ";")):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line[1:-1]
-                continue
-            key, separator, value = line.partition("=")
-            if not separator or not section or raw.rstrip().endswith("\\"):
-                raise InventoryError("legacy generated Linux unit has ambiguous syntax")
-            fields.setdefault((section, key.strip()), []).append(value.strip())
-        selected = {"CLAUDLOBBY_ROOT": str(plan.data_root)}
-        if declaration.scope in ("fleet", "bot"):
-            fleet_root = dict(declaration.environment).get("FLEET_ROOT")
-            if not fleet_root or not Path(fleet_root).is_absolute():
-                raise InventoryError("legacy Linux unit has no declared fleet root")
-            selected["FLEET_ROOT"] = fleet_root
-        if declaration.scope == "fleet":
-            selected["CLAUDLOBBY_FLEET"] = declaration.fleet
-        if declaration.service:
-            if (fields.get(("Timer", "Unit"), [declaration.service]) != [declaration.service]
-                    or any(group == "Service" for group, _ in fields)):
-                raise InventoryError("legacy Linux timer has a different service owner")
-            # The paired service supplies the environment and working directory.
-            timers.append((len(result), declaration.service))
-            result.append(replace(declaration, release_id="", environment=tuple(sorted(selected.items()))))
-            continue
-        if fields.get(("Service", "WorkingDirectory")) != [str(declaration.working_directory)]:
-            raise InventoryError("legacy Linux service has a different working directory")
-        environment = {}
-        for value in fields.get(("Service", "Environment"), ()):
-            try:
-                assignments = shlex.split(value)
-            except ValueError as exc:
-                raise InventoryError("legacy Linux service environment is ambiguous") from exc
-            for assignment in assignments:
-                key, separator, item = assignment.partition("=")
-                if not separator or key in environment:
-                    raise InventoryError("legacy Linux service environment is ambiguous")
-                environment[key] = item
-        if "FLEET_ROOT" in selected and "FLEET_ROOT" not in environment:
-            # Old compositor units predate FLEET_ROOT. Only its absence is
-            # legacy; a present different value still refuses below. The fleet
-            # owner is then CLAUDLOBBY_FLEET (fleet) or the exact unshared bot
-            # working directory (bot), and the returned declaration claims
-            # only assignments the source really carries.
-            if declaration.scope == "bot" and (
-                    declaration.working_directory.resolve() == Path(plan.data_root).resolve()
-                    or sum(item.working_directory.resolve() == declaration.working_directory.resolve()
-                           for item in planned if not item.service) != 1):
-                raise InventoryError("legacy Linux bot without fleet root has no unique working directory")
-            del selected["FLEET_ROOT"]
-        if any(environment.get(key) != value for key, value in selected.items()):
-            raise InventoryError("legacy Linux service has a different root or fleet owner")
-        if declaration.scope == "bot":
-            if not environment.get("TMUX_TMPDIR"):
-                raise InventoryError("legacy Linux bot has no tmux owner")
-            selected["TMUX_TMPDIR"] = environment["TMUX_TMPDIR"]
-        services[declaration.source.name] = tuple(sorted(selected.items()))
-        result.append(replace(declaration, release_id="", environment=services[declaration.source.name]))
-    for index, service in timers:
-        # A timer binds exactly the environment proven for its paired service.
-        if service in services:
-            result[index] = replace(result[index], environment=services[service])
-    if not result:
-        raise InventoryError("no reviewed legacy Linux unit sources were found")
-    plan.check_fresh()
-    return tuple(result)
 
 
 def _darwin_disabled(text: str) -> dict[str, str]:

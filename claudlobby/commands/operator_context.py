@@ -19,32 +19,23 @@ def require_operator_context(root: str | Path | None = None) -> None:
     if root is None:
         return  # Cold setup has no selected unit ancestry to inspect.
 
-    from ..activation_state import read_selection
-    from ..config_plan import read_plan
-    from ..config_units import current_declarations, current_git_declarations
+    from ..config_units import current_git_declarations
     from ..context import resolve_paths
     from ..supervision_inventory import Adapter, _catalog, collect_enrollment, is_unit_template
 
     try:
         root_path = Path(root).expanduser().resolve()
-        selected = None
-        if "CLAUDLOBBY_INSTALLATION" not in os.environ:
-            selected = read_selection(root_path)
-            if selected is None:
-                return  # Cold setup has no installed runtime to inspect yet.
-        adapter = Adapter(resolve_paths(root=root_path).package)
-        installation = adapter.package.installation
-        if installation is not None:
-            from ..active_config import read_current_config
-            snapshot = read_current_config(root_path, installation=installation,
-                                           revision=adapter.package.source_revision)
-        else:
-            if selected is None:
-                return
-            plan = read_plan(root_path, selected["plan_id"])
+        package = resolve_paths(root=root_path).package
+        installation = package.installation
+        if installation is None:
+            from ..plane.owner_source import fresh_owner_setup
+            fresh_owner_setup(root_path, allow_absent=True)
+            return  # Cold authoring has no current consumers; execution still requires Git.
+        from ..active_config import read_current_config
+        snapshot = read_current_config(root_path, installation=installation, revision=package.source_revision)
+        adapter = Adapter(package)
         manager, _, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
-        declarations = (current_git_declarations(snapshot, manager) if installation is not None
-                        else current_declarations(plan, manager))
+        declarations = current_git_declarations(snapshot, manager)
         inventory = collect_enrollment(root_path, declarations, adapter=adapter).require_complete()
         checked = 0
         for unit in inventory.units:

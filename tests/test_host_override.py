@@ -15,7 +15,7 @@ import pytest
 from claudlobby import composer as composer_mod
 from claudlobby.config import _load_system_defaults, host_unit_name, load_host_jobs
 from claudlobby import switches as sw
-from tests.package_fixtures import source_package
+from tests.package_fixtures import source_package, git_package
 from claudlobby.paths import Paths
 from claudlobby.__main__ import main
 from claudlobby import host_job_operations as host_run
@@ -32,7 +32,7 @@ def override(tmp_path, monkeypatch) -> Path:
 
 def _units(root: Path, job: str) -> list[str]:
     root.mkdir()
-    out = composer_mod.compose_host_timers(Paths(root=root, package=source_package()))
+    out = composer_mod.compose_host_timers(Paths(root=root, package=git_package(root)))
     return sorted(p.name for p in out.iterdir() if p.name.startswith(f"claudlobby-{job}."))
 
 
@@ -52,7 +52,7 @@ def test_two_host_roots_compose_distinct_native_labels_and_keep_private_override
     root_a.mkdir()
     root_b.mkdir()
     override.write_text("host: { unit_prefix: claudlobby-canary, jobs: { plane-daemon: { enroll: true } } }\n")
-    generated_a = composer_mod.compose_host_timers(Paths(root=root_a, package=source_package()))
+    generated_a = composer_mod.compose_host_timers(Paths(root=root_a, package=git_package(root_a)))
     names_a = {p.name for p in generated_a.iterdir()}
     assert "claudlobby-canary-plane-daemon.plist" in names_a
     assert "claudlobby-plane-daemon.plist" not in names_a
@@ -63,7 +63,7 @@ def test_two_host_roots_compose_distinct_native_labels_and_keep_private_override
     assert host_unit_name("plane-prune") == "claudlobby-canary-plane-prune"
 
     override.write_text("host: { jobs: { plane-daemon: { enroll: true } } }\n")
-    generated_b = composer_mod.compose_host_timers(Paths(root=root_b, package=source_package()))
+    generated_b = composer_mod.compose_host_timers(Paths(root=root_b, package=git_package(root_b)))
     names_b = {p.name for p in generated_b.iterdir()}
     assert "claudlobby-plane-daemon.plist" in names_b
     assert names_a.isdisjoint(names_b)
@@ -157,101 +157,6 @@ def test_host_job_reads_effective_host_override_without_fleet_merge(tmp_path, ov
     assert "installed/running state was not checked" in " ".join(lines[1:])
 
 
-def test_host_job_run_requires_selected_enabled_unit_and_reports_only_request(tmp_path, monkeypatch):
-    root = tmp_path / "root"
-    root.mkdir()
-    native = tmp_path / "native"
-    native.mkdir()
-    generated = tmp_path / "generated"
-    installed_dir = tmp_path / "user-units"
-    generated.mkdir()
-    installed_dir.mkdir()
-    name = "claudlobby-plane-prune"
-    release = SimpleNamespace(release_id="selected", native_path=native, seal_sha256="seal")
-    plan = SimpleNamespace(release_id="selected", release_seal="seal", blob=lambda _: b"unit")
-    declarations, items, entries, units = [], [], [], []
-    for suffix in (".service", ".timer"):
-        source = generated / (name + suffix)
-        source.write_text("reviewed unit")
-        installed = installed_dir / source.name
-        installed.write_text("reviewed unit")
-        declaration = SimpleNamespace(source=source, scope="host", working_directory=root,
-                                      environment=(), service=name + ".service" if suffix == ".timer" else None)
-        item = {"phase": "producers", "enroll": True, "sha256": suffix, "mode": 0o640}
-        target = source.name
-        entry = {"source": str(source), "target": target, "installed": str(installed),
-                 "after": {"kind": "file", "sha256": suffix, "mode": 0o640},
-                 "working_directory": str(root), "environment": {}}
-        declarations.append(declaration)
-        items.append((declaration, item))
-        entries.append(entry)
-        units.append(SimpleNamespace(declaration=declaration, target=target,
-                                     installed=(SimpleNamespace(path=str(installed)),),
-                                     properties=(("LoadState", "loaded"),)))
-    calls = []
-    class Native:
-        package = SimpleNamespace(native=native)
-        response = subprocess.CompletedProcess([], 0, "invoking\nrun-requested\n", "")
-        def read(self, function):
-            assert function == "svc_inventory_catalog"
-            return f"manager\tLinux\ndirectory\t{installed_dir}\n"
-        def call(self, function, *args, timeout=30):
-            calls.append((function, args))
-            return self.response
-    @contextmanager
-    def admitted(*_args, **_kwargs):
-        yield release
-    monkeypatch.setattr(host_run, "mutation_admission", admitted)
-    monkeypatch.setattr(host_run.RuntimeIdentity, "current", lambda: object())
-    monkeypatch.setattr(host_run, "load_host_jobs", lambda: {"plane-prune": {"type": "oneshot"},
-                                                              "pull-root": {"enroll": True}})
-    monkeypatch.setattr(host_run, "read_selection", lambda *_: {"release_id": "selected", "plan_id": "plan"})
-    monkeypatch.setattr(host_run, "read_plan", lambda *_: plan)
-    monkeypatch.setattr(host_run, "planned_units", lambda *_: tuple(items))
-    monkeypatch.setattr(host_run, "current_declarations", lambda *_: tuple(declarations))
-    monkeypatch.setattr(host_run, "selected_phase_entries", lambda *_: tuple(entries))
-    monkeypatch.setattr(host_run, "validate_unit_admission", lambda *_: None)
-    def inventory(*_args, **kwargs):
-        assert kwargs["only_names"] == frozenset({name + ".service", name + ".timer"})
-        return SimpleNamespace(require_complete=lambda: SimpleNamespace(units=units))
-    monkeypatch.setattr(host_run, "collect_enrollment", inventory)
-    adapter = Native()
-
-    result = host_run.run_host_job(root, "plane-prune", adapter=adapter)
-    assert (result.native_outcome, result.completion) == ("requested", "unobserved")
-    assert calls == [("svc_host_job_run_exact", (str(installed_dir / (name + ".service")), name + ".service"))]
-
-    adapter.response = subprocess.CompletedProcess([], 1, "invoking\n", "failed")
-    with pytest.raises(host_run.HostJobError) as uncertain:
-        host_run.run_host_job(root, "plane-prune", adapter=adapter)
-    assert uncertain.value.effect_attempted and uncertain.value.unavailable
-
-    calls.clear()
-    with pytest.raises(host_run.HostJobError, match="retired"):
-        host_run.run_host_job(root, "pull-root", adapter=adapter)
-    assert calls == []
-    monkeypatch.setattr(host_run, "load_host_jobs", lambda: {"plane-prune": {"type": "oneshot", "enroll": False}})
-    with pytest.raises(host_run.HostJobError, match="disabled"):
-        host_run.run_host_job(root, "plane-prune", adapter=adapter)
-    assert calls == []
-    from claudlobby.command_result import CommandFailure
-    from claudlobby.commands import host, host_jobs, releases
-    monkeypatch.setattr(host, "_operator_shell", lambda *_: None)
-    monkeypatch.setattr(releases, "_host_root", lambda *_: root)
-    with pytest.raises(CommandFailure) as disabled:
-        host_jobs._run(SimpleNamespace(name="plane-prune"))
-    assert "host.jobs.plane-prune.enroll" in disabled.value.error.hint
-    assert "host doctor --switches" in disabled.value.error.hint
-    assert "config plan" in disabled.value.error.hint
-    assert disabled.value.data["native_outcome"] == "unattempted" and calls == []
-
-    monkeypatch.setattr(host_run, "load_host_jobs", lambda: {"plane-prune": {"type": "oneshot"}})
-    entries[0]["installed"] = str(tmp_path / "foreign" / (name + ".service"))
-    with pytest.raises(host_run.HostJobError, match="placement"):
-        host_run.run_host_job(root, "plane-prune", adapter=adapter)
-    assert calls == []
-
-
 @pytest.mark.parametrize("platform,domain_kind", [("Linux", ""), ("Darwin", "user"), ("Darwin", "gui")])
 def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path, monkeypatch, platform, domain_kind):
     import os
@@ -283,7 +188,7 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
         stem + ".timer": (f"[Timer]\nUnit={stem}.service\n".encode(), 0o644)}
     generated = root / "runtime/_host/timers"
     generated.mkdir(parents=True)
-    rows = unit_family(files, destination=generated, scope="host", phase="producers", release_id="")
+    rows = unit_family(files, destination=generated, scope="host", phase="producers")
     for name, (content, mode) in files.items():
         (generated / name).write_bytes(content); (generated / name).chmod(mode)
         (directory / name).write_bytes(content); (directory / name).chmod(mode)
@@ -295,11 +200,10 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
         yield current
     monkeypatch.setattr(host_run, "mutation_admission", admitted)
     monkeypatch.setattr(host_run.RuntimeIdentity, "current", lambda: object())
-    monkeypatch.setattr(host_run, "load_host_jobs", lambda: pytest.fail("pending authored override read"))
     monkeypatch.setattr(host_run, "_load_system_defaults", lambda: {"host": {"jobs": {"plane-prune": {}}}})
-    monkeypatch.setattr(host_run, "read_selection", lambda *_: pytest.fail("sealed selection read"))
     calls = []
     class Native:
+        response = subprocess.CompletedProcess([], 0, "invoking\nrun-requested\n", "")
         def __init__(self): self.package = package
         def read(self, function):
             assert function == "svc_inventory_catalog"
@@ -307,7 +211,7 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
                     + ("PID\tStatus\tLabel\n" if platform == "Darwin" else ""))
         def call(self, function, *args, **kwargs):
             calls.append((function, args))
-            return subprocess.CompletedProcess([], 0, "invoking\nrun-requested\n", "")
+            return self.response
     def inventory(root, declarations, **kwargs):
         assert kwargs["only_names"] == frozenset({stem + ".plist"} if platform == "Darwin" else {stem + ".service", stem + ".timer"})
         units = [SimpleNamespace(declaration=d, target=domain + "/" + d.source.stem if platform == "Darwin" else d.source.name,
@@ -321,6 +225,14 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
     suffix = ".plist" if platform == "Darwin" else ".service"
     target = domain + "/" + stem if platform == "Darwin" else stem + suffix
     assert calls == [("svc_host_job_run_exact", (str(directory / (stem + suffix)), target))]
+    # A timed-out/failed request may already have invoked the oneshot. Report
+    # uncertainty; no automatic retry or timer manipulation follows it.
+    uncertain_adapter = Native()
+    uncertain_adapter.response = subprocess.CompletedProcess([], 1, "invoking\n", "failed")
+    with pytest.raises(host_run.HostJobError) as uncertain:
+        host_run.run_host_job(root, "plane-prune", adapter=uncertain_adapter)
+    assert uncertain.value.effect_attempted and uncertain.value.unavailable
+    assert calls == [("svc_host_job_run_exact", (str(directory / (stem + suffix)), target))] * 2
     calls.clear()
     with pytest.raises(host_run.HostJobError, match="not packaged"):
         host_run.run_host_job(root, "prune", adapter=Native())
@@ -329,8 +241,19 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
         with pytest.raises(host_run.HostJobError, match="GUI.*unavailable"):
             host_run.run_host_job(root, "plane-prune", adapter=Native())
         current.snapshot["supervision"]["domain"] = domain
-    next(row for row in rows if row["source"].endswith(".plist" if platform == "Darwin" else ".service"))["enroll"] = False
-    with pytest.raises((host_run.HostJobError, ValueError)):
+    original_inventory = inventory
+    def foreign_inventory(*args, **kwargs):
+        observed = original_inventory(*args, **kwargs).require_complete()
+        observed.units[0].installed = (SimpleNamespace(path=str(tmp_path / "foreign" / "unit")),)
+        return SimpleNamespace(require_complete=lambda: observed)
+    monkeypatch.setattr(host_run, "collect_enrollment", foreign_inventory)
+    with pytest.raises(host_run.HostJobError, match="placement"):
+        host_run.run_host_job(root, "plane-prune", adapter=Native())
+    assert calls == []
+    monkeypatch.setattr(host_run, "collect_enrollment", original_inventory)
+    for row in rows:
+        row["enroll"] = False
+    with pytest.raises(host_run.HostJobError, match="disabled"):
         host_run.run_host_job(root, "plane-prune", adapter=Native())
     assert calls == []
 

@@ -13,16 +13,33 @@ from claudlobby import fleet_operations as fleet
 from claudlobby import fleet_pulse
 from claudlobby.bot_operations import BotLifecycleError, BotLifecycleResult
 from claudlobby.config import FleetPulseConfig
+from claudlobby.installation import Installation
+from claudlobby.runtime_admission import GitCurrentRuntime
 from tests.ingest_listener import short_socket_dir
 
 
 def _scope(tmp_path, *, origin=None):
     selected_fleet = SimpleNamespace(name="example", manager="manager",
                                      bots={bot: object() for bot in ("manager", "worker-b", "worker-a")})
-    package = SimpleNamespace(native=tmp_path / "native")
+    package = SimpleNamespace(native=tmp_path / "native",installation=Installation(tmp_path.parent/"managed",tmp_path),source_revision="a"*40)
     destination = SimpleNamespace(fleet=selected_fleet,
                                   paths=SimpleNamespace(root=tmp_path, package=package))
-    return destination, origin, {"release_id": "selected-release", "plan_id": "selected-plan"}
+    return destination, origin, GitCurrentRuntime(package.installation,"a"*40,"b"*64,{})
+
+
+def _bindings(monkeypatch,destination,current,*,directory,tmux_dir=None,per_bot=False):
+    from claudlobby import active_config
+    monkeypatch.setattr(active_config,"read_current_config",lambda *_a,**_k:current.snapshot)
+    declarations=tuple(SimpleNamespace(source=directory/(bot+".service"),scope="bot",fleet="example",bot=bot)
+                       for bot in destination.fleet.bots)
+    def bound(root,admitted,selected,bot,adapter):
+        assert admitted is current
+        bot_dir=directory/bot if per_bot else directory
+        return SimpleNamespace(adapter=adapter,manager="Linux",declarations=declarations,
+            entry={"target":bot+".service","installed":str(directory/(bot+".service"))},
+            spec=SimpleNamespace(bot_dir=bot_dir,label="private",environment={"TMUX_TMPDIR":str(tmux_dir or directory)}),
+            verify_configuration=lambda:None)
+    monkeypatch.setattr(fleet,"_current_bot_binding",bound)
 
 
 def test_fleet_stop_is_serial_and_retains_partial_persistent_outcomes(tmp_path, monkeypatch):
@@ -108,7 +125,6 @@ def test_generated_worker_cannot_mutate_selected_fleet(tmp_path, monkeypatch):
     destination, _, selected = _scope(tmp_path)
     worker = SimpleNamespace(fleet=destination.fleet, bot_id="worker-a")
     monkeypatch.setattr(fleet, "resolve_operation_scope", lambda **_k: (destination, worker))
-    monkeypatch.setattr(fleet, "read_selection", lambda _root: selected)
     with pytest.raises(fleet.FleetLifecycleError, match="manager"):
         fleet.set_fleet_running(root=tmp_path, fleet="example", action="start", workers_only=True)
 
@@ -124,7 +140,7 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
     destination = SimpleNamespace(fleet=SimpleNamespace(name="example", manager="manager",
                                                         fleet_pulse=FleetPulseConfig(timeout_s=450)),
                                   paths=SimpleNamespace(root=tmp_path, lib=native,
-                                                        package=SimpleNamespace(installation=None, runtime_native=native)))
+                                                        package=SimpleNamespace(installation=Installation(tmp_path.parent/"managed",tmp_path), runtime_native=native)))
 
     @contextmanager
     def admitted(root, **kwargs):
@@ -213,12 +229,7 @@ def test_selected_private_pulse_refuses_direct_entry(tmp_path):
 def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monkeypatch):
     destination, _, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
-    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
-    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
-    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
-        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
-    monkeypatch.setattr(fleet, "build_supervision_spec", lambda _b, _f, _p: SimpleNamespace(
-        bot_dir=tmp_path, label="private", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    _bindings(monkeypatch,destination,selected,directory=tmp_path)
     observed = {"worker-a": (False, "inactive", "absent"),
                 "worker-b": (True, "active", "absent"),
                 "manager": (True, "active", "ready")}
@@ -262,17 +273,12 @@ def test_reconcile_reads_a_cleanly_stopped_session_absent_only_by_the_quiet_proo
     connections) reads that as absent; anything less stays unknown."""
     destination, _, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
-    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
-    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
-    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
-        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
     tmux_dir = short_socket_dir("sq-")
     stale = tmux_dir / f"tmux-{os.getuid()}" / "private"
     stale.parent.mkdir()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(str(stale))  # bound, never listening: what a clean tmux exit leaves
-    monkeypatch.setattr(fleet, "build_supervision_spec", lambda _b, _f, _p: SimpleNamespace(
-        bot_dir=tmp_path, label="private", environment={"TMUX_TMPDIR": str(tmux_dir)}))
+    _bindings(monkeypatch,destination,selected,directory=tmp_path,tmux_dir=tmux_dir)
     unit = SimpleNamespace(declaration=SimpleNamespace(scope="bot", fleet="example", bot="worker-a",
                                                        working_directory=tmp_path),
                            target="worker-a.service", installed=(),
@@ -330,12 +336,7 @@ def test_reconcile_reads_a_recorded_stop_as_stopped(tmp_path, monkeypatch):
     no record the states are unchanged."""
     destination, _, selected = _scope(tmp_path)
     monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
-    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
-    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
-    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
-        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
-    monkeypatch.setattr(fleet, "build_supervision_spec", lambda bot, _f, _p: SimpleNamespace(
-        bot_dir=tmp_path / bot, label="private", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    _bindings(monkeypatch,destination,selected,directory=tmp_path,per_bot=True)
     observed = {"worker-a": (True, "absent"), "worker-b": (True, "unknown"),
                 "manager": (False, "absent")}
     destination.fleet.bots = {bot: bot for bot in observed}
@@ -426,8 +427,6 @@ def test_git_reconcile_preserves_stopped_intent_without_historical_selection(git
     case = git_bot_binding
     (case.root / 'state/selected-release.json').write_text('malformed obsolete selection\n')
     monkeypatch.setattr(fleet, 'resolve_operation_scope', lambda **_kw: (case.destination, None))
-    monkeypatch.setattr(fleet, 'read_selection', lambda *_: pytest.fail('historical selection read'))
-    monkeypatch.setattr(fleet, 'read_plan', lambda *_: pytest.fail('historical plan read'))
     native = _GitStoppedNative(case)
     bot_dir = case.destination.paths.bot_runtime('lead')
     (bot_dir / 'data').mkdir()
@@ -447,7 +446,6 @@ def test_git_reconcile_preserves_stopped_intent_without_historical_selection(git
 def test_git_fleet_restart_delegates_frozen_current_scope_and_skips_stopped_bot(git_bot_binding, monkeypatch, skip_reason):
     case = git_bot_binding
     monkeypatch.setattr(fleet, 'resolve_operation_scope', lambda **_kw: (case.destination, None))
-    monkeypatch.setattr(fleet, 'read_selection', lambda *_: pytest.fail('historical selection read'))
     calls = []
     def restart(**kwargs):
         calls.append(kwargs)

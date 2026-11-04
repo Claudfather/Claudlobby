@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from uuid import UUID
 
-from ..activation_identity import read_selected_identity_bindings
+from ..activation_identity import read_current_identity_bindings
 from ..active_config import resolve_active_context
 from ..context import resolve_paths
 from ..operation_context import (bind_task_context, OperationContextError,
@@ -82,7 +82,7 @@ class OwnerActions:
         # Session admission precedes configuration/registry access.
         access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
-        bindings = read_selected_identity_bindings(self.root, room, package=self.package)
+        bindings = read_current_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_message(reader.token, reader.principal,
             host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)

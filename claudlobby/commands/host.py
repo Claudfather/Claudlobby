@@ -51,18 +51,17 @@ def _status(args, root):
     selected = evidence["selected_activation"]
     state = ("incomplete" if evidence["unfinished_activations"] else
              "indeterminate" if problem else "active" if selected else "unselected")
-    from ..activation_state import resumable_running_step
     from ..activation_state import read_activation
     recovery = []
     if not evidence["activation_errors"]:
         for item in evidence["unfinished_activations"]:
             try:
                 record = read_activation(root, item["activation_id"])
-                step = resumable_running_step(record)
+                step = None  # Sealed execution is retired; this is evidence only.
                 aborting = "adoption_abort" in record.body or "upgrade_abort" in record.body
             except Exception:
                 step, aborting = None, False
-            # An abort in progress continues only through host abort-adoption.
+            # Preserve abort evidence; never offer a removed execution path.
             recovery.append({"activation_id": item["activation_id"], "supported_step": step,
                              "abort_in_progress": aborting})
     data = _status_data(root, state, evidence, recovery)

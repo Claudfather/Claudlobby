@@ -116,7 +116,7 @@ def _item(row: dict) -> dict:
 
 def _read(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..brief import plane_session
     from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
@@ -151,7 +151,7 @@ def _read(args) -> CommandOutput:
         if selected is None:
             raise CommandFailure("conflict", "active report selection is unavailable")
         release_id = selected.release_id
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):

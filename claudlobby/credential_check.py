@@ -7,11 +7,9 @@ import os
 from pathlib import Path
 import subprocess
 
-from .activation_state import read_selection
-from .config_plan import PlanError, path_state, read_plan
 from .context import native_environment
 from .operation_context import resolve_operation_scope
-from .runtime_admission import GitCurrentRuntime, mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
+from .runtime_admission import mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
 
 class CredentialCheckError(RuntimeError):
@@ -43,37 +41,16 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
         if native != destination.paths.package.runtime_native / "creds-check.sh":
             raise CredentialCheckError("credential probe differs from the selected release")
 
-        # The roster, manager and chat are the activated plan's frozen
-        # fleet.yaml (resolve_operation_scope), and the probe is handed that
-        # roster for each read it makes, the alert sender's included. An edit
-        # made since is not live until it is activated, so the probe runs on
-        # the activated roster and the result says the source has changed. It
-        # used to stop here, every day until the next activation (#2515).
-        if isinstance(release, GitCurrentRuntime):
-            frozen = release.snapshot["fleets"][destination.fleet.name]
-            manifest = Path(frozen["manifest"])
-            if manifest != destination.paths.fleet_yaml:
-                raise CredentialCheckError("fleet source differs from its committed configuration")
-            try:
-                source_changed = (manifest.is_symlink() or manifest.resolve() != manifest
-                                  or manifest.read_bytes() != frozen["fleet"].encode())
-            except OSError:
-                source_changed = True
-        else:
-            selected = read_selection(root)
-            if selected is None or selected["release_id"] != release.release_id:
-                raise CredentialCheckError("credential check has no stable selected fleet")
-            plan = read_plan(root, selected["plan_id"])
-            source = plan.effects["fleet_sources"][destination.fleet.name]["fleet"]
-            manifest, _ = plan.frozen_input(source, required=True)
-            if manifest != destination.paths.fleet_yaml:
-                raise CredentialCheckError("fleet source is not where the activated plan read it")
-            try:
-                source_changed = path_state(manifest, source=True) != plan.inputs[str(manifest)]["state"]
-            except PlanError:
-                # Activation fingerprinted this source, so one that cannot be
-                # fingerprinted now (unreadable, a link loop) has changed as well.
-                source_changed = True
+        # Pending authored edits do not replace the committed roster or alert scope.
+        frozen = release.snapshot["fleets"][destination.fleet.name]
+        manifest = Path(frozen["manifest"])
+        if manifest != destination.paths.fleet_yaml:
+            raise CredentialCheckError("fleet source differs from its committed configuration")
+        try:
+            source_changed = (manifest.is_symlink() or manifest.resolve() != manifest
+                              or manifest.read_bytes() != frozen["fleet"].encode())
+        except OSError:
+            source_changed = True
         if destination.paths.runtime_bots.resolve() != destination.paths.runtime_bots:
             raise CredentialCheckError("fleet bot runtime is redirected")
 

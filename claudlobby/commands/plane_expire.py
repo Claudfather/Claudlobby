@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import os
 import sqlite3
 
+from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
 from ..context import resolve_paths
 from ..plane.db import connect_ro, db_file
@@ -15,13 +16,12 @@ from ..plane.expiry import (DEFAULT_AFTER_DAYS, ExpiryChanged, ExpiryPlan,
                             expirable, expired_events, require_expirable)
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, require_current_schema
-from ..runtime_admission import (GitCurrentRuntime, RuntimeIdentity, mutation_admission,
+from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                  runtime_release_id, runtime_provenance)
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
-    from ..config_plan import PlanError, read_plan
+    from ..config_plan import PlanError
 
     if args.fleet or args.seed:
         raise CommandFailure("invalid_argument", "plane expire is a host-wide selected-fleet sweep")
@@ -34,17 +34,7 @@ def dispatch(args) -> CommandOutput:
                                 expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
             release_id = runtime_release_id(release)
             provenance = runtime_provenance(release)
-            if isinstance(release, GitCurrentRuntime):
-                fleet_names = tuple(release.snapshot["fleets"])
-            else:
-                selected = read_selection(root)
-                if selected is None:
-                    raise ActivationError("active selection is unavailable")
-                plan = read_plan(root, selected["plan_id"])
-                if (plan.release_id != release.release_id
-                        or plan.release_seal != release.seal_sha256):
-                    raise PlanError("active plan differs from the admitted release")
-                fleet_names = plan.fleets
+            fleet_names = tuple(release.snapshot["fleets"])
             if not fleet_names:
                 raise PlanError("current configuration has no fleets to sweep")
             stamp = datetime.now(timezone.utc)

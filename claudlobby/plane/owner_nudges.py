@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from ..activation_identity import read_selected_identity_bindings
+from ..activation_identity import read_current_identity_bindings
 from ..active_config import resolve_active_context
 from ..application_result import ApplicationOutcome
 from ..application_tasks import nudge_bound_task
@@ -70,7 +70,7 @@ class OwnerNudges:
         if not isinstance(fleet, str) or not fleet:
             raise AccessDenied("fleet_required")
         selected = resolve_active_context(root=self.root, fleet=fleet, package=self.package)
-        bindings = read_selected_identity_bindings(self.root, fleet, package=self.package)
+        bindings = read_current_identity_bindings(self.root, fleet, package=self.package)
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
         if (ctx.host_uid != self.host_uid or ctx.fleet_uid != grant.fleet_uid
                 or bindings["host_uid"] != self.host_uid or bindings["fleet_uid"] != grant.fleet_uid

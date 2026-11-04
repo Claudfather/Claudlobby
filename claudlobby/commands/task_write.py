@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 
+from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
 from ..task_operations import UNSPECIFIED_ASSIGNMENT
 from ..application_tasks import (_reference, _request_id, _text, _committed_notification,
@@ -179,7 +180,6 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
@@ -188,7 +188,6 @@ def dispatch(args) -> CommandOutput:
     from ..paths import InvalidPathSelector
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
-    from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
     from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance, runtime_route_matches)
@@ -209,10 +208,10 @@ def dispatch(args) -> CommandOutput:
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if args.public_command == "task.feedback" and (origin is not None or any(
                 key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE",
-                                               "CLAUDLOBBY_RELEASE_ID"))):
-            # Fleet timers and host update children can have no bot origin.
-            # Their fleet/service/release carriers cannot borrow a human; the
-            # timer marker is also refused defensively, even when empty.
+                                               "CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_NATIVE_ADMITTED"))):
+            # Fleet timers and admitted native children can have no bot origin.
+            # These routing carriers cannot borrow a human; marker presence is
+            # refused defensively even when empty, never used as action authority.
             raise CommandFailure("conflict", "task feedback requires an explicit local human caller")
         fleet_name = selected.fleet.name
         if selected.paths.seed:
@@ -300,9 +299,7 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError, MessageContextError, BotNotFoundError,
             TaskStateError) as exc:
         raise CommandFailure("conflict", "active task scope or state is incomplete",
-                             hint=f"{exc}; inspect claudlobby host releases" if isinstance(exc, ActivationError) else None,
+                             hint="inspect claudlobby host update status" if isinstance(exc, ActivationError) else None,
                              release_id=release_id) from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid task root or fleet selector") from exc

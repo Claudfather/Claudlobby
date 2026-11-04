@@ -22,7 +22,7 @@ import pytest
 
 from claudlobby.composer import compose_launchd_plist
 from claudlobby.config import BotConfig, FleetConfig
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
@@ -71,7 +71,7 @@ def test_composed_plist_is_structurally_valid(tmp_path):
     fleet = FleetConfig(name="t", service_prefix="p", manager="w", bots={"w": bot})
     (tmp_path / "runtime" / "bots" / "w").mkdir(parents=True)
 
-    text = compose_launchd_plist(bot, fleet, Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package()))
+    text = compose_launchd_plist(bot, fleet, Paths(root=tmp_path, fleet_dir=tmp_path, package=git_package(tmp_path)))
     parsed = plistlib.loads(text.encode())
 
     assert parsed["Label"] == "p.w"
@@ -102,7 +102,7 @@ def test_native_plutil_accepts_composed_plist(tmp_path):
     bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
     fleet = FleetConfig(name="ci", service_prefix="claudlobby-ci", manager="worker", bots={"worker": bot})
     plist = tmp_path / "worker.plist"
-    plist.write_text(compose_launchd_plist(bot, fleet, Paths(root=tmp_path, package=source_package())))
+    plist.write_text(compose_launchd_plist(bot, fleet, Paths(root=tmp_path, package=git_package(tmp_path))))
     result = subprocess.run(["/usr/bin/plutil", "-lint", str(plist)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -115,7 +115,7 @@ def _native_scratch_job(tmp_path):
     fleet = FleetConfig(name="ci", service_prefix=prefix, manager="worker", bots={"worker": bot})
     # The launcher is fixture-owned; never replace the selected package's native
     # start-bot.sh when composition and writable data live in different roots.
-    package = replace(source_package(), native=tmp_path / "native")
+    package = replace(git_package(tmp_path), native=tmp_path / "native")
     paths = Paths(root=tmp_path, package=package)
     bot_dir = paths.bot_runtime(bot.bot_id)
     bot_dir.mkdir(parents=True)
@@ -124,7 +124,9 @@ def _native_scratch_job(tmp_path):
     launcher.write_text('#!/bin/bash\nprintf "%s\\n" "$$" > "$1/native.pid"\nexec /bin/sleep 60\n')
     launcher.chmod(0o755)
     plist = tmp_path / "native.plist"
-    plist.write_text(compose_launchd_plist(bot, fleet, paths))
+    from claudlobby.supervision import build_supervision_spec, render_launchd_plist
+    spec = replace(build_supervision_spec(bot, fleet, paths), launcher=launcher, launcher_args=(str(bot_dir),))
+    plist.write_text(render_launchd_plist(spec))
     lint = subprocess.run(["/usr/bin/plutil", "-lint", str(plist)],
                           capture_output=True, text=True)
     assert lint.returncode == 0, lint.stdout + lint.stderr

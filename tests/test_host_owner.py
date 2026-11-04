@@ -211,7 +211,7 @@ def test_hidden_input_failure_is_not_allowed_to_echo(owner, monkeypatch):
 
 # Independent activation fixtures use the real frozen config/Plane and runtime
 # admission, with an explicitly synthetic release identity/native supervisor.
-from tests.test_activation import cold, tmp_path  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
@@ -221,7 +221,7 @@ from claudlobby.operation_context import resolve_task_mutation_context
 @pytest.fixture
 def message_owner(active, monkeypatch):
     root, host = active
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     for name in host_owner._GENERATED:
         monkeypatch.delenv(name, raising=False)
     store = OwnerAccess.initialize(root)
@@ -333,7 +333,7 @@ def test_allow_actions_requires_finite_explicit_unique_selection(message_owner, 
     assert store.local_action_status().message_grants == ()
 
 
-@pytest.mark.parametrize("change", ["owner", "actor", "fleet", "release"])
+@pytest.mark.parametrize("change", ["owner", "actor", "fleet", "configuration"])
 def test_allow_actions_rechecks_displayed_identity_before_batch(message_owner, monkeypatch, change):
     store, _, owner, ctx = message_owner
     terminal(monkeypatch, iter([]))
@@ -345,7 +345,7 @@ def test_allow_actions_rechecks_displayed_identity_before_batch(message_owner, m
                 conn.execute("UPDATE identity_registry SET uid=? WHERE alias=?",
                              (change + "_" + uuid4().hex, ctx.caller.alias if change == "actor" else "example"))
         else:
-            (store.root / "state/selected-release.json").unlink()
+            (store.root / "state/config.json").unlink()
     monkeypatch.setattr(host_owner, "_approve", race)
     assert call(store, "allow-actions", "--target-fleet", "example", "--actor", ctx.caller.alias,
                 "--capabilities", "messages", "nudges") in (4, 7)
@@ -376,7 +376,7 @@ def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config
     assert all(value in output.getvalue() for value in (owner.principal.subject, owner.host_uid, ctx.fleet_uid, ctx.caller.uid, ctx.caller.alias))
     assert "ordinary messages only" in output.getvalue()
     # Revocation reads only retained authority; no active config or Plane needed.
-    (store.root / "state/selected-release.json").unlink()
+    (store.root / "state/config.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
     capsys.readouterr()
     before = store.path.read_bytes()
@@ -637,7 +637,7 @@ def test_nudge_console_registration_is_separate_and_status_revoke_need_no_active
     assert "selected-task nudges only" in output.getvalue() and grant.actor_alias == actor
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
-    (store.root / "state/selected-release.json").unlink()
+    (store.root / "state/config.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
     capsys.readouterr()
     assert call(store, "status", "--json") == 0
@@ -688,7 +688,7 @@ def test_feedback_console_registration_is_separate_and_status_revoke_need_no_act
     assert "task-linked comments" in output.getvalue() and grant.actor_alias == actor
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
-    (store.root / "state/selected-release.json").unlink()
+    (store.root / "state/config.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
     capsys.readouterr()
     assert call(store, "status", "--json") == 0

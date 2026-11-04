@@ -10,7 +10,7 @@ from ..command_result import CommandFailure, CommandOutput
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..activation_state import ActivationError
     from ..brief import ALERT_WINDOW_H, _alerts_section, plane_session
     from ..active_config import runtime_read_stamp
@@ -40,7 +40,7 @@ def dispatch(args) -> CommandOutput:
         if selected is None:
             raise CommandFailure("conflict", "active inbox selection is unavailable")
         release_id = selected.release_id
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):

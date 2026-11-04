@@ -45,13 +45,12 @@ from claudlobby.composer import (
     telegram_handle,
 )
 from claudlobby.diff import diff_bot
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
-from claudlobby.resources import selected_cli
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 class TestRevenueWebAppCandidate:
@@ -469,7 +468,7 @@ class TestComposeSettingsLocal:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def _make_fleet_with_bots(self, *bot_ids, manager, meta=None):
         bots = {}
@@ -492,7 +491,7 @@ class TestComposeSettingsLocal:
     def test_every_bot_excludes_only_data_root_instructions(self, tmp_path, overlay):
         root = tmp_path / "data"
         fleet_dir = root / "local" / "example" if overlay else root
-        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         fleet = self._make_fleet_with_bots("lead", "worker", manager="lead")
         for bot in fleet.bots.values():
             settings = compose_settings_local(bot, fleet, paths)
@@ -653,7 +652,7 @@ class TestComposeSettingsLocal:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "solo").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         bot = BotConfig(
             bot_id="solo",
             name="solo",
@@ -870,7 +869,7 @@ class TestComposeBotConfModelStrategy:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_bot_conf(bot, fleet, paths)
 
     def test_no_model_strategy_no_vars(self, tmp_path):
@@ -953,7 +952,7 @@ class TestComposeBotConfExportedVars:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "astrid").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export BOT_ID=astrid" in conf
 
@@ -965,7 +964,7 @@ class TestComposeBotConfExportedVars:
         root = tmp_path / "cl"
         (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=source_package()))
+        return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=git_package(root)))
 
     def test_disable_nonessential_traffic_default_and_override(self, tmp_path):
 
@@ -1043,7 +1042,7 @@ class TestComposeBotConfServicePrefix:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "eng-1").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(bot, fleet, paths)
         assert "BOT_SERVICE=com.myorg.prod.eng-1" in conf
         assert "export SERVICE_PREFIX=com.myorg.prod" in conf
@@ -1066,7 +1065,7 @@ class TestComposeBotConfServicePrefix:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(bot, fleet, paths)
         assert "com.example" not in conf
         assert "com.claudlobby" not in conf
@@ -1099,7 +1098,7 @@ class TestComposeBotConfFleetRoot:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Root-mode fleet IS the install root — the anchor collapses cleanly.
         assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT"' in conf
@@ -1110,7 +1109,7 @@ class TestComposeBotConfFleetRoot:
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Nested overlay — anchored under the install root, so a re-nest of the
         # fleet only moves FLEET_ROOT; every derived path follows.
@@ -1122,7 +1121,7 @@ class TestComposeBotConfFleetRoot:
         vault_fleet = tmp_path / "vault" / "tl"
         (vault_fleet / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=vault_fleet, package=source_package())
+        paths = Paths(root=root, fleet_dir=vault_fleet, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Fleet outside the install tree (vault) — absolute, no anchor to lean on.
         assert f"export FLEET_ROOT={vault_fleet}" in conf
@@ -1132,7 +1131,7 @@ class TestComposeBotConfFleetRoot:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         assert "FLEET_ROOT" in conf
 
@@ -1154,7 +1153,7 @@ class TestComposeBotConfSecretFiles:
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+        return Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
 
     def _bot(self, **kw):
         return BotConfig(
@@ -1261,7 +1260,7 @@ class TestComposerProvidedPathAnchorsExported:
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         conf = compose_bot_conf(bot, fleet, paths)
         for anchor in COMPOSER_PROVIDED_PATH_ANCHORS:
             assert f"{anchor}=" in conf, f"{anchor} not assigned in bot.conf"
@@ -1280,7 +1279,7 @@ class TestBotConfExportsTheRuntime:
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=fleet_dir, package=source_package()))
+        return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=fleet_dir, package=git_package(root)))
 
     def test_bot_conf_exports_the_agent_cli(self, tmp_path):
         lines = self._conf(tmp_path).splitlines()
@@ -1716,7 +1715,7 @@ class TestChannelSkillInSettingsLocal:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     @pytest.mark.parametrize("command, plugins, expected", [
         (None, ["claudna@Claudfather"], "claudna:session"),
@@ -1886,7 +1885,7 @@ class TestResolveMcpPermissions:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def test_github_and_notion_emit_wildcards(self, tmp_path):
         """When all tools are allowed, emit mcp__<server>__* wildcards instead of per-tool entries."""
@@ -2031,7 +2030,7 @@ class TestMcpPermissionsInSettingsLocal:
             _write_integration(
                 root, name, tool_grants=[f"mcp__{name}__*"] if tools else []
             )
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def test_mcp_trust_allowlist_sorted_no_blanket(self, tmp_path):
         """enabledMcpjsonServers = sorted server set; blanket enableAllProjectMcpServers never emitted."""
@@ -2270,7 +2269,7 @@ class TestResolveExpertisePermissions:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in files.items():
             (exp_dir / f"{name}.md").write_text(content)
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def test_allow_all_expands_to_full_tool_set(self, tmp_path):
         from claudlobby.composer import _resolve_expertise_permissions
@@ -2399,7 +2398,7 @@ class TestExpertisePermissionsInSettingsLocal:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in files.items():
             (exp_dir / f"{name}.md").write_text(content)
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def test_expertise_allow_in_settings(self, tmp_path):
         paths = self._setup_expertise(
@@ -2487,7 +2486,7 @@ class TestExpertisePermissionsInSettingsLocal:
         )
         _write_integration(root, "github", tool_grants=["mcp__github__*"])
 
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         bot = BotConfig(
             bot_id="w",
             name="w",
@@ -2559,7 +2558,7 @@ class TestComposeSystemdUnit:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         (root / "runtime" / "bots" / "w").mkdir(parents=True)
         bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
         fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
@@ -2608,7 +2607,18 @@ class TestComposeSystemdUnit:
         assert "RemainAfterExit=yes" in unit
         # The spawner half: ExecStart runs start-bot.sh, which backgrounds tmux
         # and returns. A foreground exec here would invert SubState's meaning.
-        assert re.search(r"^ExecStart=\S*start-bot\.sh ", unit, re.M)
+        # In the Git model the unit starts the stable installation CLI, whose
+        # _native entry runs start-bot.sh as that same spawner (phase bots,
+        # mode exec); the spawner is the argv after the "--" separator.
+        cli = str(paths.package.installation.cli)
+        start_bot = str(paths.package.runtime_native / "start-bot.sh")
+        exec_start = re.search(r"^ExecStart=(.*)$", unit, re.M)
+        assert exec_start
+        argv = re.findall(r'"((?:[^"\\]|\\.)*)"', exec_start.group(1))
+        assert argv[0] == cli
+        assert argv[3:5] == ["_native", "--unit"]
+        assert argv[6:11] == ["--phase", "bots", "--mode", "exec", "--"]
+        assert argv[11] == start_bot
 
 
 class TestHostBootOffset:
@@ -2659,14 +2669,14 @@ class TestHostBootOffset:
         """This fleet's (manager_base, worker_base), via the real door."""
         d = (local / "sys" / name) if nested else (local / name)
         own_managers = 1
-        return _host_boot_rung_bases(Paths(root=root, fleet_dir=d, package=source_package()), own_managers)
+        return _host_boot_rung_bases(Paths(root=root, fleet_dir=d, package=git_package(root)), own_managers)
 
     def _rungs(self, root, local, spec):
         """Every bot's delay on the host, keyed <fleet>.<bot>, via the real door."""
         out = {}
         for name in spec:
             fleet = self._fleet(name, spec)
-            paths = Paths(root=root, fleet_dir=local / name, package=source_package())
+            paths = Paths(root=root, fleet_dir=local / name, package=git_package(root))
             for bot in fleet.bots.values():
                 out[f"{name}.{bot.bot_id}"] = bot_boot_delay_s(bot, fleet, paths)
         return out
@@ -2770,7 +2780,7 @@ class TestHostBootOffset:
         """No host placement is not licence to stack two bots on rung 0."""
         spec = {"aaa": (3, 1)}
         root, _ = self._host(tmp_path, spec)
-        paths = Paths(root=root, fleet_dir=None, package=source_package())  # root mode
+        paths = Paths(root=root, fleet_dir=None, package=git_package(root))  # root mode
         assert _host_boot_rung_bases(paths, 1) == (0, 1)
         fleet = self._fleet("aaa", spec)
         rungs = [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()]
@@ -2838,7 +2848,7 @@ class TestHostBootOffset:
         the later fleet: it is the one that inherits the shortfall.
         """
         root, local = self._host_ungrouped(tmp_path)
-        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb", package=source_package()), 1)
+        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb", package=git_package(root)), 1)
         assert bases == (1, 3), (
             "bbb's manager must ladder past aaa's; an ungrouped manager that "
             "the sibling count cannot see collapses that gap"
@@ -2869,8 +2879,8 @@ class TestHostBootOffset:
         """
         root, local = self._host_ungrouped(tmp_path)
         aaa, bbb = self._ungrouped_fleets()
-        p_aaa = Paths(root=root, fleet_dir=local / "aaa", package=source_package())
-        p_bbb = Paths(root=root, fleet_dir=local / "bbb", package=source_package())
+        p_aaa = Paths(root=root, fleet_dir=local / "aaa", package=git_package(root))
+        p_bbb = Paths(root=root, fleet_dir=local / "bbb", package=git_package(root))
         rungs = {
             "aaa.b0": bot_boot_delay_s(aaa.bots["b0"], aaa, p_aaa),  # manager
             "bbb.b0": bot_boot_delay_s(bbb.bots["b0"], bbb, p_bbb),  # manager
@@ -2909,7 +2919,7 @@ class TestHostBootOffset:
         """
         spec = {"aaa": (2, 0), "bbb": (3, 0)}
         root, local = self._host(tmp_path, spec)
-        paths = Paths(root=root, fleet_dir=local / "bbb", package=source_package())
+        paths = Paths(root=root, fleet_dir=local / "bbb", package=git_package(root))
         fleet = self._fleet("bbb", spec)
         # 2 managers (aaa.b0 rung 0, bbb.b0 rung 1); workers start at rung 2,
         # and aaa's one worker takes it — so bbb's workers are rungs 3-4.
@@ -2949,7 +2959,7 @@ class TestDeclaredManagerRecognition:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         directory = tmp_path / bot_id
         directory.mkdir()
         (directory / "bot.conf").write_text(
@@ -3047,7 +3057,7 @@ class TestPluginsBotConf:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_bot_conf(bot, fleet, paths)
 
     def test_bot_conf_has_sync_env_var(self, tmp_path):
@@ -3156,7 +3166,7 @@ class TestPluginsSettingsLocal:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def test_settings_local_has_enabled_plugins(self, tmp_path):
         from claudlobby.config import PluginsConfig
@@ -3290,7 +3300,7 @@ class TestChannelPluginInstallEnableCarveout:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
 
         bot = BotConfig(
             bot_id="worker",
@@ -3354,7 +3364,7 @@ class TestComposeBotEventsDir:
         (root / "lib").mkdir()
         (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
 
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
         fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
 
@@ -3388,7 +3398,7 @@ class TestComposeBotConfObservability:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_bot_conf(bot, fleet, paths)
 
     def test_default_observability_values(self, tmp_path):
@@ -3455,14 +3465,15 @@ class TestComposeBotConfObservability:
 
         from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S, compose_bot_conf
         from claudlobby.config import load_fleet
-        from tests.package_fixtures import source_package
+        from tests.package_fixtures import git_package
         from claudlobby.paths import Paths
 
         root = tmp_path / "claudlobby"
         (root / "library" / "expertise").mkdir(parents=True)
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
-        (root / "fleet.yaml").write_text(_dedent("""\
+        (root / "fleet.yaml").write_text(
+            _dedent("""\
             fleet:
               name: test-fleet
               manager: worker
@@ -3470,13 +3481,19 @@ class TestComposeBotConfObservability:
               bots:
                 worker:
                   expertise: [eng]
-        """))
+        """)
+        )
         fleet, _md = load_fleet(root / "fleet.yaml")
-        conf = compose_bot_conf(fleet.bots["worker"], fleet,
-                                Paths(root=root, fleet_dir=root, package=source_package()))
+        conf = compose_bot_conf(
+            fleet.bots["worker"],
+            fleet,
+            Paths(root=root, fleet_dir=root, package=git_package(root)),
+        )
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
-        assert fleet.bots["worker"].observability.dispatch_deadline == \
-            DEFAULT_DISPATCH_DEADLINE_S
+        assert (
+            fleet.bots["worker"].observability.dispatch_deadline
+            == DEFAULT_DISPATCH_DEADLINE_S
+        )
 
     def test_default_deadline_matches_system_tier(self):
         """The composed default and system tier retain the same 24h value."""
@@ -3554,7 +3571,7 @@ class TestComposePermissions:
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_claude_md, paths
 
     def test_permissions_rendered_in_claude_md(self, tmp_path):
@@ -3654,7 +3671,7 @@ class TestJinja2Sandbox:
         root.mkdir()
         (root / "templates").mkdir()
         (root / "templates" / "claude.md.j2").write_text("{{ bot.name }}")
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         env = _build_jinja_env(paths)
         assert isinstance(env, SandboxedEnvironment)
 
@@ -3668,7 +3685,7 @@ class TestJinja2Sandbox:
         (root / "templates" / "evil.j2").write_text(
             "{{ ''.__class__.__mro__[1].__subclasses__() }}"
         )
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         env = _build_jinja_env(paths)
         tmpl = env.get_template("evil.j2")
         with pytest.raises(SecurityError):
@@ -3704,7 +3721,7 @@ class TestComposeBotConfShellEscaping:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_bot_conf(bot, fleet, paths)
 
     def test_command_substitution_escaped(self, tmp_path):
@@ -3789,7 +3806,7 @@ class TestDefaultStartupPromptIgnition:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        return Paths(root=root, fleet_dir=root if overlay else None, package=source_package())
+        return Paths(root=root, fleet_dir=root if overlay else None, package=git_package(root))
 
     def _bot(self, bot_id="worker", **kw):
         return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"], **kw)
@@ -3920,7 +3937,7 @@ class TestVoiceLayouts:
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"],
                         voice="voices/custom.md")
         fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
@@ -3958,7 +3975,7 @@ class TestComposeAutonomousRunner:
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_claude_md, paths
 
     def test_section_omitted_when_not_configured(self, tmp_path):
@@ -4059,8 +4076,9 @@ class TestResolveEffectiveIntegrations:
         for name in names:
             (int_dir / f"{name}.md").write_text(f"# {name}\n")
         return Paths(
-            root=root, fleet_dir=root,
-            package=replace(source_package(), library=library),
+            root=root,
+            fleet_dir=root,
+            package=replace(git_package(root), library=library),
         )
 
     def test_explicit_integrations_union_mcp_paired(self, tmp_path):
@@ -4135,7 +4153,7 @@ class TestPermissionMode:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_bot_conf(bot, fleet, paths)
 
     def test_permission_mode_auto(self, tmp_path):
@@ -4251,8 +4269,9 @@ class TestResolveEffectiveIntegrationsUnion:
         for n in integration_names:
             _write_integration(package_root, n)
         return Paths(
-            root=root, fleet_dir=root,
-            package=replace(source_package(), library=package_root / "library"),
+            root=root,
+            fleet_dir=root,
+            package=replace(git_package(root), library=package_root / "library"),
         )
 
     def test_explicit_integrations_union_auto_paired_mcp(self, tmp_path):
@@ -4357,7 +4376,7 @@ class TestResolveIntegrationGrants:
                 tool_grants=spec.get("tool_grants"),
                 type_=spec.get("type_"),
             )
-        return Paths(root=root, fleet_dir=root, package=source_package())
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     def test_fragment_backed_default_instance(self, tmp_path):
         from claudlobby.composer import _resolve_integration_grants
@@ -4474,8 +4493,9 @@ class TestGrantUnionInSettingsLocal:
                 type_=spec.get("type_"),
             )
         return Paths(
-            root=root, fleet_dir=root,
-            package=replace(source_package(), library=package_root / "library"),
+            root=root,
+            fleet_dir=root,
+            package=replace(git_package(root), library=package_root / "library"),
         )
 
     _GH_FRAGMENT = {
@@ -4735,6 +4755,14 @@ class TestTimerUnitPath:
             f"{home}/.npm-global/bin",
         ]
 
+
+    @staticmethod
+    def _selected_bin(tmp_path: Path) -> str:
+        """The stable managed installation's bin, which holds its CLI."""
+        installation = git_package(tmp_path / "claudlobby").installation
+        assert installation.cli.parent == installation.bin
+        return str(installation.bin)
+
     def _emit(self, tmp_path: Path) -> Path:
         root = tmp_path / "claudlobby"
         root.mkdir()
@@ -4790,13 +4818,15 @@ class TestTimerUnitPath:
     def test_path_includes_the_selected_release_bin(self, tmp_path):
         """Both supervisors can resolve the selected release's console script."""
         d = self._emit(tmp_path)
-        selected_bin = str(selected_cli().parent)
+        selected_bin = self._selected_bin(tmp_path)
         for unit, extract in (
             ("com.t.reload-fleet.service", self._systemd_path),
             ("com.t.reload-fleet.plist", self._launchd_path),
         ):
             segs = extract((d / unit).read_text()).split(":")
-            assert selected_bin in segs, f"{selected_bin} missing from {unit} PATH: {segs}"
+            assert selected_bin in segs, (
+                f"{selected_bin} missing from {unit} PATH: {segs}"
+            )
 
     def test_selected_release_precedes_ambient_installs(self, tmp_path):
         """Timers use the selected release before any system or user install."""
@@ -4804,7 +4834,7 @@ class TestTimerUnitPath:
         segs = self._systemd_path((d / "com.t.reload-fleet.service").read_text()).split(
             ":"
         )
-        assert segs[0] == str(selected_cli().parent), segs
+        assert segs[0] == self._selected_bin(tmp_path), segs
         assert f"{tmp_path / 'claudlobby'}/.venv/bin" not in segs
 
 
@@ -5326,7 +5356,10 @@ class TestFleetEnvStubDoesNotShadowUpstream:
                         # No upstream value anywhere — MUST still get one, or the
                         # test above passes for the trivial reason that nothing
                         # is ever stubbed.
-                        "FLEET_ONLY_TOKEN": {"description": "unset", "default_tier": "fleet"},
+                        "FLEET_ONLY_TOKEN": {
+                            "description": "unset",
+                            "default_tier": "fleet",
+                        },
                     },
                 }
             )
@@ -5350,7 +5383,7 @@ class TestFleetEnvStubDoesNotShadowUpstream:
             root / "runtime" / "bots" / "worker",
         ):
             d.mkdir(parents=True, exist_ok=True)
-        package = replace(source_package(), library=root / "library")
+        package = replace(git_package(root), library=root / "library")
         return root, fleet_dir, Paths(root=root, fleet_dir=fleet_dir, package=package)
 
     def _scaffold(self, root: Path, fleet_dir: Path, paths: Paths) -> str:
@@ -5535,26 +5568,33 @@ class TestLaunchdArgvSplitting:
     def test_flagged_script_splits_into_separate_argv_entries(self, tmp_path):
         pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
         argv = pl["ProgramArguments"]
-        assert argv[0].endswith("/lib/data-sweep.sh"), (
-            f"argv[0] must be the executable alone, got {argv[0]!r}"
+        # Git model: argv[0] is the stable installation CLI and the job's own
+        # argv follows the "--" separator of the native entry (index 11).
+        assert argv[10] == "--", argv
+        assert argv[11].endswith("/lib/data-sweep.sh"), (
+            f"the job executable must be its own argv entry, got {argv[11]!r}"
         )
-        assert " " not in argv[0], f"argv[0] contains a space: {argv[0]!r}"
-        assert "--purge" in argv, f"the flag was dropped: {argv}"
+        assert " " not in argv[0] and " " not in argv[11], (
+            f"an executable entry contains a space: {argv[0]!r} {argv[11]!r}"
+        )
+        assert "--purge" in argv[12:], f"the flag was dropped: {argv}"
 
     def test_flag_precedes_fleet_name_as_on_systemd(self, tmp_path):
         """Order must match the systemd form (`script --purge <fleet>`), or the
         two platforms would pass arguments differently to the same script."""
         pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
         argv = pl["ProgramArguments"]
-        assert argv.index("--purge") < argv.index("t"), (
+        assert argv.index("--purge", 11) < argv.index("t", 11), (
             f"flag must precede the fleet name, got {argv}"
         )
 
     def test_unflagged_script_is_unchanged(self, tmp_path):
         pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/plain.sh")
         argv = pl["ProgramArguments"]
-        assert argv[0].endswith("/lib/plain.sh")
-        assert argv[1] == "t"
+        assert argv[10] == "--", argv
+        assert argv[11].endswith("/lib/plain.sh")
+        assert argv[12] == "t"
+        assert len(argv) == 13
 
 
 class TestComposeBotConfTelegramStateDirExported:
@@ -5594,7 +5634,7 @@ class TestComposeBotConfTelegramStateDirExported:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_bot_conf(bot, fleet, paths)
 
     def test_state_dir_is_exported(self, tmp_path):
@@ -5655,7 +5695,7 @@ class TestTaskRecheckTimer:
         from claudlobby.composer import compose_fleet_timers
         from claudlobby.config import load_fleet
         from claudlobby.env_tiers import Resolution
-        from tests.package_fixtures import source_package
+        from tests.package_fixtures import git_package
         from claudlobby.paths import Paths
 
         root = tmp_path / "f"
@@ -5671,7 +5711,7 @@ class TestTaskRecheckTimer:
             )
         (root / "fleet.yaml").write_text(manifest)
         fleet, md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
 
         import claudlobby.env_tiers as env_tiers_mod
 
@@ -5681,10 +5721,13 @@ class TestTaskRecheckTimer:
         cas: dict = {}
         if armed is not None:
             cas["TASK_RECHECK_ENABLED"] = Resolution(
-                name="TASK_RECHECK_ENABLED", value=armed, tier="fleet",
-                path=None)
-        monkeypatch.setattr(env_tiers_mod, "read_tiers",
-                            lambda paths, fleet_name=None, bot_name=None: [])
+                name="TASK_RECHECK_ENABLED", value=armed, tier="fleet", path=None
+            )
+        monkeypatch.setattr(
+            env_tiers_mod,
+            "read_tiers",
+            lambda paths, fleet_name=None, bot_name=None: [],
+        )
         monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: cas)
         return compose_fleet_timers(fleet, paths, md)
 
@@ -5694,7 +5737,12 @@ class TestTaskRecheckTimer:
         timers = self._compose(tmp_path, monkeypatch)
         service = (timers / "com.test.task-recheck.service").read_text()
         assert (timers / "com.test.task-recheck.timer").is_file()
-        assert "_task-recheck-tick rc-fleet" in service
+        # ExecStart is a quoted argv, one entry per word: the tick command and
+        # then the fleet it runs for, as the final two entries.
+        exec_start = re.search(r"^ExecStart=(.*)$", service, re.M)
+        assert exec_start, service
+        argv = re.findall(r'"((?:[^"\\]|\\.)*)"', exec_start.group(1))
+        assert argv[-2:] == ["_task-recheck-tick", "rc-fleet"], argv
         assert "task-recheck.sh" not in service
 
     def test_it_is_ENROLLED_by_default(self, tmp_path, monkeypatch):
@@ -5800,6 +5848,19 @@ def working_tree_export(tmp_path_factory) -> Path:
 class TestNoLeafManagerShapesComposeByteIdentically:
     _SHAPES = ("solo", "cross-fleet-worker", "cross-fleet-coordinator")
 
+
+    @pytest.fixture(autouse=True)
+    def _render_through_the_git_installation(self, monkeypatch, working_tree_export):
+        """compose_shape builds its paths from tests.package_fixtures.source_package
+        (it imports it at call time), which has no managed installation, and
+        generated native units refuse that. Bind it to the pure renderer
+        fixture for this export; the package is built once, before the patch,
+        because git_package itself calls source_package."""
+        import tests.package_fixtures as package_fixtures
+
+        package = git_package(working_tree_export)
+        monkeypatch.setattr(package_fixtures, "source_package", lambda: package)
+
     def test_no_leaf_manager_shapes_compose_byte_identically(self, tmp_path, working_tree_export):
         """The registry role line (task 3 step 3) is a no-op for a fleet
         shape that has no leaf manager to apply it to: BOT trees only
@@ -5892,17 +5953,19 @@ class TestAccessJsonWriteFailureWarns:
         import logging
 
         from claudlobby.composer import compose_bot
-        from tests.conftest import load_test_fleet, make_paths
+        from tests.conftest import load_test_fleet
 
         fake_home = self._home_with_a_file_where_channels_belongs(tmp_path, monkeypatch)
         fleet = load_test_fleet(fleet_dir)
         with caplog.at_level(logging.WARNING, logger="claudlobby.composer"):
-            bot_dir = compose_bot(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+            bot_dir = compose_bot(fleet.bots["lead"], fleet, _make_paths(fleet_dir))
         # Composition went on past the access.json block: the unit files follow it.
         assert (bot_dir / f"{fleet.service_prefix}.lead.service").exists()
         msgs = self._access_warnings(caplog)
         assert len(msgs) == 1, msgs
-        assert "lead" in msgs[0] and str(fake_home / ".claude" / "channels") in msgs[0], msgs
+        assert (
+            "lead" in msgs[0] and str(fake_home / ".claude" / "channels") in msgs[0]
+        ), msgs
         assert "re-run generate" in msgs[0], msgs
 
     def test_a_fleet_generate_composes_every_bot_and_warns_once_each(
@@ -5913,17 +5976,20 @@ class TestAccessJsonWriteFailureWarns:
         import logging
 
         from claudlobby.composer import compose_fleet
-        from tests.conftest import load_test_fleet, make_paths
+        from tests.conftest import load_test_fleet
 
         self._home_with_a_file_where_channels_belongs(tmp_path, monkeypatch)
         fleet = load_test_fleet(fleet_dir)
         with caplog.at_level(logging.WARNING, logger="claudlobby.composer"):
-            composed = compose_fleet(fleet, make_paths(fleet_dir))
+            composed = compose_fleet(fleet, _make_paths(fleet_dir))
         assert set(composed) == set(fleet.bots), composed
         warned = self._access_warnings(caplog)
         assert len(warned) == len(fleet.bots), warned
         for bot_id, bot in fleet.bots.items():
-            assert any(f"telegram-{bot.telegram.handle}" in line for line in warned), (bot_id, warned)
+            assert any(f"telegram-{bot.telegram.handle}" in line for line in warned), (
+                bot_id,
+                warned,
+            )
 
 
 class TestAccessJsonIsWrittenWhole:
@@ -5967,35 +6033,39 @@ class TestAccessJsonIsWrittenWhole:
         self, fleet_dir, tmp_path, monkeypatch
     ):
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
         fleet, bot, access = self._lead(fleet_dir, tmp_path, monkeypatch)
         access.parent.mkdir(parents=True)
-        runtime = {"allowFrom": ["111"], "groups": {}, "pending": {"abc123": {"senderId": "222"}}}
+        runtime = {
+            "allowFrom": ["111"],
+            "groups": {},
+            "pending": {"abc123": {"senderId": "222"}},
+        }
         original = json.dumps({"dmPolicy": "allowlist", **runtime}, indent=2) + "\n"
         access.write_text(original)
         real = self._writes_fail_after_40_bytes(monkeypatch)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert access.read_text() == original
         assert not self._temps(access), self._temps(access)
         # With space back, the next generate rewrites it and keeps the runtime state.
         monkeypatch.setattr(Path, "write_text", real)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         after = json.loads(access.read_text())
-        assert after["pending"] == runtime["pending"] and "111" in after["allowFrom"], after
+        assert after["pending"] == runtime["pending"] and "111" in after["allowFrom"], (
+            after
+        )
 
     def test_a_failed_first_write_leaves_no_file_and_the_next_generate_writes_it(
         self, fleet_dir, tmp_path, monkeypatch
     ):
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
         fleet, bot, access = self._lead(fleet_dir, tmp_path, monkeypatch)
         real = self._writes_fail_after_40_bytes(monkeypatch)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert not access.exists() and not self._temps(access), self._temps(access)
         monkeypatch.setattr(Path, "write_text", real)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert isinstance(json.loads(access.read_text()), dict)
 
 
@@ -6017,17 +6087,24 @@ class TestAccessJsonKeepsItsMode:
         return path.stat().st_mode & 0o7777
 
     @pytest.mark.parametrize("mode", [0o600, 0o640])
-    def test_a_reconcile_keeps_the_mode_the_file_had(self, fleet_dir, tmp_path, monkeypatch, mode):
+    def test_a_reconcile_keeps_the_mode_the_file_had(
+        self, fleet_dir, tmp_path, monkeypatch, mode
+    ):
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
-        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(
+            fleet_dir, tmp_path, monkeypatch
+        )
         access.parent.mkdir(parents=True, mode=0o700)
-        original = json.dumps({"dmPolicy": "allowlist", "allowFrom": ["111"], "groups": {}, "pending": {}})
+        original = json.dumps(
+            {"dmPolicy": "allowlist", "allowFrom": ["111"], "groups": {}, "pending": {}}
+        )
         access.write_text(original)
         os.chmod(access, mode)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
-        assert access.read_text() != original, "precondition: the reconcile rewrote the file"
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
+        assert access.read_text() != original, (
+            "precondition: the reconcile rewrote the file"
+        )
         assert self._mode(access) == mode, oct(self._mode(access))
 
     @staticmethod
@@ -6038,39 +6115,55 @@ class TestAccessJsonKeepsItsMode:
             access.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": ["111"], "groups": {}, "pending": {}}))
             os.chmod(access, 0o600)
 
-    @pytest.mark.parametrize("existing", [True, False], ids=["reconcile", "first-write"])
-    def test_a_temp_file_the_plugin_left_is_left_alone(self, fleet_dir, tmp_path, monkeypatch, existing):
+    @pytest.mark.parametrize(
+        "existing", [True, False], ids=["reconcile", "first-write"]
+    )
+    def test_a_temp_file_the_plugin_left_is_left_alone(
+        self, fleet_dir, tmp_path, monkeypatch, existing
+    ):
         # The plugin's saveAccess writes access.json.tmp and renames it over access.json, so an
         # interrupted save leaves that name behind. The composer's temp file has its own name.
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
-        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(
+            fleet_dir, tmp_path, monkeypatch
+        )
         self._as_the_plugin_leaves_it(access, existing)
         stale = access.with_name("access.json.tmp")
         stale.write_text("{}")
         os.chmod(stale, 0o644)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert access.is_file(), "precondition: the write ran"
-        assert stale.is_file() and stale.read_text() == "{}" and self._mode(stale) == 0o644, "the plugin's temp was used"
+        assert (
+            stale.is_file() and stale.read_text() == "{}" and self._mode(stale) == 0o644
+        ), "the plugin's temp was used"
         assert self._mode(access) == 0o600, oct(self._mode(access))
         assert not TestAccessJsonIsWrittenWhole._temps(access)
 
-    @pytest.mark.parametrize("existing", [True, False], ids=["reconcile", "first-write"])
-    def test_the_plugin_saving_mid_write_does_not_change_the_mode(self, fleet_dir, tmp_path, monkeypatch, existing):
+    @pytest.mark.parametrize(
+        "existing", [True, False], ids=["reconcile", "first-write"]
+    )
+    def test_the_plugin_saving_mid_write_does_not_change_the_mode(
+        self, fleet_dir, tmp_path, monkeypatch, existing
+    ):
         # The plugin's saveAccess, run while generate writes: writeFileSync(access.json.tmp, ...,
         # {mode: 0o600}), then renameSync(access.json.tmp, access.json). With a shared temp name,
         # generate then recreated its temp file with the default mode and renamed that into place.
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
-        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(
+            fleet_dir, tmp_path, monkeypatch
+        )
         self._as_the_plugin_leaves_it(access, existing)
         fired = []
         real = Path.write_text
 
         def write_text(self, data, *args, **kwargs):
-            if self.parent == access.parent and self.name.startswith("access.json.") and not fired:
+            if (
+                self.parent == access.parent
+                and self.name.startswith("access.json.")
+                and not fired
+            ):
                 body = b'{"dmPolicy": "allowlist"}\n'
                 plugin_tmp = access.with_name("access.json.tmp")
                 fd = os.open(plugin_tmp, os.O_WRONLY | os.O_CREAT, 0o600)
@@ -6082,28 +6175,34 @@ class TestAccessJsonKeepsItsMode:
             return real(self, data, *args, **kwargs)
 
         monkeypatch.setattr(Path, "write_text", write_text)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert fired, "precondition: the plugin saved while generate was writing"
         assert self._mode(access) == 0o600, oct(self._mode(access))
         json.loads(access.read_text())
         assert not TestAccessJsonIsWrittenWhole._temps(access)
 
-    def test_a_first_write_creates_the_file_readable_by_the_user_alone(self, fleet_dir, tmp_path, monkeypatch):
+    def test_a_first_write_creates_the_file_readable_by_the_user_alone(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
-        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(
+            fleet_dir, tmp_path, monkeypatch
+        )
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert access.is_file(), "precondition: the first write ran"
         assert self._mode(access) == 0o600, oct(self._mode(access))
 
-    def test_the_text_never_reaches_a_file_more_open_than_the_target(self, fleet_dir, tmp_path, monkeypatch):
+    def test_the_text_never_reaches_a_file_more_open_than_the_target(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
         # The temp file has its final mode before any text is written to it, so there is
         # no moment when the allowlist sits in a file with the default mode.
         from claudlobby.composer import compose_bot
-        from tests.conftest import make_paths
 
-        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(
+            fleet_dir, tmp_path, monkeypatch
+        )
         seen = []
         real = Path.write_text
 
@@ -6113,7 +6212,7 @@ class TestAccessJsonKeepsItsMode:
             return real(self, data, *args, **kwargs)
 
         monkeypatch.setattr(Path, "write_text", write_text)
-        compose_bot(bot, fleet, make_paths(fleet_dir))
+        compose_bot(bot, fleet, _make_paths(fleet_dir))
         assert access.is_file(), "precondition: the first write ran"
         assert seen == [0o600], seen
 

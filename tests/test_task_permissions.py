@@ -9,7 +9,7 @@ from claudlobby import task_operations as tasks, task_permissions as permissions
 from claudlobby.plane import PLANE_SCHEMA_VERSION
 from claudlobby.plane.identity import resolve_party
 from claudlobby.request_receipts import ReceiptConflict
-from tests.test_activation import cold, tmp_path  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_operations import estate  # noqa: F401
 from tests.test_task_write_cli import active  # noqa: F401
@@ -158,7 +158,7 @@ def test_cli_request_show_and_operator_decision_use_canonical_owner(active, monk
     scope_file.write_text(json.dumps({"action": SCOPE.action, "target": SCOPE.target, "constraints": SCOPE.constraints}))
     env = {"FLEET_NAME": "example", "BOT_ID": "manager", "CLAUDLOBBY_ROOT": str(root),
            "FLEET_ROOT": str(root), "BOT_DIR": str(root / "runtime/bots/manager"),
-           "CLAUDLOBBY_RELEASE_ID": release.release_id}
+           "CLAUDLOBBY_INSTALLATION": str(release.directory)}
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     requested = _call(capsys, root, "task", "permission", "request", tid, "--scope-file", str(scope_file),
@@ -408,3 +408,20 @@ def test_git_permission_cli_binds_full_runtime_across_terminal_approval(active, 
             monkeypatch.setenv(key, value)
         checked = _call(capsys, root, 'task', 'permission', 'check', permission_id, '--scope-file', str(scope_file))
         assert checked['data']['allowed'] and checked['data']['source_revision'] == snapshot['revision']
+
+
+def test_permission_show_refuses_uninitialized_current_identities(cold, capsys):
+    from claudlobby import active_config
+    from tests.test_task_write_cli import _call, _counts
+
+    root, installation, _, host = cold
+    snapshot = dict(host.snapshot, identities=None)
+    snapshot["fingerprint"] = active_config._fingerprint(snapshot)
+    active_config.publish_current_config(snapshot, installation=installation,
+        expected_previous=host.snapshot["fingerprint"])
+    before = _counts(root)
+    result = _call(capsys, root, "task", "permission", "show", "perm_" + "1" * 32,
+                   expected=4)
+    assert result["error"]["code"] == "conflict"
+    assert "identities are not initialized" in result["error"]["message"]
+    assert _counts(root) == before

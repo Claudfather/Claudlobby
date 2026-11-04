@@ -1,7 +1,7 @@
 """Verified current identity bindings for operational fleets.
 
-Git configuration and legacy activation journals retain verified registry results.
-Selected reads never open Plane. Explicit registry seeding uses the canonical
+Committed Git configuration retains verified registry results.
+Current reads never open Plane. Explicit registry seeding uses the canonical
 committed scan, then the read-only binding owner; this module never invents IDs.
 """
 
@@ -11,9 +11,9 @@ from dataclasses import replace
 from pathlib import Path
 import re
 
-from .active_config import context_from_plan, read_current_config, _selected_activation, _plan_for_selection
+from .active_config import context_from_plan, read_current_config
 from .activation_state import ActivationError, ActivationRefusal
-from .config_plan import ConfigPlan, RenderedConfiguration
+from .config_plan import RenderedConfiguration
 from .operation_context import OperationContextError, _host_uid
 from .plane.ids import ID_PATTERNS
 from .resources import PackageResources, get_resources
@@ -21,21 +21,6 @@ from .resources import PackageResources, get_resources
 
 def _uid(value, kind: str) -> bool:
     return isinstance(value, str) and re.fullmatch(ID_PATTERNS[kind], value) is not None
-
-
-def validate_identity_bindings(plan: ConfigPlan, payload: dict, *, package: PackageResources) -> None:
-    """Check the recorded IDs against the exact plan and current host identity."""
-    if (not isinstance(payload, dict) or set(payload) != {
-            "schema", "root", "plan_id", "release_id", "release_seal", "host_uid", "fleets"}
-            or payload["schema"] != 1 or payload["root"] != str(plan.data_root)
-            or payload["plan_id"] != plan.plan_id or payload["release_id"] != plan.release_id
-            or payload["release_seal"] != plan.release_seal or not _uid(payload["host_uid"], "host")
-            or not isinstance(payload["fleets"], dict)
-            or len(set(plan.fleets)) != len(plan.fleets)
-            or set(payload["fleets"]) != set(plan.fleets)):
-        raise ActivationError("active identity bindings differ from the selected plan")
-    contexts = {name: context_from_plan(plan, name, package=package) for name in plan.fleets}
-    _validate_roster(plan.data_root, contexts, payload)
 
 
 def validate_current_identity_bindings(root: Path, payload: dict, *, contexts: dict) -> None:
@@ -47,7 +32,7 @@ def validate_current_identity_bindings(root: Path, payload: dict, *, contexts: d
 
 
 def _validate_roster(root: Path, contexts: dict, payload: dict) -> None:
-    """The single host/manager/bot identity model for both committed carriers."""
+    """The host/manager/bot identity model for committed Git configuration."""
     if (not _uid(payload["host_uid"], "host") or not isinstance(payload["fleets"], dict)
             or set(payload["fleets"]) != set(contexts)):
         raise ActivationError("active identity bindings differ from the frozen fleets")
@@ -78,7 +63,7 @@ def _validate_roster(root: Path, contexts: dict, payload: dict) -> None:
         raise ActivationError("active bot actor identities are ambiguous")
 
 
-def identity_bindings_from_registry(plan: ConfigPlan | RenderedConfiguration, registry: list[dict], *,
+def identity_bindings_from_registry(plan: RenderedConfiguration, registry: list[dict], *,
                                     package: PackageResources) -> dict:
     """Retain existing registry results against exact frozen fleet inputs; never mint."""
     if (not isinstance(registry, list) or len(registry) != len(plan.fleets)
@@ -102,16 +87,9 @@ def identity_bindings_from_registry(plan: ConfigPlan | RenderedConfiguration, re
             "bots": row["bindings"]["bots"],
         } for row in registry},
     }
-    if package.installation is not None:
-        if package.installation.data_root != plan.data_root:
-            raise ActivationError("current identity bindings belong to another data root")
-        validate_current_identity_bindings(plan.data_root, payload, contexts=contexts)
-    else:
-        if not isinstance(plan, ConfigPlan):
-            raise ActivationError("rendered identity bindings require a Git installation")
-        payload.update(root=str(plan.data_root), plan_id=plan.plan_id,
-                       release_id=plan.release_id, release_seal=plan.release_seal)
-        validate_identity_bindings(plan, payload, package=package)
+    if package.installation is None or package.installation.data_root != plan.data_root:
+        raise ActivationError("current identity bindings require this data root's managed Git installation")
+    validate_current_identity_bindings(plan.data_root, payload, contexts=contexts)
     return payload
 
 
@@ -142,7 +120,7 @@ def _registry_bindings(context) -> dict:
             "bots": {bot: actor.uid for bot, actor in bound.bots.items()}}
 
 
-def scan_registry(plan: ConfigPlan | RenderedConfiguration, *, package: PackageResources,
+def scan_registry(plan: RenderedConfiguration, *, package: PackageResources,
                   contexts=None) -> list[dict]:
     """Seed the frozen roster through committed scans and bind its canonical IDs.
 
@@ -152,7 +130,7 @@ def scan_registry(plan: ConfigPlan | RenderedConfiguration, *, package: PackageR
     """
     if not plan.fleets or len(set(plan.fleets)) != len(plan.fleets):
         raise ActivationError("candidate registry requires an unambiguous frozen fleet roster")
-    if package.installation is not None and package.installation.data_root != plan.data_root:
+    if package.installation is None or package.installation.data_root != plan.data_root:
         raise ActivationError("current identity bindings belong to another data root")
     frozen = tuple(context_from_plan(plan, name, package=package) for name in sorted(plan.fleets))
     if contexts is not None and tuple(contexts) != frozen:
@@ -173,7 +151,7 @@ def scan_registry(plan: ConfigPlan | RenderedConfiguration, *, package: PackageR
     return rows
 
 
-def read_registry_identity_bindings(plan: ConfigPlan | RenderedConfiguration, *, package: PackageResources) -> dict:
+def read_registry_identity_bindings(plan: RenderedConfiguration, *, package: PackageResources) -> dict:
     """Read already registered identities for frozen fleets; no scan, repair or write."""
     rows = []
     for name in plan.fleets:
@@ -186,30 +164,16 @@ def read_registry_identity_bindings(plan: ConfigPlan | RenderedConfiguration, *,
     return identity_bindings_from_registry(plan, rows, package=package)
 
 
-def read_selected_identity_bindings(root: Path, fleet: str, *,
-                                    package: PackageResources | None = None) -> dict:
-    """Read one active fleet binding without Plane; a mutating caller holds admission."""
+def read_current_identity_bindings(root: Path, fleet: str, *,
+                                   package: PackageResources | None = None) -> dict:
+    """Read one committed fleet binding without Plane; mutation admission is separate."""
     package = package if package is not None else get_resources()
-    if package.installation is not None:
-        snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
-        payload = snapshot["identities"]
-        if payload is None:
-            raise ActivationError("current configuration identities are not initialized; no action authority")
-        return _fleet_bindings(payload, fleet)
-    selected, record = _selected_activation(root)
-    if record.status != "active":
-        raise ActivationError("selected identity activation is incomplete")
-    plan = _plan_for_selection(root, selected, package)
-    return _selected_bindings(plan, record, fleet, package=package)
-
-
-def _selected_bindings(plan: ConfigPlan, record, fleet: str, *,
-                       package: PackageResources) -> dict:
-    """Validate recorded binding observation; callers separately require active."""
-    if fleet not in plan.fleets:
-        raise ActivationError("requested fleet is not in the selected activation")
-    payload = record.body.get("identity_bindings")
-    validate_identity_bindings(plan, payload, package=package)
+    if package.installation is None:
+        raise ActivationError("current identity bindings require a managed Git installation")
+    snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
+    payload = snapshot["identities"]
+    if payload is None:
+        raise ActivationError("current configuration identities are not initialized; no action authority")
     return _fleet_bindings(payload, fleet)
 
 

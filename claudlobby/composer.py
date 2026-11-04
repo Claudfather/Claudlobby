@@ -4377,7 +4377,7 @@ def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, p
 
     The instance calls the selected CLI directly, not through the unit-start
     wrapper, whose argv names exactly one unit: `fleet notify` takes its own
-    admission, bound to the release in CLAUDLOBBY_RELEASE_ID. ``%i`` is the
+    admission, bound to the committed Git runtime. ``%i`` is the
     failed unit's name. The template has no OnFailure= of its own: an instance
     whose alert fails stays failed, and fleet-pulse reports it (#2532). It has
     no [Install] section: only OnFailure= starts it.
@@ -4487,7 +4487,7 @@ def _write_service_units(
     argv = wrap_unit_argv(environment, unit=service_name,
                           phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
                           argv=command if command is not None else _native_script_argv(script, environment))
-    guarded = "CLAUDLOBBY_RELEASE_ID" in environment or "CLAUDLOBBY_INSTALLATION" in environment
+    guarded = "CLAUDLOBBY_INSTALLATION" in environment
     exec_start = unit_systemd_command(argv) if command is not None or guarded else script_expanded
     tool_path = _scheduler_tool_path(paths)
 
@@ -4647,7 +4647,7 @@ def _write_timer_units(
             argv.append(fleet_name)
         argv.extend(exec_args or [])
     argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
-    if ("CLAUDLOBBY_RELEASE_ID" in environment or "CLAUDLOBBY_INSTALLATION" in environment
+    if ("CLAUDLOBBY_INSTALLATION" in environment
             or (fleet_name and name == _FLEET_PULSE_JOB)):
         exec_start = unit_systemd_command(argv)
 

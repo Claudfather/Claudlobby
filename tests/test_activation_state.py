@@ -1,322 +1,168 @@
-"""Interrupted selection stays recoverable and never implies resumed intake."""
+"""Retained activation evidence is strict, read-only and never repaired or resumed.
+
+Historical envelopes are authored directly (exact on-disk schema and digest);
+no activation writer, native service or bootstrap path is involved.
+"""
 
 import json
 
 import pytest
 
 from claudlobby import activation_state as a
-from tests.test_config_plan import proposal
-from tests.test_releases import installed
 
 
-def _prepare(store, plan, name="candidate"):
-    return store.prepare(name, plan, recovery_release_id=plan.release_id,
-                         enrollment_digest="1" * 64)
+def write_activation(
+    root,
+    activation_id,
+    *,
+    status="active",
+    pending=None,
+    completed=(),
+    release_id="r-" + "a" * 64,
+    plan_id="p-" + "b" * 64,
+    **extra,
+):
+    """Author one historical activation.json exactly as the retired writer sealed it."""
+    root = root.resolve()
+    body = {
+        "schema": 1,
+        "activation_id": activation_id,
+        "root": str(root),
+        "status": status,
+        "pending": pending,
+        "completed": list(completed),
+        "intent": {"release_id": release_id, "plan_id": plan_id},
+        **extra,
+    }
+    path = root / "state/activations" / activation_id / "activation.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"record": body, "sha256": a._digest(body)}))
+    return path, body
 
 
-def _advance(store, name, steps):
-    for step in steps:
-        store.begin(name, step)
-        store.complete(name, step, evidence_digest="2" * 64)
+def write_selection(
+    root, activation_id, release_id="r-" + "a" * 64, plan_id="p-" + "b" * 64
+):
+    value = {
+        "schema": 1,
+        "activation_id": activation_id,
+        "release_id": release_id,
+        "plan_id": plan_id,
+    }
+    path = root.resolve() / "state/selected-release.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value))
+    return path, value
 
 
-def test_lock_and_unfinished_intent_prevent_competing_cutovers(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        with pytest.raises(a.ActivationError, match="holds the lock"):
-            with a.locked_activation(builder.root):
-                pytest.fail("another lock was admitted")
-        first = _prepare(store, plan)
-        assert first.status == "prepared"
-        assert _prepare(store, plan) == first
-        with pytest.raises(a.ActivationError, match="unfinished activation"):
-            _prepare(store, plan, "competing")
-        with pytest.raises(a.ActivationError, match="out of order"):
-            store.begin("candidate", "ingest_started")
-    with pytest.raises(a.ActivationError, match="lock is not held"):
-        store.begin("candidate", "producers_paused")
-    assert a.read_selection(builder.root) is None
+def snapshot(root):
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
 
 
-def test_cancel_only_unstarted_prepared_intent_retains_record(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan, "cancelled")
-        record = store.cancel_prepared("cancelled")
-        assert record.status == "rolled_back"
-        assert record.body["cancellation"]["kind"] == "prepared-before-effects"
-        assert record.body["cancellation"]["journals"] == []
-        assert a.read_activation(builder.root, "cancelled") == record
-        _prepare(store, plan, "successor")
-        with pytest.raises(a.ActivationError, match="effects or changed selection"):
-            store.cancel_prepared("cancelled")
+def test_sealed_writer_and_resume_surface_are_gone():
+    for name in ("ActivationStore", "locked_activation", "STEPS", "ROLLBACK_STEPS"):
+        assert not hasattr(a, name)
+    assert issubclass(a.ActivationRefusal, a.ActivationError)
 
 
-@pytest.mark.parametrize("change", ["config", "parking", "step", "selection"])
-def test_cancel_prepared_refuses_any_uncertain_effect(proposal, change):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan)
-        if change == "config":
-            (builder.root / "state/activations/candidate/config").mkdir()
-        elif change == "parking":
-            from claudlobby.activation_units import journal_id
-            (builder.root / "state/activations" / journal_id("candidate", "producers")).mkdir()
-        elif change == "step":
-            store.begin("candidate", "producers_paused")
-        else:
-            a._write(builder.root / "state/selected-release.json", {
-                "schema": 1, "activation_id": "foreign", "release_id": plan.release_id,
-                "plan_id": plan.plan_id})
+def test_read_activation_returns_the_recorded_body_without_touching_it(tmp_path):
+    path, body = write_activation(
+        tmp_path,
+        "previous",
+        status="activating",
+        pending="producers_paused",
+        completed=["producers_paused"],
+    )
+    before = snapshot(tmp_path)
+    record = a.read_activation(tmp_path, "previous")
+    assert record.status == "activating" and record.activation_id == "previous"
+    assert record.body == body and record.root == tmp_path.resolve()
+    assert snapshot(tmp_path) == before and path.exists()
+
+
+@pytest.mark.parametrize(
+    "tamper", ["body", "digest", "id", "root", "schema", "garbage", "shape"]
+)
+def test_read_activation_refuses_changed_or_unreadable_evidence(tmp_path, tamper):
+    path, body = write_activation(tmp_path, "previous")
+    raw = json.loads(path.read_text())
+    if tamper == "body":
+        raw["record"]["status"] = "rolled_back"  # digest no longer matches
+    elif tamper == "digest":
+        raw["sha256"] = "0" * 64
+    elif tamper == "id":
+        raw["record"] = {**body, "activation_id": "other"}
+        raw["sha256"] = a._digest(raw["record"])
+    elif tamper == "root":
+        raw["record"] = {**body, "root": str(tmp_path.resolve() / "elsewhere")}
+        raw["sha256"] = a._digest(raw["record"])
+    elif tamper == "schema":
+        raw["record"] = {**body, "schema": 2}
+        raw["sha256"] = a._digest(raw["record"])
+    elif tamper == "shape":
+        raw = ["not", "an", "envelope"]
+    if tamper == "garbage":
+        path.write_text("not json")
+    else:
+        path.write_text(json.dumps(raw))
+    before = snapshot(tmp_path)
+    with pytest.raises(a.ActivationError):
+        a.read_activation(tmp_path, "previous")
+    assert snapshot(tmp_path) == before  # nothing is repaired
+
+
+def test_read_activation_refuses_missing_record_and_unsafe_ids(tmp_path):
+    with pytest.raises(a.ActivationError, match="cannot read activation"):
+        a.read_activation(tmp_path, "absent")
+    for bad in ("", "../escape", "a/b", ".hidden", "x" * 97):
+        with pytest.raises(a.ActivationError, match="explicit simple activation id"):
+            a.read_activation(tmp_path, bad)
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("redirect", ["state", "activation"])
+def test_read_activation_refuses_redirected_state(tmp_path, redirect):
+    root, foreign = tmp_path / "root", tmp_path / "foreign"
+    root.mkdir()
+    write_activation(foreign, "previous")
+    if redirect == "state":
+        (root / "state").symlink_to(foreign / "state", target_is_directory=True)
+    else:
+        (root / "state/activations").mkdir(parents=True)
+        (root / "state/activations/previous").symlink_to(
+            foreign / "state/activations/previous", target_is_directory=True
+        )
+    with pytest.raises(a.ActivationError, match="redirected"):
+        a.read_activation(root, "previous")
+
+
+def test_read_selection_distinguishes_absent_valid_and_invalid(tmp_path):
+    assert a.read_selection(tmp_path) is None
+    assert not (tmp_path / "state").exists()
+    path, value = write_selection(tmp_path, "previous")
+    before = snapshot(tmp_path)
+    assert a.read_selection(tmp_path) == value
+    assert snapshot(tmp_path) == before
+    for bad in (
+        "not json",
+        json.dumps([value]),
+        json.dumps({**value, "extra": 1}),
+        json.dumps({**value, "schema": 2}),
+        json.dumps({k: v for k, v in value.items() if k != "plan_id"}),
+    ):
+        path.write_text(bad)
         with pytest.raises(a.ActivationError):
-            store.cancel_prepared("candidate")
-        assert a.read_activation(builder.root, "candidate").status != "rolled_back"
+            a.read_selection(tmp_path)
+        assert path.read_text() == bad
 
 
-def test_first_adoption_records_unsealed_source_without_inventing_release(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        record = store.prepare("adopt", plan, recovery_release_id=plan.release_id,
-                               enrollment_digest="1" * 64, legacy_source=True)
-        assert record.body["intent"]["source_kind"] == "legacy-unsealed"
-        assert record.body["intent"]["source_release_id"] is None
-        assert store.prepare("adopt", plan, recovery_release_id=plan.release_id,
-                             enrollment_digest="1" * 64, legacy_source=True) == record
-        with pytest.raises(a.ActivationError, match="repair forward"):
-            store.begin_rollback("adopt")
-        with pytest.raises(a.ActivationError, match="different intent"):
-            _prepare(store, plan, "adopt")
-        with pytest.raises(a.ActivationError, match="cannot claim a selected source"):
-            store.prepare("other", plan, recovery_release_id=plan.release_id,
-                          source_release_id=plan.release_id, enrollment_digest="1" * 64,
-                          legacy_source=True)
-
-
-def test_interrupted_switch_reconciles_exact_selection_without_resuming(proposal, monkeypatch):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan)
-        _advance(store, "candidate", a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin("candidate", "selection_switched")
-        write = a._write
-
-        def crash(path, value):
-            if path.name == "activation.json":
-                raise OSError("interrupted after pointer replacement")
-            write(path, value)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(a, "_write", crash)
-            with pytest.raises(OSError, match="interrupted"):
-                store.select("candidate")
-        selected = a.read_selection(builder.root)
-        assert selected["release_id"] == plan.release_id
-        assert a.read_activation(builder.root, "candidate").status == "activating"
-        assert a.read_activation(builder.root, "candidate").body["pending"] == "selection_switched"
-    with a.locked_activation(builder.root) as store:
-        recovered = store.select("candidate")
-        assert recovered.status == "activating"
-        assert recovered.body["pending"] is None
-        assert a.read_selection(builder.root) == selected
-        _advance(store, "candidate", a.STEPS[a.STEPS.index("selection_switched") + 1:])
-        assert a.read_activation(builder.root, "candidate").status == "active"
-
-
-def test_rollback_preserves_forward_evidence_and_refuses_foreign_pointer(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan)
-        _advance(store, "candidate", a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin("candidate", "selection_switched")
-        store.select("candidate")
-        forward = a.read_activation(builder.root, "candidate").body.copy()
-        store.begin_rollback("candidate")
-        _advance(store, "candidate", a.ROLLBACK_STEPS[:a.ROLLBACK_STEPS.index("selection_restored")])
-        store.begin("candidate", "selection_restored")
-        pointer = builder.root / "state/selected-release.json"
-        selected = pointer.read_bytes()
-        other = json.loads(selected)
-        other["activation_id"] = "foreign"
-        pointer.write_text(json.dumps(other))
-        with pytest.raises(a.ActivationError, match="outside this activation"):
-            store.restore_selection("candidate")
-        assert json.loads(pointer.read_bytes()) == other
-        pointer.write_bytes(selected)
-        store.restore_selection("candidate")
-        _advance(store, "candidate", a.ROLLBACK_STEPS[a.ROLLBACK_STEPS.index("selection_restored") + 1:])
-        result = a.read_activation(builder.root, "candidate")
-        assert result.status == "rolled_back"
-        assert result.body["forward"]["completed"] == forward["completed"]
-        assert a.read_selection(builder.root) is None
-
-
-def test_preserved_bot_state_is_upgrade_only_and_part_of_immutable_intent(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    states = {"example.worker": {"disposition": "stopped", "session": "server_absent"}}
-    with a.locked_activation(builder.root) as store:
-        with pytest.raises(a.ActivationError, match="selected release upgrade"):
-            store.prepare("cold", plan, recovery_release_id=plan.release_id,
-                          enrollment_digest="1" * 64, bot_states=states)
-        _prepare(store, plan, "prior")
-        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin("prior", "selection_switched")
-        store.select("prior")
-        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
-        record = store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
-                               enrollment_digest="1" * 64, bot_states=states)
-        states["example.worker"]["disposition"] = "restart"
-        assert a.read_activation(builder.root, "upgrade").body["intent"]["bot_states"]["example.worker"]["disposition"] == "stopped"
-        with pytest.raises(a.ActivationError, match="different intent"):
-            store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
-                          enrollment_digest="1" * 64, bot_states=states)
-        assert record.body["intent"]["preserve_bot_state"] is True
-
-
-def test_forward_recovery_is_target_bound_selected_and_immutable(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        with pytest.raises(a.ActivationError, match="selected upgrade and its exact target"):
-            store.prepare("cold", plan, recovery_release_id=plan.release_id,
-                          enrollment_digest="1" * 64, forward_recovery=True)
-        assert not (builder.root / "state/activations/cold").exists()
-        _prepare(store, plan, "prior")
-        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin("prior", "selection_switched")
-        store.select("prior")
-        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
-        with pytest.raises(a.ActivationError, match="selected upgrade and its exact target"):
-            store.prepare("wrong", plan, recovery_release_id="r-" + "a" * 64,
-                          enrollment_digest="1" * 64, forward_recovery=True)
-        record = store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
-                               enrollment_digest="1" * 64, forward_recovery=True)
-        assert record.body["intent"]["forward_recovery"] is True
-        assert store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
-                             enrollment_digest="1" * 64, forward_recovery=True) == record
-        with pytest.raises(a.ActivationError, match="different intent"):
-            store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
-                          enrollment_digest="1" * 64)
-        with pytest.raises(a.ActivationError, match="old-source rollback is unsupported"):
-            store.begin_rollback("upgrade")
-        assert a.read_activation(builder.root, "upgrade") == record
-
-
-def test_forward_recovery_keeps_no_effect_cancel_and_early_upgrade_abort(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan, "prior")
-        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin("prior", "selection_switched")
-        store.select("prior")
-        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
-        selected = a.read_selection(builder.root)
-        for name in ("cancelled", "early"):
-            store.prepare(name, plan, recovery_release_id=plan.release_id,
-                          enrollment_digest="1" * 64, forward_recovery=True)
-            if name == "cancelled":
-                assert store.cancel_prepared(name).status == "rolled_back"
-                continue
-            _advance(store, name, ("producers_paused",))
-            store.begin_upgrade_abort(name, reason="before bot quiescence", release_id=plan.release_id,
-                                      artifact_id="fixture", sql_user_version=13)
-            assert store.finish_upgrade_abort(name, sql_user_version=13, evidence_digest="3" * 64,
-                                              resumed=[], cleared=[]).status == "rolled_back"
-        assert a.read_selection(builder.root) == selected
-
-
-@pytest.mark.parametrize("request_ns", [None, True, -1, 0, "123", 1234567890])
-@pytest.mark.parametrize("preserve", [True, False])
-def test_preserved_handoff_request_is_atomic_bound_and_immutable(proposal, request_ns, preserve):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    target = "example.worker"
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan, "prior")
-        _advance(store, "prior", a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin("prior", "selection_switched")
-        store.select("prior")
-        _advance(store, "prior", a.STEPS[a.STEPS.index("configuration_applied"):])
-        store.prepare("upgrade", plan, recovery_release_id=plan.release_id,
-            enrollment_digest="1" * 64, install_directory=builder.root,
-            bot_states={target: {"disposition": "restart"}} if preserve else None)
-        _advance(store, "upgrade", ("producers_paused",))
-        store.begin("upgrade", "sessions_handed_off")
-        before = a.read_activation(builder.root, "upgrade")
-        if type(request_ns) is not int or request_ns <= 0:
-            with pytest.raises(a.ActivationError, match="immutable request witness"):
-                store.record_handoff("upgrade", target=target, result=None, request_started_ns=request_ns)
-            assert a.read_activation(builder.root, "upgrade") == before
-        else:
-            record = store.record_handoff("upgrade", target=target, result=None, request_started_ns=request_ns)
-            assert record.body["handoff_effects"] == {target: None}
-            assert record.body["handoff_requests"] == {target: {"started_at_ns": request_ns}}
-            assert a.handoff_request_started_ns(record, target) == request_ns
-            assert a.resumable_running_step(record) == "sessions_handed_off"
-            with pytest.raises(a.ActivationError):
-                store.record_handoff("upgrade", target=target, result=None, request_started_ns=request_ns + 1)
-            assert a.read_activation(builder.root, "upgrade") == record
-            saved = store.record_handoff("upgrade", target=target, result="handed_off")
-            assert saved.body["handoff_requests"] == record.body["handoff_requests"]
-
-
-def test_prepare_records_a_handoff_max_age_only_for_the_per_bot_quiesce(proposal, tmp_path):
-    """#963: the activation's intent carries --handoff-max-age, which --resume reads back; only the
-    per-bot quiesce reads it, and only a whole number of seconds is recorded."""
-    builder, _, _ = proposal
-    plan = builder.seal()
-    with a.locked_activation(builder.root) as store:
-        with pytest.raises(a.ActivationError, match="handoff max age"):
-            store.prepare("candidate", plan, recovery_release_id=plan.release_id,
-                          enrollment_digest="1" * 64, handoff_max_age_s=900)
-        with pytest.raises(a.ActivationError, match="handoff max age"):
-            store.prepare("candidate", plan, recovery_release_id=plan.release_id, enrollment_digest="1" * 64,
-                          install_directory=tmp_path.resolve(), quiesce_mode="per-bot-v1", handoff_max_age_s=True)
-        record = store.prepare("candidate", plan, recovery_release_id=plan.release_id, enrollment_digest="1" * 64,
-                               install_directory=tmp_path.resolve(), quiesce_mode="per-bot-v1", handoff_max_age_s=900)
-    assert record.body["intent"]["handoff_max_age_s"] == 900
-
-
-@pytest.mark.parametrize("marker,returncode,valid", [
-    ("handoff-skipped:recent", 0, True),
-    ("handoff-saved", 3, True),
-    ("unrecognized", -15, True),
-    ("arbitrary stdout must not enter the journal", 0, False),
-    ("handoff-saved", True, False),
-    ("handoff-saved", 256, False),
-])
-def test_handoff_native_response_is_durable_typed_and_separate_from_completion(
-        proposal, marker, returncode, valid):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    target = "example.worker"
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan)
-        _advance(store, "candidate", ("producers_paused",))
-        store.begin("candidate", "sessions_handed_off")
-        with pytest.raises(a.ActivationError):
-            store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
-        store.record_handoff("candidate", target=target, result=None, request_started_ns=123)
-        before = a.read_activation(builder.root, "candidate")
-        if not valid:
-            with pytest.raises(a.ActivationError):
-                store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
-            assert a.read_activation(builder.root, "candidate") == before
-            return
-        store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
-        recorded = a.read_activation(builder.root, "candidate")
-        assert recorded.body["handoff_effects"] == {target: None}
-        assert recorded.body["handoff_requests"][target] == {
-            "started_at_ns": 123, "native_result": {"marker": marker, "returncode": returncode}}
-        assert a.handoff_request_started_ns(recorded, target) == 123
-        with pytest.raises(a.ActivationError):
-            store.record_handoff_response("candidate", target=target, marker=marker, returncode=returncode)
-        saved = store.record_handoff("candidate", target=target, result="handed_off")
-        assert saved.body["handoff_requests"] == recorded.body["handoff_requests"]
+def test_read_selection_refuses_a_redirected_pointer(tmp_path):
+    foreign = tmp_path / "foreign.json"
+    _, value = write_selection(tmp_path / "other", "previous")
+    foreign.write_text(json.dumps(value))
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state/selected-release.json").symlink_to(foreign)
+    with pytest.raises(a.ActivationError, match="redirected"):
+        a.read_selection(tmp_path)

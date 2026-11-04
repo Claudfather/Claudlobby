@@ -4,7 +4,7 @@ from __future__ import annotations
 from contextlib import closing
 from pathlib import Path
 
-from ..activation_identity import read_selected_identity_bindings
+from ..activation_identity import read_current_identity_bindings
 from ..active_config import resolve_active_context, runtime_read_stamp
 from ..message_context import resolve_message_route
 from ..operation_context import bind_task_context, OperationContextError
@@ -33,7 +33,7 @@ class OwnerNudgeActions:
         access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
         stamp = runtime_read_stamp(self.root, package=self.package)
-        bindings = read_selected_identity_bindings(self.root, room, package=self.package)
+        bindings = read_current_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_nudge(reader.token, reader.principal,
                                       host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)

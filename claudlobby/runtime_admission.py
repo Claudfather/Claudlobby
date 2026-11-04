@@ -1,71 +1,40 @@
-"""Release selection and activation admission for mutations and native startup.
+"""Current Git runtime admission for operational mutations and unit generation.
 
-Ordinary mutations and one-shots hold the shared host lock through completion;
-resident startup hands its tracked PID across exec before releasing that lock.
-The coordinator requires the exclusive side to quiesce admitted processes. No
-lock/state provisioning, application import, supervisor, or migration occurs
-here. Read-only diagnosis and activation itself do not use this door.
+The copied stdlib launcher owns native startup and the runtime-use fence.
+Historical release/activation records never authorize execution through this module.
 """
-
 from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
-import json
 import os
 from pathlib import Path
 import re
-import socket
-import stat
-import struct
-import subprocess
 import sys
-import threading
-import time
 from typing import TYPE_CHECKING
 
-from .activation_state import STEPS, ActivationError, ActivationStore, read_activation, read_selection
-from .releases import ReleaseManifest, read_release
+from .activation_state import ActivationError
 from .installation import unit_systemd_command
 
 if TYPE_CHECKING:
     from .installation import Installation
 
-
 RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
-# A due timer can fire while its own candidate still starts producers (Pi
-# 2026-10-01: a 44-timer phase took about 55 seconds). Its one-shot waits.
-_SCHEDULED_WAIT = 180.0
-_UNIT_PREFIX = ("-I", "-B", "-m", "claudlobby.runtime_admission", "unit-start")
-# A one-shot's command learns when its unit started, as "<admission pid>
-# <monotonic seconds>", so a time limit it counts from there covers the wait for
-# admission too. The pid scopes it to the admission's own child: a process that
-# outlives the job, such as a bot session keepalive starts, inherits a stamp it
-# must ignore.
 UNIT_STARTED_ENV = "CLAUDLOBBY_UNIT_STARTED"
-
-
-class WatchdogActivationPause(ActivationError):
-    """The coordinator holds EX; this watchdog tick must wait for the next sweep."""
 
 
 def wrap_unit_argv(environment: dict[str, str], *, unit: str, phase: str,
                    mode: str, argv: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    """Bind sealed generated units; source-only renders are not activatable."""
-    if "CLAUDLOBBY_INSTALLATION" in environment:
-        from .installation import parse_git_unit_argv
-        result = (environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
-                  "_native", "--unit", unit, "--phase", phase, "--mode", mode, "--", *argv)
-        parse_git_unit_argv(result)
-        return result
-    if "CLAUDLOBBY_RELEASE_ID" not in environment:
-        return tuple(argv)
-    result = (str(Path(environment["CLAUDLOBBY_CLI"]).parent / "python"), *_UNIT_PREFIX,
-              environment["CLAUDLOBBY_ROOT"], environment["CLAUDLOBBY_RELEASE_ID"],
-              unit, phase, mode, "--", *argv)
-    parse_unit_argv(result)
+    """Bind every generated native command to the stable Git admission entry."""
+    from .installation import parse_git_unit_argv
+    if (not environment.get("CLAUDLOBBY_INSTALLATION")
+            or any(key in environment for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID"))):
+        raise ActivationError("native unit generation requires a managed Git installation")
+    result = (environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
+              "_native", "--unit", unit, "--phase", phase, "--mode", mode, "--", *argv)
+    parse_git_unit_argv(result)
     return result
+
 
 
 def unit_systemd_environment(key: str, value: str) -> str:
@@ -85,129 +54,6 @@ def unit_systemd_environment(key: str, value: str) -> str:
     return "Environment=" + assignment
 
 
-@dataclass(frozen=True)
-class UnitStart:
-    argv: tuple[str, ...]
-    root: Path
-    release_id: str
-    unit: str
-    phase: str
-    mode: str
-    command: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class _AdmissionNotice:
-    event: threading.Event
-    deadline: float
-
-    def wait(self) -> bool:
-        return self.event.wait(max(0.0, self.deadline - time.monotonic()))
-
-
-def parse_unit_argv(argv) -> UnitStart:
-    """One codec used by rendering, frozen-unit validation and the private entry."""
-    if (not isinstance(argv, (tuple, list)) or len(argv) < 13
-            or not all(isinstance(part, str) and part and not any(ord(c) < 32 for c in part) for part in argv)
-            or tuple(argv[1:6]) != _UNIT_PREFIX or argv[11] != "--"
-            or not Path(argv[0]).is_absolute() or not Path(argv[6]).is_absolute()
-            or not re.fullmatch(r"r-[0-9a-f]{64}", argv[7])
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*", argv[8])
-            or argv[9] not in {"bots", "ingest", "producers"}
-            or argv[10] not in {"exec", "oneshot"}
-            or (argv[9] in {"bots", "ingest"} and argv[10] != "exec")
-            or not Path(argv[12]).is_absolute()):
-        raise ActivationError("unit start requires the exact release-bound argument vector")
-    return UnitStart(tuple(argv), Path(argv[6]), argv[7], argv[8], argv[9], argv[10], tuple(argv[12:]))
-
-
-def validate_unit_admission(release, declaration, metadata, generated_bytes) -> UnitStart:
-    """Prove the published native definition reaches its frozen admission first.
-
-    Called before enrollment writes, including timer service-family metadata.
-    This validates generated bytes, not loaded/effective supervisor state; the
-    existing enrollment inventory owns that separate observation.
-    """
-    import hashlib
-    from .supervision_inventory import _darwin_source
-
-    admission = metadata.get("admission")
-    if not isinstance(admission, dict) or set(admission) != {"kind", "unit", "argv"} or admission["kind"] != "unit-start-v1":
-        raise ActivationError("unit lacks durable release admission")
-    target = parse_unit_argv(admission["argv"])
-    env = dict(declaration.environment)
-    source = declaration.source
-    if (target.unit != admission["unit"] or target.unit != source.stem
-            or target.phase != metadata["phase"] or target.release_id != release.release_id
-            or declaration.release_id != release.release_id
-            or target.argv[0] != str(release.directory / release.paths.interpreter)
-            or target.root != release.directory.parents[2]
-            or target.root.resolve() != target.root or env.get("CLAUDLOBBY_ROOT") != str(target.root)
-            or env.get("CLAUDLOBBY_CLI") != str(release.cli_path)
-            or env.get("CLAUDLOBBY_NATIVE_DIR") != str(release.native_path)
-            or env.get("CLAUDLOBBY_ARTIFACT_ID") != release.inputs.artifact_id
-            or env.get("CLAUDLOBBY_RELEASE_ID") != release.release_id
-            or hashlib.sha256(generated_bytes).hexdigest() != metadata["sha256"]):
-        raise ActivationError("unit admission differs from its sealed release or declaration")
-    if (declaration.scope == "bot") != (target.phase == "bots"):
-        raise ActivationError("unit admission scope differs from its declared phase")
-    if target.phase == "bots" and (declaration.scope != "bot"
-            or target.command != (str(release.native_path / "start-bot.sh"), str(declaration.working_directory))):
-        raise ActivationError("bot admission does not name its exact native start target")
-    if declaration.scope != "bot":
-        # Admission reads frozen unit bytes, never the host's mutable override.
-        # The one ingest owner is the exact native daemon command and job
-        # identity; all other host and fleet units remain producers.
-        from .config import host_unit_name
-        daemon_label = False
-        if target.unit.endswith("-plane-daemon"):
-            prefix = target.unit[:-len("-plane-daemon")]
-            try:
-                daemon_label = host_unit_name("plane-daemon", prefix=prefix) == target.unit
-            except RuntimeError:
-                pass
-        ingest_commands = {
-            (str(release.native_path / "plane-daemon.sh"),),
-        }
-        ingest_owner = (declaration.scope == "host" and daemon_label
-                        and target.command in ingest_commands)
-        if target.phase != ("ingest" if ingest_owner else "producers"):
-            raise ActivationError("unit phase differs from its declared resident owner")
-    if source.suffix == ".plist":
-        parsed = _darwin_source(generated_bytes)
-        if (parsed["label"] != target.unit or parsed["program"] != target.argv[0]
-                or tuple(parsed["arguments"]) != target.argv
-                or any(parsed["environment"].get(key) != value for key, value in env.items())):
-            raise ActivationError("plist bypasses its frozen unit admission")
-    else:
-        section, fields = None, {}
-        for raw in generated_bytes.decode().splitlines():
-            line = raw.strip()
-            if not line or line.startswith(("#", ";")):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line[1:-1]
-                continue
-            key, separator, value = line.partition("=")
-            if not separator:
-                raise ActivationError("unsupported native unit definition")
-            fields.setdefault((section, key), []).append(value)
-        if source.suffix == ".timer":
-            if (declaration.service != target.unit + ".service"
-                    or fields.get(("Timer", "Unit"), [declaration.service]) != [declaration.service]
-                    or any(section == "Service" for section, _ in fields)):
-                raise ActivationError("timer does not target its guarded service family")
-        elif source.suffix == ".service":
-            if fields.get(("Service", "ExecStart")) != [unit_systemd_command(target.argv)]:
-                raise ActivationError("service bypasses its frozen unit admission")
-            for (section, key), values in fields.items():
-                if section == "Service" and key.startswith("Exec") and key not in {"ExecStart", "ExecStop"}:
-                    if key != "ExecStartPre" or any(not re.fullmatch(r"/bin/sleep [0-9]+", value) for value in values):
-                        raise ActivationError("service has an effect before unit admission")
-        else:
-            raise ActivationError("unsupported unit admission carrier")
-    return target
-
 
 class ReleaseMismatch(ActivationError):
     """Wrong executable or generated context; no operation may begin."""
@@ -217,9 +63,10 @@ class ReleaseMismatch(ActivationError):
 
     def __init__(self, root: Path, expected: str, actual: str):
         self.root, self.expected, self.actual = root, expected, actual
-        self.hint = (f"Use the selected release under {root}; inspect host releases "
-                     "and recompose stale bot configuration through host activation")
+        self.hint = (f"Use the stable managed Git CLI for {root}; inspect host update status "
+                     "and preserve the original operation when configuration is stale")
         super().__init__(f"release mismatch: expected {expected}, found {actual}; no mutation performed")
+
 
 
 @dataclass(frozen=True)
@@ -242,8 +89,10 @@ class RuntimeIdentity:
                     or Path(sys.executable).absolute() != installation.environment / "bin/python"
                     or package.native != installation.native or not package.source_revision):
                 raise ActivationError("executing Git runtime differs from its recorded installation")
-        return cls(selected_cli(), package.native, package.artifact_id,
-                   installation, package.source_revision if installation is not None else None)
+        if installation is None:
+            raise ActivationError("executing runtime requires a managed Git installation")
+        return cls(selected_cli(), package.native, package.artifact_id, installation, package.source_revision)
+
 
 
 @dataclass(frozen=True)
@@ -256,25 +105,21 @@ class GitCurrentRuntime:
     snapshot: dict
 
 
-def bound_runtime_release(package, *, generated):
-    """Generated Git callers bind installation; sealed callers bind a release."""
-    from .command_result import CommandFailure
 
-    if package.installation is not None:
-        if any(key in os.environ for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")):
-            raise CommandFailure("release_mismatch", "Git caller cannot claim sealed runtime provenance")
-        return None
-    if "CLAUDLOBBY_INSTALLATION" in os.environ:
-        raise CommandFailure("release_mismatch", "sealed caller cannot claim a Git installation")
-    bound = os.environ.get("CLAUDLOBBY_RELEASE_ID") if generated else None
-    if generated and (not bound or not re.fullmatch(r"r-[0-9a-f]{64}", bound)):
-        raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
-    return bound
+def bound_runtime_release(package, *, generated):
+    """Require current Git execution; historical release IDs grant no admission."""
+    from .command_result import CommandFailure
+    if package.installation is None or any(key in os.environ for key in (
+            "CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")):
+        raise CommandFailure("release_mismatch", "caller requires managed Git runtime provenance")
+    return None
+
 
 
 def runtime_release_id(current):
     """Git admission has no sealed release identity."""
-    return None if isinstance(current, GitCurrentRuntime) else current.release_id
+    return None
+
 
 
 def runtime_provenance(value):
@@ -282,6 +127,7 @@ def runtime_provenance(value):
     revision = getattr(value, "revision", getattr(value, "source_revision", None))
     return ({"source_revision": revision, "config_fingerprint": value.config_fingerprint}
             if revision is not None else {})
+
 
 
 def runtime_route_matches(current, route, *, package=None):
@@ -295,8 +141,8 @@ def runtime_route_matches(current, route, *, package=None):
                 and revision == current.revision and fingerprint == current.config_fingerprint
                 and package.installation == current.installation
                 and package.source_revision == current.revision)
-    return (package.installation is None and route.release_id == current.release_id
-            and revision is None and fingerprint is None)
+    return False
+
 
 
 @contextmanager
@@ -305,7 +151,7 @@ def _git_mutation_admission(root: Path, identity: RuntimeIdentity | None, expect
     from .config_plan import PlanError
     from .installation import InstallationError, read_installation, _runtime_lock, _check_maintenance
 
-    if expected_release is not None or "CLAUDLOBBY_RELEASE_ID" in os.environ:
+    if expected_release is not None or any(key in os.environ for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")):
         raise ActivationError("Git runtime cannot admit a sealed release expectation")
     fd = None
     try:
@@ -340,556 +186,19 @@ def _git_mutation_admission(root: Path, identity: RuntimeIdentity | None, expect
         os.close(fd)
 
 
-def _selected_active(root: Path, identity: RuntimeIdentity,
-                     expected_release: str | None) -> ReleaseManifest:
-    selected = read_selection(root)
-    if selected is None:
-        raise ActivationError(f"no active release under {root}; host setup/activation is required")
-    actual = selected["release_id"]
-    if expected_release is not None and expected_release != actual:
-        raise ReleaseMismatch(root, expected_release, actual)
-    record = read_activation(root, selected["activation_id"])
-    if (record.status != "active" or record.body["intent"]["release_id"] != actual
-            or record.body["intent"]["plan_id"] != selected["plan_id"]):
-        raise ActivationError("selected release activation is incomplete; recover it before mutations")
-    # A cutover can have paused producers before replacing the selector. Checking
-    # only the selected activation would admit old commands after an interruption.
-    for path in (root / "state/activations").iterdir():
-        journal = path / "activation.json"
-        if journal.exists() or journal.is_symlink():
-            pending = read_activation(root, path.name)
-            if pending.status not in {"active", "rolled_back"}:
-                raise ActivationError(f"unfinished activation {path.name}; recover it before mutations")
-    release = read_release(root, actual, verify_files=False)
-    _match_identity(root, release, identity)
-    return release
-
-
-def _match_identity(root: Path, release: ReleaseManifest, identity: RuntimeIdentity) -> None:
-    if (identity.cli.absolute() != release.cli_path
-            or identity.native.absolute() != release.native_path
-            or identity.artifact_id != release.inputs.artifact_id):
-        raise ReleaseMismatch(root, release.release_id, f"{identity.artifact_id} at {identity.cli}")
-
-
-def _take_shared(root: Path, fd: int) -> None:
-    """SH on the activation lock unless an activation is pending; else BlockingIOError.
-
-    An activation holds activation-pending.lock exclusively from before it
-    waits for the holders already running until it ends, so a job or operation
-    starting meanwhile backs off as if the activation were running. Holding the
-    marker shared while taking its own lock means none can slip in after the
-    activation marks itself. A host where no activation has run has no marker.
-    """
-    try:
-        pending = os.open(root / "state/activation-pending.lock",
-                          os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        pending = None
-    except OSError as exc:
-        raise ActivationError("host activation pending lock unavailable") from exc
-    try:
-        if pending is not None:
-            if not stat.S_ISREG(os.fstat(pending).st_mode):
-                raise ActivationError("host activation pending lock was replaced or redirected")
-            fcntl.flock(pending, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-    finally:
-        if pending is not None:
-            os.close(pending)
-
 
 @contextmanager
 def mutation_admission(root: Path, *, identity: RuntimeIdentity | None = None,
                        expected_release: str | None = None):
-    """Admit current Git configuration or transitional sealed selection.
-
-    Git returns GitCurrentRuntime, never a release-shaped compatibility value.
-    Generated sealed callers supply their bound expected release. Bare operator calls
-    omit it but must still run the selected executable and installed resources.
-    This guard is not authentication between trusted local callers.
-    """
+    """Admit only the executing managed Git runtime and committed configuration."""
     root = Path(root).expanduser().resolve()
     identity = identity if identity is not None else RuntimeIdentity.current()
-    if ("CLAUDLOBBY_INSTALLATION" in os.environ
-            or identity.installation is not None):
-        with _git_mutation_admission(root, identity, expected_release) as current:
-            yield current
-        return
-    state = root / "state"
-    if state.resolve() != state:
-        raise ActivationError("activation state directory is redirected")
-    lock = state / "activation.lock"
-    try:
-        fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ActivationError(f"host activation lock unavailable under {root}") from exc
-    try:
-        try:
-            _take_shared(root, fd)
-        except BlockingIOError as exc:
-            raise ActivationError("host activation is running; no mutation performed") from exc
-        info, linked = os.fstat(fd), lock.lstat()
-        if (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino):
-            raise ActivationError("host activation lock was replaced")
-        yield _selected_active(root, identity, expected_release)
-    finally:
-        os.close(fd)
+    if identity.installation is None:
+        raise ActivationError("mutation requires a managed Git installation")
+    with _git_mutation_admission(root, identity, expected_release) as current:
+        yield current
 
-
-def _native_lock(root: Path, fd: int, owner_pid: int) -> Path:
-    """An inherited open description, owned by the invoking native shell.
-
-    The child takes flock on this description; closing the child descriptor does
-    not unlock the shell's copy. PID is a lifetime check, not authentication.
-    """
-    root = Path(root).expanduser().resolve()
-    if os.getppid() != owner_pid:
-        raise ActivationError("native admission caller changed")
-    lock = root / "state/activation.lock"
-    try:
-        info, linked = os.fstat(fd), lock.lstat()
-        if (lock.parent.resolve() != lock.parent or not stat.S_ISREG(linked.st_mode)
-                or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)):
-            raise ActivationError("native admission lock was replaced or redirected")
-    except OSError as exc:
-        raise ActivationError("native admission requires the existing host lock") from exc
-    return root
-
-
-def _start_request(root: Path, operation: str, bot_dir: Path | None,
-                   expected_release: str, identity: RuntimeIdentity) -> dict:
-    if operation not in {"start-bot", "keepalive", "ingest-start"}:
-        raise ActivationError("unknown native admission operation")
-    if not expected_release:
-        raise ActivationError("native operation requires its composed release identity")
-    if operation == "ingest-start":
-        if bot_dir is not None:
-            raise ActivationError("ingest admission cannot name a bot")
-    elif bot_dir is None or not Path(bot_dir).is_absolute() or not Path(bot_dir).is_dir():
-        raise ActivationError("native admission requires an existing absolute bot directory")
-    return {"root": str(root), "operation": operation,
-            "bot_dir": str(Path(bot_dir).resolve()) if bot_dir is not None else None,
-            "release_id": expected_release, "cli": str(identity.cli.absolute()),
-            "native": str(identity.native.absolute()), "artifact_id": identity.artifact_id}
-
-
-def _receive(stream: socket.socket, deadline: float) -> dict:
-    data = bytearray()
-    while not data.endswith(b"\n"):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or len(data) >= 8192:
-            raise ActivationError("activation start handshake timed out or exceeded its limit")
-        stream.settimeout(remaining)
-        chunk = stream.recv(min(4096, 8192 - len(data)))
-        if not chunk:
-            raise ActivationError("activation start handshake ended without admission")
-        data.extend(chunk)
-    try:
-        value = json.loads(data)
-    except (ValueError, TypeError) as exc:
-        raise ActivationError("invalid activation start handshake") from exc
-    if not isinstance(value, dict):
-        raise ActivationError("invalid activation start handshake")
-    return value
-
-
-def _request_start(root: Path, request: dict, timeout: float) -> None:
-    endpoint = root / "state/activation-start.sock"
-    try:
-        info = endpoint.lstat()
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-            raise ActivationError("activation start endpoint is not owned by this host user")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
-            deadline = time.monotonic() + timeout
-            stream.settimeout(timeout)
-            stream.connect(str(endpoint))
-            stream.sendall(json.dumps(request).encode() + b"\n")
-            reply = _receive(stream, deadline)
-            if reply != {"admitted": request}:
-                raise ActivationError("activation start scope does not admit this operation")
-    except (OSError, ValueError) as exc:
-        raise ActivationError("activation start authorization unavailable; host remains paused") from exc
-
-
-def admit_native(root: Path, fd: int, *, owner_pid: int, operation: str,
-                 bot_dir: Path | None, expected_release: str,
-                 identity: RuntimeIdentity | None = None, timeout: float = 2.0) -> str:
-    """Admit a native shell while retaining SH flock on its inherited descriptor.
-
-    The shell must call release_native on normal exit. Children can inherit this
-    same open description; explicit unlock prevents lingering tmux/emit children
-    from retaining it after normal completion. A killed shell can conservatively
-    leave admission locked until those descendants close it. No check/exit gap.
-    Only a start (never a watchdog tick) may use a currently armed coordinator
-    scope while the exclusive lock is held. No environment boolean bypass exists.
-    """
-    root = _native_lock(root, fd, owner_pid)
-    identity = identity or RuntimeIdentity.current()
-    request = _start_request(root, operation, bot_dir, expected_release, identity)
-    request["pid"] = owner_pid
-    try:
-        _take_shared(root, fd)
-    except BlockingIOError as exc:
-        if operation == "keepalive":
-            raise WatchdogActivationPause("host activation is running; watchdog remains paused") from exc
-        _request_start(root, request, timeout)
-        return "activation"
-    try:
-        _native_lock(root, fd, owner_pid)
-        _selected_active(root, identity, expected_release)
-    except BaseException:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        raise
-    return "shared"
-
-
-def release_native(root: Path, fd: int, *, owner_pid: int) -> None:
-    """Release the caller's open-description lock, including inherited copies."""
-    _native_lock(root, fd, owner_pid)
-    fcntl.flock(fd, fcntl.LOCK_UN)
-
-
-def _activation_release(store: ActivationStore, activation_id: str, step: str,
-                        identity: RuntimeIdentity) -> ReleaseManifest:
-    store.assert_locked()
-    record = read_activation(store.root, activation_id)
-    if record.status not in {"activating", "rolling_back"} or record.body["pending"] != step:
-        raise ActivationError("activation has not begun the matching start step")
-    selected = read_selection(store.root)
-    wanted = (record.body["previous_selection"] if record.status == "rolling_back" else
-              {"schema": 1, "activation_id": activation_id,
-               "release_id": record.body["intent"]["release_id"],
-               "plan_id": record.body["intent"]["plan_id"]})
-    if selected is None or selected != wanted:
-        raise ActivationError("activation start requires its exact selected release")
-    release = read_release(store.root, selected["release_id"], verify_files=False)
-    _match_identity(store.root, release, identity)
-    return release
-
-
-def _activation_request(store: ActivationStore, activation_id: str, operation: str,
-                        bot_dir: Path | None, identity: RuntimeIdentity) -> dict:
-    if operation not in {"start-bot", "ingest-start"}:
-        raise ActivationError("activation may authorize starts, never watchdog work")
-    step = "bots_started" if operation == "start-bot" else "ingest_started"
-    release = _activation_release(store, activation_id, step, identity)
-    return _start_request(store.root, operation, bot_dir, release.release_id, identity)
-
-
-def _unit_request(target: UnitStart, identity: RuntimeIdentity) -> dict:
-    result = _start_request(target.root, "ingest-start", None, target.release_id, identity)
-    return {**result, "operation": "unit-start", "unit": target.unit,
-            "argv": list(target.argv), "phase": target.phase, "mode": target.mode}
-
-
-def _activation_unit_request(store, activation_id, target, identity):
-    step = {"bots": "bots_started", "ingest": "ingest_started",
-            "producers": "producers_resumed"}[target.phase]
-    release = _activation_release(store, activation_id, step, identity)
-    if (target.root != store.root or target.release_id != release.release_id
-            or target.argv[0] != str(release.directory / release.paths.interpreter)):
-        raise ActivationError("unit start scope differs from the selected release")
-    if target.phase == "bots" and (len(target.command) != 2
-            or target.command[0] != str(release.native_path / "start-bot.sh")
-            or not Path(target.command[1]).is_absolute()):
-        raise ActivationError("bot unit has no exact native continuation")
-    return _unit_request(target, identity)
-
-
-def _peer_pid(connection):
-    """Kernel peer PID when the platform exports it; otherwise explicit scope PID.
-
-    This is a continuation/lifetime check between trusted local callers, not an
-    authentication boundary. Do not add platform-specific process-table guesses.
-    """
-    if hasattr(socket, "SO_PEERCRED"):
-        return struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
-    if hasattr(socket, "LOCAL_PEERPID"):
-        return connection.getsockopt(getattr(socket, "SOL_LOCAL", 0), socket.LOCAL_PEERPID)
-    return None
-
-
-def _scheduled_candidate(target: UnitStart) -> dict | None:
-    """The selected verified candidate's own frozen Linux timer service, else None.
-
-    Read-only identification before waiting, never admission: after the lock
-    frees, the unchanged selected-active check decides. Only the exact service
-    member of an enrolled producer timer family qualifies; it never uses a
-    start grant (its timer shares that family's admission argv).
-    """
-    if not sys.platform.startswith("linux") or target.phase != "producers" or target.mode != "oneshot":
-        return None
-    from .config_plan import PlanError, read_plan
-    from .config_units import planned_units
-    try:
-        selected = read_selection(target.root)
-        record = read_activation(target.root, selected["activation_id"]) if selected else None
-        body = record.body if record else {}
-        if (record is None or selected["release_id"] != target.release_id
-                or body["intent"]["release_id"] != target.release_id
-                or body["intent"]["plan_id"] != selected["plan_id"]
-                or (record.status, body["pending"], body["completed"]) not in (
-                    ("activating", "producers_resumed", list(STEPS[:-1])), ("active", None, list(STEPS)))):
-            return None
-        units = planned_units(read_plan(target.root, selected["plan_id"]), "Linux")
-    except (ActivationError, PlanError, OSError, ValueError, KeyError, TypeError):
-        return None
-    timed = {d.service for d, item in units
-             if item["enroll"] and item["phase"] == "producers" and d.source.suffix == ".timer"}
-    return selected if any(
-        d.source.suffix == ".service" and d.source.name in timed and d.source.stem == target.unit
-        and item["enroll"] and item["phase"] == "producers"
-        and item["admission"]["argv"] == list(target.argv) for d, item in units) else None
-
-
-def _await_scheduled(target: UnitStart, fd: int, selected: dict) -> None:
-    """Poll the existing SH lock; no body runs, nothing is recorded or resent."""
-    deadline = time.monotonic() + _SCHEDULED_WAIT
-    while True:
-        time.sleep(0.5)
-        try:
-            _take_shared(target.root, fd)
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
-            continue
-        _native_lock(target.root, fd, os.getppid())
-        if read_selection(target.root) != selected:
-            raise ActivationError("selected activation changed while the scheduled producer waited; no job ran")
-        return
-
-
-def _unit_started() -> str:
-    """UNIT_STARTED_ENV's value: this pid and its process's start on the monotonic
-    clock, read from procfs where there is one, else now."""
-    now = time.monotonic()
-    try:
-        with open("/proc/self/stat") as proc_stat:
-            ticks = int(proc_stat.read().rsplit(")", 1)[1].split()[19])
-        with open("/proc/uptime") as uptime:
-            age = max(0.0, float(uptime.read().split()[0]) - ticks / os.sysconf("SC_CLK_TCK"))
-    except (OSError, ValueError, IndexError):
-        age = 0.0
-    return f"{os.getpid()} {now - age:.3f}"
-
-
-def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
-             execer=os.execvpe, runner=subprocess.run) -> int:
-    """Private native unit boundary, not a readiness or lifetime writer claim.
-
-    Exec-mode releases its shared lock at the kernel exec transition (CLOEXEC),
-    retaining the supervisor's already tracked PID. There is no check/exit then
-    later untracked spawn. The coordinator can then acquire EX and quiesce this
-    known unit. One-shots retain SH through child completion; inherited copies
-    remain conservative if the wrapper is killed. Normal completion explicitly
-    unlocks descendants. Safe stop commands remain outside this boundary.
-    """
-    target = parse_unit_argv(argv)
-    started = _unit_started()
-    identity = identity or RuntimeIdentity.current()
-    release = read_release(target.root, target.release_id, verify_files=False)
-    _match_identity(target.root, release, identity)
-    if target.argv[0] != str(release.directory / release.paths.interpreter):
-        raise ActivationError("unit interpreter differs from its sealed release")
-    env = dict(os.environ if environment is None else environment)
-    required = {"CLAUDLOBBY_ROOT": str(target.root), "CLAUDLOBBY_RELEASE_ID": target.release_id,
-                "CLAUDLOBBY_CLI": str(identity.cli), "CLAUDLOBBY_NATIVE_DIR": str(identity.native),
-                "CLAUDLOBBY_ARTIFACT_ID": identity.artifact_id}
-    if any(env.get(key) != value for key, value in required.items()):
-        raise ActivationError("unit environment differs from its bound release context")
-    fd = os.open(target.root / "state/activation.lock", os.O_RDONLY | os.O_NOFOLLOW)
-    finished = False
-    try:
-        _native_lock(target.root, fd, os.getppid())
-        try:
-            _take_shared(target.root, fd)
-        except BlockingIOError:
-            selected = _scheduled_candidate(target)
-            if selected is None:
-                _request_start(target.root, {**_unit_request(target, identity), "pid": os.getpid()}, 2.0)
-            else:
-                _await_scheduled(target, fd, selected)
-                _selected_active(target.root, identity, target.release_id)
-        else:
-            _selected_active(target.root, identity, target.release_id)
-        # These are startup definitions, never ambient Python/shell injection.
-        env.pop("BASH_ENV", None)
-        env.pop("ENV", None)
-        env.pop("PYTHONPATH", None)
-        env.pop("PYTHONHOME", None)
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env = {key: value for key, value in env.items() if not key.startswith("BASH_FUNC_")}
-        if target.mode == "exec":
-            os.set_inheritable(fd, False)
-            execer(target.command[0], target.command, env)
-            raise ActivationError("native unit exec unexpectedly returned")
-        env[UNIT_STARTED_ENV] = started
-        result = runner(target.command, env=env, pass_fds=(fd,), check=False)
-        finished = True
-        return result.returncode
-    finally:
-        if finished:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-@contextmanager
-def activation_start(store: ActivationStore, activation_id: str, *, operation: str | None = None,
-                     bot_dir: Path | None = None, identity: RuntimeIdentity | None = None,
-                     unit: dict | None = None, timeout: float = 30.0,
-                     abort_producer: bool = False):
-    """Arm one ephemeral supervisor start while the coordinator holds EX flock.
-
-    Keep this context AND locked_activation open through start/readiness. A
-    service manager cannot inherit the coordinator's descriptor, so the native
-    guard asks this bounded local responder for one exact start. A bot unit has
-    just one same-PID continuation into its inner start-bot guard. This is not a
-    control service, durable grant, retry queue, or replacement for quiescence.
-    A reply cannot revoke an already admitted process on coordinator death;
-    the incomplete journal refuses later ordinary starts, and reboot removes
-    the live responder. Recovery must quiesce any surviving admitted processes.
-    """
-    identity = identity or RuntimeIdentity.current()
-    if abort_producer and unit is None:
-        raise ActivationError("abort producer scope requires one exact frozen unit")
-    target = None
-    if unit is not None:
-        if (operation is not None or bot_dir is not None or unit.get("kind") != "unit-start-v1"
-                or set(unit) != {"kind", "unit", "argv"}):
-            raise ActivationError("supply exactly one frozen unit start scope")
-        target = parse_unit_argv(unit["argv"])
-        if target.unit != unit["unit"]:
-            raise ActivationError("unit admission identity changed")
-        if abort_producer:
-            from .activation_units import abort_producer_request
-            unit_request = abort_producer_request
-        else:
-            unit_request = _activation_unit_request
-        request = unit_request(store, activation_id, target, identity)
-    else:
-        request = _activation_request(store, activation_id, operation, bot_dir, identity)
-    endpoint = store.root / "state/activation-start.sock"
-    # The host lock permits replacing only a dead socket. A live or foreign
-    # endpoint is a conflict, never overwritten by a second armed scope.
-    if endpoint.exists() or endpoint.is_symlink():
-        info = endpoint.lstat()
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-            raise ActivationError("activation start endpoint is occupied")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-            probe.settimeout(0.1)
-            try:
-                probe.connect(str(endpoint))
-            except ConnectionRefusedError:
-                endpoint.unlink()
-            else:
-                raise ActivationError("another activation start scope is armed")
-    stopped = threading.Event()
-    admitted = threading.Event()
-    errors = []
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        server.bind(str(endpoint))
-        endpoint.chmod(0o600)
-        inode = endpoint.lstat().st_ino
-        server.listen(1)
-        server.settimeout(0.1)
-        deadline = time.monotonic() + timeout
-
-        def serve():
-            pending, continuation_pid = request, None
-            while not stopped.is_set() and time.monotonic() < deadline:
-                try:
-                    connection, _ = server.accept()
-                except socket.timeout:
-                    continue
-                except OSError:
-                    return
-                with connection:
-                    try:
-                        received = _receive(connection, min(deadline, time.monotonic() + 2.0))
-                        reported_pid = received.get("pid")
-                        body = {key: value for key, value in received.items() if key != "pid"}
-                        if (body != pending or type(reported_pid) is not int or reported_pid <= 0
-                                or continuation_pid is not None and reported_pid != continuation_pid):
-                            connection.sendall(b'{"refused":true}\n')
-                            continue
-                        fresh = (unit_request(store, activation_id, target, identity) if target else
-                                 _activation_request(store, activation_id, operation, bot_dir, identity))
-                        if fresh != request:
-                            raise ActivationError("activation start scope changed")
-                        peer_pid = _peer_pid(connection)
-                        if target and continuation_pid is None and peer_pid is not None and peer_pid != reported_pid:
-                            connection.sendall(b'{"refused":true}\n')
-                            continue
-                        if abort_producer:
-                            store.record_upgrade_resident_grant(activation_id, unit=target.unit, pid=reported_pid)
-                        connection.sendall(json.dumps({"admitted": received}).encode() + b"\n")
-                        admitted.set()
-                        if target and target.phase == "bots" and continuation_pid is None:
-                            continuation_pid = peer_pid or reported_pid
-                            pending = _activation_request(store, activation_id, "start-bot",
-                                                          Path(target.command[1]), identity)
-                            continue
-                        return  # exactly one admitted start per armed scope
-                    except (ActivationError, OSError) as exc:
-                        errors.append(exc)
-
-        worker = threading.Thread(target=serve, name="activation-start", daemon=True)
-        worker.start()
-        try:
-            yield _AdmissionNotice(admitted, deadline)
-            store.assert_locked()
-        finally:
-            stopped.set()
-            server.close()
-            worker.join(timeout=2.2)
-        if errors:
-            raise ActivationError("activation start handshake failed") from errors[0]
-    finally:
-        server.close()
-        if "inode" in locals() and endpoint.exists() and endpoint.lstat().st_ino == inode:
-            endpoint.unlink()
-
-
-def _native_main() -> int:
-    """Private stdlib adapter; never a public CLI or hot tool-hook route."""
-    import argparse
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "unit-start":
-        try:
-            return run_unit(sys.orig_argv)
-        except (ActivationError, OSError, ValueError) as exc:
-            print(f"native admission: {exc}; inspect claudlobby host releases", file=sys.stderr)
-            return 7
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("acquire", "release"))
-    parser.add_argument("fd", type=int)
-    parser.add_argument("owner_pid", type=int)
-    parser.add_argument("root", type=Path)
-    parser.add_argument("scope", nargs="*")
-    args = parser.parse_args()
-    try:
-        if args.action == "release":
-            release_native(args.root, args.fd, owner_pid=args.owner_pid)
-        else:
-            if len(args.scope) != 6:
-                raise ActivationError("native start requires complete composed context")
-            operation, bot, expected, cli, native, artifact = args.scope
-            identity = RuntimeIdentity.current()
-            if identity != RuntimeIdentity(Path(cli), Path(native), artifact):
-                raise ActivationError("native executable differs from composed context")
-            admit_native(args.root, args.fd, owner_pid=args.owner_pid,
-                         operation=operation, bot_dir=Path(bot) if bot else None,
-                         expected_release=expected, identity=identity)
-        return 0
-    except WatchdogActivationPause as exc:
-        print(f"native admission: {exc}", file=sys.stderr)
-        return 75
-    except (ActivationError, OSError, ValueError) as exc:
-        print(f"native admission: {exc}; inspect claudlobby host releases", file=sys.stderr)
-        return 7
 
 
 if __name__ == "__main__":
-    raise SystemExit(_native_main())
+    raise SystemExit("native startup requires the stable managed Git installation CLI")

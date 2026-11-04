@@ -8,20 +8,19 @@ import sqlite3
 
 import pytest
 
-from claudlobby import activation, context
+from claudlobby import context
 from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_state import _assignment, _task
 
 
 @pytest.fixture
 def active(cold, monkeypatch):  # noqa: F811 — pytest fixture parameter
-    root, _, plan, host = cold
+    root, _, _, host = cold
     for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR", "FLEET_ROOT"):
         monkeypatch.delenv(key, raising=False)
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     monkeypatch.setattr(context, "get_resources", lambda: host.package)
     return root, host
 
@@ -36,8 +35,8 @@ def _call(capsys, root, *argv, expected=0):
 
 def test_list_show_assignment_and_scoped_reference_hints_are_read_only(active, capsys):
     root, host = active
-    from claudlobby.activation_identity import read_selected_identity_bindings
-    bindings = read_selected_identity_bindings(root, "example", package=host.package)
+    from claudlobby.activation_identity import read_current_identity_bindings
+    bindings = read_current_identity_bindings(root, "example", package=host.package)
     with sqlite3.connect(db_file(root)) as conn:
         _task(conn, "wi_first", fleet_uid=bindings["fleet_uid"], source_ref="dispatch-log:old-17")
         _task(conn, "wi_second", fleet_uid=bindings["fleet_uid"])
@@ -51,7 +50,7 @@ def test_list_show_assignment_and_scoped_reference_hints_are_read_only(active, c
                   conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
 
     first_result = _call(capsys, root, "task", "list", "--limit", "1")
-    assert first_result["release_id"] == host.release.release_id
+    assert first_result["release_id"] == None
     first = first_result["data"]
     assert [item["task_id"] for item in first["items"]] == ["wi_first"]
     assert first["next_cursor"]
@@ -162,7 +161,7 @@ def test_task_reviews_reads_host_evidence_without_writing_and_refuses_plane_outa
                   conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
     result = _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1046")
     data = result["data"]
-    assert result["release_id"] == host.release.release_id
+    assert result["release_id"] == None
     assert data["caller_fleet"] == "example" and data["host_scope"] == "all fleets in the selected root"
     assert data["rows"] == 2 and data["fleets"] == ["other"]
     assert data["attribution_events"][0]["events"][0]["actor"] == "bot:other/worker"
@@ -227,34 +226,19 @@ def test_help_and_syntax_remain_dependency_light(monkeypatch, capsys):
 
 def _use_git_current(active, monkeypatch):
     """Reuse the existing private Plane with an honestly committed Git snapshot."""
-    from dataclasses import replace
-    from claudlobby import active_config, activation_state
-    from claudlobby.config_plan import read_plan
-    from claudlobby.installation import Installation
     root, host = active
-    selected = activation_state.read_selection(root)
-    plan = read_plan(root, selected["plan_id"])
-    record = activation_state.read_activation(root, selected["activation_id"])
-    installation = Installation(root.parent / "git-installation", root)
-    from tests.package_fixtures import source_package
-    package = replace(source_package(), native=host.package.native,
-                      installation=installation, source_revision="a" * 40,
-                      artifact_id="", content_sha256="")
-    identities = {key: record.body["identity_bindings"][key] for key in ("schema", "host_uid", "fleets")}
-    snapshot = active_config.snapshot_from_plan(replace(plan, changes=(), effects={**plan.effects, "units": []}),
-                                               installation, package.source_revision, identities=identities)
-    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
-    monkeypatch.setattr(context, "get_resources", lambda: package)
+    monkeypatch.setattr(context, "get_resources", lambda: host.package)
     monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
-    # A retained, unreadable legacy pointer must not be touched by these readers.
     (root / "state/selected-release.json").write_text("historical broken pointer\n")
-    return root, package, snapshot
+    from claudlobby.active_config import read_current_config
+    return root, host.package, read_current_config(root,
+        installation=host.package.installation, revision=host.package.source_revision)
 
 
 def test_git_task_read_uses_current_snapshot_and_retains_query_cursor_contract(active, monkeypatch, capsys):
-    from claudlobby.activation_identity import read_selected_identity_bindings
+    from claudlobby.activation_identity import read_current_identity_bindings
     root, package, snapshot = _use_git_current(active, monkeypatch)
-    bindings = read_selected_identity_bindings(root, "example", package=package)
+    bindings = read_current_identity_bindings(root, "example", package=package)
     with sqlite3.connect(db_file(root)) as conn:
         _task(conn, "wi_git_one", fleet_uid=bindings["fleet_uid"])
         _task(conn, "wi_git_two", fleet_uid=bindings["fleet_uid"])

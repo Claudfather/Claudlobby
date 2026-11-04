@@ -1,4 +1,4 @@
-"""Owner nudges over private activation/Plane, with a synthetic native receiver.
+"""Owner nudges over private committed Git/Plane, with a synthetic native receiver.
 
 No installed CLI, browser authentication, real bot or native delivery is claimed.
 """
@@ -24,9 +24,7 @@ from claudlobby.request_receipts import ReceiptBusy, ReceiptConflict, RequestSto
 from claudlobby.runtime_admission import ReleaseMismatch
 from claudlobby.task_queries import TaskNotFoundError, TaskQueryError
 from claudlobby.task_state import TaskStateError
-from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
 
@@ -34,9 +32,9 @@ from tests.test_message_write_cli import _human
 @pytest.fixture
 def gateway(active, monkeypatch):  # noqa: F811
     root, host = active
-    _human(monkeypatch, host.release)
-    package = replace(source_package(), native=host.release.native_path,
-                      artifact_id=host.release.inputs.artifact_id)
+    _human(monkeypatch, host.installation)
+    package = host.package
+    monkeypatch.delenv("CLAUDLOBBY_INSTALLATION", raising=False)
     ctx = operation_context.resolve_task_mutation_context(
         root=root, fleet="example", operator_alias="human:paired-owner", package=package)
     access = OwnerAccess.initialize(root)
@@ -51,7 +49,9 @@ def gateway(active, monkeypatch):  # noqa: F811
     adapter = OwnerNudges(root, package=package)
     options = dict(fleet="example", fleet_uid=ctx.fleet_uid, task_id=task.task_id,
         manager_uid=ctx.bots[ctx.context.fleet.manager].uid, request_id=str(uuid4()), expected_grant=grant)
-    selection = dict(expected_assignment_id=None, expected_release_id=host.release.release_id)
+    selection = dict(expected_assignment_id=None, expected_release_id=None,
+                     expected_source_revision=host.snapshot["revision"],
+                     expected_config_fingerprint=host.snapshot["fingerprint"])
     monkeypatch.setattr(operation_context, "_local_operator_alias",
                         lambda: pytest.fail("owner nudge must not use the OS account"))
     return adapter, reader, ctx, options, selection

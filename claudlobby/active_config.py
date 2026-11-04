@@ -9,12 +9,12 @@ import json
 from dataclasses import dataclass
 import hashlib
 import os
+from .activation_state import ActivationError
 from pathlib import Path
 import re
 import tempfile
 
-from .activation_state import ActivationError, read_activation, read_selection
-from .config_plan import ConfigPlan, RenderedConfiguration, PlanError, read_plan
+from .config_plan import RenderedConfiguration, PlanError
 from .context import BotNotFoundError, Context, resolve_paths
 from .paths import Paths
 from .resources import PackageResources, get_resources
@@ -223,7 +223,7 @@ def _fingerprint(snapshot: dict) -> str:
     return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def snapshot_from_plan(plan: ConfigPlan | RenderedConfiguration, installation: Installation, revision: str, *,
+def snapshot_from_plan(plan: RenderedConfiguration, installation: Installation, revision: str, *,
                        identities: dict | None = None, supervision: dict | None = None) -> dict:
     """Freeze effective inputs and output ownership, independent of startup progress."""
     if plan.data_root != installation.data_root or getattr(plan, "revision", revision) != revision:
@@ -336,7 +336,7 @@ class RuntimeReadStamp:
         from .command_result import selection_read_conflict
         try:
             same = runtime_read_stamp(root, package=package) == self
-        except (ActivationError, PlanError, OSError):
+        except (PlanError, OSError):
             same = False
         if not same:
             failure = selection_read_conflict(message, release_id=self.release_id)
@@ -353,14 +353,10 @@ def runtime_read_stamp(root: Path, *, package: PackageResources | None = None) -
         snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
         return RuntimeReadStamp("git", source_revision=snapshot["revision"],
                                 config_fingerprint=snapshot["fingerprint"])
-    # Use the canonical reader at call time, preserving legacy diagnostics and
-    # callers that instrument selection changes during a read.
-    from .activation_state import read_selection
-    selection = read_selection(root)
-    return RuntimeReadStamp("sealed", selection=json.loads(json.dumps(selection))) if selection is not None else None
+    raise PlanError("operational reads require a managed Git installation")
 
 
-def context_from_plan(plan: ConfigPlan, fleet: str, *, bot: str | None = None,
+def context_from_plan(plan: RenderedConfiguration, fleet: str, *, bot: str | None = None,
                       package: PackageResources) -> Context:
     """Use the shared FleetConfig parser over exact content-addressed inputs."""
     from .config import load_fleet_snapshot
@@ -393,61 +389,12 @@ def context_from_plan(plan: ConfigPlan, fleet: str, *, bot: str | None = None,
     return Context(paths, config, defaults, bot)
 
 
-def _selected_activation(root: Path):
-    """Observe the matching selected journal; this grants no admission."""
-    selected = read_selection(root)
-    if selected is None:
-        raise ActivationError("host has no active configuration")
-    record = read_activation(root, selected["activation_id"])
-    if (record.body["intent"]["plan_id"] != selected["plan_id"]
-            or record.body["intent"]["release_id"] != selected["release_id"]):
-        raise ActivationError("selected configuration activation is incomplete")
-    return selected, record
-
-
-def _plan_for_selection(root: Path, selected: dict, package: PackageResources) -> ConfigPlan:
-    """Validate one selected package and frozen plan without authoring fallback."""
-    from .releases import read_release
-    release = read_release(root, selected["release_id"], verify_files=False)
-    if release.native_path != package.native or release.inputs.artifact_id != package.artifact_id:
-        raise ActivationError("active configuration and executing package differ")
-    plan = read_plan(root, selected["plan_id"])
-    if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-        raise ActivationError("active configuration and selected release differ")
-    return plan
-
-
-def _selected_plan(root: Path, package: PackageResources):
-    """Observe sealed selection inputs; this grants no operational admission."""
-    selected, record = _selected_activation(root)
-    return selected, record, _plan_for_selection(root, selected, package)
-
-
-def _selected_context(plan: ConfigPlan, fleet: str | None, *, bot: str | None,
-                      package: PackageResources) -> Context:
-    if fleet is None:
-        if len(plan.fleets) != 1:
-            raise PlanError("select --fleet from the active fleets")
-        fleet = plan.fleets[0]
-    return context_from_plan(plan, fleet, bot=bot, package=package)
-
-
-def _load_legacy_active_context(root: Path, fleet: str | None, *, bot: str | None,
-                                package: PackageResources) -> Context:
-    """Temporary sealed-runtime reader; remove with the old activation engine."""
-    selected, record = _selected_activation(root)
-    if record.status != "active":
-        raise ActivationError("selected configuration activation is incomplete")
-    plan = _plan_for_selection(root, selected, package)
-    return _selected_context(plan, fleet, bot=bot, package=package)
-
-
 def load_active_context(root: Path, fleet: str | None, *, bot: str | None = None,
                         package: PackageResources | None = None) -> Context:
     """Load recorded active scope; runtime availability remains unobserved."""
     package = package if package is not None else get_resources()
     if package.installation is None:
-        return _load_legacy_active_context(root, fleet, bot=bot, package=package)
+        raise PlanError("operational context requires a managed Git installation")
     if package.source_revision is None:
         raise PlanError("executing Git source revision is unavailable")
     snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)

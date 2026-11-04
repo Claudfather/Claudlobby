@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 
 from claudlobby import task_permissions
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from claudlobby.plane.owner_task_action_protocol import runtime_fields
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_owner_feedback import gateway  # noqa: F401
 from tests.test_plane_owner_feedback_http import feedback_http, post, counts  # noqa: F401
@@ -41,7 +41,7 @@ def proposal(fixture, decision='approve'):
     return {'version': 2, 'kind': 'permission', 'scope': context['scope'], 'request_id': str(uuid4()),
         'decision': decision, 'target': {'permission_id': permission.permission_id,
             'task_id': permission.task_id, 'scope_sha256': permission.scope.digest,
-            'release_id': context['release_id']}}
+            **runtime_fields(context)}}
 
 
 def prepare(fixture, decision='approve'):
@@ -96,8 +96,10 @@ def test_scope_or_grant_change_cannot_decide_and_receipt_never_claims_other_inte
     assert counts(adapter) == before
     assert post(client, 'send', {**row, 'body': 'Reviewed these exact terms'}).json()['status'] == 'recorded'
     assert post(client, 'receipt', {**row, 'decision': 'decline'}).json()['status'] == 'unknown'
-    forged_release = {**row, 'target': {**row['target'], 'release_id': 'r-' + 'f' * 64}}
-    assert post(client, 'receipt', forged_release).json()['status'] == 'unknown'
+    forged_runtime = {**row, 'target': {**row['target'], 'source_revision': 'f' * 40}}
+    assert post(client, 'receipt', forged_runtime).json()['status'] == 'unknown'
+    mixed = {**row, 'target': {**row['target'], 'release_id': 'r-' + 'f' * 64}}
+    assert post(client, 'receipt', mixed).status_code == 403
     adapter.access.revoke_permissions(expected_owner=grant.owner, fleet_uid=ctx.fleet_uid, expected_grant=grant)
     assert post(client, 'receipt', row).status_code == 403
     replacement = adapter.access.allow_permissions(expected_owner=grant.owner, fleet_uid=ctx.fleet_uid,
@@ -277,30 +279,11 @@ def test_native_owner_permission_proof_does_not_admit_bot_or_timer_selectors(nat
 
 
 @pytest.fixture
-def git_permissions(permissions_http, monkeypatch):
-    """Existing private authority/Plane, with real Git config and synthetic admission."""
-    from contextlib import contextmanager
-    from claudlobby import active_config, context, runtime_admission
-    from claudlobby.plane import owner_permission_actions
-    from tests.test_plane_owner_feedback import _git_gateway
+def git_permissions(permissions_http):
+    """Reuse the committed runtime, canonical admission, and private grants."""
+    from claudlobby.plane.owner_permission_actions import OwnerPermissionActions
     _, gateway, reader, ctx, permission, grant, _ = permissions_http
-    # This action resolves a native destination, so reuse the full Git fixture's
-    # stable launcher and CLI binding rather than the read-only snapshot helper.
-    gateway, _, _, _, _ = _git_gateway((gateway, reader, ctx, {}, None), monkeypatch)
-    root = gateway.root
-    owner = owner_permission_actions.OwnerPermissionActions(root, package=gateway.package)
-    monkeypatch.setattr(context, 'get_resources', lambda: owner.package)
-    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: runtime_admission.RuntimeIdentity(
-        owner.package.installation.cli, owner.package.native, owner.package.artifact_id,
-        owner.package.installation, owner.package.source_revision))
-    @contextmanager
-    def admitted(*args, **kwargs):
-        assert kwargs['expected_release'] is None
-        current = active_config.read_current_config(root, installation=owner.package.installation,
-                                                    revision=owner.package.source_revision)
-        yield runtime_admission.GitCurrentRuntime(owner.package.installation, current['revision'],
-                                                  current['fingerprint'], current)
-    monkeypatch.setattr(owner_permission_actions, 'mutation_admission', admitted)
+    owner = OwnerPermissionActions(gateway.root, package=gateway.package)
     return owner, reader, ctx, permission, grant
 
 

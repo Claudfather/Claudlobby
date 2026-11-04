@@ -61,17 +61,20 @@ def test_git_boolean_marker_is_not_a_release_argument(runtime, mode):
     ({"CLAUDLOBBY_CLI": "/missing/cli"}, ["--admitted-runtime"]),
     ({"CLAUDLOBBY_NATIVE_DIR": "relative"}, ["--admitted-runtime"]),
     ({"CLAUDLOBBY_RELEASE_ID": "old-release"}, ["--admitted-runtime"]),
+    ({"CLAUDLOBBY_RELEASE_ID": ""}, ["--admitted-runtime"]),
+    ({"CLAUDLOBBY_ARTIFACT_ID": "old-artifact"}, ["--admitted-runtime"]),
+    ({"CLAUDLOBBY_INSTALLATION": ""}, ["--admitted-runtime"]),
 ])
 def test_invalid_runtime_shape_refuses_before_any_native_body(runtime, change, args):
     result = parse({**runtime, **change}, "runtime", *args)
     assert result.returncode == 2 and result.stdout == ""
 
 
-def test_legacy_sealed_marker_retains_exact_matching_release(runtime):
+def test_legacy_sealed_marker_is_refused_even_when_exact(runtime):
     runtime.pop("CLAUDLOBBY_INSTALLATION")
     runtime.pop("CLAUDLOBBY_NATIVE_ADMITTED")
     runtime["CLAUDLOBBY_RELEASE_ID"] = "sealed-fixture"
-    assert parse(runtime, "runtime", "--selected-release", "sealed-fixture").returncode == 0
+    assert parse(runtime, "runtime", "--selected-release", "sealed-fixture").returncode == 2
     assert parse(runtime, "runtime", "--selected-release", "different").returncode == 2
 
 

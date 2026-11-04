@@ -478,76 +478,64 @@ def test_reap_removes_orphan_keeps_long_form(tmp_path):
 def test_selected_orphan_reap_is_operator_only_and_confined_to_declared_fleet(
     tmp_path, monkeypatch
 ):
-    from contextlib import contextmanager
-    from types import SimpleNamespace
-    import pytest
     from claudlobby import supervision_reap
+    from claudlobby.activation_state import ActivationError
+    from tests.fixtures.current_runtime import current_runtime
 
-    root = tmp_path / "cl"
-    _build_library(root)
-    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot}, manager="kev")
-    paths = Paths(root=root, fleet_dir=root / "local" / "selected",
-                  package=source_package())
-    bot_dir = _seed_bot_dir(paths)
-    long_form = bot_dir / "p.kev.plist"
-    stale = bot_dir / "kev.plist"
-    long_form.write_text("<plist/>")
-    stale.write_text("<plist/>")
-    foreign_dir = root / "local" / "other" / "runtime" / "bots" / "kev"
+    root, _, _, host = current_runtime.__wrapped__(tmp_path, monkeypatch)
+    for key in ('CLAUDLOBBY_ROOT', 'FLEET_ROOT', 'FLEET_NAME', 'CLAUDLOBBY_FLEET',
+                'BOT_ID', 'BOT_NAME', 'BOT_DIR', 'BOT_SERVICE'):
+        monkeypatch.delenv(key, raising=False)
+    # Use the shared actual checkout, committed roster, origin observation and
+    # runtime-use lock. Reaping takes real admission and reads the real stamp.
+    paths = Paths(root=root, package=host.package)
+    bot_dir = paths.bot_runtime('worker')
+    long_form = bot_dir / 'com.example.worker.plist'
+    stale = bot_dir / 'worker.plist'
+    stale.write_text('<plist/>')
+    foreign_dir = root / 'local/other/runtime/bots/worker'
     foreign_dir.mkdir(parents=True)
-    foreign_stale = foreign_dir / "kev.plist"
-    foreign_stale.write_text("<plist/>")
-    destination = SimpleNamespace(paths=paths, fleet=fleet)
-    origin = None
-
-    @contextmanager
-    def admitted(_root, expected_release=None, identity=None):
-        yield SimpleNamespace(release_id="r-selected")
-
-    from claudlobby.active_config import RuntimeReadStamp
-    stamp = RuntimeReadStamp("sealed", selection={"release_id": "r-selected"})
-    monkeypatch.setattr(supervision_reap, "runtime_read_stamp", lambda *args, **kwargs: stamp)
-    monkeypatch.setattr(supervision_reap.RuntimeIdentity, "current", lambda: None)
-    monkeypatch.setattr(supervision_reap, "mutation_admission", admitted)
-    monkeypatch.setattr(supervision_reap, "resolve_operation_scope",
-                        lambda **kwargs: (destination, origin))
-    with pytest.raises(supervision_reap.SupervisionReapError, match="not declared"):
-        supervision_reap.reap_selected_orphans(root=root, fleet="selected", bot="other",
-                                               dry_run=False)
+    foreign_stale = foreign_dir / 'worker.plist'
+    foreign_stale.write_text('<plist/>')
+    with pytest.raises(supervision_reap.SupervisionReapError, match='not declared'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot='other', dry_run=False)
     assert stale.exists() and foreign_stale.exists()
 
-    preview = supervision_reap.reap_selected_orphans(root=root, fleet="selected", bot=None,
-                                                     dry_run=True)
+    preview = supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=True)
     assert preview.paths == (stale,)
+    assert preview.release_id is None
+    assert (preview.source_revision, preview.config_fingerprint) == (
+        host.snapshot['revision'], host.snapshot['fingerprint'])
     assert stale.exists() and foreign_stale.exists()
-    applied = supervision_reap.reap_selected_orphans(root=root, fleet="selected", bot="kev",
-                                                     dry_run=False)
+    applied = supervision_reap.reap_selected_orphans(root=root, fleet='example', bot='worker', dry_run=False)
     assert applied.paths == (stale,)
     assert not stale.exists() and long_form.exists() and foreign_stale.exists()
 
-    stale.write_text("<plist/>")
-    origin = SimpleNamespace(bot_id="kev")
-    with pytest.raises(supervision_reap.SupervisionReapError, match="operator process"):
-        supervision_reap.reap_selected_orphans(root=root, fleet="selected", bot=None,
-                                               dry_run=False)
-    assert stale.exists()
+    stale.write_text('<plist/>')
+    monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+    monkeypatch.setenv('FLEET_NAME', 'example')
+    monkeypatch.setenv('FLEET_ROOT', str(root))
+    monkeypatch.setenv('BOT_ID', 'worker')
+    monkeypatch.setenv('BOT_DIR', str(bot_dir))
+    with pytest.raises(supervision_reap.SupervisionReapError, match='operator process'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=False)
+    assert stale.exists() and foreign_stale.exists()
 
-    origin = None
-    monkeypatch.setenv("FLEET_ROOT", str(paths.fleet_config_dir))
-    with pytest.raises(supervision_reap.SupervisionReapError, match="operator process"):
-        supervision_reap.reap_selected_orphans(root=root, fleet="selected", bot=None,
-                                               dry_run=False)
-    assert stale.exists()
-    monkeypatch.delenv("FLEET_ROOT")
-    stale.unlink()
-    long_form.unlink()
-    bot_dir.rmdir()
+    monkeypatch.delenv('BOT_ID')
+    monkeypatch.delenv('BOT_DIR')
+    with pytest.raises(supervision_reap.SupervisionReapError, match='operator process'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=False)
+    assert stale.exists() and foreign_stale.exists()
+    monkeypatch.delenv('FLEET_ROOT')
+    monkeypatch.delenv('FLEET_NAME')
+    # Preserve all generated bytes; redirect only the original directory name.
+    # Canonical admission rejects its escaped owned outputs before reaping.
+    retained = bot_dir.with_name('retained-worker')
+    bot_dir.rename(retained)
     bot_dir.symlink_to(foreign_dir, target_is_directory=True)
-    with pytest.raises(supervision_reap.SupervisionReapError, match="redirected"):
-        supervision_reap.reap_selected_orphans(root=root, fleet="selected", bot=None,
-                                               dry_run=False)
-    assert foreign_stale.exists()
+    with pytest.raises(ActivationError, match='ownership escapes generated destinations'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=False)
+    assert foreign_stale.exists() and (retained / stale.name).exists()
 
 
 def test_flat_path_in_emitted_mcp_json_is_improper_path_fail(tmp_path):
@@ -1243,7 +1231,7 @@ class TestGithubAppFreshbox:
         assert include and all(f.severity == "fail" for f in include), finds
 
 
-from tests.test_activation import cold, tmp_path  # noqa: F401 — private selected root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — private selected root
 from tests.test_releases import installed  # noqa: F401 — cold dependency
 from tests.test_task_read_cli import active  # noqa: F401 — retained fleet identities
 

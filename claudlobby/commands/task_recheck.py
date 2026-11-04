@@ -30,7 +30,7 @@ def _validate(args) -> None:
 
 
 def _dispatch(args) -> CommandOutput:
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..active_config import runtime_read_stamp
     from ..message_context import resolve_message_route
     from ..operation_context import resolve_operation_scope, resolve_task_mutation_context
@@ -55,7 +55,7 @@ def _dispatch(args) -> CommandOutput:
     if args.dry_run:
         # A preview cannot call the mutation binder: a cold local human would
         # register an identity before the dry-run returned.
-        bindings = read_selected_identity_bindings(root, selected.fleet.name,
+        bindings = read_current_identity_bindings(root, selected.fleet.name,
                                                    package=selected.paths.package)
         if bindings["manager"] != selected.fleet.manager or set(bindings["bots"]) != set(selected.fleet.bots):
             raise CommandFailure("conflict", "active task bindings differ from the selected fleet")

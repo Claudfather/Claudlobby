@@ -58,12 +58,16 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=cli-context.sh
 . "$LIB_DIR/cli-context.sh"
+if [ "${1:-}" = "--selected-release" ]; then
+    echo "legacy release execution is retired; use the managed Git CLI" >&2
+    exit 2
+fi
 if _claudlobby_runtime_bound && [ -z "${CLAUDLOBBY_ROOT:-}" ]; then
     echo "creds-check: current timer has no data root" >&2
     exit 2
 fi
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-if [ "${1:-}" != "--admitted-runtime" ] && [ "${1:-}" != "--selected-release" ] && _claudlobby_runtime_bound; then
+if [ "${1:-}" != "--admitted-runtime" ] && _claudlobby_runtime_bound; then
     _cc_timer_fleet="${1:-${CLAUDLOBBY_FLEET:-}}"
     _claudlobby_require_native "$LIB_DIR" || exit $?
     [ -n "$_cc_timer_fleet" ] && [ "$_cc_timer_fleet" = "${CLAUDLOBBY_FLEET:-}" ] \
@@ -83,7 +87,7 @@ fi
 FLEET_ARG="${1:-${CLAUDLOBBY_FLEET:-}}"
 SELECTED_BOTS=""
 _cc_admitted=0
-if [ "${1:-}" = "--admitted-runtime" ] || [ "${1:-}" = "--selected-release" ]; then
+if [ "${1:-}" = "--admitted-runtime" ]; then
     _claudlobby_parse_runtime_scope credentials "$LIB_DIR" "$@" || exit $?
     _cc_admitted=1
     FLEET_ARG="$_CL_RUNTIME_FLEET"

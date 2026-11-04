@@ -39,9 +39,9 @@ class FleetPulseResult:
 
 
 # A tick's cap. Scaled by load per CPU up to MAX_CAP_S, which keeps a run and
-# its stop under the default 300 s pulse cadence: every oneshot holds the
-# activation lock shared while it runs, and `host activate` waits at most
-# ACTIVATION_WAIT_S (300 s) for those holders before it refuses.
+# its stop under the default 300 s pulse cadence. Each native entry holds the
+# installation runtime-use lock through its command; the updater waits for
+# current readers and independently rechecks quiet before changing source.
 # UNIT_STOP_S is the unit's TimeoutStopSec=, waited per systemd kill phase, four at most.
 DEFAULT_CAP_S = 120
 MAX_CAP_S = 240

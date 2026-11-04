@@ -8,7 +8,7 @@ import json
 import re
 from uuid import UUID
 
-from ..activation_identity import read_selected_identity_bindings
+from ..activation_identity import read_current_identity_bindings
 from ..active_config import resolve_active_context, runtime_read_stamp
 from ..operation_context import bind_task_context, OperationContextError
 from ..request_queries import read_request
@@ -45,7 +45,7 @@ class OwnerPermissionActions:
         host = inspect_source(self.root)
         access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
-        bindings = read_selected_identity_bindings(self.root, room, package=self.package)
+        bindings = read_current_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_permission(reader.token, reader.principal,
             host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)

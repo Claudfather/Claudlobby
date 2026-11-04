@@ -7,12 +7,16 @@ import re
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
+from dataclasses import replace
+import shutil
 
 import pytest
 
 from claudlobby import composer, config, config_staging, context, env_tiers, releases
-from claudlobby.config_plan import PlanError, read_plan
-from claudlobby.config_units import current_declarations, planned_units
+from claudlobby.config_plan import PlanError, read_rendered
+from claudlobby.active_config import snapshot_from_plan
+from claudlobby.installation import Installation
+from claudlobby.config_units import current_git_declarations, staged_git_declarations
 from claudlobby.paths import Paths
 from tests.package_fixtures import source_package
 
@@ -84,22 +88,11 @@ def _fleet(root, directory, name, package):
 def staging_case(tmp_path, monkeypatch):
     root = tmp_path / "data"
     (root / "state").mkdir(parents=True)
-    package = source_package()
-    cli = _write(root / "state/releases" / ("r-" + "a" * 64) / "venv/bin/claudlobby",
-                 "#!/bin/sh\nexit 97\n")
+    installation = Installation(tmp_path / "installation", root)
+    package = replace(source_package(), installation=installation, artifact_id="", source_revision="a" * 40)
+    cli = _write(installation.cli, "#!/bin/sh\nexit 97\n")
     cli.chmod(0o755)
-    # Release sealing has its own tests. Select a candidate here while keeping
-    # the actual config loader, validator, resource readers and renderers.
-    release = SimpleNamespace(
-        release_id="r-" + "a" * 64, seal_sha256="b" * 64,
-        cli_path=cli, native_path=package.native,
-        inputs=SimpleNamespace(artifact_id=package.artifact_id),
-    )
-    monkeypatch.setattr(config_staging, "read_release", lambda *_: release)
-    monkeypatch.setattr(releases, "read_release", lambda *_, **__: release)
-    monkeypatch.setattr(config_staging, "get_resources", lambda: package)
-    for module in (config_staging, context, composer):
-        monkeypatch.setattr(module, "selected_cli", lambda: cli)
+    (root / 'state/update-work').mkdir()
 
     # The native shell resolver and host probes are separate contracts. Keep
     # real dotenv parsing over these explicit fixture-owned tier paths.
@@ -119,7 +112,12 @@ def staging_case(tmp_path, monkeypatch):
     monkeypatch.setattr(composer._switches, "missing_extra", lambda *_: None)
     monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(Path.home() / "host-system.yaml"))
     paths = _fleet(root, root, "primary", package)
-    return SimpleNamespace(root=root, package=package, paths=paths, cli=cli, release=release)
+    return SimpleNamespace(root=root, package=package, paths=paths, cli=cli)
+
+
+def _units(case, plan, platform):
+    snapshot = snapshot_from_plan(plan, case.package.installation, plan.revision)
+    return [(declaration, item) for declaration, item, _ in staged_git_declarations(snapshot, plan, platform)]
 
 
 def _changes(plan):
@@ -144,7 +142,7 @@ def test_plan_freezes_the_effective_fleet_ops_body_without_metadata(staging_case
     skill = _write(case.paths.fleet_config_dir / "library/skills/fleet-ops/SKILL.md",
                    "---\nname: fleet-ops\ndescription: FROZEN_ORIENTATION_METADATA\ntool_grants: []\n---\n"
                    "# Selected fleet guide\n" + content + "Guide tail sentinel.\n")
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     expected = "## Selected fleet guide\n" + content + "Guide tail sentinel."
     assert len(expected) > 10000  # Beyond the native SessionStart output-preview boundary.
     for bot in ("primary-manager", "primary-worker"):
@@ -182,7 +180,10 @@ def test_host_plan_probes_shared_vault_once_and_refreshes_next_request(staging_c
     monkeypatch.setattr(claudron_compat, "_run", run)
 
     for request in range(1, 3):
-        plan = config_staging.stage_configuration([case.paths, other], case.release)
+        if request > 1:
+            # This is a new independent test-owned render after retiring the prior preview.
+            shutil.rmtree(plan.directory)
+        plan = config_staging.render_git_configuration([case.paths, other], revision=case.package.source_revision)
         assert plan.fleets == ("primary", "secondary")
         assert [argv[1] for argv in calls] == ["status", "doctor"] * request
         assert all(argv[-1] == str(vault) for argv in calls)
@@ -191,7 +192,7 @@ def test_host_plan_probes_shared_vault_once_and_refreshes_next_request(staging_c
 def test_selected_account_plugins_are_frozen_as_plan_input(staging_case):
     account = Path.home() / ".claude" / "settings.json"
     _write(account, json.dumps({"enabledPlugins": {"telegram@claude-plugins-official": True}}))
-    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    plan = config_staging.render_git_configuration([staging_case.paths], revision=staging_case.package.source_revision)
     assert str(account) in plan.inputs
     generated = staging_case.paths.bot_runtime("primary-manager") / ".claude/settings.local.json"
     settings = json.loads(plan.content(_changes(plan)[generated]))
@@ -226,7 +227,7 @@ def test_stage_validates_and_renders_retained_bytes_when_authoring_changes_durin
 
     monkeypatch.setattr(config, "load_fleet", alternate_during_mutable_parse)
     monkeypatch.setattr(config_staging, "validate", observe_validation)
-    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    plan = config_staging.render_git_configuration([staging_case.paths], revision=staging_case.package.source_revision)
     digest = plan.effects["fleet_sources"]["primary"]["fleet"]["sha256"]
     assert plan.blob(digest) == original.encode()
     assert validated_managers == ["primary-manager"]
@@ -244,15 +245,15 @@ def test_stage_refuses_a_bot_declared_to_run_a_cli_with_no_adapter(staging_case,
     assert manifest.read_text().count(anchor) == 1, "the fixture's worker stanza moved"
     manifest.write_text(manifest.read_text().replace(anchor, anchor + f"      {line}\n"))
     with pytest.raises(PlanError, match="invalid fleet configuration: bot 'primary-worker'"):
-        config_staging.stage_configuration([staging_case.paths], staging_case.release)
+        config_staging.render_git_configuration([staging_case.paths], revision=staging_case.package.source_revision)
 
 
 def test_stage_freezes_prefixed_host_ingest_identity(staging_case, tmp_path, monkeypatch):
     override = _write(tmp_path / "host-system.yaml",
                       "host: { unit_prefix: claudlobby-canary, jobs: { plane-daemon: { enroll: true } } }\n")
     monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(override))
-    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
-    host_linux = [(declaration, item) for declaration, item in planned_units(plan, "Linux")
+    plan = config_staging.render_git_configuration([staging_case.paths], revision=staging_case.package.source_revision)
+    host_linux = [(declaration, item) for declaration, item in _units(staging_case, plan, "Linux")
                   if declaration.scope == "host"]
     ingest = [(declaration, item) for declaration, item in host_linux if item["phase"] == "ingest"]
     assert len(ingest) == 1
@@ -270,9 +271,9 @@ def test_staged_fleet_job_declared_dormant_is_not_enrollment_authority(staging_c
     source = source.replace("observability: false", "observability: false\n    timers: true")
     source = source.replace("channels: []", "channels: []\n    jobs:\n      weekly-worker-restart: {enroll: false}")
     manifest.write_text(source)
-    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    plan = config_staging.render_git_configuration([staging_case.paths], revision=staging_case.package.source_revision)
     for platform in ("Linux", "Darwin"):
-        jobs = [item for _declaration, item in planned_units(plan, platform)
+        jobs = [item for _declaration, item in _units(staging_case, plan, platform)
                 if "weekly-worker-restart" in item["source"]]
         assert jobs and all(item["enroll"] is False for item in jobs)
 
@@ -295,22 +296,22 @@ def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_c
                        "groups": {"-10042": {"requireMention": False}},
                        "pending": {"request": {"user": "runtime-user"}}}
     _write(access, json.dumps(existing_access))
-    store = case.root / "state/config-plans"
+    store = case.root / "state/update-work/render"
     before = (_tree(case.root, excluding=store), _tree(Path.home()))
 
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
 
     assert (_tree(case.root, excluding=store), _tree(Path.home())) == before
-    assert plan.directory.parent == store
-    assert read_plan(case.root, plan.plan_id) == plan
+    assert plan.directory == store
+    assert read_rendered(case.root, plan.fingerprint) == plan
     plan.check_fresh()
     changes = _changes(plan)
     assert plan.effects["restart_bots"] == ["primary/primary-manager", "primary/primary-worker"]
     assert plan.effects["reload_supervision"] is True
     # The proposal's enrollment list covers both native representations, not
     # whichever files happen to remain installed on the development host.
-    linux = planned_units(plan, "Linux")
-    darwin = planned_units(plan, "Darwin")
+    linux = _units(case, plan, "Linux")
+    darwin = _units(case, plan, "Darwin")
     assert len([item for _, item in linux if item["scope"] == "bot"]) == 2
     assert len([item for _, item in darwin if item["scope"] == "bot"]) == 2
     assert all(item["phase"] == "bots" for _, item in linux if item["scope"] == "bot")
@@ -318,12 +319,13 @@ def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_c
     assert all(item["phase"] == "producers" for _, item in linux
                if item["scope"] == "fleet")
     with pytest.raises(PlanError, match="current generated unit"):
-        current_declarations(plan, "Linux")  # candidate is not running evidence
+        current_git_declarations(snapshot_from_plan(plan, case.package.installation, plan.revision), "Linux")
     for bot in ("primary-manager", "primary-worker"):
         directory = case.paths.bot_runtime(bot)
         conf = plan.content(changes[directory / "bot.conf"]).decode()
-        assert str(case.cli) in conf and str(case.package.native) in conf
-        assert f"CLAUDLOBBY_RELEASE_ID={case.release.release_id}" in conf
+        assert str(case.cli) in conf and str(case.package.runtime_native) in conf
+        assert f"CLAUDLOBBY_INSTALLATION={case.package.installation.directory}" in conf
+        assert "CLAUDLOBBY_RELEASE_ID" not in conf
         assert str(case.root) in conf and f"runtime/bots/{bot}" in conf
         assert "claudlobby-render-" not in conf
         assert plan.content(changes[directory / "CLAUDE.md"])
@@ -363,7 +365,7 @@ def test_stage_refuses_incomplete_timer_compose_before_replacing_live_tree(
     live = case.paths.runtime_fleet / "timers"
     _write(live / "com.primary.keepalive.timer", "previous generated unit\n")
     before = _tree(live)
-    store = case.root / "state/config-plans"
+    store = case.root / "state/update-work/render"
 
     # A fleet still asks for default timers, but its declared job set was
     # torn. Ordinary generate warns and preserves old files in its own tree;
@@ -371,7 +373,7 @@ def test_stage_refuses_incomplete_timer_compose_before_replacing_live_tree(
     with monkeypatch.context() as patch:
         patch.setattr(config, "_load_system_defaults", lambda: {"defaults": {"jobs": {}}})
         with pytest.raises(PlanError, match="torn declaration"):
-            config_staging.stage_configuration([case.paths], case.release)
+            config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     assert _tree(live) == before and not store.exists()
 
     # Drive the same shared guard's partial-composition branch from the
@@ -387,14 +389,14 @@ def test_stage_refuses_incomplete_timer_compose_before_replacing_live_tree(
     with monkeypatch.context() as patch:
         patch.setattr(composer, "_reconcile_fleet_job_units", shortfall)
         with pytest.raises(PlanError, match="partial composed set"):
-            config_staging.stage_configuration([case.paths], case.release)
+            config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     assert _tree(live) == before and not store.exists()
 
     # An explicit opt-out is a genuine teardown and may replace the timer tree.
     manifest = case.paths.fleet_yaml
     manifest.write_text(manifest.read_text().replace(
         "system_defaults:\n", "system_defaults:\n    timers: false\n", 1))
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     staged = _files(plan, _changes(plan)[live])
     assert "com.primary.keepalive.timer" not in staged
     assert _tree(live) == before
@@ -402,7 +404,7 @@ def test_stage_refuses_incomplete_timer_compose_before_replacing_live_tree(
 
 def test_stage_freezes_overlay_skill_bytes_and_refuses_changed_inputs(staging_case):
     case = staging_case
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     destination = case.paths.bot_runtime("primary-worker") / ".claude/skills"
     change = _changes(plan)[destination]
     frozen = _files(plan, change)
@@ -411,7 +413,7 @@ def test_stage_freezes_overlay_skill_bytes_and_refuses_changed_inputs(staging_ca
 
     source = case.root / "library/skills/stage-skill/scripts/run.sh"
     source.write_text("#!/bin/sh\necho changed\n")
-    assert _files(read_plan(case.root, plan.plan_id), change) == frozen
+    assert _files(read_rendered(case.root, plan.fingerprint), change) == frozen
     assert frozen["stage-skill/scripts/run.sh"] == b"#!/bin/sh\necho original\n"
     assert not destination.exists()
     with pytest.raises(PlanError, match="configuration input changed"):
@@ -430,7 +432,7 @@ def test_each_skill_link_beside_its_directory_resolves_in_a_bot_copy(staging_cas
     manifest = case.paths.fleet_yaml
     manifest.write_text(manifest.read_text().replace(
         "skills: [stage-skill]", f"skills: [{', '.join(skills)}]"))
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     staged = _files(plan, _changes(plan)[case.paths.bot_runtime("primary-worker") / ".claude/skills"])
     checked, outside = [], []
     for name in sorted(staged):
@@ -465,7 +467,7 @@ def test_every_bot_copy_holds_every_shared_partial(staging_case):
     skills = case.root / "library/skills"
     _write(skills / "_stage-steps.md", "Shared stage steps.\n")
     _write(skills / "_telegram-formatting.md", "This fleet's own formatting.\n")
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     changes = _changes(plan)
     for bot in ("primary-worker", "primary-manager"):
         staged = _files(plan, changes[case.paths.bot_runtime(bot) / ".claude/skills"])
@@ -485,7 +487,7 @@ def test_a_staged_partial_keeps_the_mode_of_the_file_it_copies(staging_case):
     shipped = case.package.library / "skills/_telegram-formatting.md"
     want = {"_private-steps.md": 0o600, "_runnable-steps.md": 0o755,
             shipped.name: shipped.stat().st_mode & 0o777}
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     for bot in ("primary-worker", "primary-manager"):
         files = _skills_copy(case, plan, bot).after["files"]
         assert {name: oct(files[name]["mode"]) for name in want} == {
@@ -504,7 +506,7 @@ def test_a_skill_directory_with_an_underscore_name_is_staged_as_a_skill(staging_
     manifest = case.paths.fleet_yaml
     manifest.write_text(manifest.read_text().replace(
         "skills: [stage-skill]", f"skills: [stage-skill, {leaf}]"))
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     staged = _files(plan, _skills_copy(case, plan))
     assert staged[f"{leaf}/SKILL.md"] == text.encode()
     assert leaf not in staged  # no file of that name beside the skills
@@ -518,7 +520,7 @@ def test_a_text_file_beside_the_partials_is_not_staged(staging_case):
     skills = case.root / "library/skills"
     _write(skills / "_stage-steps.md", "Shared stage steps.\n")
     _write(skills / "_notes.txt", "Notes that are not a partial.\n")
-    plan = config_staging.stage_configuration([case.paths], case.release)
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
     for bot in ("primary-worker", "primary-manager"):
         staged = _files(plan, _skills_copy(case, plan, bot))
         assert staged["_stage-steps.md"] == b"Shared stage steps.\n"
@@ -530,13 +532,13 @@ def test_stage_requires_local_coverage_and_includes_explicit_external_fleet(stag
     case = staging_case
     local = _fleet(case.root, case.root / "local/local-team", "local-team", case.package)
     external = _fleet(case.root, tmp_path / "vault/fleets/external-team", "external-team", case.package)
-    store = case.root / "state/config-plans"
+    store = case.root / "state/update-work/render"
     before = (_tree(case.root, excluding=store), _tree(external.fleet_config_dir), _tree(Path.home()))
     with pytest.raises(PlanError, match="omits local fleet declarations"):
-        config_staging.stage_configuration([case.paths, external], case.release)
+        config_staging.render_git_configuration([case.paths, external], revision=case.package.source_revision)
     assert not store.exists()
 
-    plan = config_staging.stage_configuration([external, case.paths, local], case.release)
+    plan = config_staging.render_git_configuration([external, case.paths, local], revision=case.package.source_revision)
 
     assert (_tree(case.root, excluding=store), _tree(external.fleet_config_dir), _tree(Path.home())) == before
     assert plan.fleets == ("external-team", "local-team", "primary")

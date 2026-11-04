@@ -62,7 +62,7 @@ def dispatch(args) -> CommandOutput:
         raise
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected runtime differs from compaction caller",
-                             hint=_runtime_hint(exc.hint)) from exc
+                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid compaction root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

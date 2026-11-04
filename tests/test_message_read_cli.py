@@ -10,7 +10,7 @@ import pytest
 from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
-from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_read_cli import active  # noqa: F401 — active release fixture
 
@@ -62,20 +62,33 @@ def _counts(root):
                 conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
 
 
+def _readers_for_test_process(package, monkeypatch):
+    """Keep native reader imports beside the package pytest actually executes.
+
+    current_runtime supplies the real private Git/config authority; its minimal
+    Python tree is not the interpreter running these in-process CLI tests.
+    """
+    from pathlib import Path
+    from claudlobby import brief
+    from claudlobby.paths import load_lib_module
+
+    native = Path(brief.__file__).resolve().parent / "_runtime_scripts"
+    for name in ("dispatch-overdue.py", "plane-readers.py"):
+        assert (native / name).read_bytes() == (package.runtime_native / name).read_bytes()
+    def doors(paths):
+        assert paths.package == package
+        return load_lib_module(native, "dispatch-overdue.py")
+    monkeypatch.setattr(brief, "load_dispatch_doors", doors)
+
+
 def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatch, capsys):  # noqa: F811
     from claudlobby import brief
-    from claudlobby.activation_identity import read_selected_identity_bindings
-    from claudlobby.activation_state import read_selection
-    from claudlobby.paths import load_lib_module
+    from claudlobby.activation_identity import read_current_identity_bindings
     from claudlobby.report_cursors import decode_cursor
     from claudlobby.report_payload import ReportPayload, encode_report_facts
-    from tests.package_fixtures import source_package
 
     root, host = active
-    # This activation fixture seals only keepalive.sh. Load the installed
-    # source reader through brief's real import seam, as its ACK fixture does.
-    monkeypatch.setattr(brief, "load_dispatch_doors",
-                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    _readers_for_test_process(host.package, monkeypatch)
     _generated(monkeypatch, root, "manager")
     capture = root / "state/plane/capture.json"
     for number, at, privacy, report in (
@@ -97,7 +110,7 @@ def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatc
         assert main(["--root", str(root), "--json", "fleet", "reports", "list", *flags]) == expected
         result = json.loads(capsys.readouterr().out)
         assert result["command"] == "fleet.reports.list" and result["request_id"] is None
-        assert result["release_id"] == host.release.release_id
+        assert result["release_id"] == None
         return result
 
     first = listed("--unacknowledged", "--limit", "1")["data"]
@@ -112,11 +125,10 @@ def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatc
     assert first["next_cursor"] == first["ack_cursor"] and first["ack_available"] is True
     key = root / "state/report-cursor.key"
     assert key.is_file() and stat.S_IMODE(key.stat().st_mode) == 0o600
-    bindings = read_selected_identity_bindings(root, "example", package=host.package)
-    selected = read_selection(root)
+    bindings = read_current_identity_bindings(root, "example", package=host.package)
     identity = {"host_uid": bindings["host_uid"], "fleet_uid": bindings["fleet_uid"],
-                "viewer_uid": first["viewer_uid"], "release_id": host.release.release_id,
-                "activation_id": selected["activation_id"], "plan_id": selected["plan_id"]}
+                "viewer_uid": first["viewer_uid"], "source_revision": host.snapshot["revision"],
+                "config_fingerprint": host.snapshot["fingerprint"]}
     second = listed("--unacknowledged", "--limit", "1", "--cursor", first["next_cursor"])["data"]
     assert [row["message_id"] for row in second["items"]] == [f"msg_{2:032x}"]
     assert second["items"][0]["report"]["state"] == "withheld"
@@ -188,7 +200,7 @@ def test_cross_fleet_participant_capture_and_receipt_proof(active, monkeypatch, 
     before = _counts(root)
     _generated(monkeypatch, root, "worker")
     shown = _call(capsys, root, "show", parent)
-    assert shown["release_id"] == host.release.release_id
+    assert shown["release_id"] == None
     message = shown["data"]["message"]
     assert message["sender"]["alias"] == "bot:other/worker"
     assert message["destination"]["alias"] == "bot:example/worker"
@@ -235,8 +247,9 @@ def test_reply_wait_facade_and_read_only_context_refusal(active, monkeypatch, ca
         patch.setattr(message_queries, "wait_for_reply", lambda _ctx, mid, *, timeout:
                       message_queries.ReplyObservation(mid, None, 8, "timeout", "no direct reply yet"))
         timed = _call(capsys, root, "wait", parent, "--for", "reply", "--timeout", "1", expected=8)
-    assert timed["release_id"] == host.release.release_id
-    assert timed["data"] == {"message_id": parent, "reply": None}
+    assert timed["release_id"] == None
+    assert timed["data"] == {"message_id": parent, "reply": None,
+        "source_revision": host.snapshot["revision"], "config_fingerprint": host.snapshot["fingerprint"]}
     assert timed["error"]["retryable"] is True
     reply = _communication(root, 3, sender="bot:example/worker", recipient="bot:other/worker",
                            reply_to=parent)
@@ -315,12 +328,9 @@ def test_git_report_cursor_binds_revision_and_config_and_legacy_shape_is_unchang
 
 
 def test_git_report_pages_and_ack_bind_same_current_config_and_replay_once(active, monkeypatch, capsys):
-    from contextlib import contextmanager
     from uuid import uuid4
-    from claudlobby import active_config, brief, runtime_admission
-    from claudlobby.paths import load_lib_module
+    from claudlobby import active_config
     from claudlobby.report_payload import ReportPayload, encode_report_facts
-    from tests.package_fixtures import source_package
     from tests.test_task_read_cli import _use_git_current
     root = active[0]
     (root / "state/plane/capture.json").write_text('{"*":"full"}')
@@ -330,16 +340,8 @@ def test_git_report_pages_and_ack_bind_same_current_config_and_replay_once(activ
             msg_id=f"msg_{number:032x}", event_ids=(f"ev_{number * 2:032x}", f"ev_{number * 2 + 1:032x}"),
             occurred_at="2026-10-01T12:00:00Z"), require_commit=True)
     root, package, snapshot = _use_git_current(active, monkeypatch)
+    _readers_for_test_process(package, monkeypatch)
     _generated(monkeypatch, root, "manager")
-    monkeypatch.setattr(brief, "load_dispatch_doors",
-                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
-    @contextmanager
-    def admitted(*args, **kwargs):
-        assert kwargs["expected_release"] is None
-        yield runtime_admission.GitCurrentRuntime(package.installation, package.source_revision,
-                                                  snapshot["fingerprint"], snapshot)
-    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
-    monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", lambda: object())
     def call(*args, expected=0):
         assert main(["--root", str(root), "--json", "fleet", "reports", *args]) == expected
         return json.loads(capsys.readouterr().out)

@@ -10,7 +10,7 @@ from claudlobby import message_operations, operation_context
 from claudlobby.__main__ import main
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold, tmp_path  # noqa: F401 — active fixture dependencies
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — active fixture dependencies
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_write_cli import _call, active  # noqa: F401 — shared private activated fixture
 from tests.test_task_state import (_assignment, _deadline_fact, _read, _task,  # noqa: F401 — reducer rows
@@ -266,8 +266,8 @@ def test_git_recheck_preview_and_uncertain_original_request_are_not_retargeted(a
     request_id = str(uuid4())
     first = _recheck(capsys, root, request_id, expected=5)
     assert first['data']['source_revision'] == snapshot['revision'] and len(calls) == 1
-    from claudlobby.activation_identity import read_selected_identity_bindings
-    fleet_uid = read_selected_identity_bindings(root, 'example', package=package)['fleet_uid']
+    from claudlobby.activation_identity import read_current_identity_bindings
+    fleet_uid = read_current_identity_bindings(root, 'example', package=package)['fleet_uid']
     original = read_request(root, fleet_uid, request_id)
     assert original.route.release_id is None and original.route.config_fingerprint == snapshot['fingerprint']
     again = _recheck(capsys, root, request_id, expected=5)

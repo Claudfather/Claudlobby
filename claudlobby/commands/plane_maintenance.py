@@ -10,8 +10,8 @@ import os
 import re
 import sqlite3
 
-from ..command_result import CommandFailure, CommandOutput
 from ..activation_state import ActivationError
+from ..command_result import CommandFailure, CommandOutput
 from ..context import resolve_paths
 from ..plane.db import connect, connect_ro, db_file
 from ..plane.ids import ensure_host_uid

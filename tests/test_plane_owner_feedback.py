@@ -1,4 +1,4 @@
-"""Owner feedback over private activation/Plane, with a synthetic native receiver.
+"""Owner feedback over private committed Git/Plane, with a synthetic native receiver.
 
 No installed CLI, browser authentication, real bot or native delivery is claimed.
 """
@@ -26,9 +26,7 @@ from claudlobby.request_receipts import ReceiptBusy, ReceiptConflict, RequestSto
 from claudlobby.runtime_admission import ReleaseMismatch
 from claudlobby.task_queries import TaskNotFoundError, TaskQueryError
 from claudlobby.task_state import TaskStateError
-from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
 from tests.conftest import constructed_env
@@ -37,9 +35,9 @@ from tests.conftest import constructed_env
 @pytest.fixture
 def gateway(active, monkeypatch):  # noqa: F811
     root, host = active
-    _human(monkeypatch, host.release)
-    package = replace(source_package(), native=host.release.native_path,
-                      artifact_id=host.release.inputs.artifact_id)
+    _human(monkeypatch, host.installation)
+    package = host.package
+    monkeypatch.delenv("CLAUDLOBBY_INSTALLATION", raising=False)
     ctx = operation_context.resolve_task_mutation_context(
         root=root, fleet="example", operator_alias="human:paired-owner", package=package)
     access = OwnerAccess.initialize(root)
@@ -54,7 +52,9 @@ def gateway(active, monkeypatch):  # noqa: F811
     adapter = OwnerFeedback(root, package=package)
     options = dict(fleet="example", fleet_uid=ctx.fleet_uid, task_id=task.task_id,
         manager_uid=ctx.bots[ctx.context.fleet.manager].uid, request_id=str(uuid4()), expected_grant=grant)
-    selection = dict(expected_assignment_id=None, expected_release_id=host.release.release_id)
+    selection = dict(expected_assignment_id=None, expected_release_id=None,
+                     expected_source_revision=host.snapshot["revision"],
+                     expected_config_fingerprint=host.snapshot["fingerprint"])
     monkeypatch.setattr(operation_context, "_local_operator_alias",
                         lambda: pytest.fail("owner feedback must not use the OS account"))
     return adapter, reader, ctx, options, selection
@@ -130,7 +130,7 @@ def test_feedback_comment_survives_native_whitespace_normalization(gateway, monk
     # Run the shipped sanitizer, not a Python model of its normalization.
     result = subprocess.run(['/bin/bash', '-c',
         'source "$1"; sanitize_tmux_input "$2"', 'feedback-sanitizer',
-        str(source_package().native / 'lib-common.sh'), calls[0][1]],
+        str(gateway[0].package.native / 'lib-common.sh'), calls[0][1]],
         env=constructed_env(), capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.split(' Comment: ', 1)[1]) == authored
@@ -236,7 +236,7 @@ def test_generated_carriers_refuse_submit_and_retained_inspection(gateway, monke
         assert len(calls) == 1
     with sqlite3.connect(db_file(adapter.root)) as conn:
         before = conn.execute("SELECT count(*) FROM communications").fetchone()[0]
-    value = selection["expected_release_id"] if carrier == "CLAUDLOBBY_RELEASE_ID" else "synthetic-carrier"
+    value = "r-" + "0" * 64 if carrier == "CLAUDLOBBY_RELEASE_ID" else "synthetic-carrier"
     monkeypatch.setenv(carrier, "" if empty else value)
     with pytest.raises(AccessDenied, match="generated_context_refused"):
         if operation == "submit":
@@ -547,31 +547,11 @@ def test_feedback_grant_rotation_preserves_message_and_nudge_authority(gateway):
 
 def _git_gateway(gateway, monkeypatch):
     """Use committed Git config with the existing private Plane and identity rows."""
-    from pathlib import Path
-    import sys
-    from claudlobby import active_config, activation_state, context, runtime_admission
-    from claudlobby.config_plan import read_plan
-    from claudlobby.installation import Installation, write_installation, install_launcher
-    from claudlobby.resources import selected_cli
-
+    from claudlobby import active_config
     old, reader, ctx, options, _ = gateway
-    selection = activation_state.read_selection(old.root)
-    plan = read_plan(old.root, selection['plan_id'])
-    retained = activation_state.read_activation(old.root, selection['activation_id']).body['identity_bindings']
-    installation = Installation(old.root.parent / 'git-installation', old.root)
-    write_installation(installation)
-    install_launcher(installation, interpreter=Path(sys.executable).resolve())
-    package = replace(old.package, installation=installation, native=installation.native,
-                      artifact_id='', source_revision='a' * 40)
-    identities = {key: retained[key] for key in ('schema', 'host_uid', 'fleets')}
-    effective = replace(plan, changes=(), effects={**plan.effects, 'units': []})
-    snapshot = active_config.snapshot_from_plan(effective, installation, package.source_revision, identities=identities)
-    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
-    identity = runtime_admission.RuntimeIdentity(installation.cli, installation.native, '', installation, package.source_revision)
-    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: identity)
-    monkeypatch.setattr(context, 'selected_cli', selected_cli)
-    for key in ('CLAUDLOBBY_INSTALLATION', 'CLAUDLOBBY_ROOT', 'CLAUDLOBBY_RELEASE_ID'):
-        monkeypatch.delenv(key, raising=False)
+    package = old.package
+    snapshot = active_config.read_current_config(old.root, installation=package.installation,
+                                                 revision=package.source_revision)
     selected = dict(expected_assignment_id=None, expected_release_id=None,
                     expected_source_revision=snapshot['revision'], expected_config_fingerprint=snapshot['fingerprint'])
     return type(old)(old.root, package=package), reader, ctx, options, selected

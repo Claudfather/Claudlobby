@@ -90,7 +90,7 @@ def ack_reports(ctx, selected: dict, cursor: str, *, request_id: str) -> AckResu
     An existing UUID is reconciled before any new effect. No missing/partial
     proof becomes an empty report set, and no recording outage enters a spool.
     """
-    from .activation_identity import read_selected_identity_bindings
+    from .activation_identity import read_current_identity_bindings
     from .active_config import RuntimeReadStamp, runtime_read_stamp
     from .brief import ack_request, plane_session
     from .plane import PLANE_SCHEMA_VERSION
@@ -122,7 +122,7 @@ def ack_reports(ctx, selected: dict, cursor: str, *, request_id: str) -> AckResu
             raise ValueError
     except (TypeError, ValueError, AttributeError) as exc:
         raise AckError("invalid_argument", "report ACK requires a canonical request UUID") from exc
-    bindings = read_selected_identity_bindings(root, fleet, package=ctx.context.paths.package)
+    bindings = read_current_identity_bindings(root, fleet, package=ctx.context.paths.package)
     if (bindings["host_uid"] != ctx.host_uid or bindings["fleet_uid"] != ctx.fleet_uid
             or bindings["bots"].get(bot) != ctx.caller.uid):
         raise AckError("conflict", "report viewer differs from active identity bindings")

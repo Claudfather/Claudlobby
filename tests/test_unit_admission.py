@@ -1,281 +1,36 @@
-"""Durable generated startup refusal; only harmless private processes run here."""
-
-from dataclasses import replace
-import hashlib
+"""Native renderer invariants on the canonical Git entry; no service enrollment."""
 import os
 from pathlib import Path
 import plistlib
-import selectors
 import shutil
 import signal
 import subprocess
 import sys
-import time
-from types import SimpleNamespace
 
 import pytest
-
-from claudlobby import activation_state as a, runtime_admission as r
-from claudlobby.releases import read_release, release_path, seal_release
-from tests.test_config_plan import proposal
-from tests.test_releases import installed
-from tests.test_runtime_admission import _active, _identity, _starting
-
-
-@pytest.fixture
-def tmp_path(tmp_path_factory):
-    return tmp_path_factory.mktemp("unit")  # bounded AF_UNIX pathname
-
-
-def _environment(release):
-    return {"CLAUDLOBBY_ROOT": str(release.directory.parents[2]),
-            "FLEET_ROOT": str(release.directory.parents[2]),
-            "CLAUDLOBBY_RELEASE_ID": release.release_id,
-            "CLAUDLOBBY_CLI": str(release.cli_path),
-            "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
-            "CLAUDLOBBY_LIBRARY_DIR": str(release.directory / "library"),
-            "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id,
-            "PATH": "/usr/bin:/bin"}
-
-
-def test_interrupted_activation_and_reboot_refuse_before_producer_effect(proposal):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    release = read_release(builder.root, plan.release_id)
-    env, identity = _environment(release), _identity(builder)
-    argv = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
-                            mode="oneshot", argv=["/bin/sh", "-c", "exit 0"])
-    effects = []
-
-    def producer(*args, **kwargs):
-        with pytest.raises(a.ActivationError, match="holds the lock"):
-            with a.locked_activation(builder.root):
-                pytest.fail("one-shot producer lost its lease")
-        effects.append("ran")
-        return SimpleNamespace(returncode=0)
-
-    _active(plan)
-    assert r.run_unit(argv, identity=identity, environment=env, runner=producer) == 0
-    with a.locked_activation(builder.root) as store:
-        from tests.test_activation_state import _prepare
-        _prepare(store, plan, "interrupted")
-    # No coordinator/socket remains, as after process loss or reboot. Selection
-    # still points to the formerly active release; durable interruption wins.
-    with pytest.raises(a.ActivationError, match="unfinished activation interrupted"):
-        r.run_unit(argv, identity=identity, environment=env, runner=producer)
-    with pytest.raises(a.ActivationError, match="environment differs"):
-        r.run_unit(argv, identity=identity, environment={**env, "CLAUDLOBBY_CLI": "/stale/cli"},
-                   runner=producer)
-    assert effects == ["ran"]
-    with a.locked_activation(builder.root):
-        pass  # normal one-shot cleanup and refusal leave no lock behind
-
-
-def test_a_one_shot_learns_when_its_unit_started(proposal):
-    """Its command counts a time limit from the unit's start, the wait for
-    admission included, so it learns that start, scoped to admission's pid."""
-    builder, _, _ = proposal
-    plan = builder.seal()
-    release = read_release(builder.root, plan.release_id)
-    env, identity = _environment(release), _identity(builder)
-    argv = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
-                            mode="oneshot", argv=["/bin/sh", "-c", "exit 0"])
-    stamps = []
-
-    def producer(*args, **kwargs):
-        stamps.append(kwargs["env"][r.UNIT_STARTED_ENV])
-        return SimpleNamespace(returncode=0)
-
-    _active(plan)
-    assert r.run_unit(argv, identity=identity, environment=env, runner=producer) == 0
-    pid, started = stamps[0].split()
-    assert int(pid) == os.getpid() and float(started) <= time.monotonic()
-
-
-def test_due_timer_service_waits_for_its_verified_candidate_then_runs_once(proposal, monkeypatch):
-    import threading
-    from claudlobby.config_units import unit_family
-    from tests.test_activation_state import _advance, _prepare
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    builder, _, _ = proposal
-    release, identity = read_release(builder.root, builder.release_id), _identity(builder)
-    env = _environment(release)
-    argv = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
-                            mode="oneshot", argv=["/bin/sh", "-c", "exit 0"])
-    files = {"claudlobby-maintenance.plist": (plistlib.dumps({
-                 "Label": "claudlobby-maintenance", "WorkingDirectory": str(builder.root),
-                 "EnvironmentVariables": env, "ProgramArguments": list(argv)}), 0o644),
-             "claudlobby-maintenance.service": (b"[Service]\nType=oneshot\n", 0o644),
-             "claudlobby-maintenance.timer": (b"[Timer]\nUnit=claudlobby-maintenance.service\n", 0o644)}
-    destination = builder.root / "runtime/_host/timers"
-    builder.effects["units"] = unit_family(files, destination=destination, scope="host",
-                                           phase="producers", release_id=release.release_id)
-    builder.directory(destination)
-    for name, (content, mode) in files.items():
-        builder.file(destination / name, content, mode=mode)
-    plan = builder.seal()
-    effects, outcomes = [], []
-
-    def producer(*args, **kwargs):
-        effects.append("ran")
-        return SimpleNamespace(returncode=0)
-
-    def tick():
-        try:
-            outcomes.append(r.run_unit(argv, identity=identity, environment=env, runner=producer))
-        except a.ActivationError as exc:
-            outcomes.append(str(exc))
-
-    def resuming(store, activation_id):
-        _advance(store, activation_id, a.STEPS[:a.STEPS.index("selection_switched")])
-        store.begin(activation_id, "selection_switched")
-        store.select(activation_id)
-        _advance(store, activation_id, a.STEPS[a.STEPS.index("selection_switched") + 1:-1])
-        store.begin(activation_id, "producers_resumed")
-
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan)
-        resuming(store, "candidate")
-        waiter = threading.Thread(target=tick)
-        waiter.start()
-        time.sleep(1.5)
-        assert effects == [] and waiter.is_alive()  # pending service: no body, no grant
-        # A producer outside the frozen timer family keeps the immediate handshake.
-        other = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
-                                 mode="oneshot", argv=["/bin/sh", "-c", "exit 1"])
-        with pytest.raises(a.ActivationError, match="authorization unavailable"):
-            r.run_unit(other, identity=identity, environment=env, runner=producer)
-        store.complete("candidate", "producers_resumed", evidence_digest="a" * 64)
-        time.sleep(1)
-        assert effects == []  # committed, but the coordinator still holds EX
-    waiter.join(timeout=10)
-    assert outcomes == [0] and effects == ["ran"]
-
-    # A timeout, or an interrupted next activation, refuses with no body run.
-    with a.locked_activation(builder.root) as store:
-        _prepare(store, plan, "next")
-        resuming(store, "next")
-        monkeypatch.setattr(r, "_SCHEDULED_WAIT", 1.0)
-        tick()
-        monkeypatch.setattr(r, "_SCHEDULED_WAIT", 180.0)
-        waiter = threading.Thread(target=tick)
-        waiter.start()
-        time.sleep(1)
-    waiter.join(timeout=10)  # coordinator lost before completing producers_resumed
-    assert outcomes[1:] == ["scheduled producer was not admitted before its wait ended; no job ran",
-                            "selected release activation is incomplete; recover it before mutations"]
-    assert effects == ["ran"]
-    with a.locked_activation(builder.root) as store:
-        monkeypatch.setattr(sys, "platform", "darwin")  # launchd keeps the existing handshake
-        with pytest.raises(a.ActivationError, match="authorization unavailable"):
-            r.run_unit(argv, identity=identity, environment=env, runner=producer)
-    assert effects == ["ran"]
-
-
-def test_resident_exec_retains_supervised_pid_without_lifetime_shared_lock(proposal, tmp_path):
-    builder, _, _ = proposal
-    plan = builder.seal()
-    _active(plan)
-    release, identity = read_release(builder.root, plan.release_id), _identity(builder)
-    env = _environment(release)
-    argv = r.wrap_unit_argv(env, unit="claudlobby-plane-daemon", phase="ingest", mode="exec",
-                            argv=["/bin/bash", "-c", "printf '%s\\n' $$; read -r finish"])
-    # Explicit fixture identity: exercise real exec/CLOEXEC, not a fake installed
-    # interpreter or native lifecycle script. Installed -I bootstrap is separate.
-    driver = tmp_path / "exec_boundary.py"
-    driver.write_text(
-        "import sys\nfrom pathlib import Path\n"
-        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
-        "from claudlobby import runtime_admission as r\n"
-        f"r.run_unit({argv!r}, environment={env!r}, identity=r.RuntimeIdentity("
-        f"Path({str(identity.cli)!r}), Path({str(identity.native)!r}), {identity.artifact_id!r}))\n"
-    )
-    process = subprocess.Popen([sys.executable, "-B", str(driver)], stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                               start_new_session=True)
-    try:
-        with selectors.DefaultSelector() as ready:
-            ready.register(process.stdout, selectors.EVENT_READ)
-            assert ready.select(timeout=5), "resident exec did not answer within five seconds"
-        assert process.stdout.readline().strip() == str(process.pid)
-        assert process.poll() is None
-        with a.locked_activation(builder.root):
-            pass  # coordinator can now acquire EX to quiesce this tracked PID
-        process.stdin.write("finish\n")
-        process.stdin.flush()
-        assert process.wait(timeout=5) == 0, process.stderr.read()
-    finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.communicate(timeout=5)
-
-
-def test_exact_armed_bot_unit_has_only_its_matching_start_continuation(proposal):
-    builder, _, settings = proposal
-    plan = builder.seal()
-    release, identity = read_release(builder.root, plan.release_id), _identity(builder)
-    env = _environment(release)
-    argv = r.wrap_unit_argv(env, unit="com.example.worker", phase="bots", mode="exec",
-                            argv=[str(release.native_path / "start-bot.sh"), str(settings.parent)])
-    admission = {"kind": "unit-start-v1", "unit": "com.example.worker", "argv": list(argv)}
-    effects = []
-
-    class ExecObserved(Exception):
-        pass
-
-    def start(*_):
-        effects.append("exact start reached exec")
-        raise ExecObserved
-
-    with a.locked_activation(builder.root) as store:
-        _starting(store, plan)
-        producer = {**admission, "unit": "claudlobby-maintenance", "argv": list(
-            r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
-                              mode="oneshot", argv=["/bin/true"]))}
-        with pytest.raises(a.ActivationError, match="matching start step"):
-            with r.activation_start(store, "candidate", unit=producer, identity=identity):
-                pytest.fail("producer was armed before verification")
-        with r.activation_start(store, "candidate", unit=admission, identity=identity):
-            wrong = list(argv)
-            wrong[8] = "com.example.other"
-            with pytest.raises(a.ActivationError, match="does not admit"):
-                r.run_unit(wrong, identity=identity, environment=env, execer=start)
-            with pytest.raises(ExecObserved):
-                r.run_unit(argv, identity=identity, environment=env, execer=start)
-            continuation = r._start_request(builder.root, "start-bot", settings.parent,
-                                             plan.release_id, identity)
-            with pytest.raises(a.ActivationError, match="does not admit"):
-                r._request_start(builder.root, {**continuation, "pid": os.getpid() + 1}, .2)
-            r._request_start(builder.root, {**continuation, "pid": os.getpid()}, .2)
-        with pytest.raises(a.ActivationError, match="authorization unavailable"):
-            r.run_unit(argv, identity=identity, environment=env, execer=start)
-    assert effects == ["exact start reached exec"]
-    assert not (builder.root / "state/activation-start.sock").exists()
+from claudlobby import runtime_admission as r
+from claudlobby.config_plan import PlanError
 
 
 @pytest.mark.parametrize("unit_prefix", ["claudlobby", "canary1747"])
-def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, monkeypatch, tmp_path,
+def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(monkeypatch, tmp_path,
                                                                  record_property, unit_prefix):
     from claudlobby import composer, supervision
     from claudlobby.config import BotConfig, FleetConfig, host_unit_name
     from claudlobby.paths import Paths
     from claudlobby.config_units import unit_family
-    from claudlobby.supervision_inventory import UnitDeclaration
-    from tests.package_fixtures import source_package
+    from claudlobby.context import native_environment
+    from claudlobby.installation import parse_git_unit_argv
+    from tests.package_fixtures import git_package
 
-    root, inputs, selected, _, _ = installed
-    spaced_root = root.with_name("data with spaces")
-    root.rename(spaced_root)  # fixture is not sealed yet; no release relocation
-    directory = release_path(spaced_root, inputs.release_id)
-    (directory / selected.cli).write_text(f"#!{directory / selected.interpreter}\n")
-    release = seal_release(spaced_root, inputs, selected)
-    env = _environment(release)
-    env.pop("PATH")  # native_environment owns identity, renderer adds scheduler PATH
+    root = tmp_path / 'data with spaces'
+    root.mkdir()
+    package = git_package(root)
+    paths = Paths(root, package=package)
+    env = native_environment(paths)
     env["PROBE_LITERAL"] = 'literal $HOME %n \\ "quoted" = value'
     for module in (composer, supervision):
         monkeypatch.setattr(module, "native_environment", lambda _: dict(env))
-    paths = Paths(spaced_root.resolve(), package=replace(source_package(), native=release.native_path))
     bot = BotConfig("worker", "Worker", [])
     fleet = FleetConfig("example", "com.example", "worker", bots={"worker": bot})
     spec = supervision.build_supervision_spec(bot, fleet, paths)
@@ -297,8 +52,7 @@ def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, m
                     for name, phase in r.RESIDENT_UNIT_PHASES.items()}
         phase = "bots" if plist_path.stem == spec.label else resident.get(plist_path.stem, "producers")
         frozen.extend(unit_family(files, destination=destination,
-                                  scope="bot" if phase == "bots" else "host", phase=phase,
-                                  release_id=release.release_id))
+                                  scope="bot" if phase == "bots" else "host", phase=phase))
     # Admission must use the reviewed unit and exact native target, never a
     # later change to this process's host override.
     changed_override = tmp_path / "later-host-system.yaml"
@@ -308,13 +62,13 @@ def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, m
     for metadata in frozen:
         source = Path(metadata["source"])
         content = source.read_bytes()
-        argv = metadata["admission"]["argv"]
-        target = r.parse_unit_argv(argv)
-        declaration = UnitDeclaration(source, metadata["scope"], Path(metadata["working_directory"]),
-                                      metadata["release_id"], tuple(metadata["environment"].items()),
-                                      service=metadata["service"])
-        assert r.validate_unit_admission(release, declaration, metadata, content) == target
         checked.append(source.suffix)
+        if metadata['admission'] is None:
+            continue  # Timers schedule the guarded service; they execute no command.
+        argv = metadata["admission"]["argv"]
+        target = parse_git_unit_argv(argv)
+        assert target.argv[0] == str(package.installation.cli)
+        assert target.unit == source.stem and target.phase == metadata['phase']
         if source.suffix == ".service":
             assert b"ExecStopPost=" not in content  # failed admission has no cleanup write
             if sys.platform.startswith("linux"):
@@ -343,7 +97,9 @@ def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, m
                 record_property("systemd_environment", "not run on this platform; Linux CI required")
             # Hashing the changed payload does not legitimize a bypass.
             bypass = content.replace(r.unit_systemd_command(argv).encode(), b"/bin/true")
-            with pytest.raises(a.ActivationError, match="bypasses"):
-                r.validate_unit_admission(release, declaration,
-                    {**metadata, "sha256": hashlib.sha256(bypass).hexdigest()}, bypass)
+            files = {p.name: (p.read_bytes(), p.stat().st_mode & 0o777)
+                     for p in destination.glob(source.stem + '.*')}
+            files[source.name] = (bypass, metadata['mode'])
+            with pytest.raises(PlanError, match='Git native entry'):
+                unit_family(files, destination=destination, scope=metadata['scope'], phase=metadata['phase'])
     assert sorted(checked) == [".plist"] * 3 + [".service"] * 3 + [".timer"]

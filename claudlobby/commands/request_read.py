@@ -24,7 +24,7 @@ def _lines(view) -> tuple[str, ...]:
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..activation_state import ActivationError
     from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
@@ -46,7 +46,7 @@ def dispatch(args) -> CommandOutput:
         if selected is None:
             raise CommandFailure("conflict", "active request selection is unavailable")
         release_id = selected.release_id
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):

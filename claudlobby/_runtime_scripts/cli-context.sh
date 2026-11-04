@@ -27,7 +27,7 @@ _claudlobby_require_cli() {
 # These markers route an already admitted Python call back into its native
 # implementation. They never replace public admission or native-unit proof.
 _claudlobby_runtime_bound() {
-    [ -n "${CLAUDLOBBY_INSTALLATION:-}" ] || [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]
+    [ -n "${CLAUDLOBBY_INSTALLATION:-}" ]
 }
 
 _claudlobby_require_native() {
@@ -38,10 +38,8 @@ _claudlobby_require_native() {
         return 2
     fi
     case "${CLAUDLOBBY_NATIVE_DIR:-}" in /*) ;; *) return 2 ;; esac
-    if [ -n "${CLAUDLOBBY_INSTALLATION:-}" ]; then
-        case "$CLAUDLOBBY_INSTALLATION" in /*) ;; *) return 2 ;; esac
-        [ -z "${CLAUDLOBBY_RELEASE_ID:-}" ] || return 2
-    fi
+    case "${CLAUDLOBBY_INSTALLATION:-}" in /*) ;; *) return 2 ;; esac
+    [ "${CLAUDLOBBY_RELEASE_ID+x}" != x ] && [ "${CLAUDLOBBY_ARTIFACT_ID+x}" != x ] || return 2
 }
 
 _claudlobby_parse_runtime_scope() {
@@ -56,13 +54,6 @@ _claudlobby_parse_runtime_scope() {
                 printf 'claudlobby: admitted runtime recursion context is missing\n' >&2; return 2;
             }
             shift ;;
-        --selected-release)
-            [ "$#" -ge 2 ] && [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] \
-                && [ "$2" = "$CLAUDLOBBY_RELEASE_ID" ] \
-                && [ -z "${CLAUDLOBBY_INSTALLATION:-}" ] || {
-                printf 'claudlobby: selected release recursion context differs\n' >&2; return 2;
-            }
-            shift 2 ;;
         *) printf 'claudlobby: admitted runtime argument is required\n' >&2; return 2 ;;
     esac
     while [ "$#" -gt 0 ]; do
@@ -107,16 +98,13 @@ _claudlobby_parse_runtime_scope() {
 }
 
 _claudlobby_require_pulse_runtime() {
-    if _claudlobby_runtime_bound; then
-        if { [ "${CLAUDLOBBY_NATIVE_ADMITTED:-}" = 1 ] && [ "${CLAUDLOBBY_PRIVATE_PULSE_RUNTIME:-}" = 1 ]; } \
-                || { [ -z "${CLAUDLOBBY_INSTALLATION:-}" ] && [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] \
-                     && [ "${CLAUDLOBBY_PRIVATE_PULSE_RELEASE:-}" = "$CLAUDLOBBY_RELEASE_ID" ]; }; then
-            _claudlobby_require_native "$1" || return $?
-            [ -n "${2:-}" ] && [ "$2" = "${CLAUDLOBBY_FLEET:-}" ] || return 2
-            return 0
-        fi
-        printf 'fleet-pulse: use claudlobby fleet pulse for the current runtime\n' >&2
-        return 3
+    if _claudlobby_runtime_bound \
+            && [ "${CLAUDLOBBY_NATIVE_ADMITTED:-}" = 1 ] \
+            && [ "${CLAUDLOBBY_PRIVATE_PULSE_RUNTIME:-}" = 1 ]; then
+        _claudlobby_require_native "$1" || return $?
+        [ -n "${2:-}" ] && [ "$2" = "${CLAUDLOBBY_FLEET:-}" ] || return 2
+        return 0
     fi
-    return 0
+    printf 'fleet-pulse: use claudlobby fleet pulse for the current runtime\n' >&2
+    return 3
 }

@@ -1,4 +1,4 @@
-"""Internal gateway against real private activation/Plane owners.
+"""Internal gateway against real committed Git/Plane owners.
 
 Only the native receiver is synthetic. No browser/Tailscale authentication or
 real bot delivery is claimed. Its explicit received event is test data, not a
@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import activation_identity, message_operations, operation_context
+from claudlobby import message_operations, operation_context
 from claudlobby.activation_state import ActivationError
 from claudlobby.command_result import CommandFailure
 from claudlobby.message_payload import MessagePayloadError
@@ -26,9 +26,7 @@ from claudlobby.plane.owner_messages import OwnerMessages, _GENERATED_ENV
 from claudlobby.request_queries import RequestNotFoundError
 from claudlobby.request_receipts import ReceiptConflict, RequestStore
 from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
-from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
 
@@ -36,9 +34,9 @@ from tests.test_message_write_cli import _human
 @pytest.fixture
 def gateway(active, monkeypatch):  # noqa: F811
     root, host = active
-    _human(monkeypatch, host.release)
-    package = replace(source_package(), native=host.release.native_path,
-                      artifact_id=host.release.inputs.artifact_id)
+    _human(monkeypatch, host.installation)
+    monkeypatch.delenv("CLAUDLOBBY_INSTALLATION", raising=False)
+    package = host.package
     ctx = operation_context.resolve_task_mutation_context(
         root=root, fleet="example", operator_alias="human:paired-owner", package=package)
     access = OwnerAccess.initialize(root)
@@ -377,13 +375,13 @@ def test_owner_outcome_persistence_failure_stays_unknown_and_never_resends(gatew
     assert len(calls) == 1
 
 
-def test_pending_activation_blocks_authorized_message(gateway, monkeypatch):
+def test_runtime_exclusion_blocks_authorized_message(gateway, monkeypatch):
     adapter, reader, _, _, options = gateway
     calls = native_receiver(monkeypatch)
-    with (adapter.root / "state/activation-pending.lock").open("a") as marker:
+    with (adapter.root / "state/runtime-use.lock").open("a") as marker:
         fcntl.flock(marker, fcntl.LOCK_EX)
-        with pytest.raises(ActivationError, match="activation is running"):
-            adapter.send(reader, **options, text="Wait for activation")
+        with pytest.raises(ActivationError, match="runtime is in use"):
+            adapter.send(reader, **options, text="Wait for update")
     assert calls == []
 
 
@@ -439,7 +437,7 @@ def test_send_admits_the_pinned_package_before_transport(gateway, monkeypatch, f
     calls = native_receiver(monkeypatch)
     changed = (adapter.package.native / "foreign") if field == "native" else "foreign-artifact"
     adapter.package = replace(adapter.package, **{field: changed})
-    with pytest.raises(ActivationError):
+    with pytest.raises(AccessDenied, match="generated_context_refused"):
         adapter.send(reader, **options, text="Must not use unadmitted scripts")
     assert calls == []
     assert not list((adapter.root / "state/requests").glob("*/*.json"))
@@ -469,76 +467,105 @@ def test_shared_delivery_refuses_conflicting_caller_before_any_effect(gateway, m
 
 
 @pytest.fixture
-def native_owner_gateway(cold, monkeypatch):
-    """Existing activation owner and native observations, with one owner unit."""
+def native_owner_gateway(cold, monkeypatch, *, with_template=False):
+    """Real committed units/admission, with synthetic native manager observations."""
     from copy import deepcopy
     from pathlib import Path
     import plistlib
-    from claudlobby import activation, runtime_admission, supervision_inventory
-    from claudlobby.config_plan import ConfigPlanBuilder
-    from claudlobby.config_units import unit_family
-    from tests.test_activation import NativeHost
+    import shlex
+    import subprocess
+    from claudlobby import active_config, runtime_admission, supervision_inventory
+    from claudlobby.config_units import current_git_declarations, template_units, unit_family
+    from tests.test_supervision_inventory import Observations
 
-    root, release, plan, old_host = cold
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
-                                plan.fleets, effects=deepcopy(plan.effects))
-    builder.inputs = deepcopy(plan.inputs)
-    builder.changes = {change.target: change for change in plan.changes}
-    builder.contents = {path.name: plan.blob(path.name)
-                        for path in (plan.directory / 'files').iterdir()}
-    env = dict(next(iter(old_host.by_name.values()))[0].environment)
-    env.pop('FLEET_ROOT', None)
+    root, installation, _, host = cold
+    snapshot = deepcopy(host.snapshot)
+    env = {'CLAUDLOBBY_ROOT': str(root), 'CLAUDLOBBY_INSTALLATION': str(installation.directory),
+           'CLAUDLOBBY_CLI': str(installation.cli), 'CLAUDLOBBY_NATIVE_DIR': str(installation.native),
+           'CLAUDLOBBY_LIBRARY_DIR': str(installation.source / 'library')}
     stem = 'example-private-owner'
     socket_directory = root / 'private-owner'
     socket_directory.mkdir(mode=0o700)
     destination = root / 'runtime/_host/timers'
-    argv = runtime_admission.wrap_unit_argv(env, unit=stem, phase='producers', mode='exec',
-        argv=[str(release.cli_path), '--root', str(root), 'host', 'owner', 'serve',
-              '--origin', 'https://host.example.test', '--tailscale', '/example/tailscale',
-              '--socket', str(socket_directory / 'owner.sock')])
-    files = {stem + '.plist': (plistlib.dumps({'Label': stem, 'WorkingDirectory': str(root),
-        'EnvironmentVariables': env, 'ProgramArguments': list(argv)}), 0o644),
-        stem + '.service': ((f'[Service]\nWorkingDirectory={root}\n'
-            f'ExecStart={runtime_admission.unit_systemd_command(argv)}\n'
-            '[Install]\nWantedBy=default.target\n').encode(), 0o644)}
-    builder.effects['units'].extend(unit_family(files, destination=destination,
-        scope='host', phase='producers', release_id=release.release_id))
-    for name, (content, mode) in files.items():
-        builder.file(destination / name, content, mode=mode)
-    plan = builder.seal()
-    host = NativeHost(root, release, plan, old_host.directory, old_host.package)
-    monkeypatch.setattr(activation, '_probe', host.probe)
-    monkeypatch.setattr(activation_identity, '_registry_scan', host.registry_scan)
-    monkeypatch.setattr(activation_identity, 'registry_scan_refusal', lambda _contexts: None)
-    activation.bootstrap_activation(root, 'cold', plan.plan_id, host.directory, adapter=host)
+    destination.mkdir(parents=True, exist_ok=True)
+    def family(label, environment, command, scope, fleet=None):
+        output = destination if scope == 'host' else root / 'runtime/fleet/timers'
+        output.mkdir(parents=True, exist_ok=True)
+        argv = runtime_admission.wrap_unit_argv(environment, unit=label, phase='producers',
+                                               mode='exec', argv=command)
+        files = {label + '.plist': (plistlib.dumps({'Label': label, 'WorkingDirectory': str(root),
+            'EnvironmentVariables': environment, 'ProgramArguments': list(argv)}), 0o644),
+            label + '.service': ((f'[Service]\nWorkingDirectory={root}\n' +
+                ''.join(runtime_admission.unit_systemd_environment(k, v) + '\n' for k, v in environment.items()) +
+                f'ExecStart={runtime_admission.unit_systemd_command(argv)}\n'
+                '[Install]\nWantedBy=default.target\n').encode(), 0o644)}
+        rows = unit_family(files, destination=output, scope=scope, phase='producers', fleet=fleet)
+        for name, (content, mode) in files.items():
+            path = output / name
+            path.write_bytes(content)
+            path.chmod(mode)
+        snapshot['units'].extend(rows)
+        return rows
+    family(stem, env, [str(installation.cli), '--root', str(root), 'host', 'owner', 'serve',
+        '--origin', 'https://host.example.test', '--tailscale', '/example/tailscale',
+        '--socket', str(socket_directory / 'owner.sock')], 'host')
+    if with_template:
+        fleet_env = {**env, 'FLEET_ROOT': str(root)}
+        jobs = family('com.example.fixture-job', fleet_env,
+            [str(installation.native / 'creds-check.sh')], 'fleet', 'example')
+        name = 'com.example.job-failed@.service'
+        content = (f'[Service]\nWorkingDirectory={root}\n' +
+            ''.join(runtime_admission.unit_systemd_environment(k, v) + '\n' for k, v in fleet_env.items()) +
+            'ExecStart=/bin/false\n').encode()
+        output = root / 'runtime/fleet/timers'
+        (output / name).write_bytes(content)
+        (output / name).chmod(0o644)
+        snapshot['units'].extend(template_units({name: (content, 0o644)}, jobs,
+            destination=output, scope='fleet', fleet='example'))
+    old_sources = {item['source'] for item in host.snapshot['units']}
+    snapshot['owned_outputs'].extend({'target': item['source'],
+        'state': {'kind': 'file', 'mode': item['mode'], 'sha256': item['sha256']}}
+        for item in snapshot['units'] if item['source'] not in old_sources)
+    snapshot['fingerprint'] = active_config._fingerprint(snapshot)
+    active_config.publish_current_config(snapshot, installation=installation,
+                                         expected_previous=host.snapshot['fingerprint'])
+    host.snapshot = snapshot
     result = gateway.__wrapped__((root, host), monkeypatch)
-    # Extend the existing manager seam with its real shared ownership reader.
-    import importlib.util
-    import subprocess
-    spec = importlib.util.spec_from_file_location('owner_action_unit',
-                                                source_package().native / 'bot-unit-owner.py')
-    ownership = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ownership)
+
+    # Reuse recorded manager shapes and the canonical native ownership reader;
+    # collect_enrollment and runtime admission are never substituted.
+    observations_dir = root.parent / 'owner-observations'
+    observations_dir.mkdir()
+    obs = Observations(observations_dir)
+    obs.root, obs.installed, obs.package = root, host.directory, host.package
+    obs.search_dirs = [host.directory]
     owner_installed = host.directory / (stem + '.service')
-    assert owner_installed != destination / (stem + '.service')
-    original_call = host.call
-    def call(function, *args, **kwargs):
-        if function == 'svc_bot_unit_owned_by':
-            host.calls.append((function, tuple(map(str, args))))
-            return subprocess.CompletedProcess([], ownership.main(*map(str, args)), '', '')
-        if function == 'svc_activation_assert_external' and Path(args[0]) != owner_installed:
-            # The native manager's loaded fragment is the installed copy;
-            # matching generated bytes do not make its source that fragment.
-            host.calls.append((function, tuple(map(str, args))))
-            return subprocess.CompletedProcess([], 3, '', 'unit state/domain unavailable')
-        return original_call(function, *args, **kwargs)
-    monkeypatch.setattr(host, 'call', call)
-    monkeypatch.setattr(supervision_inventory, 'Adapter', lambda *a, **k: host)
+    owner_installed.write_bytes((destination / owner_installed.name).read_bytes())
+    owner_installed.chmod(0o644)
+    obs.properties[owner_installed.name] = {
+        'Id': owner_installed.name, 'LoadState': 'loaded', 'ActiveState': 'active',
+        'UnitFileState': 'enabled', 'FragmentPath': str(owner_installed),
+        'WorkingDirectory': str(root), 'Environment': shlex.join(f'{k}={v}' for k,v in env.items()),
+        'ExecStart': 'owner', 'DropInPaths': '', 'NeedDaemonReload': 'no',
+        'Triggers': '', 'TriggeredBy': ''}
+    native = supervision_inventory.Adapter(host.package)
+    native.directory, native.package = host.directory, host.package
+    native.external_result, native.calls = 1, []
+    metadata = {item['source']: item for item in snapshot['units']}
+    native.by_name = {item.source.name: (item, metadata[str(item.source)])
+                      for item in current_git_declarations(snapshot, 'Linux')}
+    def runner(command, **kwargs):
+        function, args = command[5], command[6:]
+        native.calls.append((function, tuple(args)))
+        if function == 'svc_activation_assert_external':
+            rc = native.external_result if Path(args[0]) == owner_installed else 3
+            return subprocess.CompletedProcess(command, rc, '', '')
+        return obs.runner(command, **kwargs)
+    native.runner = runner
+    monkeypatch.setattr(supervision_inventory, 'Adapter', lambda *a, **k: native)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    host.external_result = 1  # Existing ancestry door: proven member, not external.
-    host.calls.clear()
-    return result, host, stem
+    return result, native, stem
 
 
 def test_native_owner_service_can_send_once_with_exact_grant(native_owner_gateway, monkeypatch):
@@ -564,27 +591,18 @@ def test_native_owner_service_can_send_once_with_exact_grant(native_owner_gatewa
 
 
 @pytest.fixture
-def native_owner_gateway_with_template(installed, monkeypatch, tmp_path):  # noqa: F811
-    """The same owner unit in a selected plan that also holds the fleet's failure
-    template, a unit with no admission (#2522)."""
-    from tests.test_activation import _cold_case
-
-    return native_owner_gateway.__wrapped__(
-        _cold_case(installed, monkeypatch, tmp_path, fleet_job=True), monkeypatch)
+def native_owner_gateway_with_template(cold, monkeypatch):
+    return native_owner_gateway.__wrapped__(cold, monkeypatch, with_template=True)
 
 
-def test_native_owner_service_acts_beside_a_failure_template_in_the_selected_plan(
+def test_native_owner_service_acts_beside_a_failure_template_in_committed_config(
         native_owner_gateway_with_template, monkeypatch):
-    """#2522: the owner check walks every planned unit, and the failure template has
-    no admission to read, so it is passed over and the owner service still acts."""
-    from claudlobby.activation_state import read_selection
-    from claudlobby.config_plan import read_plan
-    from claudlobby.config_units import planned_units
-
+    """#2522: the committed failure template has no admission or owner authority."""
+    from claudlobby.active_config import read_current_config
     (adapter, reader, owner, ctx, options), host, stem = native_owner_gateway_with_template
-    plan = read_plan(adapter.root, read_selection(adapter.root)['plan_id'])
-    assert [item['admission'] for declaration, item in planned_units(plan, 'Linux')
-            if declaration.source.name == 'com.example.job-failed@.service'] == [None]
+    snapshot = read_current_config(adapter.root, installation=adapter.package.installation)
+    assert [item['admission'] for item in snapshot['units']
+            if item['source'].endswith('/com.example.job-failed@.service')] == [None]
     calls = native_receiver(monkeypatch)
     observation = adapter.send(reader, text='native owner message', **options)
     assert observation.data['delivery'] == 'received'
@@ -633,76 +651,17 @@ def test_native_owner_process_proof_fails_closed(native_owner_gateway, monkeypat
 
 @pytest.mark.parametrize('defect', [None, 'external', 'unknown', 'file', 'selector'])
 def test_git_owner_service_uses_committed_native_binding_and_keeps_process_gate(
-        tmp_path, monkeypatch, defect):
-    """Probe the service boundary only; it grants no owner/workspace capability."""
-    from contextlib import contextmanager
-    from pathlib import Path
-    from types import SimpleNamespace
-    import plistlib
-    import subprocess
-    from claudlobby import runtime_admission, supervision_inventory
-    from claudlobby.config_units import unit_family
-    from claudlobby.installation import Installation
+        native_owner_gateway, monkeypatch, defect):
+    """Process admission grants no workspace capability and lasts one invocation."""
+    from claudlobby import supervision_inventory
     from claudlobby.plane import owner_service
-
-    root = tmp_path / 'data'
-    root.mkdir()
-    installation = Installation(tmp_path / 'installation', root)
-    package = replace(source_package(), installation=installation, native=installation.native,
-                      artifact_id='', source_revision='a' * 40)
-    identity = runtime_admission.RuntimeIdentity(installation.cli, installation.native, '', installation, 'a' * 40)
-    env = {'CLAUDLOBBY_ROOT': str(root), 'CLAUDLOBBY_INSTALLATION': str(installation.directory),
-           'CLAUDLOBBY_CLI': str(installation.cli), 'CLAUDLOBBY_NATIVE_DIR': str(installation.native),
-           'CLAUDLOBBY_LIBRARY_DIR': str(installation.source / 'library')}
-    stem = 'example-private-owner'
-    argv = runtime_admission.wrap_unit_argv(env, unit=stem, phase='producers', mode='exec',
-        argv=[str(installation.cli), '--root', str(root), 'host', 'owner', 'serve',
-              '--socket', str(root / 'owner.sock')])
-    files = {stem + '.plist': (plistlib.dumps({'Label': stem, 'WorkingDirectory': str(root),
-        'EnvironmentVariables': env, 'ProgramArguments': list(argv)}), 0o644),
-        stem + '.service': ((f'[Service]\nWorkingDirectory={root}\n'
-            f'ExecStart={runtime_admission.unit_systemd_command(argv)}\n'
-            + ''.join(runtime_admission.unit_systemd_environment(k, v) + '\n' for k, v in env.items())).encode(), 0o644)}
-    generated = root / 'runtime/_host/timers'
-    generated.mkdir(parents=True)
-    rows = unit_family(files, destination=generated, scope='host', phase='producers', release_id='')
-    for name, (content, mode) in files.items():
-        (generated / name).write_bytes(content)
-        (generated / name).chmod(mode)
-    installed = root / (stem + '.service')
-    installed.write_bytes(files[installed.name][0]); installed.chmod(0o644)
-    snapshot = {'installation': str(installation.directory), 'data_root': str(root), 'units': rows}
-    current = runtime_admission.GitCurrentRuntime(installation, 'a' * 40, 'b' * 64, snapshot)
-    @contextmanager
-    def admitted(*args, **kwargs):
-        assert kwargs['identity'] == identity and kwargs['expected_release'] is None
-        yield current
-    monkeypatch.setattr(runtime_admission, 'mutation_admission', admitted)
-    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: identity)
-    calls = []
-    class Native:
-        def read(self, function):
-            assert function == 'svc_inventory_catalog'
-            return f'manager\tLinux\ndirectory\t{root}\n'
-        def call(self, function, *args, **kwargs):
-            calls.append((function, args))
-            assert function == 'svc_activation_assert_external' and args[0] == str(installed)
-            return subprocess.CompletedProcess([], 0 if defect == 'external' else 3 if defect == 'unknown' else 1, '', '')
-    native = Native()
-    monkeypatch.setattr(supervision_inventory, 'Adapter', lambda *_: native)
-    def inventory(_root, declarations, **kwargs):
-        assert len(declarations) == 1 and declarations[0].source.name == installed.name
-        unit = SimpleNamespace(generated=supervision_inventory.FileSnapshot.read(declarations[0].source),
-            installed=(supervision_inventory.FileSnapshot.read(installed),), target=stem + '.service')
-        return SimpleNamespace(require_complete=lambda: None, units=(unit,))
-    monkeypatch.setattr(supervision_inventory, 'collect_enrollment', inventory)
-    for key in (*owner_service._ACTION_SELECTORS, 'CLAUDLOBBY_RELEASE_ID', 'CLAUDLOBBY_ARTIFACT_ID'):
-        monkeypatch.delenv(key, raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    if defect == 'file':
-        (generated / installed.name).write_text('drifted native binding\n')
-    if defect == 'selector':
+    (adapter, _, _, _, _), host, stem = native_owner_gateway
+    declaration, _ = host.by_name[stem + '.service']
+    if defect in {'external', 'unknown'}:
+        host.external_result = 0 if defect == 'external' else 3
+    elif defect == 'file':
+        declaration.source.write_text('drifted native binding\n')
+    elif defect == 'selector':
         monkeypatch.setenv('BOT_ID', '')
     class Probe:
         @owner_service.admitted_action
@@ -710,50 +669,28 @@ def test_git_owner_service_uses_committed_native_binding_and_keeps_process_gate(
             owner_service.check_action_process(self.root, self.package)
             return 'service-bound'
     probe = Probe()
-    probe.root, probe.package = root, package
+    probe.root, probe.package = adapter.root, adapter.package
     if defect is None:
         assert probe.authorize() == 'service-bound'
-        declaration = SimpleNamespace(source=generated / installed.name)
-        inventory_view = SimpleNamespace(units=(SimpleNamespace(declaration=declaration, installed=(installed,)),))
-        assert owner_service.managed_listeners(snapshot, inventory_view) == {(stem, root / 'owner.sock')}
+        inventory = supervision_inventory.collect_enrollment(adapter.root, (declaration,), adapter=host,
+            only_names=frozenset({declaration.source.name})).require_complete()
+        from claudlobby.active_config import read_current_config
+        snapshot = read_current_config(adapter.root, installation=adapter.package.installation)
+        assert owner_service.managed_listeners(snapshot, inventory) == {
+            (stem, adapter.root / 'private-owner/owner.sock')}
     else:
         with pytest.raises(AccessDenied, match='generated_context_refused'):
             probe.authorize()
-    # An admission proof is scoped to one invocation, never the server instance.
     with pytest.raises(AccessDenied, match='generated_context_refused'):
-        owner_service.check_action_process(root, package)
+        owner_service.check_action_process(adapter.root, adapter.package)
 
 
 @pytest.fixture
-def git_gateway(gateway, monkeypatch):
-    from pathlib import Path
-    import sys
-    from claudlobby import active_config, activation_state, context, runtime_admission
-    from claudlobby.config_plan import read_plan
-    from claudlobby.installation import Installation, write_installation, install_launcher
-    from claudlobby.resources import selected_cli
-
-    old, reader, owner, ctx, options = gateway
-    selection = activation_state.read_selection(old.root)
-    plan = read_plan(old.root, selection['plan_id'])
-    retained = activation_state.read_activation(old.root, selection['activation_id']).body['identity_bindings']
-    installation = Installation(old.root.parent / 'git-installation', old.root)
-    write_installation(installation)
-    install_launcher(installation, interpreter=Path(sys.executable).resolve())
-    package = replace(old.package, installation=installation, native=installation.native,
-                      artifact_id='', source_revision='a' * 40)
-    identities = {key: retained[key] for key in ('schema', 'host_uid', 'fleets')}
-    effective = replace(plan, changes=(), effects={**plan.effects, 'units': []})
-    snapshot = active_config.snapshot_from_plan(effective, installation, package.source_revision, identities=identities)
-    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
-    identity = runtime_admission.RuntimeIdentity(installation.cli, installation.native, '', installation, package.source_revision)
-    monkeypatch.setattr(runtime_admission.RuntimeIdentity, 'current', lambda: identity)
-    monkeypatch.setattr(context, 'selected_cli', selected_cli)
-    # This is foreground local admission, not a fabricated native owner process.
-    # The existing native-owner tests separately exercise ancestry/enrollment.
-    for key in ('CLAUDLOBBY_INSTALLATION', 'CLAUDLOBBY_ROOT', 'CLAUDLOBBY_RELEASE_ID'):
-        monkeypatch.delenv(key, raising=False)
-    return OwnerMessages(old.root, package=package), reader, owner, ctx, options, snapshot
+def git_gateway(gateway):
+    from claudlobby.active_config import read_current_config
+    adapter, reader, owner, ctx, options = gateway
+    snapshot = read_current_config(adapter.root, installation=adapter.package.installation)
+    return adapter, reader, owner, ctx, options, snapshot
 
 
 @pytest.mark.parametrize('received', [True, False])
@@ -790,3 +727,21 @@ def test_git_owner_message_uses_canonical_request_and_does_not_resend_unknown(gi
     with pytest.raises(ReceiptConflict):
         adapter.send(reader, **options, text='Changed synthetic request')
     assert len(calls) == 1
+
+    # A later committed configuration cannot relabel this original receipt or
+    # turn an unknown submission into permission to send again.
+    from copy import deepcopy
+    from claudlobby import active_config
+    updated = deepcopy(snapshot)
+    updated['fleets']['example']['fleet'] += '\n# later approved configuration\n'
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=adapter.package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    historical = adapter.inspect(reader, **options)
+    assert historical.request.route.config_fingerprint == snapshot['fingerprint']
+    assert historical.request.route.config_fingerprint != updated['fingerprint']
+    assert len(calls) == 1
+    if not received:
+        with pytest.raises(CommandFailure):
+            send()
+        assert len(calls) == 1

@@ -77,15 +77,12 @@ def _offline(args) -> CommandOutput:
     return CommandOutput(data, lines=(f"{verdict} (unknown={data['unknown_count']})", *findings))
 
 
-def _runtime_hint(sealed_hint):
-    from ..context import get_resources
-
-    return ("inspect the current configuration and claudlobby host update status"
-            if get_resources().installation is not None else sealed_hint)
+def _runtime_hint():
+    return "inspect the current configuration and claudlobby host update status"
 
 
 def _scope(args):
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
     from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
@@ -107,25 +104,19 @@ def _scope(args):
     if destination.paths.seed:
         raise CommandFailure("conflict", "seed configuration has no active check-in selection")
     root = shlex.quote(str(destination.paths.root))
-    restage = (f"inspect claudlobby --root {root} host update status and its current configuration"
-               if destination.paths.package.installation is not None else
-               f"run claudlobby --root {root} config plan --release RELEASE_ID "
-               "(host releases lists the IDs), then host activate the reviewed plan")
+    restage = f"inspect claudlobby --root {root} host update status and its current configuration"
     selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
     if selected is None:
         raise CommandFailure("conflict", "active check-in selection is unavailable",
-                             hint=(restage if destination.paths.package.installation is not None else
-                                   f"inspect claudlobby --root {root} host releases; pass this "
-                                   f"host's --root, or {restage}"))
-    bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+                             hint=restage)
+    bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                package=destination.paths.package)
     selected.check(destination.paths.root, package=destination.paths.package,
                    message='active check-in selection changed during read')
     if (bindings["manager"] != destination.fleet.manager
             or set(bindings["bots"]) != set(destination.fleet.bots)):
         raise CommandFailure("conflict", "active check-in scope differs from frozen bindings",
-                             hint=(("current fleet bots or manager differ; " if selected.kind == "git" else
-                                    "fleet bots or manager changed after activation; ") + restage))
+                             hint="current fleet bots or manager differ; " + restage)
     return destination, origin, selected, bindings
 
 
@@ -306,7 +297,7 @@ def dispatch(args) -> CommandOutput:
                              data={**(exc.data or {}), **data}) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=_runtime_hint(exc.hint)) from exc
+                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid check-in root or fleet selector",
                              hint=str(exc)) from exc
@@ -316,13 +307,13 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError, BotNotFoundError) as exc:
         # Authored scope causes name selectors and identities, not config values.
         raise CommandFailure("conflict", "active check-in scope is incomplete",
-                             hint=_runtime_hint(f"{exc}; inspect claudlobby host releases")) from exc
+                             hint=_runtime_hint()) from exc
     except TaskStateError as exc:
         raise CommandFailure("conflict", "check-in history cannot be interpreted safely",
                              hint="inspect claudlobby host doctor") from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched",
-                             hint=_runtime_hint("inspect claudlobby host releases")) from exc
+                             hint=_runtime_hint()) from exc
     except (PendingMigrationError, DowngradeError) as exc:
         raise CommandFailure("unavailable", "Plane schema is not current for this CLI") from exc
     except ReceiptError as exc:

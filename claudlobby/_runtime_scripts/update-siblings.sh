@@ -83,7 +83,11 @@ install_error_trap ""
 
 # shellcheck source=cli-context.sh
 . "$LIB_DIR/cli-context.sh"
-if [ "${1:-}" = "--admitted-runtime" ] || [ "${1:-}" = "--selected-release" ]; then
+if [ "${1:-}" = "--selected-release" ]; then
+    echo "legacy release execution is retired; use the managed Git CLI" >&2
+    exit 2
+fi
+if [ "${1:-}" = "--admitted-runtime" ]; then
     _claudlobby_parse_runtime_scope siblings "$LIB_DIR" "$@" || exit $?
     set --
     if [ "$_CL_RUNTIME_DRY_RUN" -eq 1 ]; then set -- --dry-run; fi

@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 
 from .active_config import resolve_active_context, runtime_read_stamp
-from .activation_identity import read_selected_identity_bindings
+from .activation_identity import read_current_identity_bindings
 from .activation_state import ActivationError
 from .context import Context
 from .message_transport import TransportDestination
@@ -138,7 +138,7 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
     contexts = {context.fleet.name: context for context in (origin, selected, peer) if context is not None}
     bindings = {}
     for name, context in contexts.items():
-        item = read_selected_identity_bindings(context.paths.root, name,
+        item = read_current_identity_bindings(context.paths.root, name,
                                                package=context.paths.package)
         if item["manager"] != context.fleet.manager or set(item["bots"]) != set(context.fleet.bots):
             raise MessageContextError(f"active identity bindings differ from frozen fleet {name}")
@@ -218,7 +218,7 @@ def resolve_human_reply_route(sender: TaskActor, *, root: Path | None = None,
             or not re.fullmatch(r"human:[^\s:/]+", sender.alias)):
         raise MessageContextError("reply recipient is not a recorded human sender")
     selection = _current_selection(selected.paths)
-    ids = read_selected_identity_bindings(selected.paths.root, selected.fleet.name,
+    ids = read_current_identity_bindings(selected.paths.root, selected.fleet.name,
                                           package=selected.paths.package)
     if (ids["manager"] != selected.fleet.manager or set(ids["bots"]) != set(selected.fleet.bots)
             or origin.bot_id not in ids["bots"]):

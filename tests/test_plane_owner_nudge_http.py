@@ -17,8 +17,7 @@ from claudlobby.plane.owner_nudges import OwnerNudges
 from claudlobby.request_queries import read_request
 from claudlobby.request_receipts import RequestStore
 from tests.test_plane_owner_nudges import gateway, receiver  # noqa: F401
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_owner_browser import ORIGIN, _post
 from tests.test_plane_two_fleets import _Sampler
@@ -185,15 +184,17 @@ def test_original_receipt_uses_retained_assignment_and_release(nudge_http, monke
     assert post(client, 'send', {**row, 'body':'Check selected work'}).json()['status'] == 'delivered'
     assigned = task_operations.assign(ctx, str(uuid4()), options['task_id'], bot_id='worker')
     original = app.actions.nudges._context
-    def projected_current_release(*args):
+    def projected_current_runtime(*args):
         capability, grant = original(*args)
-        return {**capability, 'release_id':'r-'+'1'*64}, grant
-    monkeypatch.setattr(app.actions.nudges, '_context', projected_current_release)
+        return {**capability, 'source_revision':'1'*40}, grant
+    monkeypatch.setattr(app.actions.nudges, '_context', projected_current_runtime)
     # Current capability projection moves; original receipt fields never rebind.
     assert post(client, 'receipt', row).json() == {**row, 'status':'delivered'}
     for target in ({**row['target'], 'assignment_id':assigned.assignment_id},
-                   {**row['target'], 'release_id':'r-'+'1'*64}):
+                   {**row['target'], 'source_revision':'1'*40}):
         assert post(client, 'receipt', {**row, 'target':target}).json()['status'] == 'unknown'
+    mixed = {**row, 'target': {**row['target'], 'release_id': 'r-' + '1' * 64}}
+    assert post(client, 'receipt', mixed).status_code == 403
     assert len(calls) == 1
 
 

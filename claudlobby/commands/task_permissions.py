@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 
+from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
 from ..application_permissions import decide_and_notify_permission, inspect_permission_notification
 
@@ -19,8 +20,7 @@ def _scope(path):
 
 
 def dispatch(args):
-    from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import ActivationError
+    from ..activation_identity import read_current_identity_bindings
     from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..operation_context import (
@@ -29,7 +29,6 @@ def dispatch(args):
     from ..plane.db import connect_ro, db_file
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError, require_current_schema
-    from ..releases import ReleaseError
     from ..request_receipts import ReceiptError
     from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance)
@@ -58,7 +57,7 @@ def dispatch(args):
                 raise CommandFailure("conflict", "no active host selection")
             release_id = selection.release_id
             provenance = selection.provenance
-            bindings = read_selected_identity_bindings(root, selected.fleet.name, package=selected.paths.package)
+            bindings = read_current_identity_bindings(root, selected.fleet.name, package=selected.paths.package)
             with closing(connect_ro(db_file(root))) as conn:
                 conn.execute("BEGIN")
                 require_current_schema(conn)
@@ -85,7 +84,7 @@ def dispatch(args):
                         expected = release_id = runtime_release_id(release)
                         preview_stamp = runtime_read_stamp(root, package=selected.paths.package)
                         provenance = runtime_provenance(release)
-                        bindings = read_selected_identity_bindings(root, selected.fleet.name,
+                        bindings = read_current_identity_bindings(root, selected.fleet.name,
                                                                    package=selected.paths.package)
                         with closing(connect_ro(db_file(root))) as conn:
                             conn.execute("BEGIN")
@@ -145,10 +144,8 @@ def dispatch(args):
         raise CommandFailure("release_mismatch", str(exc), release_id=release_id) from exc
     except TaskQueryError as exc:
         raise CommandFailure(exc.code, str(exc), release_id=release_id) from exc
-    except (ReceiptError, TaskStateError, ActivationError, PlanError, OperationContextError) as exc:
+    except (ActivationError, ReceiptError, TaskStateError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", str(exc), release_id=release_id) from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", str(exc), release_id=release_id) from exc
     except (OSError, sqlite3.Error, PendingMigrationError, DowngradeError) as exc:
         raise CommandFailure("unavailable", "permission storage or active identity is unavailable",
                              release_id=release_id) from exc

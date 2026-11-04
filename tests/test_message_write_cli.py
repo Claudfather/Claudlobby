@@ -16,33 +16,26 @@ from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
 from claudlobby.plane.ids import mint_msg_id
 from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
-from tests.test_activation import cold, tmp_path  # noqa: F401 — short private activation root
-from tests.test_releases import installed  # noqa: F401 — cold dependency
-from tests.package_fixtures import source_package
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — short private committed runtime root
 from tests.test_task_read_cli import active  # noqa: F401 — active private Plane fixture
 
 
-def _generated(monkeypatch, root, release, *, bot="manager"):
+def _generated(monkeypatch, root, installation, *, bot="manager"):
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
     monkeypatch.setenv("FLEET_ROOT", str(root))
     monkeypatch.setenv("BOT_DIR", str(root / f"runtime/bots/{bot}"))
     monkeypatch.setenv("FLEET_NAME", "example")
     monkeypatch.setenv("BOT_ID", bot)
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
-    monkeypatch.setattr(context, "selected_cli", lambda: release.cli_path)
-    package = source_package()
-    monkeypatch.setattr(context, "get_resources", lambda: replace(
-        package, native=release.native_path, artifact_id=release.inputs.artifact_id))
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
+    monkeypatch.setattr(context, "selected_cli", lambda **_: installation.cli)
 
 
-def _human(monkeypatch, release):
+def _human(monkeypatch, installation):
     for key in ("CLAUDLOBBY_ROOT", "FLEET_ROOT", "BOT_DIR", "FLEET_NAME", "CLAUDLOBBY_FLEET",
                 "BOT_ID", "BOT_NAME", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(context, "selected_cli", lambda: release.cli_path)
-    package = source_package()
-    monkeypatch.setattr(context, "get_resources", lambda: replace(
-        package, native=release.native_path, artifact_id=release.inputs.artifact_id))
+    monkeypatch.setattr(context, "selected_cli", lambda **_: installation.cli)
     monkeypatch.setattr(operation_context, "_local_operator_alias", lambda: "human:operator")
 
 
@@ -100,13 +93,13 @@ def _facts(root):
 
 def test_send_is_submitted_once_and_replay_waits_for_final_integrity(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     calls = []
     _native(monkeypatch, calls)
     request_id = str(uuid4())
     argv = ("--to", "worker", "--text", "Private SECRET message", "--request-id", request_id)
     first = _call(capsys, root, *argv, expected=5)
-    assert first["release_id"] == host.release.release_id
+    assert first["release_id"] == None
     assert first["error"]["code"] == "delivery_unknown"
     assert first["data"]["recording"] == "committed"
     assert first["data"]["transport"] == first["data"]["delivery"] == "submitted"
@@ -123,7 +116,7 @@ def test_send_is_submitted_once_and_replay_waits_for_final_integrity(active, mon
 
 def test_final_receipt_is_required_for_success_and_mismatch_fails(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     calls = []
     _native(monkeypatch, calls)
     from claudlobby import message_queries
@@ -151,7 +144,7 @@ def test_final_receipt_is_required_for_success_and_mismatch_fails(active, monkey
 
 def test_recording_outage_keeps_submitted_effect_and_alert_truth(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     calls = []
     _native(monkeypatch, calls)
     original = message_operations.emit_batch
@@ -185,7 +178,7 @@ def test_unread_tiers_fail_only_a_telegram_alert_with_no_target(active, monkeypa
     reach Telegram while the .env tiers are unreadable, and it stays reported as
     sent (#2234). Only an alert with no target fails for the unread tiers."""
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     from claudlobby import application_messages as message_write
     monkeypatch.setattr(message_write, "_alert_tiers", lambda route: ({}, False))
     original = message_operations.emit_batch
@@ -207,7 +200,7 @@ def test_unread_tiers_fail_only_a_telegram_alert_with_no_target(active, monkeypa
 def test_busy_send_request_is_retryable_with_same_uuid(active, monkeypatch, capsys):
     from claudlobby.request_receipts import ReceiptBusy
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     request_id = str(uuid4())
 
     def busy(*args, **kwargs):
@@ -222,7 +215,7 @@ def test_busy_send_request_is_retryable_with_same_uuid(active, monkeypatch, caps
 
 def test_local_human_sends_and_replies_only_to_a_bot_sender(active, monkeypatch, capsys):  # noqa: F811
     root, host = active
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     calls = []
     _native(monkeypatch, calls)
     from claudlobby.plane import emit_api
@@ -279,7 +272,7 @@ def test_local_human_sends_and_replies_only_to_a_bot_sender(active, monkeypatch,
     assert degraded["data"]["recording"] == "unrecorded" and len(calls) == 3
 
     # A reply to the human is recorded on the Plane and carried by nothing (#2068).
-    _generated(monkeypatch, root, host.release, bot="worker")
+    _generated(monkeypatch, root, host.installation, bot="worker")
     recorded = _reply_call(capsys, root, sent["data"]["message_id"],
                            "--text", "Recorded for the human", "--request-id", str(uuid4()), expected=0)
     assert recorded["data"]["destination"]["alias"] == "human:operator"
@@ -293,7 +286,7 @@ def test_a_bot_answers_a_human_sender_on_the_plane(active, monkeypatch, capsys):
     linked to the question, readable by the session that asked, and submitted to no pane,
     because the asker has none."""
     root, host = active
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     calls = []
     _native(monkeypatch, calls)
     asked = _call(capsys, root, "--to", "worker", "--text", "Reply with your path and readiness",
@@ -301,7 +294,7 @@ def test_a_bot_answers_a_human_sender_on_the_plane(active, monkeypatch, capsys):
     question = asked["data"]["message_id"]
     assert len(calls) == 1
 
-    _generated(monkeypatch, root, host.release, bot="worker")
+    _generated(monkeypatch, root, host.installation, bot="worker")
     request_id = str(uuid4())
     before = _facts(root)
     answered = _reply_call(capsys, root, question, "--text", "Ready; nothing in flight",
@@ -315,7 +308,7 @@ def test_a_bot_answers_a_human_sender_on_the_plane(active, monkeypatch, capsys):
                          "--request-id", request_id, expected=0)
     assert replay["data"]["replayed"] is True and _facts(root)[0] == before[0] + 1
 
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     assert main(["--root", str(root), "--json", "message", "wait", question,
                  "--for", "reply", "--timeout", "1"]) == 0
     waited = json.loads(capsys.readouterr().out)
@@ -328,12 +321,12 @@ def test_a_reply_to_a_human_has_no_receipt_or_carrier_and_send_stays_refused(act
     renders a human destination with no fleet, and a bot still cannot `message
     send` to a human, so it answers only someone who asked it."""
     root, host = active
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     calls = []
     _native(monkeypatch, calls)
     question = _call(capsys, root, "--to", "worker", "--text", "Are you ready?",
                      "--request-id", str(uuid4()), expected=5)["data"]["message_id"]
-    _generated(monkeypatch, root, host.release, bot="worker")
+    _generated(monkeypatch, root, host.installation, bot="worker")
     data = _reply_call(capsys, root, question, "--text", "Ready", "--request-id", str(uuid4()),
                        expected=0)["data"]
     assert (data["delivery"], data["transport"]) == ("not_requested", "not_requested")
@@ -355,7 +348,7 @@ def test_a_reply_to_a_human_has_no_receipt_or_carrier_and_send_stays_refused(act
 
 def test_reply_requires_recorded_recipient_and_replays_to_parent_sender(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     calls = []
     _native(monkeypatch, calls)
     parent = _call(capsys, root, "--to", "worker", "--text", "Private parent",
@@ -364,7 +357,7 @@ def test_reply_requires_recorded_recipient_and_replays_to_parent_sender(active, 
     args = (parent, "--text", "Private answer", "--request-id", reply_id)
     wrong_peer = _reply_call(capsys, root, *args, expected=4)
     assert wrong_peer["error"]["code"] == "conflict" and len(calls) == 1
-    _generated(monkeypatch, root, host.release, bot="worker")
+    _generated(monkeypatch, root, host.installation, bot="worker")
     missing = _reply_call(capsys, root, mint_msg_id(), "--text", "Private answer",
                           "--request-id", str(uuid4()), expected=3)
     assert missing["error"]["code"] == "not_found" and len(calls) == 1
@@ -385,7 +378,7 @@ def test_bad_context_release_and_file_refuse_before_native(active, monkeypatch, 
     root, host = active
     calls = []
     _native(monkeypatch, calls)
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     invalid = tmp_path / "invalid-message.txt"
     invalid.write_bytes(b"\xff")
     _call(capsys, root, "--to", "worker", "--file", str(invalid),
@@ -402,7 +395,7 @@ def test_bad_context_release_and_file_refuse_before_native(active, monkeypatch, 
 
 def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     _ctx, task, assigned = _assigned(root)
     with sqlite3.connect(db_file(root)) as conn:
         before = conn.execute("SELECT event_id FROM events WHERE kind='task' ORDER BY ingest_seq").fetchall()
@@ -410,7 +403,7 @@ def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monke
         task_before = next(item for item in read_tasks(conn, fleet_uid=_ctx.fleet_uid).tasks
                            if item.task_id == task.task_id)
         assert task_before.open and task_before.current_assignment.assignment_id == assigned.assignment_id
-    _generated(monkeypatch, root, host.release, bot="worker")
+    _generated(monkeypatch, root, host.installation, bot="worker")
     calls = []
     _native(monkeypatch, calls, operation="send_unlinked_report")
     args = ["--root", str(root), "--json", "fleet", "reports", "submit",
@@ -476,7 +469,7 @@ def test_help_and_syntax_do_not_import_message_effect_owner(monkeypatch, capsys)
 
 def test_assignment_deliver_submits_once_and_requires_final_receipt(active, monkeypatch, capsys, tmp_path):  # noqa: F811
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     ctx, task, assigned = _assigned(root)
     body = tmp_path / "assignment.txt"
     body.write_text("Private assignment delivery", encoding="utf-8")
@@ -526,7 +519,7 @@ def test_assignment_deliver_submits_once_and_requires_final_receipt(active, monk
 
 def test_assignment_deliver_refuses_stale_before_native(active, monkeypatch, capsys, tmp_path):  # noqa: F811
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     ctx, task, assigned = _assigned(root)
     task_operations.withdraw(ctx, str(uuid4()), task.task_id, reason="No longer assigned")
     body = tmp_path / "assignment.txt"
@@ -552,7 +545,7 @@ def test_assignment_show_names_its_delivery_attempts_and_receipt(active, monkeyp
     from claudlobby.commands import assignment_delivery as deliver_command
     from claudlobby.plane.emit_api import emit_batch
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     _ctx, _task, assigned = _assigned(root)
     assert _show_call(capsys, root, assigned.assignment_id)["delivery"] is None
     real = assignment_delivery.deliver
@@ -607,22 +600,10 @@ def test_assignment_show_names_its_delivery_attempts_and_receipt(active, monkeyp
 
 def _git_generated(active, monkeypatch, *, bot="manager"):
     """Same private Plane/identity fixture, admitted under current Git provenance."""
-    from contextlib import contextmanager
-    from claudlobby import runtime_admission
     from tests.test_task_read_cli import _use_git_current
     root, host = active
-    _generated(monkeypatch, root, host.release, bot=bot)
-    root, package, snapshot = _use_git_current(active, monkeypatch)
-    monkeypatch.setattr(context, "selected_cli", lambda *, installation: installation.cli)
-    monkeypatch.delenv("CLAUDLOBBY_ARTIFACT_ID", raising=False)
-    @contextmanager
-    def admitted(*args, **kwargs):
-        assert kwargs["expected_release"] is None
-        yield runtime_admission.GitCurrentRuntime(package.installation, package.source_revision,
-                                                  snapshot["fingerprint"], snapshot)
-    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
-    monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", lambda: object())
-    return root, package, snapshot
+    _generated(monkeypatch, root, host.installation, bot=bot)
+    return _use_git_current(active, monkeypatch)
 
 
 def test_git_send_retains_original_unknown_request_without_resend(active, monkeypatch, capsys):
@@ -674,7 +655,7 @@ def test_git_send_rejects_mixed_or_changed_route_before_effect(active, monkeypat
 
 def test_git_bot_human_reply_is_recorded_once_without_native_send(active, monkeypatch, capsys):
     root, host = active
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     calls = []
     _native(monkeypatch, calls)
     asked = _call(capsys, root, "--to", "worker", "--text", "Private question",
@@ -691,7 +672,7 @@ def test_git_bot_human_reply_is_recorded_once_without_native_send(active, monkey
 
 def test_git_assignment_delivery_preserves_unknown_without_resend(active, monkeypatch, capsys, tmp_path):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     _ctx, _task, assigned = _assigned(root)
     root, package, snapshot = _git_generated(active, monkeypatch)
     body = tmp_path / "git-assignment.txt"

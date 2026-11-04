@@ -10,9 +10,9 @@ from ..command_result import CommandFailure, CommandOutput
 def dispatch(args):
     from .. import switches
     from ..active_config import runtime_read_stamp, read_current_config, load_active_context
-    from ..config_plan import read_plan, PlanError
+    from ..config_plan import PlanError
     from ..activation_state import ActivationError
-    from ..context import declared_paths, generated_selectors, load_context, resolve_paths
+    from ..context import generated_selectors, resolve_paths
     from ..doctor import format_report, run_doctor
     from ._helpers import _load_env
 
@@ -21,8 +21,6 @@ def dispatch(args):
     try:
         fleet_selector, _ = generated_selectors(fleet=args.fleet)
         paths = resolve_paths(root=args.root)
-        if paths.package.installation is None:
-            paths = resolve_paths(root=args.root, fleet=fleet_selector)
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "invalid host doctor fleet selector") from exc
     if args.markdown:
@@ -33,18 +31,11 @@ def dispatch(args):
             f"--- {name}\n{body}" for name, body in blocks.items()))
     try:
         stamp = runtime_read_stamp(paths.root, package=paths.package)
-        if paths.package.installation is not None:
-            snapshot = read_current_config(paths.root, installation=paths.package.installation,
-                                           revision=paths.package.source_revision)
-            names = [fleet_selector] if fleet_selector else list(snapshot["fleets"])
-            contexts = [load_active_context(paths.root, name, package=paths.package) for name in names]
-            scopes = [(context.paths, context.fleet) for context in contexts]
-        else:
-            selected = stamp.selection if stamp else None
-            external = (read_plan(paths.root, selected["plan_id"]).effects["fleet_manifests"].values()
-                        if selected else ())
-            declared = [paths] if fleet_selector else declared_paths(paths.root, paths.package, external=external)
-            scopes = [(scope, load_context(scope).fleet if scope.fleet_yaml.is_file() else None) for scope in declared]
+        snapshot = read_current_config(paths.root, installation=paths.package.installation,
+                                       revision=paths.package.source_revision)
+        names = [fleet_selector] if fleet_selector else list(snapshot["fleets"])
+        contexts = [load_active_context(paths.root, name, package=paths.package) for name in names]
+        scopes = [(context.paths, context.fleet) for context in contexts]
         if not scopes and not args.switches:
             raise CommandFailure("not_found", "no fleet declarations; run fleet setup first")
     except (ActivationError, PlanError, OSError) as exc:
