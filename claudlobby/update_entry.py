@@ -6,6 +6,7 @@ coordinator supplies its inherited locked descriptors and original request.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -17,15 +18,22 @@ from .installation import read_installation
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Private updater application stage")
     parser.add_argument("installation")
-    parser.add_argument("stage", choices=["render", "prepare", "quiesce", "quiet", "publish", "restore"])
+    parser.add_argument("stage", choices=["authorize", "render", "prepare", "quiesce", "quiet", "publish", "restore"])
     parser.add_argument("lock_fd", type=int)
     parser.add_argument("parent_pid", type=int)
     parser.add_argument("request_id")
     parser.add_argument("runtime_fd", type=int, nargs="?")
     args = parser.parse_args(argv)
     installation = read_installation(Path(args.installation))
-    store = UpdateStore.from_parent(installation, fd=args.lock_fd, parent_pid=args.parent_pid,
-                                    request_id=args.request_id)
+    if args.stage == "authorize":
+        if os.getppid() != args.parent_pid:
+            raise UpdateError("operator stage does not belong to updater parent")
+        store = UpdateStore(installation)
+        _verify_inherited_lock(store.state / "update.lock", args.lock_fd)
+        store._fd = args.lock_fd
+    else:
+        store = UpdateStore.from_parent(installation, fd=args.lock_fd, parent_pid=args.parent_pid,
+                                        request_id=args.request_id)
     try:
         record = store.load()
         source = Path(__file__).absolute().parent.parent
@@ -36,7 +44,8 @@ def main(argv=None):
             _candidate_revision(store, source)
             expected_python = Path(record["candidate_python"])
         else:
-            expected = record["before"] if args.stage in {"prepare", "quiesce", "quiet"} else record["target"]
+            expected = (_head(installation) if args.stage == "authorize" else
+                        record["before"] if args.stage in {"prepare", "quiesce", "quiet"} else record["target"])
             if source != installation.source or _head(installation) != expected:
                 raise UpdateError("application stage source differs from required Git revision")
             expected_python = installation.environment / "bin/python"
@@ -47,6 +56,17 @@ def main(argv=None):
                 raise UpdateError("application stage requires inherited runtime EX")
             _verify_inherited_lock(store.state / "runtime-use.lock", args.runtime_fd)
         from .resources import get_resources
+        if args.stage == "authorize":
+            from .commands.operator_context import require_operator_context
+            from .active_config import read_current_config
+            require_operator_context(store.root)
+            package = get_resources(installation=installation)
+            snapshot = read_current_config(store.root, installation=installation, revision=package.source_revision)
+            placement = snapshot.get("supervision")
+            if placement is None:
+                raise UpdateError("current configuration has no committed native placement")
+            print(json.dumps({"directory": placement["directory"], "revision": snapshot["revision"]}))
+            return 0
         from .supervision_inventory import Adapter
         from . import update_operation
         if args.stage == "render":

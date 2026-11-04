@@ -13,6 +13,8 @@ from copy import deepcopy
 import fcntl
 import hashlib
 import importlib.util
+import importlib
+import types
 import json
 import os
 from pathlib import Path
@@ -32,6 +34,10 @@ _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 class UpdateError(ValueError):
     """Current operation is unavailable, changed, or not admitted for cutover."""
+
+
+class UpdateBusyError(UpdateError):
+    """Another coordinator owns the process lock; read-only attachment may succeed."""
 
 
 def _digest(content: bytes) -> str:
@@ -128,6 +134,11 @@ def _validate(installation, record):
         if type(record.get("finalized", True)) is not bool:
             raise ValueError()
         uuid.UUID(record["request_id"])
+        dispatch = record.get("job_dispatch")
+        if dispatch is not None and (type(dispatch) is not dict or set(dispatch) != {"state", "attempt"}
+                or dispatch["state"] not in {"pending", "entered", "finished"}
+                or type(dispatch["attempt"]) is not int or dispatch["attempt"] < 1):
+            raise ValueError()
         for name, identity in record["scope"].items():
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}", name) or not _SHA.fullmatch(identity):
                 raise ValueError()
@@ -174,7 +185,8 @@ def read_update(installation):
 
 class UpdateStore:
     """One process lock and current operation; native proof belongs to its caller."""
-    def __init__(self, installation):
+    def __init__(self, installation, *, wait=False):
+        self.wait = wait
         self.installation = installation
         self.root = installation.data_root
         self.state = _plain(installation.data_root / "state")
@@ -185,12 +197,14 @@ class UpdateStore:
         self.state.mkdir(parents=True, exist_ok=True)
         try:
             self._fd = os.open(self.state / "update.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(self._fd, fcntl.LOCK_EX | (0 if self.wait else fcntl.LOCK_NB))
         except OSError as exc:
             if self._fd is not None:
                 os.close(self._fd)
                 self._fd = None
-            raise UpdateError("another update is running or its lock is unavailable") from exc
+            if isinstance(exc, BlockingIOError):
+                raise UpdateBusyError("another update is running and owns the process lock") from exc
+            raise UpdateError("update process lock is unavailable") from exc
         return self
 
     def __exit__(self, *_):
@@ -502,7 +516,7 @@ raise SystemExit(update_entry.main(sys.argv[2:]))
 def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None):
     """One fixed private stage in a fresh verified application process."""
     store._assert_locked()
-    if stage not in {"render", "prepare", "quiesce", "quiet", "publish", "restore"}:
+    if stage not in {"authorize", "render", "prepare", "quiesce", "quiet", "publish", "restore"}:
         raise UpdateError("unknown application update stage")
     record = store.load()
     source = _plain(source if source is not None else store.installation.source)
@@ -510,7 +524,7 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
     if not python.is_file() or not os.access(python, os.X_OK):
         raise UpdateError("application stage interpreter is unavailable")
     inherited = [store._fd]
-    args = [str(store.installation.directory), stage, str(store._fd), str(os.getpid()), record["request_id"]]
+    args = [str(store.installation.directory), stage, str(store._fd), str(os.getpid()), record["request_id"] if record is not None else "-"]
     if runtime_fd is not None:
         _verify_inherited_lock(store.state / "runtime-use.lock", runtime_fd)
         inherited.append(runtime_fd)
@@ -527,9 +541,17 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
         raise UpdateError(f"application stage {stage} interrupted; continue the same operation") from exc
     if result.returncode:
         record = store.load()
-        record["stage_error"] = {"stage": stage, "detail": result.stderr[-2000:]}
-        store.save(record)
-        raise UpdateError(f"application stage {stage} refused; retained diagnostics in current update")
+        if record is not None:
+            record["stage_error"] = {"stage": stage, "detail": result.stderr[-2000:]}
+            store.save(record)
+        raise UpdateError(f"application stage {stage} refused; continue the retained operation")
+    if stage == "authorize":
+        try:
+            authorized = json.loads(result.stdout)
+            authorized["interpreter"] = str(Path(sys.executable).resolve())
+            return authorized
+        except (ValueError, TypeError) as exc:
+            raise UpdateError("operator authorization returned no bound installation context") from exc
     return store.load()
 
 
@@ -753,8 +775,242 @@ def cleanup_candidate(store):
     return record
 
 
+
+_JOB_SUPPORT = ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py",
+                "supervisor-caller.py")
+
+
+def _prepare_job_support(store):
+    """Retain canonical stdlib observation/membership owners before native effects."""
+    _prepare_quiet_support(store)
+    record = store.load()
+    if record.get("job_support") is not None:
+        return _retained_job(store)
+    if _head(store.installation) != record["before"]:
+        raise UpdateError("independent job support requires the unchanged previous checkout")
+    directory = _plain(store.work / ("quiet-" + record["request_id"]))
+    hashes = {}
+    for name in _JOB_SUPPORT:
+        source = store.installation.source / "claudlobby" / name
+        if name == "supervisor-caller.py":
+            source = store.installation.source / "claudlobby/_runtime_scripts" / name
+        if source.is_symlink() or not source.is_file():
+            raise UpdateError("canonical independent updater support is unavailable")
+        content = source.read_bytes()
+        destination = _plain(directory / name)
+        if destination.exists() and destination.read_bytes() != content:
+            raise UpdateError("retained updater support changed")
+        _write(destination, content)
+        hashes[name] = _digest(content)
+    if _head(store.installation) != record["before"]:
+        raise UpdateError("source changed while retaining updater support")
+    record["job_support"] = hashes
+    store.save(record)
+    return _retained_job(store)
+
+
+def _retained_job(store):
+    """Load a fixed verified stdlib support package, never the mutable application."""
+    record = store.load()
+    directory = _plain(store.work / ("quiet-" + record["request_id"]))
+    hashes = record.get("job_support", {})
+    quiet = record.get("quiet_support", {})
+    if set(hashes) != set(_JOB_SUPPORT) or set(quiet) != {"supervisor.sh", "supervision_runtime.py"}:
+        raise UpdateError("independent updater support is incomplete")
+    for name, digest in {**hashes, **quiet}.items():
+        path = _plain(directory / name)
+        if not path.is_file() or _digest(path.read_bytes()) != digest:
+            raise UpdateError("retained independent updater support changed")
+    # Import the unchanged canonical modules under a private package so their
+    # relative imports remain intact. No activation or application policy copy.
+    name = "_claudlobby_update_" + record["request_id"].replace("-", "")
+    for key in tuple(sys.modules):
+        if key == name or key.startswith(name + "."):
+            del sys.modules[key]
+    package = types.ModuleType(name)
+    package.__path__ = [str(directory)]
+    sys.modules[name] = package
+    sys.modules[name + ".git_update"] = sys.modules[__name__]
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        jobs = importlib.import_module(name + ".update_job")
+        inventory = importlib.import_module(name + ".supervision_inventory")
+        locations = importlib.import_module(name + ".installation")
+    finally:
+        sys.dont_write_bytecode = previous
+    installation = locations.read_installation(store.installation.directory)
+    adapter = inventory.Adapter(types.SimpleNamespace(native=directory))
+    return jobs, installation, adapter
+
+
+
+def _authorize_retained_operator(store, adapter):
+    """Continue from retained native bindings when src/env are unavailable."""
+    if any(key in os.environ for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE")):
+        raise UpdateError("host update requires an operator outside generated bot context")
+    record = store.load()
+    checked = 0
+    for key, progress in record["consumers"].items():
+        row = progress["intent"]
+        if not row["installed"] or "@." in key:
+            continue
+        checked += 1
+        verdict = adapter.call("svc_activation_assert_external", row["installed"][0]["path"],
+                               key, str(os.getpid()), timeout=30)
+        if verdict.returncode != 0:
+            raise UpdateError("operator ancestry is managed or cannot be verified")
+    binding = record.get("updater_job")
+    if binding is not None:
+        checked += 1
+        verdict = adapter.call("svc_activation_assert_external", binding["installed"], binding["target"],
+                               str(os.getpid()), timeout=30)
+        if verdict.returncode != 0:
+            raise UpdateError("operator ancestry belongs to the updater or cannot be verified")
+    if not checked:
+        raise UpdateError("current host has no retained native ancestry evidence")
+
+
+def _check_bound_job(store, jobs, installation, adapter):
+    """Keep the original native target/domain; a caller context never relocates it."""
+    record = store.load()
+    binding = record.get("updater_job")
+    if binding is None:
+        raise UpdateError("independent native job has no retained binding")
+    actual = jobs._definition(installation, adapter, Path(record["native_install_directory"]),
+                              native_target=binding["target"])
+    if (binding["manager"] != actual.manager or binding["target"] != actual.target
+            or binding["source"] != str(actual.source) or binding["installed"] != str(actual.installed)
+            or binding["sha256"] != _digest(actual.content)):
+        raise UpdateError("native updater differs from retained operation binding/domain")
+    return actual
+
+
+def _dispatch_update_job(store):
+    """Freeze each coordinator dispatch; native observation decides attach/resume."""
+    jobs, installation, adapter = _retained_job(store)
+    record = store.load()
+    directory = Path(record["native_install_directory"])
+    _check_bound_job(store, jobs, installation, adapter)
+    observed = jobs.observe_update_job(installation, adapter, directory,
+                                       native_target=record["updater_job"]["target"])
+    prior = record.get("job_dispatch")
+    if observed["state"] in {"running", "starting"}:
+        return {"request_id": record["request_id"], **observed, "dispatch": "attached"}, None
+    if observed["state"] not in {"inactive", "failed"}:
+        raise UpdateError("independent updater job is not enrolled and inactive")
+    record["job_dispatch"] = {"state": "pending", "attempt": 1 if prior is None else prior["attempt"] + 1}
+    store.save(record)
+    return None, (jobs, installation, adapter, directory, record["updater_job"]["target"])
+
+
+def _apply_or_continue(installation, *, target=None):
+    """The single operator route; always continue the original frozen operation."""
+    dispatch = None
+    with UpdateStore(installation) as store:
+        record = store.load()
+        pending = record is not None and (record["phase"] != "done" or record.get("health_errors"))
+        if pending and target is not None and target != record["target"]:
+            raise UpdateError("continue the existing frozen target before requesting another")
+        if pending and record["phase"] != "prepare" and record.get("job_support") is not None:
+            jobs, independent, adapter = _retained_job(store)
+            _authorize_retained_operator(store, adapter)
+        else:
+            # The current application owns operator authorization and committed
+            # placement. No candidate/dependency/native effect precedes this.
+            stable = runpy.run_path(str(installation.cli), run_name="_update_operator_admission")
+            runtime = stable["_runtime_lock"](installation)
+            try:
+                stable["_check_maintenance"](installation)
+                authorized = _application_stage(store, "authorize")
+            finally:
+                os.close(runtime)
+            if not pending:
+                if target is None:
+                    return {"update": record, "dispatch": "nothing_pending"}
+                if record is not None and record["target"] == target:
+                    return {"update": record, "dispatch": "complete"}
+                store.prepare_target(target, request_id=str(uuid.uuid4()))
+            record = store.load()
+            if record["phase"] == "prepare":
+                if not record.get("candidate_render"):
+                    prepare_candidate_render(store, interpreter=Path(authorized["interpreter"]))
+                prepare_application_operation(store, install_directory=Path(authorized["directory"]),
+                                              interpreter=Path(authorized["interpreter"]))
+        # An interrupted preparation may have finalized configuration before
+        # native job support/enrollment was retained. Finish that preparation
+        # only while the original application remains intact.
+        record = store.load()
+        if record.get("updater_job") is None:
+            jobs, independent, adapter = _prepare_job_support(store)
+            directory = Path(record["native_install_directory"])
+            jobs.prepare_update_job(independent, adapter, directory)
+            jobs.bind_update_job(store, adapter, directory)
+        observed, dispatch = _dispatch_update_job(store)
+        if dispatch is None:
+            return {"update": store.load(), "job": observed}
+    # The native job may acquire update.lock immediately. Never hold it while
+    # starting or waiting for the manager's acknowledgement.
+    jobs, independent, adapter, directory, native_target = dispatch
+    outcome = jobs.run_update_job(independent, adapter, directory, native_target=native_target)
+    return {"update": read_update(installation), "job": outcome}
+
+
+
+def apply_or_continue(installation, *, target=None):
+    """Prepare/dispatch once, or attach read-only to the active original job."""
+    try:
+        return _apply_or_continue(installation, target=target)
+    except UpdateBusyError:
+        store = UpdateStore(installation)
+        record = store.load()
+        if record is None or record.get("updater_job") is None:
+            raise UpdateBusyError("another update is preparing; inspect its current operation") from None
+        if target is not None and target != record["target"]:
+            raise UpdateError("another frozen target is running; continue its original operation") from None
+        jobs, independent, adapter = _retained_job(store)
+        _authorize_retained_operator(store, adapter)
+        _check_bound_job(store, jobs, independent, adapter)
+        observed = jobs.observe_update_job(independent, adapter, Path(record["native_install_directory"]),
+                                           native_target=record["updater_job"]["target"])
+        latest = store.load()
+        if (observed["state"] not in {"running", "starting"}
+                or latest["request_id"] != record["request_id"]):
+            raise UpdateBusyError("update lock is occupied; native attachment is not established") from None
+        return {"update": latest, "job": {"request_id": record["request_id"], **observed, "dispatch": "attached"}}
+
+def _run_native_update(installation):
+    """Fixed job entry: kernel membership, then the one resumable coordinator."""
+    with UpdateStore(installation, wait=True) as store:
+        jobs, independent, adapter = _retained_job(store)
+        record = store.load()
+        binding = record.get("updater_job")
+        if binding is None:
+            raise UpdateError("independent native job has no retained binding")
+        jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
+                                      native_target=binding["target"])
+        _check_bound_job(store, jobs, independent, adapter)
+        dispatch = record.get("job_dispatch")
+        if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
+            raise UpdateError("native updater lacks its original dispatch intent")
+        record["job_dispatch"] = {**dispatch, "state": "entered"}
+        store.save(record)
+        try:
+            return run_prepared_update(store)
+        finally:
+            record = store.load()
+            record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
+            store.save(record)
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Independent current-update inspection")
+    argv = sys.argv[1:] if argv is None else argv
+    directory = Path(__file__).absolute().parent.parent
+    namespace = runpy.run_path(str(directory / "bin/claudlobby"), run_name="_stable_installation")
+    installation = namespace["read_installation"](directory)
+    if argv == ["_run"]:
+        _run_native_update(installation)
+        return 0
+    parser = argparse.ArgumentParser(description="Current Git installation update")
     parser.add_argument("--root", required=True)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--fleet")
@@ -762,16 +1018,24 @@ def main(argv=None):
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("host", choices=["host"])
     parser.add_argument("update", choices=["update"])
-    parser.add_argument("action", nargs="?", choices=["status", "recovery"])
+    parser.add_argument("action", nargs="?", choices=["status", "recovery", "apply", "continue"], default="status")
+    parser.add_argument("target", nargs="?")
     args = parser.parse_args(argv)
-    directory = Path(__file__).absolute().parent.parent
-    namespace = runpy.run_path(str(directory / "bin/claudlobby"), run_name="_stable_installation")
-    installation = namespace["read_installation"](directory)
     if Path(args.root) != installation.data_root:
         raise UpdateError("updater data root differs from the recorded installation")
-    if args.action is None:
-        raise UpdateError("application update owner is not bound; no effects attempted")
-    print(json.dumps({"update": read_update(installation), "read_only": True}, sort_keys=True))
+    if args.action in {"status", "recovery"}:
+        if args.target is not None:
+            raise UpdateError("read-only update inspection takes no target")
+        result = {"update": read_update(installation), "read_only": True}
+    else:
+        if args.fleet or args.seed:
+            raise UpdateError("host update cannot select a fleet")
+        if args.action == "apply" and (args.target is None or not _COMMIT.fullmatch(args.target)):
+            raise UpdateError("apply requires one frozen full Git commit")
+        if args.action == "continue" and args.target is not None:
+            raise UpdateError("continue uses the existing frozen target")
+        result = apply_or_continue(installation, target=args.target)
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

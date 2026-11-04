@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from dataclasses import asdict
 from datetime import datetime, timezone
 import sqlite3
@@ -13,8 +11,9 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args) -> CommandOutput:
     from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
     from ..brief import ALERT_WINDOW_H, _alerts_section, plane_session
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..inbox_queries import InboxCursorError, project_inbox
@@ -37,10 +36,10 @@ def dispatch(args) -> CommandOutput:
         destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no fleet inbox")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active inbox selection is unavailable")
-        release_id = selected["release_id"]
+        release_id = selected.release_id
         bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
@@ -80,8 +79,7 @@ def dispatch(args) -> CommandOutput:
                 raise CommandFailure("unavailable", "installed Plane inbox reader is incomplete",
                                      release_id=release_id)
             scope = {"host_uid": bindings["host_uid"], "fleet_uid": bindings["fleet_uid"],
-                     "viewer_uid": viewer_uid, "release_id": release_id,
-                     "activation_id": selected["activation_id"], "plan_id": selected["plan_id"],
+                     "viewer_uid": viewer_uid, **selected.cursor_scope,
                      "limit": args.limit}
             page = project_inbox(session.conn, session.pr, fleet=destination.fleet.name,
                                  fleet_uid=bindings["fleet_uid"], viewer_uids=entry["uids"],
@@ -99,8 +97,7 @@ def dispatch(args) -> CommandOutput:
                                 for item in degraded)
             alert_labeled = any(item.field == "alerts" and item.mode == "labeled"
                                 for item in degraded)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active inbox selection changed during read', release_id=release_id)
+        selected.check(destination.paths.root, package=destination.paths.package, message='active inbox selection changed during read')
         reports = [report_item(row) for row in page.reports]
         viewer = f"bot:{destination.fleet.name}/{viewer_bot}"
         data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
@@ -150,6 +147,7 @@ def dispatch(args) -> CommandOutput:
         lines += tuple(f"inbox {item.field} {item.mode}: {item.reason}" for item in degraded)
         if page.next_cursor:
             lines += (f"next_cursor: {page.next_cursor}",)
+        data.update(selected.provenance)
         return CommandOutput(data, release_id=release_id, lines=lines)
     except CommandFailure:
         raise

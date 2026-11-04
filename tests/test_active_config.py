@@ -185,6 +185,22 @@ def test_git_uninitialized_identity_keeps_context_readable_but_refuses_actions(g
         activation_identity.read_selected_identity_bindings(root, "example", package=package)
 
 
+def test_native_placement_is_part_of_the_committed_configuration(git_snapshot):
+    root, _, _, plan, installation, package = git_snapshot
+    placement = {"manager": "Linux", "domain": "", "directory": str(root.parent / "native-units")}
+    snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision,
+                                                supervision=placement)
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    saved = active_config.read_current_config(root, installation=installation)
+    assert saved["supervision"] == placement
+    saved["supervision"]["directory"] = str(root.parent / "other-units")
+    with pytest.raises(PlanError, match="fingerprint"):
+        active_config._validate_snapshot(saved, installation)
+    with pytest.raises(PlanError, match="placement"):
+        active_config.snapshot_from_plan(plan, installation, package.source_revision,
+                                         supervision={"manager": "Linux", "domain": "", "directory": str(root / "runtime")})
+
+
 def test_git_identity_is_committed_with_frozen_roster_and_current_host(git_snapshot, git_registry, monkeypatch):
     root, manifest, _, plan, installation, package = git_snapshot
     identities = activation_identity.identity_bindings_from_registry(plan, git_registry, package=package)
@@ -332,3 +348,31 @@ def test_git_snapshot_ownership_cannot_include_private_mutable_files(git_snapsho
         {"kind": "file", "mode": 0o600, "sha256": "0" * 64})))
     with pytest.raises(PlanError, match="escapes generated"):
         active_config.snapshot_from_plan(bad, installation, package.source_revision)
+
+
+def test_git_read_stamp_ignores_historical_selection_and_detects_config_change(git_snapshot, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    root, _, _, plan, installation, package = git_snapshot
+    snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision)
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: pytest.fail("historical selection read"))
+    stamp = active_config.runtime_read_stamp(root, package=package)
+    assert stamp.release_id is None and stamp.cursor_scope == stamp.provenance
+    assert stamp.provenance == {"source_revision": package.source_revision, "config_fingerprint": snapshot["fingerprint"]}
+    stamp.check(root, package=package)
+    changed = deepcopy(snapshot)
+    changed["identities"] = None
+    changed["fleets"]["example"]["fleet"] += "\n# new reviewed configuration epoch\n"
+    changed["fingerprint"] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=installation, expected_previous=snapshot["fingerprint"])
+    with pytest.raises(CommandFailure, match="changed"):
+        stamp.check(root, package=package)
+
+
+def test_legacy_read_stamp_retains_exact_cursor_scope(frozen, monkeypatch):
+    root, _, _, _, package = frozen
+    selection = {"schema": 1, "release_id": "r-example", "activation_id": "a-example", "plan_id": "p-example"}
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: selection)
+    stamp = active_config.runtime_read_stamp(root, package=package)
+    assert stamp.release_id == "r-example" and stamp.provenance == {}
+    assert stamp.cursor_scope == {key: selection[key] for key in ("release_id", "activation_id", "plan_id")}

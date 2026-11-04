@@ -27,6 +27,7 @@ from tests.package_fixtures import source_package
 from tests.test_activation import cold, tmp_path  # noqa: F401 — real short-root activation fixtures
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_self_restart_handoff import _checkpointed, _stamp
+from tests.test_git_composition import candidate  # noqa: F401 — lightweight Git composition fixture
 
 
 def test_private_control_uses_one_exact_native_send(tmp_path):
@@ -431,7 +432,13 @@ if sys.argv[4] == '1':
             time.sleep(1)
         return real_select(*args)
     b.select.select = late_select
-b.read_selection = lambda _: {'release_id': 'selected'}
+from contextlib import contextmanager
+from types import SimpleNamespace
+@contextmanager
+def admitted(*args, **kwargs):
+    yield SimpleNamespace(release_id='selected')
+b.mutation_admission = admitted
+b.RuntimeIdentity.current = staticmethod(lambda: object())
 def restart(**kwargs):
     kwargs['_on_lock']()
     (bot_dir / 'native-effect').write_text('attempted')
@@ -1283,3 +1290,166 @@ def test_fresh_self_handoff_keeps_300_s_unless_the_activation_passes_a_wider_win
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned session handoff"):
         bot_operations._fresh_self_handoff(bot_dir)
     assert 399 <= bot_operations._fresh_self_handoff(bot_dir, max_age_s=900) <= 402
+
+
+@pytest.fixture
+def git_bot_binding(candidate, monkeypatch):
+    """Real committed unit hashes and bot.conf; no native manager is invoked."""
+    from claudlobby import active_config
+    from claudlobby.composer import compose_launchd_plist, compose_systemd_unit
+    from claudlobby.config_plan import path_state
+    from claudlobby.config_units import unit_family
+    from claudlobby.runtime_admission import GitCurrentRuntime
+
+    installation, paths, fleet, _ = candidate
+    from claudlobby.paths import Paths
+    paths = Paths(installation.data_root, package=replace(paths.package, native=installation.native))
+    bot = fleet.bots["lead"]
+    bot_dir = paths.bot_runtime("lead")
+    bot_dir.mkdir(parents=True)
+    configuration = bot_dir / "bot.conf"
+    configuration.write_text("# committed bot context\n")
+    configuration.chmod(0o600)
+    files = {"com.example.lead.service": (compose_systemd_unit(bot, fleet, paths).encode(), 0o644),
+             "com.example.lead.plist": (compose_launchd_plist(bot, fleet, paths).encode(), 0o644)}
+    for name, (content, mode) in files.items():
+        path = bot_dir / name
+        path.write_bytes(content)
+        path.chmod(mode)
+    (installation.data_root / "state").mkdir()
+    directory = installation.data_root / "native-user"
+    directory.mkdir()
+    snapshot = {"installation": str(installation.directory), "data_root": str(installation.data_root),
+                "revision": paths.package.source_revision, "fingerprint": "b" * 64,
+                "supervision": {"manager": "Linux", "domain": "", "directory": str(directory)},
+                "units": unit_family(files, destination=bot_dir, scope="bot", phase="bots",
+                                     release_id="", fleet="example", bot="lead"),
+                "owned_outputs": [{"target": str(configuration), "state": path_state(configuration)["node"]}]}
+    current = GitCurrentRuntime(installation, snapshot["revision"], snapshot["fingerprint"], deepcopy(snapshot))
+    monkeypatch.setattr(active_config, "read_current_config", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(bot_operations, "read_selection", lambda *_: pytest.fail("sealed selection consulted"))
+    monkeypatch.setattr(bot_operations, "read_plan", lambda *_: pytest.fail("sealed plan consulted"))
+    destination = SimpleNamespace(paths=paths, fleet=fleet)
+    adapter = SimpleNamespace(package=paths.package, read=lambda function:
+        f"manager\tLinux\ndirectory\t{directory}\n")
+    return SimpleNamespace(root=installation.data_root, current=current, snapshot=snapshot,
+                           destination=destination, adapter=adapter, directory=directory,
+                           configuration=configuration)
+
+
+def test_git_current_bot_binding_retains_deenrolled_placement_and_honest_provenance(git_bot_binding):
+    case = git_bot_binding
+    binding = bot_operations._current_bot_binding(case.root, case.current, case.destination,
+                                                  "lead", case.adapter)
+    binding.verify_configuration()
+    assert binding.entry == {"source": str(binding.declaration.source),
+                             "target": "com.example.lead.service",
+                             "installed": str(case.directory / "com.example.lead.service")}
+    assert not Path(binding.entry["installed"]).exists()  # A deliberate stop retains placement authority.
+    result = bot_operations._bot_result(bot_operations.BotLifecycleResult, case.current,
+        "example", "lead", bot_operations._release_id(case.current), binding.entry["target"],
+        "stopped", False, "not_running")
+    assert result.release_id is None
+    assert result.source_revision == case.current.revision
+    assert result.config_fingerprint == case.current.config_fingerprint
+
+
+@pytest.mark.parametrize("drift", ["snapshot", "unit", "configuration", "redirected", "manager", "duplicate"])
+def test_git_current_bot_binding_refuses_changed_or_ambiguous_context(git_bot_binding, drift):
+    case = git_bot_binding
+    current = case.current
+    if drift == "snapshot":
+        case.snapshot["fingerprint"] = "c" * 64
+    elif drift == "unit":
+        Path(next(unit["source"] for unit in case.snapshot["units"] if unit["platform"] == "Linux")).write_text("changed")
+    elif drift == "configuration":
+        case.configuration.write_text("uncommitted context")
+    elif drift == "redirected":
+        (case.directory / "com.example.lead.service").symlink_to(case.configuration)
+    elif drift == "manager":
+        case.snapshot["supervision"]["manager"] = "Darwin"
+        current = replace(current, snapshot=deepcopy(case.snapshot))
+    else:
+        case.snapshot["units"].append(deepcopy(case.snapshot["units"][0]))
+        current = replace(current, snapshot=deepcopy(case.snapshot))
+    with pytest.raises((bot_operations.BotLifecycleError, ValueError)):
+        binding = bot_operations._current_bot_binding(case.root, current, case.destination,
+                                                      "lead", case.adapter)
+        binding.verify_configuration()
+
+
+def test_git_current_bot_without_committed_placement_cannot_guess_start_destination(git_bot_binding, monkeypatch):
+    case = git_bot_binding
+    case.snapshot.pop("supervision")
+    current = replace(case.current, snapshot=deepcopy(case.snapshot))
+    inventory = SimpleNamespace(units=[SimpleNamespace(
+        declaration=SimpleNamespace(source=case.destination.paths.bot_runtime("lead") / "com.example.lead.service"),
+        installed=())])
+    inventory.require_complete = lambda: inventory
+    monkeypatch.setattr(bot_operations, "collect_enrollment", lambda *_args, **_kwargs: inventory)
+    with pytest.raises(bot_operations.BotLifecycleError, match="placement is unavailable"):
+        bot_operations._current_bot_binding(case.root, current, case.destination, "lead", case.adapter)
+
+
+def test_git_handoff_check_reports_committed_provenance_without_sealed_selection(git_bot_binding, monkeypatch):
+    case = git_bot_binding
+    monkeypatch.setattr(bot_operations, "resolve_operation_scope", lambda **_: (case.destination, None))
+    result = bot_operations.check_handoff(root=case.root, fleet="example", bot="lead")
+    assert result.release_id is None
+    assert result.source_revision == case.current.revision
+    assert result.config_fingerprint == case.current.config_fingerprint
+    assert result.reason == "no_request_recorded"
+
+
+def test_self_restart_refuses_changed_committed_provenance_before_admitted_callback(git_bot_binding, monkeypatch):
+    from contextlib import contextmanager
+    case = git_bot_binding
+    @contextmanager
+    def admitted(*_args, **_kwargs):
+        yield case.current
+    monkeypatch.setattr(bot_operations, "mutation_admission", admitted)
+    monkeypatch.setattr(bot_operations, "resolve_operation_scope", lambda **_: pytest.fail("provenance drift escaped"))
+    with pytest.raises(bot_operations.BotLifecycleError, match="configuration changed"):
+        bot_operations.set_bot_running(root=case.root, fleet="example", bot="lead", running=True,
+            restart=True, _self_child=True, identity=object(),
+            _expected_provenance=(None, {"source_revision": "0" * 40, "config_fingerprint": "0" * 64}),
+            _on_lock=lambda: pytest.fail("caller admitted before provenance check"))
+
+
+@pytest.mark.parametrize("committed, caller, switch", [
+    ("gui", "gui", False), ("gui", "user", True), ("user", "user", False),
+])
+def test_git_bot_binding_uses_exact_committed_darwin_domain(git_bot_binding, committed, caller, switch):
+    case = git_bot_binding
+    uid = os.getuid()
+    case.snapshot["supervision"].update(manager="Darwin", domain=f"{committed}/{uid}")
+    current = replace(case.current, snapshot=deepcopy(case.snapshot))
+    switches = []
+    class Native:
+        package = case.adapter.package
+        def __init__(self, domain):
+            self.domain = domain
+        def read(self, function):
+            assert function == "svc_inventory_catalog"
+            return (f"manager\tDarwin\ndomain\t{self.domain}\ndirectory\t{case.directory}\n"
+                    "PID\tStatus\tLabel\n")
+        def in_selected_gui(self, target):
+            switches.append(target)
+            return Native(f"gui/{uid}")
+    binding = bot_operations._current_bot_binding(case.root, current, case.destination,
+                                                  "lead", Native(f"{caller}/{uid}"))
+    assert binding.entry["target"] == f"{committed}/{uid}/com.example.lead"
+    assert binding.entry["installed"] == str(case.directory / "com.example.lead.plist")
+    assert switches == ([f"gui/{uid}/com.example.lead"] if switch else [])
+
+
+def test_git_bot_binding_refuses_gui_caller_for_committed_user_domain(git_bot_binding):
+    case = git_bot_binding
+    uid = os.getuid()
+    case.snapshot["supervision"].update(manager="Darwin", domain=f"user/{uid}")
+    current = replace(case.current, snapshot=deepcopy(case.snapshot))
+    adapter = SimpleNamespace(package=case.adapter.package, read=lambda _:
+        f"manager\tDarwin\ndomain\tgui/{uid}\ndirectory\t{case.directory}\nPID\tStatus\tLabel\n",
+        in_selected_gui=lambda _: pytest.fail("committed user target silently changed to GUI"))
+    with pytest.raises(bot_operations.BotLifecycleError, match="domain differs"):
+        bot_operations._current_bot_binding(case.root, current, case.destination, "lead", adapter)

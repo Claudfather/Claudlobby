@@ -34,6 +34,8 @@ class OwnerFeedbackActions:
         host = inspect_source(self.root)
         access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
+        if self.package.installation is not None:
+            raise AccessUnavailable("current Git task-action target adapter is not yet connected")
         bindings = read_selected_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_feedback(reader.token, reader.principal,
                                           host_uid=host, fleet_uid=bindings["fleet_uid"])

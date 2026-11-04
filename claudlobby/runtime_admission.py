@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from .activation_state import STEPS, ActivationError, ActivationStore, read_activation, read_selection
 from .releases import ReleaseManifest, read_release
+from .installation import unit_systemd_command
 
 if TYPE_CHECKING:
     from .installation import Installation
@@ -65,12 +66,6 @@ def wrap_unit_argv(environment: dict[str, str], *, unit: str, phase: str,
               unit, phase, mode, "--", *argv)
     parse_unit_argv(result)
     return result
-
-
-def unit_systemd_command(argv) -> str:
-    """Literal argv in systemd's quoted command syntax, including $/% escaping."""
-    return " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"')
-                    .replace("%", "%%").replace("$", "$$") + '"' for part in argv)
 
 
 def unit_systemd_environment(key: str, value: str) -> str:
@@ -259,6 +254,33 @@ class GitCurrentRuntime:
     revision: str
     config_fingerprint: str
     snapshot: dict
+
+
+def runtime_release_id(current):
+    """Git admission has no sealed release identity."""
+    return None if isinstance(current, GitCurrentRuntime) else current.release_id
+
+
+def runtime_provenance(value):
+    """Add Git provenance to presentation without changing legacy payloads."""
+    revision = getattr(value, "revision", getattr(value, "source_revision", None))
+    return ({"source_revision": revision, "config_fingerprint": value.config_fingerprint}
+            if revision is not None else {})
+
+
+def runtime_route_matches(current, route, *, package=None):
+    """Compare admitted provenance; caller/actor grants stay with the operation."""
+    package = package if package is not None else route.selected.paths.package
+    revision = getattr(route, "revision", getattr(route, "source_revision", None))
+    fingerprint = getattr(route, "config_fingerprint", None)
+    if isinstance(current, GitCurrentRuntime):
+        return (route.release_id is None and getattr(route, "activation_id", None) is None
+                and getattr(route, "plan_id", None) is None
+                and revision == current.revision and fingerprint == current.config_fingerprint
+                and package.installation == current.installation
+                and package.source_revision == current.revision)
+    return (package.installation is None and route.release_id == current.release_id
+            and revision is None and fingerprint is None)
 
 
 @contextmanager

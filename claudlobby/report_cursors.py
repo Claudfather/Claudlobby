@@ -17,6 +17,7 @@ import tempfile
 
 _IDENTITY = frozenset({"host_uid", "fleet_uid", "viewer_uid", "release_id",
                        "activation_id", "plan_id"})
+_GIT_IDENTITY = frozenset({"host_uid", "fleet_uid", "viewer_uid", "source_revision", "config_fingerprint"})
 _KEY_FILE = "report-cursor.key"
 _TOKEN_LIMIT = 4096
 _MSG = re.compile(r"msg_[0-9a-f]{32}\Z")
@@ -46,10 +47,13 @@ class ServedPrefix:
 
 
 def _identity(value: dict) -> dict[str, str]:
-    if (not isinstance(value, dict) or set(value) != _IDENTITY
+    if (not isinstance(value, dict) or set(value) not in (_IDENTITY, _GIT_IDENTITY)
             or any(not isinstance(part, str) or not part for part in value.values())):
         raise CursorError("report cursor identity is invalid")
-    return {key: value[key] for key in sorted(_IDENTITY)}
+    if set(value) == _GIT_IDENTITY and (not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["source_revision"])
+            or not _SHA.fullmatch(value["config_fingerprint"])):
+        raise CursorError("report cursor Git provenance is invalid")
+    return {key: value[key] for key in sorted(value)}
 
 
 def _key(root: Path, *, create: bool) -> bytes:

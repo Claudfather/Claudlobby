@@ -330,3 +330,27 @@ def test_stalled_or_dead_start_responder_cannot_license_effects(proposal):
             listener.close()
             os.close(fd)
     assert effects == []
+
+
+def test_shared_git_route_comparison_binds_configuration_and_installation(git_current):
+    from types import SimpleNamespace
+    from claudlobby.resources import get_resources
+    from claudlobby.runtime_admission import GitCurrentRuntime, runtime_route_matches, runtime_provenance
+    installation, snapshot = git_current
+    package = get_resources(installation=installation)
+    current = GitCurrentRuntime(installation, snapshot["revision"], snapshot["fingerprint"], snapshot)
+    route = SimpleNamespace(release_id=None, activation_id=None, plan_id=None,
+                            revision=current.revision, config_fingerprint=current.config_fingerprint,
+                            selected=SimpleNamespace(paths=SimpleNamespace(package=package)))
+    assert runtime_route_matches(current, route)
+    assert runtime_provenance(current) == {"source_revision": current.revision,
+                                           "config_fingerprint": current.config_fingerprint}
+    route.config_fingerprint = "b" * 64
+    assert not runtime_route_matches(current, route)
+    route.config_fingerprint = current.config_fingerprint
+    route.release_id = "r-" + "c" * 64
+    assert not runtime_route_matches(current, route)
+    route.release_id = None
+    from claudlobby.installation import Installation
+    other = replace(package, installation=Installation(installation.directory.parent / "other", installation.data_root))
+    assert not runtime_route_matches(current, route, package=other)

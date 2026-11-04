@@ -6,6 +6,7 @@ Authoring/read-only declaration commands continue to use context.load_context.
 """
 
 import json
+from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
@@ -61,7 +62,7 @@ def _snapshot_context(root: Path, fleet: str, item: dict, *, bot: str | None,
 
 
 def _validate_snapshot(snapshot: dict, installation: Installation, revision: str | None = None) -> None:
-    if (not isinstance(snapshot, dict) or set(snapshot) != {
+    if (not isinstance(snapshot, dict) or set(snapshot) - {"supervision"} != {
             "schema", "data_root", "installation", "source", "revision", "fleets", "owned_outputs", "units", "identities", "fingerprint"}
             or type(snapshot["schema"]) is not int or snapshot["schema"] != 1
             or snapshot["data_root"] != str(installation.data_root)
@@ -73,6 +74,20 @@ def _validate_snapshot(snapshot: dict, installation: Installation, revision: str
         raise PlanError("effective configuration installation/source provenance differs")
     if snapshot["fingerprint"] != _fingerprint(snapshot):
         raise PlanError("effective configuration fingerprint differs")
+    if "supervision" in snapshot:
+        placement = snapshot["supervision"]
+        if (not isinstance(placement, dict) or set(placement) != {"manager", "directory", "domain"}
+                or placement["manager"] not in {"Linux", "Darwin"}
+                or not isinstance(placement["directory"], str)
+                or (placement["manager"] == "Linux" and placement["domain"] != "")
+                or (placement["manager"] == "Darwin" and placement["domain"] not in {
+                    f"gui/{os.getuid()}", f"user/{os.getuid()}"})):
+            raise PlanError("effective native placement is invalid")
+        directory = Path(placement["directory"])
+        if (not directory.is_absolute() or directory.resolve() != directory
+                or directory.is_relative_to(installation.directory)
+                or directory.is_relative_to(installation.data_root)):
+            raise PlanError("effective native placement is redirected or overlaps managed data")
     if not isinstance(snapshot["fleets"], dict) or not snapshot["fleets"]:
         raise PlanError("effective configuration has no frozen fleets")
     # The same parser used by declaration commands verifies every frozen fleet.
@@ -209,7 +224,7 @@ def _fingerprint(snapshot: dict) -> str:
 
 
 def snapshot_from_plan(plan: ConfigPlan | RenderedConfiguration, installation: Installation, revision: str, *,
-                       identities: dict | None = None) -> dict:
+                       identities: dict | None = None, supervision: dict | None = None) -> dict:
     """Freeze effective inputs and output ownership, independent of startup progress."""
     if plan.data_root != installation.data_root or getattr(plan, "revision", revision) != revision:
         raise PlanError("configuration plan belongs to another data root")
@@ -234,6 +249,8 @@ def snapshot_from_plan(plan: ConfigPlan | RenderedConfiguration, installation: I
                 "units": plan.effects.get("units", []),
                 "identities": identities,
                 "owned_outputs": [{"target": change.target, "state": change.after} for change in plan.changes]}
+    if supervision is not None:
+        snapshot["supervision"] = supervision
     # Detach mutable plan dictionaries before returning the committed document.
     snapshot = json.loads(json.dumps(snapshot))
     snapshot["fingerprint"] = _fingerprint(snapshot)
@@ -290,6 +307,57 @@ def read_current_config(root: Path, *, installation: Installation, revision: str
         if isinstance(exc, PlanError):
             raise
         raise PlanError("effective configuration is missing or invalid") from exc
+
+
+@dataclass(frozen=True)
+class RuntimeReadStamp:
+    """Observed current provenance, never mutation or viewer authority."""
+    kind: str
+    selection: dict | None = None
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
+
+    @property
+    def release_id(self):
+        return self.selection["release_id"] if self.selection is not None else None
+
+    @property
+    def provenance(self):
+        return ({"source_revision": self.source_revision, "config_fingerprint": self.config_fingerprint}
+                if self.kind == "git" else {})
+
+    @property
+    def cursor_scope(self):
+        if self.kind == "git":
+            return self.provenance
+        return {key: self.selection[key] for key in ("release_id", "activation_id", "plan_id")}
+
+    def check(self, root, *, package, message="current runtime changed during read"):
+        from .command_result import selection_read_conflict
+        try:
+            same = runtime_read_stamp(root, package=package) == self
+        except (ActivationError, PlanError, OSError):
+            same = False
+        if not same:
+            failure = selection_read_conflict(message, release_id=self.release_id)
+            failure.data.update(self.provenance)
+            raise failure
+
+
+def runtime_read_stamp(root: Path, *, package: PackageResources | None = None) -> RuntimeReadStamp | None:
+    """Read only config.json for Git; legacy selection remains migration-only."""
+    package = package if package is not None else get_resources()
+    if package.installation is not None:
+        if not package.source_revision:
+            raise PlanError("current Git runtime revision is unavailable")
+        snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
+        return RuntimeReadStamp("git", source_revision=snapshot["revision"],
+                                config_fingerprint=snapshot["fingerprint"])
+    # Use the canonical reader at call time, preserving legacy diagnostics and
+    # callers that instrument selection changes during a read.
+    from .activation_state import read_selection
+    selection = read_selection(root)
+    return RuntimeReadStamp("sealed", selection=json.loads(json.dumps(selection))) if selection is not None else None
 
 
 def context_from_plan(plan: ConfigPlan, fleet: str, *, bot: str | None = None,

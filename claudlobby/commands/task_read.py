@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from contextlib import closing
 from dataclasses import asdict
 import sqlite3
@@ -14,8 +12,8 @@ from ..reference_hints import note_prefix
 
 def _read(args) -> CommandOutput:
     from ..active_config import ActivationError
-    from ..activation_state import read_selection
     from ..activation_identity import read_selected_identity_bindings
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import (
@@ -36,13 +34,12 @@ def _read(args) -> CommandOutput:
         destination, _origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no task registry")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active task selection is unavailable")
         bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active task selection changed during read')
+        selected.check(destination.paths.root, package=destination.paths.package, message='active task selection changed during read')
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):
             raise CommandFailure("conflict", "active task identity bindings differ from frozen fleet")
@@ -87,7 +84,10 @@ def _read(args) -> CommandOutput:
                     lines += (f"delivery\t{delivery.message_id}\t{delivery.receipt_observation}\t"
                               f"{delivery.integrity_verdict}",)
                 lines = note_prefix(data, lines, args.assignment_id, view.assignment.assignment_id)
-        return CommandOutput(data, release_id=selected["release_id"], lines=lines)
+        selected.check(destination.paths.root, package=destination.paths.package,
+                       message="active task selection changed during read")
+        data.update(selected.provenance)
+        return CommandOutput(data, release_id=selected.release_id, lines=lines)
     except CommandFailure:
         raise
     except OperationContextUnavailableError as exc:

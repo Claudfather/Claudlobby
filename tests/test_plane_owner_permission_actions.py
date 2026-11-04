@@ -274,3 +274,25 @@ def test_native_owner_permission_proof_does_not_admit_bot_or_timer_selectors(nat
     monkeypatch.setenv(carrier, '')
     denied = post(client, 'context', {'kind':'permission', 'room':'example', 'task_id':permission.task_id})
     assert denied.status_code == 403 and counts(adapter) == before
+
+
+@pytest.mark.parametrize('kind', ['nudge', 'feedback', 'permission'])
+def test_git_task_target_context_refuses_before_advertising_sealed_actions(permissions_http, kind):
+    from claudlobby.installation import Installation
+    from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable
+    from claudlobby.plane.owner_nudge_actions import OwnerNudgeActions
+    from claudlobby.plane.owner_feedback_actions import OwnerFeedbackActions
+    from claudlobby.plane.owner_permission_actions import OwnerPermissionActions
+
+    _, adapter, reader, _, _, _, _ = permissions_http
+    installation = Installation(adapter.root.parent / 'git-installation', adapter.root)
+    package = replace(adapter.package, installation=installation, native=installation.native,
+                      artifact_id='', source_revision='a' * 40)
+    owner = {'nudge': OwnerNudgeActions, 'feedback': OwnerFeedbackActions,
+             'permission': OwnerPermissionActions}[kind](adapter.root, package=package)
+    before = counts(adapter)
+    with pytest.raises(AccessUnavailable, match='current Git task-action target adapter is not yet connected'):
+        owner._context(reader, 'example')
+    with pytest.raises(AccessDenied):
+        owner._context(replace(reader, token='unverified-session'), 'example')
+    assert counts(adapter) == before

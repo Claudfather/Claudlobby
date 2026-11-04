@@ -176,9 +176,11 @@ def test_standalone_update_status_needs_neither_source_nor_runtime(update):
     assert outcome.returncode == 0, outcome.stderr
     assert json.loads(outcome.stdout)["update"]["target"] == target
     assert read_update(installation)["phase"] == "prepare"
-    unsupported = subprocess.run([str(installation.cli), "host", "update"], env=constructed_env(),
-                                 cwd=installation.data_root, capture_output=True, text=True, timeout=10)
-    assert unsupported.returncode != 0 and "application update owner" in unsupported.stderr
+    default_status = subprocess.run([str(installation.cli), "host", "update"], env=constructed_env(),
+                                    cwd=installation.data_root, capture_output=True, text=True, timeout=10)
+    assert default_status.returncode == 0, default_status.stderr
+    assert json.loads(default_status.stdout)["read_only"] is True
+    assert json.loads(default_status.stdout)["update"]["target"] == target
 
 
 def _tiny_wheel(directory, version):
@@ -320,12 +322,13 @@ def test_application_preparation_finalizes_the_original_staged_target(update, mo
     monkeypatch.setattr(update_operation, "snapshot_from_plan", lambda *_a, **_k: current)
     monkeypatch.setattr(update_operation, "validate_candidate_consumers", lambda *_: None)
     monkeypatch.setattr(update_operation, "_schema", lambda *_: 14)
+    monkeypatch.setattr(update_operation, "_catalog", lambda *_: (update_operation.platform.system(), "", [], set(), {}))
     monkeypatch.setattr(update_operation, "freeze_service_intent", lambda *_: [])
     monkeypatch.setattr(update_operation, "prepare_publication", lambda *_: None)
     with UpdateStore(installation) as store:
         staged = store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001")
         result = update_operation.prepare_operation(
-            store, rendered, SimpleNamespace(package=None), installation.data_root,
+            store, rendered, SimpleNamespace(package=None, read=lambda *_: "catalog"), installation.data_root,
             Path(sys.executable), staged["request_id"])
         assert result["request_id"] == staged["request_id"]
         assert result["finalized"] and result["phase"] == "quiesce"
@@ -474,3 +477,233 @@ def test_completed_candidate_cleanup_preserves_dirty_work_then_removes_owned_che
         assert not source.exists()
         listing = _run(["git", "-C", installation.source, "worktree", "list", "--porcelain"], store.root)
         assert str(source) not in listing
+
+
+def test_retained_job_support_loads_canonical_owners_without_source_or_environment(update):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    root = Path(__file__).resolve().parents[1] / "claudlobby"
+    for name in ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py", "supervision_runtime.py"):
+        shutil.copy2(root / name, installation.source / "claudlobby" / name)
+    for name in ("supervisor.sh", "supervisor-caller.py"):
+        shutil.copy2(root / "_runtime_scripts" / name, installation.native / name)
+    before = commit("Current fixed native updater support")
+    (installation.source / "templates/candidate.txt").write_text("next fixed support\n")
+    target = commit("Target fixed native updater support")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        updater._prepare_job_support(store)
+        installation.source.rename(installation.directory / "source-unavailable")
+        jobs, independent, adapter = updater._retained_job(store)
+        assert independent.data_root == installation.data_root
+        assert Path(jobs.__file__).parent == adapter.package.native
+        assert hasattr(jobs, "verify_update_job_runner")
+        from types import SimpleNamespace
+        foreign = SimpleNamespace(directory=installation.directory,
+                                  data_root=installation.data_root / "another-host")
+        with pytest.raises(UpdateError, match="installation record differs"):
+            jobs.update_job_definition(foreign, manager="Linux", domain="", install_directory=store.root)
+        assert not installation.environment.exists()
+        support = adapter.package.native / "supervisor-caller.py"
+        support.write_text("foreign membership predicate")
+        with pytest.raises(UpdateError, match="support changed"):
+            updater._retained_job(store)
+
+
+def _bound_native_job(store, state="inactive"):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    record = store.load()
+    directory = store.root / "native"
+    directory.mkdir(exist_ok=True)
+    job = SimpleNamespace(manager="Linux", target="example-updater.service",
+                          source=store.installation.bin / "example-updater.service",
+                          installed=directory / "example-updater.service", content=b"fixed native job")
+    record.update(native_install_directory=str(directory), updater_job={
+        "manager": job.manager, "target": job.target, "source": str(job.source),
+        "installed": str(job.installed), "sha256": updater._digest(job.content)})
+    store.save(record)
+    jobs = SimpleNamespace(_definition=lambda *_args, **_kwargs: job,
+        observe_update_job=lambda *_args, **_kwargs: {"target": job.target, "state": state})
+    return jobs, job
+
+
+@pytest.mark.parametrize("state", ["running", "starting", "inactive", "failed"])
+def test_dispatch_reconciles_same_job_and_retains_original_request(update, monkeypatch, state):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, job = _bound_native_job(store, state)
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+        observed, dispatch = updater._dispatch_update_job(store)
+        assert store.load()["request_id"] == record["request_id"]
+        if state in {"running", "starting"}:
+            assert observed["dispatch"] == "attached" and dispatch is None
+            assert store.load()["job_dispatch"]["attempt"] == 1
+        else:
+            # Native inactivity permits resuming the same coordinator, whose
+            # canonical operation reconciles original business-effect receipts.
+            assert observed is None and dispatch[0] is jobs
+            assert store.load()["job_dispatch"] == {"state": "pending", "attempt": 2}
+
+
+def test_unknown_job_observation_does_not_dispatch_or_replace_receipt(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+        jobs.observe_update_job = lambda *_args, **_kwargs: (_ for _ in ()).throw(UpdateError("unknown native state"))
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+        original = store.load()
+        with pytest.raises(UpdateError, match="unknown native"):
+            updater._dispatch_update_job(store)
+        assert store.load() == original
+
+
+def test_public_apply_authorizes_before_record_candidate_or_native_effects(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    calls = []
+    def refused(_store, stage, **_kwargs):
+        calls.append(stage)
+        raise UpdateError("operator ancestry refused")
+    monkeypatch.setattr(updater, "_application_stage", refused)
+    monkeypatch.setattr(updater, "prepare_candidate_render", lambda *_args, **_kwargs: pytest.fail("candidate effect before authority"))
+    with pytest.raises(UpdateError, match="operator ancestry"):
+        updater.apply_or_continue(installation, target=target)
+    assert calls == ["authorize"] and read_update(installation) is None
+    assert installation.preflight() == before
+
+
+def test_native_runner_checks_membership_before_operation_and_uses_waiting_lock(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+    jobs.verify_update_job_runner = lambda *_args, **_kwargs: (_ for _ in ()).throw(UpdateError("external native caller"))
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+    monkeypatch.setattr(updater, "run_prepared_update", lambda *_: pytest.fail("external caller reached coordinator"))
+    waits = []
+    def store_factory(current, *, wait=False):
+        waits.append(wait)
+        return UpdateStore(current, wait=wait)
+    monkeypatch.setattr(updater, "UpdateStore", store_factory)
+    with pytest.raises(UpdateError, match="external native"):
+        updater._run_native_update(installation)
+    assert waits == [True]
+    assert read_update(installation)["job_dispatch"]["state"] == "pending"
+
+
+def test_public_continue_attaches_original_operation_without_mutable_application(update, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="environment", maintenance=True, job_support={}, consumers={"example.service": {"intent": {
+            "installed": [{"path": str(store.root / "example.service")}], "bot_binding": None}}})
+        store.save(record)
+        jobs, _ = _bound_native_job(store, "running")
+    installation.source.rename(installation.directory / "source-unavailable")
+    monkeypatch.setattr(updater, "_application_stage", lambda *_args, **_kwargs: pytest.fail("continuation imported mutable app"))
+    adapter = SimpleNamespace(call=lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, adapter))
+    result = updater.apply_or_continue(installation)
+    assert result["job"]["dispatch"] == "attached"
+    assert result["update"]["request_id"] == record["request_id"]
+    assert result["update"]["target"] == target and result["update"]["maintenance"]
+
+
+def test_copied_native_runner_verifies_retained_binding_without_src_or_env(update):
+    """Fixture native observations only; no live native manager is called."""
+    import hashlib
+    import shlex
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    root = Path(__file__).resolve().parents[1] / "claudlobby"
+    for name in ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py", "supervision_runtime.py"):
+        shutil.copy2(root / name, installation.source / "claudlobby" / name)
+    shutil.copy2(root / "_runtime_scripts/supervisor-caller.py", installation.native / "supervisor-caller.py")
+    directory = installation.data_root / "native"
+    directory.mkdir()
+    label = "com.claudlobby.update." + hashlib.sha256(str(installation.directory).encode()).hexdigest()[:16]
+    target = label + ".service"
+    values = {"Id": target, "LoadState": "loaded", "ActiveState": "active", "UnitFileState": "static",
+        "FragmentPath": str(directory / target), "DropInPaths": "", "NeedDaemonReload": "no",
+        "Triggers": "", "TriggeredBy": "", "WorkingDirectory": str(installation.directory),
+        "Environment": "", "ExecStart": "fixture D-Bus command; exact argv is typed separately"}
+    properties = "\n".join(f"{key}={value}" for key, value in values.items())
+    typed = json.dumps({"type": "a(sasbttttuii)", "data": [[str(installation.bin / "claudlobby-update"),
+        [str(installation.bin / "claudlobby-update"), "_run"], False, 0, 0, 0, 0, 0, 0, 0]]})
+    catalog = f"manager\tLinux\ndirectory\t{directory}\n"
+    fixture_native = (
+        "svc_inventory_catalog() { printf '%s' " + shlex.quote(catalog) + "; }\n"
+        "svc_inventory_properties() { printf '%s' " + shlex.quote(properties) + "; }\n"
+        "svc_inventory_state() { printf 'static loaded active\\n'; }\n"
+        "svc_update_job_exec() { printf '%s' " + shlex.quote(typed) + "; }\n"
+        "svc_activation_assert_external() { return 1; }\n")
+    (installation.native / "supervisor.sh").write_text(fixture_native)
+    before = commit("Retained fixture native observation provider")
+    (installation.source / "templates/candidate.txt").write_text("candidate fixture\n")
+    target_commit = commit("Candidate fixture update")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    install_updater(installation, interpreter=Path(sys.executable).resolve())
+    with UpdateStore(installation) as store:
+        record = prepare(store, target_commit)
+        record.update(phase="quiesce", consumers={})
+        store.save(record)
+        jobs, independent, adapter = updater._prepare_job_support(store)
+        job = jobs.update_job_definition(independent, manager="Linux", domain="", install_directory=directory)
+        for path in (job.source, job.installed):
+            path.write_bytes(job.content)
+            path.chmod(0o644)
+        assert type(independent) is not type(store.installation)
+        jobs.bind_update_job(store, adapter, directory)
+        record = store.load()
+        # A mechanical recovery can positively admit its native job without
+        # src/env. Missing Git source then refuses safely before publication.
+        record.update(phase="environment", maintenance=True, git_complete=True,
+                      job_dispatch={"state": "pending", "attempt": 1}, native_install_directory=str(directory))
+        store.save(record)
+    installation.source.rename(installation.directory / "source-unavailable")
+    assert not installation.environment.exists()
+    result = subprocess.run([str(installation.bin / "claudlobby-update"), "_run"],
+        env=constructed_env(), capture_output=True, text=True, timeout=30)
+    assert result.returncode == 6
+    assert "ModuleNotFoundError" not in result.stderr and "Traceback" not in result.stderr
+    retained = read_update(installation)
+    assert retained["request_id"] == record["request_id"]
+    assert retained["job_dispatch"]["state"] == "finished"  # Membership gate was passed.
+    assert retained["phase"] == "environment" and retained["maintenance"]
+
+
+def test_public_continue_attaches_while_native_runner_holds_update_lock(update, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", consumers={})
+        store.save(record)
+        jobs, _ = _bound_native_job(store, "running")
+        adapter = SimpleNamespace(call=lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, adapter))
+        result = updater.apply_or_continue(installation, target=target)
+        assert result["job"]["dispatch"] == "attached"
+        assert result["update"]["request_id"] == record["request_id"]
+        with pytest.raises(UpdateError, match="frozen target"):
+            updater.apply_or_continue(installation, target="f" * 40)

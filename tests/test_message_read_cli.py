@@ -283,3 +283,81 @@ def test_help_does_not_import_message_query_owner(monkeypatch, capsys):
     assert syntax["command"] == "message.wait"
     assert syntax["error"]["code"] == "invalid_argument"
     assert "private-value" not in json.dumps(syntax)
+
+
+def test_git_message_read_keeps_private_viewer_gate_and_honest_provenance(active, monkeypatch, capsys):
+    from tests.test_task_read_cli import _use_git_current
+    root = active[0]
+    message_id = _communication(root, 902, sender="bot:example/manager", recipient="bot:example/worker")
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    _generated(monkeypatch, root, "worker")
+    result = _call(capsys, root, "show", message_id)
+    assert result["release_id"] is None
+    assert result["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert result["data"]["source_revision"] == package.source_revision
+    _generated(monkeypatch, root, "observer")
+    denied = _call(capsys, root, "show", message_id, expected=4)
+    assert denied["ok"] is False
+
+
+def test_git_report_cursor_binds_revision_and_config_and_legacy_shape_is_unchanged(tmp_path):
+    from claudlobby.report_cursors import _identity, CursorError
+    git = {"host_uid": "host-example", "fleet_uid": "fleet-example", "viewer_uid": "actor-example",
+           "source_revision": "a" * 40, "config_fingerprint": "b" * 64}
+    assert _identity(git) == git
+    legacy = {"host_uid": "host-example", "fleet_uid": "fleet-example", "viewer_uid": "actor-example",
+              "release_id": "r-example", "activation_id": "a-example", "plan_id": "p-example"}
+    assert _identity(legacy) == legacy
+    with pytest.raises(CursorError):
+        _identity({**git, "release_id": "r-example"})
+    with pytest.raises(CursorError):
+        _identity({**git, "config_fingerprint": None})
+
+
+def test_git_report_pages_and_ack_bind_same_current_config_and_replay_once(active, monkeypatch, capsys):
+    from contextlib import contextmanager
+    from uuid import uuid4
+    from claudlobby import active_config, brief, runtime_admission
+    from claudlobby.paths import load_lib_module
+    from claudlobby.report_payload import ReportPayload, encode_report_facts
+    from tests.package_fixtures import source_package
+    from tests.test_task_read_cli import _use_git_current
+    root = active[0]
+    (root / "state/plane/capture.json").write_text('{"*":"full"}')
+    for number in (910, 911):
+        emit_batch(root, encode_report_facts(ReportPayload("completed", summary="Git report"),
+            fleet="example", sender="bot:example/worker", recipient="bot:example/manager",
+            msg_id=f"msg_{number:032x}", event_ids=(f"ev_{number * 2:032x}", f"ev_{number * 2 + 1:032x}"),
+            occurred_at="2026-10-01T12:00:00Z"), require_commit=True)
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    _generated(monkeypatch, root, "manager")
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs["expected_release"] is None
+        yield runtime_admission.GitCurrentRuntime(package.installation, package.source_revision,
+                                                  snapshot["fingerprint"], snapshot)
+    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
+    monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", lambda: object())
+    def call(*args, expected=0):
+        assert main(["--root", str(root), "--json", "fleet", "reports", *args]) == expected
+        return json.loads(capsys.readouterr().out)
+    first = call("list", "--unacknowledged", "--limit", "1")
+    assert first["release_id"] is None and first["data"]["source_revision"] == package.source_revision
+    second = call("list", "--unacknowledged", "--limit", "1", "--cursor", first["data"]["next_cursor"])
+    assert len(second["data"]["items"]) == 1
+    request = str(uuid4())
+    cursor = second["data"]["ack_cursor"]
+    ack = call("ack", "--through", cursor, "--request-id", request)
+    assert ack["data"]["count"] == 2 and ack["data"]["replayed"] is False
+    assert ack["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    replay = call("ack", "--through", cursor, "--request-id", request)
+    assert replay["data"]["replayed"] is True
+    changed = json.loads(json.dumps(snapshot))
+    changed["fleets"]["example"]["fleet"] += "\n# next reviewed epoch\n"
+    changed["fingerprint"] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=package.installation,
+                                         expected_previous=snapshot["fingerprint"])
+    mismatch = call("list", "--unacknowledged", "--cursor", cursor, expected=2)
+    assert mismatch["error"]["code"] == "invalid_argument"

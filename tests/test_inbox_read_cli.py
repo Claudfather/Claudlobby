@@ -115,3 +115,31 @@ def test_inbox_keeps_fleet_work_and_viewer_reports_separate(active, monkeypatch,
     assert operator["viewer_selection"] == "manager_default"
     assert [item["task_id"] for item in operator["work"]["items"]] == ["wi_inbox"]
     assert counts() == before  # reads never register a human or ACK a report
+
+
+def test_git_inbox_cursor_binds_committed_config_not_null_release(active, monkeypatch, capsys):
+    from tests.test_task_read_cli import _use_git_current
+    from claudlobby import active_config
+    root, host = active
+    bindings = read_selected_identity_bindings(root, "example", package=host.package)
+    with sqlite3.connect(db_file(root)) as conn:
+        _task(conn, "wi_git_inbox_one", fleet_uid=bindings["fleet_uid"])
+        _task(conn, "wi_git_inbox_two", fleet_uid=bindings["fleet_uid"])
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    def read(*args, expected=0):
+        assert main(["--root", str(root), "--json", "fleet", "inbox", "--limit", "1", *args]) == expected
+        return json.loads(capsys.readouterr().out)
+    first = read()
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    cursor = first["data"]["next_cursor"]
+    assert cursor
+    changed = json.loads(json.dumps(snapshot))
+    changed["fleets"]["example"]["fleet"] += "\n# next config epoch\n"
+    changed["fingerprint"] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=package.installation,
+                                         expected_previous=snapshot["fingerprint"])
+    assert read("--cursor", cursor, expected=2)["error"]["code"] == "invalid_argument"

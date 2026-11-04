@@ -15,8 +15,10 @@ from .activation_identity import read_registry_identity_bindings
 from .config_install import prepare_publication, apply_publication
 from .config_plan import read_rendered
 from .git_update import UpdateError, _git, _head
+from .installation import install_launcher, install_updater
 from .plane.db import db_file, connect_ro
 from .runtime_versions import SQL_SCHEMA_VERSION
+from .supervision_inventory import _catalog
 from .update_services import (
     freeze_service_intent, consumer_scope, validate_candidate_consumers,
     quiesce_consumer, observe_quiet, restore_consumer,
@@ -73,8 +75,15 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
             return _operation(store)
     rendered.check_inputs()
     current = read_current_config(store.root, installation=store.installation)
+    manager, domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    if manager != platform.system():
+        raise UpdateError("native manager differs from current host")
+    placement = {"manager": manager, "domain": domain, "directory": str(install_directory)}
+    if current.get("supervision") not in (None, placement):
+        raise UpdateError("native install directory differs from committed placement")
     identities = read_registry_identity_bindings(rendered, package=adapter.package)
-    candidate = snapshot_from_plan(rendered, store.installation, rendered.revision, identities=identities)
+    candidate = snapshot_from_plan(rendered, store.installation, rendered.revision,
+                                   identities=identities, supervision=placement)
     validate_candidate_consumers(current, candidate, platform.system())
     if current["identities"] != candidate["identities"]:
         raise UpdateError("identity changes require an explicit configuration scope")
@@ -194,6 +203,9 @@ def publish_operation(store):
         record = store.load()
         record["phase"] = "commit"
         store.save(record)
+    interpreter = Path(record["host_interpreter"])
+    install_launcher(store.installation, interpreter=interpreter)
+    install_updater(store.installation, interpreter=interpreter)
     publish_current_config(record["candidate_config"], installation=store.installation,
                            expected_previous=record["previous_config"])
     record = store.load()

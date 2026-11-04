@@ -252,6 +252,78 @@ def test_host_job_run_requires_selected_enabled_unit_and_reports_only_request(tm
     assert calls == []
 
 
+def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import plistlib
+    from claudlobby.config_units import unit_family
+    from claudlobby.installation import Installation
+    from claudlobby.runtime_admission import GitCurrentRuntime, wrap_unit_argv, unit_systemd_command, unit_systemd_environment
+    from claudlobby.supervision_inventory import FileSnapshot
+
+    root, directory = tmp_path / "data", tmp_path / "units"
+    root.mkdir(); directory.mkdir()
+    installation = Installation(tmp_path / "installation", root)
+    package = replace(source_package(), installation=installation, native=installation.native,
+                      artifact_id="", source_revision="a" * 40)
+    env = {"CLAUDLOBBY_ROOT": str(root), "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_CLI": str(installation.cli), "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+           "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+    stem = "committed-plane-prune"
+    argv = wrap_unit_argv(env, unit=stem, phase="producers", mode="oneshot",
+                         argv=[str(installation.native / "plane-prune.sh")])
+    files = {stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(root),
+        "EnvironmentVariables": env, "ProgramArguments": list(argv)}), 0o644),
+        stem + ".service": ((f"[Service]\nWorkingDirectory={root}\nExecStart={unit_systemd_command(argv)}\n"
+            + "".join(host_run_line + "\n" for host_run_line in
+                      [unit_systemd_environment(k, v)
+                       for k,v in env.items()])).encode(), 0o644),
+        stem + ".timer": (f"[Timer]\nUnit={stem}.service\n".encode(), 0o644)}
+    generated = root / "runtime/_host/timers"
+    generated.mkdir(parents=True)
+    rows = unit_family(files, destination=generated, scope="host", phase="producers", release_id="")
+    for name, (content, mode) in files.items():
+        (generated / name).write_bytes(content); (generated / name).chmod(mode)
+        if not name.endswith(".plist"):
+            (directory / name).write_bytes(content); (directory / name).chmod(mode)
+    current = GitCurrentRuntime(installation, "a" * 40, "b" * 64,
+                               {"installation": str(installation.directory), "data_root": str(root), "units": rows})
+    @contextmanager
+    def admitted(*args, **kwargs):
+        yield current
+    monkeypatch.setattr(host_run, "mutation_admission", admitted)
+    monkeypatch.setattr(host_run.RuntimeIdentity, "current", lambda: object())
+    monkeypatch.setattr(host_run, "load_host_jobs", lambda: pytest.fail("pending authored override read"))
+    monkeypatch.setattr(host_run, "_load_system_defaults", lambda: {"host": {"jobs": {"plane-prune": {}}}})
+    monkeypatch.setattr(host_run, "read_selection", lambda *_: pytest.fail("sealed selection read"))
+    calls = []
+    class Native:
+        def __init__(self): self.package = package
+        def read(self, function):
+            assert function == "svc_inventory_catalog"
+            return f"manager\tLinux\ndirectory\t{directory}\n"
+        def call(self, function, *args, **kwargs):
+            calls.append((function, args))
+            return subprocess.CompletedProcess([], 0, "invoking\nrun-requested\n", "")
+    def inventory(root, declarations, **kwargs):
+        assert kwargs["only_names"] == frozenset({stem + ".service", stem + ".timer"})
+        units = [SimpleNamespace(declaration=d, target=d.source.name,
+            installed=(FileSnapshot.read(directory / d.source.name),), properties=(("LoadState", "loaded"),))
+            for d in declarations]
+        return SimpleNamespace(require_complete=lambda: SimpleNamespace(units=units))
+    monkeypatch.setattr(host_run, "collect_enrollment", inventory)
+    result = host_run.run_host_job(root, "plane-prune", adapter=Native())
+    assert result.release_id is None and result.revision == current.revision
+    assert result.config_fingerprint == current.config_fingerprint
+    assert calls == [("svc_host_job_run_exact", (str(directory / (stem + ".service")), stem + ".service"))]
+    calls.clear()
+    with pytest.raises(host_run.HostJobError, match="not packaged"):
+        host_run.run_host_job(root, "prune", adapter=Native())
+    next(row for row in rows if row["source"].endswith(".service"))["enroll"] = False
+    with pytest.raises((host_run.HostJobError, ValueError)):
+        host_run.run_host_job(root, "plane-prune", adapter=Native())
+    assert calls == []
+
+
 @pytest.mark.parametrize("platform,suffix,target,invocation", [
     ("Linux", ".service", "claudlobby-fixture.service", "--user start claudlobby-fixture.service"),
     ("Darwin", ".plist", "gui/501/claudlobby-fixture", "kickstart gui/501/claudlobby-fixture"),

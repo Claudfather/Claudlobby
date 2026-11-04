@@ -118,3 +118,18 @@ def test_request_help_and_syntax_remain_dependency_light(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert exited.value.code == 2 and "private-value" not in output
     assert json.loads(output)["command"] == "request.show"
+
+
+def test_git_request_read_uses_committed_provenance_without_historical_selection(active, monkeypatch, capsys):
+    from tests.test_task_read_cli import _use_git_current
+    root = active[0]
+    request_id = str(uuid4())
+    _call(capsys, root, "task", "admit", "--title", "Retained Git read", "--request-id", request_id)
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    before = _counts(root)
+    shown = _call(capsys, root, "request", "show", request_id)
+    assert shown["release_id"] is None
+    assert shown["data"]["request"]["request_id"] == request_id
+    assert shown["data"]["source_revision"] == package.source_revision
+    assert shown["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert _counts(root) == before

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
@@ -27,7 +25,8 @@ def _lines(view) -> tuple[str, ...]:
 
 def dispatch(args) -> CommandOutput:
     from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
@@ -43,10 +42,10 @@ def dispatch(args) -> CommandOutput:
         destination, _origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no retained request history")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active request selection is unavailable")
-        release_id = selected["release_id"]
+        release_id = selected.release_id
         bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
@@ -57,10 +56,10 @@ def dispatch(args) -> CommandOutput:
         if view.host_uid != bindings["host_uid"] or view.fleet_uid != bindings["fleet_uid"]:
             raise CommandFailure("conflict", "retained request belongs to another active host or fleet",
                                  release_id=release_id)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active request selection changed during read', release_id=release_id)
+        selected.check(destination.paths.root, package=destination.paths.package, message='active request selection changed during read')
         data = {"fleet": destination.fleet.name, "request": asdict(view)}
         lines = note_prefix(data, _lines(view), args.request_id, view.request_id)
+        data.update(selected.provenance)
         return CommandOutput(data, release_id=release_id, lines=lines)
     except CommandFailure:
         raise

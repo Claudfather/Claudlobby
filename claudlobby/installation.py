@@ -24,6 +24,12 @@ class InstallationError(ValueError):
     """Installation paths or the managed source cannot be verified."""
 
 
+def unit_systemd_command(argv) -> str:
+    """Literal argv in systemd's quoted command syntax, including $/% escaping."""
+    return " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"')
+                    .replace("%", "%%").replace("$", "$$") + '"' for part in argv)
+
+
 def _path(value: Path) -> Path:
     path = Path(value)
     if not path.is_absolute() or path != path.resolve():
@@ -156,7 +162,7 @@ def install_launcher(installation: Installation, *, interpreter: Path) -> None:
 
 
 def install_updater(installation: Installation, *, interpreter: Path) -> None:
-    """Install independent current-update inspection; it exposes no apply shortcut."""
+    """Install the independent updater outside the mutable source/environment."""
     _install_entry(installation, interpreter, Path(__file__).with_name("git_update.py"),
                    installation.bin / "claudlobby-update")
 

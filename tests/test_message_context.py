@@ -193,3 +193,65 @@ def test_unknown_or_foreign_target_bad_origin_and_package_skew_refuse(selected, 
     monkeypatch.setenv("BOT_ID", "manager")
     with pytest.raises(state.ActivationError, match="executing package differ"):
         resolve_message_route("worker", package=source_package())
+
+
+@pytest.fixture
+def git_selected(selected, monkeypatch):  # noqa: F811
+    from claudlobby import active_config, context, message_context
+    from claudlobby.config_plan import read_plan
+    from claudlobby.installation import Installation
+    from claudlobby.resources import selected_cli
+
+    root, old_package = selected
+    selection = state.read_selection(root)
+    plan = read_plan(root, selection['plan_id'])
+    bindings = state.read_activation(root, selection['activation_id']).body['identity_bindings']
+    installation = Installation(root.parent / 'git-installation', root)
+    installation.bin.mkdir(parents=True)
+    installation.cli.write_text('# fixture CLI\n')
+    package = replace(old_package, installation=installation, native=installation.native,
+                      artifact_id='', source_revision='a' * 40)
+    # No native-unit authority is needed to resolve a route. Preserve genuine
+    # retained identities; this fixture makes no enrollment/startup claim.
+    effective = replace(plan, changes=(), effects={**plan.effects, 'units': []})
+    identities = {key: bindings[key] for key in ('schema', 'host_uid', 'fleets')}
+    snapshot = active_config.snapshot_from_plan(effective, installation, package.source_revision, identities=identities)
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    monkeypatch.setattr(context, 'selected_cli', selected_cli)
+    monkeypatch.setattr(state, 'read_selection', lambda *_: pytest.fail('sealed selection read'))
+    return root, package, snapshot
+
+
+def test_git_route_uses_current_config_and_retained_ids_without_plane(git_selected):
+    root, package, snapshot = git_selected
+    route = resolve_message_route('worker', package=package)
+    assert route.activation_id is route.plan_id is route.release_id is None
+    assert (route.revision, route.config_fingerprint) == (snapshot['revision'], snapshot['fingerprint'])
+    assert route.caller.uid == snapshot['identities']['fleets']['example']['bots']['manager']
+    assert route.peer.uid == snapshot['identities']['fleets']['example']['bots']['worker']
+    binding = route.receipt_binding()
+    assert binding.revision == route.revision and binding.config_fingerprint == route.config_fingerprint
+    assert binding.peer_destination.socket == 'com.example.worker'
+    assert not db_file(root).exists()
+    from claudlobby.message_context import resolve_human_reply_route
+    from claudlobby.task_operations import TaskActor
+    reply = resolve_human_reply_route(TaskActor('actor_' + '9' * 32, 'human:owner'), package=package)
+    assert reply.release_id is None and reply.revision == route.revision
+    assert reply.receipt_binding('msg_' + '8' * 32).config_fingerprint == route.config_fingerprint
+
+
+def test_git_route_refuses_current_snapshot_change_during_resolution(git_selected, monkeypatch):
+    from claudlobby import active_config, message_context
+    root, package, snapshot = git_selected
+    original = message_context.read_selected_identity_bindings
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        updated = deepcopy(snapshot)
+        updated['fleets']['example']['fleet'] += '\n# approved configuration changed\n'
+        updated['fingerprint'] = active_config._fingerprint(updated)
+        active_config.publish_current_config(updated, installation=package.installation,
+                                             expected_previous=snapshot['fingerprint'])
+        return result
+    monkeypatch.setattr(message_context, 'read_selected_identity_bindings', changed)
+    with pytest.raises(MessageContextError, match='selection changed'):
+        resolve_message_route('worker', package=package)

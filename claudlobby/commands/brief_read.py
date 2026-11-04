@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
@@ -147,11 +145,12 @@ def dispatch(args) -> CommandOutput:
         usage_window = _window(args.usage_since)
 
     from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
+    from ..active_config import runtime_read_stamp
     from ..brief import (BriefIdentityMismatch, boot_provenance, build_brief,
                          format_boot_brief, format_brief)
     from ..config_plan import PlanError
-    from ..context import BotNotFoundError
+    from ..context import BotNotFoundError, resolve_paths
     from ..env_tiers import ResolverUnavailable, resolve as resolve_env_tiers
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      resolve_operation_scope)
@@ -161,21 +160,27 @@ def dispatch(args) -> CommandOutput:
     release_id = None
     releases = "inspect claudlobby host releases"
     try:
-        waited_selection = _wait_for_startup(args) if startup_wait is not None else None
+        waited_selection = None
+        if startup_wait is not None:
+            startup_paths = resolve_paths(root=args.root)
+            # Git consumers start only after the current config is committed.
+            # Sealed activation alone has a late-startup journal to wait on.
+            if startup_paths.package.installation is None:
+                waited_selection = _wait_for_startup(args)
         context, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if context.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no operational brief")
         root = shlex.quote(str(context.paths.root))
         restage = (f"run claudlobby --root {root} config plan --release RELEASE_ID "
                    "(host releases lists the IDs), then host activate the reviewed plan")
-        selection = read_selection(context.paths.root)
-        if waited_selection is not None and waited_selection != (context.paths.root, selection):
+        stamp = runtime_read_stamp(context.paths.root, package=context.paths.package)
+        if waited_selection is not None and waited_selection != (context.paths.root, stamp.selection if stamp else None):
             raise CommandFailure("conflict", "brief startup selection changed before admitted read")
-        if selection is None:
+        if stamp is None:
             raise CommandFailure("conflict", "active brief selection is unavailable",
                                  hint=f"inspect claudlobby --root {root} host releases; pass this "
                                       f"host's --root, or {restage}")
-        release_id = selection["release_id"]
+        release_id = stamp.release_id
         bindings = read_selected_identity_bindings(context.paths.root, context.fleet.name,
                                                    package=context.paths.package)
         viewer, source = _viewer(context, origin, bindings, args.bot,
@@ -204,9 +209,9 @@ def dispatch(args) -> CommandOutput:
                 selected_identity=selected_identity)).rstrip("\n"),)
                      if args.boot else (f"Brief viewer: bot:{context.fleet.name}/{viewer} ({source})",
                                         format_brief(brief).rstrip("\n")))
-        if read_selection(context.paths.root) != selection:
-            raise selection_read_conflict('active brief selection changed during read', release_id=release_id)
-        return CommandOutput({"brief": brief, "viewer_selection": source},
+        stamp.check(context.paths.root, package=context.paths.package,
+                    message="active brief selection changed during read")
+        return CommandOutput({"brief": brief, "viewer_selection": source, **stamp.provenance},
                              release_id=release_id, lines=lines)
     except CommandFailure:
         raise

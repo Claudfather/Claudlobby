@@ -1806,3 +1806,41 @@ def test_startup_wait_bounds_and_boot_rejection_precede_observation(monkeypatch,
             main(["--json", "brief", "--startup-wait", value])
         assert rejected.value.code == 2
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
+
+@pytest.mark.parametrize("change_during_read", [False, True])
+def test_git_brief_uses_shared_current_stamp(active, monkeypatch, capsys, change_during_read):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from claudlobby import active_config, brief, context, env_tiers
+    from claudlobby.paths import load_lib_module
+    from tests.test_task_read_cli import _use_git_current
+
+    root, _ = active
+    root, package, snapshot = _use_git_current(
+        (root, SimpleNamespace(package=context.get_resources())), monkeypatch)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(
+                            source_package().native, "dispatch-overdue.py"))
+    monkeypatch.setattr(env_tiers, "resolve", lambda *args, **kwargs: {})
+    original = brief.build_brief
+
+    def build(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if change_during_read:
+            changed = deepcopy(snapshot)
+            changed["fleets"]["example"]["fleet"] += "\n# approved change\n"
+            changed["fingerprint"] = active_config._fingerprint(changed)
+            active_config.publish_current_config(changed, installation=package.installation,
+                                                 expected_previous=snapshot["fingerprint"])
+        return result
+
+    monkeypatch.setattr(brief, "build_brief", build)
+    result = _call(capsys, root, "brief", "--startup-wait", "120",
+                   expected=4 if change_during_read else 0)
+    assert result["release_id"] is None
+    if change_during_read:
+        assert result["error"]["retryable"] is True
+    else:
+        assert result["data"]["source_revision"] == snapshot["revision"]
+        assert result["data"]["config_fingerprint"] == snapshot["fingerprint"]
+        assert result["data"]["brief"]["reports"]["cursor"] is None

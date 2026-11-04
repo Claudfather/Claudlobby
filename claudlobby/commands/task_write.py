@@ -140,9 +140,9 @@ def _report_envelope(result, route, report) -> str:
             f"Assignment: {result.assignment_id}\nReport: {report.to_body()}")
 
 
-def _task_output(result, *, fleet_name, release_id, notification_data=None):
+def _task_output(result, *, fleet_name, release_id, notification_data=None, provenance=None):
     outcome = task_outcome(result, fleet_name=fleet_name, release_id=release_id,
-                           notification_data=notification_data)
+                           notification_data=notification_data, provenance=provenance)
     data = outcome.data
     lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
              f"recording={data['recording']}\tdelivery={result.delivery}\t"
@@ -190,7 +190,9 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_provenance, runtime_route_matches)
+    from .message_write import _bound_release
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
                                    complete, escalate, fail, progress, reassign,
                                    reschedule, return_assignment, withdraw)
@@ -215,15 +217,11 @@ def dispatch(args) -> CommandOutput:
         fleet_name = selected.fleet.name
         if selected.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
-        bound_release = None
-        if origin is not None:
-            bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-            if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-                raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+        bound_release = _bound_release(selected.paths.package, generated=origin is not None)
         root = selected.paths.root
         with mutation_admission(root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
+            release_id = runtime_release_id(release)
             ctx = (bind_task_context(selected, operator_alias=args.actor)
                    if args.public_command == "task.feedback" else
                    resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
@@ -236,7 +234,7 @@ def dispatch(args) -> CommandOutput:
                                               fleet=selected.fleet.name,
                                               package=selected.paths.package,
                                               caller_context=ctx if origin is None else None)
-                if (route.release_id != release_id or route.host_uid != ctx.host_uid
+                if (not runtime_route_matches(release, route) or route.host_uid != ctx.host_uid
                         or route.selected_fleet_uid != ctx.fleet_uid
                         or route.caller_fleet_uid != ctx.caller_fleet_uid
                         or route.caller != ctx.caller
@@ -275,7 +273,7 @@ def dispatch(args) -> CommandOutput:
             else:
                 result = accept(ctx, args.request_id, values["assignment_id"])
         return _task_output(result, fleet_name=fleet_name, release_id=release_id,
-                            notification_data=notification_data)
+                            notification_data=notification_data, provenance=runtime_provenance(release))
     except CommandFailure:
         raise
     except TaskRecordingError as exc:

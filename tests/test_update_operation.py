@@ -104,20 +104,50 @@ def test_resume_before_stop_rechecks_original_live_save_without_replaying(monkey
     assert store.load()["consumers"]["bot"].get("stop") is None
 
 
-def test_publication_commits_config_before_restore(monkeypatch):
+@pytest.mark.parametrize("interrupt_second_entry", [False, True])
+def test_publication_commits_config_before_restore(tmp_path, monkeypatch, interrupt_second_entry):
+    import sys
+    from claudlobby import installation as locations
+
     data = record()
+    interpreter = Path(sys.executable).resolve()
     data.update(phase="environment", maintenance=True, git_complete=True,
-                dependencies={"environment_complete": True})
+                dependencies={"environment_complete": True}, host_interpreter=str(interpreter))
     store, events = Store(data), []
+    store.installation = locations.Installation(tmp_path / "installation", tmp_path / "data")
+    store.root = store.installation.data_root
+    locations.write_installation(store.installation)
+    store.installation.bin.mkdir()
+    updater = store.installation.bin / "claudlobby-update"
+    updater.write_bytes(b"previous updater")
+    expected_launcher = (f"#!{interpreter}\n".encode()
+                         + Path(locations.__file__).read_bytes())
+    expected_updater = (f"#!{interpreter}\n".encode()
+                        + Path(locations.__file__).with_name("git_update.py").read_bytes())
     monkeypatch.setattr(operation, "_schema", lambda *_: 14)
     monkeypatch.setattr(operation, "_head", lambda *_: "target")
     monkeypatch.setattr(operation, "read_rendered", lambda *_: "render")
     monkeypatch.setattr(operation, "apply_publication", lambda *_: events.append("files"))
+    attempts = []
+    def install_second(*args, **kwargs):
+        assert store.installation.cli.read_bytes() == expected_launcher
+        attempts.append(True)
+        if interrupt_second_entry and len(attempts) == 1:
+            raise OSError("interrupted second entry refresh")
+        locations.install_updater(*args, **kwargs)
+    monkeypatch.setattr(operation, "install_updater", install_second)
     def commit(*_args, **_kwargs):
         assert store.load()["phase"] == "commit"
         assert store.load()["maintenance"]
+        assert store.installation.cli.read_bytes() == expected_launcher
+        assert updater.read_bytes() == expected_updater
         events.append("config")
     monkeypatch.setattr(operation, "publish_current_config", commit)
+    if interrupt_second_entry:
+        with pytest.raises(OSError, match="second entry"):
+            operation.publish_operation(store)
+        assert store.load()["phase"] == "commit" and store.load()["maintenance"]
+        assert events == ["files"] and updater.read_bytes() == b"previous updater"
     result = operation.publish_operation(store)
     assert events == ["files", "config"]
     assert result["phase"] == "restore"

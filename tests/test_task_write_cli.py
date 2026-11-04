@@ -648,3 +648,28 @@ def test_feedback_cli_expanded_body_has_bounded_native_budget_and_never_retries(
     assert replay['data']['replayed'] and replay['data']['transport'] == 'unknown'
     assert _counts(root) == recorded and len(calls) == 1
     assert calls[0]['timeout'] == 120 and len(calls[0]['input']) > 98301
+
+
+def test_git_generated_task_writes_use_current_provenance_and_same_request(active, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from tests.test_message_write_cli import _git_generated
+    root, release = active
+    host = SimpleNamespace(release=release, package=replace(source_package(), native=release.native_path,
+                                                           artifact_id=release.inputs.artifact_id))
+    root, package, snapshot = _git_generated((root, host), monkeypatch)
+    request = str(uuid4())
+    argv = ("task", "admit", "--title", "Private Git task", "--request-id", request)
+    first = _call(capsys, root, *argv)
+    replay = _call(capsys, root, *argv)
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert replay["data"]["task_id"] == first["data"]["task_id"] and replay["data"]["replayed"]
+    assigned = _call(capsys, root, "task", "assign", first["data"]["task_id"], "--bot", "worker",
+                     "--request-id", str(uuid4()))
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
+    accepted = _call(capsys, root, "assignment", "accept", assigned["data"]["assignment_id"],
+                     "--request-id", str(uuid4()))
+    assert accepted["data"]["state"] == "active" and accepted["release_id"] is None
+    assert accepted["data"]["config_fingerprint"] == snapshot["fingerprint"]

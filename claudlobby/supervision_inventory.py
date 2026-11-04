@@ -61,6 +61,7 @@ class Adapter:
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
         "svc_bot_control_exact",
         "svc_host_job_run_exact",
+        "svc_update_job_enroll_exact", "svc_update_job_run_exact", "svc_update_job_exec",
     })
 
     def __init__(self, package: PackageResources | None = None, *, runner=None,
@@ -882,6 +883,34 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     anchors = {str(owner) for owner in owners}
     anchors.update(anchor for declaration in declarations for key, anchor in declaration.environment
                    if key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"))
+    # This deterministic name only routes validation. Exemption requires the
+    # independent job owner's exact files, placement and effective native argv.
+    independent_name = None
+    if installation is not None:
+        from .update_job import update_job_label
+        independent_name = update_job_label(installation) + (".service" if manager == "Linux" else ".plist")
+    independent_targets = {}
+
+    def independent_updater(name, *, native_target=None, observed_properties=None):
+        if name != independent_name:
+            return False
+        # Import at use time: update_job consumes the inventory parsers, while
+        # its own fixed independent job must never become a fleet consumer.
+        from .update_job import _definition, _observe
+        snapshots = installed.get(name, ())
+        if len(snapshots) != 1:
+            raise InventoryError("independent updater has no unique installed definition")
+        native_target = native_target if native_target is not None else independent_targets.get(name)
+        job = _definition(installation, adapter, Path(snapshots[0].path).parent, native_target=native_target)
+        if (job.manager != manager or str(job.installed) != snapshots[0].path
+                or native_target is not None and job.target != native_target):
+            raise InventoryError("independent updater native placement differs")
+        if manager == "Darwin" and observed_properties is None:
+            observed_properties = _darwin_print(adapter.read("svc_inventory_properties", job.target), job.target)
+        _observe(job, installation, adapter, observed_properties=observed_properties)
+        independent_targets[name] = job.target
+        return True
+
     properties = {}
     disabled = {}
     if manager == "Linux":
@@ -900,7 +929,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                         (name in expected or not _SYSTEMD_NAME.fullmatch(props["Id"]))):
                     raise InventoryError("native identity is an unproved alias")
                 properties[name] = props
-            except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+            except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
     else:
         disabled = _darwin_disabled(adapter.read("svc_inventory_disabled", domain))
@@ -921,6 +950,10 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 return None
             if observed.returncode:
                 raise InventoryError(f"svc_inventory_properties failed ({observed.returncode}): {observed.stderr.strip()}")
+            if name == independent_name:
+                props = _darwin_print(observed.stdout, target)
+                independent_updater(name, native_target=target, observed_properties=props)
+                return props
             if name in expected:
                 return _darwin_print(observed.stdout, target)
             foreign = _darwin_foreign_print(observed.stdout, target, anchors, owners)
@@ -938,7 +971,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 properties[name] = observed_props
                 if name in expected and observed_props["ActiveState"] != loaded[name]:
                     raise InventoryError("launchd list/print activity changed")
-            except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+            except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
 
     def related_properties(props):
@@ -948,6 +981,14 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 or bool(cwd and (Path(cwd).resolve() in owners or Path(cwd).resolve().is_relative_to(data_root))))
 
     for name in sorted(names - set(expected)):
+        if name == independent_name:
+            try:
+                independent_updater(name)
+            except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                issues.append(f"{name}: independent updater binding is unproved: {exc}")
+            else:
+                foreign.extend(saved.path for saved in installed.get(name, ()))
+            continue  # never add it to units, quiet scope or deletion authority
         props = properties.get(name, {})
         template = template_of_instance(name)
         if manager == "Linux" and template in expected:
@@ -1113,7 +1154,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                         fresh_loaded = _catalog(adapter.read("svc_inventory_catalog"))[4]
                         if name in fresh_loaded:
                             raise InventoryError("new loaded ownership is unobservable")
-                except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+                except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                     issues.append(f"{name}: new loaded ownership is unknown: {exc}")
         elif only_names is None and updated != catalog:
             raise InventoryError("installed/loaded catalog changed during inventory")

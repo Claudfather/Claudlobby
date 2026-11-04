@@ -1,8 +1,8 @@
-"""Selected-release bot enrollment and de-enrollment.
+"""Committed-current bot enrollment and de-enrollment.
 
-The active activation journal owns native placement; the sealed configuration
-owns bot identity. This module observes one exact target before and after the
-existing native supervisor adapter acts. It never purges a bot or changes the
+Committed configuration owns Git native placement and bot identity; the
+transitional sealed path retains its activation placement. This module observes
+one exact target before and after the existing native supervisor adapter acts. It never purges a bot or changes the
 active roster, release selection, or retained actor bindings.
 """
 
@@ -33,12 +33,12 @@ from .activation_handoffs import _strip_envelope
 from .activation_runtime import assert_quiescent, unit_start_budget
 from .activation_state import ActivationError, read_selection
 from .config_plan import path_state, read_plan
-from .config_units import current_declarations, planned_units
+from .config_units import current_declarations, current_git_declarations, planned_units
 from .loader import parse_frontmatter
 from .operation_context import resolve_operation_scope
 from .plane.emit_api import emit_batch
 from .plane.fleet_events import fleet_event_request
-from .runtime_admission import RuntimeIdentity, mutation_admission, validate_unit_admission
+from .runtime_admission import GitCurrentRuntime, RuntimeIdentity, mutation_admission, validate_unit_admission
 from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
@@ -55,10 +55,13 @@ class BotLifecycleError(RuntimeError):
     def __init__(self, reason: str, *, effect_attempted: bool = False,
                  unavailable: bool = False, release_id: str | None = None,
                  target: str | None = None, handoff_reason: str | None = None,
-                 busy: bool = False, skip_reason: str | None = None):
+                 busy: bool = False, skip_reason: str | None = None,
+                 source_revision: str | None = None, config_fingerprint: str | None = None):
         self.effect_attempted = effect_attempted
         self.unavailable = unavailable
         self.release_id = release_id
+        self.source_revision = source_revision
+        self.config_fingerprint = config_fingerprint
         self.target = target
         self.handoff_reason = handoff_reason
         # Another lifecycle operation holds the host lock; nothing was attempted.
@@ -85,7 +88,7 @@ class StaleHandoffError(BotLifecycleError):
 class BotLifecycleResult:
     fleet: str
     bot: str
-    release_id: str
+    release_id: str | None
     target: str
     state: str
     changed: bool
@@ -101,16 +104,20 @@ class BotLifecycleResult:
     # loss of the bot's unit reads as a deliberate stop. None when it was removed or
     # there was none.
     stop_record_kept: bool | None = None
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
 class BotHandoffResult:
     fleet: str
     bot: str
-    release_id: str
+    release_id: str | None
     target: str
     handoff: str
     reason: str
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 class HandoffState(NamedTuple):
@@ -124,21 +131,25 @@ class HandoffState(NamedTuple):
 class BotHandoffCheck:
     fleet: str
     bot: str
-    release_id: str
+    release_id: str | None
     handoff: str
     reason: str
     requested_at: str | None
     written_at: str | None
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
 class BotControlResult:
     fleet: str
     bot: str
-    release_id: str
+    release_id: str | None
     target: str
     control: str
     outcome: str
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 def _owned_handoff_dir(bot_dir: Path) -> Path:
@@ -612,10 +623,9 @@ def _log_self_result(fd: int, request_id: str, *, status: str, **fields: object)
 def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
                            ceiling: int | None, bot_dir: Path) -> BotLifecycleResult:
     _fresh_self_handoff(bot_dir)
-    selection = read_selection(root)
-    if selection is None:
-        raise BotLifecycleError("self restart requires an active selected release")
-    release_id = selection["release_id"]
+    with mutation_admission(root, identity=RuntimeIdentity.current(),
+                            expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as current:
+        provenance = (_release_id(current), _provenance(current))
     log_fd, log_path = _self_restart_log(bot_dir)
     request_id = str(uuid4())
     admitted_read, admitted_write = os.pipe()
@@ -653,9 +663,10 @@ def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
 
             result = set_bot_running(root=root, fleet=fleet, bot=bot, running=True,
                                      restart=True, ceiling=ceiling, _self_child=True,
-                                     _on_lock=after_lock)
+                                     _on_lock=after_lock, _expected_provenance=provenance)
             _log_self_result(log_fd, request_id, status="complete",
-                             release_id=result.release_id, target=result.target,
+                             release_id=result.release_id, source_revision=result.source_revision,
+                             config_fingerprint=result.config_fingerprint, target=result.target,
                              readiness=result.readiness, handoff=result.handoff)
             os._exit(0)
         except BaseException as exc:
@@ -696,7 +707,7 @@ def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
             os.close(release_write)
 
     atexit.register(release_after_response)
-    return BotLifecycleResult(fleet, bot, release_id, "",
+    return _bot_result(BotLifecycleResult, current, fleet, bot, _release_id(current), "",
                               "requested", False, "not_checked", "captured",
                               request_id, str(log_path))
 
@@ -722,6 +733,121 @@ def _operation_lock(root: Path):
         yield
     finally:
         os.close(fd)
+
+
+def _release_id(current):
+    return None if isinstance(current, GitCurrentRuntime) else current.release_id
+
+
+def _provenance(current):
+    if isinstance(current, GitCurrentRuntime):
+        return {"source_revision": current.revision, "config_fingerprint": current.config_fingerprint}
+    return {}
+
+
+def _bot_result(result_type, current, *args, **kwargs):
+    return result_type(*args, **kwargs, **_provenance(current))
+
+
+@dataclass(frozen=True)
+class _CurrentBotBinding:
+    adapter: object
+    manager: str
+    declaration: object
+    entry: dict
+    declarations: tuple
+    spec: object
+    configuration: dict
+
+    def verify_configuration(self):
+        path = self.spec.bot_dir / "bot.conf"
+        if self.configuration.get("kind") != "file" or path_state(path)["node"] != self.configuration:
+            raise BotLifecycleError("generated bot.conf differs from selected frozen configuration")
+
+
+def _current_bot_binding(root, current, destination, bot, adapter=None):
+    """Bind one committed bot to the same exact native lifecycle owner."""
+    package = destination.paths.package
+    adapter = adapter or Adapter(package)
+    if isinstance(current, GitCurrentRuntime):
+        from .active_config import read_current_config
+        if (package.installation != current.installation or package.source_revision != current.revision
+                or adapter.package.installation != current.installation
+                or adapter.package.native != current.installation.native):
+            raise BotLifecycleError("bot native adapter differs from current Git installation")
+        snapshot = read_current_config(root, installation=current.installation, revision=current.revision)
+        if snapshot != current.snapshot:
+            raise BotLifecycleError("committed bot configuration changed before operation")
+        manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+        placement = snapshot.get("supervision")
+        if placement is not None:
+            if placement["manager"] != manager:
+                raise BotLifecycleError("committed native manager differs from this host")
+        declarations = current_git_declarations(snapshot, manager)
+        matches = [item for item in snapshot["units"] if item["platform"] == manager
+                   and item["scope"] == "bot" and item["fleet"] == destination.fleet.name
+                   and item["bot"] == bot and item["enroll"]]
+        if len(matches) != 1:
+            raise BotLifecycleError("selected bot has no unique declared native unit")
+        item = matches[0]
+        declaration = next(value for value in declarations if str(value.source) == item["source"])
+        if placement is not None:
+            selected_domain = placement["domain"]
+            if manager == "Darwin":
+                if selected_domain not in {f"gui/{os.getuid()}", f"user/{os.getuid()}"}:
+                    raise BotLifecycleError("committed native domain belongs to another user")
+                target = f"{selected_domain}/{declaration.source.stem}"
+                if selected_domain == f"gui/{os.getuid()}" and domain == f"user/{os.getuid()}":
+                    if not hasattr(adapter, "in_selected_gui"):
+                        raise BotLifecycleError("selected GUI native adapter is unavailable", unavailable=True)
+                    adapter = adapter.in_selected_gui(target)
+                    actual_manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+                    if actual_manager != manager:
+                        raise BotLifecycleError("selected native manager changed")
+            if domain != selected_domain:
+                raise BotLifecycleError("native adapter domain differs from committed supervision; "
+                                        "invoke from the recorded domain", unavailable=True)
+        if placement is not None:
+            installed = Path(placement["directory"]) / declaration.source.name
+        else:
+            # Prototype snapshots have no placement authority after de-enrollment.
+            # Exact installed evidence can still support existing-session reads.
+            inventory = collect_enrollment(root, declarations, adapter=adapter,
+                                           only_names=frozenset({declaration.source.name})).require_complete()
+            units = [unit for unit in inventory.units if unit.declaration.source == declaration.source]
+            if len(units) != 1 or len(units[0].installed) != 1:
+                raise BotLifecycleError("current bot native placement is unavailable; explicit enrollment is required")
+            installed = Path(units[0].installed[0].path)
+        entry = {"source": str(declaration.source), "installed": str(installed),
+                 "target": _target(manager, domain, declaration.source)}
+        if (installed.parent not in directories or installed.parent.resolve() != installed.parent
+                or installed == declaration.source or installed.is_symlink()):
+            raise BotLifecycleError("selected bot native placement is redirected or ambiguous")
+        spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet, destination.paths)
+        states = [output["state"] for output in snapshot["owned_outputs"]
+                  if output["target"] == str(spec.bot_dir / "bot.conf")]
+    else:
+        selected = read_selection(root)
+        if selected is None or selected["release_id"] != current.release_id:
+            raise BotLifecycleError("active selection changed before bot operation")
+        plan = read_plan(root, selected["plan_id"])
+        if plan.release_id != current.release_id or plan.release_seal != current.seal_sha256:
+            raise BotLifecycleError("active bot plan differs from selected release")
+        if adapter.package.native != current.native_path:
+            raise BotLifecycleError("bot native adapter differs from selected release")
+        adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
+        manager, declaration, entry, declarations = _selected_unit(
+            root, plan, current, package, adapter, destination.fleet.name, bot)
+        spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet, destination.paths)
+        states = [change.after for change in plan.changes if change.target == str(spec.bot_dir / "bot.conf")]
+    native_label = (entry["target"].removesuffix(".service") if manager == "Linux"
+                    else entry["target"].split("/")[-1])
+    if (spec.bot_dir != declaration.working_directory or spec.label != declaration.source.stem
+            or spec.label != native_label):
+        raise BotLifecycleError("bot supervision spec differs from frozen native unit")
+    if len(states) != 1:
+        raise BotLifecycleError("bot has no unique committed bot.conf")
+    return _CurrentBotBinding(adapter, manager, declaration, entry, declarations, spec, states[0])
 
 
 def _selected_unit(root, plan, release, package, adapter, fleet, bot):
@@ -808,33 +934,18 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                 raise BotLifecycleError("only the selected fleet manager may hand off another bot")
             if bot not in destination.fleet.bots:
                 raise BotLifecycleError("bot is not declared in the selected active fleet")
-            selected = read_selection(root)
-            if selected is None or selected["release_id"] != release.release_id:
-                raise BotLifecycleError("active selection changed before bot handoff")
-            plan = read_plan(root, selected["plan_id"])
-            if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-                raise BotLifecycleError("active bot plan differs from selected release")
-            adapter = adapter or Adapter(destination.paths.package)
-            if adapter.package.native != release.native_path:
-                raise BotLifecycleError("bot native adapter differs from selected release")
-            adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
-            manager, declaration, entry, declarations = _selected_unit(
-                root, plan, release, destination.paths.package, adapter, destination.fleet.name, bot)
-            spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet,
-                                          destination.paths)
-            if spec.bot_dir != declaration.working_directory or spec.label != declaration.source.stem:
-                raise BotLifecycleError("bot handoff target differs from frozen supervision")
-            bot_conf = spec.bot_dir / "bot.conf"
-            changes = [change for change in plan.changes if change.target == str(bot_conf)]
-            if len(changes) != 1 or changes[0].after.get("kind") != "file" or path_state(bot_conf)["node"] != changes[0].after:
-                raise BotLifecycleError("generated bot.conf differs from selected frozen configuration")
+            binding = _current_bot_binding(root, release, destination, bot, adapter)
+            adapter, manager = binding.adapter, binding.manager
+            declaration, entry, declarations, spec = (binding.declaration, binding.entry,
+                                                       binding.declarations, binding.spec)
+            binding.verify_configuration()
             unit = _observed(root, declarations, adapter, entry["target"], Path(entry["installed"]))
             if not unit.installed:
                 raise BotLifecycleError("bot is not enrolled in its selected native unit")
             session = _native(adapter, "svc_bot_session_observe", spec.bot_dir, spec.label,
                               spec.environment["TMUX_TMPDIR"], entry["installed"], entry["target"])
             if session == "absent":
-                return BotHandoffResult(destination.fleet.name, bot, release.release_id,
+                return _bot_result(BotHandoffResult, release, destination.fleet.name, bot, _release_id(release),
                                         entry["target"], "skipped", "no_session")
             if session != "ready":
                 raise BotLifecycleError("private bot session is unverified", unavailable=True)
@@ -843,7 +954,7 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                               or handoff_state(spec.bot_dir).state != "saved")):
                 raise BotLifecycleError("existing handoff request is unresolved; inspect with --check; "
                                         "it is never automatically resent", effect_attempted=True,
-                                        unavailable=True, release_id=release.release_id,
+                                        unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"], handoff_reason="pending")
             try:
                 request = _new_handoff_request(spec.bot_dir)
@@ -854,18 +965,18 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                        spec.environment["TMUX_TMPDIR"], "explicit", timeout=45)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
-                                        unavailable=True, release_id=release.release_id,
+                                        unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"]) from exc
             marker = _record_native_handoff(spec.bot_dir, request, outcome)
             skipped = (["handoff-skipped:recent"], ["handoff-skipped:capability"],
                        ["handoff-skipped:no-session"])
             if marker == ["handoff-timeout"]:
                 raise BotLifecycleError("bot handoff timed out after 30 seconds", effect_attempted=True,
-                                        unavailable=True, release_id=release.release_id,
+                                        unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"], handoff_reason="timeout")
             if outcome.returncode or marker not in (["handoff-saved"], *skipped):
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
-                                        unavailable=True, release_id=release.release_id,
+                                        unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"])
             if marker == ["handoff-saved"]:
                 try:
@@ -873,13 +984,13 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                      native_result=request["native_result"], target=entry["target"])
                 except BotLifecycleError as exc:
                     raise BotLifecycleError("fresh bot handoff file is unverified", effect_attempted=True,
-                                            unavailable=True, release_id=release.release_id,
+                                            unavailable=True, release_id=_release_id(release), **_provenance(release),
                                             target=entry["target"]) from exc
-                return BotHandoffResult(destination.fleet.name, bot, release.release_id,
+                return _bot_result(BotHandoffResult, release, destination.fleet.name, bot, _release_id(release),
                                         entry["target"], "saved", "fresh_file_verified")
             # A definitive no-send result is not an outstanding request.
             (spec.bot_dir / "data" / _HANDOFF_REQUEST).unlink()
-            return BotHandoffResult(destination.fleet.name, bot, release.release_id,
+            return _bot_result(BotHandoffResult, release, destination.fleet.name, bot, _release_id(release),
                                     entry["target"], "skipped", marker[0].split(":", 1)[1])
 
 
@@ -898,6 +1009,13 @@ def check_handoff(*, root: Path, fleet: str | None, bot: str) -> BotHandoffCheck
         raise BotLifecycleError("only the selected fleet manager may check another bot's handoff")
     if bot not in destination.fleet.bots:
         raise BotLifecycleError("bot is not declared in the selected active fleet")
+    package = destination.paths.package
+    if package.installation is not None:
+        from .active_config import read_current_config
+        snapshot = read_current_config(root, installation=package.installation, revision=package.source_revision)
+        return BotHandoffCheck(destination.fleet.name, bot, None,
+                               *handoff_state(destination.paths.bot_runtime(bot)),
+                               source_revision=snapshot["revision"], config_fingerprint=snapshot["fingerprint"])
     selected = read_selection(root)
     if selected is None:
         raise BotLifecycleError("a handoff check requires an active selected release")
@@ -924,26 +1042,11 @@ def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
                 raise BotLifecycleError("only the selected fleet manager may control another bot")
             if bot not in destination.fleet.bots:
                 raise BotLifecycleError("bot is not declared in the selected active fleet")
-            selected = read_selection(root)
-            if selected is None or selected["release_id"] != release.release_id:
-                raise BotLifecycleError("active selection changed before bot control")
-            plan = read_plan(root, selected["plan_id"])
-            if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-                raise BotLifecycleError("active bot plan differs from selected release")
-            adapter = adapter or Adapter(destination.paths.package)
-            if adapter.package.native != release.native_path:
-                raise BotLifecycleError("bot native adapter differs from selected release")
-            adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
-            _, declaration, entry, declarations = _selected_unit(
-                root, plan, release, destination.paths.package, adapter, destination.fleet.name, bot)
-            spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet,
-                                          destination.paths)
-            if spec.bot_dir != declaration.working_directory or spec.label != declaration.source.stem:
-                raise BotLifecycleError("bot control target differs from frozen supervision")
-            bot_conf = spec.bot_dir / "bot.conf"
-            changes = [change for change in plan.changes if change.target == str(bot_conf)]
-            if len(changes) != 1 or changes[0].after.get("kind") != "file" or path_state(bot_conf)["node"] != changes[0].after:
-                raise BotLifecycleError("generated bot.conf differs from selected frozen configuration")
+            binding = _current_bot_binding(root, release, destination, bot, adapter)
+            adapter, manager = binding.adapter, binding.manager
+            declaration, entry, declarations, spec = (binding.declaration, binding.entry,
+                                                       binding.declarations, binding.spec)
+            binding.verify_configuration()
             unit = _observed(root, declarations, adapter, entry["target"], Path(entry["installed"]))
             if not unit.installed:
                 raise BotLifecycleError("bot is not enrolled in its selected native unit")
@@ -956,13 +1059,13 @@ def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
                                        spec.environment["TMUX_TMPDIR"], control, timeout=45)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise BotLifecycleError("bot control outcome is unknown", effect_attempted=True,
-                                        unavailable=True, release_id=release.release_id,
+                                        unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"]) from exc
             if outcome.returncode or outcome.stdout.strip() != "control-submitted":
                 raise BotLifecycleError("bot control outcome is unknown", effect_attempted=True,
-                                        unavailable=True, release_id=release.release_id,
+                                        unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"])
-            return BotControlResult(destination.fleet.name, bot, release.release_id,
+            return _bot_result(BotControlResult, release, destination.fleet.name, bot, _release_id(release),
                                     entry["target"], control, "submitted")
 
 
@@ -1025,7 +1128,8 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     restart: bool = False, ceiling: int | None = None,
                     identity: RuntimeIdentity | None = None,
                     adapter: Adapter | None = None, _self_child: bool = False,
-                    _on_lock=None, reason: str | None = None) -> BotLifecycleResult:
+                    _on_lock=None, reason: str | None = None,
+                    _expected_provenance=None) -> BotLifecycleResult:
     """Start, stop or restart one exact selected bot; prove native effects."""
     if restart and not running:
         raise BotLifecycleError("restart requires a running target")
@@ -1052,6 +1156,9 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
     with mutation_admission(root, identity=identity,
                             expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
         with _operation_lock(root):
+            if (_expected_provenance is not None
+                    and (_release_id(release), _provenance(release)) != _expected_provenance):
+                raise BotLifecycleError("self restart configuration changed before admission")
             if _on_lock is not None:
                 _on_lock()
             destination, origin = resolve_operation_scope(root=root, fleet=fleet)
@@ -1063,25 +1170,10 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 raise BotLifecycleError("self restart lost its exact generated origin")
             if bot not in destination.fleet.bots:
                 raise BotLifecycleError("bot is not declared in the selected active fleet")
-            selected = read_selection(root)
-            if selected is None or selected["release_id"] != release.release_id:
-                raise BotLifecycleError("active selection changed before bot operation")
-            plan = read_plan(root, selected["plan_id"])
-            if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
-                raise BotLifecycleError("active bot plan differs from selected release")
-            adapter = adapter or Adapter(destination.paths.package)
-            if adapter.package.native != release.native_path:
-                raise BotLifecycleError("bot native adapter differs from selected release")
-            adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
-            manager, declaration, entry, declarations = _selected_unit(
-                root, plan, release, destination.paths.package, adapter, destination.fleet.name, bot)
-            spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet,
-                                          destination.paths)
-            native_label = (entry["target"].removesuffix(".service") if manager == "Linux"
-                            else entry["target"].split("/")[-1])
-            if (spec.bot_dir != declaration.working_directory
-                    or spec.label != declaration.source.stem or spec.label != native_label):
-                raise BotLifecycleError("bot supervision spec differs from frozen native unit")
+            binding = _current_bot_binding(root, release, destination, bot, adapter)
+            adapter, manager = binding.adapter, binding.manager
+            declaration, entry, declarations, spec = (binding.declaration, binding.entry,
+                                                       binding.declarations, binding.spec)
             installed = Path(entry["installed"])
             socket = Path(spec.environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / spec.label
             unit = _observed(root, declarations, adapter, entry["target"], installed)
@@ -1124,7 +1216,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                         raise BotLifecycleError(f"bot stop refused or proof is incomplete: {stage}",
                                                 effect_attempted=attempted,
                                                 unavailable=True,
-                                                release_id=release.release_id,
+                                                release_id=_release_id(release), **_provenance(release),
                                                 target=entry["target"]) from exc
                 else:
                     _confirm_stopped(adapter, installed, entry["target"], socket,
@@ -1132,20 +1224,17 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 row = _record_lifecycle(root, destination.fleet.name, bot, "bot_stopped", by=by,
                                         reason=reason, request_id=request_id,
                                         changed=bool(unit.installed))
-                return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
+                return _bot_result(BotLifecycleResult, release, destination.fleet.name, bot, _release_id(release),
                                           entry["target"], "stopped", bool(unit.installed), "not_running",
                                           recording=row if recorded else "degraded")
-            bot_conf = spec.bot_dir / "bot.conf"
-            changes = [change for change in plan.changes if change.target == str(bot_conf)]
-            if len(changes) != 1 or changes[0].after.get("kind") != "file" or path_state(bot_conf)["node"] != changes[0].after:
-                raise BotLifecycleError("generated bot.conf differs from selected frozen configuration")
+            binding.verify_configuration()
             if restart:
                 # A deliberate stop removed supervision. Restart may bounce only
                 # an already enrolled exact unit; bot start owns re-enrollment.
                 if not unit.installed:
                     raise BotLifecycleError("bot is de-enrolled; use bot start",
                                             skip_reason="de_enrolled",
-                                            release_id=release.release_id,
+                                            release_id=_release_id(release), **_provenance(release),
                                             target=entry["target"])
                 native_state = dict(unit.properties).get("ActiveState")
                 if native_state in {"failed", "activating"} and manager == "Linux":
@@ -1189,7 +1278,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                          session_ready=True)
                         recording, kept = _started(root, destination.fleet.name, bot, spec.bot_dir,
                                                    by, request_id, changed=False)
-                        return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
+                        return _bot_result(BotLifecycleResult, release, destination.fleet.name, bot, _release_id(release),
                                                   entry["target"], "running", False,
                                                   "current_session_ready",
                                                   recording=recording, stop_record_kept=kept)
@@ -1242,11 +1331,11 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 raise BotLifecycleError("bot restart effect or readiness proof is incomplete" if restart
                                         else "bot start effect or readiness proof is incomplete",
                                         effect_attempted=True,
-                                        release_id=release.release_id,
+                                        release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"]) from exc
             recording, kept = (None, None) if restart else _started(
                 root, destination.fleet.name, bot, spec.bot_dir, by, request_id, changed=True)
-            return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
+            return _bot_result(BotLifecycleResult, release, destination.fleet.name, bot, _release_id(release),
                                       entry["target"], "running", True,
                                       readiness.replace("-", "_"), handoff,
                                       recording=recording, stop_record_kept=kept)

@@ -223,3 +223,62 @@ def test_help_and_syntax_remain_dependency_light(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert exited.value.code == 2 and "private-value" not in output
     assert json.loads(output)["command"] == "assignment.show"
+
+
+def _use_git_current(active, monkeypatch):
+    """Reuse the existing private Plane with an honestly committed Git snapshot."""
+    from dataclasses import replace
+    from claudlobby import active_config, activation_state
+    from claudlobby.config_plan import read_plan
+    from claudlobby.installation import Installation
+    root, host = active
+    selected = activation_state.read_selection(root)
+    plan = read_plan(root, selected["plan_id"])
+    record = activation_state.read_activation(root, selected["activation_id"])
+    installation = Installation(root.parent / "git-installation", root)
+    from tests.package_fixtures import source_package
+    package = replace(source_package(), native=host.package.native,
+                      installation=installation, source_revision="a" * 40,
+                      artifact_id="", content_sha256="")
+    identities = {key: record.body["identity_bindings"][key] for key in ("schema", "host_uid", "fleets")}
+    snapshot = active_config.snapshot_from_plan(replace(plan, changes=(), effects={**plan.effects, "units": []}),
+                                               installation, package.source_revision, identities=identities)
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    monkeypatch.setattr(context, "get_resources", lambda: package)
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID", raising=False)
+    # A retained, unreadable legacy pointer must not be touched by these readers.
+    (root / "state/selected-release.json").write_text("historical broken pointer\n")
+    return root, package, snapshot
+
+
+def test_git_task_read_uses_current_snapshot_and_retains_query_cursor_contract(active, monkeypatch, capsys):
+    from claudlobby.activation_identity import read_selected_identity_bindings
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    bindings = read_selected_identity_bindings(root, "example", package=package)
+    with sqlite3.connect(db_file(root)) as conn:
+        _task(conn, "wi_git_one", fleet_uid=bindings["fleet_uid"])
+        _task(conn, "wi_git_two", fleet_uid=bindings["fleet_uid"])
+    first = _call(capsys, root, "task", "list", "--limit", "1")
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    second = _call(capsys, root, "task", "list", "--limit", "1", "--cursor", first["data"]["next_cursor"])
+    assert [item["task_id"] for item in second["data"]["items"]] == ["wi_git_two"]
+
+
+def test_git_task_read_refuses_configuration_change_during_query(active, monkeypatch, capsys):
+    from claudlobby import active_config, task_queries
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    query = task_queries.list_tasks
+    def changed(*args, **kwargs):
+        page = query(*args, **kwargs)
+        following = json.loads(json.dumps(snapshot))
+        following["fleets"]["example"]["fleet"] += "\n# changed during read\n"
+        following["fingerprint"] = active_config._fingerprint(following)
+        active_config.publish_current_config(following, installation=package.installation,
+                                             expected_previous=snapshot["fingerprint"])
+        return page
+    monkeypatch.setattr(task_queries, "list_tasks", changed)
+    result = _call(capsys, root, "task", "list", expected=4)
+    assert result["error"]["retryable"] is True
+    assert "items" not in result["data"]

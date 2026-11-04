@@ -603,3 +603,112 @@ def test_assignment_show_names_its_delivery_attempts_and_receipt(active, monkeyp
     assert main(["--root", str(root), "assignment", "show", prefix]) == 0
     assert capsys.readouterr().out.splitlines() == [
         *plain, f"resolved from prefix {prefix}: {assigned.assignment_id}"]
+
+
+def _git_generated(active, monkeypatch, *, bot="manager"):
+    """Same private Plane/identity fixture, admitted under current Git provenance."""
+    from contextlib import contextmanager
+    from claudlobby import runtime_admission
+    from tests.test_task_read_cli import _use_git_current
+    root, host = active
+    _generated(monkeypatch, root, host.release, bot=bot)
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    monkeypatch.setattr(context, "selected_cli", lambda *, installation: installation.cli)
+    monkeypatch.delenv("CLAUDLOBBY_ARTIFACT_ID", raising=False)
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs["expected_release"] is None
+        yield runtime_admission.GitCurrentRuntime(package.installation, package.source_revision,
+                                                  snapshot["fingerprint"], snapshot)
+    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
+    monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", lambda: object())
+    return root, package, snapshot
+
+
+def test_git_send_retains_original_unknown_request_without_resend(active, monkeypatch, capsys):
+    root, package, snapshot = _git_generated(active, monkeypatch)
+    calls = []
+    _native(monkeypatch, calls)
+    request = str(uuid4())
+    argv = ("--to", "worker", "--text", "Private Git message", "--request-id", request)
+    first = _call(capsys, root, *argv, expected=5)
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    replay = _call(capsys, root, *argv, expected=5)
+    assert replay["data"]["message_id"] == first["data"]["message_id"]
+    assert replay["data"]["replayed"] and len(calls) == 1
+    stored = json.loads(next((root / "state/requests").glob(f"*/{request}.json")).read_text())
+    assert stored["intent"]["route"]["release_id"] is None
+    assert stored["intent"]["route"]["revision"] == package.source_revision
+
+
+@pytest.mark.parametrize("defect", ["revision", "config_fingerprint", "installation", "sealed_env", "artifact_env"])
+def test_git_send_rejects_mixed_or_changed_route_before_effect(active, monkeypatch, capsys, defect):
+    from claudlobby import message_context
+    from claudlobby.installation import Installation
+    root, package, snapshot = _git_generated(active, monkeypatch)
+    original = message_context.resolve_message_route
+    def changed(*args, **kwargs):
+        route = original(*args, **kwargs)
+        if defect in {"revision", "config_fingerprint"}:
+            return replace(route, **{defect: "b" * (40 if defect == "revision" else 64)})
+        if defect == "installation":
+            other = replace(package, installation=Installation(root.parent / "other-installation", root))
+            selected = replace(route.selected, paths=replace(route.selected.paths, package=other))
+            return replace(route, selected=selected)
+        return route
+    if defect in {"sealed_env", "artifact_env"}:
+        monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID" if defect == "sealed_env" else "CLAUDLOBBY_ARTIFACT_ID",
+                           "r-" + "b" * 64)
+    else:
+        monkeypatch.setattr(message_context, "resolve_message_route", changed)
+    calls = []
+    _native(monkeypatch, calls)
+    before = _facts(root)
+    refused = _call(capsys, root, "--to", "worker", "--text", "Not sent",
+                    "--request-id", str(uuid4()), expected=7)
+    assert refused["error"]["code"] == "release_mismatch"
+    assert not calls and _facts(root) == before
+
+
+def test_git_bot_human_reply_is_recorded_once_without_native_send(active, monkeypatch, capsys):
+    root, host = active
+    _human(monkeypatch, host.release)
+    calls = []
+    _native(monkeypatch, calls)
+    asked = _call(capsys, root, "--to", "worker", "--text", "Private question",
+                  "--request-id", str(uuid4()), expected=5)
+    root, package, snapshot = _git_generated(active, monkeypatch, bot="worker")
+    argv = (asked["data"]["message_id"], "--text", "Private answer", "--request-id", str(uuid4()))
+    first = _reply_call(capsys, root, *argv, expected=0)
+    replay = _reply_call(capsys, root, *argv, expected=0)
+    assert first["release_id"] is None and first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert replay["data"]["replayed"] and len(calls) == 1
+    assert first["data"]["delivery"] == "not_requested"
+
+
+def test_git_assignment_delivery_preserves_unknown_without_resend(active, monkeypatch, capsys, tmp_path):
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    _ctx, _task, assigned = _assigned(root)
+    root, package, snapshot = _git_generated(active, monkeypatch)
+    body = tmp_path / "git-assignment.txt"
+    body.write_text("Private Git assignment")
+    calls = []
+    real = assignment_delivery.deliver
+    def injected(*args, **kwargs):
+        def transport(*_, **native):
+            calls.append(native["body"])
+            return TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0)
+        return real(*args, transport=transport, **kwargs)
+    monkeypatch.setattr(assignment_delivery, "deliver", injected)
+    argv = (assigned.assignment_id, "--file", str(body), "--request-id", str(uuid4()))
+    first = _delivery_call(capsys, root, *argv, expected=5)
+    replay = _delivery_call(capsys, root, *argv, expected=5)
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert replay["data"]["message_id"] == first["data"]["message_id"]
+    assert replay["data"]["replayed"] and len(calls) == 1

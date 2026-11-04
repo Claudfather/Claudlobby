@@ -119,7 +119,10 @@ def _grant_preview(paths, store, fleet, actor_alias, release):
             ctx.host_uid != bindings["host_uid"] or ctx.fleet_uid != bindings["fleet_uid"]
             or {name: bot.uid for name, bot in ctx.bots.items()} != bindings["bots"])):
         raise CommandFailure("conflict", "active and recorded owner identities differ")
-    return {"owner": owner, "release": release.release_id, "fleet": selected.fleet.name,
+    from ..runtime_admission import GitCurrentRuntime
+    provenance = ({"revision": release.revision, "config_fingerprint": release.config_fingerprint}
+                  if isinstance(release, GitCurrentRuntime) else {"release": release.release_id})
+    return {"owner": owner, **provenance, "fleet": selected.fleet.name,
             "bindings": bindings, "actor_alias": actor_alias,
             "actor_uid": ctx.caller.uid if ctx is not None else None}
 
@@ -157,7 +160,7 @@ def _prepare_action_approval(args, paths, store, terminal):
                        "Registration alone does not grant owner actions.\n")
         _approve(terminal, "REGISTER")
         with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                                expected_release=preview["release"]) as release:
+                                expected_release=preview.get("release")) as release:
             _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
             resolve_task_mutation_context(root=paths.root, fleet=preview["fleet"],
                                           operator_alias=args.actor, package=paths.package)
@@ -199,7 +202,7 @@ def _allow_actions(args, paths, store, terminal):
                    "The selected approvals are saved together; matching approvals and prepared requests stay valid.\n")
     _approve(terminal, "ALLOW-ACTIONS")
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                            expected_release=preview["release"]) as release:
+                            expected_release=preview.get("release")) as release:
         ctx = _approved_action_context(args, paths, store, preview, release)
         actions = tuple({"messages": "message", "nudges": "nudge", "feedback": "feedback"}[capability]
                         for capability in args.capabilities)
@@ -237,7 +240,7 @@ def _allow_action(args, paths, store, terminal, action):
     label, _, allow_word, _ = _ACTION_LABELS[action]
     _approve(terminal, allow_word)
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                            expected_release=preview["release"]) as release:
+                            expected_release=preview.get("release")) as release:
         ctx = _approved_action_context(args, paths, store, preview, release)
         allow = {"message": store.allow_messages, "nudge": store.allow_nudges,
                  "feedback": store.allow_feedback, "permission": store.allow_permissions}[action]
@@ -280,7 +283,7 @@ def _grant_errors(action):
     try:
         yield
     except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "owner grant requires this installation's active sealed runtime") from exc
+        raise CommandFailure("release_mismatch", "owner grant requires this installation's current runtime") from exc
     except OperationContextError as exc:
         raise CommandFailure(exc.code, f"owner {action} identities could not be bound; verify the active fleet and actor") from exc
     except ActivationError as exc:

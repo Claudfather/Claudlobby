@@ -231,6 +231,31 @@ def message_owner(active, monkeypatch):
     return store, host, grant, ctx
 
 
+
+def test_owner_grant_preview_binds_git_configuration_without_a_fake_release(message_owner):
+    from dataclasses import replace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.installation import Installation
+    from claudlobby.runtime_admission import GitCurrentRuntime
+
+    store, _host, owner, ctx = message_owner
+    # Reuse the real owner/Plane identity fixture. This isolates the preview's
+    # provenance binding; current Git identity loading is tested by its owner.
+    installation = Installation(store.root.parent / "installation", store.root)
+    current = GitCurrentRuntime(installation, "a" * 40, "b" * 64, {})
+    paths = ctx.context.paths
+    preview = host_owner._grant_preview(paths, store, "example", ctx.caller.alias, current)
+    assert "release" not in preview
+    assert (preview["revision"], preview["config_fingerprint"]) == (current.revision, current.config_fingerprint)
+    assert preview["owner"] == owner and preview["actor_uid"] == ctx.caller.uid
+    args = SimpleNamespace(target_fleet="example", actor=ctx.caller.alias)
+    assert host_owner._approved_action_context(args, paths, store, preview, current).caller == ctx.caller
+    changed = replace(current, config_fingerprint="c" * 64)
+    with pytest.raises(CommandFailure, match="changed"):
+        host_owner._approved_action_context(args, paths, store, preview, changed)
+    assert store.local_action_status().message_grants == ()
+
+
 def allow(store, *extra):
     return call(store, "allow-messages", "--target-fleet", "example", "--actor", "human:local-owner", *extra)
 

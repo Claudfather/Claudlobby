@@ -1,8 +1,7 @@
 """Frozen routes for generated bots and already-bound local human callers.
 
-The public operation holds activation admission. This resolver reads selected
-configuration and activation identities, never Plane, bot.conf or mutable
-authoring. It authorizes no send and makes no receiver-readiness claim.
+The public operation holds runtime admission. This resolver reads committed
+configuration and identities, never Plane, bot.conf or mutable authoring. It authorizes no send and makes no receiver-readiness claim.
 """
 
 from __future__ import annotations
@@ -11,9 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from .active_config import resolve_active_context
+from .active_config import resolve_active_context, runtime_read_stamp
 from .activation_identity import read_selected_identity_bindings
-from .activation_state import ActivationError, read_selection
+from .activation_state import ActivationError
 from .context import Context
 from .message_transport import TransportDestination
 from .operation_context import resolve_operation_scope
@@ -32,9 +31,9 @@ class MessageRoute:
     origin: Context | None
     selected: Context
     peer_context: Context
-    activation_id: str
-    plan_id: str
-    release_id: str
+    activation_id: str | None
+    plan_id: str | None
+    release_id: str | None
     host_uid: str
     caller_fleet_uid: str | None
     selected_fleet_uid: str
@@ -44,12 +43,15 @@ class MessageRoute:
     manager: TaskActor
     peer_destination: TransportDestination
     manager_destination: TransportDestination
+    revision: str | None = None
+    config_fingerprint: str | None = None
 
     def receipt_binding(self) -> MessageRouteBinding:
         """Retain the route's historical targets before recording or transport."""
         return MessageRouteBinding(
             activation_id=self.activation_id, plan_id=self.plan_id,
-            release_id=self.release_id, caller_fleet_uid=self.caller_fleet_uid,
+            release_id=self.release_id, revision=self.revision, config_fingerprint=self.config_fingerprint,
+            caller_fleet_uid=self.caller_fleet_uid,
             peer_fleet_uid=self.peer_fleet_uid, caller_alias=self.caller.alias,
             recipient_alias=self.peer.alias, manager_uid=self.manager.uid,
             manager_alias=self.manager.alias,
@@ -88,6 +90,17 @@ def _transport(context: Context, bot_id: str) -> TransportDestination:
                                 spec.bot_dir.name, Path(spec.environment["TMUX_TMPDIR"]))
 
 
+def _current_selection(paths):
+    stamp = runtime_read_stamp(paths.root, package=paths.package)
+    if stamp is None:
+        raise ActivationError("host has no active configuration")
+    if stamp.kind == "git":
+        return {"activation_id": None, "plan_id": None, "release_id": None,
+                "revision": stamp.source_revision,
+                "config_fingerprint": stamp.config_fingerprint}
+    return {**stamp.selection, "revision": None, "config_fingerprint": None}
+
+
 def resolve_message_route(target: str, *, root: Path | None = None, fleet: str | None = None,
                           package: PackageResources | None = None,
                           caller_context: TaskOperationContext | None = None) -> MessageRoute:
@@ -120,9 +133,7 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
         raise MessageContextError("message target belongs to another host or package")
     if bot_id not in peer.fleet.bots:
         raise MessageContextError(f"bot {bot_id!r} is not in active fleet {fleet_name!r}")
-    selection = read_selection(selected.paths.root)
-    if selection is None:
-        raise ActivationError("host has no active configuration")
+    selection = _current_selection(selected.paths)
 
     contexts = {context.fleet.name: context for context in (origin, selected, peer) if context is not None}
     bindings = {}
@@ -133,7 +144,7 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
             raise MessageContextError(f"active identity bindings differ from frozen fleet {name}")
         bindings[name] = item
     if (len({item["host_uid"] for item in bindings.values()}) != 1
-            or read_selection(selected.paths.root) != selection):
+            or _current_selection(selected.paths) != selection):
         raise MessageContextError("active host selection changed during message resolution")
 
     source_ids = bindings[origin.fleet.name] if origin is not None else bindings[selected.fleet.name]
@@ -158,7 +169,7 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
                         source_ids["host_uid"], caller_fleet_uid,
                         selected_ids["fleet_uid"], peer_ids["fleet_uid"], caller,
                         recipient, manager, _transport(peer, bot_id),
-                        _transport(selected, manager_id))
+                        _transport(selected, manager_id), selection["revision"], selection["config_fingerprint"])
 
 
 @dataclass(frozen=True)
@@ -168,19 +179,22 @@ class HumanReplyRoute:
 
     origin: Context
     selected: Context
-    activation_id: str
-    plan_id: str
-    release_id: str
+    activation_id: str | None
+    plan_id: str | None
+    release_id: str | None
     host_uid: str
     caller_fleet_uid: str
     selected_fleet_uid: str
     caller: TaskActor
     peer: TaskActor
+    revision: str | None = None
+    config_fingerprint: str | None = None
 
     def receipt_binding(self, parent_message_id: str) -> RecordedReplyBinding:
         return RecordedReplyBinding(
             activation_id=self.activation_id, plan_id=self.plan_id,
-            release_id=self.release_id, caller_fleet_uid=self.caller_fleet_uid,
+            release_id=self.release_id, revision=self.revision, config_fingerprint=self.config_fingerprint,
+            caller_fleet_uid=self.caller_fleet_uid,
             caller_alias=self.caller.alias, recipient_alias=self.peer.alias,
             parent_message_id=parent_message_id)
 
@@ -203,17 +217,15 @@ def resolve_human_reply_route(sender: TaskActor, *, root: Path | None = None,
     if (not isinstance(sender, TaskActor) or not isinstance(sender.alias, str)
             or not re.fullmatch(r"human:[^\s:/]+", sender.alias)):
         raise MessageContextError("reply recipient is not a recorded human sender")
-    selection = read_selection(selected.paths.root)
-    if selection is None:
-        raise ActivationError("host has no active configuration")
+    selection = _current_selection(selected.paths)
     ids = read_selected_identity_bindings(selected.paths.root, selected.fleet.name,
                                           package=selected.paths.package)
     if (ids["manager"] != selected.fleet.manager or set(ids["bots"]) != set(selected.fleet.bots)
             or origin.bot_id not in ids["bots"]):
         raise MessageContextError(f"active identity bindings differ from frozen fleet {selected.fleet.name}")
-    if read_selection(selected.paths.root) != selection:
+    if _current_selection(selected.paths) != selection:
         raise MessageContextError("active host selection changed during message resolution")
     caller = TaskActor(ids["bots"][origin.bot_id], f"bot:{origin.fleet.name}/{origin.bot_id}")
     return HumanReplyRoute(origin, selected, selection["activation_id"], selection["plan_id"],
                            selection["release_id"], ids["host_uid"], ids["fleet_uid"],
-                           ids["fleet_uid"], caller, sender)
+                           ids["fleet_uid"], caller, sender, selection["revision"], selection["config_fingerprint"])

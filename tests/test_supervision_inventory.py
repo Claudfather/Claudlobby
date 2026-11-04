@@ -1002,9 +1002,125 @@ launchctl() {{
     assert adapter.read("svc_inventory_disabled", "gui/501") == disabled
     assert adapter.read("svc_inventory_properties", "user/501/com.fixture.observed") == captured
     assert adapter.call("svc_inventory_properties", "user/502/com.fixture.observed").returncode == 3
-    assert adapter.call("svc_inventory_disabled", "user/501").returncode == 3
+    assert adapter.read("svc_inventory_disabled", "user/501") == disabled
+    assert adapter.call("svc_inventory_disabled", "user/502").returncode == 3
+    # Read-only cross-domain support must not loosen the mutation proof.
+    job = tmp_path / "com.claudlobby.update.0123456789abcdef.plist"
+    job.write_text("fixture")
+    assert adapter.call("svc_update_job_run_exact", job,
+                        "user/501/com.claudlobby.update.0123456789abcdef").returncode == 3
     assert trace.read_text().splitlines() == [
         "manageruid", "managername", "print gui/501/com.fixture.observed",
         "manageruid", "managername", "print-disabled gui/501", "manageruid", "managername",
         "manageruid", "managername", "print user/501/com.fixture.observed",
+        "manageruid", "managername", "manageruid", "managername",
+        "manageruid", "managername", "manageruid", "managername", "print-disabled user/501",
         "manageruid", "managername", "manageruid", "managername", "manageruid", "managername"]
+
+
+def _git_inventory_with_independent_updater(tmp_path, manager, *, job_domain=None):
+    """Existing native capture grammar plus the fixed job owner's definition."""
+    import os
+    from claudlobby.installation import Installation, write_installation
+    from claudlobby.update_job import update_job_definition
+    obs = Observations(tmp_path)
+    installation = Installation(tmp_path / "installation", obs.root)
+    write_installation(installation)
+    installation.bin.mkdir()
+    updater = installation.bin / "claudlobby-update"
+    updater.write_text("#!/bin/sh\nexit 0\n")
+    updater.chmod(0o755)
+    obs.package = replace(obs.package, installation=installation)
+    obs.manager = manager
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "FLEET_ROOT": str(obs.root / "local/alpha"),
+               "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+               "CLAUDLOBBY_CLI": str(installation.cli), "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+               "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+    obs.add("example.worker.service" if manager == "Linux" else "example.worker.plist", scope="bot")
+    obs.declarations = [replace(value, release_id="") for value in obs.declarations]
+    domain = f"gui/{os.getuid()}" if manager == "Darwin" else ""
+    job = update_job_definition(installation, manager=manager, domain=job_domain or domain, install_directory=obs.installed)
+    for path in (job.source, job.installed):
+        path.write_bytes(job.content)
+        path.chmod(0o644)
+    executable = str(updater)
+    if manager == "Linux":
+        obs.properties[job.installed.name] = {"Id": job.target, "LoadState": "loaded", "ActiveState": "inactive",
+            "UnitFileState": "static", "FragmentPath": str(job.installed), "WorkingDirectory": str(installation.directory),
+            "Environment": "", "ExecStart": f"{{ path={executable} ; argv[]={executable} _run ; }}",
+            "DropInPaths": "", "NeedDaemonReload": "no", "Triggers": "", "TriggeredBy": ""}
+    else:
+        obs.launchd[job.installed.name] = observed_print(job.target,
+            {**plistlib.loads(job.content), "EnvironmentVariables": {}}, job.installed, active=False)
+        obs.launchd_active[job.installed.name] = False
+    native_argv = [executable, [executable, "_run"], False, 0, 0, 0, 0, 0, 0, 0]
+    def runner(command, **kwargs):
+        function, args = command[5], command[6:]
+        if function == "svc_inventory_catalog":
+            return subprocess.CompletedProcess(command, 0, obs.catalog().replace("gui/501", domain), "")
+        if function == "svc_inventory_disabled":
+            return subprocess.CompletedProcess(command, 0, obs.disabled, "")
+        if function == "svc_inventory_state":
+            assert args == [str(job.installed), job.target]
+            if manager == "Darwin" and job.target.rsplit("/", 1)[0] != domain:
+                return subprocess.CompletedProcess(command, 3, "", "")
+            return subprocess.CompletedProcess(command, 0,
+                "static loaded inactive\n" if manager == "Linux" else "unchanged loaded inactive\n", "")
+        if function == "svc_update_job_exec":
+            assert manager == "Linux" and args == [str(job.installed), job.target]
+            return subprocess.CompletedProcess(command, 0,
+                json.dumps({"type": "a(sasbttttuii)", "data": [native_argv]}), "")
+        if function == "svc_inventory_properties" and manager == "Darwin":
+            name = args[0].split("/")[-1] + ".plist"
+            observed_domain = domain
+            if name == job.installed.name:
+                if args[0] != job.target:
+                    return subprocess.CompletedProcess(command, 113, "", "Could not find service")
+                observed_domain = job.target.rsplit("/", 1)[0]
+            return subprocess.CompletedProcess(command, 0, obs.launchd[name].replace("gui/501", observed_domain), "")
+        return obs.runner(command, **kwargs)
+    return obs, job, native_argv, runner
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_exact_independent_updater_is_foreign_never_a_fleet_consumer(tmp_path, manager):
+    obs, job, _, runner = _git_inventory_with_independent_updater(tmp_path, manager)
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                runner=runner).require_complete()
+    assert str(job.installed) in result.foreign
+    assert job.target not in {unit.target for unit in result.units}
+    assert len(result.units) == 1
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+@pytest.mark.parametrize("defect", ["installed", "source", "native_argv"])
+def test_independent_updater_mismatch_remains_an_issue(tmp_path, manager, defect):
+    obs, job, native_argv, runner = _git_inventory_with_independent_updater(tmp_path, manager)
+    if defect == "installed":
+        job.installed.write_bytes(job.content + b"\nchanged")
+    elif defect == "source":
+        job.source.unlink()
+    elif manager == "Linux":
+        native_argv[1].append("--foreign")
+    else:
+        obs.launchd[job.installed.name] = obs.launchd[job.installed.name].replace("_run", "_foreign")
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package, runner=runner)
+    assert result.issues
+    with pytest.raises(InventoryError):
+        result.require_complete()
+    assert job.target not in {unit.target for unit in result.units}
+
+
+def test_gui_inventory_verifies_exact_user_domain_updater_without_quieting_it(tmp_path):
+    import os
+    obs, job, _, runner = _git_inventory_with_independent_updater(
+        tmp_path, "Darwin", job_domain=f"user/{os.getuid()}")
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                runner=runner).require_complete()
+    assert str(job.installed) in result.foreign
+    assert job.target not in {unit.target for unit in result.units}
+    assert len(result.units) == 1
+    from claudlobby.update_job import observe_update_job
+    with pytest.raises(InventoryError, match="svc_inventory_state failed"):
+        observe_update_job(obs.package.installation, Adapter(obs.package, runner=runner),
+                           obs.installed, native_target=job.target)

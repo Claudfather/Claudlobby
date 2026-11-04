@@ -9,10 +9,10 @@ import subprocess
 
 from .activation_enrollment import _target, selected_phase_entries
 from .activation_state import read_selection
-from .config import host_unit_name, load_host_jobs
+from .config import _load_system_defaults, host_unit_name, load_host_jobs
 from .config_plan import read_plan
-from .config_units import current_declarations, planned_units
-from .runtime_admission import RuntimeIdentity, mutation_admission, validate_unit_admission
+from .config_units import current_declarations, current_git_declarations, planned_units
+from .runtime_admission import GitCurrentRuntime, RuntimeIdentity, mutation_admission, validate_unit_admission
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
 
 
@@ -30,10 +30,83 @@ class HostJobError(RuntimeError):
 @dataclass(frozen=True)
 class HostJobRun:
     name: str
-    release_id: str
+    release_id: str | None
     target: str
     native_outcome: str = "requested"
     completion: str = "unobserved"
+    revision: str | None = None
+    config_fingerprint: str | None = None
+
+
+def _run_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None) -> HostJobRun:
+    """Use committed family/enrollment, never pending host override authoring."""
+    root, installation = current.installation.data_root, current.installation
+    packaged_jobs = (_load_system_defaults().get("host") or {}).get("jobs") or {}
+    if name not in packaged_jobs:
+        raise HostJobError("host job is not packaged in the current installation")
+    adapter = adapter or Adapter()
+    if (adapter.package.installation != installation or adapter.package.native != installation.native
+            or adapter.package.source_revision != current.revision):
+        raise HostJobError("host job adapter differs from the current installation")
+    manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    declarations = current_git_declarations(current.snapshot, manager)
+    metadata = {item["source"]: item for item in current.snapshot["units"]}
+    # Prefixes are frozen in the committed labels. Use the existing label codec
+    # rather than rereading a pending host.unit_prefix override.
+    families = []
+    for declaration in declarations:
+        stem = declaration.source.stem
+        if declaration.scope != "host" or not stem.endswith("-" + name):
+            continue
+        suffixes = [key for key in packaged_jobs if stem.endswith("-" + key)]
+        if (suffixes == [name]
+                and host_unit_name(name, prefix=stem[:-len(name) - 1]) == stem):
+            families.append(stem)
+    if len(set(families)) != 1:
+        raise HostJobError("host job has no unique committed native family")
+    stem = families[0]
+    wanted = {stem + ".plist"} if manager == "Darwin" else {stem + ".service", stem + ".timer"}
+    selected = [declaration for declaration in declarations if declaration.source.name in wanted]
+    if (len(selected) != len(wanted) or any(metadata[str(declaration.source)]["phase"] != "producers"
+            or not metadata[str(declaration.source)]["enroll"] for declaration in selected)):
+        raise HostJobError("host job is disabled or lacks a complete committed timer family")
+    service = next(declaration for declaration in selected if declaration.service is None)
+    admission = metadata[str(service.source)]["admission"]
+    if admission is None or admission["mode"] != "oneshot":
+        raise HostJobError("host job run requires a scheduled oneshot job")
+    if manager == "Darwin" and domain == f"user/{os.getuid()}":
+        # An explicit operator may reach its already enrolled GUI LaunchAgent.
+        adapter = adapter.in_selected_gui(f"gui/{os.getuid()}/{stem}")
+        manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    inventory = collect_enrollment(root, tuple(selected), adapter=adapter,
+                                   only_names=frozenset(wanted)).require_complete()
+    if len(inventory.units) != len(wanted):
+        raise HostJobError("host job inventory is incomplete", unavailable=True)
+    target = installed = None
+    for unit in inventory.units:
+        if (len(unit.installed) != 1 or dict(unit.properties).get("LoadState") != "loaded"
+                or Path(unit.installed[0].path).parent not in directories):
+            raise HostJobError("host job is not installed at its committed placement", unavailable=True)
+        if unit.declaration.source == service.source:
+            target, installed = unit.target, unit.installed[0].path
+    if target is None:
+        raise HostJobError("host job service placement is unavailable", unavailable=True)
+    return _request_job(adapter, name, target, installed, revision=current.revision,
+                        config_fingerprint=current.config_fingerprint)
+
+
+def _request_job(adapter, name, target, installed, *, release_id=None, revision=None, config_fingerprint=None):
+    try:
+        result = adapter.call("svc_host_job_run_exact", installed, target, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HostJobError("host job native request outcome is unknown", effect_attempted=True,
+                           unavailable=True, release_id=release_id, target=target) from exc
+    invoked = result.stdout.startswith("invoking\n")
+    if result.returncode or result.stdout != "invoking\nrun-requested\n":
+        raise HostJobError("host job native request was refused or is unverified",
+                           effect_attempted=invoked or result.returncode == 0, unavailable=True,
+                           release_id=release_id, target=target)
+    return HostJobRun(name, release_id, target, revision=revision, config_fingerprint=config_fingerprint)
 
 
 def run_host_job(root: Path, name: str, *, adapter: Adapter | None = None) -> HostJobRun:
@@ -41,6 +114,8 @@ def run_host_job(root: Path, name: str, *, adapter: Adapter | None = None) -> Ho
     if name == "pull-root":
         raise HostJobError("pull-root is retired; release changes require host activation")
     with mutation_admission(root, identity=RuntimeIdentity.current()) as release:
+        if isinstance(release, GitCurrentRuntime):
+            return _run_git_job(release, name, adapter)
         cfg = load_host_jobs().get(name)
         if cfg is None:
             raise HostJobError("host job is not packaged in the selected release")
@@ -112,14 +187,4 @@ def run_host_job(root: Path, name: str, *, adapter: Adapter | None = None) -> Ho
                 raise HostJobError("host job is not installed at its frozen placement", unavailable=True)
         service = by_name[stem + (".plist" if manager == "Darwin" else ".service")]
         target, installed = service["target"], service["installed"]
-        try:
-            result = adapter.call("svc_host_job_run_exact", installed, target, timeout=60)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise HostJobError("host job native request outcome is unknown", effect_attempted=True,
-                               unavailable=True, release_id=release.release_id, target=target) from exc
-        invoked = result.stdout.startswith("invoking\n")
-        if result.returncode or result.stdout != "invoking\nrun-requested\n":
-            raise HostJobError("host job native request was refused or is unverified",
-                               effect_attempted=invoked or result.returncode == 0, unavailable=True,
-                               release_id=release.release_id, target=target)
-        return HostJobRun(name, release.release_id, target)
+        return _request_job(adapter, name, target, installed, release_id=release.release_id)

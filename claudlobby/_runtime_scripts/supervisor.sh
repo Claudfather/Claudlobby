@@ -307,6 +307,93 @@ svc_host_job_run_exact() {
     printf 'run-requested\n'
 }
 
+# Fixed independent updater only. The Python owner verifies exact installed
+# bytes and native overrides first. Neither verb enables, replaces or bounces
+# a service; the updater must live outside the owner service process group.
+_svc_update_job_exact() {
+    local file="$1" target="$2" label="${2##*/}"
+    case "$file" in /*) ;; *) return 3 ;; esac
+    [ -f "$file" ] && [ ! -L "$file" ] || return 3
+    case "$_OS" in
+        Linux)
+            [[ "$target" =~ ^com\.claudlobby\.update\.[0-9a-f]{16}\.service$ ]] || return 3
+            [ "${file##*/}" = "$target" ] || return 3
+            ;;
+        Darwin)
+            [[ "$label" =~ ^com\.claudlobby\.update\.[0-9a-f]{16}$ ]] || return 3
+            [ "${file##*/}" = "$label.plist" ] || return 3
+            _svc_inventory_domain "${target%/*}" || return 3
+            ;;
+        *) return 3 ;;
+    esac
+}
+
+# Typed argv is required: systemctl show flattens the argument array with
+# spaces, so its human-readable ExecStart cannot prove argument boundaries.
+svc_update_job_exec() {
+    local file="$1" target="$2" object
+    [ "$_OS" = Linux ] || return 3
+    _svc_update_job_exact "$file" "$target" || return 3
+    object="/org/freedesktop/systemd1/unit/${target//./_2e}"
+    busctl --user --json=short --auto-start=no --allow-interactive-authorization=no --timeout=20 \
+        get-property org.freedesktop.systemd1 "$object" org.freedesktop.systemd1.Service ExecStart
+}
+
+svc_update_job_enroll_exact() {
+    local file="$1" target="$2"
+    _svc_update_job_exact "$file" "$target" || return 3
+    case "$_OS" in
+        Linux)
+            systemctl --user daemon-reload || return $?
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_LOAD" = loaded ] || return 3
+            case "$SVC_ACT_ACTIVE" in
+                active|activating) printf 'already-running\n'; return 0 ;;
+                inactive|failed) printf 'enrolled\n'; return 0 ;;
+                *) return 3 ;;
+            esac
+            ;;
+        Darwin)
+            _svc_activation_read "$file" "$target" || return 3
+            if [ "$SVC_ACT_LOAD" = loaded ]; then
+                case "$SVC_ACT_ACTIVE" in
+                    active) printf 'already-running\n' ;;
+                    inactive) printf 'already-enrolled\n' ;;
+                    *) return 3 ;;
+                esac
+                return 0
+            fi
+            [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = unloaded:inactive ] || return 3
+            launchctl bootstrap "${target%/*}" "$file" || return $?
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = loaded:inactive ] || return 3
+            printf 'enrolled\n'
+            ;;
+    esac
+}
+
+svc_update_job_run_exact() {
+    local file="$1" target="$2"
+    _svc_update_job_exact "$file" "$target" || return 3
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || return 3
+    case "$SVC_ACT_ACTIVE" in
+        active|activating) printf 'already-running\n'; return 0 ;;
+        inactive) ;;
+        failed)
+            [ "$_OS" = Linux ] || return 3
+            systemctl --user reset-failed "$target" || return $?
+            ;;
+        *) return 3 ;;
+    esac
+    case "$_OS" in
+        Linux) systemctl --user start --no-block "$target" || return $? ;;
+        Darwin) launchctl kickstart "$target" || return $? ;;
+        *) return 3 ;;
+    esac
+    printf 'run-requested\n'
+}
+
 # svc_enroll <bot_dir>
 # In THIS PR, a thin dispatcher onto the two existing installer scripts —
 # install-bot-systemd.sh's sequence (stale-unit cleanup, copy the composed
@@ -1325,13 +1412,7 @@ svc_inventory_properties() {
             # launchctl list in an Aqua session also reports same-UID user
             # services. This read-only inventory query may inspect either
             # domain; activation controls still require the manager domain.
-            if ! _svc_inventory_domain "${1%/*}"; then
-                local uid manager
-                uid=$(launchctl manageruid) || return 3
-                manager=$(launchctl managername) || return 3
-                case "$uid" in ''|*[!0-9]*) return 3 ;; esac
-                [ "$manager" = Aqua ] && [ "${1%/*}" = "user/$uid" ] || return 3
-            fi
+            _svc_inventory_read_domain "${1%/*}" || return 3
             case "${1##*/}" in ''|*[!a-zA-Z0-9_.@:-]*) return 3 ;; esac
             launchctl print "$1"
             ;;
@@ -1339,7 +1420,7 @@ svc_inventory_properties() {
     esac
 }
 
-# Exact caller-domain proof is required for both observations. print output is
+# Native controls require exact caller-domain proof. Read-only print output is
 # not an Apple API: the inventory owner validates the observed macOS grammar and
 # refuses unknown shapes. These queries neither load nor alter a launchd job.
 _svc_inventory_domain() {
@@ -1351,8 +1432,21 @@ _svc_inventory_domain() {
     case "$1:$manager" in "gui/$uid:Aqua"|"user/$uid:Background") return 0 ;; *) return 3 ;; esac
 }
 
+# Read-only inventory may also inspect user services visible from Aqua. Keep
+# control-domain proof separate: this helper never permits a native mutation.
+_svc_inventory_read_domain() {
+    [ "$_OS" = Darwin ] || return 3
+    if ! _svc_inventory_domain "$1"; then
+        local uid manager
+        uid=$(launchctl manageruid) || return 3
+        manager=$(launchctl managername) || return 3
+        case "$uid" in ''|*[!0-9]*) return 3 ;; esac
+        [ "$manager" = Aqua ] && [ "$1" = "user/$uid" ] || return 3
+    fi
+}
+
 svc_inventory_disabled() {
-    _svc_inventory_domain "$1" || return 3
+    _svc_inventory_read_domain "$1" || return 3
     launchctl print-disabled "$1"
 }
 
