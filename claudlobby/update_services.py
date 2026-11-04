@@ -322,6 +322,11 @@ def quiesce_consumer(store, key, adapter):
         store.save(record)
         return progress
     if progress.get("stop") is None:
+        proof = progress.get("checkpoint")
+        if (row["bot_binding"] and proof is not None
+                and proof.get("kind") == "native-session-v1"):
+            from .native_session import verify_live
+            verify_live(Path(row["bot_binding"][0]), proof, adapter)
         progress["stop"] = "pending"
         store.save(record)
         capability = ()

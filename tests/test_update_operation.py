@@ -104,6 +104,52 @@ def test_resume_before_stop_rechecks_original_native_identity_without_replaying(
     assert store.load()["consumers"]["bot"].get("stop") is None
 
 
+@pytest.mark.parametrize("disposition", ["running", "stopped"])
+def test_update_adopts_running_session_but_leaves_stopped_bot_and_optional_handoff_alone(tmp_path, monkeypatch, disposition):
+    from claudlobby import native_session as native
+    from claudlobby.isolation import transcript_slug
+    from tests.test_native_session import Observation, SID, provider_record
+
+    bot, account, tmpdir = (tmp_path / part for part in ("bot", "account", "tmux"))
+    (bot / "data").mkdir(parents=True)
+    (bot / "data/.spawn").touch()
+    optional = bot / "data/.handoff-request"
+    optional.write_bytes(b'{"request_id":"unknown-original","state":"pending"}\n')
+    retained = optional.read_bytes(), optional.stat().st_ino
+    adapter = Observation(tmp_path)
+    provider_record(bot, account, adapter, SID)
+    transcript = account / "projects" / transcript_slug(bot) / (SID + ".jsonl")
+    transcript.parent.mkdir(parents=True); transcript.write_bytes(b"retained older interactive context\n")
+    monkeypatch.setattr(native, "_context", lambda *_: (object(), account))
+    monkeypatch.setattr(native, "require_provider", lambda _: None)
+    data = record()
+    data["consumers"] = {"bot": data["consumers"]["bot"]}
+    data["consumers"]["bot"]["intent"].update(bot_binding=[str(bot), "example.worker", str(tmpdir)],
+                                              disposition=disposition)
+    store = Store(data)
+    monkeypatch.setattr(operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "previous"})
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: SimpleNamespace(check_inputs=lambda: None))
+    stopped = []
+    def quiet(store, key, adapter):
+        current = store.load()
+        if disposition == "running":
+            proof = current["consumers"][key]["checkpoint"]
+            assert proof["operation_id"] == "original" and proof["session"]["session_id"] == SID
+            bot_operations.verify_checkpoint_after_stop(bot, proof)
+        else:
+            assert "checkpoint" not in current["consumers"][key] and native.read(bot) is None
+        stopped.append(key)
+        current["consumers"][key]["stop"] = "done"
+        store.save(current)
+    monkeypatch.setattr(operation, "quiesce_consumer", quiet)
+    result = operation.quiesce_operation(store, adapter)
+    operation.quiesce_operation(store, adapter)
+    assert stopped == ["bot"] and result["request_id"] == "original"
+    assert (optional.read_bytes(), optional.stat().st_ino) == retained
+    assert bool(adapter.calls) == (disposition == "running")
+    assert all(name == "svc_bot_native_session" for name, _ in adapter.calls)
+
+
 @pytest.mark.parametrize("interrupt_second_entry", [False, True])
 def test_publication_commits_config_before_restore(tmp_path, monkeypatch, interrupt_second_entry):
     import sys

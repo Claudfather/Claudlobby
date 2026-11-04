@@ -254,8 +254,15 @@ def _checkpoint(store, key, adapter):
     directory, label, tmpdir = row["bot_binding"]
     progress["checkpoint_state"] = "waiting_for_native_idle"
     store.save(record)
+    options = {}
+    if record.get("conversion_scope") is not None:
+        from .active_config import context_from_plan
+        baseline = conversion_baseline(store, adapter.package)
+        declaration = row["declaration"]
+        options["context"] = context_from_plan(baseline.plan, declaration["fleet"],
+                                               bot=declaration["bot"], package=adapter.package)
     proof = save_planned_checkpoint(Path(directory), label, tmpdir, adapter,
-                                    operation_id=progress["checkpoint_operation"])
+                                    operation_id=progress["checkpoint_operation"], **options)
     # Interrupted observation resumes the same operation without model sends.
     record = store.load()
     record["consumers"][key]["checkpoint"] = proof

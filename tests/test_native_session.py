@@ -3,6 +3,8 @@
 The SessionStart payload shape is from Claude Code 2.1.318 captures retained in
 native-resume-proof/hooks (startup and resume, tools-disabled print probe).
 IDs/paths below are synthetic. This is shape evidence, not interactive acceptance.
+The provider PID record is from the sanitized live Darwin capture retained in
+native-session-adoption-20261104/sanitized-darwin-shape.json (Claude 2.1.318).
 """
 from copy import deepcopy
 import json
@@ -47,14 +49,16 @@ class Observation:
     def __init__(self, root):
         self.package = SimpleNamespace(installation=SimpleNamespace(data_root=root))
         self.pid, self.generation, self.idle = 4242, 1700000000, True
+        self.kernel_start = "Darwin:Wed Nov  4 12:20:00 2026"
         self.calls, self.reject_caller = [], False
 
     def call(self, function, *args, **kwargs):
         assert function == "svc_bot_native_session", "continuation must not send a model request"
         self.calls.append((function, args))
         rc = 3 if self.reject_caller and len(args) == 4 else 0
+        start = "\t" + self.kernel_start if args[3:] == ("", "start") else ""
         return subprocess.CompletedProcess([function], rc,
-            f"{self.pid}\t{self.generation}\t{'idle' if self.idle else 'unready'}\n", "")
+            f"{self.pid}\t{self.generation}\t{'idle' if self.idle else 'unready'}{start}\n", "")
 
 
 @pytest.fixture
@@ -68,6 +72,26 @@ def bound(tmp_path, monkeypatch):
     receipt = retain_native_session(bot, "example.worker", tmpdir, account, adapter)
     return SimpleNamespace(bot=bot, account=account, tmpdir=tmpdir, adapter=adapter, receipt=receipt,
                            label="example.worker")
+
+
+def provider_record(bot, account, adapter, sid):
+    """Author the captured provider shape at its exact PID filename."""
+    path = account / "sessions" / (str(adapter.pid) + ".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"pid": adapter.pid, "sessionId": sid, "cwd": str(bot),
+        "startedAt": 1793790000000, "procStart": "Wed Nov  4 12:20:00 2026",
+        "version": "2.1.318", "kind": "interactive", "entrypoint": "cli", "pidDomain": "darwin"}))
+    return path
+
+
+@pytest.fixture
+def older(bound):
+    b = bound
+    (b.bot / "data" / native.NAME).unlink()
+    (b.bot / "data/.spawn").touch()
+    b.provider = provider_record(b.bot, b.account, b.adapter, b.receipt["session_id"])
+    b.adapter.calls.clear()
+    return b
 
 
 def test_exact_session_continues_despite_newer_decoy_and_requires_matching_capture(bound):
@@ -95,6 +119,7 @@ def test_exact_session_continues_despite_newer_decoy_and_requires_matching_captu
     assert confirmed["process"] != proof["session"]["process"]
     assert confirmed["session_id"] == b.receipt["session_id"]
     assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
+    assert all(args[3:] != ("", "start") for _, args in b.adapter.calls)
 
 
 def test_clear_rotates_identity_only_inside_the_recorded_process(bound):
@@ -165,6 +190,190 @@ def test_prior_spawn_without_receipt_requires_explicit_adoption(tmp_path):
     with pytest.raises(native.NativeSessionError, match="adoption"):
         native.launch(bot, "example.worker", tmp_path / "tmux", tmp_path / "account")
     assert not (bot / "data" / native.NAME).exists()
+
+
+def test_absent_receipt_adopts_exact_pane_pid_despite_newer_decoy_and_optional_handoff(older):
+    b = older
+    provider_bytes = b.provider.read_bytes()
+    decoy = b.provider.with_name(str(b.adapter.pid + 1) + ".json")
+    decoy.write_text(json.dumps({**json.loads(provider_bytes), "pid": b.adapter.pid + 1, "sessionId": OTHER}))
+    os.utime(decoy, ns=(decoy.stat().st_atime_ns, b.provider.stat().st_mtime_ns + 1_000_000_000))
+    transcript_decoy = Path(b.receipt["transcript"]).with_name(OTHER + ".jsonl")
+    transcript_decoy.write_bytes(b"newer unrelated session\n")
+    os.utime(transcript_decoy, ns=(transcript_decoy.stat().st_atime_ns,
+                                 Path(b.receipt["transcript"]).stat().st_mtime_ns + 1_000_000_000))
+    optional = b.bot / "data/.handoff-request"
+    optional.write_bytes(b'{"request_id":"original-unknown","state":"pending"}\n')
+    original_optional = optional.read_bytes(), optional.stat().st_ino
+
+    proof = bot_operations.save_planned_checkpoint(b.bot, b.label, str(b.tmpdir), b.adapter,
+                                                  operation_id="original-update")
+    assert proof["kind"] == "native-session-v1" and proof["operation_id"] == "original-update"
+    assert proof["session"]["session_id"] == b.receipt["session_id"]
+    assert proof["session"]["process"] == f"{b.adapter.generation}:{b.adapter.pid}"
+    assert proof["session"]["provider_start"] == b.adapter.kernel_start
+    assert native.read(b.bot) == proof["session"] and not proof["session"]["pending"]
+    assert all(args[3:] == ("", "start") for _, args in b.adapter.calls)
+    bot_operations.verify_checkpoint_after_stop(b.bot, proof)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", b.receipt["session_id"])
+    assert native.read(b.bot)["provider_start"] == b.adapter.kernel_start
+    b.adapter.pid += 2
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, b.receipt["session_id"], source="resume"), caller=123)
+    assert native.confirm(b.bot, expected=proof["session"])["session_id"] == b.receipt["session_id"]
+    assert "provider_start" not in native.read(b.bot)
+    assert (optional.read_bytes(), optional.stat().st_ino) == original_optional
+    assert b.provider.read_bytes() == provider_bytes
+    assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
+
+
+@pytest.mark.parametrize("drift", ["stale-start", "cwd", "account", "pid"])
+def test_absent_receipt_refuses_provider_drift_without_publishing_or_waiting(older, monkeypatch, drift):
+    b = older
+    value = json.loads(b.provider.read_bytes())
+    if drift == "stale-start":
+        value["procStart"] = "Tue Nov  3 12:20:00 2026"
+    elif drift == "cwd":
+        value["cwd"] = str(b.bot.parent / "other-bot")
+    elif drift == "account":
+        other = b.account.parent / "other-account/sessions"; other.mkdir(parents=True)
+        b.provider.rename(other / b.provider.name)
+    elif drift == "pid":
+        value["pid"] += 1
+    if drift != "account":
+        b.provider.write_text(json.dumps(value))
+    monkeypatch.setattr(bot_operations.time, "sleep", lambda _: pytest.fail("permanent identity errors must not wait"))
+    with pytest.raises(bot_operations.BotLifecycleError):
+        bot_operations.save_planned_checkpoint(b.bot, b.label, str(b.tmpdir), b.adapter, operation_id="original")
+    assert not (b.bot / "data" / native.NAME).exists()
+    assert (b.bot / "data/.spawn").exists()
+    assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
+
+
+@pytest.mark.parametrize("invalid", ["malformed-receipt", "wrong-account-receipt", "symlink-provider", "oversize-provider"])
+def test_adoption_never_replaces_invalid_existing_evidence(older, invalid):
+    b = older
+    receipt = b.bot / "data" / native.NAME
+    if invalid == "malformed-receipt":
+        receipt.write_bytes(b"{malformed original receipt\n")
+    elif invalid == "wrong-account-receipt":
+        receipt.write_text(json.dumps({**b.receipt, "account": str(b.account.parent / "foreign")}))
+    elif invalid == "symlink-provider":
+        target = b.provider.with_suffix(".original")
+        b.provider.rename(target); b.provider.symlink_to(target)
+    else:
+        b.provider.write_bytes(b" " * (native.TAIL_BYTES + 1))
+    before = receipt.read_bytes() if receipt.exists() else None
+    with pytest.raises((native.NativeSessionError, OSError)):
+        native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original")
+    assert (receipt.read_bytes() if receipt.exists() else None) == before
+    if before is not None:
+        assert b.adapter.calls == []
+
+
+def test_adoption_rereads_provider_clear_identity_before_publication(older, monkeypatch):
+    b = older
+    original_observe, observations = native.observe, []
+    def clear_during_second_observation(*args, **kwargs):
+        observed = original_observe(*args, **kwargs)
+        observations.append(observed)
+        if len(observations) == 2:
+            provider_record(b.bot, b.account, b.adapter, OTHER)
+            Path(b.receipt["transcript"]).with_name(OTHER + ".jsonl").write_bytes(b"new clear context\n")
+        return observed
+    monkeypatch.setattr(native, "observe", clear_during_second_observation)
+    with pytest.raises(native.NativeSessionError, match="session changed"):
+        native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original")
+    assert not (b.bot / "data" / native.NAME).exists()
+    assert json.loads(b.provider.read_bytes())["sessionId"] == OTHER
+
+
+def test_adopted_legacy_process_tracks_clear_until_new_hook_confirms_resume(older):
+    b = older
+    old = native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original")
+    provider_record(b.bot, b.account, b.adapter, OTHER)
+    Path(b.receipt["transcript"]).with_name(OTHER + ".jsonl").write_bytes(b"context after legacy clear\n")
+    refreshed = native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original")
+    assert refreshed["session"]["session_id"] == OTHER
+    assert refreshed["session"]["provider_start"] == old["session"]["provider_start"]
+    with pytest.raises(native.NativeSessionError):
+        native.verify(b.bot, old)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", OTHER)
+    assert native.read(b.bot)["provider_start"] == b.adapter.kernel_start
+    b.adapter.pid += 1
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, OTHER, source="resume"), caller=123)
+    assert "provider_start" not in native.confirm(b.bot, expected=refreshed["session"])
+    b.provider.unlink()
+    b.adapter.calls.clear()
+    hooked = native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="later")
+    assert hooked["session"]["session_id"] == OTHER
+    assert all(args[3:] == () for _, args in b.adapter.calls)
+
+
+@pytest.mark.parametrize("drift", ["process", "account"])
+def test_adopted_legacy_receipt_refuses_changed_process_or_account(older, monkeypatch, drift):
+    b = older
+    native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original")
+    before = (b.bot / "data" / native.NAME).read_bytes()
+    if drift == "process":
+        b.adapter.pid += 1
+        provider_record(b.bot, b.account, b.adapter, OTHER)
+    else:
+        account = b.account.parent / "foreign-account"
+        provider_record(b.bot, account, b.adapter, OTHER)
+        monkeypatch.setattr(native, "_context", lambda *_: (object(), account))
+    with pytest.raises(native.NativeSessionError):
+        native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="original")
+    assert (b.bot / "data" / native.NAME).read_bytes() == before
+
+
+def test_absent_receipt_waits_for_idle_then_adopts_in_same_operation(older, monkeypatch):
+    b = older
+    b.adapter.idle = False
+    waits = []
+    def become_idle(seconds):
+        assert native.read(b.bot) is None
+        waits.append(seconds); b.adapter.idle = True
+    monkeypatch.setattr(bot_operations.time, "sleep", become_idle)
+    proof = bot_operations.save_planned_checkpoint(b.bot, b.label, str(b.tmpdir), b.adapter,
+                                                  operation_id="original")
+    assert len(waits) == 1 and proof["operation_id"] == "original"
+    assert proof["session"]["session_id"] == b.receipt["session_id"]
+    assert all(name == "svc_bot_native_session" for name, _ in b.adapter.calls)
+
+
+def test_native_observer_reports_actual_kernel_start_in_utc_without_starting_processes(tmp_path):
+    from tests.conftest import constructed_env
+
+    bot, tmpdir = tmp_path / "worker", tmp_path / "tmux"
+    bot.mkdir(); tmpdir.mkdir()
+    (bot / "bot.conf").write_text(f'BOT_SERVICE="example.worker"\nTMUX_TMPDIR="{tmpdir}"\n')
+    scripts = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
+    # Only tmux queries are substituted; ps reads this already-running pytest
+    # process. No session, native service, or provider is launched.
+    snippet = r'''
+fixture_tmux() {
+    case "$3" in
+        list-panes) printf '%s\n' "$FIXTURE_PID" ;;
+        display-message) printf '1700000000\n' ;;
+        capture-pane) printf '\n❯ \n' ;;
+        *) return 3 ;;
+    esac
+}
+export TMUX_BIN=fixture_tmux
+. "$1/supervisor.sh"
+svc_bot_native_session "$2" example.worker "$3" '' start
+'''
+    env = constructed_env(FIXTURE_PID=str(os.getpid()), LC_ALL="C", TZ="Pacific/Honolulu")
+    result = subprocess.run(["/bin/bash", "-c", snippet, "observer-fixture", str(scripts), str(bot), str(tmpdir)],
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    pid, generation, _idle, kernel_start = result.stdout.strip().split("\t")
+    expected = subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="],
+                                      env={**env, "TZ": "UTC"}, text=True).strip()
+    assert pid == str(os.getpid()) and generation == "1700000000"
+    assert kernel_start == os.uname().sysname + ":" + expected
 
 
 def test_busy_then_idle_completes_one_checkpoint_without_model_send(bound, monkeypatch):

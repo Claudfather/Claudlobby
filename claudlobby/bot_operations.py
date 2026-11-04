@@ -443,13 +443,14 @@ def _record_native_handoff(bot_dir: Path, record: dict, outcome) -> list[str]:
 
 
 def save_planned_checkpoint(bot_dir: Path, label: str, tmpdir: str, adapter: Adapter, *,
-                            operation_id: str) -> dict:
+                            operation_id: str, context=None) -> dict:
     """Observe exact durable native continuation; never ask the model to save."""
     from .native_session import checkpoint, checkpoint_account, NativeSessionBusy, NativeSessionError
     if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", operation_id):
         raise BotLifecycleError("checkpoint requires one exact operation ID")
     try:
-        account = checkpoint_account(bot_dir, label, adapter)
+        account = (checkpoint_account(bot_dir, label, adapter) if context is None
+                   else checkpoint_account(bot_dir, label, adapter, context=context))
     except (NativeSessionError, OSError, InventoryError, subprocess.SubprocessError) as exc:
         raise BotLifecycleError(str(exc), unavailable=True) from exc
     started = time.monotonic()
@@ -1193,6 +1194,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     raise BotLifecycleError(f"bot native state is {native_state or 'unknown'}; wait or inspect the exact unit",
                                             unavailable=True)
             handoff = "not_applicable"
+            restart_checkpoint = None
             if restart:
                 session = _native(adapter, "svc_bot_session_observe", spec.bot_dir,
                                   spec.label, spec.environment["TMUX_TMPDIR"])
@@ -1203,14 +1205,14 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     if session != "ready":
                         raise BotLifecycleError("self restart lost its private live session",
                                                 unavailable=True)
-                    _planned_restart_handoff(spec.bot_dir, spec.label,
+                    restart_checkpoint = _planned_restart_handoff(spec.bot_dir, spec.label,
                                              spec.environment["TMUX_TMPDIR"], adapter)
                     handoff = "native_session"
                 elif session == "ready":
                     # A planned live bounce must retain context before the
                     # existing native restart can terminate its private pane.
                     try:
-                        _planned_restart_handoff(spec.bot_dir, spec.label,
+                        restart_checkpoint = _planned_restart_handoff(spec.bot_dir, spec.label,
                                                  spec.environment["TMUX_TMPDIR"], adapter)
                     except BotLifecycleError as exc:
                         raise BotLifecycleError(str(exc), unavailable=True) from exc
@@ -1260,6 +1262,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             fence = _native(adapter, "svc_activation_bot_fence", *fence_args).split("\t")
             if len(fence) != 2 or not fence[0].isdigit() or not fence[1]:
                 raise BotLifecycleError("bot readiness fence is incomplete")
+            if restart_checkpoint is not None:
+                from .native_session import verify_live, NativeSessionError
+                try:
+                    verify_live(spec.bot_dir, restart_checkpoint, adapter)
+                except (NativeSessionError, InventoryError, OSError) as exc:
+                    raise BotLifecycleError(str(exc), unavailable=True) from exc
             try:
                 _native(adapter, "svc_bot_enroll_exact", declaration.source, installed, entry["target"],
                         timeout=enroll_budget)

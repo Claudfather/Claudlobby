@@ -70,8 +70,11 @@ Claude session, and resume that conversation with current composed instructions.
 They send no checkpoint or restore prompt. The mandatory SessionStart hook keeps
 the saved identity tied to its account, working directory and native process;
 unknown prior sends are never replayed. Background updates measure Claude using
-the same tool path as the bot. Older bots without a native session receipt still
-need an explicit one-time adoption before this update path can stop them.
+the same tool path as the bot. On macOS, running older bots without a native
+receipt can adopt their exact PID-keyed provider session through that same
+checkpoint path. The configured account, working directory and process start
+must match; malformed receipts are never replaced and stopped bots stay stopped.
+Linux adoption awaits native provider evidence and currently refuses explicitly.
 
 Optional `bot handoff` receipts remain untouched and do not gate native restart
 or update, including pending, unknown, malformed or unreadable receipts. Explicit

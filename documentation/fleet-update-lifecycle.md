@@ -606,9 +606,20 @@ Continuation sends neither a restore prompt nor the authored startup prompt. A
 new bot instead receives an explicit fresh UUID and its normal startup prompt.
 
 Missing or invalid transcript/session evidence refuses before stopping a running
-bot. Older bots without this metadata require an explicit one-time adoption;
-this implementation never guesses the newest transcript or silently falls back
-to model handoff. Native continuation does not read or change optional handoff
+bot. For a running pre-feature bot without a receipt, the same checkpoint owner
+can adopt its exact PID-keyed Claude provider record. It checks the configured
+account, cwd, UUID, interactive process and native process start, then rechecks
+that binding before recording the ordinary continuation proof. Adopted receipts
+retain their provider-process provenance until a validated SessionStart hook
+confirms continuation. Later checkpoint attempts re-read the same PID record,
+including a same-process `/clear`, and the stop owner performs a final
+currentness check before its native action. This does not make external terminal
+input atomic with a stop. This automatic
+adoption is verified for Darwin; the Linux provider-record shape still needs
+native evidence and currently refuses. Existing malformed receipts are never
+replaced through adoption. Already stopped older bots remain stopped; selecting
+their historical conversation for a later start is outside this slice. No path
+guesses the newest transcript or silently falls back to model handoff. Native continuation does not read or change optional handoff
 receipts; pending, unknown, malformed or unreadable receipts do not block it.
 `bot handoff` remains an optional explicit tool with its own no-resend protection,
 rather than a prerequisite for routine updates. Crash recovery can resume only what

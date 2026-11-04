@@ -201,6 +201,46 @@ def test_read_valid_baseline_preserves_original_bytes_ids_and_stopped_placement(
     assert not (case.root / "state/config.json").exists() and _files(case.root) == before
 
 
+def test_conversion_checkpoint_uses_frozen_old_context_without_current_git_config(baseline, monkeypatch):
+    from claudlobby import native_session as native, update_operation as operation
+    from claudlobby.active_config import context_from_plan
+    from claudlobby.composer import account_dir
+    from claudlobby.isolation import expand_home, transcript_slug
+    from tests.test_native_session import Observation, SID, provider_record
+    from tests.test_update_operation import Store, record
+
+    case = baseline
+    original = read_sealed_baseline(case.root, package=case.package)
+    context = context_from_plan(original.plan, "example", bot="manager", package=case.package)
+    bot = context.paths.bot_runtime("manager")
+    account = expand_home(account_dir(context.fleet.bots["manager"], context.fleet), Path.home())
+    adapter = Observation(case.root)
+    adapter.package = case.package
+    provider_record(bot, account, adapter, SID)
+    transcript = account / "projects" / transcript_slug(bot) / (SID + ".jsonl")
+    transcript.parent.mkdir(parents=True, exist_ok=True); transcript.write_bytes(b"original sealed session\n")
+    (bot / "data/.spawn").touch()
+    optional = bot / "data/.handoff-request"; optional.write_bytes(b"original unresolved optional request\n")
+    retained = optional.read_bytes(), case.selector.read_bytes(), case.activation.read_bytes()
+    monkeypatch.setattr(native, "_context", lambda *_: pytest.fail("conversion cannot require current Git configuration"))
+    measured = []
+    monkeypatch.setattr(native, "require_provider", lambda ctx: measured.append((ctx.bot_id, ctx.fleet.service_prefix)))
+    monkeypatch.setattr(operation, "conversion_baseline", lambda store, package: original)
+    data = record()
+    data["conversion_scope"] = {"original": True}
+    data["consumers"] = {"bot": data["consumers"]["bot"]}
+    data["consumers"]["bot"]["intent"].update(bot_binding=[str(bot), "com.example.manager", str(case.root / "tmux")],
+        declaration={"fleet": "example", "bot": "manager"})
+    store = Store(data)
+    operation._checkpoint(store, "bot", adapter)
+    proof = store.load()["consumers"]["bot"]["checkpoint"]
+    assert proof["operation_id"] == "original" and proof["session"]["session_id"] == SID
+    assert proof["session"]["account"] == str(account)
+    assert measured == [("manager", "com.example")]
+    assert not (case.root / "state/config.json").exists()
+    assert (optional.read_bytes(), case.selector.read_bytes(), case.activation.read_bytes()) == retained
+
+
 @pytest.mark.parametrize("drift", ["selection", "authored", "identity", "publication", "unknown_handoff", "pending_stop"])
 def test_baseline_refuses_drift_and_unresolved_effects_without_repair(baseline, drift):
     case = baseline

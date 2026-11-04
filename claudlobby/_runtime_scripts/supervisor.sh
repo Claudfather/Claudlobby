@@ -755,7 +755,7 @@ svc_bot_session_observe() (
 # Exact native-session generation; hooks additionally prove their nearest
 # Claude ancestor is this pane, so headless/subagent hooks cannot replace it.
 svc_bot_native_session() (
-    local bot_dir="$1" expected="$2" tmpdir="$3" caller="${4:-}" session pane created text region idle=unready actual
+    local bot_dir="$1" expected="$2" tmpdir="$3" caller="${4:-}" inspect="${5:-}" session pane created text region idle=unready actual started
     export TMUX_TMPDIR="$tmpdir"
     . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
     [ "$(tmux_socket_for_bot "$bot_dir")" = "$expected" ] || return 3
@@ -776,7 +776,15 @@ svc_bot_native_session() (
         idle=idle
     fi
     [ "$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}')" = "$pane" ] || return 3
-    printf '%s\t%s\t%s\n' "$pane" "$created" "$idle"
+    case "$inspect" in
+        '') printf '%s\t%s\t%s\n' "$pane" "$created" "$idle" ;;
+        start)
+            started=$(LC_ALL=C TZ=UTC ps -p "$pane" -o lstart=) || return 3
+            started="${started#"${started%%[! ]*}"}"
+            [ -n "$started" ] || return 3
+            printf '%s\t%s\t%s\t%s:%s\n' "$pane" "$created" "$idle" "$_OS" "$started" ;;
+        *) return 3 ;;
+    esac
 )
 
 # Submit exactly one explicit control to the selected bot's private session.

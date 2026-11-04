@@ -2,6 +2,7 @@
 import base64
 from copy import deepcopy
 import hashlib
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,6 +115,44 @@ def test_bot_session_drift_refuses_before_parking_or_stop(tmp_path, frozen, obse
     assert Path(services._file(row)).is_file()
     assert not services._park_path(store, row).exists()
     assert not any(call[0] == "svc_activation_pause" for call in native.calls)
+
+
+def test_adopted_clear_after_checkpoint_refuses_before_native_stop(tmp_path, monkeypatch):
+    from claudlobby import native_session
+    from claudlobby.isolation import transcript_slug
+    from tests.test_native_session import Observation, SID, OTHER, provider_record
+
+    bot, account, tmpdir = (tmp_path / part for part in ("bot", "account", "tmux"))
+    (bot / "data").mkdir(parents=True)
+    observation = Observation(tmp_path)
+    provider = provider_record(bot, account, observation, SID)
+    transcript = account / "projects" / transcript_slug(bot) / (SID + ".jsonl")
+    transcript.parent.mkdir(parents=True); transcript.write_bytes(b"original legacy session\n")
+    proof = native_session.checkpoint(bot, "example", tmpdir, observation,
+                                      operation_id="original", account=account)
+    row = intent(tmp_path)
+    row.update(manager="Darwin", target="user/123/example", disposition="running",
+               saved_native="unchanged loaded active", restore_native="unchanged loaded active",
+               bot_binding=[str(bot), "example", str(tmpdir)])
+    store, native = Store(tmp_path, row), Native()
+    store.record["consumers"][row["target"]]["checkpoint"] = proof
+    native.state, native.session = row["saved_native"], "ready"
+    def call(function, *args, **kwargs):
+        return (observation if function == "svc_bot_native_session" else native).call(function, *args, **kwargs)
+    adapter = SimpleNamespace(package=observation.package, call=call)
+    # The existing native ownership boundary is independent of session metadata.
+    monkeypatch.setattr(services, "_darwin", lambda *_: None)
+    provider_record(bot, account, observation, OTHER)
+    original_receipt = (bot / "data" / native_session.NAME).read_bytes()
+    with pytest.raises(native_session.NativeSessionError, match="session changed before stop"):
+        services.quiesce_consumer(store, row["target"], adapter)
+    progress = store.load()["consumers"][row["target"]]
+    assert "stop" not in progress and "park" not in progress
+    assert progress["checkpoint"] == proof
+    assert (bot / "data" / native_session.NAME).read_bytes() == original_receipt
+    assert Path(services._file(row)).read_bytes() == services._content(row["installed"][0])
+    assert not any(name == "svc_activation_pause" for name, _ in native.calls)
+    assert json.loads(provider.read_bytes())["sessionId"] == OTHER
 
 
 def test_unknown_start_never_replays_resume(tmp_path, monkeypatch):

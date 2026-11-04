@@ -55,7 +55,12 @@ def read(bot_dir):
         return None
     try:
         value = json.loads(raw)
-        if (set(value) != {"schema", "session_id", "transcript", "account", "cwd", "label", "tmpdir", "process", "pending", "checkpoint"}
+        fields = {"schema", "session_id", "transcript", "account", "cwd", "label", "tmpdir", "process", "pending", "checkpoint"}
+        if (set(value) not in (fields, fields | {"provider_start"})
+                or "provider_start" in value and (not isinstance(value["provider_start"], str)
+                    or not value["provider_start"].startswith("Darwin:")
+                    or len(value["provider_start"]) > 128
+                    or any(c in value["provider_start"] for c in "\r\n\t"))
                 or value["schema"] != 1 or not _uuid(value["session_id"])
                 or value["cwd"] != str(bot_dir) or type(value["pending"]) is not bool
                 or not all(isinstance(value[k], str) for k in ("transcript", "account", "label", "tmpdir"))
@@ -136,21 +141,84 @@ def _image(value, *, prefix=None):
             "tail_sha256": hashlib.sha256(tail).hexdigest()}
 
 
-def observe(adapter, bot_dir, label, tmpdir, *, caller=None):
-    args = (str(caller),) if caller is not None else ()
+def observe(adapter, bot_dir, label, tmpdir, *, caller=None, process_start=False):
+    args = ((str(caller) if caller is not None else "", "start") if process_start
+            else (str(caller),) if caller is not None else ())
     result = adapter.call("svc_bot_native_session", bot_dir, label, tmpdir, *args)
     try:
-        pid, generation, idle = result.stdout.strip().split("\t")
+        fields = result.stdout.strip().split("\t")
+        if len(fields) != (4 if process_start else 3):
+            raise ValueError()
+        pid, generation, idle = fields[:3]
         if result.returncode or not pid.isdigit() or int(pid) <= 1 or not generation.isdigit() or idle not in {"idle", "unready"}:
             raise ValueError()
     except (ValueError, AttributeError) as exc:
         raise NativeSessionError("native process/session observation is unavailable") from exc
-    return {"process": generation + ":" + pid, "idle": idle == "idle"}
+    value = {"process": generation + ":" + pid, "idle": idle == "idle"}
+    if process_start:
+        value["process_start"] = fields[3]
+    return value
 
 
-def checkpoint_account(bot_dir, label, adapter):
+def _provider_session(bot_dir, account, current):
+    """Read only the exact native PID record; never enumerate provider state."""
+    pid = int(current["process"].split(":")[1])
+    path = _plain(Path(account) / "sessions" / (str(pid) + ".json"))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if before.st_uid != os.getuid() or not stat.S_ISREG(before.st_mode):
+            raise NativeSessionError("native provider PID record is not owned")
+        content = stream.read(TAIL_BYTES + 1)
+        after = os.fstat(stream.fileno())
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (len(content) > TAIL_BYTES or any(getattr(before, k) != getattr(after, k) for k in fields)
+            or any(getattr(after, k) != getattr(path.lstat(), k) for k in fields)):
+        raise NativeSessionError("native provider PID record changed during adoption")
+    try:
+        raw = json.loads(content)
+        keys = ("pid", "sessionId", "cwd", "procStart", "kind", "entrypoint", "pidDomain")
+        identity = {key: raw[key] for key in keys}
+        if (type(identity["pid"]) is not int or identity["pid"] != pid
+                or not _uuid(identity["sessionId"]) or identity["cwd"] != str(bot_dir)
+                or identity["kind"] != "interactive" or identity["entrypoint"] != "cli"
+                or not isinstance(identity["procStart"], str)):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError) as exc:
+        raise NativeSessionError("native provider PID record does not bind this interactive bot") from exc
+    # Only the Darwin shape/currentness contract has native capture evidence.
+    # Existing valid native receipts remain supported on either platform.
+    if identity["pidDomain"] != "darwin" or not current["process_start"].startswith("Darwin:"):
+        raise NativeSessionError("pre-feature session adoption requires verified provider process metadata; Linux shape is not yet verified")
+    if current["process_start"] != "Darwin:" + identity["procStart"]:
+        raise NativeSessionError("native provider PID record belongs to another process start")
+    return identity
+
+
+def _adopted_value(bot_dir, label, tmpdir, account, current, identity):
+    from .isolation import transcript_slug
+    sid = identity["sessionId"]
+    return {"schema": 1, "session_id": sid,
+            "transcript": str(Path(account) / "projects" / transcript_slug(bot_dir) / (sid + ".jsonl")),
+            "account": str(account), "cwd": str(bot_dir), "label": label, "tmpdir": str(tmpdir),
+            "process": current["process"], "pending": False, "checkpoint": None,
+            "provider_start": current["process_start"]}
+
+
+def checkpoint_account(bot_dir, label, adapter, *, context=None):
     """Validate current composition/provider once before a bounded idle wait."""
-    context, account = _context(adapter.package, adapter.package.installation.data_root, bot_dir, label)
+    if context is None:
+        context, account = _context(adapter.package, adapter.package.installation.data_root, bot_dir, label)
+    else:
+        from .composer import account_dir
+        from .isolation import expand_home
+        bot = context.fleet.bots[context.bot_id]
+        if (context.paths.bot_runtime(context.bot_id) != Path(bot_dir) or bot.agent_cli != "claude"
+                or label != f"{context.fleet.service_prefix}.{context.bot_id}"):
+            raise NativeSessionError("frozen native continuation context names another bot")
+        account = expand_home(account_dir(bot, context.fleet), Path.home())
+        if account is None:
+            raise NativeSessionError("frozen native account path is unavailable")
     require_provider(context)
     return account
 
@@ -158,21 +226,30 @@ def checkpoint_account(bot_dir, label, adapter):
 def checkpoint(bot_dir, label, tmpdir, adapter, *, operation_id, account=None):
     if account is None:
         account = checkpoint_account(bot_dir, label, adapter)
-    value = _binding(read(bot_dir), bot_dir, label, tmpdir, account)
-    current = observe(adapter, bot_dir, label, tmpdir)
-    if value["pending"] or value["process"] != current["process"]:
+    original = read(bot_dir)
+    adopting = original is None or "provider_start" in original
+    value = None if original is None else _binding(original, bot_dir, label, tmpdir, account)
+    current = observe(adapter, bot_dir, label, tmpdir, process_start=adopting)
+    if adopting and not current["process_start"].startswith("Darwin:"):
+        raise NativeSessionError("pre-feature session adoption requires verified provider process metadata; Linux shape is not yet verified")
+    if original is not None and (value["pending"] or value["process"] != current["process"]
+            or adopting and value["provider_start"] != current["process_start"]):
         raise NativeSessionError("native session is not the recorded process")
     if not current["idle"]:
         raise NativeSessionBusy("native session is busy or has queued input")
+    identity = _provider_session(bot_dir, account, current) if adopting else None
+    if adopting:
+        value = _adopted_value(bot_dir, label, tmpdir, account, current, identity)
     image = _image(value)
-    if read(bot_dir) != value:
+    if read(bot_dir) != original:
         raise NativeSessionError("native session identity changed during checkpoint observation")
-    after = observe(adapter, bot_dir, label, tmpdir)
-    if after["process"] != current["process"]:
+    after = observe(adapter, bot_dir, label, tmpdir, process_start=adopting)
+    if after["process"] != current["process"] or adopting and after["process_start"] != current["process_start"]:
         raise NativeSessionError("native process changed during checkpoint observation")
     if not after["idle"]:
         raise NativeSessionBusy("native session became busy during checkpoint observation")
-    original = value
+    if adopting and _provider_session(bot_dir, account, after) != identity:
+        raise NativeSessionError("native provider session changed during adoption")
     value = {**value, "checkpoint": image}
     _write(bot_dir, value, expected=original)
     return {"kind": "native-session-v1", "operation_id": operation_id, "session": value, "transcript": image}
@@ -185,6 +262,21 @@ def verify(bot_dir, proof):
     _binding(value, bot_dir, value["label"], value["tmpdir"])
     if read(bot_dir) != value or _image(value, prefix=proof["transcript"]["size"]) != proof["transcript"]:
         raise NativeSessionError("native checkpoint session/transcript differs from the original proof")
+
+
+def verify_live(bot_dir, proof, adapter):
+    """Recheck an adopted legacy process immediately before its native stop."""
+    value = proof["session"]
+    if "provider_start" not in value:
+        return
+    verify(bot_dir, proof)
+    current = observe(adapter, bot_dir, value["label"], value["tmpdir"], process_start=True)
+    if (current["process"] != value["process"] or current["process_start"] != value["provider_start"]
+            or not current["idle"]):
+        raise NativeSessionError("adopted native process changed before stop")
+    identity = _provider_session(bot_dir, Path(value["account"]), current)
+    if identity["sessionId"] != value["session_id"] or read(bot_dir) != value:
+        raise NativeSessionError("adopted provider session changed before stop; continue the same operation")
 
 
 def launch(bot_dir, label, tmpdir, account):
@@ -228,7 +320,8 @@ def capture(bot_dir, label, tmpdir, account, adapter, payload, *, caller):
     transcript = account / "projects" / transcript_slug(bot_dir) / (payload["session_id"] + ".jsonl")
     if payload.get("transcript_path") != str(transcript):
         raise NativeSessionError("SessionStart transcript differs from the configured account")
-    _write(bot_dir, {**prior, "session_id": payload["session_id"], "transcript": str(transcript),
+    hooked = {key: value for key, value in prior.items() if key != "provider_start"}
+    _write(bot_dir, {**hooked, "session_id": payload["session_id"], "transcript": str(transcript),
                      "process": current["process"], "pending": False, "checkpoint": None}, expected=prior, allow_checkpoint_change=True)
 
 
