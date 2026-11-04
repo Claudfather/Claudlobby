@@ -200,7 +200,7 @@ def _sync_directory(path):
         os.close(fd)
 
 
-def _runtime_lock(installation, *, exclusive=False, inherited=None):
+def _runtime_fd(installation, inherited=None):
     path = _path(installation.data_root / "state/runtime-use.lock")
     fd = inherited
     try:
@@ -209,12 +209,21 @@ def _runtime_lock(installation, *, exclusive=False, inherited=None):
         linked, opened = path.lstat(), os.fstat(fd)
         if (not stat.S_ISREG(linked.st_mode) or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
             raise InstallationError("runtime exclusion file changed")
-        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-        os.set_inheritable(fd, False)
         return fd
     except (OSError, ValueError):
         if fd is not None:
             os.close(fd)
+        raise InstallationError("runtime is in use or its exclusion lock is unavailable") from None
+
+
+def _runtime_lock(installation, *, exclusive=False, inherited=None):
+    fd = _runtime_fd(installation, inherited)
+    try:
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        os.set_inheritable(fd, False)
+        return fd
+    except OSError:
+        os.close(fd)
         raise InstallationError("runtime is in use or its exclusion lock is unavailable") from None
 
 
@@ -259,7 +268,7 @@ def parse_git_unit_argv(argv) -> GitUnitStart:
     return GitUnitStart(tuple(argv), Path(argv[2]), argv[5], argv[7], argv[9], tuple(argv[11:]))
 
 
-def _committed_unit(installation, target, environment):
+def _committed_snapshot(installation):
     path = _path(installation.data_root / "state/config.json")
     try:
         snapshot = json.loads(path.read_bytes())
@@ -271,6 +280,14 @@ def _committed_unit(installation, target, environment):
                 or snapshot["source"] != str(installation.source)
                 or fingerprint != hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()):
             raise ValueError()
+        return snapshot
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise InstallationError("committed configuration cannot be verified") from exc
+
+
+def _committed_unit(installation, target, environment, *, directory=None):
+    snapshot = _committed_snapshot(installation)
+    try:
         platform = "Darwin" if sys.platform == "darwin" else "Linux" if sys.platform == "linux" else "unsupported"
         rows = [row for row in snapshot["units"] if row["platform"] == platform
                 and isinstance(row.get("admission"), dict) and row["admission"].get("unit") == target.unit]
@@ -281,7 +298,7 @@ def _committed_unit(installation, target, environment):
         if (admission != {"kind": "git-native-v1", "unit": target.unit, "mode": target.mode,
                           "argv": list(target.argv), "command": list(target.command)}
                 or row["phase"] != target.phase or row["enroll"] is not True
-                or Path(row["working_directory"]) != Path.cwd()
+                or Path(row["working_directory"]) != (Path.cwd() if directory is None else directory)
                 or type(row["environment"]) is not dict
                 or any(environment.get(key) != value for key, value in row["environment"].items())):
             raise ValueError()
@@ -306,6 +323,84 @@ def _committed_unit(installation, target, environment):
         return row
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise InstallationError("native command or context differs from committed configuration") from exc
+
+
+def _native_shell(installation, arguments, environment):
+    """Private inherited-fd boundary for startup/watchdog, not an action grant.
+
+    Acquire locks the shell-owned open description. Explicit release unlocks
+    its inherited copies too; neither operation imports the changing runtime.
+    """
+    try:
+        action, descriptor, *values = arguments
+        fd = int(descriptor)
+        if fd < 3:
+            raise ValueError()
+        if action == "python" and not values:
+            fd = _runtime_lock(installation, inherited=fd)
+            try:
+                _check_maintenance(installation, native=True)
+                python = installation.environment / "bin/python"
+                if python.parent.resolve() != python.parent or not python.is_file() or not os.access(python, os.X_OK):
+                    raise InstallationError("recorded runtime Python is unavailable")
+                print(python)
+                return 0
+            finally:
+                os.close(fd)  # leave the shared description locked in the shell
+        if not values or int(values[0]) != os.getppid():
+            raise InstallationError("native shell caller changed")
+        if action == "release" and len(values) == 1:
+            fd = _runtime_fd(installation, fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+            return 0
+        if action != "acquire" or len(values) != 6:
+            raise ValueError()
+        _, operation, directory, label, fleet, native = values
+        fd = _runtime_lock(installation, inherited=fd)
+        try:
+            _check_maintenance(installation, native=True)
+            if (operation not in {"start-bot", "keepalive"} or native != str(installation.native)
+                    or environment.get("CLAUDLOBBY_NATIVE_DIR") != native):
+                raise ValueError()
+            directory = _path(Path(directory))
+            snapshot = _committed_snapshot(installation)
+            platform = "Darwin" if sys.platform == "darwin" else "Linux" if sys.platform == "linux" else "unsupported"
+            rows = [row for row in snapshot["units"] if row["platform"] == platform
+                    and row["scope"] == "bot" and row["working_directory"] == str(directory)
+                    and isinstance(row.get("admission"), dict) and row["admission"].get("unit") == label]
+            if len(rows) != 1 or rows[0]["fleet"] != fleet:
+                raise ValueError()
+            row = rows[0]
+            target = parse_git_unit_argv(row["admission"]["argv"])
+            if (target.argv[0] != str(installation.cli) or target.root != installation.data_root
+                    or target.command != (str(installation.native / "start-bot.sh"), str(directory))):
+                raise ValueError()
+            _committed_unit(installation, target, row["environment"], directory=directory)
+            expected = row["environment"]
+            keys = ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_INSTALLATION", "CLAUDLOBBY_CLI",
+                    "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "FLEET_ROOT")
+            if any(environment.get(key) != expected.get(key) for key in keys):
+                raise ValueError()
+            configuration = _path(directory / "bot.conf")
+            outputs = [output["state"] for output in snapshot["owned_outputs"]
+                       if output["target"] == str(configuration)]
+            if (not configuration.is_file() or len(outputs) != 1 or outputs[0] != {
+                    "kind": "file", "mode": stat.S_IMODE(configuration.stat().st_mode),
+                    "sha256": hashlib.sha256(configuration.read_bytes()).hexdigest()}):
+                raise ValueError()
+            return 0
+        except BaseException:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            raise
+        finally:
+            os.close(fd)
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, InstallationError):
+            raise
+        raise InstallationError("native shell context differs from committed configuration") from exc
 
 
 _NATIVE_CLI = """import pathlib,sys
@@ -436,6 +531,10 @@ def _launch(argv: list[str]) -> int:
         if not updater.is_file() or not os.access(updater, os.X_OK):
             raise InstallationError("independent Git updater is unavailable; no runtime fallback attempted")
         os.execve(updater, [str(updater), *arguments], environment)
+    if len(arguments) > 2 and arguments[2] == "_native-shell":
+        if os.environ.get("CLAUDLOBBY_INSTALLATION") != str(installation.directory):
+            raise InstallationError("native shell installation differs from its launcher")
+        return _native_shell(installation, arguments[3:], environment)
     _check_maintenance(installation)
     if len(arguments) > 2 and arguments[2] == "_native":
         return _run_git_unit(installation, [str(installation.cli), *arguments], environment)

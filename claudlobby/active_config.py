@@ -62,7 +62,7 @@ def _snapshot_context(root: Path, fleet: str, item: dict, *, bot: str | None,
 
 def _validate_snapshot(snapshot: dict, installation: Installation, revision: str | None = None) -> None:
     if (not isinstance(snapshot, dict) or set(snapshot) != {
-            "schema", "data_root", "installation", "source", "revision", "fleets", "owned_outputs", "units", "fingerprint"}
+            "schema", "data_root", "installation", "source", "revision", "fleets", "owned_outputs", "units", "identities", "fingerprint"}
             or type(snapshot["schema"]) is not int or snapshot["schema"] != 1
             or snapshot["data_root"] != str(installation.data_root)
             or snapshot["installation"] != str(installation.directory)
@@ -104,6 +104,12 @@ def _validate_snapshot(snapshot: dict, installation: Installation, revision: str
     from .config_units import validate_git_units
     validate_git_units(snapshot["units"], installation)
     by_fleet = {context.fleet.name: context for context in contexts}
+    if snapshot["identities"] is not None:
+        from .activation_identity import validate_current_identity_bindings
+        try:
+            validate_current_identity_bindings(installation.data_root, snapshot["identities"], contexts=by_fleet)
+        except ActivationError as exc:
+            raise PlanError(f"effective configuration identity bindings are invalid: {exc}") from exc
     for unit in snapshot["units"]:
         source = Path(unit["source"])
         context = by_fleet.get(unit["fleet"])
@@ -202,7 +208,8 @@ def _fingerprint(snapshot: dict) -> str:
     return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def snapshot_from_plan(plan: ConfigPlan | RenderedConfiguration, installation: Installation, revision: str) -> dict:
+def snapshot_from_plan(plan: ConfigPlan | RenderedConfiguration, installation: Installation, revision: str, *,
+                       identities: dict | None = None) -> dict:
     """Freeze effective inputs and output ownership, independent of startup progress."""
     if plan.data_root != installation.data_root or getattr(plan, "revision", revision) != revision:
         raise PlanError("configuration plan belongs to another data root")
@@ -225,6 +232,7 @@ def snapshot_from_plan(plan: ConfigPlan | RenderedConfiguration, installation: I
                 "installation": str(installation.directory), "source": str(installation.source),
                 "revision": revision, "fleets": fleets,
                 "units": plan.effects.get("units", []),
+                "identities": identities,
                 "owned_outputs": [{"target": change.target, "state": change.after} for change in plan.changes]}
     # Detach mutable plan dictionaries before returning the committed document.
     snapshot = json.loads(json.dumps(snapshot))

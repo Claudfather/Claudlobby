@@ -171,3 +171,146 @@ def test_lock_covers_cli_lifetime_but_not_native_service_lifetime(native, entry)
             process.communicate()
             raise
     assert process.returncode == 0, stdout + stderr
+
+
+@pytest.fixture
+def native_shell(native):
+    import shutil
+    installation, _, snapshot, save, _, _ = native
+    script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/runtime-admission.sh"
+    shutil.copy2(script, installation.native / script.name)
+    directory = installation.data_root / "local/example/runtime/bots/worker"
+    directory.mkdir(parents=True)
+    configuration = directory / "bot.conf"
+    configuration.write_text("# approved generated bot configuration\n")
+    configuration.chmod(0o600)
+    python = installation.environment / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(Path(sys.executable).resolve())
+    item = snapshot["units"][0]
+    environment = item["environment"]
+    environment["FLEET_ROOT"] = str(installation.data_root / "local/example")
+    command = (str(installation.native / "start-bot.sh"), str(directory))
+    argv = wrap_unit_argv(environment, unit="example.worker", phase="bots", mode="exec", argv=command)
+    item.update(scope="bot", phase="bots", fleet="example", bot="worker", working_directory=str(directory),
+                admission={"kind": "git-native-v1", "unit": "example.worker", "mode": "exec",
+                           "argv": list(argv), "command": list(command)})
+    snapshot["owned_outputs"] = [{"target": str(configuration), "state": {
+        "kind": "file", "mode": 0o600, "sha256": hashlib.sha256(configuration.read_bytes()).hexdigest()}}]
+    save()
+    environment = {**environment, "BOT_DIR": str(directory), "BOT_SERVICE": "example.worker",
+                   "FLEET_NAME": "example", "LIB_DIR": str(installation.native)}
+    # Only the actual admission helper runs: no application, tmux or services.
+    body = '''set -euo pipefail
+_lc_cleanup() { :; }
+. "$LIB_DIR/runtime-admission.sh"
+native_admission "$1"
+printf '%s\\n' "$_NATIVE_ADMISSION_PYTHON" > "$CLAUDLOBBY_ROOT/acquired"
+read -r finish
+'''
+    def start(operation="start-bot", body=body, **extra):
+        return subprocess.Popen(["/bin/bash", "-c", body, "native-shell-test", operation],
+                                env=constructed_env(**{**environment, **extra}), cwd=directory,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return installation, directory, environment, start
+
+
+def _await_native_shell(process, marker):
+    for _ in range(500):
+        if marker.exists():
+            return
+        if process.poll() is not None:
+            _, errors = process.communicate(timeout=5)
+            pytest.fail(f"native shell refused unexpectedly: {errors}")
+        time.sleep(0.01)
+    pytest.fail("native shell did not acquire its lock")
+
+
+@pytest.mark.parametrize("operation", ["start-bot", "keepalive"])
+def test_actual_shell_admission_holds_lock_and_resolves_recorded_python(native_shell, operation):
+    from claudlobby.installation import InstallationError
+    installation, _, _, start = native_shell
+    process = start(operation)
+    try:
+        marker = installation.data_root / "acquired"
+        _await_native_shell(process, marker)
+        assert marker.read_text().strip() == str(installation.environment / "bin/python")
+        assert not (installation.data_root / "state/activation.lock").exists()
+        with pytest.raises(InstallationError):
+            with native_start_fence(installation):
+                pass
+        # Cleanup must work after the coordinator fences new native entries.
+        (installation.data_root / "state/update.json").write_text(json.dumps({
+            "schema": 1, "phase": "quiesce", "maintenance": False}))
+        _, errors = process.communicate("finish\n", timeout=10)
+        assert process.returncode == 0, errors
+        with native_start_fence(installation):
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("change", ["configuration", "directory", "label", "fleet", "native", "installation", "operation", "quiesce", "maintenance"])
+def test_actual_shell_refuses_stale_binding_and_update_fence(native_shell, change):
+    installation, directory, _, start = native_shell
+    extra = {}
+    operation = "start-bot"
+    if change == "configuration":
+        (directory / "bot.conf").write_text("# unapproved generated change\n")
+    elif change == "directory":
+        extra["BOT_DIR"] = str(installation.data_root)
+    elif change == "label":
+        extra["BOT_SERVICE"] = "foreign.worker"
+    elif change == "fleet":
+        extra["FLEET_NAME"] = "foreign"
+    elif change == "native":
+        extra["CLAUDLOBBY_NATIVE_DIR"] = str(directory)
+    elif change == "installation":
+        extra["CLAUDLOBBY_INSTALLATION"] = str(directory)
+    elif change == "operation":
+        operation = "unrecognized-start"
+    else:
+        (installation.data_root / "state/update.json").write_text(json.dumps({
+            "schema": 1, "phase": "quiesce" if change == "quiesce" else "git",
+            "maintenance": change == "maintenance"}))
+    process = start(operation, **extra)
+    _, errors = process.communicate("finish\n", timeout=10)
+    assert process.returncode != 0
+    assert not (installation.data_root / "acquired").exists()
+    assert "Traceback" not in errors
+    with native_start_fence(installation):
+        pass
+
+
+def test_actual_shell_explicit_unlock_releases_inherited_child_descriptor(native_shell):
+    installation, _, _, start = native_shell
+    body = '''set -euo pipefail
+_lc_cleanup() { :; }
+. "$LIB_DIR/runtime-admission.sh"
+native_admission start-bot
+"$_NATIVE_ADMISSION_PYTHON" -I -B -c 'import os,pathlib,sys,time
+os.fstat(9)
+root=pathlib.Path(sys.argv[1]); (root/"child").write_text(str(os.getpid()))
+while not (root/"finish-child").exists(): time.sleep(.01)
+' "$CLAUDLOBBY_ROOT" >/dev/null 2>&1 &
+printf '%s\\n' "$_NATIVE_ADMISSION_PYTHON" > "$CLAUDLOBBY_ROOT/acquired"
+read -r finish
+'''
+    process = start(body=body)
+    try:
+        _await_native_shell(process, installation.data_root / "acquired")
+        _await_native_shell(process, installation.data_root / "child")
+        _, errors = process.communicate("finish\n", timeout=10)
+        assert process.returncode == 0, errors
+        # The child still owns fd 9, but explicit unlock releases its flock.
+        import os
+        os.kill(int((installation.data_root / "child").read_text()), 0)
+        with native_start_fence(installation):
+            pass
+    finally:
+        (installation.data_root / "finish-child").touch()
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=10)
