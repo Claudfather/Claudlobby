@@ -15,6 +15,8 @@ import importlib
 import json
 import os
 import subprocess
+import sys
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +25,6 @@ import pytest
 from tests.conftest import _scrubbed_env, read_fleet_events, write_jsonl
 
 REPO = Path(__file__).resolve().parent.parent
-FLEET_PULSE = REPO / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
 
 
 def _recorder():
@@ -322,30 +323,31 @@ def test_events_land_on_the_plane_once_and_read_back_as_fleet_events(tmp_path):
 
 @pytest.mark.parametrize("admission_mismatch", [False, True])
 def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, monkeypatch, admission_mismatch):
-    from claudlobby import activation_state
+    from claudlobby import active_config
     from claudlobby.commands import checkin
 
     door = importlib.import_module("claudlobby.commands.compactions_record")
     fleet, paths = _fleet(tmp_path, "b", "gone")
     d = _transcripts(tmp_path, paths, "b")
     write_jsonl(d / "s1.jsonl", [_boundary("2026-10-06T20:00:00Z", 2, 2, "u1")])
-    selected = {"release_id": "r1"}
     from contextlib import contextmanager
     from claudlobby.active_config import RuntimeReadStamp
     from claudlobby import runtime_admission
-    from tests.package_fixtures import source_package
-    paths.package = source_package()
-    stamp = RuntimeReadStamp("sealed", selection=selected)
+    from tests.package_fixtures import git_package
+    paths.package = git_package(tmp_path)
+    stamp = RuntimeReadStamp("git", source_revision=paths.package.source_revision,
+                             config_fingerprint="c" * 64)
     @contextmanager
     def admitted(*args, **kwargs):
         if admission_mismatch:
             raise runtime_admission.ReleaseMismatch(tmp_path, "r1", "different")
-        yield SimpleNamespace(release_id="r1")
+        yield runtime_admission.GitCurrentRuntime(paths.package.installation,
+            stamp.source_revision, stamp.config_fingerprint, {})
     monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
     monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", lambda: None)
     monkeypatch.setattr(checkin, "_scope", lambda _args: (
         SimpleNamespace(paths=paths, fleet=fleet), None, stamp, None))
-    monkeypatch.setattr(activation_state, "read_selection", lambda _root: selected)
+    monkeypatch.setattr(active_config, "runtime_read_stamp", lambda *_args, **_kw: stamp)
     plane = Plane()
     monkeypatch.setattr("claudlobby.plane.emit_api.emit_batch", lambda root, raws: plane(raws))
     if admission_mismatch:
@@ -381,12 +383,23 @@ def test_each_pulse_records_the_fleets_compactions_through_the_cli(tmp_path, rc)
     (bot / "data").mkdir(parents=True)
     (bot / "bot.conf").write_text("TMUX_SOCKET=compactions2206-none\n")
     (root / "local" / fleet / "fleet.yaml").write_text(
-        "fleet:\n  manager: solo\n  bots:\n    solo:\n")
+        "fleet:\n  name: cfleet\n  manager: solo\n  bots:\n    solo: {expertise: [testing]}\n")
     stub, log = _stub_cli(tmp_path)
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
+    native = tmp_path / "native"
+    native.mkdir()
+    # Only the compaction recorder is substituted; pulse admission stays real.
+    common = (REPO / "claudlobby/_runtime_scripts/lib-common.sh").read_text()
+    common += ('\nclaudlobby_cli() {\n  case "$*" in\n'
+               '    *"fleet compactions record") ' + shlex.quote(str(stub)) + ' "$@" ;;\n'
+               '    *) "$CLAUDLOBBY_CLI" "$@" ;;\n  esac\n}\n')
+    (native / "lib-common.sh").write_text(common)
     env = _scrubbed_env(HOME=str(root / "home"), CLAUDLOBBY_ROOT=str(root),
-                        CLAUDLOBBY_CLI=str(stub), STUB_RC=str(rc), PLANE_EMIT_DISABLED="1",
+                        STUB_RC=str(rc), PLANE_EMIT_DISABLED="1",
                         TMUX_TMPDIR=os.environ["TMPDIR"])
-    proc = subprocess.run(["bash", str(FLEET_PULSE), fleet], env=env, capture_output=True,
+    proc = subprocess.run([sys.executable, str(REPO / "harness/compose.py"),
+                           "--root", str(root), "--fleet", fleet, "--pulse",
+                           "--native-dir", str(native)], env=env, capture_output=True,
                           text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr          # a refusal never stops the sweep
     assert (f"--root {root} --fleet {fleet} --json fleet compactions record"
