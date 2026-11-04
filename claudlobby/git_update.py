@@ -942,6 +942,29 @@ def _independent_quiet(store):
             evidence = module.assert_native_absent(QuietAdapter(), manager=row["manager"],
                 domain=row["domain"], target=key, installed_file=Path(row["destination"]),
                 search_directories=row["search_directories"], socket_path=socket).details
+        elif row.get("preserved_mask"):
+            retained = row["preserved_mask"]
+            saved = retained["snapshot"]
+            mask = Path(saved["path"])
+            try:
+                node = mask.lstat()
+                matches = (not os.path.lexists(retained["installed_path"])
+                    and mask.parent.resolve() == mask.parent and stat.S_ISLNK(node.st_mode)
+                    and node.st_uid == os.getuid() and stat.S_IMODE(node.st_mode) == saved["mode"]
+                    and os.readlink(mask) == saved["link"] == "/dev/null"
+                    and str(mask.resolve(strict=True)) == saved["resolved"] == "/dev/null"
+                    and saved["content"] == {"base64": ""} and saved["sha256"] == _digest(b""))
+            except OSError as exc:
+                raise UpdateError("preserved runtime mask is unavailable") from exc
+            if not matches:
+                raise UpdateError("preserved runtime mask or native path changed")
+            adapter = QuietAdapter()
+            state = adapter.call("svc_inventory_state", retained["installed_path"], key)
+            native = state.stdout.strip().split()
+            if state.returncode or len(native) != 3 or native[:2] != ["masked-runtime", "masked"] or native[2] not in {"inactive", "failed"}:
+                raise UpdateError("preserved runtime mask is no longer effective and quiet")
+            evidence = module.assert_quiescent(adapter, installed_file=Path(retained["installed_path"]),
+                                               target=key, socket_path=socket).details
         elif not row["installed"] or "@." in key:
             evidence = {"uninstalled_or_template": True}
         else:

@@ -110,6 +110,21 @@ def baseline(current_runtime, request):
             "working_directory": str(working), "environment": env, "service": None,
             "after": {"kind": "file", "sha256": sha, "mode": 0o644},
             "publish": bot != "worker", "enablement": None})
+    if variant == "pending":
+        for name, phase in (("com.example.schedule.timer", "producers"), ("com.example.recorder.service", "ingest")):
+            source = root / "runtime/_host/timers" / name
+            content = ("[Service]\nWorkingDirectory=" + str(root) + "\nExecStart=/bin/true\n").encode()
+            sha = hashlib.sha256(content).hexdigest()
+            builder.file(source, content)
+            env = deepcopy(entries[0]["environment"])
+            row = {"source": str(source), "scope": "host", "phase": phase, "release_id": release.release_id,
+                "working_directory": str(root), "environment": env, "fleet": None, "bot": None,
+                "enroll": True, "admission": {}, "service": None, "platform": "Linux", "sha256": sha, "mode": 0o644}
+            builder.effects["units"].append(row)
+            entries.append({"target": name, "installed": str(install_directory / name), "source": str(source),
+                "phase": phase, "original": True, "working_directory": str(root), "environment": env,
+                "service": None, "after": {"kind": "file", "sha256": sha, "mode": 0o644},
+                "publish": True, "enablement": None})
     plan = historical_plan(builder, release_id=release.release_id, release_seal=release.seal_sha256)
     aid, enrollment = "previous-active", "d" * 64
     publication_files = []
@@ -289,7 +304,7 @@ def test_prior_active_selection_does_not_hide_later_unfinished_lifecycle(baselin
         completed=["producers_paused"], release_id=case.release.release_id,
         plan_id=case.plan.plan_id, previous_selection=case.selected, **extra)
     before = _files(case.root)
-    with pytest.raises(activation_state.ActivationRefusal, match="another sealed lifecycle is unfinished"):
+    with pytest.raises(activation_state.ActivationRefusal, match="outside the pre-publication parking boundary"):
         read_sealed_baseline(case.root, package=case.package)
     assert _files(case.root) == before and later.exists()
     assert json.loads(case.selector.read_bytes()) == case.selected
@@ -351,8 +366,9 @@ def test_baseline_keeps_unenrolled_frozen_bot_row_without_native_authority(basel
     result = read_sealed_baseline(baseline.root, package=baseline.package)
     assert {row["bot"] for row in result.units} == {"manager", "worker"}
     assert next(row for row in result.units if row["bot"] == "worker")["enroll"] is False
-    assert [declaration.bot for declaration in result.declarations] == ["manager"]
+    assert [declaration.bot for declaration in result.declarations] == ["manager", "worker"]
     assert len(result.placements) == 1
+    assert result.placements[0]["source"] == str(result.declarations[0].source)
 
 
 @pytest.mark.parametrize("kind", ["upgrade", "adoption"])
@@ -379,6 +395,115 @@ def test_prepared_parking_without_exact_terminal_abort_proof_is_refused(baseline
         else:
             history.body["intent"]["enrollment_digest"] = "0" * 64
         history.activation.write_text(json.dumps({"record": history.body, "sha256": activation_state._digest(history.body)}))
+    before = _files(baseline.root)
+    with pytest.raises(activation_state.ActivationRefusal):
+        read_sealed_baseline(baseline.root, package=baseline.package)
+    assert _files(baseline.root) == before
+
+
+def _pending_history(case):
+    """Sanitized Pi capture shape: paused producers, parked bots, untouched ingest.
+
+    The 2026-11-04 read-only rollout receipt retained a null per-bot stop result;
+    this smaller roster retains that uncertainty without resuming its old owner.
+    """
+    from claudlobby.supervision_inventory import EnrollmentInventory, EnrolledUnit, FileSnapshot
+
+    aid = "later-pending"
+    original = read_sealed_baseline(case.root, package=case.package)
+    units = []
+    for declaration in original.declarations:
+        entry = next(row for row in case.entries if row["source"] == str(declaration.source))
+        content = case.plan.blob(entry["after"]["sha256"])
+        for path in (declaration.source, Path(entry["installed"])):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        props = (("UnitFileState", "enabled"), ("LoadState", "loaded"), ("ActiveState", "active"))
+        units.append(EnrolledUnit(declaration, entry["target"], FileSnapshot.read(declaration.source),
+                                  (FileSnapshot.read(Path(entry["installed"])),), props))
+    enrollment = EnrollmentInventory(case.root, "Linux", "", tuple(units), (), (), ()).payload()
+    digest = _digest(enrollment)
+    phases = {phase: [entry["target"] for entry in case.entries if entry["phase"] == phase]
+              for phase in ("producers", "bots", "ingest")}
+    shared = {"owner": "activation-units-v1", "activation_id": aid, "enrollment_digest": digest,
+              "enrollment": enrollment, "phases": phases, "original_release_id": case.release.release_id,
+              "native_observations": {}}
+    journals = {}
+    for phase in ("producers", "bots", "ingest"):
+        builder = ConfigPlanBuilder(case.root, ("example",), effects={**shared, "phase": phase})
+        for entry in case.entries:
+            if entry["target"] in phases[phase]:
+                builder.remove(Path(entry["installed"]))
+        plan = historical_plan(builder, release_id=case.release.release_id, release_seal=case.release.seal_sha256)
+        journals[phase] = _journal(plan, "units-" + _digest([aid, phase]),
+                                   "prepared" if phase == "ingest" else "applied")
+        if phase != "ingest":
+            for entry in case.entries:
+                if entry["target"] in phases[phase]:
+                    Path(entry["installed"]).unlink()
+    manifest = case.root / "fleet.yaml"
+    manifest.write_text(manifest.read_text() + "\n# Retained pending configuration\n")
+    builder = ConfigPlanBuilder(case.root, ("example",), effects=deepcopy(case.plan.effects))
+    for sources in builder.effects["fleet_sources"].values():
+        for descriptor in sources.values():
+            descriptor["sha256"] = builder.input_content(Path(descriptor["path"]))
+    for change in case.plan.changes:
+        builder.file(Path(change.target), case.plan.blob(change.after["sha256"]), mode=change.after["mode"])
+    pending = historical_plan(builder, release_id=case.release.release_id, release_seal=case.release.seal_sha256)
+    config = _journal(pending, aid, "prepared")
+    intent = {"release_id": case.release.release_id, "plan_id": pending.plan_id, "source_kind": "sealed",
+              "source_release_id": case.release.release_id, "enrollment_digest": digest,
+              "install_directory": str(original.install_directory), "quiesce_mode": "per-bot-v1", "preserve_bot_state": True}
+    activation, body = write_activation(case.root, aid, status="activating", completed=["producers_paused"],
+        pending="sessions_handed_off", intent=intent, previous_selection=case.selected,
+        evidence={"producers_paused": "e" * 64}, quiesce_mode="per-bot-v1",
+        handoff_effects={"com.example.manager.service": "handed_off", "com.example.worker.service": "handed_off"},
+        bot_quiescence={"com.example.manager.service": {"result": {"quiet": True}},
+                        "com.example.worker.service": {"result": None}}, start_effects={})
+    return SimpleNamespace(activation=activation, body=body, plan=pending, journals=journals, config=config)
+
+
+@pytest.mark.parametrize("baseline", ["pending"], indirect=True)
+def test_pending_prepublication_baseline_binds_owned_images_and_preserves_unknown(baseline):
+    history = _pending_history(baseline)
+    before = _files(baseline.root)
+    result = read_sealed_baseline(baseline.root, package=baseline.package)
+    assert result.selection == baseline.selected and result.plan == baseline.plan
+    assert result.authored_plan == history.plan
+    assert result.interruption["activation_id"] == history.body["activation_id"]
+    assert set(result.parked) == {entry["installed"] for entry in baseline.entries if entry["phase"] != "ingest"}
+    for entry in baseline.entries:
+        path = Path(entry["installed"])
+        if entry["phase"] == "ingest":
+            assert path.read_bytes() == baseline.plan.blob(entry["after"]["sha256"])
+            continue
+        parked = result.parked[str(path)]
+        assert not path.exists() and parked["snapshot"]["sha256"] == entry["after"]["sha256"]
+        blob = Path(parked["journal"]).parent / "blobs" / entry["after"]["sha256"]
+        assert result.evidence[str(blob)] == hashlib.sha256(blob.read_bytes()).hexdigest()
+    assert history.body["bot_quiescence"]["com.example.worker.service"]["result"] is None
+    assert _files(baseline.root) == before
+
+
+@pytest.mark.parametrize("baseline", ["pending"], indirect=True)
+@pytest.mark.parametrize("defect", ["publication", "extra_owner", "authored", "blob", "reappeared"])
+def test_pending_prepublication_conversion_refuses_other_effects_without_repair(baseline, defect):
+    history = _pending_history(baseline)
+    if defect == "publication":
+        history.body["completed"].append("selection_switched")
+        history.activation.write_text(json.dumps({"record": history.body, "sha256": activation_state._digest(history.body)}))
+    elif defect == "extra_owner":
+        write_activation(baseline.root, "another-pending", status="activating", pending="sessions_handed_off")
+    elif defect == "authored":
+        path = baseline.root / "fleet.yaml"
+        path.write_text(path.read_text() + "# Unexplained drift\n")
+    elif defect == "blob":
+        journal = history.journals["bots"]
+        raw = json.loads(journal.read_bytes())["journal"]
+        digest = next(row["before"]["node"]["sha256"] for row in raw["rows"] if not row["ensure"])
+        (journal.parent / "blobs" / digest).write_bytes(b"foreign before image")
+    else:
+        Path(baseline.entries[0]["installed"]).write_bytes(b"reappeared native file")
     before = _files(baseline.root)
     with pytest.raises(activation_state.ActivationRefusal):
         read_sealed_baseline(baseline.root, package=baseline.package)

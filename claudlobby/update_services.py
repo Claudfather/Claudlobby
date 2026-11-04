@@ -93,9 +93,13 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
         if (observed_manager, observed_domain) != (baseline.manager, baseline.domain):
             raise UpdateError("sealed conversion requires its original native manager domain")
         inventory = collect_enrollment(baseline.root, baseline.declarations, adapter=adapter,
-                                       historical_release=baseline.release).require_complete()
+                                       historical_release=baseline.release,
+                                       **({"historical_parked": baseline.parked} if getattr(baseline, "parked", None) else {})).require_complete()
         rows = inventory.payload()['units']
-        expected = {entry["source"]: entry["target"] for entry in baseline.placements}
+        expected = {str(item.source): next((entry["target"] for entry in baseline.placements
+                    if entry["source"] == str(item.source)),
+                    baseline.domain + "/" + item.source.stem if manager == "Darwin" else item.source.name)
+                    for item in baseline.declarations}
         observed = {row["declaration"]["source"]: row["target"] for row in rows}
         if expected != observed:
             raise UpdateError("sealed conversion inventory differs from historical native targets")
@@ -114,6 +118,21 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
         if any(Path(node["path"]).parent != install_directory for node in row["installed"]):
             raise UpdateError("observed native definition differs from install directory")
         props = dict(row["properties"])
+        parked = next((value for value in getattr(baseline, "parked", {}).values()
+                       if value["target"] == row["target"]), None)
+        masked = (manager == "Linux" and props.get("UnitFileState") == "masked-runtime"
+                  and props.get("LoadState") == "masked" and props.get("ActiveState") in {"inactive", "failed"})
+        if masked:
+            masks = [node for node in inventory.payload()["observed_files"]
+                     if Path(node["path"]).name == row["target"] and node["link"] == "/dev/null"]
+            if len(masks) != 1 or row["installed"]:
+                raise UpdateError("quiet masked consumer lacks exact runtime mask evidence")
+            row["preserved_mask"] = {"snapshot": masks[0], "installed_path": str(install_directory / row["target"])}
+        elif parked is not None:
+            if row["installed"]:
+                raise UpdateError("parked consumer unexpectedly has an installed definition")
+            row["installed"] = [parked["snapshot"]]
+            row["legacy_parked"] = parked
         row["manager"] = manager
         row["scheduled"] = row["target"] in scheduled
         if manager == "Darwin":
@@ -121,10 +140,14 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
             import plistlib
             plist = plistlib.loads(_content(row["generated"]))
             row["scheduled"] = any(key in plist for key in ("StartCalendarInterval", "StartInterval"))
-        row["saved_native"] = " ".join(props[key] for key in ("UnitFileState", "LoadState", "ActiveState"))
+        row["saved_native"] = None if is_unit_template(row["target"]) else " ".join(("not-found" if key == "UnitFileState" and props["LoadState"] == "not-found"
+                                        else props[key]) for key in ("UnitFileState", "LoadState", "ActiveState"))
         row["restore_native"] = row["saved_native"]
+        if parked is not None and not masked and not is_unit_template(row["target"]):
+            previous = dict(parked["properties"])
+            row["restore_native"] = " ".join(previous[key] for key in ("UnitFileState", "LoadState")) + " " + props["ActiveState"]
         if row["scheduled"] and manager == "Linux":
-            row["restore_native"] = " ".join(row["saved_native"].split()[:2] + ["inactive"])
+            row["restore_native"] = " ".join(row["restore_native"].split()[:2] + ["inactive"])
         row["defer_native_load"] = (manager == "Darwin" and not row["scheduled"]
             and props.get("LoadState") == "loaded" and props.get("ActiveState") == "inactive"
             and bool(plist.get("RunAtLoad") or plist.get("KeepAlive")))
@@ -134,7 +157,7 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
             source = row["installed"][0] if row["installed"] else row["generated"]
             env = (_darwin_source(_content(source))["environment"] if manager == "Darwin"
                    else _environment(props.get("Environment", "")))
-            if manager == "Linux" and not row["installed"]:
+            if manager == "Linux" and (not row["installed"] or parked is not None):
                 env = {}
                 for line in _content(source).decode().splitlines():
                     if line.startswith("Environment="):
@@ -149,10 +172,15 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
             binding = [row["declaration"]["working_directory"], Path(row["declaration"]["source"]).stem, tmpdir]
             row["bot_binding"] = binding
             if row["installed"]:
-                observed = _native(adapter, row, "svc_bot_session_observe", *binding, _file(row), row["target"])
-                if observed not in {"ready", "absent", "dead"}:
-                    raise UpdateError("bot disposition is unknown")
-                row["disposition"] = "running" if observed == "ready" else "stopped"
+                if parked is not None:
+                    from .native_session import observe
+                    observed = observe(adapter, Path(binding[0]), binding[1], binding[2])
+                    row["disposition"] = "running"
+                else:
+                    observed = _native(adapter, row, "svc_bot_session_observe", *binding, _file(row), row["target"])
+                    if observed not in {"ready", "absent", "dead"}:
+                        raise UpdateError("bot disposition is unknown")
+                    row["disposition"] = "running" if observed == "ready" else "stopped"
                 if manager == "Darwin" and not row["scheduled"]:
                     row["defer_native_load"] = (observed != "ready"
                         and props.get("LoadState") == "loaded"
@@ -163,7 +191,7 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
                 # Inventory has already proved native absence. Reuse the exact
                 # endpoint proof without treating generated bytes as installed.
                 assert_private_endpoint_quiet(socket, target=row["target"])
-                row["disposition"] = "uninstalled"
+                row["disposition"] = "stopped" if masked else "uninstalled"
         if len(row["installed"]) > 1:
             raise UpdateError("consumer has multiple installed definitions")
     if candidate_snapshot is not None:
@@ -176,6 +204,17 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
         for declaration, item, content in staged:
             if str(declaration.source) not in old_sources:
                 rows.append(_freeze_added(candidate_snapshot, adapter, install_directory, declaration, item, content, paired))
+        if baseline is not None:
+            originals = {row["declaration"]["source"]: row for row in rows if row["bot_binding"]}
+            for declaration, item, content in staged:
+                old = originals.get(str(declaration.source))
+                if old is not None:
+                    env = _darwin_source(content)["environment"] if manager == "Darwin" else {
+                        key: value for line in content.decode().splitlines() if line.startswith("Environment=")
+                        for entry in shlex.split(line.partition("=")[2])
+                        for key, _, value in (entry.partition("="),)}
+                    if env.get("TMUX_TMPDIR") != old["bot_binding"][2]:
+                        raise UpdateError("sealed conversion cannot change the private native session socket")
         phases = {item["source"]: item["phase"] for item in candidate_snapshot["units"]}
         for row in rows:
             row["phase"] = phases[row["declaration"]["source"]]
@@ -264,11 +303,59 @@ def _park(store, record, progress, row):
     store.save(record)
 
 
+def _retain_legacy_parking(store, record, progress, row):
+    """Transfer a proved before-image into this update's existing parking slot."""
+    saved = row["installed"][0]
+    source, parked = Path(saved["path"]), _park_path(store, row)
+    if os.path.lexists(source):
+        raise UpdateError("original parked native path reappeared")
+    blob = Path(row["legacy_parked"]["journal"]).parent / "blobs" / saved["sha256"]
+    if (blob.is_symlink() or blob.resolve() != blob or not blob.is_file()
+            or blob.stat().st_uid != os.getuid() or hashlib.sha256(blob.read_bytes()).hexdigest() != saved["sha256"]):
+        raise UpdateError("original parked native before-image changed")
+    if progress.get("park") is None:
+        progress["park"] = "pending"
+        store.save(record)
+    parked.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if parked.parent.resolve() != parked.parent:
+        raise UpdateError("native parking directory is redirected")
+    if not os.path.lexists(parked):
+        fd, name = tempfile.mkstemp(prefix=".retained-", dir=parked.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), saved["mode"])
+                stream.write(_content(saved))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, parked)
+            _sync(parked.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+    _park(store, record, progress, row)
+
+
+def _preserved_mask_quiet(row, adapter):
+    retained = row["preserved_mask"]
+    if os.path.lexists(retained["installed_path"]):
+        raise UpdateError("installed definition would shadow the preserved runtime mask")
+    _check(retained["snapshot"])
+    observed = _native(adapter, row, "svc_inventory_state", retained["installed_path"], row["target"]).split()
+    if len(observed) != 3 or observed[:2] != ["masked-runtime", "masked"] or observed[2] not in {"inactive", "failed"}:
+        raise UpdateError("preserved runtime mask is no longer the effective quiet native state")
+    binding = row["bot_binding"]
+    socket = Path(binding[2]) / f"tmux-{os.getuid()}" / binding[1] if binding else None
+    return assert_quiescent(adapter, installed_file=Path(row["declaration"]["source"]),
+                            target=row["target"], socket_path=socket).details
+
+
 def observe_quiet(store, key, adapter):
     """Fresh final observation; caller holds its exclusive maintenance fence."""
     record, progress, row = _row(store, key)
     if row.get("kind") == "added":
         evidence = observe_added_absence(row, adapter)
+    elif row.get("preserved_mask"):
+        evidence = _preserved_mask_quiet(row, adapter)
     elif not row["installed"] or is_unit_template(key):
         evidence = {"uninstalled_or_template": True, "intent": _hash(row)}
     else:
@@ -296,19 +383,27 @@ def quiesce_consumer(store, key, adapter):
         progress["stop"] = "done"
         store.save(record)
         return progress
+    if row.get("preserved_mask"):
+        observe_quiet(store, key, adapter)
+        record, progress, row = _row(store, key)
+        progress["stop"] = "done"
+        store.save(record)
+        return progress
     if not row["installed"]:
         progress["stop"] = "done"
         store.save(record)
         return progress
     _check(row["generated"])
     _darwin(adapter, row)
-    if progress.get("stop") is None and progress.get("park") is None:
-        _check(row["installed"][0])
+    if not is_unit_template(key) and progress.get("stop") is None and (progress.get("park") is None or row.get("legacy_parked")):
+        if not row.get("legacy_parked"):
+            _check(row["installed"][0])
         _native(adapter, row, "svc_activation_assert_external", _file(row), key, str(os.getpid()))
-        observed = _native(adapter, row, "svc_activation_snapshot", _file(row), key)
+        observed = _native(adapter, row, "svc_inventory_state" if row.get("legacy_parked")
+                           else "svc_activation_snapshot", _file(row), key)
         if not native_state_matches(row, observed):
             raise UpdateError("native state drifted before stop")
-        if row["bot_binding"]:
+        if row["bot_binding"] and not row.get("legacy_parked"):
             session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], _file(row), key)
             if session not in {"ready", "absent", "dead"}:
                 raise UpdateError("bot session disposition is unknown before stop")
@@ -316,7 +411,10 @@ def quiesce_consumer(store, key, adapter):
             if disposition != row["disposition"]:
                 raise UpdateError("bot session disposition drifted before stop; prepare from its intended state")
     if row["manager"] == "Linux":
-        _park(store, record, progress, row)
+        if row.get("legacy_parked"):
+            _retain_legacy_parking(store, record, progress, row)
+        else:
+            _park(store, record, progress, row)
     if is_unit_template(key):
         progress["stop"] = "done"
         store.save(record)
@@ -348,6 +446,12 @@ def restore_consumer(store, key, adapter, current_snapshot):
     record, progress, row = _row(store, key)
     if row.get("kind") == "added":
         return _restore_added(store, record, progress, row, adapter, current_snapshot)
+    if row.get("preserved_mask"):
+        _preserved_mask_quiet(row, adapter)
+        progress["outcome"] = "paused, runtime mask preserved; installed publication withheld"
+        progress["restore"] = "done"
+        store.save(record)
+        return progress
     if not row["installed"]:
         progress["restore"] = "done"
         store.save(record)
@@ -599,7 +703,8 @@ def _restore_added(store, record, progress, row, adapter, snapshot):
     collect_enrollment(Path(snapshot["data_root"]), candidates, adapter=adapter,
                        only_names=frozenset({source.name})).require_complete()
     if is_unit_template(row["target"]):
-        progress["restore"] = "done"; store.save(record); return progress
+        progress["restore"] = "done"
+        store.save(record); return progress
     observed = _native(adapter, row, "svc_inventory_state", installed, row["target"])
     should_start = row["enabled"] and not (row["manager"] == "Linux" and row["scheduled"] and source.suffix != ".timer")
     if progress["restore"] == "files":

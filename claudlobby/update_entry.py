@@ -142,13 +142,16 @@ def _authorize_conversion(store, package):
     if (manager, domain) != (baseline.manager, baseline.domain):
         raise UpdateError("sealed conversion requires its original native manager domain")
     inventory = collect_enrollment(store.root, baseline.declarations, adapter=adapter,
-                                   historical_release=baseline.release).require_complete()
+                                   historical_release=baseline.release,
+                                   **({"historical_parked": baseline.parked} if getattr(baseline, "parked", None) else {})).require_complete()
     checked = 0
     for unit in inventory.units:
-        if not unit.installed or is_unit_template(unit.target):
+        parked = next((row for row in getattr(baseline, "parked", {}).values() if row["target"] == unit.target), None)
+        if is_unit_template(unit.target) or not unit.installed and parked is None:
             continue
+        installed = unit.installed[0].path if unit.installed else Path(parked["snapshot"]["path"])
         checked += 1
-        if adapter.call('svc_activation_assert_external', unit.installed[0].path,
+        if adapter.call('svc_activation_assert_external', installed,
                         unit.target, str(os.getpid())).returncode != 0:
             raise UpdateError('sealed conversion requires a proven external local operator')
     if not checked:

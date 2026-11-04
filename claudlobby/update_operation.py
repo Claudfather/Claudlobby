@@ -151,10 +151,11 @@ def conversion_baseline(store, package, *, require_authored=True):
     if baseline.selector_sha256 != scope['selector_sha256'] or baseline.evidence != scope['evidence']:
         raise UpdateError('original sealed conversion evidence changed')
     if require_authored:
-        for sources in baseline.plan.effects['fleet_sources'].values():
+        authored = getattr(baseline, "authored_plan", None) or baseline.plan
+        for sources in authored.effects['fleet_sources'].values():
             for item in sources.values():
                 path = Path(item['path'])
-                if path_state(path, source=True) != baseline.plan.inputs[str(path)]['state']:
+                if path_state(path, source=True) != authored.inputs[str(path)]['state']:
                     raise UpdateError('authored configuration differs from the frozen sealed baseline; review it before conversion')
     return baseline
 
@@ -189,6 +190,15 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
         identities = None
     elif baseline is not None:
         current = None
+        from .composer import account_dir
+        for fleet, old in baseline.contexts.items():
+            new = context_from_plan(rendered, fleet, package=adapter.package)
+            if (old.paths.fleet_yaml != new.paths.fleet_yaml or old.fleet.service_prefix != new.fleet.service_prefix
+                    or set(old.fleet.bots) != set(new.fleet.bots)
+                    or any((old.fleet.bots[name].agent_cli, account_dir(old.fleet.bots[name], old.fleet))
+                           != (new.fleet.bots[name].agent_cli, account_dir(new.fleet.bots[name], new.fleet))
+                           for name in old.fleet.bots)):
+                raise UpdateError("sealed conversion cannot change native session identity/account bindings")
         identities = read_registry_identity_bindings(rendered, package=adapter.package)
         if identities != baseline.identities:
             raise UpdateError('sealed conversion cannot change existing identities')

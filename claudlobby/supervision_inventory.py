@@ -424,7 +424,7 @@ def systemd_show_blocks(text: str) -> list[dict[str, str]]:
     return [_key_values(block.splitlines()) for block in text.split("\n\n") if block.strip()]
 
 
-def _properties(text, *, foreign=False):
+def _properties(text, *, foreign=False, parked=False):
     result = _key_values(text.splitlines())
     required = {"Id", "LoadState", "ActiveState", "UnitFileState", "FragmentPath",
                 "DropInPaths", "NeedDaemonReload", "Triggers", "TriggeredBy"}
@@ -441,8 +441,15 @@ def _properties(text, *, foreign=False):
                   and result.get("FragmentPath") == ""
                   and (foreign or all(result.get(key) == "" for key in (
                       "WorkingDirectory", "Environment", "DropInPaths", "UnitFileState"))))
+        # Parsing is not acceptance. Exact parked ownership or an owned quiet
+        # runtime mask is proved below before a declared missing definition is used.
+        parked_shape = (parked and result.get("LoadState") == "not-found"
+                        and result.get("FragmentPath") == "" and result.get("DropInPaths") == "")
+        masked_shape = (result.get("LoadState") == "masked" and result.get("ActiveState") in {"inactive", "failed"}
+                        and result.get("UnitFileState") == "masked-runtime" and result.get("DropInPaths") == "")
         if (service_fields - result.keys() == {"ExecStart"}
-                and (absent or foreign and result.get("LoadState") == "loaded")):
+                and (absent or parked_shape or masked_shape
+                     or foreign and result.get("LoadState") in {"loaded", "not-found", "masked"})):
             result["ExecStart"] = ""
         required |= service_fields
     if not required <= result.keys() or not result.keys() <= allowed:
@@ -739,7 +746,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                        package: PackageResources | None = None, runner=None,
                        bootstrap_empty: bool = False, legacy_source: bool = False,
                        adapter=None, only_names: frozenset[str] | None = None,
-                       historical_release=None) -> EnrollmentInventory:
+                       historical_release=None, historical_parked=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -757,6 +764,15 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     """
     data_root = data_root.resolve(strict=True)
     historical_identity = None
+    historical_parked = historical_parked or {}
+    if not isinstance(historical_parked, dict) or historical_parked and historical_release is None:
+        raise InventoryError("parked native evidence requires a verified sealed baseline")
+    parked_by_name = {}
+    for path, retained in historical_parked.items():
+        name = Path(path).name
+        if name in parked_by_name or retained["snapshot"]["path"] != path or retained["target"] != name:
+            raise InventoryError("parked native evidence has ambiguous paths or targets")
+        parked_by_name[name] = retained
     if historical_release is not None:
         from .releases import release_path
         if (bootstrap_empty or legacy_source
@@ -897,7 +913,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 continue
             try:
                 props = _properties(adapter.read("svc_inventory_properties", name),
-                                    foreign=name not in expected)
+                                    foreign=name not in expected, parked=name in parked_by_name)
                 if (props["Id"] != name and
                         (name in expected or not _SYSTEMD_NAME.fullmatch(props["Id"]))):
                     raise InventoryError("native identity is an unproved alias")
@@ -1061,6 +1077,23 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         props = properties.get(name, {})
         try:
             generated = FileSnapshot.read(declaration.source)
+            retained = parked_by_name.get(name)
+            if retained is not None:
+                before = retained["snapshot"]
+                if (manager != "Linux" or os.path.lexists(before["path"])
+                        or before["link"] is not None or before["sha256"] != generated.sha256
+                        or base64.b64decode(before["content"]["base64"], validate=True) != generated.content):
+                    raise InventoryError("parked definition differs from its exact generated owner")
+            masked = (manager == "Linux" and props.get("LoadState") == "masked"
+                      and props.get("UnitFileState") == "masked-runtime")
+            if masked:
+                if (len(sources) != 1 or sources[0].link != "/dev/null" or not runtime_mask(sources[0].path, name)
+                        or props.get("FragmentPath") not in {sources[0].path, "/dev/null"}
+                        or props.get("DropInPaths") or props.get("ActiveState") not in {"inactive", "failed"}):
+                    raise InventoryError("declared runtime mask is not exact and quiet")
+                from .supervision_runtime import assert_quiescent
+                assert_quiescent(adapter, installed_file=declaration.source, target=name)
+                sources = ()  # The mask is observed_files evidence, never an installed definition.
             if len(sources) > 1:
                 raise InventoryError("multiple installed definitions shadow one another")
             binding = expected[declaration.service] if declaration.service else declaration
@@ -1078,7 +1111,24 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             elif manager == "Linux":
                 if not props:
                     raise InventoryError("missing effective native properties")
-                if sources:
+                if masked:
+                    pass  # Exact owned mask and native quiet were proved above.
+                elif retained is not None:
+                    before = retained["snapshot"]
+                    if (sources or props.get("FragmentPath") not in {"", before["path"], before["resolved"]}
+                            or props.get("LoadState") not in {"loaded", "not-found"}
+                            or props.get("DropInPaths") or props.get("NeedDaemonReload") not in {"yes", "no"}
+                            or props.get("ActiveState") not in {"active", "inactive", "failed", "activating"}):
+                        raise InventoryError("parked effective native ownership differs")
+                    # systemd can discard a parked definition's binding while
+                    # its exited launcher/private session remains alive. Only
+                    # the proved old journal permits that absence; present
+                    # binding fields must still match, never ambient defaults.
+                    if (props.get("WorkingDirectory") and Path(props["WorkingDirectory"]).resolve() != declaration.working_directory.resolve()
+                            or props.get("Environment") and any(_environment(props["Environment"]).get(k) != v
+                                                              for k, v in declaration.environment)):
+                        raise InventoryError("parked native data/fleet/release identity differs")
+                elif sources:
                     if (props["FragmentPath"] != sources[0].path or props["LoadState"] != "loaded"
                             or props["DropInPaths"] or props["NeedDaemonReload"] != "no"):
                         raise InventoryError("effective definition is missing, masked, overridden or stale")

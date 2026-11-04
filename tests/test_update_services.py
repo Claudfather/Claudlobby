@@ -950,3 +950,82 @@ def test_deenrolled_bot_freeze_requires_positive_private_endpoint_quiet(tmp_path
     finally:
         if server is not None:
             server.close()
+
+
+@pytest.mark.parametrize("state", ["masked-runtime", "masked"])
+def test_conversion_resume_preserves_observed_mask_without_start_or_unmask(tmp_path, state):
+    """Pi's parked quiet bots stay down; the old restart intent grants no start."""
+    unit = tmp_path / "worker.service"
+    unit.write_text("[Service]\nExecStart=/bin/true\n")
+    trace = tmp_path / "calls"
+    script = r'''
+. "$1/supervisor.sh"
+_OS=Linux; file="$2"; target=worker.service; saved="$3 masked inactive"; trace="$4"
+mask="$3"
+systemctl() {
+    printf '%s\n' "$*" >> "$trace"
+    [ "$2" = show ] || return 3
+    printf 'Id=worker.service\nLoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=%s\nFragmentPath=/dev/null\nControlGroup=\nMainPID=0\nControlPID=0\n' "$mask"
+}
+svc_activation_resume "$file" "$target" "$saved"
+'''
+    result = _runtime_bash(script, NATIVE, unit, state, trace)
+    assert result.returncode == 0, result.stderr
+    calls = trace.read_text().splitlines()
+    assert calls and all(call.startswith("--user show ") for call in calls)
+    assert unit.read_text() == "[Service]\nExecStart=/bin/true\n"
+
+
+@pytest.mark.parametrize("active", ["inactive", "failed"])
+def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it(tmp_path, monkeypatch, active):
+    """Pi quiet/masked rows retain physical absence despite old enabled intent."""
+    row = intent(tmp_path)
+    generated = tmp_path / "generated" / row["target"]
+    generated.parent.mkdir()
+    row["generated"].update(path=str(generated), resolved=str(generated))
+    content = ("[Service]\nEnvironment=TMUX_TMPDIR=" + str(tmp_path / "tmux") + "\nExecStart=/bin/true\n").encode()
+    generated.write_bytes(content)
+    row["generated"].update(sha256=hashlib.sha256(content).hexdigest(), content={"base64": base64.b64encode(content).decode()})
+    installed = Path(row["installed"][0]["path"])
+    installed.unlink()
+    mask = tmp_path / "runtime" / row["target"]
+    mask.parent.mkdir()
+    mask.symlink_to("/dev/null")
+    mask_snapshot = {"path": str(mask), "resolved": "/dev/null", "link": "/dev/null", "mode": mask.lstat().st_mode & 0o777,
+                     "sha256": hashlib.sha256(b"").hexdigest(), "content": {"base64": ""}}
+    declaration = {**row["declaration"], "source": str(generated), "scope": "bot", "service": None}
+    observed = {"target": row["target"], "installed": [], "generated": row["generated"], "declaration": declaration,
+                "properties": [["UnitFileState", "masked-runtime"], ["LoadState", "masked"], ["ActiveState", active]]}
+    parked = {str(installed): {"target": row["target"], "snapshot": row["installed"][0],
+                              "properties": [["UnitFileState", "enabled"], ["LoadState", "loaded"], ["ActiveState", "active"]]}}
+    baseline = SimpleNamespace(root=tmp_path, manager="Linux", domain="", install_directory=tmp_path,
+        declarations=(SimpleNamespace(source=generated),), release=object(), parked=parked,
+        placements=({"source": str(generated), "target": row["target"]},))
+    inventory = SimpleNamespace(payload=lambda: {"units": [deepcopy(observed)], "observed_files": [deepcopy(mask_snapshot)]})
+    calls = []
+    def collect(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(require_complete=lambda: inventory)
+    monkeypatch.setattr(services, "collect_enrollment", collect)
+    monkeypatch.setattr(services.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(services, "_catalog", lambda _: ("Linux", "", [], [], []))
+    class QuietMask(Native):
+        def call(self, function, *args, timeout=30):
+            if function == "svc_activation_quiet":
+                self.calls.append((function, args))
+                return SimpleNamespace(returncode=0, stdout="inactive\tno-cgroup-witness", stderr="")
+            return super().call(function, *args, timeout=timeout)
+    adapter = QuietMask()
+    adapter.read = lambda *_: "catalog"
+    adapter.state = "masked-runtime masked " + active
+    frozen, = services.freeze_service_intent(None, adapter, tmp_path, baseline=baseline)
+    assert calls[0]["historical_parked"] == parked
+    assert frozen["installed"] == [] and frozen["disposition"] == "stopped"
+    assert frozen["saved_native"] == frozen["restore_native"] == adapter.state
+    assert frozen["preserved_mask"]["snapshot"] == mask_snapshot and "legacy_parked" not in frozen
+    store = Store(tmp_path, frozen)
+    services.quiesce_consumer(store, frozen["target"], adapter)
+    services.restore_consumer(store, frozen["target"], adapter, {})
+    assert {name for name, _ in adapter.calls} == {"svc_inventory_state", "svc_activation_quiet"}
+    assert not installed.exists() and mask.is_symlink() and os.readlink(mask) == "/dev/null"
+    assert generated.read_bytes() == content

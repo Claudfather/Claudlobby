@@ -1640,3 +1640,60 @@ def test_retained_job_uses_only_its_frozen_same_uid_gui_domain_without_applicati
         assert calls == ({"retained_gui": [False, True], "unknown_gui": [False, True],
                           "background_from_gui": [False]}.get(case, []))
         assert store.load() == original and not installation.environment.exists()
+
+
+@pytest.mark.parametrize("defect", [None, "removed_mask", "new_definition", "live_socket"])
+def test_independent_quiet_rechecks_preserved_mask_before_cutover(update, defect):
+    """Retained checks cannot skip a quiet mask because installed definitions are absent."""
+    import hashlib
+    import os
+    import socket
+    import tempfile
+    from claudlobby.git_update import _prepare_quiet_support, _independent_quiet
+
+    installation, _, _, commit = update
+    package = installation.source / "claudlobby"
+    shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/supervision_runtime.py",
+                 package / "supervision_runtime.py")
+    (package / "_runtime_scripts/supervisor.sh").write_text(
+        "svc_inventory_state() { printf 'masked-runtime masked inactive\\n'; }\n"
+        "svc_activation_quiet() { printf 'inactive\\tno-cgroup-witness\\n'; }\n")
+    target = commit("Retained masked quiet observer")
+    installed = installation.data_root / "example.service"
+    mask = installation.data_root / "runtime-mask" / "example.service"
+    mask.parent.mkdir()
+    mask.symlink_to("/dev/null")
+    saved = {"path": str(mask), "resolved": "/dev/null", "mode": mask.lstat().st_mode & 0o777,
+             "link": "/dev/null", "content": {"base64": ""}, "sha256": hashlib.sha256(b"").hexdigest()}
+    with tempfile.TemporaryDirectory(prefix="mask-", dir="/tmp") as temporary:
+        tmpdir = Path(temporary).resolve()
+        endpoint = tmpdir / f"tmux-{os.getuid()}" / "example"
+        endpoint.parent.mkdir()
+        server = None
+        try:
+            with UpdateStore(installation) as store:
+                record = prepare(store, target, consumers={"example.service": {"intent": {
+                    "installed": [], "bot_binding": [str(installation.data_root), "example", str(tmpdir)],
+                    "preserved_mask": {"snapshot": saved, "installed_path": str(installed)}}}})
+                record["phase"] = "quiesce"
+                store.save(record)
+                _prepare_quiet_support(store)
+                if defect == "removed_mask":
+                    mask.unlink()
+                elif defect == "new_definition":
+                    installed.write_text("foreign native definition")
+                elif defect == "live_socket":
+                    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    server.bind(str(endpoint)); server.listen(1)
+                if defect:
+                    with pytest.raises(UpdateError if defect != "live_socket" else RuntimeError,
+                                       match="mask" if defect != "live_socket" else "socket"):
+                        _independent_quiet(store)
+                    assert store.load()["quiet"] == {} and store.load()["phase"] == "quiesce"
+                else:
+                    _independent_quiet(store)
+                    assert store.load()["quiet"]["example.service"]["identity"] == record["scope"]["example.service"]
+                    assert mask.is_symlink() and not installed.exists()
+        finally:
+            if server is not None:
+                server.close()

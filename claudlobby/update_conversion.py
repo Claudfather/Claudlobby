@@ -3,7 +3,8 @@
 This is historical evidence, not a current Git configuration or native-state
 observation. The common update owner separately fences and observes consumers.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import base64
 import hashlib
 import json
 import os
@@ -45,6 +46,9 @@ class SealedBaseline:
     domain: str
     install_directory: Path
     evidence: dict
+    interruption: dict | None = None
+    authored_plan: object | None = None
+    parked: dict = field(default_factory=dict)
 
 
 def _json(value):
@@ -207,7 +211,7 @@ def _untouched_abort(record, plan, journals, root, evidence):
     return abort["result"].get("evidence") == hashlib.sha256(_json(receipt)).hexdigest()
 
 
-def _settled_history(root, names, evidence):
+def _settled_history(root, names, evidence, interruption=None):
     """One-time conversion gate, including effects newer than the selected release."""
     records, journals = {}, {}
     for name in names:
@@ -216,7 +220,8 @@ def _settled_history(root, names, evidence):
         if os.path.lexists(path):
             record = read_activation(root, name)
             _read(path, evidence)
-            if record.status not in {"active", "rolled_back"} or record.body.get("pending") is not None:
+            allowed = interruption is not None and name == interruption["activation_id"]
+            if not allowed and (record.status not in {"active", "rolled_back"} or record.body.get("pending") is not None):
                 raise ActivationRefusal("another sealed lifecycle is unfinished; reconcile its original request before conversion")
             records[name] = record
         else:
@@ -236,11 +241,142 @@ def _settled_history(root, names, evidence):
     for name, (journal, plan, raw) in journals.items():
         if journal.status in {"applied", "rolled_back"}:
             continue
+        if interruption is not None and name in interruption["journals"].values():
+            continue  # Its exact membership/progress was proved by _interrupted_upgrade.
         record = records.get(plan.effects.get("activation_id"))
         if (journal.status != "prepared" or not name.startswith("units-") or record is None
                 or not _untouched_abort(record, plan, journals, root, evidence)):
             raise ActivationRefusal("sealed native publication retains unfinished recovery evidence")
         _journal_rows(plan, raw, "pending")
+
+
+def _interrupted_upgrade(root, names, selected, selected_plan, rows, placements, evidence):
+    """Read one parked Linux upgrade before configuration/ingest publication.
+
+    No historical effect is completed or retried. Its before-images only explain
+    why exact native paths are absent; current native disposition is observed by
+    the common inventory and lifecycle owners.
+    """
+    unfinished = [read_activation(root, name) for name in names
+                  if (root / "state/activations" / name / "activation.json").exists()
+                  and read_activation(root, name).status not in {"active", "rolled_back"}]
+    if not unfinished:
+        return None, None, {}
+    if len(unfinished) != 1:
+        raise ActivationRefusal("more than one sealed lifecycle is unfinished")
+    record = unfinished[0]
+    body, intent, aid = record.body, record.body["intent"], record.activation_id
+    if (body.get("previous_selection") != selected or body.get("status") != "activating"
+            or body.get("completed") != ["producers_paused"] or body.get("pending") != "sessions_handed_off"
+            or set(body.get("evidence", {})) != {"producers_paused"}
+            or intent.get("source_release_id") != selected["release_id"]
+            or intent.get("source_kind") == "legacy-unsealed" or intent.get("quiesce_mode") != "per-bot-v1"
+            or any(body.get(key) for key in ("start_effects", "start_phases"))
+            or any(key in body for key in ("identity_bindings", "forward", "upgrade_abort", "adoption_abort"))
+            or os.path.lexists(root / "state/activations" / aid / "migration.json")):
+        raise ActivationRefusal("unfinished sealed lifecycle is outside the pre-publication parking boundary")
+    _read(root / "state/activations" / aid / "activation.json", evidence)
+    candidate = read_plan(root, intent["plan_id"])
+    _read(candidate.directory / "plan.json", evidence)
+    release = read_release(root, intent["release_id"], verify_files=False)
+    _read(release.directory / "release.json", evidence)
+    if candidate.release_id != release.release_id or candidate.release_seal != release.seal_sha256:
+        raise ActivationRefusal("unfinished upgrade candidate identity differs")
+    config = read_config_install(root, aid)
+    raw = json.loads(_read(config.directory / "journal.json", evidence))["journal"]
+    if config.status != "prepared" or config.plan_id != candidate.plan_id:
+        raise ActivationRefusal("unfinished upgrade configuration publication has begun")
+    _journal_rows(candidate, raw, "pending")
+    for entry in raw["rows"]:
+        if path_state(Path(entry["target"])) != entry["before"]:
+            raise ActivationRefusal("unfinished upgrade generated configuration changed before publication")
+    selected_rows = {row["source"]: row for row in rows if row["platform"] == "Linux"}
+    installed = {entry["source"]: entry for entry in placements}
+    if intent.get("install_directory") not in {str(Path(entry["installed"]).parent) for entry in placements}:
+        raise ActivationRefusal("unfinished upgrade changes native install directory")
+    for phase in (*_PHASES, "directories"):
+        identifier = "enrollment-" + hashlib.sha256(_json([aid, phase])).hexdigest()
+        if os.path.lexists(root / "state/activations" / identifier):
+            raise ActivationRefusal("unfinished upgrade candidate native publication has begun")
+    journals, parked, shared = {}, {}, None
+    for phase in _PHASES:
+        identifier = "units-" + hashlib.sha256(_json([aid, phase])).hexdigest()
+        journal = read_config_install(root, identifier)
+        raw = json.loads(_read(journal.directory / "journal.json", evidence))["journal"]
+        plan = read_plan(root, journal.plan_id)
+        _read(plan.directory / "plan.json", evidence)
+        effects = plan.effects
+        common = {key: value for key, value in effects.items() if key != "phase"}
+        if (effects.get("owner") != "activation-units-v1" or effects.get("activation_id") != aid
+                or effects.get("phase") != phase or effects.get("enrollment_digest") != intent.get("enrollment_digest")
+                or shared is not None and shared != common
+                or plan.release_id != selected_plan.release_id or plan.release_seal != selected_plan.release_seal):
+            raise ActivationRefusal("unfinished upgrade parking identity differs")
+        shared = common
+        enrollment, phases = effects["enrollment"], effects["phases"]
+        frozen = enrollment["units"]
+        targets = [unit["target"] for unit in frozen]
+        if (enrollment.get("manager") != "Linux" or enrollment.get("data_root") != str(root)
+                or enrollment.get("legacy_source") or enrollment.get("bootstrap_empty")
+                or hashlib.sha256(_json(enrollment)).hexdigest() != intent["enrollment_digest"]
+                or set(phases) != set(_PHASES) or len(targets) != len(set(targets))
+                or len(frozen) != len(selected_rows)
+                or sorted(unit["target"] for unit in frozen if unit["installed"] or dict(unit["properties"]).get("LoadState") == "loaded")
+                   != sorted(target for members in phases.values() for target in members)
+                or {unit["declaration"]["source"] for unit in frozen} != set(selected_rows)):
+            raise ActivationRefusal("unfinished upgrade parking roster differs")
+        for unit in frozen:
+            declaration = unit["declaration"]
+            original = selected_rows[declaration["source"]]
+            if (any(declaration.get(key) != original.get(key) for key in ("scope", "fleet", "bot", "service", "release_id", "working_directory"))
+                    or dict(declaration["environment"]) != original["environment"]
+                    or unit["generated"]["sha256"] != original["sha256"]
+                    or unit["target"] != Path(original["source"]).name
+                    or not original["enroll"] and (unit["installed"] or dict(unit["properties"]).get("LoadState") != "not-found")):
+                raise ActivationRefusal("unfinished upgrade frozen declaration differs from selected roster")
+        membership = {unit["installed"][0]["path"]: unit for unit in frozen
+                      if unit["target"] in phases[phase] and len(unit["installed"]) == 1}
+        if (len(membership) != len(phases[phase]) or {change.target for change in plan.changes} != set(membership)
+                or any(change.after != {"kind": "absent"} for change in plan.changes)):
+            raise ActivationRefusal("unfinished upgrade parking target coverage differs")
+        status = "pending" if phase == "ingest" else "applied"
+        if journal.status != ("prepared" if phase == "ingest" else "applied"):
+            raise ActivationRefusal("unfinished upgrade parking progress is unsupported")
+        _journal_rows(plan, raw, status)
+        for entry in raw["rows"]:
+            unit = membership[entry["target"]]
+            snapshot, declaration = unit["installed"][0], unit["declaration"]
+            original = selected_rows[declaration["source"]]
+            placement = installed[declaration["source"]]
+            node = entry["before"]["node"]
+            if (node.get("kind") != "file" or snapshot["link"] is not None
+                    or snapshot["path"] != placement["installed"] or snapshot["resolved"] != snapshot["path"]
+                    or node != {"kind": "file", "mode": snapshot["mode"], "sha256": snapshot["sha256"]}
+                    or snapshot["sha256"] != original["sha256"] or unit["target"] != placement["target"]
+                    or any(declaration.get(key) != original.get(key) for key in ("scope", "fleet", "bot", "service", "release_id"))
+                    or declaration["working_directory"] != original["working_directory"]
+                    or dict(declaration["environment"]) != original["environment"]
+                    or unit["generated"]["sha256"] != original["sha256"]
+                    or unit["target"] not in phases[original["phase"]]):
+                raise ActivationRefusal("unfinished upgrade before-image differs from selected native ownership")
+            content = _read(journal.directory / "blobs" / snapshot["sha256"], evidence)
+            if (hashlib.sha256(content).hexdigest() != snapshot["sha256"]
+                    or base64.b64decode(snapshot["content"]["base64"], validate=True) != content):
+                raise ActivationRefusal("unfinished upgrade native before-image is unavailable")
+            if phase == "ingest":
+                if path_state(Path(snapshot["path"])) != entry["before"]:
+                    raise ActivationRefusal("unfinished upgrade ingest state changed")
+            else:
+                if os.path.lexists(snapshot["path"]):
+                    raise ActivationRefusal("unfinished upgrade parked native path reappeared")
+                parked[snapshot["path"]] = {"snapshot": snapshot, "properties": unit["properties"],
+                    "target": unit["target"], "phase": phase, "journal": str(journal.directory / "journal.json")}
+        journals[phase] = identifier
+    bot_targets = set(shared["phases"]["bots"])
+    if (not isinstance(body.get("handoff_effects"), dict) or set(body["handoff_effects"]) - bot_targets
+            or not isinstance(body.get("bot_quiescence"), dict) or set(body["bot_quiescence"]) - bot_targets):
+        raise ActivationRefusal("unfinished upgrade has unknown effect targets")
+    return {"activation_id": aid, "plan_id": candidate.plan_id, "journals": journals}, candidate, parked
 
 
 def _units(plan, release, contexts):
@@ -346,6 +482,10 @@ def _placements(root, selected, record, candidate, rows, evidence):
             raise ActivationRefusal("sealed native placement differs from its declared owner")
         declarations.append(UnitDeclaration(source, row["scope"], Path(row["working_directory"]),
             row["release_id"], tuple(sorted(row["environment"].items())), row["fleet"], row["bot"], row.get("service")))
+    for row in rows:
+        if row["platform"] == manager and row["source"] not in sources:
+            declarations.append(UnitDeclaration(Path(row["source"]), row["scope"], Path(row["working_directory"]),
+                row["release_id"], tuple(sorted(row["environment"].items())), row["fleet"], row["bot"], row.get("service")))
     if len(domains) != 1:
         raise ActivationRefusal("sealed native domains disagree")
     return manager, domains.pop(), directory, tuple(declarations), tuple(rows), tuple(all_entries)
@@ -384,7 +524,6 @@ def read_sealed_baseline(root, *, package, expected_selection=None, archived_sel
         _read(root / "state/activations" / record.activation_id / "activation.json", evidence)
         _complete(record.body)
         history = _activation_names(root)
-        _settled_history(root, history, evidence)
         if any(record.body["intent"].get(key) != selected[key] for key in ("release_id", "plan_id")):
             raise ActivationRefusal("sealed activation differs from selection")
         release = read_release(root, selected["release_id"], verify_files=False)
@@ -394,11 +533,6 @@ def read_sealed_baseline(root, *, package, expected_selection=None, archived_sel
         if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
             raise ActivationRefusal("sealed configuration differs from selected release")
         contexts = {fleet: context_from_plan(plan, fleet, package=package) for fleet in plan.fleets}
-        for sources in plan.effects["fleet_sources"].values():
-            for descriptor in sources.values():
-                path, _ = plan.frozen_input(descriptor)
-                if path_state(path, source=True) != plan.inputs[str(path)]["state"]:
-                    raise ActivationRefusal("authored fleet or projects differs from frozen sealed configuration")
         old_ids = record.body["identity_bindings"]
         if (set(old_ids) != {"schema", "root", "plan_id", "release_id", "release_seal", "host_uid", "fleets"}
                 or old_ids["root"] != str(root) or old_ids["plan_id"] != plan.plan_id
@@ -410,12 +544,35 @@ def read_sealed_baseline(root, *, package, expected_selection=None, archived_sel
             raise ActivationRefusal("sealed identities differ from existing canonical registry")
         rows = _units(plan, release, contexts)
         manager, domain, directory, declarations, units, placements = _placements(root, selected, record, plan, rows, evidence)
+        interruption, authored_plan, parked = _interrupted_upgrade(root, history, selected, plan, rows, placements, evidence)
+        if interruption is not None and manager != "Linux":
+            raise ActivationRefusal("interrupted parked conversion currently requires Linux")
+        _settled_history(root, history, evidence, interruption)
+        authored = authored_plan or plan
+        if authored.fleets != plan.fleets:
+            raise ActivationRefusal("unfinished upgrade changes the selected fleet roster")
+        from .composer import account_dir
+        for fleet in plan.fleets:
+            old = contexts[fleet]
+            new = context_from_plan(authored, fleet, package=package)
+            if (old.paths.fleet_yaml != new.paths.fleet_yaml
+                    or old.fleet.service_prefix != new.fleet.service_prefix
+                    or set(old.fleet.bots) != set(new.fleet.bots)
+                    or any((old.fleet.bots[name].agent_cli, account_dir(old.fleet.bots[name], old.fleet))
+                           != (new.fleet.bots[name].agent_cli, account_dir(new.fleet.bots[name], new.fleet))
+                           for name in old.fleet.bots)):
+                raise ActivationRefusal("unfinished upgrade changes native session identity/account bindings")
+        for sources in authored.effects["fleet_sources"].values():
+            for descriptor in sources.values():
+                path, _ = authored.frozen_input(descriptor)
+                if path_state(path, source=True) != authored.inputs[str(path)]["state"]:
+                    raise ActivationRefusal("authored fleet or projects differs from frozen sealed configuration")
         if _activation_names(root) != history or _read(selector, {}) != original or any(hashlib.sha256(_read(Path(path), {})).hexdigest() != digest
                                                 for path, digest in evidence.items()):
             raise ActivationRefusal("sealed baseline changed during read")
         return SealedBaseline(root, selected, original, hashlib.sha256(original).hexdigest(), selector,
             record, release, plan, contexts, identities, declarations, units, placements,
-            manager, domain, directory, evidence)
+            manager, domain, directory, evidence, interruption, authored_plan, parked)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
         if isinstance(exc, ActivationRefusal):
             raise

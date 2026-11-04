@@ -1030,3 +1030,19 @@ def test_gui_inventory_verifies_exact_user_domain_updater_without_quieting_it(tm
     with pytest.raises(InventoryError, match="svc_inventory_state failed"):
         observe_update_job(obs.package.installation, Adapter(obs.package, runner=runner),
                            obs.installed, native_target=job.target)
+
+
+@pytest.mark.parametrize("load,active,file_state,fragment", [
+    ("not-found", "active", "", ""),
+    ("masked", "inactive", "masked", "/dev/null"),
+])
+def test_foreign_pi_missing_execstart_is_only_parser_shape(load, active, file_state, fragment):
+    """Read-only Pi capture: parked foreign active units omit an empty ExecStart."""
+    observed = {"Id": "com.example.foreign.service", "LoadState": load, "ActiveState": active,
+                "UnitFileState": file_state, "FragmentPath": fragment, "DropInPaths": "",
+                "NeedDaemonReload": "no", "WorkingDirectory": "", "Environment": "",
+                "Triggers": "", "TriggeredBy": ""}
+    text = "\n".join(key + "=" + value for key, value in observed.items())
+    assert inventory._properties(text, foreign=True) == {**observed, "ExecStart": ""}
+    with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
+        inventory._properties(text)
