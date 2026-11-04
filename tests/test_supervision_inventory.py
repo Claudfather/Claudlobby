@@ -1046,3 +1046,28 @@ def test_foreign_pi_missing_execstart_is_only_parser_shape(load, active, file_st
     assert inventory._properties(text, foreign=True) == {**observed, "ExecStart": ""}
     with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
         inventory._properties(text)
+
+
+@pytest.mark.parametrize("directory", ["foreign", "owned", "relative"])
+def test_native_ignore_missing_working_directory_never_uses_callers_cwd(tmp_path, monkeypatch, directory):
+    """Pi gpg capture: native WorkingDirectory='!/home/example', unit owner rc2."""
+    obs = Observations(tmp_path)
+    obs.add("owned.service")  # Keep declared root/native anchors nonempty.
+    foreign = obs.add("gpg-agent.service", declared=False)
+    foreign.write_text("[Service]\nExecStart=/usr/bin/gpg-agent\n")
+    assert obs.owner.main(str(foreign), str(obs.root)) == 2
+    native = "!/home/example" if directory == "foreign" else "!" + str(obs.root) if directory == "owned" else "relative/path"
+    obs.properties[foreign.name].update(WorkingDirectory=native, Environment="",
+                                        ExecStart="{ path=/usr/bin/gpg-agent ; argv[]=/usr/bin/gpg-agent ; }")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(obs.root))
+    for cwd in (outside, obs.root):
+        monkeypatch.chdir(cwd)
+        if directory == "foreign":
+            inventory_result = obs.collect().require_complete()
+            assert inventory_result.foreign == (str(foreign),)
+            assert len(inventory_result.units) == 1
+        else:
+            with pytest.raises(InventoryError, match="owned consumer|working directory"):
+                obs.collect().require_complete()

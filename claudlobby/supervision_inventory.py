@@ -467,6 +467,22 @@ def _environment(text):
     return result
 
 
+def _native_working_directory(value: str, *, systemd=False) -> Path | None:
+    """Read native cwd metadata without resolving a relative name in this process.
+
+    systemctl serializes its ignore-missing flag as `!` before an absolute
+    directory. Keep raw properties intact; normalize only the path comparison.
+    """
+    if not value:
+        return None
+    if systemd and value.startswith("!/"):
+        value = value[1:]
+    path = Path(value)
+    if not path.is_absolute():
+        raise InventoryError("native working directory is relative or unsupported")
+    return path.resolve()
+
+
 def runtime_mask(path: str | Path, name: str) -> bool:
     """This user's exact `mask --runtime` link for NAME, to /dev/null.
 
@@ -965,9 +981,9 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
 
     def related_properties(props):
         env = _environment(props.get("Environment", ""))
-        cwd = props.get("WorkingDirectory", "")
+        cwd = _native_working_directory(props.get("WorkingDirectory", ""), systemd=manager == "Linux")
         return (env.get("CLAUDLOBBY_ROOT") == str(data_root)
-                or bool(cwd and (Path(cwd).resolve() in owners or Path(cwd).resolve().is_relative_to(data_root))))
+                or cwd is not None and (cwd in owners or cwd.is_relative_to(data_root)))
 
     for name in sorted(names - set(expected)):
         if name == independent_name:
@@ -1124,7 +1140,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     # its exited launcher/private session remains alive. Only
                     # the proved old journal permits that absence; present
                     # binding fields must still match, never ambient defaults.
-                    if (props.get("WorkingDirectory") and Path(props["WorkingDirectory"]).resolve() != declaration.working_directory.resolve()
+                    if (props.get("WorkingDirectory") and _native_working_directory(props["WorkingDirectory"], systemd=True) != declaration.working_directory.resolve()
                             or props.get("Environment") and any(_environment(props["Environment"]).get(k) != v
                                                               for k, v in declaration.environment)):
                         raise InventoryError("parked native data/fleet/release identity differs")
@@ -1137,7 +1153,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     if declaration.service:
                         if props["Triggers"].split() != [declaration.service] or not installed.get(declaration.service):
                             raise InventoryError("timer activates a different service")
-                    elif (Path(props["WorkingDirectory"]).resolve() != declaration.working_directory.resolve()
+                    elif (_native_working_directory(props["WorkingDirectory"], systemd=True) != declaration.working_directory.resolve()
                           or any(_environment(props["Environment"]).get(key) != value for key, value in declaration.environment)
                           or "FLEET_ROOT" in _environment(props["Environment"]).keys() - dict(declaration.environment).keys()):
                         raise InventoryError("loaded data/fleet/release identity differs")

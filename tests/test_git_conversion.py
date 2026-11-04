@@ -401,7 +401,7 @@ def test_prepared_parking_without_exact_terminal_abort_proof_is_refused(baseline
     assert _files(baseline.root) == before
 
 
-def _pending_history(case):
+def _pending_history(case, *, pause_observation="enabled loaded active"):
     """Sanitized Pi capture shape: paused producers, parked bots, untouched ingest.
 
     The 2026-11-04 read-only rollout receipt retained a null per-bot stop result;
@@ -427,7 +427,7 @@ def _pending_history(case):
               for phase in ("producers", "bots", "ingest")}
     shared = {"owner": "activation-units-v1", "activation_id": aid, "enrollment_digest": digest,
               "enrollment": enrollment, "phases": phases, "original_release_id": case.release.release_id,
-              "native_observations": {}}
+              "native_observations": {target: pause_observation for target in phases["producers"]}}
     journals = {}
     for phase in ("producers", "bots", "ingest"):
         builder = ConfigPlanBuilder(case.root, ("example",), effects={**shared, "phase": phase})
@@ -456,7 +456,9 @@ def _pending_history(case):
               "install_directory": str(original.install_directory), "quiesce_mode": "per-bot-v1", "preserve_bot_state": True}
     activation, body = write_activation(case.root, aid, status="activating", completed=["producers_paused"],
         pending="sessions_handed_off", intent=intent, previous_selection=case.selected,
-        evidence={"producers_paused": "e" * 64}, quiesce_mode="per-bot-v1",
+        evidence={"producers_paused": _digest({"phase": "producers", "journal_id": "units-" + _digest([aid, "producers"]),
+            "plan_id": json.loads(journals["producers"].read_bytes())["journal"]["plan_id"],
+            "targets": phases["producers"], "operation": "paused"})}, quiesce_mode="per-bot-v1",
         handoff_effects={"com.example.manager.service": "handed_off", "com.example.worker.service": "handed_off"},
         bot_quiescence={"com.example.manager.service": {"result": {"quiet": True}},
                         "com.example.worker.service": {"result": None}}, start_effects={})
@@ -478,6 +480,8 @@ def test_pending_prepublication_baseline_binds_owned_images_and_preserves_unknow
             assert path.read_bytes() == baseline.plan.blob(entry["after"]["sha256"])
             continue
         parked = result.parked[str(path)]
+        if entry["phase"] == "producers":
+            assert parked["paused_native"] == "enabled loaded active"
         assert not path.exists() and parked["snapshot"]["sha256"] == entry["after"]["sha256"]
         blob = Path(parked["journal"]).parent / "blobs" / entry["after"]["sha256"]
         assert result.evidence[str(blob)] == hashlib.sha256(blob.read_bytes()).hexdigest()
@@ -486,10 +490,15 @@ def test_pending_prepublication_baseline_binds_owned_images_and_preserves_unknow
 
 
 @pytest.mark.parametrize("baseline", ["pending"], indirect=True)
-@pytest.mark.parametrize("defect", ["publication", "extra_owner", "authored", "blob", "reappeared"])
+@pytest.mark.parametrize("defect", ["publication", "extra_owner", "authored", "blob", "reappeared", "pause_receipt", "pause_observation"])
 def test_pending_prepublication_conversion_refuses_other_effects_without_repair(baseline, defect):
-    history = _pending_history(baseline)
-    if defect == "publication":
+    history = _pending_history(baseline, pause_observation="unknown" if defect == "pause_observation" else "enabled loaded active")
+    if defect == "pause_observation":
+        pass
+    elif defect == "pause_receipt":
+        history.body["evidence"]["producers_paused"] = "0" * 64
+        history.activation.write_text(json.dumps({"record": history.body, "sha256": activation_state._digest(history.body)}))
+    elif defect == "publication":
         history.body["completed"].append("selection_switched")
         history.activation.write_text(json.dumps({"record": history.body, "sha256": activation_state._digest(history.body)}))
     elif defect == "extra_owner":

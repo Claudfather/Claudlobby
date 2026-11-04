@@ -339,6 +339,30 @@ def _interrupted_upgrade(root, names, selected, selected_plan, rows, placements,
         if (len(membership) != len(phases[phase]) or {change.target for change in plan.changes} != set(membership)
                 or any(change.after != {"kind": "absent"} for change in plan.changes)):
             raise ActivationRefusal("unfinished upgrade parking target coverage differs")
+        if phase == "producers":
+            receipt = dict(phase=phase, journal_id=identifier, plan_id=plan.plan_id,
+                targets=[unit["target"] for unit in frozen if unit["target"] in phases[phase]], operation="paused")
+            if body["evidence"]["producers_paused"] != hashlib.sha256(_json(receipt)).hexdigest():
+                raise ActivationRefusal("unfinished upgrade lacks its exact completed producer pause receipt")
+            scheduled = {unit["declaration"]["service"] for unit in frozen
+                         if unit["target"] in phases[phase] and unit["target"].endswith(".timer")}
+            observations = effects.get("native_observations")
+            if not isinstance(observations, dict):
+                raise ActivationRefusal("unfinished upgrade lacks original producer native observations")
+            for unit in membership.values():
+                target = unit["target"]
+                if "@." in target:
+                    continue
+                properties = dict(unit["properties"])
+                previous = [properties[key] for key in ("UnitFileState", "LoadState", "ActiveState")]
+                observed = observations.get(target, "").split()
+                matching = observed == previous
+                if target in scheduled:
+                    states = {"active", "activating", "inactive", "failed"}
+                    matching = (len(observed) == 3 and observed[:2] == previous[:2]
+                                and observed[2] in states and previous[2] in states)
+                if not matching:
+                    raise ActivationRefusal("unfinished upgrade producer native observation differs from original intent")
         status = "pending" if phase == "ingest" else "applied"
         if journal.status != ("prepared" if phase == "ingest" else "applied"):
             raise ActivationRefusal("unfinished upgrade parking progress is unsupported")
@@ -371,6 +395,8 @@ def _interrupted_upgrade(root, names, selected, selected_plan, rows, placements,
                     raise ActivationRefusal("unfinished upgrade parked native path reappeared")
                 parked[snapshot["path"]] = {"snapshot": snapshot, "properties": unit["properties"],
                     "target": unit["target"], "phase": phase, "journal": str(journal.directory / "journal.json")}
+                if phase == "producers" and "@." not in unit["target"]:
+                    parked[snapshot["path"]]["paused_native"] = observations[unit["target"]]
         journals[phase] = identifier
     bot_targets = set(shared["phases"]["bots"])
     if (not isinstance(body.get("handoff_effects"), dict) or set(body["handoff_effects"]) - bot_targets

@@ -996,7 +996,7 @@ def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it
     declaration = {**row["declaration"], "source": str(generated), "scope": "bot", "service": None}
     observed = {"target": row["target"], "installed": [], "generated": row["generated"], "declaration": declaration,
                 "properties": [["UnitFileState", "masked-runtime"], ["LoadState", "masked"], ["ActiveState", active]]}
-    parked = {str(installed): {"target": row["target"], "snapshot": row["installed"][0],
+    parked = {str(installed): {"target": row["target"], "snapshot": row["installed"][0], "phase": "bots",
                               "properties": [["UnitFileState", "enabled"], ["LoadState", "loaded"], ["ActiveState", "active"]]}}
     baseline = SimpleNamespace(root=tmp_path, manager="Linux", domain="", install_directory=tmp_path,
         declarations=(SimpleNamespace(source=generated),), release=object(), parked=parked,
@@ -1029,3 +1029,79 @@ def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it
     assert {name for name, _ in adapter.calls} == {"svc_inventory_state", "svc_activation_quiet"}
     assert not installed.exists() and mask.is_symlink() and os.readlink(mask) == "/dev/null"
     assert generated.read_bytes() == content
+
+
+@pytest.mark.parametrize("kind,previous,desired", [
+    ("resident", "enabled loaded active", "enabled loaded active"),
+    ("stopped", "disabled loaded inactive", "disabled loaded inactive"),
+    ("timer", "enabled loaded active", "enabled loaded active"),
+    ("oneshot", "enabled loaded active", "enabled loaded inactive"),
+    ("preexisting_mask", "masked-runtime masked inactive", "masked-runtime masked inactive"),
+])
+def test_completed_old_producer_pause_restores_original_intent(tmp_path, monkeypatch, kind, previous, desired):
+    """The completed producer pause created this mask; it did not change intent."""
+    row = intent(tmp_path)
+    if kind == "timer":
+        original = Path(row["installed"][0]["path"])
+        original.rename(original.with_suffix(".timer"))
+        row["target"] = original.with_suffix(".timer").name
+        row["installed"][0].update(path=str(original.with_suffix(".timer")), resolved=str(original.with_suffix(".timer")))
+    installed = Path(row["installed"][0]["path"])
+    generated = tmp_path / "generated" / row["target"]
+    generated.parent.mkdir()
+    generated.write_bytes(services._content(row["generated"]))
+    row["generated"].update(path=str(generated), resolved=str(generated))
+    installed.unlink()
+    mask = tmp_path / "runtime" / row["target"]
+    mask.parent.mkdir(); mask.symlink_to("/dev/null")
+    mask_snapshot = {"path": str(mask), "resolved": "/dev/null", "link": "/dev/null", "mode": mask.lstat().st_mode & 0o777,
+                     "sha256": hashlib.sha256(b"").hexdigest(), "content": {"base64": ""}}
+    journal = tmp_path / "old-parking" / "journal.json"
+    blobs = journal.parent / "blobs"; blobs.mkdir(parents=True)
+    (blobs / row["installed"][0]["sha256"]).write_bytes(services._content(row["installed"][0]))
+    journal.write_text("retained old journal placeholder\n")
+    declaration = {**row["declaration"], "source": str(generated), "service": None}
+    properties = [[key, value] for key, value in zip(("UnitFileState", "LoadState", "ActiveState"), previous.split())]
+    parked = {str(installed): {"target": row["target"], "snapshot": row["installed"][0], "phase": "producers",
+                              "paused_native": previous, "properties": properties, "journal": str(journal)}}
+    observed = {"target": row["target"], "installed": [], "generated": row["generated"], "declaration": declaration,
+                "properties": [["UnitFileState", "masked-runtime"], ["LoadState", "masked"], ["ActiveState", "inactive"]]}
+    rows = [observed]
+    if kind == "oneshot":
+        timer = generated.with_suffix(".timer")
+        timer.write_text("[Timer]\n")
+        rows.append({"target": timer.name, "installed": [], "generated": {},
+                     "declaration": {**declaration, "source": str(timer), "service": row["target"]},
+                     "properties": [["UnitFileState", "not-found"], ["LoadState", "not-found"], ["ActiveState", "inactive"]]})
+    baseline = SimpleNamespace(root=tmp_path, manager="Linux", domain="", install_directory=tmp_path,
+        declarations=tuple(SimpleNamespace(source=Path(item["declaration"]["source"])) for item in rows),
+        release=object(), parked=parked, placements=())
+    inventory = SimpleNamespace(payload=lambda: {"units": deepcopy(rows), "observed_files": [deepcopy(mask_snapshot)]})
+    monkeypatch.setattr(services, "collect_enrollment", lambda *a, **k: SimpleNamespace(require_complete=lambda: inventory))
+    monkeypatch.setattr(services.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(services, "_catalog", lambda _: ("Linux", "", [], [], []))
+    class Paused(Native):
+        def call(self, function, *args, timeout=30):
+            if function == "svc_activation_quiet":
+                self.calls.append((function, args))
+                return SimpleNamespace(returncode=0, stdout="inactive\tno-cgroup-witness", stderr="")
+            return super().call(function, *args, timeout=timeout)
+    adapter = Paused(); adapter.read = lambda *_: "catalog"; adapter.state = "masked-runtime masked inactive"
+    frozen = next(item for item in services.freeze_service_intent(None, adapter, tmp_path, baseline=baseline)
+                  if item["target"] == row["target"])
+    if kind == "preexisting_mask":
+        assert frozen["preserved_mask"]["snapshot"] == mask_snapshot and frozen["installed"] == []
+        assert frozen["restore_native"] == desired and not installed.exists()
+        return
+    assert "preserved_mask" not in frozen and frozen["legacy_parked"] == parked[str(installed)]
+    assert frozen["saved_native"] == "masked-runtime masked inactive" and frozen["restore_native"] == desired
+    declarations(monkeypatch, frozen)
+    store = Store(tmp_path, frozen)
+    services.quiesce_consumer(store, frozen["target"], adapter)
+    assert not installed.exists() and mask.is_symlink()
+    assert not any(name == "svc_activation_pause" for name, _ in adapter.calls)
+    services.restore_consumer(store, frozen["target"], adapter, {})
+    assert installed.read_bytes() == generated.read_bytes()
+    assert adapter.state == desired
+    resumes = [args for name, args in adapter.calls if name == "svc_activation_resume"]
+    assert len(resumes) == 1 and resumes[0][2] == desired

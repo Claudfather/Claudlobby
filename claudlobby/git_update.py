@@ -795,13 +795,19 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
                                 cwd=store.root, env=clean, pass_fds=tuple(inherited),
                                 capture_output=True, text=True, timeout=900)
     except (OSError, subprocess.SubprocessError) as exc:
+        if store.load() is None:
+            raise UpdateError(f"application stage {stage} interrupted before an update operation was recorded") from exc
         raise UpdateError(f"application stage {stage} interrupted; continue the same operation") from exc
     if result.returncode:
         record = store.load()
         if record is not None:
             record["stage_error"] = {"stage": stage, "detail": result.stderr[-2000:]}
             store.save(record)
-        raise UpdateError(f"application stage {stage} refused; continue the retained operation")
+            raise UpdateError(f"application stage {stage} refused; continue the retained operation")
+        lines = result.stderr.strip().splitlines()
+        detail = " ".join(lines[-1].split()) if lines else "no application error detail"
+        detail = "".join(character for character in detail if character.isprintable())[:500]
+        raise UpdateError(f"application stage {stage} refused (exit {result.returncode}): {detail}; no update operation was recorded")
     if stage == "authorize":
         try:
             authorized = json.loads(result.stdout)

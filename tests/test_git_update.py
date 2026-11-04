@@ -1697,3 +1697,27 @@ def test_independent_quiet_rechecks_preserved_mask_before_cutover(update, defect
         finally:
             if server is not None:
                 server.close()
+
+
+@pytest.mark.parametrize("failure", ["refusal", "interrupted"])
+def test_application_authorization_failure_without_record_reports_actual_boundary(update, monkeypatch, failure):
+    from claudlobby import git_update as updater
+    installation, before, _, _ = update
+    with UpdateStore(installation) as store:
+        assert store.load() is None
+        def refused(*_args, **_kwargs):
+            if failure == "interrupted":
+                raise subprocess.TimeoutExpired("authorize", 900)
+            return subprocess.CompletedProcess([], 6, "", "earlier traceback\n  inventory refused unknown native state\x00  \n")
+        monkeypatch.setattr(updater.subprocess, "run", refused)
+        with pytest.raises(UpdateError) as raised:
+            updater._application_stage(store, "authorize", python=Path(sys.executable).resolve())
+        message = str(raised.value)
+        assert "no update operation was recorded" in message or "before an update operation was recorded" in message
+        assert "continue" not in message and "retained operation" not in message
+        if failure == "refusal":
+            assert "exit 6" in message and "inventory refused unknown native state" in message
+            assert "traceback" not in message and "\x00" not in message
+        assert store.load() is None
+    monkeypatch.undo()
+    assert installation.preflight() == before

@@ -122,7 +122,17 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
                        if value["target"] == row["target"]), None)
         masked = (manager == "Linux" and props.get("UnitFileState") == "masked-runtime"
                   and props.get("LoadState") == "masked" and props.get("ActiveState") in {"inactive", "failed"})
-        if masked:
+        previous = dict(parked["properties"]) if parked is not None else {}
+        # A completed old producer pause owns this transient mask. Restore its
+        # original enrollment/activity; quiet bots retain their observed pause.
+        resume_producer = (masked and parked is not None and parked["phase"] == "producers"
+            and row["declaration"]["scope"] != "bot" and bool(parked.get("paused_native"))
+            and previous.get("UnitFileState") in {"enabled", "enabled-runtime", "disabled", "static"}
+            and previous.get("LoadState") == "loaded")
+        if resume_producer and (previous.get("ActiveState") not in
+                ({"active", "activating", "inactive", "failed"} if row["target"] in scheduled else {"active", "inactive"})):
+            raise UpdateError("original producer activity has no supported restoration intent")
+        if masked and not resume_producer:
             masks = [node for node in inventory.payload()["observed_files"]
                      if Path(node["path"]).name == row["target"] and node["link"] == "/dev/null"]
             if len(masks) != 1 or row["installed"]:
@@ -143,9 +153,11 @@ def freeze_service_intent(current_snapshot, adapter, install_directory, *, candi
         row["saved_native"] = None if is_unit_template(row["target"]) else " ".join(("not-found" if key == "UnitFileState" and props["LoadState"] == "not-found"
                                         else props[key]) for key in ("UnitFileState", "LoadState", "ActiveState"))
         row["restore_native"] = row["saved_native"]
-        if parked is not None and not masked and not is_unit_template(row["target"]):
-            previous = dict(parked["properties"])
-            row["restore_native"] = " ".join(previous[key] for key in ("UnitFileState", "LoadState")) + " " + props["ActiveState"]
+        if parked is not None and not is_unit_template(row["target"]):
+            if resume_producer:
+                row["restore_native"] = " ".join(previous[key] for key in ("UnitFileState", "LoadState", "ActiveState"))
+            elif not masked:
+                row["restore_native"] = " ".join(previous[key] for key in ("UnitFileState", "LoadState")) + " " + props["ActiveState"]
         if row["scheduled"] and manager == "Linux":
             row["restore_native"] = " ".join(row["restore_native"].split()[:2] + ["inactive"])
         row["defer_native_load"] = (manager == "Darwin" and not row["scheduled"]
@@ -416,6 +428,15 @@ def quiesce_consumer(store, key, adapter):
         else:
             _park(store, record, progress, row)
     if is_unit_template(key):
+        progress["stop"] = "done"
+        store.save(record)
+        return progress
+    if (row.get("legacy_parked", {}).get("paused_native")
+            and row["saved_native"].split()[:2] == ["masked-runtime", "masked"]):
+        # The old completed producer pause is not repeated. Its before-image is
+        # now in this operation's parking slot; freshly prove current quiet.
+        observe_quiet(store, key, adapter)
+        record, progress, row = _row(store, key)
         progress["stop"] = "done"
         store.save(record)
         return progress
