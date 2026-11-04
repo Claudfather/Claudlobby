@@ -69,6 +69,13 @@ def test_changed_payload_or_manifest_is_not_a_reviewed_plan(proposal):
     with pytest.raises(PlanError, match="changed staged content"):
         read_plan(builder.root, plan.plan_id)
     blob.write_bytes(original)
+    files = plan.directory / "files"
+    retained = files.rename(plan.directory / "redirected-files")
+    files.symlink_to(retained, target_is_directory=True)
+    with pytest.raises(PlanError, match="missing staged content"):
+        read_plan(builder.root, plan.plan_id)
+    files.unlink()
+    retained.rename(files)
     manifest = plan.directory / "plan.json"
     payload = json.loads(manifest.read_text())
     payload["fleets"].append("another-fleet")

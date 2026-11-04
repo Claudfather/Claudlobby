@@ -705,45 +705,29 @@ def _record_handoff_response(store, activation_id, target, result):
     return marker
 
 
-def _capture_request_boundary(record, target, requested):
-    # Only a durable, successful no-send result permits a pre-request capture.
-    # Its age/ownership still pass the ordinary verifier. No native retry follows.
-    response = record.body.get("handoff_requests", {}).get(target, {}).get("native_result")
-    return None if response == {"marker": "handoff-skipped:recent", "returncode": 0} else requested
-
-
 _HANDOFF_CAPTURE_WAIT_S = 900
 _HANDOFF_CAPTURE_POLL_S = 2
 
 
 def _require_requested_handoff(record, target, bot_dir, *, activation_id, requested, max_age_s=None):
-    """Observe a known timed-out save; the durable request never authorizes a resend."""
+    """Delegate planned save verification to the ordinary lifecycle owner."""
+    from .bot_operations import _HANDOFF_FRESH_S, BotLifecycleError, wait_for_handoff
     response = record.body.get("handoff_requests", {}).get(target, {}).get("native_result")
-    boundary = _capture_request_boundary(record, target, requested)
-    if response != {"marker": "handoff-timeout", "returncode": 3}:
-        _require_preserved_handoff(bot_dir, not_before=boundary, max_age_s=max_age_s)
-        return
-    started = time.monotonic()
-    deadline, next_progress = started + _HANDOFF_CAPTURE_WAIT_S, started
-    while True:
-        try:
-            _require_preserved_handoff(bot_dir, not_before=boundary, max_age_s=max_age_s)
-        except ActivationRefusal as exc:
-            now = time.monotonic()
-            if now >= deadline:
-                raise ActivationRefusal(
-                    f"activation is still waiting for checkpoint from {target}: no fresh verified session handoff "
-                    f"arrived within {_HANDOFF_CAPTURE_WAIT_S} s; inspect its live session and capture, then "
-                    f"resume this same activation with --resume {activation_id}; "
-                    "the existing handoff request is retained and is never resent") from exc
-            if now >= next_progress:
-                print(f"activation: waiting for checkpoint from {target} ({now - started:.0f} s elapsed); "
-                      "observing the existing request", file=sys.stderr, flush=True)
-                next_progress = now + 30
-            time.sleep(min(_HANDOFF_CAPTURE_POLL_S, deadline - now))
-        else:
-            print(f"activation: checkpoint verified for {target}; continuing", file=sys.stderr, flush=True)
-            return
+    max_age = _HANDOFF_FRESH_S if max_age_s is None else max_age_s
+    try:
+        wait_for_handoff(bot_dir, requested=requested, native_result=response, target=target,
+                         max_age_s=max_age, wait_s=_HANDOFF_CAPTURE_WAIT_S,
+                         poll_s=_HANDOFF_CAPTURE_POLL_S, _clock=time)
+    except BotLifecycleError as exc:
+        if exc.handoff_reason == "timeout":
+            raise ActivationRefusal(f"activation {exc}; inspect its live session and capture, then "
+                                    f"resume this same activation with --resume {activation_id}") from exc
+        raise ActivationRefusal(
+            f"activation requires a fresh verified session handoff, under {max_age} s old "
+            "(set by host activate --handoff-max-age when an activation starts, for bots that "
+            "saved and stayed idle); "
+            "inspect the live session and saved handoff, then retry the same activation with --resume; "
+            "existing handoff attempts are never resent") from exc
 
 
 # The widest window --handoff-max-age may set: 4 h under start-bot's default resume limit

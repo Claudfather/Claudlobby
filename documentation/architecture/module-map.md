@@ -9,6 +9,7 @@ The [website boundary](website-boundary.md) maps the shared operational UI and h
 
 ```
 claudlobby/
+  installation.py    — Explicit Git installation/data-root binding and read-only source preflight; its stdlib launcher lives outside the changing source/environment and checks maintenance before importing the application. Foundation for the common Git updater; existing fleet deployments still use the sealed path until coordinated cutover.
   task_permissions.py — Canonical task-scoped permission requests, explicit human decisions and exact bot/scope checks over existing Plane facts; `commands/task_permissions.py` owns CLI admission and local terminal confirmation. No effect execution. Reference: `documentation/architecture/task-permissions.md`.
   host_backup.py      — Owner-managed private database/configuration export and inactive replacement restore; reuses SQLite backup and bootstrap/migration, preserves historical identities and excludes credential/owner authority. `commands/host_backup.py` exposes `host backup create|inspect|restore`; instructions and exclusions: `documentation/backup-and-restore.md`.
   application_result.py — Data/release outcome shared by application workflows; CLI text belongs to command facades.

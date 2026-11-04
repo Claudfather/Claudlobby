@@ -115,7 +115,8 @@ class ConfigPlan:
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise PlanError("invalid staged content digest")
         content_path = self.directory / "files" / digest
-        if not content_path.is_file() or content_path.is_symlink():
+        if (not content_path.is_file() or content_path.is_symlink()
+                or content_path.parent.is_symlink() or content_path.resolve() != content_path):
             raise PlanError(f"missing staged content: {digest}")
         data = content_path.read_bytes()
         if _digest(data) != digest:

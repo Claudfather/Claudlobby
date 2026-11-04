@@ -99,7 +99,7 @@ def build_supervision_spec(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     log_dir = paths.assert_writable(bot_dir / "logs")
     environment = native_environment(paths)
     argv = wrap_unit_argv(environment, unit=label, phase="bots", mode="exec",
-                          argv=(str(paths.lib / "start-bot.sh"), str(bot_dir)))
+                          argv=(str(paths.package.runtime_native / "start-bot.sh"), str(bot_dir)))
     return SupervisionSpec(
         label=label,
         description=f"claudlobby bot: {bot.name} ({fleet.name})",

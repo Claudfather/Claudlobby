@@ -96,7 +96,9 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
         else:
             builder.file(directory / name, artifact.content.encode(), mode=artifact.mode)
     builder.tree(directory / "tools", tools)
-    builder.symlink(directory / ".cli/bin/claudlobby", selected_cli())
+    installation = paths.package.installation
+    builder.symlink(directory / ".cli/bin/claudlobby",
+                    selected_cli(installation=installation) if installation is not None else selected_cli())
 
     skills = compose.resolve_effective_skills(
         bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots())

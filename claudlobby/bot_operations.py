@@ -273,32 +273,68 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False,
 
 
 _HANDOFF_REQUEST = ".handoff-request"
+_HANDOFF_CAPTURE_WAIT_S = 900
+_HANDOFF_CAPTURE_POLL_S = 2
 
 
-def _record_handoff_request(bot_dir: Path, requested_at: float) -> bool:
-    """Record when the door asked for a handoff, in the bot's data/ (#990).
+def wait_for_handoff(bot_dir: Path, *, requested: int, native_result: dict | None,
+                     target: str, max_age_s: int = _HANDOFF_FRESH_S,
+                     wait_s: int = _HANDOFF_CAPTURE_WAIT_S,
+                     poll_s: int = _HANDOFF_CAPTURE_POLL_S, _clock=None) -> float:
+    """Verify one recorded save, observing a native timeout without another send.
 
-    The door waits 30 s and a handoff is a model turn of minutes (#963), so
-    `bot handoff BOT --check` reads the handoff file against this record
-    later. When the write fails, the previous record is removed, so it never
-    answers for this request.
+    The caller persists intent before sending and owns stop/start. Only a
+    successful native recent-skip permits a capture older than the request.
+    A missing/unknown native result can be reconciled by a genuine late save,
+    but never authorizes another native request or an inferred successful save.
     """
+    boundary = None if native_result == {
+        "marker": "handoff-skipped:recent", "returncode": 0} else requested
+    if native_result != {"marker": "handoff-timeout", "returncode": 3}:
+        return _fresh_self_handoff(bot_dir, not_before=boundary, max_age_s=max_age_s)
+    clock = time if _clock is None else _clock
+    started = clock.monotonic()
+    deadline, next_progress = started + wait_s, started
+    while True:
+        try:
+            age = _fresh_self_handoff(bot_dir, not_before=boundary, max_age_s=max_age_s)
+        except BotLifecycleError as exc:
+            now = clock.monotonic()
+            if now >= deadline:
+                raise BotLifecycleError(
+                    f"still waiting for checkpoint from {target}: no fresh verified session handoff "
+                    f"arrived within {wait_s} s; the existing handoff request is retained and is never resent",
+                    unavailable=True, handoff_reason="timeout") from exc
+            if now >= next_progress:
+                print(f"waiting for checkpoint from {target} ({now - started:.0f} s elapsed); "
+                      "observing the existing request", file=sys.stderr, flush=True)
+                next_progress = now + 30
+            clock.sleep(min(poll_s, deadline - now))
+        else:
+            print(f"checkpoint verified for {target}; continuing", file=sys.stderr, flush=True)
+            return age
+
+
+def _write_handoff_request(bot_dir: Path, value: dict) -> bool:
+    """Atomically retain request intent/result in the existing owned metadata file."""
     data = bot_dir / "data"
     try:
         data.mkdir(mode=0o700, exist_ok=True)
         info = data.lstat()
-    except OSError:
-        return False
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        return False
-    record = data / _HANDOFF_REQUEST
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(requested_at)))
-    try:
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return False
         fd, tmp = tempfile.mkstemp(dir=data, prefix=_HANDOFF_REQUEST + ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(json.dumps({"requested_at": stamp}) + "\n")
-            os.replace(tmp, record)
+                stream.write(json.dumps(value) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, data / _HANDOFF_REQUEST)
+            directory_fd = os.open(data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -306,12 +342,90 @@ def _record_handoff_request(bot_dir: Path, requested_at: float) -> bool:
                 pass
             raise
     except OSError:
-        try:
-            record.unlink()
-        except OSError:
-            pass
         return False
     return True
+
+
+def _read_handoff_request(bot_dir: Path) -> dict | None:
+    """Read the shared save intent without following a redirected metadata file."""
+    path = bot_dir / "data" / _HANDOFF_REQUEST
+    try:
+        data = path.parent.lstat()
+        if not stat.S_ISDIR(data.st_mode) or data.st_uid != os.getuid():
+            raise OSError("not an owned request directory")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise OSError("not an owned request file")
+            record = json.load(stream)
+        if not isinstance(record, dict):
+            raise ValueError("invalid handoff request")
+    except FileNotFoundError:
+        record = None
+    except (OSError, ValueError) as exc:
+        raise BotLifecycleError("existing handoff request cannot be verified; inspect before another save",
+                                unavailable=True) from exc
+    return record
+
+
+def _new_handoff_request(bot_dir: Path, **fields) -> dict:
+    requested = _handoff_clock_ns(bot_dir)
+    record = {"request_id": str(uuid4()),
+              "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(requested // 1_000_000_000)),
+              "requested_ns": requested, "native_result": None, **fields}
+    if not _write_handoff_request(bot_dir, record):
+        raise BotLifecycleError("cannot record handoff intent; no handoff was sent", unavailable=True)
+    return record
+
+
+def _record_native_handoff(bot_dir: Path, record: dict, outcome) -> list[str]:
+    marker = outcome.stdout.strip().splitlines()[-1:] if outcome.stdout else []
+    record["native_result"] = {"marker": marker[0] if marker else "unrecognized",
+                               "returncode": outcome.returncode}
+    if not _write_handoff_request(bot_dir, record):
+        raise BotLifecycleError("cannot record handoff result; existing request is retained",
+                                unavailable=True)
+    return marker
+
+
+def _planned_restart_handoff(bot_dir: Path, label: str, tmpdir: str,
+                             adapter: Adapter) -> None:
+    """Save once before a live planned restart; retries only observe that request."""
+    record = _read_handoff_request(bot_dir)
+    if record is not None and record.get("planned_restart") != label:
+        # An ordinary handoff may still be in flight. Do not overwrite an
+        # unknown send merely because this invocation asks for a restart.
+        if handoff_state(bot_dir).state != "saved":
+            raise BotLifecycleError("existing handoff request is unresolved; inspect with bot handoff --check; "
+                                    "it is never resent by restart", unavailable=True)
+        record = None
+    if record is None:
+        record = _new_handoff_request(bot_dir, planned_restart=label)
+        try:
+            outcome = adapter.call("svc_activation_handoff", bot_dir, label, tmpdir, "explicit", timeout=45)
+        except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+            raise BotLifecycleError("planned restart handoff outcome is unknown; its request is retained, "
+                                    "never resent; inspect before retrying", unavailable=True) from exc
+        _record_native_handoff(bot_dir, record, outcome)
+        if record["native_result"] not in (
+                {"marker": "handoff-saved", "returncode": 0},
+                {"marker": "handoff-skipped:recent", "returncode": 0},
+                {"marker": "handoff-timeout", "returncode": 3}):
+            raise BotLifecycleError("planned restart requires a verified save; unknown request is retained",
+                                    unavailable=True)
+    requested = record.get("requested_ns")
+    if type(requested) is not int or requested < 0:
+        raise BotLifecycleError("existing planned handoff has no request boundary", unavailable=True)
+    try:
+        wait_for_handoff(bot_dir, requested=requested, native_result=record.get("native_result"),
+                         target=label, wait_s=_HANDOFF_CAPTURE_WAIT_S, poll_s=_HANDOFF_CAPTURE_POLL_S)
+    except BotLifecycleError as exc:
+        raise BotLifecycleError(f"planned restart requires a verified save: {exc}; "
+                                "inspect the retained request; it is never resent", unavailable=True) from exc
+    # The save is now known complete, before the existing native owner acts.
+    # Do not add a second native restart journal or leave an old save reusable.
+    (bot_dir / "data" / _HANDOFF_REQUEST).unlink()
 
 
 def handoff_state(bot_dir: Path) -> HandoffState:
@@ -330,6 +444,9 @@ def handoff_state(bot_dir: Path) -> HandoffState:
         requested_at = record["requested_at"]
         requested = datetime.strptime(requested_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc).timestamp()
+        requested_ns = record.get("requested_ns")
+        if requested_ns is not None and (type(requested_ns) is not int or requested_ns < 0):
+            raise ValueError("invalid request boundary")
     except FileNotFoundError:
         return HandoffState("unknown", "no_request_recorded")
     except (OSError, UnicodeError, ValueError, KeyError, TypeError):
@@ -341,7 +458,8 @@ def handoff_state(bot_dir: Path) -> HandoffState:
         return pending
     except OSError:
         return HandoffState("unknown", "file_unverified", requested_at)
-    if stat.S_ISREG(info.st_mode) and info.st_mtime < requested:
+    if stat.S_ISREG(info.st_mode) and (info.st_mtime_ns < requested_ns if requested_ns is not None
+                                      else info.st_mtime < requested):
         return pending
     try:
         mtime, stamp = _handoff_capture(bot_dir)
@@ -350,7 +468,7 @@ def handoff_state(bot_dir: Path) -> HandoffState:
     if mtime < requested:
         return pending
     written_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
-    if stamp.timestamp() < requested - 300:
+    if stamp.timestamp() < (requested_ns // 1_000_000_000 if requested_ns is not None else requested - 300):
         return HandoffState("unknown", "capture_predates_request", requested_at, written_at)
     return HandoffState("saved", "written_after_request", requested_at, written_at)
 
@@ -607,22 +725,26 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "skipped", "no_session")
             if session != "ready":
                 raise BotLifecycleError("private bot session is unverified", unavailable=True)
-            requested_at = time.time()
+            if (_read_handoff_request(spec.bot_dir) is not None
+                    and handoff_state(spec.bot_dir).state != "saved"):
+                raise BotLifecycleError("existing handoff request is unresolved; inspect with --check; "
+                                        "it is never automatically resent", effect_attempted=True,
+                                        unavailable=True, release_id=release.release_id,
+                                        target=entry["target"], handoff_reason="pending")
+            try:
+                request = _new_handoff_request(spec.bot_dir)
+            except BotLifecycleError as exc:
+                raise BotLifecycleError(str(exc), unavailable=True) from exc
             try:
                 outcome = adapter.call("svc_activation_handoff", spec.bot_dir, spec.label,
                                        spec.environment["TMUX_TMPDIR"], "explicit", timeout=45)
             except (OSError, subprocess.SubprocessError) as exc:
-                _record_handoff_request(spec.bot_dir, requested_at)
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"]) from exc
-            marker = outcome.stdout.strip().splitlines()[-1:] if outcome.stdout else []
+            marker = _record_native_handoff(spec.bot_dir, request, outcome)
             skipped = (["handoff-skipped:recent"], ["handoff-skipped:capability"],
                        ["handoff-skipped:no-session"])
-            if outcome.returncode or marker not in skipped:
-                # A handoff can land minutes after this 30 s wait (#963), so
-                # `bot handoff BOT --check` reads it against this record (#990).
-                _record_handoff_request(spec.bot_dir, requested_at)
             if marker == ["handoff-timeout"]:
                 raise BotLifecycleError("bot handoff timed out after 30 seconds", effect_attempted=True,
                                         unavailable=True, release_id=release.release_id,
@@ -633,13 +755,16 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         target=entry["target"])
             if marker == ["handoff-saved"]:
                 try:
-                    _fresh_self_handoff(spec.bot_dir, observed_capture=True)
+                    wait_for_handoff(spec.bot_dir, requested=request["requested_ns"],
+                                     native_result=request["native_result"], target=entry["target"])
                 except BotLifecycleError as exc:
                     raise BotLifecycleError("fresh bot handoff file is unverified", effect_attempted=True,
                                             unavailable=True, release_id=release.release_id,
                                             target=entry["target"]) from exc
                 return BotHandoffResult(destination.fleet.name, bot, release.release_id,
                                         entry["target"], "saved", "fresh_file_verified")
+            # A definitive no-send result is not an outstanding request.
+            (spec.bot_dir / "data" / _HANDOFF_REQUEST).unlink()
             return BotHandoffResult(destination.fleet.name, bot, release.release_id,
                                     entry["target"], "skipped", marker[0].split(":", 1)[1])
 
@@ -918,7 +1043,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             if restart:
                 session = _native(adapter, "svc_bot_session_observe", spec.bot_dir,
                                   spec.label, spec.environment["TMUX_TMPDIR"])
-                if session not in {"ready", "unknown", "absent"}:
+                if session not in {"ready", "absent"}:
                     raise BotLifecycleError("current bot session observation is indeterminate",
                                             unavailable=True)
                 if _self_child:
@@ -927,18 +1052,18 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                                 unavailable=True)
                     _fresh_self_handoff(spec.bot_dir)
                     handoff = "captured"
-                elif session != "absent":
-                    # The existing pre-stop door is best effort: even its rc 0
-                    # means attempted, not that a new handoff file was written.
-                    # Run it while the old tmux session still exists, before
-                    # the native restart invokes start-bot's kill-session.
+                elif session == "ready":
+                    # A planned live bounce must retain context before the
+                    # existing native restart can terminate its private pane.
                     try:
-                        attempted = adapter.call("svc_activation_handoff", spec.bot_dir,
-                                                 spec.label, spec.environment["TMUX_TMPDIR"],
-                                                 timeout=45)
-                        handoff = "attempted" if attempted.returncode == 0 else "unavailable"
-                    except (InventoryError, OSError, subprocess.SubprocessError):
-                        handoff = "unavailable"
+                        _planned_restart_handoff(spec.bot_dir, spec.label,
+                                                 spec.environment["TMUX_TMPDIR"], adapter)
+                    except BotLifecycleError as exc:
+                        raise BotLifecycleError(str(exc), unavailable=True) from exc
+                    handoff = "captured"
+                # An absent/dead session cannot produce a fresh checkpoint.
+                # Its native recovery restores whatever was durably saved;
+                # this branch makes no claim that new context was captured.
             if unit.installed and not restart:
                 props = dict(unit.properties)
                 if (props.get("ActiveState") == "active"

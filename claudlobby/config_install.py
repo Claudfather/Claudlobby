@@ -5,8 +5,10 @@ for preparation, application, recovery and rollback. This is not an activation
 door: it selects no release, calls no supervisor, and never restores a database.
 Only ``state/activations/<explicit id>/config`` belongs to this backend.
 
-Before bytes and frozen desired bytes live in a private, fsynced journal store.
-Exact restoration uses the plan's bytes, modes and symbolic-link targets.
+The reviewed plan owns the only staged desired bytes. This backend retains
+publication progress and changed before bytes only; it never copies the plan
+or its desired content into another store. Legacy journals remain readable
+for migration, but this writer never changes their representation.
 Replacement workspaces live beside each target (including external fleets), so
 no rename crosses a filesystem. A crash before a workspace is journaled may
 leave an unreferenced private workspace; it cannot have changed a live target
@@ -16,7 +18,6 @@ and is deliberately not guessed at or deleted by recovery.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ import re
 import shutil
 import tempfile
 
-from .config_plan import ConfigPlan, PlanError, path_state, read_plan
+from .config_plan import ConfigPlan, PlanError, _digest, _json, _sync, path_state, read_plan
 
 
 class ConfigInstallError(PlanError):
@@ -38,22 +39,6 @@ class ConfigInstall:
     status: str
     progress: tuple[str, ...]
     retained_directories: tuple[Path, ...]
-
-
-def _json(value) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-
-
-def _digest(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
-
-def _sync(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _location(root: Path, activation_id: str) -> Path:
@@ -75,7 +60,10 @@ def _write_new(path: Path, content: bytes, mode: int = 0o600) -> None:
 
 
 def _save(directory: Path, journal: dict) -> None:
-    data = {"journal": journal, "sha256": _digest(_json(journal))}
+    if journal["schema"] != 2:
+        raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
+    payload = {key: value for key, value in journal.items() if key != "_plan"}
+    data = {"journal": payload, "sha256": _digest(_json(payload))}
     fd, name = tempfile.mkstemp(prefix=".journal-", dir=directory)
     temporary = Path(name)
     try:
@@ -89,10 +77,12 @@ def _save(directory: Path, journal: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _blob(directory: Path, digest: str) -> bytes:
+def _blob(directory: Path, digest: str, plan: ConfigPlan | None = None) -> bytes:
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ConfigInstallError("invalid configuration backup digest")
     path = directory / "blobs" / digest
+    if plan is not None and not path.exists() and not path.is_symlink():
+        return plan.blob(digest)
     if (path.parent.is_symlink() or path.is_symlink() or not path.is_file()
             or path.resolve() != path):
         raise ConfigInstallError(f"missing configuration backup: {digest}")
@@ -110,10 +100,16 @@ def _load(directory: Path) -> dict:
         envelope = json.loads(path.read_bytes())
         journal = envelope["journal"]
         if (_digest(_json(journal)) != envelope["sha256"]
-                or journal["schema"] != 1
-                or journal["directory"] != str(directory)
-                or "p-" + _digest(_json(journal["plan"])) != journal["plan_id"]):
+                or journal["schema"] not in (1, 2)
+                or journal["directory"] != str(directory)):
             raise ConfigInstallError("configuration journal identity changed")
+        if journal["schema"] == 1:
+            if "p-" + _digest(_json(journal["plan"])) != journal["plan_id"]:
+                raise ConfigInstallError("configuration journal identity changed")
+        else:
+            # _location fixes this path at ROOT/state/activations/ID/config.
+            # Retain one verified plan in memory, not in the progress record.
+            journal["_plan"] = read_plan(directory.parents[3], journal["plan_id"])
         for digest in journal["blobs"]:
             _blob(directory, digest)
         return journal
@@ -181,23 +177,18 @@ def change_effect(change) -> str:
     return "mode" if _modeless(before) == _modeless(after) else "content"
 
 
-def _collect(node: dict, read, contents: dict) -> None:
+def _backup(path: Path, node: dict, contents: dict, staged: set[str], plan: ConfigPlan) -> None:
     if node["kind"] == "file":
-        data = read(node["sha256"])
+        if node["sha256"] in staged:
+            plan.blob(node["sha256"])  # A filename alone is not verified recovery content.
+            return  # The reviewed desired set already retains these exact bytes.
+        data = path.read_bytes()
         if _digest(data) != node["sha256"]:
             raise ConfigInstallError("configuration changed while backing up")
         contents[node["sha256"]] = data
     elif node["kind"] == "directory":
-        for child in node["entries"].values():
-            _collect(child, read, contents)
-
-
-def _backup(path: Path, node: dict, contents: dict) -> None:
-    if node["kind"] == "file":
-        _collect(node, lambda _: path.read_bytes(), contents)
-    elif node["kind"] == "directory":
         for name, child in node["entries"].items():
-            _backup(path / name, child, contents)
+            _backup(path / name, child, contents, staged, plan)
 
 
 def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
@@ -216,6 +207,7 @@ def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
         raise ConfigInstallError("configuration plan changed before preparation")
     plan.check_fresh()
     rows, contents = {}, {}
+    staged = {path.name for path in (plan.directory / "files").iterdir()}
     reserved = [plan.data_root / "state" / name
                 for name in ("activations", "config-plans", "releases", "plane")]
     for change in plan.changes:
@@ -226,28 +218,30 @@ def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
         leaf = target.parent.resolve() / target.name
         if any(leaf.is_relative_to(p) or p.is_relative_to(leaf) for p in reserved):
             raise ConfigInstallError(f"configuration output overlaps protected state: {target}")
+        after = _desired(change.after)
+        unchanged = change.before["node"] == after
         # Access.json and other file outputs may need parents not explicitly
         # emitted by the compositor. Record each ensure, including its rollback.
         parent = target.parent
-        while not parent.exists():
+        while not unchanged and not parent.exists():
             rows.setdefault(str(parent), {
                 "target": str(parent), "before": path_state(parent),
                 "after": {"kind": "directory", "mode": 0o755, "entries": {}},
                 "ensure": True, "parent": str(parent.parent.resolve()), "status": "pending"})
             parent = parent.parent
-        if not parent.is_dir():
+        if not unchanged and not parent.is_dir():
             raise ConfigInstallError(f"configuration parent is not a directory: {parent}")
         rows[str(target)] = {
             "target": str(target), "before": change.before,
-            "after": _desired(change.after), "ensure": change.after["kind"] == "directory",
+            "after": after, "ensure": change.after["kind"] == "directory",
             "parent": str(target.parent.resolve()), "status": "pending"}
         if rows[str(target)]["ensure"] and change.before["node"]["kind"] != "absent":
             raise ConfigInstallError("an ensured directory must have been absent in the plan")
-        _backup(target, change.before["node"], contents)
-        _collect(rows[str(target)]["after"], plan.blob, contents)
-    journal = {"schema": 1, "directory": str(directory), "plan_id": plan.plan_id,
-               "plan": plan.payload(), "status": "prepared", "blobs": sorted(contents),
-               "rows": [rows[name] for name in sorted(rows)]}
+        if not unchanged:
+            _backup(target, change.before["node"], contents, staged, plan)
+    journal = {"schema": 2, "directory": str(directory), "plan_id": plan.plan_id,
+               "status": "prepared", "blobs": sorted(contents),
+               "rows": [rows[name] for name in sorted(rows)], "_plan": plan}
     # No stale input or before snapshot may acquire a prepared journal.
     plan.check_fresh()
     _check_rows(journal)
@@ -337,10 +331,10 @@ def _check_rows(journal: dict) -> None:
             _workspace(row)
 
 
-def _materialize(path: Path, node: dict, directory: Path) -> None:
+def _materialize(path: Path, node: dict, read) -> None:
     kind = node["kind"]
     if kind == "file":
-        _write_new(path, _blob(directory, node["sha256"]), node["mode"])
+        _write_new(path, read(node["sha256"]), node["mode"])
     elif kind == "symlink":
         path.symlink_to(node["target"])
     elif kind == "directory":
@@ -348,7 +342,7 @@ def _materialize(path: Path, node: dict, directory: Path) -> None:
         for name, child in node["entries"].items():
             if Path(name).name != name or name in (".", ".."):
                 raise ConfigInstallError("invalid backup child name")
-            _materialize(path / name, child, directory)
+            _materialize(path / name, child, read)
         path.chmod(node["mode"])
         _sync(path)
     elif kind != "absent":
@@ -370,7 +364,8 @@ def _begin(directory: Path, journal: dict, row: dict, *, rollback: bool) -> None
         raise ConfigInstallError(f"foreign configuration change at {target}")
     workspace = Path(tempfile.mkdtemp(prefix=f".claudlobby-config-{directory.parent.name}-",
                                      dir=target.parent))
-    _materialize(workspace / "next", desired, directory)
+    _materialize(workspace / "next", desired,
+                 lambda digest: _blob(directory, digest, journal["_plan"]))
     _sync(workspace)
     _sync(workspace.parent)
     row["work"] = {"path": str(workspace), "identity": _identity(workspace),
@@ -437,6 +432,8 @@ def apply_config(data_root: Path, activation_id: str) -> ConfigInstall:
     """Apply/resume a prepared config under the caller's host activation lock."""
     directory = _location(data_root, activation_id)
     journal = _load(directory)
+    if journal["schema"] != 2:
+        raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
     if journal["status"] in ("rolling_back", "rolled_back"):
         raise ConfigInstallError("configuration rollback has begun; cannot resume apply")
     _check_rows(journal)
@@ -444,7 +441,11 @@ def apply_config(data_root: Path, activation_id: str) -> ConfigInstall:
     _save(directory, journal)
     for row in journal["rows"]:
         if row["status"] == "pending":
-            _begin(directory, journal, row, rollback=False)
+            if row["before"]["node"] == row["after"]:
+                row["status"] = "applied"
+                _save(directory, journal)
+            else:
+                _begin(directory, journal, row, rollback=False)
         if row["status"] == "installing":
             _finish(directory, journal, row)
         else:
@@ -464,6 +465,8 @@ def rollback_config(data_root: Path, activation_id: str) -> ConfigInstall:
     """
     directory = _location(data_root, activation_id)
     journal = _load(directory)
+    if journal["schema"] != 2:
+        raise ConfigInstallError("legacy configuration journal is read-only; reviewed migration required")
     _check_rows(journal)
     journal["status"] = "rolling_back"
     _save(directory, journal)
@@ -475,7 +478,10 @@ def rollback_config(data_root: Path, activation_id: str) -> ConfigInstall:
             _save(directory, journal)
         elif row["status"] == "applied":
             _cleanup(directory, journal, row)
-            if row["ensure"]:
+            if row["before"]["node"] == row["after"]:
+                row["status"] = "reverted"
+                _save(directory, journal)
+            elif row["ensure"]:
                 row["status"] = "removing_directory"
                 _save(directory, journal)
             else:

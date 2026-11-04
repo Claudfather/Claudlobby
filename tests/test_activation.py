@@ -2851,13 +2851,14 @@ def test_ordinary_handoff_stop_reloads_persisted_effect_and_rechecks_capture(pre
     # The real store returns new record snapshots rather than mutating a cached body.
     monkeypatch.setattr(activation, "read_activation", lambda *_: SimpleNamespace(
         body=deepcopy(case.body), status="activating"))
-    verify = activation._require_preserved_handoff
+    from claudlobby import bot_operations
+    verify = bot_operations._fresh_self_handoff
     verified = []
     def check(path, **kwargs):
         verify(path, **kwargs)
         verified.append(path)
         _preserve_capture(path, kind="stale-capture")
-    monkeypatch.setattr(activation, "_require_preserved_handoff", check)
+    monkeypatch.setattr(bot_operations, "_fresh_self_handoff", check)
     case.on_call[0] = lambda: _preserve_capture(case.bot_dir)
     with pytest.raises(state.ActivationRefusal, match="fresh verified session handoff"):
         case.run()
@@ -3361,15 +3362,16 @@ def test_recent_skip_receipt_survives_capture_validation_and_resume_never_sends(
         monkeypatch.setattr(activation, "_quiesce_one_bot", lambda *_: (_ for _ in ()).throw(case.BotPauseReached()))
     else:
         case.outcome[:] = [0, "handoff-skipped:recent"]
-    verify = activation._require_preserved_handoff
-    monkeypatch.setattr(activation, "_require_preserved_handoff",
+    from claudlobby import bot_operations
+    verify = bot_operations._fresh_self_handoff
+    monkeypatch.setattr(bot_operations, "_fresh_self_handoff",
                         lambda *_args, **_kwargs: (_ for _ in ()).throw(InterruptedError("capture validation interrupted")))
     with pytest.raises(InterruptedError):
         case.run()
     assert case.body["handoff_effects"][target] is None
     assert case.body["handoff_requests"][target]["native_result"] == {
         "marker": "handoff-skipped:recent", "returncode": 0}
-    monkeypatch.setattr(activation, "_require_preserved_handoff", verify)
+    monkeypatch.setattr(bot_operations, "_fresh_self_handoff", verify)
     if not fresh:
         _preserve_capture(bot_dir, kind="stale-capture")
     with pytest.raises(case.BotPauseReached if fresh else state.ActivationRefusal):

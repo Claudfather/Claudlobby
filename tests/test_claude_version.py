@@ -657,6 +657,8 @@ def test_no_other_script_reads_a_claude_version():
         # Runtime scripts are covered above and build copies of assets retain
         # their source owners; this half checks the Python implementation package.
         if p.relative_to(REPO / "claudlobby").parts[0] not in {"_runtime_scripts", "_resources"}
-        and '"--version"' in p.read_text() and p.name != "__main__.py"
+        # Both entries parse Claudlobby's own --version option; neither reads
+        # the Claude binary's version. The stable launcher must route it too.
+        and '"--version"' in p.read_text() and p.name not in {"__main__.py", "installation.py"}
     ]
     assert py == [], py

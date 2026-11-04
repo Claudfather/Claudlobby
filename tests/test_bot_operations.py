@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -273,7 +274,8 @@ def test_a_late_handoff_is_read_against_the_request_the_door_recorded(tmp_path):
     older = f"---\nlast_updated: {stamp(asked - 3600)}\n---\nolder context\n"
     write(older, asked - 3600)
     assert bot_operations.handoff_state(bot_dir)[:2] == ("unknown", "no_request_recorded")
-    assert bot_operations._record_handoff_request(bot_dir, asked)
+    # Old second-resolution receipts remain readable after the shared writer changes.
+    (bot_dir / "data/.handoff-request").write_text(json.dumps({"requested_at": stamp(asked)}))
     # Not written since: also what a turn that ends without writing it leaves (#963).
     assert bot_operations.handoff_state(bot_dir)[:2] == ("pending", "not_written_since_request")
     handoff.unlink()
@@ -583,6 +585,12 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
 
     monkeypatch.setattr(bot_operations, "_observed", observed)
     monkeypatch.setattr(bot_operations, "assert_quiescent", lambda *a, **kw: None)
+    # A real recent-skip is backed by an actual owned capture. Tests which
+    # exercise missing/stale saves replace or remove it explicitly.
+    checkpoint = root / "runtime/bots/worker/.claude/session.md"
+    checkpoint.parent.mkdir(exist_ok=True)
+    now = datetime.now(timezone.utc)
+    checkpoint.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
 
     def call(*argv, expected=0, use_root=True):
         root_flag = ["--root", str(root)] if use_root else []
@@ -648,6 +656,13 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert unknown["error"]["code"] == "unavailable" and native.actions == []
     assert unknown["data"]["handoff"] == "unknown"
     assert unknown["data"]["reason"] == "unverified"
+    before_retry = native.calls.count("svc_activation_handoff")
+    pending = call("bot", "handoff", "worker", expected=6)
+    assert pending["data"]["reason"] == "pending"
+    assert native.calls.count("svc_activation_handoff") == before_retry
+    # The first request genuinely completes before a distinct ordinary save.
+    now = datetime.now(timezone.utc)
+    _checkpointed(root / "runtime/bots/worker", refreshed=now, captured=now, field=None)
     native.explicit_handoff = "handoff-timeout"
     native.handoff_rc = 3
     timed_out = call("bot", "handoff", "worker", expected=6)
@@ -656,6 +671,8 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert timed_out["data"]["reason"] == "timeout"
     assert "do not automatically resend" in timed_out["error"]["hint"]
     assert native.actions == []
+    now = datetime.now(timezone.utc)
+    _checkpointed(root / "runtime/bots/worker", refreshed=now, captured=now, field=None)
     native.handoff_rc = 0
     native.explicit_handoff = "handoff-saved"
     saved = call("bot", "handoff", "worker")["data"]
@@ -749,7 +766,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     bounced = call("bot", "restart", "worker")["data"]
     assert bounced["state"] == "running" and bounced["changed"] is True
     assert bounced["readiness"] == "bridge_ready"
-    assert bounced["handoff"] == "attempted"
+    assert bounced["handoff"] == "captured"
     assert native.calls.index("svc_bot_session_observe") < native.calls.index("svc_activation_handoff")
     assert native.calls.index("svc_activation_handoff") < native.calls.index("svc_activation_bot_fence")
     assert native.calls.index("svc_activation_bot_fence") < native.calls.index("svc_bot_enroll_exact")
@@ -785,9 +802,12 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
         assert len(native.actions) == before_self
 
     native.handoff_rc = 3
-    incomplete_handoff = call("bot", "restart", "worker")["data"]
-    assert incomplete_handoff["handoff"] == "unavailable"
-    assert incomplete_handoff["readiness"] == "bridge_ready"
+    before_incomplete = len(native.actions)
+    call("bot", "restart", "worker", expected=6)
+    assert len(native.actions) == before_incomplete
+    native.handoff_rc = 0
+    # The preceding save was genuinely written despite a contradictory native
+    # result. Retrying observes that capture; it never sends a second handoff.
     assert call("bot", "restart", "worker", "--ceiling", "0", expected=2)["error"]["code"] == "invalid_argument"
     before = len(native.actions)
     assert call("bot", "restart", "worker", "--ceiling", "37")["data"]["readiness"] == "bridge_ready"
@@ -890,6 +910,79 @@ def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold
     monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
     refused = call("bot", "handoff", "manager", "--check", expected=4)
     assert refused["error"]["code"] == "conflict"
+
+
+def test_live_restart_refuses_an_unverified_recent_skip(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    # A native no-send marker alone cannot authorize killing a live session.
+    worker.native.explicit_handoff = "handoff-skipped:recent"
+    (worker.root / "runtime/bots/worker/.claude/session.md").unlink()
+    failed = worker.call("bot", "restart", "worker", expected=6)
+    assert failed["error"]["code"] == "unavailable"
+    assert worker.native.actions == []
+    assert "svc_activation_bot_fence" not in worker.native.calls
+
+
+@pytest.mark.parametrize("unknown_result", [False, True])
+def test_planned_restart_records_before_send_and_reuses_a_late_save(
+        cold, monkeypatch, capsys, unknown_result):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    (bot_dir / ".claude").mkdir(exist_ok=True)
+    request_path = bot_dir / "data/.handoff-request"
+    worker.native.explicit_handoff, worker.native.handoff_rc = "handoff-timeout", 3
+    monkeypatch.setattr(bot_operations, "_HANDOFF_CAPTURE_WAIT_S", 0, raising=False)
+    native_call = worker.native.call
+    requests = []
+    synced = []
+    fsync = os.fsync
+
+    def sync(fd):
+        synced.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        fsync(fd)
+
+    monkeypatch.setattr(bot_operations.os, "fsync", sync)
+
+    def native(function, *args, **kwargs):
+        if function == "svc_activation_handoff":
+            requests.append(json.loads(request_path.read_text()))
+            assert args[-1] == "explicit"
+            assert synced[-2:] == ["file", "directory"]
+            if unknown_result:
+                raise subprocess.TimeoutExpired([function], 45)
+        return native_call(function, *args, **kwargs)
+
+    worker.native.call = native
+    worker.call("bot", "restart", "worker", expected=6)
+    original = request_path.read_bytes()
+    assert worker.native.actions == [] and len(requests) == 1
+    assert worker.call("bot", "handoff", "worker", "--check")["data"]["handoff"] == "pending"
+    refused = worker.call("bot", "handoff", "worker", expected=6)
+    assert refused["data"]["reason"] == "pending"
+    assert request_path.read_bytes() == original and len(requests) == 1
+    # This is the original request completing later, not a second model turn.
+    now = datetime.now(timezone.utc)
+    (bot_dir / ".claude/session.md").write_text(
+        f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\nretained unknown delivery; do not retry\n")
+    resumed = worker.call("bot", "restart", "worker")["data"]
+    assert resumed["handoff"] == "captured" and resumed["state"] == "running"
+    assert len(requests) == 1 and worker.native.actions == ["start"]
+    # Successful use retires the restart request; it must not authorize a later
+    # restart after that newly started session has done more work.
+    assert json.loads(original)["requested_at"]
+    assert not request_path.exists()
+
+
+@pytest.mark.parametrize("session, expected", [("absent", 0), ("unknown", 6)])
+def test_restart_distinguishes_dead_session_recovery_from_unknown_live_state(
+        cold, monkeypatch, capsys, session, expected):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.native.session = session
+    result = worker.call("bot", "restart", "worker", expected=expected)
+    assert "svc_activation_handoff" not in worker.native.calls
+    assert worker.native.actions == (["start"] if session == "absent" else [])
+    if session == "absent":
+        assert result["data"]["handoff"] == "not_applicable"
 
 
 def test_a_staggered_unit_restarts_and_starts_within_its_boot_delay(cold, monkeypatch, capsys):  # noqa: F811

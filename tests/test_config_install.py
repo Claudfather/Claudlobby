@@ -69,6 +69,11 @@ def test_partial_config_activation_rolls_back_exact_before_and_candidate_only_as
     assert prepared.status == "prepared"
     assert prepared.directory.stat().st_mode & 0o777 == 0o700
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in (prepared.directory / "blobs").iterdir())
+    journal = json.loads((prepared.directory / "journal.json").read_bytes())["journal"]
+    assert journal["schema"] == 2 and "plan" not in journal
+    # Desired content is kept once, in the reviewed staged set. The installer
+    # retains only old bytes that are not already available in that set.
+    assert not (set(journal["blobs"]) & {p.name for p in (plan.directory / "files").iterdir()})
     replace = install._replace
 
     def stop_at_settings(source, target):
@@ -112,10 +117,17 @@ def test_interrupted_tree_resume_uses_frozen_bytes_and_rollback_preserves_mutabl
         with pytest.raises(InterruptedError, match="between directory renames"):
             install.apply_config(plan.data_root, "tree-resume")
     assert moved and not external.exists()
-    # Recovery reads its own verified frozen blobs, not mutable authoring or
-    # a plan-store blob that could disappear after activation started.
-    for blob in (plan.directory / "files").iterdir():
+    # Recovery uses the same reviewed staged set as preview. Missing staged
+    # bytes refuse before more target writes; authoring cannot repair them.
+    staged = {blob: blob.read_bytes() for blob in (plan.directory / "files").iterdir()}
+    for blob in staged:
         blob.unlink()
+    interrupted = _tree(runtime), _tree(external.parent)
+    with pytest.raises(install.ConfigInstallError, match="missing staged content"):
+        install.apply_config(plan.data_root, "tree-resume")
+    assert (_tree(runtime), _tree(external.parent)) == interrupted
+    for blob, content in staged.items():
+        _file(blob, content, 0o600)
     assert install.apply_config(plan.data_root, "tree-resume").status == "applied"
     assert (external / "new/SKILL.md").read_bytes() == b"frozen candidate skill\n"
     assert (external / "new/run.sh").stat().st_mode & 0o777 == 0o755
@@ -166,6 +178,22 @@ def test_changed_foreign_target_refuses_before_other_writes_and_backup_tamper_re
     with pytest.raises(install.ConfigInstallError, match="changed configuration backup"):
         install.rollback_config(plan.data_root, "foreign")
     assert (_tree(runtime), _tree(external)) == before
+
+
+def test_corrupt_retained_input_cannot_replace_a_before_image(proposal):
+    original, runtime, external, _, settings = proposal
+    builder = ConfigPlanBuilder(original.data_root, original.release_id, original.release_seal,
+                                original.fleets, effects={})
+    digest = builder.input_content(settings)
+    builder.file(settings, b"replacement settings\n")
+    builder.file(runtime / "earlier.json", b"another proposed output\n")
+    plan = builder.seal()
+    (plan.directory / "files" / digest).write_bytes(b"corrupt retained input\n")
+    before = _tree(runtime), _tree(external)
+    with pytest.raises(PlanError, match="changed staged content"):
+        install.prepare_config(plan, "corrupt-retained")
+    assert (_tree(runtime), _tree(external)) == before
+    assert not (plan.data_root / "state/activations").exists()
 
 
 def test_stale_plan_or_wrong_activation_identity_never_prepares_or_overwrites(proposal):
@@ -234,6 +262,45 @@ def _re_record(plan):
         else:
             builder.directory(target)  # records nothing once the directory exists
     return builder.seal()
+
+
+def test_unchanged_outputs_keep_their_identity_and_need_no_backup(proposal, monkeypatch):
+    plan, runtime, external, _, _ = proposal
+    install.prepare_config(plan, "first")
+    install.apply_config(plan.data_root, "first")
+    repeated = _re_record(plan)
+    identities = {Path(change.target): Path(change.target).lstat().st_ino
+                  for change in repeated.changes if Path(change.target).exists()}
+    prepared = install.prepare_config(repeated, "unchanged")
+    assert list((prepared.directory / "blobs").iterdir()) == []
+
+    def unexpected_replace(*args):
+        raise AssertionError("unchanged configuration must not be replaced")
+
+    monkeypatch.setattr(install, "_replace", unexpected_replace)
+    assert install.apply_config(plan.data_root, "unchanged").status == "applied"
+    assert install.rollback_config(plan.data_root, "unchanged").status == "rolled_back"
+    assert {path: path.lstat().st_ino for path in identities} == identities
+
+
+def test_legacy_journal_is_readable_without_rewriting_or_resuming_it(proposal):
+    plan, runtime, external, _, _ = proposal
+    prepared = install.prepare_config(plan, "legacy")
+    path = prepared.directory / "journal.json"
+    journal = json.loads(path.read_bytes())["journal"]
+    journal.update(schema=1, plan=plan.payload())
+    for blob in (plan.directory / "files").iterdir():
+        _file(prepared.directory / "blobs" / blob.name, blob.read_bytes(), 0o600)
+    journal["blobs"] = sorted(p.name for p in (prepared.directory / "blobs").iterdir())
+    path.write_bytes(install._json({"journal": journal, "sha256": install._digest(install._json(journal))}))
+    original = path.read_bytes()
+    before = _tree(runtime), _tree(external)
+    assert install.read_config_install(plan.data_root, "legacy").status == "prepared"
+    for operation in (install.apply_config, install.rollback_config):
+        with pytest.raises(install.ConfigInstallError, match="legacy configuration journal is read-only"):
+            operation(plan.data_root, "legacy")
+        assert path.read_bytes() == original
+        assert (_tree(runtime), _tree(external)) == before
 
 
 def test_change_effect_reads_what_apply_wrote_as_unchanged_and_names_what_differs(proposal):

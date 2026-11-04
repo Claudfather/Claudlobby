@@ -59,15 +59,18 @@ def native_environment(paths: Paths) -> dict[str, str]:
     Native hot paths consume this context without starting Python or guessing
     mutable storage from their installed script directory.
     """
-    cli = selected_cli()
+    installation = paths.package.installation
+    cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     result = {
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),
-        "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
-        "CLAUDLOBBY_LIBRARY_DIR": str(paths.base_library),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.package.runtime_native),
+        "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.runtime_library),
         "CLAUDLOBBY_CLI": str(cli),
         "CLAUDLOBBY_ARTIFACT_ID": paths.package.artifact_id,
     }
+    if installation is not None:
+        result["CLAUDLOBBY_INSTALLATION"] = str(installation.directory)
     # Composition can run from an explicit development package, but a sealed
     # candidate binds generated callers to its complete release (dependencies
     # included), not merely the source/resource artifact identity.
@@ -88,8 +91,8 @@ def resolve_paths(
 ) -> Paths:
     """Resolve host/fleet paths without requiring a fleet for host commands.
 
-    Production always reads the installed package. Explicit injection is for
-    callers such as isolated test/source harnesses, never a discovery fallback.
+    Resources come from the explicit installation or installed package.
+    The working directory is never a resource discovery fallback.
     """
     return Paths.detect(root, fleet, seed=seed,
                         package=package if package is not None else get_resources())
