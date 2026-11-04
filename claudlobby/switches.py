@@ -132,7 +132,7 @@ ENROLL_FLEET = "fleet.yaml"
 #: A per-bot manifest key the composer reads and nothing else: no unit.
 #: Activation publishes it for one selected bot before the operator widens it;
 #: a deny can bind on the next tool call, while .mcp.json is read at session start.
-COMPOSE_BOT = "fleet.yaml bots.<bot> → activated composition"
+COMPOSE_BOT = "fleet.yaml bots.<bot> → published composition"
 
 #: Carriers whose scope is a FLEET. A host-wide run (``host doctor``,
 #: ``plane doctor`` without ``--fleet``) has not read these, and saying so is
@@ -143,7 +143,7 @@ FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET, COMPOSE_BO
 _ENV_WHERE = {
     ENV_FLEET: "the fleet-tier .env",
     ENV_HOST: "the host or root .env",
-    BOT_CONF: ("fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at"
+    BOT_CONF: ("fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at"
                " its next start — a .env tier does NOT reach a session)"),
 }
 
@@ -176,18 +176,16 @@ class Switch:
     #: loop), never merely a slower or quieter one.
     target_workflow: bool = False
     why_opt_in: str = ""  #: which of the four categories keeps it off
-    #: an opt-out whose off value activation REFUSES, before it stops any bot:
+    #: an opt-out whose off value Git update REFUSES, before it stops any bot:
     #: its disarm line names that refusal instead of offering the value
     off_refused: bool = False
     #: COMPOSE_BOT only: what to run after setting the key, and when what it
     #: composes takes effect. The defaults are the deny-rule shape #1665 set;
     #: a key whose file is read at SESSION START (#1604's .mcp.json) must say
     #: restart, or the arm line promises something the key cannot do.
-    compose_steps: str = ("config plan, config diff PLAN_ID, and claudlobby"
-                          " --root <data-root> host activate PLAN_ID"
-                          " --install-directory <native-user-unit-dir>")
-    takes_effect: str = "activation can restart selected bots; the deny then binds on the next tool call"
-    takes_effect_off: str = "activation can restart selected bots; the deny is removed for the next tool call"
+    compose_steps: str = ("claudlobby --root <data-root> host update apply FULL_COMMIT_SHA")
+    takes_effect: str = "Git update can restart enrolled bots; the deny then binds on the next tool call"
+    takes_effect_off: str = "Git update can restart enrolled bots; the deny is removed for the next tool call"
 
     @property
     def default_on(self) -> bool:
@@ -220,7 +218,7 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
             return (f"unset {var} — recording by default",
                     f"{var}=1 in {where} — the ruled harness exemption;"
                     " silences EVERY door at once")
-        disarm = (f"none — activation refuses {var}=0 in {where} before it stops any bot"
+        disarm = (f"none — first-fleet initialization refuses {var}=0 in {where}; ordinary updates reuse existing registry identities"
                   if sw.off_refused else f"{var}=0 in {where}")
         return f"unset {var} — on by default", disarm
     if sw.carrier == COMPOSE_BOT:
@@ -236,17 +234,14 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
         extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
         return (
             f"{key}: true in this host's override, ~/.config/claudlobby/system.yaml"
-            f" (host jobs bypass the fleet merge){extra}, then config plan + config diff + host activate",
-            f"{key}: false in this host's override, ~/.config/claudlobby/system.yaml,"
-            " then config plan + config diff + host activate (removes the"
-            " installed unit)",
+            f" (host jobs bypass the fleet merge){extra}, then host update apply FULL_COMMIT_SHA",
+            f"{key}: false in this host's override, ~/.config/claudlobby/system.yaml"
+            "; removing an existing native consumer is currently refused by Git update",
         )
     key = sw.config or f"defaults.jobs.{sw.job}.enroll"
     extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
-    return (f"{key}: true in fleet.yaml{extra}, then config plan, config diff PLAN_ID,"
-            " and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>",
-            f"{key}: false in fleet.yaml, then config plan, config diff PLAN_ID,"
-            " and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>")
+    return (f"{key}: true in fleet.yaml{extra}, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA",
+            f"{key}: false in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA")
 
 
 #: Every switch the shipped system has. Adding a door with a knob means adding
@@ -261,7 +256,7 @@ SWITCHES: tuple[Switch, ...] = (
            config="claudna.session_summary",
            why_opt_in="model spend (one Haiku call per sealed segment, in the background of the bot's session)",
            what="let clauDNA summarize this bot's sealed segments; session-export carries the journey to the plane",
-           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           compose_steps="host update apply FULL_COMMIT_SHA",
            takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
            takes_effect_off="from the next session on, sealed segments export as skipped: disabled"),
     Switch(key="claudna-harvest", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
@@ -269,7 +264,7 @@ SWITCHES: tuple[Switch, ...] = (
            why_opt_in="model spend (summaries) and draft-note writes through claudron capture",
            what="opt this bot into clauDNA harvest: composition arms summaries too; typed blocks become unverified "
                 "drafts in CLAUDRON_VAULT_PATH; needs Claudron >= 0.8.0 on the host (PR 6a)",
-           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           compose_steps="host update apply FULL_COMMIT_SHA",
            takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
            takes_effect_off="no harvest from the bot's next session on"),
     Switch(key="claudna-precompact-reflect", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
@@ -277,7 +272,7 @@ SWITCHES: tuple[Switch, ...] = (
            why_opt_in="it blocks: clauDNA's PreCompact hook refuses every other compaction until"
                       " /claudna:capture runs, and nobody at a bot's pane runs it (#941)",
            what="let clauDNA's PreCompact hook ask this bot for a capture before it compacts",
-           compose_steps="config plan, config diff PLAN_ID, host activate PLAN_ID",
+           compose_steps="host update apply FULL_COMMIT_SHA",
            takes_effect="from the bot's next session: bot.conf is read at session start",
            takes_effect_off="from the bot's next session, compactions pass without the prompt"),
     Switch(
@@ -432,7 +427,7 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=ENV_FLEET,
         env="PLANE_EMIT_ENABLED",
         plane=True,
-        what="one registry keyframe scan per activated configuration — what the fleet IS, "
+        what="first-fleet initialization registry keyframes — what the fleet IS, "
              "so every metric sample has something to join to",
         # Activation's identity bindings join to the scan's keyframes, so it
         # refuses the off value (plane/registry_emit.activation_scan_refusal).
@@ -601,7 +596,7 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=BOT_CONF,
         env="KEEPALIVE_LIMIT_RESUME_ENABLED",
         why_opt_in="no deployment gate: claudlobby/_runtime_scripts/ is in "
-                   "force on every bot at activation, and this door types into "
+                   "force on every bot at publication, and this door types into "
                    "a bot's pane, so one armed bot is the only canary",
         what="once a usage limit's printed reset has passed, confirm the limit "
              "menu's \"Stop and wait for limit to reset\" by its label if the "
@@ -664,7 +659,7 @@ SWITCHES: tuple[Switch, ...] = (
         config="isolation.shared_config",
         why_opt_in="restricts access to shared host resources used by running "
                    "bots; enable for one canary bot before widening the "
-                   "manifest default through activation",
+                   "manifest default through Git update",
         what="compose the Layer 0b deny rules (#1665): other bots' transcripts "
              "and Telegram dirs, the shared history, credential and account "
              "config, every .env tier, and Edit on the install's code and the "
@@ -679,15 +674,12 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=COMPOSE_BOT,
         config="mcp_direct_launch",
         compose_steps=("claudlobby --root <data-root> --fleet <fleet> host cache warm,"
-                       " then claudlobby --root <data-root> config plan --release RELEASE_ID,"
-                       " claudlobby --root <data-root> config diff PLAN_ID, and claudlobby"
-                       " --root <data-root> host activate PLAN_ID"
-                       " --install-directory <native-user-unit-dir>"),
+                       " then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA"),
         takes_effect=("it takes effect when that bot next restarts: .mcp.json is"
                       " read at session start"),
         takes_effect_off="back on npx at the bot's next restart",
         why_opt_in="changes how every MCP server starts; warm the pinned cache "
-                   "and activate an independent canary root with one armed bot "
+                   "and update an independent canary root with one armed bot "
                    "before widening the manifest",
         what="launch each exactly pinned npx MCP server as `node <entry>` from "
              "the copy warm-cache installs under state/mcp/npm, instead of "
@@ -854,7 +846,7 @@ def missing_extra(job: str) -> str:
 
 
 def extra_install_line(extra: str) -> str:
-    return f"assemble a sealed release with the [{extra}] extra in its offline wheelhouse"
+    return f"use a managed Git runtime lock containing the [{extra}] dependencies"
 
 
 # ---------------------------------------------------------------------------
@@ -1100,7 +1092,7 @@ def resolve(
             detail = (f"{extra} does not import in this install — no unit is"
                       " composed (a supervised unit that cannot start is a"
                       " crash loop, not an honest failure)")
-            arm_override = extra_install_line(extra) + ", then config plan + config diff + host activate"
+            arm_override = extra_install_line(extra) + ", then host update apply FULL_COMMIT_SHA"
 
         rows.append(
             SwitchState(
