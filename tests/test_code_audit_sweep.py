@@ -16,14 +16,14 @@ from textwrap import dedent
 
 from claudlobby.config import SweepConfig, _coerce_sweep, load_fleet
 from claudlobby.composer import compose_bot_conf, compose_fleet_timers
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 from tests.test_plane_events_door import _serving
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _write(root: Path, body: str) -> Path:

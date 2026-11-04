@@ -25,8 +25,8 @@ from claudlobby import defaults
 from claudlobby.composer import compose_bot, resolve_effective_skills
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
-from tests.conftest import install_real_template, make_paths
-from tests.package_fixtures import source_package
+from tests.conftest import install_real_template
+from tests.package_fixtures import git_package, source_package
 
 LIBRARY = Path(__file__).resolve().parent.parent / "library"
 
@@ -71,7 +71,7 @@ def _compose(fleet_dir: Path, monkeypatch):
     if not dst.exists():
         shutil.copytree(LIBRARY / "skills" / "status", dst)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    paths = make_paths(fleet_dir)
+    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
     for bot in fleet.bots.values():
         compose_bot(bot, fleet, paths, log=lambda m: None)
     return fleet, paths

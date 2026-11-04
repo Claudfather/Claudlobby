@@ -20,17 +20,21 @@ import sys
 import venv
 
 
-def private_installation(root, tree, *, native=None):
+def private_installation(root, tree, resources, package, *, native=None):
     """Prepare executable private Git paths; never enroll a native service."""
     from claudlobby.installation import Installation, write_installation, install_launcher
     installation = Installation(root.parent / (".harness-installation-" + root.name), root)
     if not installation.source.exists():
         installation.source.mkdir(parents=True)
-        for name in ("claudlobby", "library", "templates"):
-            shutil.copytree(tree / name, installation.source / name,
+        # The selected candidate may be an installed wheel whose source export
+        # has deliberately been removed. Copy its verified code and assets.
+        for name, source in (("claudlobby", package), ("library", resources.library),
+                             ("templates", resources.templates)):
+            shutil.copytree(source, installation.source / name,
                             ignore=shutil.ignore_patterns("__pycache__", "_resources", "_artifact.json"))
-        for name in ("fleet.yaml.seed", "projects.yaml.seed", ".env.seed.example", "requirements-runtime.lock"):
-            shutil.copy2(tree / name, installation.source / name)
+        for name in ("fleet.yaml.seed", "projects.yaml.seed", ".env.seed.example"):
+            shutil.copy2(resources.seeds / name, installation.source / name)
+        shutil.copy2(tree / "requirements-runtime.lock", installation.source / "requirements-runtime.lock")
         subprocess.run(["git", "init", "--quiet", str(installation.source)], check=True)
         venv.EnvBuilder(with_pip=False, symlinks=True).create(installation.environment)
         # Use the selected test interpreter's installed dependencies. Application
@@ -41,7 +45,7 @@ def private_installation(root, tree, *, native=None):
         write_installation(installation)
         install_launcher(installation, interpreter=Path(sys.executable).resolve())
     if native is not None:
-        for item in (tree / "claudlobby/_runtime_scripts").iterdir():
+        for item in resources.native.iterdir():
             if item.is_file():
                 shutil.copy2(item, installation.native / item.name)
         for item in native.iterdir():
@@ -209,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("selected wheel was not built from this harness tree revision")
     else:
         parser.error("harness source has no built artifact or Git revision identity")
-    installation = private_installation(root, tree, native=args.native_dir)
+    installation = private_installation(root, tree, resources, origin, native=args.native_dir)
     os.environ["CLAUDLOBBY_INSTALLATION"] = str(installation.directory)
     for key in ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID"):
         os.environ.pop(key, None)
