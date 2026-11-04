@@ -321,6 +321,72 @@ def test_new_darwin_schedule_loads_without_kickstart(tmp_path, monkeypatch):
     assert not any(name == "svc_activation_start" for name, _ in native.calls)
 
 
+class StartingBotNative(Native):
+    """launchd acknowledges bootstrap before the private bot session is ready."""
+    def __init__(self, store, target, *, fail_ready=False):
+        super().__init__()
+        self.store, self.target, self.fail_ready = store, target, fail_ready
+        self.state, self.session = "unchanged unloaded inactive", "unknown"
+        self.ready_timeouts = []
+
+    def call(self, function, *args, timeout=30):
+        if function == "svc_activation_bot_fence":
+            self.calls.append((function, args))
+            return SimpleNamespace(returncode=0, stdout="210\tRR_FENCE_original", stderr="")
+        if function == "svc_activation_resume":
+            progress = self.store.load()["consumers"][self.target]
+            assert progress["restore"] == "pending"
+            assert progress["readiness"] == {"ceiling": 210, "token": "RR_FENCE_original"}
+            self.calls.append((function, args))
+            self.state = "unchanged loaded inactive"
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if function == "svc_activation_bot_ready":
+            self.calls.append((function, args))
+            self.ready_timeouts.append(timeout)
+            assert self.session == "unknown"
+            if self.fail_ready:
+                return SimpleNamespace(returncode=3, stdout="", stderr="readiness unverified")
+            self.session = "ready"
+            return SimpleNamespace(returncode=0, stdout="session-ready", stderr="")
+        return super().call(function, *args, timeout=timeout)
+
+
+@pytest.mark.parametrize("added", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_launchd_bot_waits_for_original_readiness_without_replaying_start(tmp_path, monkeypatch, added, interrupted):
+    import plistlib
+    row = added_intent(tmp_path, monkeypatch)[0] if added else intent(tmp_path)
+    content = plistlib.dumps({"RunAtLoad": True, "ProgramArguments": ["/bin/true"]})
+    source = Path(row["declaration"]["source"])
+    source.write_bytes(content)
+    row.update(manager="Darwin", target="user/123/example", scheduled=False,
+               bot_binding=[str(tmp_path), "example", str(tmp_path / "tmux")], disposition="running")
+    if added:
+        row.update(run_at_load=True, candidate={"sha256": hashlib.sha256(content).hexdigest(),
+            "mode": source.stat().st_mode & 0o777, "content": {"base64": base64.b64encode(content).decode()}})
+        monkeypatch.setattr(services, "observe_added_absence", lambda *_: {"absent": True})
+    else:
+        row["saved_native"] = row["restore_native"] = "unchanged loaded active"
+        declarations(monkeypatch, row)
+        monkeypatch.setattr(services, "_darwin", lambda *_: None)
+    store = Store(tmp_path, row)
+    native = StartingBotNative(store, row["target"], fail_ready=interrupted)
+    snapshot = {"data_root": str(tmp_path)}
+    if interrupted:
+        with pytest.raises(RuntimeError):
+            services.restore_consumer(store, row["target"], native, snapshot)
+        assert store.load()["consumers"][row["target"]]["restore"] == "pending"
+        native.fail_ready = False
+    result = services.restore_consumer(store, row["target"], native, snapshot)
+    assert result["restore"] == "done"
+    assert sum(name == "svc_activation_resume" for name, _ in native.calls) == 1
+    assert sum(name == "svc_activation_bot_fence" for name, _ in native.calls) == 1
+    assert not any(name == "svc_activation_start" for name, _ in native.calls)
+    ready = [args for name, args in native.calls if name == "svc_activation_bot_ready"]
+    assert ready == [(str(tmp_path), str(tmp_path), "210", "RR_FENCE_original", str(tmp_path / "tmux"))] * (2 if interrupted else 1)
+    assert native.ready_timeouts == [240] * len(ready)
+
+
 def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path):
     from claudlobby.supervision_inventory import UnitDeclaration
     directory = tmp_path / "native"
@@ -383,10 +449,10 @@ def test_a_unit_start_budget_counts_only_a_linux_units_boot_delay():
 
 
 
-def _runtime_bash(script, *args):
+def _runtime_bash(script, *args, env=None):
     process = subprocess.Popen(["/bin/bash", "-c", script, "activation-fixture", *map(str, args)],
                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               start_new_session=True)
+                               start_new_session=True, env=env)
     try:
         stdout, stderr = process.communicate(timeout=8)
     except subprocess.TimeoutExpired:
@@ -455,9 +521,10 @@ svc_activation_start "$file" "$target"
 
 def test_real_restart_policy_fence_is_verified_and_ready_uses_same_marker(tmp_path):
     bot = tmp_path / "bots/worker"
+    bot_tmpdir = tmp_path / "private-tmux"
     bot.mkdir(parents=True)
     (bot / "bot.conf").write_text('RC_READY_TIMEOUT_S="001"\nBOT_SERVICE="fixture-worker"\n'
-                                  'TELEGRAM_BOT_HANDLE="fixture_handle"\n')
+                                  f'TELEGRAM_BOT_HANDLE="fixture_handle"\nTMUX_TMPDIR="{bot_tmpdir}"\n')
     prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
 TMUX_BIN=fixture_tmux; export TMUX_BIN
 . "$1/supervisor.sh"; shift; "$@"'''
@@ -472,9 +539,9 @@ TMUX_BIN=fixture_tmux; export TMUX_BIN
     assert token in log.read_text()
     with log.open("a") as out:
         out.write("BRIDGE_READY fixture\n")
-    ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, bot_tmpdir)
     assert ready.returncode == 0 and ready.stdout.strip() == "bridge-ready"
-    missing = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", "absent-marker")
+    missing = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", "absent-marker", bot_tmpdir)
     assert missing.returncode != 0
     log.unlink()
     log.mkdir()  # bridge_fence_write is best-effort; the new boundary must refuse
@@ -501,8 +568,9 @@ def test_native_bot_readiness_accepts_only_configured_post_fence_outcome(
     tmp_path, extra_conf, accepted, rejected, readiness
 ):
     bot = tmp_path / "bots/worker"
+    bot_tmpdir = tmp_path / "private-tmux"
     bot.mkdir(parents=True)
-    (bot / "bot.conf").write_text('BOT_SERVICE="fixture-worker"\n' + extra_conf)
+    (bot / "bot.conf").write_text(f'BOT_SERVICE="fixture-worker"\nTMUX_TMPDIR="{bot_tmpdir}"\n' + extra_conf)
     log = bot / "logs/startup.log"
     log.parent.mkdir()
     log.write_text(accepted + "\n")  # an old boot cannot satisfy the new fence
@@ -512,20 +580,58 @@ TMUX_BIN=fixture_tmux; export TMUX_BIN
     fence = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "1")
     assert fence.returncode == 0, fence.stderr
     _, token = fence.stdout.strip().split("\t")
-    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token).returncode != 0
+    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, bot_tmpdir).returncode != 0
     with log.open("a") as out:
         out.write(rejected + "\n")
-    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token).returncode != 0
+    assert _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, bot_tmpdir).returncode != 0
     with log.open("a") as out:
         out.write(accepted + "\n")
-    ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, bot_tmpdir)
     assert ready.returncode == 0 and ready.stdout.strip() == readiness
     no_session = _runtime_bash(prefix.replace(
         "fixture_tmux() { [ \"$*\" = '-L fixture-worker has-session -t worker' ]; }",
         "fixture_tmux() { return 1; }",
-    ), NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    ), NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, bot_tmpdir)
     assert no_session.returncode != 0
 
+
+
+def test_native_bot_readiness_uses_frozen_tmpdir_instead_of_operator_socket(tmp_path):
+    import shutil
+    import tempfile
+    from tests.conftest import constructed_env
+
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        pytest.skip("tmux is required for the real private-session contract")
+    # Keep the Unix socket short even when pytest's private checkout path is long.
+    with tempfile.TemporaryDirectory(prefix="cf-ready-", dir="/tmp") as scratch:
+        bot_tmpdir, operator_tmpdir = Path(scratch) / "bot", Path(scratch) / "operator"
+        bot_tmpdir.mkdir(mode=0o700)
+        operator_tmpdir.mkdir(mode=0o700)
+        bot = tmp_path / "bots/worker"
+        bot.mkdir(parents=True)
+        (bot / "bot.conf").write_text(f'BOT_SERVICE="fixture-worker"\nTMUX_TMPDIR="{bot_tmpdir}"\n')
+        env = constructed_env(HOME=tmp_path, TMUX_BIN=tmux, TMUX_TMPDIR=operator_tmpdir)
+        bot_env = {**env, "TMUX_TMPDIR": str(bot_tmpdir)}
+        prefix = '. "$1/supervisor.sh"; shift; "$@"'
+        try:
+            subprocess.run([tmux, "-f", "/dev/null", "-L", "fixture-worker", "new-session", "-d", "-s", "worker"],
+                           env=bot_env, check=True, capture_output=True, timeout=5)
+            fence = _runtime_bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "1", env=env)
+            assert fence.returncode == 0, fence.stderr
+            _, token = fence.stdout.strip().split("\t")
+            with (bot / "logs/startup.log").open("a") as out:
+                out.write("READY — non-channel bot, no poller to await\n")
+            ready = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, bot_tmpdir, env=env)
+            assert ready.returncode == 0, ready.stderr
+            assert ready.stdout.strip() == "session-ready"
+            wrong = _runtime_bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token, operator_tmpdir, env=env)
+            assert wrong.returncode != 0
+            assert not (operator_tmpdir / f"tmux-{os.getuid()}" / "fixture-worker").exists()
+        finally:
+            subprocess.run([tmux, "-L", "fixture-worker", "kill-server"], env=bot_env,
+                           capture_output=True, timeout=5)
 
 
 def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path, monkeypatch, request):

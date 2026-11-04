@@ -187,6 +187,30 @@ def _native(adapter, row, function, *args, timeout=30):
     return _call(adapter, function, row["target"], *args, timeout=timeout)
 
 
+def _prepare_bot_readiness(store, record, progress, row, adapter, root):
+    """Retain the lifecycle's readiness fence before this bot's native start."""
+    if progress.get("readiness") is None:
+        fence = _native(adapter, row, "svc_activation_bot_fence", root, row["bot_binding"][0]).split("\t")
+        if len(fence) != 2 or not fence[0].isdigit() or int(fence[0]) <= 0 or not fence[1]:
+            raise UpdateError("bot readiness fence is incomplete")
+        progress["readiness"] = {"ceiling": int(fence[0]), "token": fence[1]}
+        store.save(record)
+
+
+def _wait_bot_readiness(progress, row, adapter, root, installed):
+    """Observe the original fenced start using the shared lifecycle's full budget."""
+    fence = progress.get("readiness")
+    if (not isinstance(fence, dict) or set(fence) != {"ceiling", "token"}
+            or type(fence["ceiling"]) is not int or fence["ceiling"] <= 0
+            or not isinstance(fence["token"], str) or not fence["token"]):
+        raise UpdateError("original bot readiness fence is unavailable; start remains pending")
+    readiness = _native(adapter, row, "svc_activation_bot_ready", root, row["bot_binding"][0],
+                        str(fence["ceiling"]), fence["token"], row["bot_binding"][2], timeout=fence["ceiling"] + 30)
+    if readiness not in {"bridge-ready", "session-ready"}:
+        raise UpdateError("bot readiness outcome is unknown; original start remains pending")
+    return _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], installed, row["target"]) == "ready"
+
+
 def _row(store, key):
     store._assert_locked()
     record = store.load()
@@ -412,6 +436,8 @@ def restore_consumer(store, key, adapter, current_snapshot):
     observed = _native(adapter, row, "svc_activation_snapshot", source, key)
     if progress["restore"] == "files":
         _darwin(adapter, restored)
+        if row["bot_binding"] and row["disposition"] == "running":
+            _prepare_bot_readiness(store, record, progress, row, adapter, current_snapshot["data_root"])
         progress["restore"] = "pending"
         store.save(record)
         _native(adapter, row, "svc_activation_resume", source, key, desired,
@@ -419,6 +445,7 @@ def restore_consumer(store, key, adapter, current_snapshot):
         observed = _native(adapter, row, "svc_activation_snapshot", source, key)
         if (row["manager"] == "Darwin" and not row["scheduled"]
                 and (row["disposition"] == "running" or desired.endswith(" active"))
+                and not (row["bot_binding"] and (policy.get("RunAtLoad") or policy.get("KeepAlive")))
                 and observed.endswith(" inactive")):
             progress["start"] = "pending"
             store.save(record)
@@ -429,7 +456,7 @@ def restore_consumer(store, key, adapter, current_snapshot):
     if row["manager"] == "Darwin" and row["scheduled"]:
         expected = observed.split()[:2] == desired.split()[:2]
     if row["bot_binding"] and row["disposition"] == "running":
-        expected = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], source, key) == "ready"
+        expected = _wait_bot_readiness(progress, row, adapter, current_snapshot["data_root"], source)
     if not expected:
         raise UpdateError("native restoration remains pending; observation only on retry")
     _darwin(adapter, restored)
@@ -569,6 +596,8 @@ def _restore_added(store, record, progress, row, adapter, snapshot):
     observed = _native(adapter, row, "svc_inventory_state", installed, row["target"])
     should_start = row["enabled"] and not (row["manager"] == "Linux" and row["scheduled"] and source.suffix != ".timer")
     if progress["restore"] == "files":
+        if row["bot_binding"] and should_start:
+            _prepare_bot_readiness(store, record, progress, row, adapter, snapshot["data_root"])
         progress["restore"] = "pending"
         store.save(record)
         if row["manager"] == "Darwin" and row["enabled"]:
@@ -587,7 +616,7 @@ def _restore_added(store, record, progress, row, adapter, snapshot):
                 observed == "unchanged unloaded inactive" if row["manager"] == "Darwin" else
                 observed.endswith(" active") if source.suffix == ".timer" else observed.endswith(" inactive"))
     if row["bot_binding"] and should_start:
-        expected = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], installed, row["target"]) == "ready"
+        expected = _wait_bot_readiness(progress, row, adapter, snapshot["data_root"], installed)
     if not expected:
         raise UpdateError("added consumer restoration pending; retry observes original native action")
     progress["restore"] = "done"

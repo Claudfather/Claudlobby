@@ -1520,3 +1520,74 @@ def test_conversion_check_entry_requires_original_before_revision(update, monkey
             assert entry.main(args) == 0
             assert calls == [(record["request_id"], adapter)]
         parent._assert_locked()
+
+
+@pytest.mark.parametrize("case", ["retained_gui", "initial", "foreign_uid", "wrong_label", "unknown_gui", "background_from_gui"])
+def test_retained_job_uses_only_its_frozen_same_uid_gui_domain_without_application(update, monkeypatch, case):
+    import base64
+    import os
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    source = Path(__file__).resolve().parents[1] / "claudlobby"
+    for name in ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py", "supervision_runtime.py"):
+        shutil.copy2(source / name, installation.source / "claudlobby" / name)
+    for name in ("supervisor.sh", "supervisor-caller.py"):
+        shutil.copy2(source / "_runtime_scripts" / name, installation.native / name)
+    before = commit("Retain exact native updater support")
+    (installation.source / "templates/candidate.txt").write_text("next support\n")
+    target = commit("Next support")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        jobs, _, _ = updater._prepare_job_support(store)
+        native_directory = store.root / "native"
+        native_directory.mkdir()
+        if case != "initial":
+            executable = installation.bin / "claudlobby-update"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            domain = f"user/{os.getuid()}" if case == "background_from_gui" else f"gui/{os.getuid()}"
+            job = jobs.update_job_definition(installation, manager="Darwin", domain=domain,
+                                             install_directory=native_directory)
+            binding = {"manager": "Darwin", "target": job.target, "source": str(job.source),
+                "installed": str(job.installed), "sha256": updater._digest(job.content),
+                "content_base64": base64.b64encode(job.content).decode("ascii")}
+            if case == "foreign_uid":
+                binding["target"] = f"gui/{os.getuid() + 1}/" + job.target.rsplit("/", 1)[1]
+            elif case == "wrong_label":
+                binding["target"] += "-foreign"
+            record = store.load()
+            record.update(updater_job=binding, native_install_directory=str(native_directory))
+            store.save(record)
+        original = store.load()
+        installation.source.rename(installation.directory / "source-unavailable")
+        calls = []
+        def native_runner(argv, **kwargs):
+            # Exercise the real Adapter's command construction; no native binary runs.
+            assert argv[-1] == "svc_inventory_catalog"
+            selected = argv[:3] == ["/bin/launchctl", "asuser", str(os.getuid())]
+            calls.append(selected)
+            if selected and case == "unknown_gui":
+                return subprocess.CompletedProcess(argv, 3, "", "unavailable")
+            observed = "gui" if selected or case == "background_from_gui" else "user"
+            output = f"manager\tDarwin\ndomain\t{observed}/{os.getuid()}\ndirectory\t{native_directory}\nPID\tStatus\tLabel\n"
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        import_module = updater.importlib.import_module
+        def copied_module(name, *args, **kwargs):
+            module = import_module(name, *args, **kwargs)
+            if name.endswith(".supervision_inventory"):
+                monkeypatch.setattr(module.Adapter, "_run", staticmethod(native_runner))
+            return module
+        monkeypatch.setattr(updater.importlib, "import_module", copied_module)
+        if case in {"foreign_uid", "wrong_label", "unknown_gui", "background_from_gui"}:
+            with pytest.raises(UpdateError, match="retained updater|retained updater job"):
+                updater._retained_job(store)
+        else:
+            _, retained, adapter = updater._retained_job(store)
+            assert retained.data_root == installation.data_root
+            assert adapter._selected_gui_uid == (os.getuid() if case == "retained_gui" else None)
+        assert calls == ({"retained_gui": [False, True], "unknown_gui": [False, True],
+                          "background_from_gui": [False]}.get(case, []))
+        assert store.load() == original and not installation.environment.exists()

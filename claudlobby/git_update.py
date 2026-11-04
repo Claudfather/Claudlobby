@@ -1119,6 +1119,25 @@ def _retained_job(store):
         sys.dont_write_bytecode = previous
     installation = locations.read_installation(store.installation.directory)
     adapter = inventory.Adapter(types.SimpleNamespace(native=directory))
+    binding = record.get("updater_job")
+    if binding is not None and binding.get("manager") == "Darwin":
+        target = binding.get("target")
+        label = jobs.update_job_label(installation)
+        domains = {f"gui/{os.getuid()}", f"user/{os.getuid()}"}
+        if not isinstance(target, str) or target not in {f"{domain}/{label}" for domain in domains}:
+            raise UpdateError("retained updater target differs from its installation or current user")
+        selected = target.rsplit("/", 1)[0]
+        try:
+            manager, domain, _, _, _ = inventory._catalog(adapter.read("svc_inventory_catalog"))
+            if manager == "Darwin" and selected == f"gui/{os.getuid()}" and domain == f"user/{os.getuid()}":
+                # Only the original bound GUI target licenses the existing same-UID
+                # pivot. A new installation still selects its observed domain.
+                adapter = adapter.in_selected_gui(target)
+                manager, domain, _, _, _ = inventory._catalog(adapter.read("svc_inventory_catalog"))
+        except inventory.InventoryError as exc:
+            raise UpdateError("retained updater native domain cannot be verified") from exc
+        if manager != "Darwin" or domain != selected:
+            raise UpdateError("native adapter domain differs from the retained updater job")
     return jobs, installation, adapter
 
 

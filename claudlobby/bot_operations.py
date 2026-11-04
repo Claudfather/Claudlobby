@@ -1302,7 +1302,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                         timeout=enroll_budget)
                 _observed(root, declarations, adapter, entry["target"], installed)
                 readiness = _native(adapter, "svc_activation_bot_ready", root, spec.bot_dir,
-                                    fence[0], fence[1], timeout=int(fence[0]) + 30)
+                                    fence[0], fence[1], spec.environment["TMUX_TMPDIR"], timeout=int(fence[0]) + 30)
                 if readiness not in {"bridge-ready", "session-ready"}:
                     raise BotLifecycleError("bot native readiness outcome is unknown",
                                             effect_attempted=True, unavailable=True)

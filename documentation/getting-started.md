@@ -51,6 +51,8 @@ CLI="$INSTALL/bin/claudlobby"
 
 This is the same preparation helper, plus the public host prerequisite/native catalog check. Choose the native installation directory from its observed `install_directories`; do not guess a replacement if the manager is unavailable.
 
+On macOS, also retain the observed native domain. A logged-in desktop terminal and an SSH/background session can select different domains (`gui/UID` and `user/UID`). Prepare new updates from the original domain. Continuing an interrupted update keeps its recorded domain, including when continuing a GUI-bound operation from a background session; it never moves the services implicitly. Preparation does not prove the agents will be available after a reboot: verify that separately in the intended login/session arrangement.
+
 **Credential gate:** stop here until provider sign-in and the intended repository/tool access are independently verified for this OS user. Preparation is not authentication or proof of agent readiness. Keep secrets in the appropriate private `.env` tiers, never in Git or command arguments. Teams without channels need no Telegram credentials. The optional `fleet.yaml.seed` is for an operator who explicitly chooses Telegram; complete its placeholders and channel prerequisites before using it.
 
 ## 2. Prepare the first fleet
