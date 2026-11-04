@@ -120,7 +120,16 @@ def _fresh_root(store, record=None, *, committed=False):
             raise UpdateError("initialization refuses foreign Plane data or queues")
     if (directory / "owner-access.db").exists():
         from .plane.owner_access import OwnerAccess
-        OwnerAccess(root).validate_storage()
+        access = OwnerAccess(root)
+        # Only a published DB proven above to belong to this same committing
+        # initialization may retain already-retired first-owner preparation.
+        resume_owner = (committed and record.get("initialize") is True
+                        and record.get("phase") == "commit"
+                        and record["initialization"]["database"]["state"] == "published")
+        access.validate_storage(allow_retired_first_fleet=resume_owner)
+        if resume_owner and not access.first_fleet_pending():
+            from .plane.owner_source import inspect_source
+            inspect_source(root)  # No re-attestation on an interrupted completion.
 
 
 def prepare_operation(store, rendered, adapter, install_directory, interpreter, request_id, *, initialize=False):
@@ -395,6 +404,10 @@ def publish_operation(store):
         store.save(record)
     if record.get("initialize", False):
         _initialize_database(store)
+        # The initializer has just proved this operation's published DB inode;
+        # bind existing first-owner preparation before any registry/native writer.
+        from .plane.owner_source import complete_first_fleet_source
+        complete_first_fleet_source(store.root)
         _initialize_identities(store, rendered)
         record = store.load()
     interpreter = Path(record["host_interpreter"])

@@ -345,7 +345,7 @@ class OwnerAccess:
             self._first_fleet_preparation(conn, allow_retired=True)
             conn.execute("UPDATE first_fleet_preparation SET active=0 WHERE singleton=1")
 
-    def validate_storage(self) -> None:
+    def validate_storage(self, *, allow_retired_first_fleet: bool = False) -> None:
         """Read-only validation for preserving authority during first activation."""
         with self._connection() as conn:
             if conn.execute("PRAGMA quick_check").fetchall()[0][0] != "ok":
@@ -360,7 +360,7 @@ class OwnerAccess:
                 self.workspace()._binding(conn)
             if tables & {"connected_metadata", "connected_challenges", "connected_sessions"}:
                 self.connected()._schema(conn)
-            self._first_fleet_preparation(conn)
+            self._first_fleet_preparation(conn, allow_retired=allow_retired_first_fleet)
 
     def workspace(self):
         """Optional local workspace authority, sharing this store's transactions."""

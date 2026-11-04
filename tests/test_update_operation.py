@@ -427,8 +427,10 @@ def test_initialize_publication_finishes_files_schema_ids_before_current_commit(
     monkeypatch.setattr(operation, "read_rendered", lambda *_: "render")
     monkeypatch.setattr(operation, "apply_publication", lambda *_: events.append("files"))
     monkeypatch.setattr(operation, "_initialize_database", lambda *_: events.append("schema"))
+    from claudlobby.plane import owner_source
+    monkeypatch.setattr(owner_source, "complete_first_fleet_source", lambda *_: events.append("owner"))
     def identities(store, rendered):
-        assert store.load()["maintenance"] is True and events == ["files", "schema"]
+        assert store.load()["maintenance"] is True and events == ["files", "schema", "owner"]
         events.append("identities")
         data = store.load()
         data["candidate_config"]["identities"] = {"actual": "registry IDs"}
@@ -442,7 +444,7 @@ def test_initialize_publication_finishes_files_schema_ids_before_current_commit(
         events.append("config")
     monkeypatch.setattr(operation, "publish_current_config", commit)
     result = operation.publish_operation(store)
-    assert events == ["files", "schema", "identities", "launcher", "updater", "config"]
+    assert events == ["files", "schema", "owner", "identities", "launcher", "updater", "config"]
     assert result["phase"] == "restore" and result["config_committed"] and not result["maintenance"]
 
 
@@ -470,3 +472,86 @@ def test_initialize_added_bot_restore_intent_does_not_request_absent_session_che
     assert observed == ["bot"]
     assert result["consumers"]["bot"]["stop"] == "done"
     assert "checkpoint" not in result["consumers"]["bot"]
+
+
+def test_owned_initialized_database_completes_existing_first_owner_before_registry(initial_store, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.ids import ensure_host_uid, read_host_uid
+    from claudlobby.plane.owner_access import OwnerAccess
+    store = initial_store
+    host = ensure_host_uid(store.root / 'state')
+    access = OwnerAccess.initialize(store.root, before_first_fleet=True)
+    monkeypatch.setattr(operation, '_git', lambda *_: SimpleNamespace(
+        stdout=f'SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n'.encode()))
+    operation._initialize_database(store)
+    before = operation._initial_database(store, store.load())
+    owner_source.complete_first_fleet_source(store.root)
+    assert operation._initial_database(store, store.load()) == before
+    assert owner_source.inspect_source(store.root) == host
+    assert read_host_uid(store.root / 'state') == host and not access.first_fleet_pending()
+    assert store.load()['candidate_config']['identities'] is None
+    assert not (store.root / 'state/config.json').exists()
+
+
+def test_publication_resumes_after_first_owner_retirement_without_rebinding(initial_store, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.ids import ensure_host_uid
+    from claudlobby.plane.owner_access import OwnerAccess, AccessUnavailable
+    store = initial_store
+    host = ensure_host_uid(store.root / 'state')
+    access = OwnerAccess.initialize(store.root, before_first_fleet=True)
+    store.record.update(phase='environment', maintenance=True, git_complete=True,
+                        dependencies={'environment_complete': True}, host_interpreter='/python')
+    monkeypatch.setattr(operation, '_git', lambda *_: SimpleNamespace(
+        stdout=f'SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n'.encode()))
+    monkeypatch.setattr(operation, '_head', lambda *_: 'target')
+    monkeypatch.setattr(operation, 'read_rendered', lambda *_: 'render')
+    monkeypatch.setattr(operation, 'apply_publication', lambda *_: None)
+    monkeypatch.setattr(operation, 'install_launcher', lambda *_a, **_k: None)
+    monkeypatch.setattr(operation, 'install_updater', lambda *_a, **_k: None)
+    def identities(store, rendered):
+        assert not access.first_fleet_pending() and owner_source.inspect_source(store.root) == host
+        data = store.load()
+        data['candidate_config']['identities'] = {'existing': 'ids'}
+        store.save(data)
+    monkeypatch.setattr(operation, '_initialize_identities', identities)
+    def interrupted(*_a, **_k):
+        raise OSError('interrupted before config commit')
+    monkeypatch.setattr(operation, 'publish_current_config', interrupted)
+    with pytest.raises(OSError, match='before config commit'):
+        operation.publish_operation(store)
+    assert store.load()['phase'] == 'commit' and not access.first_fleet_pending()
+    assert not (store.root / 'state/config.json').exists()
+    # The default fresh preparation validation stays strict.
+    with pytest.raises(AccessUnavailable):
+        access.validate_storage()
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must inspect retired binding'))
+    commits = []
+    monkeypatch.setattr(operation, 'publish_current_config', lambda snapshot, **_: commits.append(snapshot))
+    result = operation.publish_operation(store)
+    assert result['phase'] == 'restore' and result['config_committed']
+    assert len(commits) == 1 and owner_source.inspect_source(store.root) == host
+
+
+@pytest.mark.parametrize('defect', ['unbound', 'foreign'])
+def test_committing_owned_database_refuses_retired_changed_source(initial_store, monkeypatch, defect):
+    import sqlite3
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.ids import ensure_host_uid
+    from claudlobby.plane.owner_access import OwnerAccess
+    store = initial_store
+    ensure_host_uid(store.root / 'state')
+    OwnerAccess.initialize(store.root, before_first_fleet=True)
+    monkeypatch.setattr(operation, '_git', lambda *_: SimpleNamespace(
+        stdout=f'SQL_SCHEMA_VERSION = {operation.SQL_SCHEMA_VERSION}\n'.encode()))
+    operation._initialize_database(store)
+    owner_source.complete_first_fleet_source(store.root)
+    store.record['phase'] = 'commit'
+    with sqlite3.connect(operation.db_file(store.root)) as conn:
+        if defect == 'unbound':
+            conn.execute('DROP TABLE owner_source_binding')
+        else:
+            conn.execute('UPDATE owner_source_binding SET host_uid=?', ('host_' + 'f' * 32,))
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must not re-attest'))
+    with pytest.raises((owner_source.SourceNeedsBinding, owner_source.SourceDenied)):
+        operation._fresh_root(store, store.load(), committed=True)
