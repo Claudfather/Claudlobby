@@ -737,3 +737,87 @@ def test_conversion_refuses_cross_domain_or_retargeted_inventory_before_freezing
     with pytest.raises(UpdateError, match="original native manager domain|historical native targets"):
         services.freeze_service_intent(None, adapter, tmp_path, baseline=baseline)
     assert calls == ([] if defect == "domain" else ["inventory"])
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_darwin_bot_pause_binds_private_server_and_pending_retry_never_resends(tmp_path, monkeypatch, interrupted):
+    row = intent(tmp_path)
+    row.update(manager="Darwin", bot_binding=[str(tmp_path), "example", str(tmp_path)],
+               disposition="running", saved_native="unchanged loaded inactive",
+               restore_native="unchanged loaded inactive")
+    store, native = Store(tmp_path, row), Native()
+    native.state, native.session = "unchanged loaded inactive", "ready"
+    monkeypatch.setattr(services, "_darwin", lambda *_: None)
+    original = native.call
+    def call(function, *args, **kwargs):
+        if function == "svc_activation_pause":
+            native.calls.append((function, args))
+            assert store.load()["consumers"][row["target"]]["stop"] == "pending"
+            assert args[4:] == ("bot-owned", *row["bot_binding"])
+            native.state = "unchanged unloaded inactive"
+            if interrupted:
+                raise TimeoutError("private stop outcome unknown")
+            native.session = "absent"
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return original(function, *args, **kwargs)
+    native.call = call
+    def quiet(*_):
+        if native.session != "absent":
+            raise UpdateError("private socket still accepts")
+    monkeypatch.setattr(services, "observe_quiet", quiet)
+    if interrupted:
+        from claudlobby.supervision_runtime import RuntimeEvidenceError
+        with pytest.raises(RuntimeEvidenceError, match="native observation failed or timed out"):
+            services.quiesce_consumer(store, row["target"], native)
+        with pytest.raises(UpdateError, match="private socket"):
+            services.quiesce_consumer(store, row["target"], native)
+        native.session = "absent"  # Original effect subsequently observed complete.
+    services.quiesce_consumer(store, row["target"], native)
+    assert sum(name == "svc_activation_pause" for name, _ in native.calls) == 1
+    assert store.load()["consumers"][row["target"]]["stop"] == "done"
+
+
+@pytest.mark.parametrize("defect", [None, "label", "file", "private-stop-failure"])
+def test_darwin_pause_shell_unloads_before_exact_private_stop(tmp_path, defect):
+    import subprocess
+    script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/supervisor.sh"
+    trace = tmp_path / "trace"
+    body = r'''
+set -euo pipefail
+. "$1"
+_OS=Darwin
+loaded=loaded
+_svc_activation_saved() { :; }
+svc_activation_assert_external() {
+    printf 'external\n' >> "$TRACE"
+    SVC_ACT_LOAD="$loaded"
+    SVC_ACT_ACTIVE=inactive
+    SVC_ACT_GROUP=""
+}
+_svc_activation_read() { SVC_ACT_LOAD="$loaded"; SVC_ACT_ACTIVE=inactive; }
+launchctl() {
+    [ "$1" = bootout ] && [ "$2" = gui/123/example ] || return 99
+    printf 'bootout\n' >> "$TRACE"
+    loaded=unloaded
+}
+svc_activation_stop_private_server() {
+    [ "$loaded" = unloaded ] || return 98
+    [ "$1" = /owned/bot ] && [ "$2" = example ] && [ "$3" = /owned/tmp ] && [ "$4" = retired ] || return 97
+    printf 'private-stop\n' >> "$TRACE"
+    [ "$DEFECT" != private-stop-failure ] || return 3
+}
+file=/owned/example.plist
+label=example
+[ "$DEFECT" != file ] || file=/owned/foreign.plist
+[ "$DEFECT" != label ] || label=foreign
+svc_activation_pause "$file" gui/123/example 'unchanged loaded inactive' 123 bot-owned /owned/bot "$label" /owned/tmp
+'''
+    outcome = subprocess.run(["/bin/bash", "-c", body, "pause-contract", str(script)],
+                             env={"PATH": "/usr/bin:/bin", "TRACE": str(trace), "DEFECT": defect or ""},
+                             capture_output=True, text=True, timeout=10)
+    observed = trace.read_text().splitlines() if trace.exists() else []
+    if defect in {"label", "file"}:
+        assert outcome.returncode == 3 and observed == []
+    else:
+        assert observed == ["external", "bootout", "private-stop"], outcome.stderr
+        assert outcome.returncode == (3 if defect else 0), outcome.stderr

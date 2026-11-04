@@ -322,11 +322,10 @@ def quiesce_consumer(store, key, adapter):
         progress["stop"] = "pending"
         store.save(record)
         capability = ()
-        if row["manager"] == "Linux":
-            if row["bot_binding"]:
-                capability = ("bot-owned", *row["bot_binding"])
-            elif row["scheduled"]:
-                capability = ("timer-owned",)
+        if row["bot_binding"]:
+            capability = ("bot-owned", *row["bot_binding"])
+        elif row["manager"] == "Linux" and row["scheduled"]:
+            capability = ("timer-owned",)
         _native(adapter, row, "svc_activation_pause", _file(row), key, row["restore_native"],
                 str(os.getpid()), *capability, timeout=120)
     observe_quiet(store, key, adapter)

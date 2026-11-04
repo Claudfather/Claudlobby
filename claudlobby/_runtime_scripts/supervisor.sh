@@ -1072,10 +1072,15 @@ EOF
 svc_activation_pause() {
     local file="$1" target="$2" saved="$3" remaining=20 reset=0 owner="${5:-}" bot_group="" members
     case "$owner" in ""|timer-owned|bot-owned) ;; *) return 3 ;; esac
-    [ -z "$owner" ] || { [ "$_OS" = Linux ] && [ "${target##*.}" = service ]; } || return 3
-    if [ "$owner" = bot-owned ]; then
-        [ "$#" = 8 ] && [ "$target" = "${7}.service" ] && [ "${file##*/}" = "$target" ] || return 3
-    fi
+    case "$owner:$_OS" in
+        timer-owned:Linux) [ "${target##*.}" = service ] || return 3 ;;
+        bot-owned:Linux)
+            [ "$#" = 8 ] && [ "$target" = "${7}.service" ] && [ "${file##*/}" = "$target" ] || return 3 ;;
+        bot-owned:Darwin)
+            [ "$#" = 8 ] && [ "${target##*/}" = "$7" ] && [ "${file##*/}" = "$7.plist" ] || return 3 ;;
+        :*) ;;
+        *) return 3 ;;
+    esac
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
     bot_group="$SVC_ACT_GROUP"
@@ -1157,6 +1162,11 @@ svc_activation_pause() {
                         _svc_activation_unknown "$target post-bootout wait interrupted"; return 3;
                     }
                 done
+            fi
+            if [ "$owner" = bot-owned ]; then
+                # The exited launch wrapper can leave its private tmux server
+                # alive. Stop only the frozen bot endpoint after native unload.
+                svc_activation_stop_private_server "$6" "$7" "$8" retired || return $?
             fi
             ;;
     esac
