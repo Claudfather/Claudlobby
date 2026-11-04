@@ -20,6 +20,17 @@ from tests.test_releases import installed, r, release_tree
 from tests.test_supervision_inventory import Observations, observed_print
 
 
+def test_successful_native_diagnostic_preserves_json_stdout(capsys):
+    class DiagnosticAdapter:
+        def call(self, function, *args):
+            return subprocess.CompletedProcess([function, *args], 0, "paused\n",
+                                               "activation parking: worker.service raw state masked failed MainPID=0 ControlPID=0\n")
+    assert units._call(DiagnosticAdapter(), "svc_activation_pause") == "paused"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "activation parking: worker.service raw state masked failed MainPID=0 ControlPID=0\n"
+
+
 class RecordedAdapter:
     def __init__(self, inventory):
         self.manager = inventory.manager
@@ -43,6 +54,7 @@ class RecordedAdapter:
         self.hidden_masks = set()
         self.binding_changed = False
         self.sessions = {}
+        self.bot_pause_args = []
 
     def read(self, function, *args):
         result = self.call(function, *args)
@@ -85,6 +97,10 @@ class RecordedAdapter:
             assert args[2] == self.native[target]
             if self.manager == "Linux" and target == "scheduled.service":
                 assert args[4] == "timer-owned"
+            elif self.manager == "Linux" and target == "member.service":
+                assert args[4] == "bot-owned" and len(args) == 8
+                assert args[6] == "member" and Path(args[5]).is_absolute() and Path(args[7]).is_absolute()
+                self.bot_pause_args.append(args[4:])
             else:
                 assert len(args) == 4
             if target == self.pause_failure:
@@ -137,6 +153,9 @@ def enrollment(installed, tmp_path):
             target.chmod(0o640)
         properties = {"UnitFileState": "disabled" if scope == "bot" else "enabled",
                       "LoadState": "loaded", "ActiveState": "inactive" if scope == "bot" else "active"}
+        if scope == "bot":
+            properties["Environment"] = shlex.join([f"{key}={value}" for key, value in native_env]
+                                                  + [f"TMUX_TMPDIR={root / 'tmux'}"])
         declaration = UnitDeclaration(source, scope, root, release.release_id, native_env,
                                       "alpha" if scope != "host" else None,
                                       "member" if scope == "bot" else None,
@@ -1389,6 +1408,9 @@ def test_per_bot_parking_keeps_native_bot_live_until_its_exact_stop_intent(enrol
         assert not Path(row["installed"][0]["path"]).exists()
         with pytest.raises(state.ActivationError, match="stop intent"):
             units.pause_bot(store, "cutover", target="member.service", adapter=adapter)
+        with pytest.raises(state.ActivationError, match="stop intent"):
+            units.pause_bot(store, "cutover", target="collector.service", adapter=adapter)
+        assert not adapter.bot_pause_args
         store.record_handoff("cutover", target="member.service", result="server_absent")
         witness = {"unit_sha256": units._digest(row), "socket": str(inventory.data_root / "private.sock"),
                    "capture_sha256": None}
@@ -1398,6 +1420,8 @@ def test_per_bot_parking_keeps_native_bot_live_until_its_exact_stop_intent(enrol
         store.record_bot_quiescence("cutover", target="member.service", witness=witness)
         proof = units.pause_bot(store, "cutover", target="member.service", adapter=adapter)
         assert proof.targets == ("member.service",)
+        assert adapter.bot_pause_args == [("bot-owned", str(inventory.data_root), "member",
+                                           str(inventory.data_root / "tmux"))]
         assert adapter.states["member.service"] == "masked-runtime masked inactive"
         assert adapter.states["collector.service"] == adapter.original["collector.service"]
         # Same parking writer resumes after a stop; it does not restore or recapture the bot.

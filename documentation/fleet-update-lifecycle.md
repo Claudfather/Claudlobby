@@ -619,6 +619,21 @@ Every bot start — intentional (restart skill, weekly bounce), crash (keepalive
 
 On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `claudlobby/_runtime_scripts/pre-stop-handoff.sh` triggers a fresh handoff before the restart — behind the same capability gate, since this runs on the `ExecStop` path where an unresolvable command costs the handoff at exactly the moment it matters. Non-blocking either way (always exits 0, even on a 30s timeout), so the restart never stalls on a slow or failed handoff; a skip is logged and emits `handoff_skipped`. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
 
+Host activation uses the explicit, verified handoff path. If that request reports
+`handoff-timeout` after its initial 30-second wait, activation continues observing
+the same request for up to 15 minutes, printing progress to stderr every 30 seconds.
+It stops the bot only after verifying the saved context. If the deadline expires,
+the activation retains its pending request and prints its exact `--resume` ID;
+resuming observes that request without sending another handoff. Other native
+refusals remain refusals, and JSON output stays on stdout.
+
+On Linux, activation first confirms the exact bot's restart mask, then stops its
+checkpointed private tmux server before stopping the unit. This lets the child
+subreaper exit with its children rather than waiting for a service-stop timeout.
+Recovery can clear a failed marker only for an owned, masked bot with no native
+PIDs or remaining cgroup members; it retains the raw failure diagnostic and still
+requires the normal independent quiescence check.
+
 ## Relationship to PR #399
 
 PR #399 added `claudlobby/_runtime_scripts/update-claude-code.sh` with a daily **fleet-wide bounce** — every bot, managers included, restarted once a day whenever the binary changed. That bounce is the literal daily-reset context-loss pain this lifecycle removes. It is **retired**: `update-claude-code.sh` is now download-only. Its daily binary download **survives unchanged**. The bounce it used to perform is replaced by the weekly worker-only lossless restart (Mechanism 2) plus natural restarts — both now resume-on-start instead of cold-starting.
