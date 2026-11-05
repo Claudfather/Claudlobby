@@ -520,6 +520,10 @@ def restore_consumer(store, key, adapter, current_snapshot):
             # over the mask, so the schedules still restore after it. A bot left
             # paused is reported apart, below.
             progress["restore"] = "done"
+            if row["bot_binding"]:
+                # Saved with "done", so a pass cut off before the bot is read
+                # leaves it to the next pass, whose read replaces or clears this.
+                progress["restore_error"] = "this update left the bot paused and has not read it since"
             store.save(record)
         if row["bot_binding"]:
             return _paused_bot_decided(store, key, adapter)

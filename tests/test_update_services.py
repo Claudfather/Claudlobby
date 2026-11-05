@@ -1073,11 +1073,17 @@ class UnitStates(Native):
         return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
 
-@pytest.mark.parametrize("decision", ["stop", "start"])
-def test_a_bot_left_paused_keeps_the_update_pending_until_it_runs_or_its_stop_is_recorded(tmp_path, monkeypatch, decision):
-    """#2699: the update reported done with four bots down. It names each one until someone decides."""
+def _at_restore(store, tmp_path, monkeypatch):
+    """The update's configuration is committed, and its restore stage runs next."""
     from claudlobby import update_operation
-    from claudlobby.stop_record import write_stop
+    store.root, store.installation = tmp_path, None
+    store.record.update(phase="restore", config_committed=True, target="target",
+                        candidate_config={"fingerprint": "candidate"})
+    monkeypatch.setattr(update_operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "candidate"})
+
+
+def _paused_update(tmp_path, monkeypatch):
+    """An update at its restore stage over the paused bot and a parked timer, which restores after it."""
     case = _paused_bot(tmp_path, monkeypatch)
     bot = case.frozen
     (tmp_path / "timer").mkdir()
@@ -1090,13 +1096,19 @@ def test_a_bot_left_paused_keeps_the_update_pending_until_it_runs_or_its_stop_is
     store = Store(tmp_path, bot)
     store.record["consumers"][timer["target"]] = {"intent": timer}
     store.record["scope"] = services.consumer_scope([bot, timer])
-    store.root, store.installation = tmp_path, None
     adapter = UnitStates({bot["target"]: "masked-runtime masked inactive", timer["target"]: "disabled loaded inactive"})
     for key in (bot["target"], timer["target"]):
         services.quiesce_consumer(store, key, adapter)
-    store.record.update(phase="restore", config_committed=True, target="target",
-                        candidate_config={"fingerprint": "candidate"})
-    monkeypatch.setattr(update_operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "candidate"})
+    _at_restore(store, tmp_path, monkeypatch)
+    return case, bot, timer, store, adapter
+
+
+@pytest.mark.parametrize("decision", ["stop", "start"])
+def test_a_bot_left_paused_keeps_the_update_pending_until_it_runs_or_its_stop_is_recorded(tmp_path, monkeypatch, decision):
+    """#2699: the update reported done with four bots down. It names each one until someone decides."""
+    from claudlobby import update_operation
+    from claudlobby.stop_record import write_stop
+    case, bot, timer, store, adapter = _paused_update(tmp_path, monkeypatch)
 
     first = update_operation.restore_operation(store, adapter)
     error = first["health_errors"][bot["target"]]
@@ -1123,6 +1135,10 @@ def test_a_bot_left_paused_keeps_the_update_pending_until_it_runs_or_its_stop_is
         adapter.states[bot["target"]] = "enabled loaded active"
         starting = update_operation.restore_operation(store, adapter)["health_errors"]
         assert set(starting) == {bot["target"]} and "(native state: enabled loaded active, session absent)" in starting[bot["target"]]
+        # The real observer answers unknown while the unit is active and its session not yet up: still down.
+        adapter.session = "unknown"
+        starting = update_operation.restore_operation(store, adapter)["health_errors"]
+        assert set(starting) == {bot["target"]} and "(native state: enabled loaded active, session unknown)" in starting[bot["target"]]
         adapter.session = "ready"
     done = update_operation.restore_operation(store, adapter)
     assert done["phase"] == "done" and done["health_errors"] == {}
@@ -1130,6 +1146,29 @@ def test_a_bot_left_paused_keeps_the_update_pending_until_it_runs_or_its_stop_is
         "; the bot's stop is recorded" if decision == "stop" else "; the bot runs again")
     effects = {"svc_activation_pause", "svc_activation_resume", "svc_activation_start", "svc_activation_clear_runtime_mask"}
     assert not [name for name, args in adapter.calls if name in effects and args[1] == bot["target"]]
+
+
+def test_a_restore_pass_cut_off_before_the_paused_bot_is_read_names_it_on_the_next_pass(tmp_path, monkeypatch):
+    """A kill, a power cut or the restore child's time limit can stop a pass mid-read; the next pass reads the bot."""
+    from claudlobby import update_operation
+    _, bot, timer, store, adapter = _paused_update(tmp_path, monkeypatch)
+
+    class Cut(BaseException):
+        pass
+
+    def call(function, *args, timeout=30, read=adapter.call):
+        if store.record["consumers"][bot["target"]].get("restore") == "done":
+            raise Cut(function)
+        return read(function, *args, timeout=timeout)
+    adapter.call = call
+    with pytest.raises(Cut, match="svc_inventory_state"):
+        update_operation.restore_operation(store, adapter)
+    del adapter.call
+    assert store.record["phase"] == "restore" and store.record["consumers"][bot["target"]]["restore"] == "done"
+    resumed = update_operation.restore_operation(store, adapter)
+    assert set(resumed["health_errors"]) == {bot["target"]}
+    assert resumed["health_errors"][bot["target"]].startswith(f"this update left bot example/worker paused: {bot['target']}")
+    assert resumed["consumers"][timer["target"]]["restore"] == "done"
 
 
 @pytest.mark.parametrize("kind,previous,desired", [
@@ -1193,6 +1232,17 @@ def test_completed_old_producer_pause_restores_original_intent(tmp_path, monkeyp
     if kind == "preexisting_mask":
         assert frozen["preserved_mask"]["snapshot"] == mask_snapshot and frozen["installed"] == []
         assert frozen["restore_native"] == desired and not installed.exists()
+        # Not a bot, so the restore keeps the mask as before: paused, and no health error (#2699).
+        from claudlobby import update_operation
+        frozen["phase"] = "producers"  # a real row's phase, from its candidate; the restore loop orders by it
+        store = Store(tmp_path, frozen)
+        _at_restore(store, tmp_path, monkeypatch)
+        adapter.calls.clear()
+        done = update_operation.restore_operation(store, adapter)
+        assert done["phase"] == "done" and done["health_errors"] == {}
+        assert done["consumers"][frozen["target"]]["restore"] == "done" and done["consumers"][frozen["target"]]["outcome"] == services._PAUSED
+        assert {name for name, _ in adapter.calls} == {"svc_inventory_state", "svc_activation_quiet"}
+        assert not installed.exists() and mask.is_symlink()
         return
     assert "preserved_mask" not in frozen and frozen["legacy_parked"] == parked[str(installed)]
     assert frozen["saved_native"] == "masked-runtime masked inactive" and frozen["restore_native"] == desired
