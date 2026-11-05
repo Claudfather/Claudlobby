@@ -234,14 +234,19 @@ An unknown result may have reached the pane, so do not automatically retry.
 ```bash
 claudlobby --json bot start WORKER
 claudlobby --json bot restart WORKER
+claudlobby --json bot restart WORKER --fresh
 claudlobby --json bot stop WORKER
 claudlobby --json bot stop WORKER --reason "parked until the review lands"
 ```
 
 `start` is idempotent when the selected bot's session is already ready; use
-`restart` for an intentional bounce, with a best-effort handoff and a fresh
-bridge/session readiness check. `stop` de-enrolls supervision and stops the
-session, so keepalive cannot revive it; a later `start` is explicit re-enrollment.
+`restart` for an intentional bounce: it waits for an idle prompt, continues the
+same conversation and ends with a fresh bridge/session readiness check. Add
+`--fresh` to start a new session instead, with an empty context that resumes
+from the bot's saved handoff when that is under a day old; when its current
+context matters, request `bot handoff WORKER` first and wait for `saved`.
+`stop` de-enrolls supervision and stops the session, so keepalive cannot revive
+it; a later `start` is explicit re-enrollment.
 `stop` also records the stop, with an optional `--reason`, so fleet-pulse raises
 no alert for the bot and shows it as stopped; `start` removes that record.
 Read `data.recording`: `degraded` means the record or its plane row did not

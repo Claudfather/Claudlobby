@@ -4440,6 +4440,39 @@ session_command_status() {
     return "$rc"
 }
 
+# fresh_session_resume <mode> <bot_dir> <socket> <session> <log> <ticks>
+# A fresh native session (`bot restart --fresh`, or any launch that mints a new
+# UUID) first restores the bot's saved handoff, so a fresh session means an
+# empty context, not a lost one (#2696). It sends SESSION_RESUME_COMMAND (empty
+# sends nothing) as its own submission before the authored startup, while the
+# handoff's last_updated, else its mtime, is under RESUME_MAX_AGE_S (86400) old.
+# Exact continuation already holds the conversation and sends nothing. Success
+# is submission evidence only, never a completed resume.
+fresh_session_resume() {
+    local mode="$1" bot_dir="$2" socket="$3" session="$4" log="$5" ticks="$6"
+    local handoff="$2/.claude/session.md" max_age="${RESUME_MAX_AGE_S:-86400}" epoch=""
+    local command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
+    [ "$mode" = fresh ] && [ -f "$handoff" ] || return 0
+    case "$max_age" in ''|*[!0-9]*) max_age=86400 ;; esac
+    epoch="$(session_md_handoff_epoch "$handoff" || true)"
+    case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$(( $(date +%s) - epoch ))" -ge "$max_age" ]; then
+        printf '%s RESUME SKIP — fresh session; handoff older than %ss, starting clean\n' \
+            "$(ts_iso)" "$max_age" >> "$log"
+        return 0
+    fi
+    if ! _session_command_resolve "$command" "$bot_dir"; then
+        printf '%s RESUME SKIP — fresh session and handoff, but no resume command [%s]; it stays at %s\n' \
+            "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$handoff" >> "$log"
+        emit_fleet_event resume_skipped startup \
+            "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$handoff\"}" || true
+        return 0
+    fi
+    printf '%s RESUME — injecting resume command [%s; fresh session]: %s\n' \
+        "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
+    _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
+}
+
 _startup_send() {
     local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5" kind="$6" label="$7" text="$8"
     local started rc=0

@@ -91,6 +91,63 @@ emit_fleet_event() { :; }
         assert output.split("\t")[0] == ("payload" if complete else "partial")
 
 
+    @pytest.mark.parametrize("mode, handoff, command, sent, line", [
+        ("fresh", "recent", "/claudna:session resume --auto", True, "RESUME — injecting resume command [available; fresh session]"),
+        ("fresh", "legacy", "/claudna:session resume --auto", True, "RESUME — injecting"),
+        ("fresh", "stale", "/claudna:session resume --auto", False, "RESUME SKIP — fresh session; handoff older than 86400s"),
+        ("fresh", "absent", "/claudna:session resume --auto", False, None),
+        ("fresh", "recent", "", False, "RESUME SKIP — fresh session and handoff, but no resume command [no-command]"),
+        ("fresh", "recent", "/absent:session resume --auto", False, "[provider-absent:absent]"),
+        ("resume", "recent", "/claudna:session resume --auto", False, "NATIVE RESUME"),
+    ])
+    def test_a_fresh_session_resumes_from_its_saved_handoff_before_startup(
+            self, tmp_path, mode, handoff, command, sent, line):
+        """#2696: the resume command precedes the authored startup only in a fresh session."""
+        sends, log, errors, events = (tmp_path / name for name in ("sends", "startup.log", "errors", "events"))
+        bot, account = tmp_path / "bot", tmp_path / "account"
+        (bot / ".claude").mkdir(parents=True)
+        (account / "plugins/cache/Claudfather/claudna").mkdir(parents=True)
+        checkpoint = bot / ".claude/session.md"
+        now = datetime.now(timezone.utc)
+        if handoff == "recent":
+            checkpoint.write_text(f"---\nlast_updated: {_iso(now)}\n---\ncontext\n")
+        elif handoff == "stale":
+            checkpoint.write_text(f"---\nlast_updated: {_iso(now - timedelta(days=2))}\n---\ncontext\n")
+        elif handoff == "legacy":
+            checkpoint.write_text("## State\nno frontmatter, so its mtime dates it\n")
+        source = START_BOT.read_text()
+        # Everything after the bridge-readiness wait up to the idle mark: what
+        # a session receives once its channel is up.
+        start = source.index("esac\n", source.index('emit_fleet_event "rc_timeout"')) + len("esac\n")
+        block = source[start:].split("# Mark bot as idle", 1)[0]
+        script = r'''
+. "$1"
+set -Eeuo pipefail
+trap 'printf "ERR\n" >> "$ERRORS"' ERR
+pane_send_verified() { printf '%s\0' "$3" >> "$SENDS"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { printf '%s\n' "$1" >> "$EVENTS"; }
+''' + block
+        env = {**os.environ, "BOT_DIR": str(bot), "TMUX_SOCKET": "private", "TMUX_SESSION": "worker",
+               "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1", "_native_mode": mode,
+               "STARTUP_PROMPT": "Authored startup.", "SESSION_RESUME_COMMAND": command,
+               "CLAUDE_CONFIG_DIR": str(account), "SENDS": str(sends), "ERRORS": str(errors),
+               "EVENTS": str(events)}
+        env.pop("RESUME_MAX_AGE_S", None)
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert not errors.exists()
+        payloads = sends.read_bytes().decode().rstrip("\0").split("\0") if sends.exists() else []
+        startup = ["set +H; Authored startup."] if mode == "fresh" else []
+        assert payloads == ([command] if sent else []) + startup
+        text = log.read_text() if log.exists() else ""
+        assert (line in text) if line else "RESUME" not in text
+        skipped = handoff == "recent" and mode == "fresh" and not sent
+        assert (events.read_text() if events.exists() else "") == ("resume_skipped\n" if skipped else "")
+
+
 class TestIsoToEpoch:
     def test_known_value(self):
         out, rc = _run('iso_to_epoch "$2"', "2026-05-15T14:30:00Z")

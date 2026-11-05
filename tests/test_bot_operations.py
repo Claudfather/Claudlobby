@@ -1457,3 +1457,117 @@ def test_unsupported_git_roster_changes_refuse_before_all_effects(tmp_path,capsy
     assert result["data"]=={"native_outcome":"unattempted","changed":False}
     assert "Git roster changes are not yet supported" in result["error"]["message"]
     assert tuple(tmp_path.iterdir())==before
+
+
+
+def test_fresh_restart_starts_a_new_session_and_a_plain_restart_continues(cold, monkeypatch, capsys):  # noqa: F811
+    """#2696: --fresh replaces the native session; without it a restart continues it."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    original = native_session.read(bot_dir)
+    fresh = worker.call("bot", "restart", "worker", "--fresh")["data"]
+    assert fresh["state"] == "running" and fresh["handoff"] == "fresh_session"
+    renewed = native_session.read(bot_dir)
+    assert renewed["session_id"] != original["session_id"]
+    assert renewed["pending"] is False and renewed["process"] != original["process"]
+    assert Path(original["transcript"]).exists()
+    assert worker.native.actions == ["start"]
+    assert "svc_activation_handoff" not in worker.native.calls
+    continued = worker.call("bot", "restart", "worker")["data"]
+    assert continued["handoff"] == "native_session"
+    assert native_session.read(bot_dir)["session_id"] == renewed["session_id"]
+
+
+def test_a_fresh_restart_refused_before_its_effect_keeps_the_retained_session(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    receipt = native_session.read(bot_dir)
+    receipt["pending"] = True
+    native_session._write(bot_dir, receipt, expected=native_session.read(bot_dir))
+    failed = worker.call("bot", "restart", "worker", "--fresh", expected=6)
+    assert failed["error"]["code"] == "unavailable" and worker.native.actions == []
+    assert native_session.read(bot_dir) == receipt
+
+
+def test_a_fresh_restart_is_unverified_unless_the_renewed_session_started(cold, monkeypatch, capsys):  # noqa: F811
+    """The restart proves its fresh session after readiness, as a host update proves a continued one."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    original = native_session.read(bot_dir)
+    native_call = worker.native.call
+
+    def restored(function, *args, **kwargs):
+        if function == "svc_bot_enroll_exact":
+            # Another writer put the retired identity back before the launch.
+            native_session._write(bot_dir, original, expected=native_session.read(bot_dir))
+        return native_call(function, *args, **kwargs)
+    monkeypatch.setattr(worker.native, "call", restored)
+    failed = worker.call("bot", "restart", "worker", "--fresh", expected=6)
+    assert failed["error"]["code"] == "unavailable" and failed["data"]["native_outcome"] == "unknown"
+    assert worker.native.actions == ["start"]
+    assert native_session.read(bot_dir)["session_id"] == original["session_id"]
+
+
+def test_a_fresh_restart_whose_unit_restart_failed_starts_fresh_after_stop_and_start(
+        cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    bot_dir = worker.root / "runtime/bots/worker"
+    native_call = worker.native.call
+
+    def refused(function, *args, **kwargs):
+        if function == "svc_bot_enroll_exact":
+            raise OSError("unit restart refused")
+        return native_call(function, *args, **kwargs)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(worker.native, "call", refused)
+        worker.call("bot", "restart", "worker", "--fresh", expected=6)
+    renewed = native_session.read(bot_dir)
+    assert renewed["pending"] is True and worker.native.actions == []
+    # The retired session still runs, so a restart that would continue it refuses.
+    worker.call("bot", "restart", "worker", expected=6)
+    worker.call("bot", "stop", "worker")
+    worker.call("bot", "start", "worker")
+    started = native_session.read(bot_dir)
+    assert started["session_id"] == renewed["session_id"] and started["pending"] is False
+
+
+@pytest.mark.parametrize("kwargs", [{"running": True}, {"running": False}])
+def test_only_a_restart_chooses_a_fresh_session(tmp_path, kwargs):  # noqa: F811
+    with pytest.raises(bot_operations.BotLifecycleError, match="only a restart"):
+        bot_operations.set_bot_running(root=tmp_path, fleet="example", bot="worker", fresh=True, **kwargs)
+
+
+
+def test_a_fresh_self_restart_needs_a_recent_handoff_before_and_after_the_idle_wait(
+        cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    original = native_session.read(bot_dir)
+    handoff = bot_dir / ".claude/session.md"
+    handoff.write_text("---\nlast_updated: 2020-01-01T00:00:00Z\n---\nold context\n")
+
+    def no_admission(*_args, **_kwargs):
+        raise AssertionError("a stale handoff must refuse before admission")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(bot_operations, "mutation_admission", no_admission)
+        with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+            bot_operations._schedule_self_restart(root=worker.root, fleet="example", bot="worker",
+                                                  ceiling=None, bot_dir=bot_dir, fresh=True)
+    assert not (bot_dir / "logs/startup.log").exists() or "self_restart" not in (
+        bot_dir / "logs/startup.log").read_text()
+    for key, value in (("CLAUDLOBBY_ROOT", str(worker.root)), ("FLEET_ROOT", str(worker.root)),
+                       ("CLAUDLOBBY_INSTALLATION", str(worker.installation.directory)),
+                       ("FLEET_NAME", "example"), ("BOT_ID", "worker"), ("BOT_DIR", str(bot_dir))):
+        monkeypatch.setenv(key, value)
+    # The admitted child re-checks after its idle wait, before any effect.
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+        bot_operations.set_bot_running(root=worker.root, fleet="example", bot="worker", running=True,
+                                       restart=True, fresh=True, _self_child=True)
+    assert worker.native.actions == [] and native_session.read(bot_dir)["session_id"] == original["session_id"]
+    now = datetime.now(timezone.utc)
+    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    renewed = bot_operations.set_bot_running(root=worker.root, fleet="example", bot="worker",
+                                             running=True, restart=True, fresh=True, _self_child=True)
+    assert renewed.handoff == "fresh_session" and worker.native.actions == ["start"]
+    assert native_session.read(bot_dir)["session_id"] != original["session_id"]

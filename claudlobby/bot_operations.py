@@ -623,7 +623,11 @@ def _log_self_result(fd: int, request_id: str, *, status: str, **fields: object)
 
 
 def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
-                           ceiling: int | None, bot_dir: Path) -> BotLifecycleResult:
+                           ceiling: int | None, bot_dir: Path,
+                           fresh: bool = False) -> BotLifecycleResult:
+    if fresh:
+        # The new session has only this handoff to resume from (#2696).
+        _fresh_self_handoff(bot_dir)
     with mutation_admission(root, identity=RuntimeIdentity.current(),
                             expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as current:
         provenance = (_release_id(current), _provenance(current))
@@ -663,7 +667,7 @@ def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
                     raise BotLifecycleError("requesting CLI did not finish its response")
 
             result = set_bot_running(root=root, fleet=fleet, bot=bot, running=True,
-                                     restart=True, ceiling=ceiling, _self_child=True,
+                                     restart=True, ceiling=ceiling, fresh=fresh, _self_child=True,
                                      _on_lock=after_lock, _expected_provenance=provenance)
             _log_self_result(log_fd, request_id, status="complete",
                              release_id=result.release_id, source_revision=result.source_revision,
@@ -709,7 +713,8 @@ def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
 
     atexit.register(release_after_response)
     return _bot_result(BotLifecycleResult, current, fleet, bot, _release_id(current), "",
-                              "requested", False, "not_checked", "native_session",
+                              "requested", False, "not_checked",
+                              "fresh_session" if fresh else "native_session",
                               request_id, str(log_path))
 
 
@@ -1073,10 +1078,16 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     identity: RuntimeIdentity | None = None,
                     adapter: Adapter | None = None, _self_child: bool = False,
                     _on_lock=None, reason: str | None = None,
-                    _expected_provenance=None) -> BotLifecycleResult:
-    """Start, stop or restart one exact selected bot; prove native effects."""
+                    _expected_provenance=None, fresh: bool = False) -> BotLifecycleResult:
+    """Start, stop or restart one exact selected bot; prove native effects.
+
+    A restart continues the exact native session unless ``fresh`` asks for a
+    new one, which resumes from the bot's saved handoff (#2696).
+    """
     if restart and not running:
         raise BotLifecycleError("restart requires a running target")
+    if fresh and not restart:
+        raise BotLifecycleError("only a restart chooses a fresh session")
     if reason is not None and running:
         raise BotLifecycleError("a reason is recorded only for a stop")
     try:
@@ -1094,7 +1105,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             if origin.fleet.name != destination.fleet.name or bot not in destination.fleet.bots:
                 raise BotLifecycleError("self restart target differs from generated origin")
             return _schedule_self_restart(root=root, fleet=destination.fleet.name,
-                                          bot=bot, ceiling=ceiling,
+                                          bot=bot, ceiling=ceiling, fresh=fresh,
                                           bot_dir=destination.paths.bot_runtime(bot))
     identity = identity or RuntimeIdentity.current()
     with mutation_admission(root, identity=identity,
@@ -1220,6 +1231,13 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 # An absent/dead session cannot produce a fresh checkpoint.
                 # Its native recovery restores whatever was durably saved;
                 # this branch makes no claim that new context was captured.
+                if fresh:
+                    # A fresh session replaces the retained one in every case
+                    # above and resumes from the saved handoff instead (#2696).
+                    if _self_child:
+                        # The idle wait above can outlast the handoff it began with.
+                        _fresh_self_handoff(spec.bot_dir)
+                    handoff = "fresh_session"
             if unit.installed and not restart:
                 props = dict(unit.properties)
                 if (props.get("ActiveState") == "active"
@@ -1262,11 +1280,21 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             fence = _native(adapter, "svc_activation_bot_fence", *fence_args).split("\t")
             if len(fence) != 2 or not fence[0].isdigit() or not fence[1]:
                 raise BotLifecycleError("bot readiness fence is incomplete")
+            from .native_session import (checkpoint_account, confirm, renew, verify_live,
+                                         NativeSessionError)
             if restart_checkpoint is not None:
-                from .native_session import verify_live, NativeSessionError
                 try:
                     verify_live(spec.bot_dir, restart_checkpoint, adapter)
                 except (NativeSessionError, InventoryError, OSError) as exc:
+                    raise BotLifecycleError(str(exc), unavailable=True) from exc
+            renewed = None
+            if fresh:
+                # Last before the effect, so a refusal above keeps the retained
+                # session. The launch starts the new identity as a fresh session.
+                try:
+                    renewed = renew(spec.bot_dir, spec.label, spec.environment["TMUX_TMPDIR"],
+                                    checkpoint_account(spec.bot_dir, spec.label, adapter))
+                except (NativeSessionError, InventoryError, OSError, subprocess.SubprocessError) as exc:
                     raise BotLifecycleError(str(exc), unavailable=True) from exc
             try:
                 _native(adapter, "svc_bot_enroll_exact", declaration.source, installed, entry["target"],
@@ -1286,7 +1314,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                                 effect_attempted=True, unavailable=True)
                 _confirm_running(adapter, installed, entry["target"], manager,
                                  session_ready=session_ready, effect_attempted=True)
-            except (BotLifecycleError, RuntimeEvidenceError, InventoryError, OSError) as exc:
+                if renewed is not None:
+                    # Proved as a host update proves a continued session: the
+                    # session SessionStart confirmed is the identity renewed above.
+                    confirm(spec.bot_dir, expected=renewed)
+            except (BotLifecycleError, RuntimeEvidenceError, InventoryError, OSError,
+                    NativeSessionError) as exc:
                 raise BotLifecycleError("bot restart effect or readiness proof is incomplete" if restart
                                         else "bot start effect or readiness proof is incomplete",
                                         effect_attempted=True,

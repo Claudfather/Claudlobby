@@ -1,0 +1,3 @@
+### Added — `bot restart --fresh` gives a bot a new session that resumes from its saved handoff (#2696)
+
+A restart continues the exact native session, so a manager could not give a worker a fresh context and `/restart` returned the same conversation. `bot restart BOT --fresh` now starts a new Claude Code session in place of the current one, after the same idle wait and session proof. The new session first submits the configured resume command when the saved handoff is under a day old, then the authored startup. The `restart` skill uses `--fresh`; a self restart into a fresh session needs a handoff under 300 s old. Without `--fresh`, a restart still continues the same conversation, as host updates and the weekly restart do.

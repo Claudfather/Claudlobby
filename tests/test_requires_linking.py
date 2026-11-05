@@ -412,15 +412,18 @@ class TestGrantUnion:
                 assert "Bash(claudlobby --json fleet reload)" in allow
                 assert lifecycle == {
                     "Bash(claudlobby --json bot restart lead)",
+                    "Bash(claudlobby --json bot restart lead --fresh)",
                     "Bash(claudlobby --json bot start worker-1)",
                     "Bash(claudlobby --json bot stop worker-1)",
                     "Bash(claudlobby --json bot restart worker-1)",
                     "Bash(claudlobby --json bot stop worker-1 --reason *)",
                     "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
+                    "Bash(claudlobby --json bot restart worker-1 --fresh)",
                 }
             else:
                 assert "Bash(claudlobby --json fleet reload)" not in allow
-                assert lifecycle == {"Bash(claudlobby --json bot restart worker-1)"}
+                assert lifecycle == {"Bash(claudlobby --json bot restart worker-1)",
+                                     "Bash(claudlobby --json bot restart worker-1 --fresh)"}
             assert not [
                 f for f in audit_bot(bot, fleet, paths)
                 if f.kind in {"orphan_grant", "under_grant"}
@@ -860,10 +863,12 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot restart worker-1)",
         "Bash(claudlobby --json bot stop worker-1 --reason *)",
         "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
+        "Bash(claudlobby --json bot restart worker-1 --fresh)",
         "Bash(claudlobby --json bot session lead)",
         "Bash(claudlobby --json bot logs lead)",
         "Bash(claudlobby --json bot logs lead --lines *)",
         "Bash(claudlobby --json bot restart lead)",
+        "Bash(claudlobby --json bot restart lead --fresh)",
     ]
     linked = sorted(
         p.name for p in (paths.bot_runtime("lead") / ".claude" / "skills").iterdir()

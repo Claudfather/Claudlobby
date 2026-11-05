@@ -2817,11 +2817,14 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
                 grants.append(f"Bash(claudlobby --json bot {verb} {target})")
             grants.append(f"Bash(claudlobby --json bot stop {target} --reason *)")
             grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")
-    # Any generated bot can request only its own context-preserving restart.
+            grants.append(f"Bash(claudlobby --json bot restart {target} --fresh)")
+    # Any generated bot can request only its own restart: continuing its session,
+    # or into a fresh one that resumes from its saved handoff (#2696).
     grants.append(f"Bash(claudlobby --json bot session {bot.bot_id})")
     grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id})")
     grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id} --lines *)")
     grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id} --fresh)")
     return grants
 
 
