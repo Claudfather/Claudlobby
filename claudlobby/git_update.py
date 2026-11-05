@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import signal
 import stat
 import subprocess
 import sys
@@ -750,6 +751,29 @@ def _verify_inherited_lock(path, fd):
     os.set_inheritable(fd, False)
 
 
+#: Seconds one application stage process may run before the coordinator stops it.
+_STAGE_TIMEOUT = 900
+
+
+def _interruption(exc):
+    """Why a stage process ended without a result: the retained record's detail (#2702).
+
+    A refusal keeps the stage's own last words. An interruption has none of its
+    own, so its cause comes last, after whatever the process wrote before it
+    stopped, in the same 2000 characters.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        cause = f"interrupted: no result within {exc.timeout:g} s; the stage process was stopped"
+        output = exc.stderr or b""
+    else:
+        cause = f"interrupted: the stage process could not run: {exc}"
+        output = b""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", "replace")
+    output = output.strip()
+    return output[-(2000 - len(cause) - 1):] + "\n" + cause if output else cause
+
+
 _STAGE_IMPORT = """import pathlib,sys
 source=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(source))
 import claudlobby
@@ -793,10 +817,14 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
     try:
         result = subprocess.run([str(python), "-I", "-B", "-c", _STAGE_IMPORT, str(source), *args],
                                 cwd=store.root, env=clean, pass_fds=tuple(inherited),
-                                capture_output=True, text=True, timeout=900)
+                                capture_output=True, text=True, timeout=_STAGE_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
-        if store.load() is None:
+        record = store.load()
+        if record is None:
             raise UpdateError(f"application stage {stage} interrupted before an update operation was recorded") from exc
+        # Keep why, as a refusal does: status shows it, and the job's notice names it (#2702).
+        record["stage_error"] = {"stage": stage, "detail": _interruption(exc)}
+        store.save(record)
         raise UpdateError(f"application stage {stage} interrupted; continue the same operation") from exc
     if result.returncode:
         record = store.load()
@@ -1384,8 +1412,112 @@ def apply_or_continue(installation, *, target=None, initialization=None, prepare
             raise UpdateBusyError("update lock is occupied; native attachment is not established") from None
         return {"update": latest, "job": {"request_id": record["request_id"], **observed, "dispatch": "attached"}}
 
+
+#: The notice's PATH: the alert door needs curl and jq, wherever the host keeps them.
+_NOTICE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+#: Seconds the notice may take. tg-post.sh gives Telegram 6 of them.
+_NOTICE_TIMEOUT = 30
+# The installation's own alert door, the one every host job's FLEET ALERT uses:
+# lib-common's resolve_alert_target picks the chat and its sender as one pair,
+# and tg-post.sh posts to Telegram. Its output is the one protocol line below:
+# tg-post can echo a carrier's error, and with it a token.
+_NOTICE = r'''
+set -u
+. "$1/lib-common.sh" >/dev/null 2>&1 || { printf 'unavailable\tlib-common.sh did not load\n'; exit 0; }
+resolve_alert_target "$2" any >/dev/null 2>&1 || :
+if [ -z "${_alert_chat_id:-}" ]; then
+    printf 'unconfigured\t%s\n' "${_alert_refusal:-no alert chat was found}"
+    exit 0
+fi
+message=''; IFS= read -r -d '' message || :
+if TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id" TELEGRAM_STATE_DIR="${_alert_state_dir:-}" \
+        TELEGRAM_BOT_TOKEN="${_alert_token:-}" "$1/tg-post.sh" "$message" >/dev/null 2>&1; then
+    printf 'carrier_accepted\t%s\n' "${_alert_target_src:-}"
+else
+    printf 'failed\ttg-post.sh exit %s\n' "$?"
+fi
+'''
+
+
+def _unfinished_text(root, record, failure):
+    """The notice for a job run that left the update unfinished, or None when it finished."""
+    if record is None or record["phase"] == "done" and not record.get("health_errors"):
+        return None
+    def clip(value, limit=300):
+        return " ".join(str(value).split())[:limit]
+    errors = record.get("health_errors") or {}
+    if failure is not None:
+        cause = clip(failure) or type(failure).__name__
+        error = record.get("stage_error")
+        if (isinstance(error, dict) and isinstance(error.get("detail"), str) and error["detail"].strip()
+                and f"application stage {error.get('stage')} " in str(failure)):
+            cause += f" ({clip(error['detail'].strip().splitlines()[-1])})"
+    elif errors:
+        first = sorted(errors)[0]
+        cause = f"{len(errors)} unit(s) reported a health error; {first}: {clip(errors[first])}"
+    else:
+        cause = "it stopped before it finished"
+    return (f"FLEET ALERT: host update {record['request_id']} did not finish "
+            f"(root {root}, phase {record['phase']}): {cause}. Whatever it stopped and has not "
+            "restored stays down: read claudlobby host update status, then run claudlobby host "
+            "update continue from a shell outside any bot session.")
+
+
+def _send_notice(store, text):
+    """Post one line through the installation's alert door: (status, detail)."""
+    command = ["/bin/bash", "--noprofile", "--norc", "-c", _NOTICE, "update-notice",
+               str(store.installation.native), str(store.root / "runtime/bots")]
+    environment = {"PATH": _NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()),
+                   "CLAUDLOBBY_ROOT": str(store.root), "PLANE_EMIT_DISABLED": "1"}
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, cwd=store.root, env=environment,
+                                   start_new_session=True)
+    except OSError as exc:
+        return "failed", f"bash did not start: {exc}"
+    try:
+        output, _ = process.communicate(text.encode() + b"\0", timeout=_NOTICE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return "failed", f"no answer within {_NOTICE_TIMEOUT} s"
+    status, _, detail = output.decode("utf-8", "replace").strip().partition("\t")
+    if status not in {"carrier_accepted", "failed", "unconfigured", "unavailable"}:
+        return "failed", "the alert door gave no answer"
+    return status, detail
+
+
+def _notify_unfinished(store, record, failure):
+    """Tell a human, once per job run, that this run left the update unfinished (#2702).
+
+    This job is the one process still running when an update cannot finish: the
+    bots, the plane daemon and every timer that would page someone (fleet-pulse,
+    keepalive) are among what it stopped. So it posts the notice itself, to
+    Telegram, which nothing the update stops carries. The notice never changes
+    the run's own outcome.
+    """
+    try:
+        text = _unfinished_text(store.root, record, failure)
+        if text is None:
+            return
+        status, detail = _send_notice(store, text)
+    except Exception as exc:  # the notice must never replace the update's own result
+        status, detail = "failed", type(exc).__name__
+    if status == "carrier_accepted":
+        print(f"claudlobby update: posted that this update did not finish ({detail})", file=sys.stderr)
+    else:
+        print(f"claudlobby update: nobody was told that this update did not finish: {status}"
+              + (f": {detail}" if detail else ""), file=sys.stderr)
+
+
 def _run_native_update(installation):
-    """Fixed job entry: kernel membership, then the one resumable coordinator."""
+    """Fixed job entry: kernel membership, then the one resumable coordinator.
+
+    A run that leaves the update unfinished posts one notice before it exits.
+    """
     with UpdateStore(installation, wait=True) as store:
         jobs, independent, adapter = _retained_job(store)
         record = store.load()
@@ -1400,12 +1532,18 @@ def _run_native_update(installation):
             raise UpdateError("native updater lacks its original dispatch intent")
         record["job_dispatch"] = {**dispatch, "state": "entered"}
         store.save(record)
+        failure = None
         try:
             return run_prepared_update(store)
+        except Exception as exc:
+            failure = exc
+            raise
         finally:
             record = store.load()
             record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
             store.save(record)
+            _notify_unfinished(store, record, failure)
+
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
