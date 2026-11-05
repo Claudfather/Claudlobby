@@ -18,6 +18,33 @@ def lifecycle_notes(result) -> tuple[str, ...]:
     return ()
 
 
+_CAUSE_LIMIT = 500
+
+
+def failure_cause(exc: BaseException) -> str:
+    """The failure's own message, as a refusal shows it (#2487).
+
+    That message names the unit or file that stopped a native read. An inventory
+    message can carry a native tool's whole stderr, so a refusal keeps only its first
+    line, cut to 500 characters, or names the exception's class when it has no message.
+    """
+    text = next(iter(str(exc).strip().splitlines()), "")
+    if len(text) > _CAUSE_LIMIT:
+        text = text[:_CAUSE_LIMIT - 3] + "..."
+    return text or type(exc).__name__
+
+
+def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFailure:
+    """A native read that failed, refused with the failure's own message (#2487).
+
+    Without that message the caller holds exit 6 and nothing to inspect. The JSON
+    result also carries it as `data.cause`.
+    """
+    cause = failure_cause(exc)
+    return CommandFailure("unavailable", f"{subject} native state cannot be established: {cause}",
+                          data={**data, "cause": cause})
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..bot_operations import (BotLifecycleError, check_handoff, control_bot, handoff_bot,
@@ -101,7 +128,7 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete", data=data) from exc
     except (InventoryError, OSError) as exc:
-        raise CommandFailure("unavailable", "bot native state cannot be established", data=data) from exc
+        raise native_state_refusal("bot", exc, data) from exc
     if action == "handoff" and getattr(args, "check", False):
         data = {key: value for key, value in asdict(result).items() if value is not None}
         when = "".join((f"; requested {result.requested_at}" if result.requested_at else "",

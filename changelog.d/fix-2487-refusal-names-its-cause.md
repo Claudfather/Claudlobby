@@ -1,0 +1,3 @@
+### Fixed — a `bot` or `fleet` lifecycle refusal names the failure that stopped it (#2487)
+
+`bot start`, `bot stop`, `bot restart`, `fleet start`, `fleet stop`, `fleet restart` and `fleet reconcile` refuse with exit 6 when a read of the host's native supervision state fails before any native effect. The refusal dropped the supervision inventory's or the operating system's own message, so nothing said which unit or file had stopped it. It now ends with that message's first line, at most 500 characters, and the JSON result also carries it as `data.cause`. Any other exception's text stays private. A bot's own lifecycle refusal inside a fleet sweep, and a failure after a native effect has begun, read as before.
