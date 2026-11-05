@@ -653,15 +653,29 @@ def test_a_unit_listed_only_through_a_dangling_wants_link_reads_absent_when_quie
     with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
         obs.collect().require_complete()
 
-    # Outside the absent shape nothing runs the quiet proof: it refuses as before.
+    # Outside the absent shape nothing runs the quiet proof: it refuses as before. Nor does
+    # a LoadState other than not-found, which refuses by itself, whatever the shape. The
+    # error and bad-setting units print an empty ExecStart= (systemctl omits an empty one) so
+    # that the property parser passes them on to that guard instead of refusing them first.
     obs.quiet[name] = (0, "inactive\tno-cgroup-witness\n")
     for changed in ({"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }"},
-                    {"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }", "WorkingDirectory": str(obs.root)}):
+                    {"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }", "WorkingDirectory": str(obs.root)},
+                    {"LoadState": "error", "ExecStart": ""}, {"LoadState": "bad-setting", "ExecStart": ""}):
         obs.extra[name] = {**absent, **changed}
         obs.calls.clear()
         with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
             obs.collect().require_complete()
         assert "svc_activation_quiet" not in [function for function, _ in obs.calls]
+
+    # A unit systemd shows loaded, with its definition, that the catalogue does not list (the
+    # two reads disagree) never reaches the shape check: only the LoadState guard refuses it here.
+    obs.rows.remove(f"loaded\t{name}")
+    obs.extra[name] = {**absent, "LoadState": "loaded", "FragmentPath": str(installed),
+                       "ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }"}
+    obs.calls.clear()
+    with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+        obs.collect().require_complete()
+    assert "svc_activation_quiet" not in [function for function, _ in obs.calls]
 
 
 def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):
