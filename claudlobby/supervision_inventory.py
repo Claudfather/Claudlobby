@@ -1157,8 +1157,25 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                           or any(_environment(props["Environment"]).get(key) != value for key, value in declaration.environment)
                           or "FLEET_ROOT" in _environment(props["Environment"]).keys() - dict(declaration.environment).keys()):
                         raise InventoryError("loaded data/fleet/release identity differs")
-                elif name in loaded or props["LoadState"] != "not-found":
+                elif props["LoadState"] != "not-found":
                     raise InventoryError("loaded consumer lacks installed source bytes")
+                elif name in loaded:
+                    # systemd lists a unit that has no file while anything still
+                    # names it: a default.target.wants link left behind its
+                    # deleted file is enough (#2700). In the absent shape it runs
+                    # nothing and bot start installs it again, but a process left
+                    # in its cgroup is a consumer, so it reads as absent only on
+                    # the masked branch's proof of native quiet. Any search
+                    # directory witnesses the absence: none holds this name.
+                    from .supervision_runtime import RuntimeEvidenceError, assert_quiescent
+                    if (props["ActiveState"] != "inactive" or props["FragmentPath"]
+                            or any(props.get(key) for key in ("WorkingDirectory", "Environment", "ExecStart",
+                                                              "DropInPaths", "UnitFileState"))):
+                        raise InventoryError("loaded consumer lacks installed source bytes")
+                    try:
+                        assert_quiescent(adapter, installed_file=directories[0] / name, target=name)
+                    except RuntimeEvidenceError as exc:
+                        raise InventoryError("loaded consumer lacks installed source bytes") from exc
             else:
                 reviewed_content = sources[0].content if legacy_source and sources else generated.content
                 props = _darwin_binding(name, reviewed_content, sources[0].path if sources else None,

@@ -442,6 +442,45 @@ def test_git_reconcile_preserves_stopped_intent_without_historical_selection(git
         fleet.reconcile_fleet(root=case.root, fleet='example', adapter=native)
 
 
+class _GitDanglingLinkNative(_GitStoppedNative):
+    """#2700: the unit file is gone, its default.target.wants link stayed, and systemd
+    still lists the unit (not-found), so the catalogue reports it loaded."""
+
+    def __init__(self, case, quiet):
+        super().__init__(case)
+        self.quiet = quiet  # svc_activation_quiet's (rc, stdout)
+
+    def read(self, function, *args):
+        if function == 'svc_inventory_catalog':
+            return super().read(function, *args) + 'loaded\tcom.example.lead.service\n'
+        return super().read(function, *args)
+
+    def call(self, function, *args, timeout=30):
+        if function == 'svc_activation_quiet':
+            self.calls.append((function, args))
+            return subprocess.CompletedProcess([], *self.quiet, '')
+        return super().call(function, *args, timeout=timeout)
+
+
+def test_git_reconcile_reads_a_unit_left_listed_by_a_dangling_wants_link_as_down(git_bot_binding, monkeypatch):
+    """#2700: the lead's unit file removed and its default.target.wants link left behind
+    made reconcile refuse the fleet; a unit listed only through that link runs nothing."""
+    case = git_bot_binding
+    monkeypatch.setattr(fleet, 'resolve_operation_scope', lambda **_kw: (case.destination, None))
+    unit = case.directory / 'com.example.lead.service'
+    (case.directory / 'default.target.wants').mkdir()
+    (case.directory / 'default.target.wants' / unit.name).symlink_to(unit)
+    native = _GitDanglingLinkNative(case, (0, 'inactive\tno-cgroup-witness\n'))
+    result = fleet.reconcile_fleet(root=case.root, fleet='example', adapter=native)
+    row, = result.bots
+    assert (row.bot, row.enrolled, row.session, row.state) == ('lead', False, 'absent', 'unsupervised_down')
+    assert [args[1] for function, args in native.calls if function == 'svc_activation_quiet'] == [unit.name]
+    # A process left in the unit's cgroup is a consumer: reconcile still refuses.
+    native = _GitDanglingLinkNative(case, (3, ''))
+    with pytest.raises(fleet.InventoryError, match=f'{unit.name}: loaded consumer lacks installed source bytes'):
+        fleet.reconcile_fleet(root=case.root, fleet='example', adapter=native)
+
+
 @pytest.mark.parametrize('skip_reason', ['de_enrolled', 'disabled'])
 def test_git_fleet_restart_delegates_frozen_current_scope_and_skips_stopped_bot(git_bot_binding, monkeypatch, skip_reason):
     case = git_bot_binding

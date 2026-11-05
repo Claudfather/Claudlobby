@@ -261,6 +261,8 @@ class Observations:
         self.declarations, self.properties, self.calls = [], {}, []
         # Catalog rows/properties outside add(): ghosts, templates, instances.
         self.rows, self.extra, self.failures = [], {}, {}
+        # svc_activation_quiet's (rc, stdout) per unit; a unit with none set fails the test.
+        self.quiet = {}
         self.manager, self.domain = "Linux", ""
         self.disabled = '\n\tdisabled services = {\n\t}\n'
         self.launchd = {}
@@ -326,8 +328,11 @@ class Observations:
         assert command[4] == str(self.package.native)
         function, args = command[5], command[6:]
         self.calls.append((function, args))
-        assert function in {"svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_bot_unit_owned_by"}
-        if function == "svc_inventory_catalog":
+        assert function in {"svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled",
+                            "svc_bot_unit_owned_by", "svc_activation_quiet"}
+        if function == "svc_activation_quiet":
+            rc, output = self.quiet[args[1]]
+        elif function == "svc_inventory_catalog":
             output, rc = self.catalog(), 0
         elif function == "svc_inventory_properties" and args[0] in self.failures:
             rc, stderr = self.failures[args[0]]
@@ -602,11 +607,75 @@ def test_declared_bot_deenrolled_by_stop_reads_absent_without_execstart(tmp_path
         obs.extra[name] = {**absent, **changed}
         with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
             obs.collect().require_complete()
-    # The absent form still refuses while the catalogue reports it loaded.
+    # Listed by the catalogue, the absent form still refuses while processes are
+    # left in its cgroup (the quiet proof refuses); one that is quiet is #2700's case.
     obs.extra[name] = dict(absent)
     obs.rows.append(f"loaded\t{name}")
+    obs.quiet[name] = (3, "")
     with pytest.raises(InventoryError, match="loaded consumer lacks installed source bytes"):
         obs.collect().require_complete()
+
+
+def test_a_unit_listed_only_through_a_dangling_wants_link_reads_absent_when_quiet(tmp_path):
+    """#2700: a unit file removed while its default.target.wants link stayed behind.
+
+    systemd keeps listing a unit that has no file while anything still names it, in
+    the same absent shape a bot stop leaves, so the catalogue reported it loaded and
+    the inventory refused it as a consumer: bot start refused the bot with exit 6.
+    """
+    obs = Observations(tmp_path)
+    name = "com.example.worker.service"
+    installed = obs.add(name, "bot")
+    wants = obs.installed / "default.target.wants"
+    wants.mkdir()
+    (wants / name).symlink_to(installed)
+    installed.unlink()  # The file is gone and its link dangles, as on the host in #2700.
+    del obs.properties[name]
+    absent = {"Environment": "", "WorkingDirectory": "", "Id": name, "Triggers": "",
+              "TriggeredBy": "", "LoadState": "not-found", "ActiveState": "inactive",
+              "FragmentPath": "", "DropInPaths": "", "UnitFileState": "", "NeedDaemonReload": "no"}
+    obs.extra[name] = dict(absent)
+    obs.rows.append(f"loaded\t{name}")  # systemd lists it: list-units --all names it
+    for witness in ("inactive\tno-cgroup-witness\n", "inactive\tcgroup-empty\n"):
+        obs.quiet[name] = (0, witness)
+        # Every read and bot start's own (only_names) read it as a bot that is down.
+        for only_names in (None, frozenset({name})):
+            obs.calls.clear()
+            inventory = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                           runner=obs.runner, only_names=only_names).require_complete()
+            (unit,) = inventory.units
+            assert unit.installed == () and dict(unit.properties)["LoadState"] == "not-found"
+            (asked,) = [args for function, args in obs.calls if function == "svc_activation_quiet"]
+            assert asked[1] == name and Path(asked[0]).name == name and not Path(asked[0]).exists()
+
+    # A process left in its cgroup is a consumer: the refusal stands.
+    obs.quiet[name] = (3, "")
+    with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+        obs.collect().require_complete()
+
+    # Outside the absent shape nothing runs the quiet proof: it refuses as before. Nor does
+    # a LoadState other than not-found, which refuses by itself, whatever the shape. The
+    # error and bad-setting units print an empty ExecStart= (systemctl omits an empty one) so
+    # that the property parser passes them on to that guard instead of refusing them first.
+    obs.quiet[name] = (0, "inactive\tno-cgroup-witness\n")
+    for changed in ({"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }"},
+                    {"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }", "WorkingDirectory": str(obs.root)},
+                    {"LoadState": "error", "ExecStart": ""}, {"LoadState": "bad-setting", "ExecStart": ""}):
+        obs.extra[name] = {**absent, **changed}
+        obs.calls.clear()
+        with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+            obs.collect().require_complete()
+        assert "svc_activation_quiet" not in [function for function, _ in obs.calls]
+
+    # A unit systemd shows loaded, with its definition, that the catalogue does not list (the
+    # two reads disagree) never reaches the shape check: only the LoadState guard refuses it here.
+    obs.rows.remove(f"loaded\t{name}")
+    obs.extra[name] = {**absent, "LoadState": "loaded", "FragmentPath": str(installed),
+                       "ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }"}
+    obs.calls.clear()
+    with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+        obs.collect().require_complete()
+    assert "svc_activation_quiet" not in [function for function, _ in obs.calls]
 
 
 def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):
