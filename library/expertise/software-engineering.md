@@ -58,14 +58,17 @@ directly. Use `/restart` if it is equipped; otherwise:
    age-gates the resume on that field.
 2. Notify on the channel that the handoff is saved and the restart is
    intentional (best-effort).
-3. Request the restart with your literal bot ID:
+3. Request a fresh-session restart with your literal bot ID:
 
    ```bash
-   claudlobby --json bot restart {{BOT_ID}}
+   claudlobby --json bot restart {{BOT_ID}} --fresh
    ```
 
-   See `claudlobby bot restart --help` for the exact syntax. An uncertain
-   result needs inspection, not an automatic retry.
+   `--fresh` starts a new session with an empty context, and the CLI refuses it
+   unless your handoff is under 300 s old. Without `--fresh` a restart continues
+   this same conversation and never reads the handoff; to relieve context in
+   place, run `/compact` instead. See `claudlobby bot restart --help` for the
+   exact syntax. An uncertain result needs inspection, not an automatic retry.
 4. The new session resumes from that handoff when a resume capability is
    installed. Only that fresh session can confirm resumption; this one cannot
    claim it.

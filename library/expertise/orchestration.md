@@ -58,7 +58,7 @@ Bots accumulate context; bad context degrades output. Proactively manage:
 
 - **Before assigning:** if a worker has reported `context-degraded`, or shows
   ~3+ completed rows in `claudlobby --json fleet reports list --bot <w>
-  --status completed --since <RFC3339 instant>`, tell it to `/compact` first or restart it. Do
+  --status completed --since <RFC3339 instant>`, tell it to `/compact` first or give it a fresh session (Restart, below). Do
   NOT ask a worker for a context percentage — no bot can measure one
   (`context-management`), so asking only invites a fabricated number you would
   then route on. Note `claudlobby fleet uptime` does not currently give a per-bot
@@ -66,12 +66,16 @@ Bots accumulate context; bad context degrades output. Proactively manage:
 
   Use the selected fleet context; name `--fleet FLEET` explicitly when reading
   another active fleet. A failed or unavailable read is not zero completed work.
-- **Between unrelated tasks:** preserve a fresh handoff and use the supported restart flow when a fresh session is needed.
-- **Reviewers:** use the supported compaction command between substantial reviews. Consider a fresh session after completed work and a verified handoff; respect operator holds and never interrupt an active review because of a report count alone.
-- **Restart:** honor operator holds and the safe-worker-restart protocol. Request
+- **Between unrelated tasks:** when a fresh session is needed, preserve a fresh handoff and use `bot restart WORKER --fresh` (Restart, below).
+- **Reviewers:** compact between substantial reviews (`claudlobby --json bot compact REVIEWER`). Consider a fresh session (`bot restart REVIEWER --fresh`) after completed work and a verified handoff; respect operator holds and never interrupt an active review because of a report count alone.
+- **Restart:** honor operator holds and the safe-worker-restart protocol. A plain
+  `claudlobby --json bot restart WORKER` continues the worker's exact conversation
+  and reads no handoff. A restart to shed context, anywhere in this role (the
+  reviewer rule above included), is a fresh session: request
   `claudlobby --json bot handoff WORKER` and require `data.handoff=saved` from it
   or, after a `timeout`, from `claudlobby --json bot handoff WORKER --check`; then
-  use `claudlobby --json bot restart WORKER` and inspect its readiness result.
+  use `claudlobby --json bot restart WORKER --fresh`. Inspect the readiness result
+  either way.
 - **Compaction:** use `claudlobby --json bot compact WORKER`; an accepted control
   submission is not proof that compaction has finished. Read the selected bot's
   session/status before claiming success. Unknown outcomes do not allow resend.
@@ -112,5 +116,6 @@ restart or an unrecorded task send.
 ## Self-Restart
 
 Follow the `/restart` skill to save a fresh self-handoff, then call
-`claudlobby --json bot restart BOT` with your literal generated bot ID. A self-restart interrupts this
-session; only a fresh session can confirm successful resumption.
+`claudlobby --json bot restart BOT --fresh` with your literal generated bot ID. A self-restart interrupts this
+session; only the fresh session can confirm successful resumption. Without `--fresh`
+the restart continues this same conversation and never reads the handoff.

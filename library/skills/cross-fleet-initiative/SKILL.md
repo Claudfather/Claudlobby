@@ -226,5 +226,5 @@ The MONITOR stage is steady-state; stages 6 and 7 fire on triggers within it.
 
 - **Don't compress the stages.** Each is load-bearing. Skipping FRAME means later forks lack a north-star check; skipping GATE means decisions become discretionary; skipping CLOSE means lessons don't compound.
 - **Don't escalate every fork.** SYNTHESIZE applies the four lenses first; only escalate when the lenses don't tip.
-- **Don't lose state to a crash.** Every stage writes durable artifacts to disk before posting to chat. A restart at any stage rebuilds context from disk.
+- **Don't lose state to a crash.** Every stage writes durable artifacts to disk before posting to chat. A fresh session at any stage rebuilds context from disk; a plain restart continues the same conversation.
 - **The owner owns the ratify; the orchestrator owns the loop.** The skill makes the operating loop mechanical — the strategic compass stays the owner's.

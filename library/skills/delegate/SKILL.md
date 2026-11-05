@@ -16,10 +16,12 @@ tasks. For `fleet`, read `claudlobby --json fleet status` and
 `claudlobby --json fleet inbox`. Unavailable observations are unknown, not idle.
 
 For `restart BOT`, first follow safe-worker-restart and honor all operator
-holds. Request `claudlobby --json bot handoff BOT` and require
-`data.handoff=saved` before `claudlobby --json bot restart BOT`; after a
-`timeout`, read `claudlobby --json bot handoff BOT --check` until it reads
-`saved`. Inspect the returned readiness and native outcome before claiming the
+holds. A plain `claudlobby --json bot restart BOT` continues the bot's exact
+conversation and reads no handoff. For a fresh session, request
+`claudlobby --json bot handoff BOT` and require `data.handoff=saved` before
+`claudlobby --json bot restart BOT --fresh`; after a `timeout`, read
+`claudlobby --json bot handoff BOT --check` until it reads `saved`. To relieve
+context in place, use `claudlobby --json bot compact BOT`. Inspect the returned readiness and native outcome before claiming the
 bot is back.
 Uncertain handoff/control outcomes require inspection, never automatic retries.
 

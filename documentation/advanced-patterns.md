@@ -97,41 +97,40 @@ Same as the alert sweep: declare the fleet job and apply it through the managed 
 
 ## 4. Graceful Restart & Pre-Stop Handoff
 
-Capture a bot's working context before a restart kills its process, so the next session can resume where it left off. The mechanism is real and current (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop` — it's invoked by whatever is doing the restart.
+A planned restart continues the bot's exact session; only a fresh session needs a handoff. `claudlobby bot restart BOT` waits for an idle prompt, proves the transcript retained, restarts the unit and resumes the same conversation: nothing is lost, and nothing is relieved. `claudlobby bot restart BOT --fresh` instead starts a new session with an empty context, which resumes from the bot's saved handoff (`.claude/session.md`). Capture that handoff first, so the fresh session can pick up where the old one left off. The capture mechanism is real and current (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop`.
 
 ### Why
 
-A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought. Any in-flight reasoning about ongoing tasks is lost. A handoff gives the bot a few seconds to write down what it's doing first; the fresh session reads it back and picks up.
+A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought: its next start continues the same conversation from the transcript, but the turn it was in is cut off. A planned `bot restart` avoids that by waiting for an idle prompt. A fresh session drops the conversation altogether, so whatever the bot knew and had not written down is gone unless a handoff carries it.
 
 ### Two entry points
 
-Which path runs the handoff depends on *who* is restarting the bot:
+Which path writes the handoff depends on *who* gives the bot a fresh session:
 
-- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the skill captures the handoff in that session before requesting the supervised restart. The public lifecycle route is `claudlobby bot restart BOT`; the skill owns the in-session sequence. See `library/skills/restart/SKILL.md`.
+- **In-session (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from a headless caller — the skill captures the handoff in that session, then requests `claudlobby bot restart BOT --fresh`, which refuses a handoff more than 300 s old. See `library/skills/restart/SKILL.md`.
 
-- **External restarter.** Use `claudlobby bot restart BOT`. Its shared lifecycle owner records and verifies the checkpoint before stopping the bot. An interrupted save retains its request; inspect with `claudlobby bot handoff BOT --check` instead of sending another handoff. The Git updater uses that same checkpoint owner while coordinating the host's other consumers.
+- **From outside (a manager).** Request `claudlobby bot handoff BOT` and wait for `saved`; after a `timeout`, inspect with `claudlobby bot handoff BOT --check` instead of sending another handoff. Then run `claudlobby bot restart BOT --fresh`. A plain `claudlobby bot restart BOT` needs no handoff: the Git updater, the weekly worker restart and crash recovery all continue the exact session and read none.
 
 ### What `pre-stop-handoff.sh` actually does
 
-This is an internal delivery helper. It loads the bot configuration, resolves its
+This is an internal delivery helper, run by `bot handoff`. It loads the bot configuration, resolves its
 private tmux session, checks the existing capture through the shared parser, and
 sends the configured handoff command when needed. Explicit mode reports whether
-a capture was saved, still pending, or unavailable; its short wait is not the
-planned restart's decision boundary.
+a capture was saved, still pending, or unavailable; its short wait is not the end
+of the handoff, which often takes minutes.
 
-The lifecycle owner retains the original request and verifies the genuine saved
-capture before stopping the bot. A delivery timeout or missing capability does
-not permit a bounce. Continue by inspecting the same request, never by sending a
-replacement. Low-level best-effort behavior is not a supported restart shortcut.
+A pending or unknown handoff is never resent automatically. Continue by inspecting
+the same request, never by sending a replacement. Low-level best-effort behavior is
+not a supported restart shortcut.
 
-### Resume on the next start
+### Resume on a fresh start
 
-Resume needs no separate wiring in the common case. `claudlobby/_runtime_scripts/start-bot.sh` injects the configured session-resume command as the new session's first keystroke, behind two gates: the checkpoint must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every boot. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason and emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
+Resume needs no separate wiring in the common case. When a session starts fresh, `claudlobby/_runtime_scripts/start-bot.sh` submits the configured session-resume command as its own submission, ahead of the authored startup prompt, behind two gates: the handoff must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every fresh start. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason; an unresolved command also emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction. A session that continues receives neither the resume command nor the startup prompt.
 
 ### Gotchas
 
-- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by the managed Git updater (the file header says *do not hand-edit*). The handoff belongs at the restarter, per the two entry points above.
-- Planned restart waits for a verified save. An unresponsive bot or missing permission remains an explicit pending checkpoint; a timeout does not authorize losing context or resending an uncertain request.
+- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by the managed Git updater (the file header says *do not hand-edit*). The handoff belongs before a fresh session, per the two entry points above.
+- A planned restart waits up to 900 s for an idle prompt. A bot that never goes idle is refused, not bounced, and no model request is sent.
 - The `--auto` flag matters — it runs the handoff non-interactively so the bot doesn't stop to ask for confirmation.
 
 ---

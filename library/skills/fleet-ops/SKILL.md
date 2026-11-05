@@ -117,7 +117,7 @@ tool_grants:
 
 # Fleet operations
 
-Automatic startup uses the shared [bootstrap envelope](bootstrap.md) when its resume command positively resolves to a model-callable Skill. The envelope names that exact slash Skill as a separate word after prose and invokes it with separate name and arguments. Claude Code retains permission ownership. If invocation is unavailable, requests permission, is refused, or fails to establish restored context, stop and report; do not continue startup or reproduce the Skill another way. Preserve nonfatal repository-scan caveats; require actual restored context before continuing the authored startup instructions in the same turn. A submitted envelope is not proof that either step completed.
+A fresh session (a new bot, or `bot restart BOT --fresh`) first receives the configured resume command as its own submission, when the bot's handoff is under a day old, then its authored startup prompt as another; a restart that continues the session receives neither. If the resume Skill is unavailable, requests permission, is refused, or fails to establish restored context, stop and report before following the startup prompt; do not reproduce the Skill another way. Preserve nonfatal repository-scan caveats. A submission is not proof that either step completed.
 
 Before a new mutation, run this granted standalone command once to mint its
 request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
@@ -213,8 +213,8 @@ These commands preserve the host-shared state under its lock; they do not
 deliver a report or Telegram message.
 
 Only the selected fleet manager may operate another declared bot's supervised
-session. Any bot may request its own restart after saving a fresh handoff;
-use `/restart` for that sequence. Use `claudlobby bot start --help`, `claudlobby bot stop --help`, or
+session. Any bot may give itself a fresh session after saving a fresh handoff;
+use `/restart` for that sequence, which ends in `bot restart BOT --fresh`. Use `claudlobby bot start --help`, `claudlobby bot stop --help`, or
 `claudlobby bot restart --help` for the exact syntax. A manager can request a
 worker's handoff without stopping it with `claudlobby --json bot handoff WORKER`.
 Only `data.handoff=saved` confirms a fresh handoff file; `skipped` and an

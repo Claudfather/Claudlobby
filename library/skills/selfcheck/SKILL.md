@@ -108,7 +108,7 @@ Send via `mcp__plugin_telegram_telegram__reply` to chat_id `$TELEGRAM_GROUP_CHAT
 2. For MCP tests, use read-only calls — don't modify anything.
 3. Flag issues prominently at the top of the output.
 4. If you notice a degradation symptom (`context-management`), call it out with
-   the token `context-degraded` and say whether a restart is safe right now.
+   the token `context-degraded` and say whether a fresh session is safe right now.
    Never substitute a guessed percentage for that.
 5. Keep the output under ~20 lines. Don't dump full logs — only the single relevant line if you found an error.
 6. Default to "full" if no argument is provided.
