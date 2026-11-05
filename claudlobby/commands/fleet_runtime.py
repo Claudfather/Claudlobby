@@ -6,7 +6,7 @@ from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
 from ..runtime_admission import runtime_provenance
-from .bot_runtime import lifecycle_notes, native_state_refusal
+from .bot_runtime import failure_cause, lifecycle_notes, native_state_refusal
 
 
 def dispatch(args) -> CommandOutput:
@@ -86,8 +86,14 @@ def dispatch(args) -> CommandOutput:
         data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
         data["release_id"] = exc.release_id
         data.update(runtime_provenance(exc))
+        message = str(exc)
+        if isinstance(exc.__cause__, (InventoryError, OSError)):
+            # A bot's native read failed inside the sweep or the reconciliation, which
+            # wrap the failure: name it, as bot start, stop and restart do (#2487).
+            data["cause"] = failure_cause(exc.__cause__)
+            message = f"{message}: {data['cause']}"
         raise CommandFailure("unavailable" if exc.effect_attempted or exc.unavailable else "conflict",
-                             str(exc), data=data, release_id=exc.release_id,
+                             message, data=data, release_id=exc.release_id,
                              hint="inspect the failed bot before resuming the remaining sweep"
                              if exc.bot else None) from exc
     except InvalidPathSelector as exc:

@@ -18,14 +18,29 @@ def lifecycle_notes(result) -> tuple[str, ...]:
     return ()
 
 
+_CAUSE_LIMIT = 500
+
+
+def failure_cause(exc: BaseException) -> str:
+    """The failure's own message, as a refusal shows it (#2487).
+
+    That message names the unit or file that stopped a native read. An inventory
+    message can carry a native tool's whole stderr, so a refusal keeps only its first
+    line, cut to 500 characters, or names the exception's class when it has no message.
+    """
+    text = next(iter(str(exc).strip().splitlines()), "")
+    if len(text) > _CAUSE_LIMIT:
+        text = text[:_CAUSE_LIMIT - 3] + "..."
+    return text or type(exc).__name__
+
+
 def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFailure:
     """A native read that failed, refused with the failure's own message (#2487).
 
-    That message is what names the unit or file that stopped the read; without it the
-    caller holds exit 6 and nothing to inspect. The JSON result carries it alone as
-    `data.cause`.
+    Without that message the caller holds exit 6 and nothing to inspect. The JSON
+    result also carries it as `data.cause`.
     """
-    cause = str(exc) or type(exc).__name__
+    cause = failure_cause(exc)
     return CommandFailure("unavailable", f"{subject} native state cannot be established: {cause}",
                           data={**data, "cause": cause})
 
