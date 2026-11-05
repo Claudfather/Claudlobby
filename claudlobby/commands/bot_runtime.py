@@ -18,6 +18,18 @@ def lifecycle_notes(result) -> tuple[str, ...]:
     return ()
 
 
+def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFailure:
+    """A native read that failed, refused with the failure's own message (#2487).
+
+    That message is what names the unit or file that stopped the read; without it the
+    caller holds exit 6 and nothing to inspect. The JSON result carries it alone as
+    `data.cause`.
+    """
+    cause = str(exc) or type(exc).__name__
+    return CommandFailure("unavailable", f"{subject} native state cannot be established: {cause}",
+                          data={**data, "cause": cause})
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..bot_operations import (BotLifecycleError, check_handoff, control_bot, handoff_bot,
@@ -101,7 +113,7 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete", data=data) from exc
     except (InventoryError, OSError) as exc:
-        raise CommandFailure("unavailable", "bot native state cannot be established", data=data) from exc
+        raise native_state_refusal("bot", exc, data) from exc
     if action == "handoff" and getattr(args, "check", False):
         data = {key: value for key, value in asdict(result).items() if value is not None}
         when = "".join((f"; requested {result.requested_at}" if result.requested_at else "",

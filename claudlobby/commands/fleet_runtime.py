@@ -6,7 +6,7 @@ from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
 from ..runtime_admission import runtime_provenance
-from .bot_runtime import lifecycle_notes
+from .bot_runtime import lifecycle_notes, native_state_refusal
 
 
 def dispatch(args) -> CommandOutput:
@@ -102,4 +102,4 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "selected fleet configuration or activation is incomplete",
                              data=data) from exc
     except (InventoryError, OSError) as exc:
-        raise CommandFailure("unavailable", "fleet native state cannot be established", data=data) from exc
+        raise native_state_refusal("fleet", exc, data) from exc
