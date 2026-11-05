@@ -87,9 +87,39 @@ def test_application_stage_recovery_clears_only_the_matching_successful_error(up
         assert store.load()["stage_error"] == error
         with pytest.raises(UpdateError, match="render interrupted"):
             updater._application_stage(store, "render", python=interpreter)
+        # The stage's newest failure is the one that stands, an interruption included (#2702).
+        error = {"stage": "render", "detail": "interrupted: no result within 900 s; the stage process was stopped"}
         assert store.load()["stage_error"] == error
         assert updater._application_stage(store, "prepare", python=interpreter)["stage_error"] == error
         recovered = updater._application_stage(store, "render", python=interpreter)
+        assert "stage_error" not in recovered and store.load() == original
+
+
+@pytest.mark.parametrize("interruption, detail", [
+    (subprocess.TimeoutExpired("restore", 900, stderr=b"restoring example.service\n"),
+     "restoring example.service\ninterrupted: no result within 900 s; the stage process was stopped"),
+    (OSError(12, "Cannot allocate memory"),
+     "interrupted: the stage process could not run: [Errno 12] Cannot allocate memory"),
+], ids=["timeout", "oserror"])
+def test_an_interrupted_stage_keeps_why_until_the_same_stage_succeeds(update, monkeypatch, interruption, detail):
+    """#2702: an interruption records its cause in the retained record, as a refusal does."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        outcomes = iter([interruption, subprocess.CompletedProcess([], 0, "", "")])
+        def stage(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(updater.subprocess, "run", stage)
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+            updater._application_stage(store, "restore", python=interpreter)
+        # What `host update status` prints is this record.
+        assert read_update(installation)["stage_error"] == {"stage": "restore", "detail": detail}
+        recovered = updater._application_stage(store, "restore", python=interpreter)
         assert "stage_error" not in recovered and store.load() == original
 
 
@@ -702,6 +732,171 @@ def test_native_runner_checks_membership_before_operation_and_uses_waiting_lock(
         updater._run_native_update(installation)
     assert waits == [True]
     assert read_update(installation)["job_dispatch"]["state"] == "pending"
+
+
+CHAT = "-1001234567890"
+TOKEN = "8888888:AAAAAAAAAAAAAAAAAAAA"
+TELEGRAM_STUB = """#!/bin/bash
+[ ! -e "$CLAUDLOBBY_ROOT/telegram-refuses" ] || exit 3
+printf '%s|%s|%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "${TELEGRAM_BOT_TOKEN:-<none>}" "$1" \\
+    >> "$CLAUDLOBBY_ROOT/telegram-capture"
+"""
+
+
+def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None):
+    """An update in phase restore whose job runs `restore` as the target's restore stage.
+
+    The target checkout carries the real alert door (lib-common.sh and the
+    supervisor.sh it sources) beside a tg-post.sh: a stub that records what it
+    is handed, or the real one. The alert chat is a bot of another fleet's tree,
+    as on a multi-fleet host, where a host job finds it. `python`, when given,
+    replaces the environment's interpreter with that script.
+    """
+    from claudlobby import git_update as updater
+    installation, before, _, commit = update
+    repository = Path(__file__).resolve().parents[1]
+    package = installation.source / "claudlobby"
+    shutil.copy2(repository / "claudlobby/git_update.py", package / "git_update.py")
+    for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", *(("tg-post.sh",) if real_carrier else ())):
+        shutil.copy2(repository / "claudlobby/_runtime_scripts" / name, package / "_runtime_scripts" / name)
+    if not real_carrier:
+        (package / "_runtime_scripts/tg-post.sh").write_text(TELEGRAM_STUB)
+        (package / "_runtime_scripts/tg-post.sh").chmod(0o755)
+    (package / "update_entry.py").write_text(
+        "import pathlib,sys,time\n"
+        "from .git_update import UpdateStore\n"
+        "from .installation import read_installation\n"
+        "def main(args):\n"
+        "    directory,stage,fd,parent,request,*_=args\n"
+        "    store=UpdateStore.from_parent(read_installation(pathlib.Path(directory)),fd=int(fd),\n"
+        "                                  parent_pid=int(parent),request_id=request)\n"
+        "    record=store.load()\n"
+        f"    {restore}\n"
+        "    store.save(record)\n"
+        "    store.__exit__()\n"
+        "    return 0\n")
+    target = commit("Notice fixture target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    interpreter = installation.environment / "bin/python"
+    interpreter.parent.mkdir(parents=True)
+    if python is None:
+        interpreter.symlink_to(Path(sys.executable).resolve())
+    else:
+        interpreter.write_text(python)
+        interpreter.chmod(0o755)
+    bot = installation.data_root / "local/example/runtime/bots/worker"
+    bot.mkdir(parents=True)
+    channel = installation.data_root / "channel"
+    channel.mkdir()
+    (channel / ".env").write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (bot / "bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="worker"\n'
+                                  f'export TELEGRAM_GROUP_CHAT_ID="{CHAT}"\n'
+                                  f'export TELEGRAM_STATE_DIR="{channel}"\n')
+    with UpdateStore(installation) as store:
+        prepare(store, target, consumers={"example.service": {"intent": {
+            "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+        _run(["git", "-C", installation.source, "checkout", "--quiet", target], installation.data_root)
+        record = store.load()
+        record.update(phase="restore", maintenance=False, config_committed=True,
+                      job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+    jobs.verify_update_job_runner = lambda *_args, **_kwargs: {"native_member": True}
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    return installation, channel
+
+
+def _posted(installation):
+    capture = installation.data_root / "telegram-capture"
+    return [line.split("|", 3) for line in capture.read_text().splitlines()] if capture.exists() else []
+
+
+HANG = 'print("restoring example.service", file=sys.stderr, flush=True); time.sleep(60)'
+
+
+@pytest.mark.parametrize("ending", ["interrupted", "cannot_start", "health_error", "carrier_refused", "done"])
+def test_an_update_job_that_ends_unfinished_tells_the_alert_chat_once(update, monkeypatch, capsys, ending):
+    """#2702: the job posts one notice through Telegram when its run leaves the update unfinished.
+
+    Every timer that would page someone is among what the update stopped, so
+    the job itself tells the host's alert chat, as a host job's FLEET ALERT
+    does. A run that finishes posts nothing, and a refused post never replaces
+    the run's own outcome.
+    """
+    from claudlobby import git_update as updater
+    restore = {"interrupted": HANG, "cannot_start": HANG, "carrier_refused": HANG,
+               "health_error": 'record.update(phase="done", health_errors={"example.service": "unit failed to start"})',
+               "done": 'record.update(phase="done")'}[ending]
+    # A broken environment: the stage process cannot start at all.
+    broken = "#!/nonexistent/interpreter\n" if ending == "cannot_start" else None
+    installation, channel = _notice_job(update, monkeypatch, restore, python=broken)
+    if ending == "carrier_refused":
+        (installation.data_root / "telegram-refuses").touch()
+    if ending in {"interrupted", "cannot_start", "carrier_refused"}:
+        with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+            updater._run_native_update(installation)
+    else:
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["job_dispatch"]["state"] == "finished"
+    posted = _posted(installation)
+    stderr = capsys.readouterr().err
+    if ending == "done":
+        assert posted == [] and "this update did not finish" not in stderr
+        return
+    if ending == "carrier_refused":
+        assert posted == []
+        assert "nobody was told that this update did not finish: failed: tg-post.sh exit 3" in stderr
+        return
+    assert len(posted) == 1
+    chat, state, token, text = posted[0]
+    # The pair resolve_alert_target found for a host-scoped alert; tg-post reads the token itself.
+    assert (chat, state, token) == (CHAT, str(channel), "<none>")
+    assert text.startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
+                           f"(root {installation.data_root}, phase {record['phase']}): ")
+    assert text.endswith("read claudlobby host update status, then run claudlobby host update continue "
+                         "from a shell outside any bot session.")
+    assert "posted that this update did not finish (scan:bot:worker)" in stderr
+    if ending == "interrupted":
+        assert record["stage_error"] == {"stage": "restore", "detail":
+            "restoring example.service\ninterrupted: no result within 3 s; the stage process was stopped"}
+        assert ("application stage restore interrupted; continue the same operation "
+                "(interrupted: no result within 3 s; the stage process was stopped)") in text
+    elif ending == "cannot_start":
+        assert record["stage_error"]["stage"] == "restore"
+        assert record["stage_error"]["detail"].startswith("interrupted: the stage process could not run: ")
+        assert ("application stage restore interrupted; continue the same operation "
+                "(interrupted: the stage process could not run: ") in text
+    else:
+        assert "1 unit(s) reported a health error; example.service: unit failed to start" in text
+
+
+def test_the_notice_rides_the_real_tg_post_under_the_jobs_own_environment(update, monkeypatch, capsys, tmp_path):
+    """#2702: the real carrier works from the job's constructed environment, token read from its file."""
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, HANG, real_carrier=True)
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in\n'
+        '    --config) cat "$2" >> "$CLAUDLOBBY_ROOT/curl-capture"; shift 2 ;;\n'
+        '    -d|--data-urlencode) printf "%s\\n" "$2" >> "$CLAUDLOBBY_ROOT/curl-capture"; shift 2 ;;\n'
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "printf '%s' '{\"ok\":true,\"result\":{\"message_id\":42}}'\n")
+    (fake / "curl").chmod(0o755)
+    monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
+    with pytest.raises(UpdateError, match="restore interrupted"):
+        updater._run_native_update(installation)
+    sent = (installation.data_root / "curl-capture").read_text()
+    assert f"https://api.telegram.org/bot{TOKEN}/sendMessage" in sent
+    assert f"chat_id={CHAT}" in sent
+    assert "text=FLEET ALERT: host update " in sent and "restore interrupted" in sent
+    assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("initialize", [False, True])
