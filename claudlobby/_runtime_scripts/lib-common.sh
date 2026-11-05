@@ -4350,12 +4350,16 @@ session_md_handoff_epoch() {
     # `last_updated:` ISO-8601 UTC frontmatter field (written by /claudna:session handoff
     # and robust to file touches the way mtime is not); falls back to the file
     # mtime for legacy artifacts that predate the field. Returns 1 if absent.
+    # A missing or unparseable field is settled inside each substitution: on
+    # bash 3.2 a failure there fires an ERR trap set by the caller, however the
+    # call is guarded.
     local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch
     [ -f "$file" ] || return 1
     iso=$(grep -m1 '^last_updated:' "$file" 2>/dev/null \
-        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//')
+        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//' || true)
     if [ -n "$iso" ]; then
-        epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
+        epoch=$(iso_to_epoch "$iso" || true)
+        [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
     fi
     stat_mtime "$file" 2>/dev/null
 }

@@ -94,6 +94,7 @@ emit_fleet_event() { :; }
     @pytest.mark.parametrize("mode, handoff, command, sent, line", [
         ("fresh", "recent", "/claudna:session resume --auto", True, "RESUME — injecting resume command [available; fresh session]"),
         ("fresh", "legacy", "/claudna:session resume --auto", True, "RESUME — injecting"),
+        ("fresh", "garbled", "/claudna:session resume --auto", True, "RESUME — injecting"),
         ("fresh", "stale", "/claudna:session resume --auto", False, "RESUME SKIP — fresh session; handoff older than 86400s"),
         ("fresh", "absent", "/claudna:session resume --auto", False, None),
         ("fresh", "recent", "", False, "RESUME SKIP — fresh session and handoff, but no resume command [no-command]"),
@@ -115,6 +116,8 @@ emit_fleet_event() { :; }
             checkpoint.write_text(f"---\nlast_updated: {_iso(now - timedelta(days=2))}\n---\ncontext\n")
         elif handoff == "legacy":
             checkpoint.write_text("## State\nno frontmatter, so its mtime dates it\n")
+        elif handoff == "garbled":
+            checkpoint.write_text("---\nlast_updated: not a time\n---\nits mtime dates it\n")
         source = START_BOT.read_text()
         # Everything after the bridge-readiness wait up to the idle mark: what
         # a session receives once its channel is up.
