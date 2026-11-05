@@ -288,16 +288,33 @@ def verify_live(bot_dir, proof, adapter):
         raise NativeSessionError("adopted provider session changed before stop; continue the same operation")
 
 
+def _new_session(bot_dir, label, tmpdir, account):
+    from .isolation import transcript_slug
+    sid = str(uuid4())
+    return {"schema": 1, "session_id": sid, "transcript": str(account / "projects" / transcript_slug(bot_dir) / (sid + ".jsonl")),
+            "account": str(account), "cwd": str(bot_dir), "label": label, "tmpdir": str(tmpdir), "process": None, "pending": True, "checkpoint": None}
+
+
+def renew(bot_dir, label, tmpdir, account):
+    """Retain a new identity in place of the current one (`bot restart --fresh`).
+
+    The next launch starts it as a fresh session, as it starts any launch that
+    never reached SessionStart; the retired transcript stays on disk. The
+    receipt is replaced only if it is still the one read here.
+    """
+    current = read(bot_dir)
+    value = _new_session(bot_dir, label, tmpdir, account)
+    _write(bot_dir, value, expected=current)
+    return value
+
+
 def launch(bot_dir, label, tmpdir, account):
     value = read(bot_dir)
     original = value
     if value is None:
         if (Path(bot_dir) / "data/.spawn").exists():
             raise NativeSessionError("older bot needs explicit native session adoption; no latest-session guess or handoff fallback")
-        from .isolation import transcript_slug
-        sid = str(uuid4())
-        value = {"schema": 1, "session_id": sid, "transcript": str(account / "projects" / transcript_slug(bot_dir) / (sid + ".jsonl")),
-                 "account": str(account), "cwd": str(bot_dir), "label": label, "tmpdir": str(tmpdir), "process": None, "pending": True, "checkpoint": None}
+        value = _new_session(bot_dir, label, tmpdir, account)
         mode = "fresh"
     else:
         _binding(value, bot_dir, label, tmpdir, account)

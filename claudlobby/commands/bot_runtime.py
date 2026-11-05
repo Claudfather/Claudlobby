@@ -86,7 +86,8 @@ def dispatch(args) -> CommandOutput:
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
-                                     ceiling=ceiling, reason=reason)
+                                     ceiling=ceiling, reason=reason,
+                                     fresh=getattr(args, "fresh", False))
     except BotLifecycleError as exc:
         if exc.source_revision is not None:
             data.update(source_revision=exc.source_revision, config_fingerprint=exc.config_fingerprint)
@@ -155,8 +156,13 @@ def dispatch(args) -> CommandOutput:
         lines = (f"{result.fleet}/{result.bot}: de-enrolled and stopped; "
                  "the declared bot and retained identity remain selected.",)
     elif result.state == "requested":
-        lines = (f"{result.fleet}/{result.bot}: self restart requested; "
+        kind = " into a fresh session" if result.handoff == "fresh_session" else ""
+        lines = (f"{result.fleet}/{result.bot}: self restart{kind} requested; "
                  f"request={result.request_id}; final outcome in {result.log_path}.",)
+    elif action == "restart" and result.handoff == "fresh_session":
+        lines = (f"{result.fleet}/{result.bot}: restarted into a fresh session; readiness="
+                 f"{result.readiness}; it resumes from the saved handoff when that is recent "
+                 "enough (the RESUME line in its startup.log says which).",)
     elif action == "restart":
         lines = (f"{result.fleet}/{result.bot}: supervised session restarted; "
                  f"readiness={result.readiness}; handoff={result.handoff}.",)

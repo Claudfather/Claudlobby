@@ -4350,12 +4350,16 @@ session_md_handoff_epoch() {
     # `last_updated:` ISO-8601 UTC frontmatter field (written by /claudna:session handoff
     # and robust to file touches the way mtime is not); falls back to the file
     # mtime for legacy artifacts that predate the field. Returns 1 if absent.
+    # A missing or unparseable field is settled inside each substitution: on
+    # bash 3.2 a failure there fires an ERR trap set by the caller, however the
+    # call is guarded.
     local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch
     [ -f "$file" ] || return 1
     iso=$(grep -m1 '^last_updated:' "$file" 2>/dev/null \
-        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//')
+        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//' || true)
     if [ -n "$iso" ]; then
-        epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
+        epoch=$(iso_to_epoch "$iso" || true)
+        [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
     fi
     stat_mtime "$file" 2>/dev/null
 }
@@ -4438,6 +4442,39 @@ session_command_status() {
     _session_command_resolve "$@" || rc=$?
     printf '%s' "$_SESSION_COMMAND_STATUS"
     return "$rc"
+}
+
+# fresh_session_resume <mode> <bot_dir> <socket> <session> <log> <ticks>
+# A fresh native session (`bot restart --fresh`, or any launch that mints a new
+# UUID) first restores the bot's saved handoff, so a fresh session means an
+# empty context, not a lost one (#2696). It sends SESSION_RESUME_COMMAND (empty
+# sends nothing) as its own submission before the authored startup, while the
+# handoff's last_updated, else its mtime, is under RESUME_MAX_AGE_S (86400) old.
+# Exact continuation already holds the conversation and sends nothing. Success
+# is submission evidence only, never a completed resume.
+fresh_session_resume() {
+    local mode="$1" bot_dir="$2" socket="$3" session="$4" log="$5" ticks="$6"
+    local handoff="$2/.claude/session.md" max_age="${RESUME_MAX_AGE_S:-86400}" epoch=""
+    local command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
+    [ "$mode" = fresh ] && [ -f "$handoff" ] || return 0
+    case "$max_age" in ''|*[!0-9]*) max_age=86400 ;; esac
+    epoch="$(session_md_handoff_epoch "$handoff" || true)"
+    case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$(( $(date +%s) - epoch ))" -ge "$max_age" ]; then
+        printf '%s RESUME SKIP — fresh session; handoff older than %ss, starting clean\n' \
+            "$(ts_iso)" "$max_age" >> "$log"
+        return 0
+    fi
+    if ! _session_command_resolve "$command" "$bot_dir"; then
+        printf '%s RESUME SKIP — fresh session and handoff, but no resume command [%s]; it stays at %s\n' \
+            "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$handoff" >> "$log"
+        emit_fleet_event resume_skipped startup \
+            "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$handoff\"}" || true
+        return 0
+    fi
+    printf '%s RESUME — injecting resume command [%s; fresh session]: %s\n' \
+        "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
+    _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
 }
 
 _startup_send() {

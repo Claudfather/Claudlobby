@@ -561,3 +561,33 @@ def test_pending_confirmation_checks_expected_uuid_before_waiting(bound):
     with pytest.raises(native.NativeSessionError, match="differs from the original checkpoint") as error:
         native.confirm(b.bot, expected={**b.receipt, "session_id": OTHER})
     assert not isinstance(error.value, native.NativeSessionPending)
+
+
+def test_renew_retains_a_new_identity_that_the_next_launch_starts_fresh(bound):
+    """#2696: a fresh restart renews the receipt; the launch after it starts that identity."""
+    b = bound
+    renewed = native.renew(b.bot, b.label, b.tmpdir, b.account)
+    assert renewed == native.read(b.bot) and renewed["session_id"] != b.receipt["session_id"]
+    assert renewed["pending"] is True and renewed["process"] is None and renewed["checkpoint"] is None
+    assert Path(renewed["transcript"]).name == renewed["session_id"] + ".jsonl"
+    assert Path(b.receipt["transcript"]).read_bytes() == b"retained native context\n"
+    # A launch that never reaches SessionStart retries the same new identity.
+    for _ in range(2):
+        assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("fresh", renewed["session_id"])
+    # The retired process, still running until the unit restarts, cannot claim it.
+    with pytest.raises(native.NativeSessionError, match="retained launch identity"):
+        native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                       session_start(b.bot, b.account, b.receipt["session_id"], source="compact"),
+                       caller=os.getpid())
+    b.adapter.pid += 1
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, renewed["session_id"]), caller=os.getpid())
+    assert native.confirm(b.bot, expected=renewed)["session_id"] == renewed["session_id"]
+
+
+def test_renew_lets_an_older_bot_without_a_receipt_start_fresh(older):
+    b = older
+    with pytest.raises(native.NativeSessionError, match="older bot needs explicit native session adoption"):
+        native.launch(b.bot, b.label, b.tmpdir, b.account)
+    renewed = native.renew(b.bot, b.label, b.tmpdir, b.account)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("fresh", renewed["session_id"])

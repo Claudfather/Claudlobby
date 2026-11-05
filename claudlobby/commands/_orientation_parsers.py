@@ -218,6 +218,9 @@ def register_orientation_subparsers(sub):
                 if verb == "restart":
                     route.add_argument("--ceiling", type=int, metavar="SECONDS",
                                        help="Override the per-bot bridge readiness ceiling")
+                    route.add_argument("--fresh", action="store_true",
+                                       help="Start a new session that resumes from the saved "
+                                            "handoff, instead of continuing the current one")
                 elif verb == "stop":
                     route.add_argument("--reason", metavar="TEXT",
                                        help="Why it is stopped, recorded with the stop (#2243)")

@@ -10,7 +10,7 @@ argument-hint: "[--auto]"
 
 Graceful self-restart with best-achievable-fidelity context preservation. The canonical `claudlobby bot restart` owner performs the native restart on Linux or macOS.
 
-Flow: capture a handoff → notify on the channel → `claudlobby --json bot restart YOUR_BOT_ID` (replace the placeholder with your literal generated bot ID) → the new session resumes from that handoff, when a resume capability is installed.
+Flow: capture a handoff → notify on the channel → `claudlobby --json bot restart YOUR_BOT_ID --fresh` (replace the placeholder with your literal generated bot ID) → a new session resumes from that handoff, when a resume capability is installed. Without `--fresh` a restart continues this same conversation and never reads the handoff.
 
 **This skill names a requirement, not a provider.** It needs *a session handoff at
 `<cwd>/.claude/session.md`*; it does not care which skill produces one. Naming a specific
@@ -32,7 +32,7 @@ Parse `$ARGUMENTS`:
 
 2. **Notify on the channel.** Send a message confirming the handoff completed and that the restart is happening now. The restart kills this session — the user needs to know it is intentional and that context was saved. Best-effort: if the channel is unavailable, proceed anyway.
 
-3. **Restart.** Read your generated bot ID, then run `claudlobby --json bot restart YOUR_BOT_ID` as the final command, replacing `YOUR_BOT_ID` with the literal ID (no shell variable). The composed permission grants exactly that target. The CLI checks your fresh handoff and requests a one-shot restart outside this session. The JSON result means **requested**, not ready: keep its request ID and startup-log path; the final result is appended there. The native owner will:
+3. **Restart.** Read your generated bot ID, then run `claudlobby --json bot restart YOUR_BOT_ID --fresh` as the final command, replacing `YOUR_BOT_ID` with the literal ID (no shell variable). The composed permission grants exactly that target. The CLI checks that your handoff is under 300 s old, refusing otherwise, and requests a one-shot restart outside this session. The JSON result means **requested**, not ready: keep its request ID and startup-log path; the final result is appended there. The native owner will:
    - Kill this session
    - Start a new session via `start-bot.sh`
    - The new session submits resume and authored startup in one fleet bootstrap when the configured command positively resolves to a model-callable Skill. Native commands and unproven custom overrides retain literal command injection before startup. Resume remains capability-gated (also age-gated: it resumes only from a checkpoint fresher than ~24h, else clean-starts), then follows the bot's `STARTUP_PROMPT`. Submission does not prove completion. Resume no longer depends on `STARTUP_PROMPT` carrying it. If no resume capability is installed, `start-bot.sh` logs a `RESUME SKIP` line naming the reason and starts clean — so the handoff you captured is still on disk for a human or a later session, it simply is not replayed automatically.
