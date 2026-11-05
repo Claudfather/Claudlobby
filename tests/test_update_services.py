@@ -1053,6 +1053,9 @@ def test_completed_old_producer_pause_restores_original_intent(tmp_path, monkeyp
         original.rename(original.with_suffix(".timer"))
         row["target"] = original.with_suffix(".timer").name
         row["installed"][0].update(path=str(original.with_suffix(".timer")), resolved=str(original.with_suffix(".timer")))
+        # The restored intent only: the held start of a timer restored to
+        # running has its own tests in test_update_timer_catch_up.py.
+        monkeypatch.setattr(services, "_held_start", lambda *_: None)
     installed = Path(row["installed"][0]["path"])
     generated = tmp_path / "generated" / row["target"]
     generated.parent.mkdir()
