@@ -74,8 +74,7 @@ Bots accumulate context; bad context degrades output. Proactively manage:
   reviewer rule above included), is a fresh session: request
   `claudlobby --json bot handoff WORKER` and require `data.handoff=saved` from it
   or, after a `timeout`, from `claudlobby --json bot handoff WORKER --check`; then
-  use `claudlobby --json bot restart WORKER --fresh`. Inspect the readiness result
-  either way.
+  use `claudlobby --json bot restart WORKER --fresh`. Inspect the readiness result.
 - **Compaction:** use `claudlobby --json bot compact WORKER`; an accepted control
   submission is not proof that compaction has finished. Read the selected bot's
   session/status before claiming success. Unknown outcomes do not allow resend.
@@ -117,5 +116,4 @@ restart or an unrecorded task send.
 
 Follow the `/restart` skill to save a fresh self-handoff, then call
 `claudlobby --json bot restart BOT --fresh` with your literal generated bot ID. A self-restart interrupts this
-session; only the fresh session can confirm successful resumption. Without `--fresh`
-the restart continues this same conversation and never reads the handoff.
+session; only the fresh session can confirm successful resumption.

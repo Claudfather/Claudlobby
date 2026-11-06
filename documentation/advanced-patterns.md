@@ -97,11 +97,11 @@ Same as the alert sweep: declare the fleet job and apply it through the managed 
 
 ## 4. Graceful Restart & Pre-Stop Handoff
 
-A planned restart continues the bot's exact session; only a fresh session needs a handoff. `claudlobby bot restart BOT` waits for an idle prompt, proves the transcript retained, restarts the unit and resumes the same conversation: nothing is lost, and nothing is relieved. `claudlobby bot restart BOT --fresh` instead starts a new session with an empty context, which resumes from the bot's saved handoff (`.claude/session.md`). Capture that handoff first, so the fresh session can pick up where the old one left off. The capture mechanism is real and current (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop`.
+A planned restart continues the bot's exact session and needs no handoff: `claudlobby bot restart BOT` waits for an idle prompt, proves the transcript retained, restarts the unit and resumes the same conversation. `claudlobby bot restart BOT --fresh` starts a new session with an empty context that resumes from the bot's saved handoff (`.claude/session.md`), so capture the handoff first. The capture mechanism (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`) is real and current, but it is *not* wired to systemd `ExecStop`.
 
 ### Why
 
-A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought: its next start continues the same conversation from the transcript, but the turn it was in is cut off. A planned `bot restart` avoids that by waiting for an idle prompt. A fresh session drops the conversation altogether, so whatever the bot knew and had not written down is gone unless a handoff carries it.
+A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought: its next start continues the same conversation from the transcript, but the turn it was in is cut off. A planned `bot restart` avoids that by waiting for an idle prompt. A fresh session drops the conversation, so anything the bot had not written down is gone unless a handoff carries it.
 
 ### Two entry points
 
@@ -125,7 +125,7 @@ not a supported restart shortcut.
 
 ### Resume on a fresh start
 
-Resume needs no separate wiring in the common case. When a session starts fresh, `claudlobby/_runtime_scripts/start-bot.sh` submits the configured session-resume command as its own submission, ahead of the authored startup prompt, behind two gates: the handoff must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every fresh start. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason; an unresolved command also emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction. A session that continues receives neither the resume command nor the startup prompt.
+Resume needs no separate wiring in the common case. When a session starts fresh, `claudlobby/_runtime_scripts/start-bot.sh` submits the configured session-resume command as its own submission, ahead of the authored startup prompt, behind two gates: the handoff must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every fresh start. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason; an unresolved command also emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
 
 ### Gotchas
 

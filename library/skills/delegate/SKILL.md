@@ -21,8 +21,8 @@ conversation and reads no handoff. For a fresh session, request
 `claudlobby --json bot handoff BOT` and require `data.handoff=saved` before
 `claudlobby --json bot restart BOT --fresh`; after a `timeout`, read
 `claudlobby --json bot handoff BOT --check` until it reads `saved`. To relieve
-context in place, use `claudlobby --json bot compact BOT`. Inspect the returned readiness and native outcome before claiming the
-bot is back.
+context in place, use `claudlobby --json bot compact BOT`. Inspect the returned
+readiness and native outcome before claiming the bot is back.
 Uncertain handoff/control outcomes require inspection, never automatic retries.
 
 Use `claudlobby --json message send --to BOT --text "QUESTION" --request-id UUID`

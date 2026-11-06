@@ -29,15 +29,13 @@ bot in plain words to write its session handoff, then check again. Continue
 only when the request or the check reads `data.handoff=saved`; anything else
 stops this sequence.
 Then run `claudlobby --json bot restart BOT --fresh` and inspect its readiness result.
-A plain restart needs no handoff: it continues the same conversation and never
-reads one.
 An explicit operator restart hold overrides the criteria below.
 
 ## Safe to restart when:
 
 - All three checks above show idle/clean
 - Bot is visibly stuck (>5 min of unchanged session evidence AND no linked progress report)
-- The worker has reported `context-degraded` AND the current task is demonstrably complete (PR merged, final report received). Only a fresh session or a compaction relieves it; a plain restart leaves the same context in place.
+- The worker has reported `context-degraded` AND the current task is demonstrably complete (PR merged, final report received). Only a fresh session or a compaction relieves it.
 - The human explicitly requests it
 
 ## Reviewers are an exception
