@@ -25,6 +25,7 @@ import pytest
 
 from claudlobby.config import load_fleet
 from tests.package_fixtures import source_package
+from tests.test_config_staging import staging_case  # noqa: F401
 from claudlobby.paths import Paths
 from claudlobby.plane.contracts import (
     ContractViolation,
@@ -1023,9 +1024,12 @@ def test_activation_scan_refusal_reads_the_winning_tier_through_the_shipped_reso
     opted_out = "PLANE_EMIT_ENABLED=0 in {} opts fleet test-fleet out of the registry scan"
     refusal = registry.activation_scan_refusal(paths, fleet)
     assert refusal.startswith(opted_out.format(root / ".env"))
-    # The refusal stops a retained first-fleet update, which continue resumes.
+    # The retained update froze this file, so the way out is to start over.
     assert refusal.endswith("that first-fleet setup needs before it starts any bot;"
-                            " remove that line, then run host update continue")
+                            " this update froze that file, so no step clears the refusal,"
+                            " neither an edit nor host update continue; remove that line,"
+                            " then start over with a new installation and data root")
+    # An exported value is no input of the update, which continue then resumes.
     monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
     assert registry.activation_scan_refusal(paths, fleet).endswith(
         "; unset it, then run host update continue")
@@ -1037,6 +1041,39 @@ def test_activation_scan_refusal_reads_the_winning_tier_through_the_shipped_reso
     assert registry.activation_scan_refusal(paths, fleet).startswith(opted_out.format(fleet_dir / ".env"))
     (fleet_dir / ".env").unlink()
     assert registry.activation_scan_refusal(paths, fleet) is None
+
+
+def test_no_tier_edit_clears_the_refusal_of_a_retained_first_fleet_update(staging_case, monkeypatch):  # noqa: F811
+    """What the tier refusal claims: the retained render froze the .env tiers, so the prepare
+    stage stops at any edit, before the registry check, and only the refused bytes pass it."""
+    from types import SimpleNamespace
+    from claudlobby import config_staging, update_operation
+    from claudlobby.activation_identity import ActivationRefusal
+    from claudlobby.config_plan import PlanError, read_rendered
+    case = staging_case
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
+    env = case.root / ".env"
+    env.write_text("export PLANE_EMIT_ENABLED=0\n")
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
+    record = {"request_id": "rid", "target": plan.revision, "config_fingerprint": None, "finalized": False,
+              "phase": "prepare", "initialization_scope": {"directory": str(case.root / "units"), "manifests": []}}
+    store = SimpleNamespace(root=case.root, installation=case.package.installation,
+                            _assert_locked=lambda: None, load=lambda: record)
+
+    def prepare():  # the update's prepare stage, on the render it retained
+        update_operation.prepare_operation(store, read_rendered(case.root, plan.fingerprint),
+                                           SimpleNamespace(package=case.package), case.root / "units",
+                                           Path("/python"), "rid", initialize=True)
+
+    with pytest.raises(ActivationRefusal, match="no step clears the refusal"):
+        prepare()
+    env.write_text("")  # the operator removes the line
+    with pytest.raises(PlanError, match="configuration input changed"):
+        prepare()
+    env.write_text("export PLANE_EMIT_ENABLED=0\n")  # the refused bytes pass, and refuse again
+    with pytest.raises(ActivationRefusal, match="no step clears the refusal"):
+        prepare()
 
 
 @pytest.mark.parametrize("failure", ["spooled", "staged", "exception", "short-list"])

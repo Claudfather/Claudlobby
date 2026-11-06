@@ -614,10 +614,14 @@ def activation_scan_refusal(paths, fleet) -> str | None:
     The setup's identity bindings join to the keyframes the scan commits, so
     there a silenced or opted-out scan is a refusal, never a skip. Each check
     reads only this process's environment or the fleet's .env tier cascade, so
-    the update's prepare stage asks before it records or stops anything, and
+    the update's prepare stage asks before it stops or starts anything, with
+    the update record already written, and
     run_generate_scan(require_commit=True) asks again at the scan. The text is
-    written for the operator: it names the value, the edit that clears it and
-    the command that resumes the retained update.
+    written for the operator and says only what clears the refusal. Unsetting
+    an exported value does, and host update continue then resumes the retained
+    update. Nothing does for a tier value: the update froze its .env tiers as
+    inputs, so an edit stops at the changed-input check, and nothing discards
+    the update. The operator starts over with a new installation and data root.
     """
     from .. import env_tiers as _env_tiers
     needs = "the registry scan that first-fleet setup needs before it starts any bot"
@@ -635,7 +639,9 @@ def activation_scan_refusal(paths, fleet) -> str | None:
                 f" PLANE_EMIT_ENABLED; {resume} once they resolve")
     if _env_tiers.resolves_to(cascade, "PLANE_EMIT_ENABLED", "0"):
         return (f"PLANE_EMIT_ENABLED=0 in {cascade['PLANE_EMIT_ENABLED'].path} opts fleet"
-                f" {fleet.name} out of {needs}; remove that line, then {resume}")
+                f" {fleet.name} out of {needs}; this update froze that file, so no step clears"
+                " the refusal, neither an edit nor host update continue; remove that line,"
+                " then start over with a new installation and data root")
     return None
 
 
@@ -699,7 +705,7 @@ def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | N
     First-fleet setup passes require_commit=True after exact ingest/config
     readiness, before starting any bot or producer. That mode refuses
     disabled/unavailable recording (activation_scan_refusal, which the setup
-    also asks before it records or stops anything) and incomplete enumeration before the first
+    also asks before it stops or starts anything) and incomplete enumeration before the first
     emission; success is complete=True, recording='committed', with every
     <=50-event chunk confirmed.
     RegistryScanError.summary discloses acknowledged partial chunks; an exception
