@@ -1,5 +1,6 @@
 """Stable native admission executes only committed commands, without services."""
 
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -99,17 +100,69 @@ def test_native_entry_refuses_unapproved_or_changed_native_binding(native, chang
     assert "Traceback" not in outcome.stderr
 
 
-@pytest.mark.parametrize("phase, maintenance", [("quiesce", False), ("git", True)])
-def test_native_entry_is_fenced_on_reboot_before_source_or_environment_access(native, phase, maintenance):
-    installation, marker, _, _, run, _ = native
+def _write_update(installation, phase, maintenance=False):
     (installation.data_root / "state/update.json").write_text(json.dumps({
         "schema": 1, "phase": phase, "maintenance": maintenance}))
+
+
+def test_native_entry_is_refused_by_maintenance_before_source_or_environment_access(native):
+    installation, marker, _, _, run, _ = native
+    _write_update(installation, "git", True)
     import shutil
     shutil.rmtree(installation.source)
     outcome = run()
-    assert outcome.returncode != 0 and not marker.exists()
-    assert "maintenance" in outcome.stderr or "quiesce" in outcome.stderr
+    assert outcome.returncode == 6 and not marker.exists()
+    assert "maintenance" in outcome.stderr
     assert "Traceback" not in outcome.stderr
+
+
+def test_fenced_oneshot_skips_its_tick_without_taking_the_lock(native):
+    installation, marker, _, _, run, _ = native
+    _write_update(installation, "quiesce")
+    import shutil
+    shutil.rmtree(installation.source)
+    with native_start_fence(installation):
+        outcome = run()
+    assert outcome.returncode == 0, outcome.stderr
+    assert not marker.exists()
+    assert "skipped example-job" in outcome.stdout and "fenced" in outcome.stdout
+    assert "Traceback" not in outcome.stdout + outcome.stderr
+
+
+def test_fenced_exec_unit_exits_75_and_runs_nothing(native):
+    installation, marker, snapshot, _, run, _ = native
+    _write_update(installation, "quiesce")
+    item = snapshot["units"][0]
+    command = tuple(item["admission"]["command"])
+    argv = wrap_unit_argv(item["environment"], unit="example-job", phase="producers", mode="exec", argv=command)
+    outcome = run(argv)
+    assert outcome.returncode == 75, outcome.stderr
+    assert not marker.exists()
+    assert "fenced" in outcome.stderr
+    assert "Traceback" not in outcome.stderr
+
+
+@pytest.mark.parametrize("record, hold", [
+    ('{"schema": 1, "phase": "git", "maintenance": true}', False),
+    ('{"schema": 1, "phase": "prepare", "maintenance": false}', True),
+    ("{", False)], ids=["maintenance", "busy-lock", "unreadable-record"])
+def test_oneshot_refusals_other_than_the_fence_stay_failures(native, record, hold):
+    installation, marker, _, _, run, _ = native
+    (installation.data_root / "state/update.json").write_text(record)
+    with native_start_fence(installation) if hold else contextlib.nullcontext():
+        outcome = run()
+    assert outcome.returncode == 6, outcome.stdout + outcome.stderr
+    assert not marker.exists()
+    assert "Traceback" not in outcome.stdout + outcome.stderr
+
+
+@pytest.mark.parametrize("phase", ["prepare", "commit", "restore", "done"])
+def test_oneshot_runs_in_every_phase_that_admits_native_starts(native, phase):
+    installation, marker, _, _, run, _ = native
+    _write_update(installation, phase)
+    outcome = run()
+    assert outcome.returncode == 0, outcome.stderr
+    assert marker.read_text() == "executed"
 
 
 def test_native_and_short_cli_cannot_enter_during_cutover_exclusion(native):
@@ -240,8 +293,7 @@ def test_actual_shell_admission_holds_lock_and_resolves_recorded_python(native_s
             with native_start_fence(installation):
                 pass
         # Cleanup must work after the coordinator fences new native entries.
-        (installation.data_root / "state/update.json").write_text(json.dumps({
-            "schema": 1, "phase": "quiesce", "maintenance": False}))
+        _write_update(installation, "quiesce")
         _, errors = process.communicate("finish\n", timeout=10)
         assert process.returncode == 0, errors
         with native_start_fence(installation):
@@ -272,12 +324,32 @@ def test_actual_shell_refuses_stale_binding_and_update_fence(native_shell, chang
     elif change == "operation":
         operation = "unrecognized-start"
     else:
-        (installation.data_root / "state/update.json").write_text(json.dumps({
-            "schema": 1, "phase": "quiesce" if change == "quiesce" else "git",
-            "maintenance": change == "maintenance"}))
+        _write_update(installation, "quiesce" if change == "quiesce" else "git", change == "maintenance")
     process = start(operation, **extra)
     _, errors = process.communicate("finish\n", timeout=10)
     assert process.returncode != 0
+    assert not (installation.data_root / "acquired").exists()
+    assert "Traceback" not in errors
+    with native_start_fence(installation):
+        pass
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["free", "held"])
+@pytest.mark.parametrize("step", ["start-bot", "keepalive", "python-step"])
+def test_actual_shell_exits_75_under_the_fence_and_leaves_no_lock(native_shell, step, held):
+    installation, directory, _, start = native_shell
+    _write_update(installation, "quiesce")
+    with native_start_fence(installation) if held else contextlib.nullcontext():
+        if step == "python-step":
+            body = '''set -euo pipefail
+exec 9<"$CLAUDLOBBY_ROOT/state/runtime-use.lock"
+"$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" _native-shell python 9
+'''
+            process = start(body=body)
+        else:
+            process = start(step)
+        _, errors = process.communicate("finish\n", timeout=10)
+    assert process.returncode == 75, errors
     assert not (installation.data_root / "acquired").exists()
     assert "Traceback" not in errors
     with native_start_fence(installation):
