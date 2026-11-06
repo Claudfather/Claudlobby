@@ -1021,7 +1021,15 @@ def test_activation_scan_refusal_reads_the_winning_tier_through_the_shipped_reso
     monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
     monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
     opted_out = "PLANE_EMIT_ENABLED=0 in {} opts fleet test-fleet out of the registry scan"
-    assert registry.activation_scan_refusal(paths, fleet).startswith(opted_out.format(root / ".env"))
+    refusal = registry.activation_scan_refusal(paths, fleet)
+    assert refusal.startswith(opted_out.format(root / ".env"))
+    # The refusal stops a retained first-fleet update, which continue resumes.
+    assert refusal.endswith("that first-fleet setup needs before it starts any bot;"
+                            " remove that line, then run host update continue")
+    monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+    assert registry.activation_scan_refusal(paths, fleet).endswith(
+        "; unset it, then run host update continue")
+    monkeypatch.delenv("PLANE_EMIT_ENABLED")
     (fleet_dir / ".env").write_text("PLANE_EMIT_ENABLED=1\n")  # the fleet tier wins
     assert registry.activation_scan_refusal(paths, fleet) is None
     (root / ".env").unlink()

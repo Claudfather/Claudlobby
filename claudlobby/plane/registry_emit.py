@@ -22,9 +22,9 @@ declaration names its scope string.
 
 Default ON since the defaults flip (chunk N): a keyframe of what the fleet IS
 is what every metric sample joins to, and a plane whose registry lane never
-ran renders an estate of unnamed uids. Activation REQUIRES the scan and
-refuses the values that would turn it off (activation_scan_refusal says which
-and why). Only the retired generate hook, which the harness still drives,
+ran renders an estate of unnamed uids. First-fleet setup REQUIRES the scan
+and refuses the values that would turn it off (activation_scan_refusal says
+which and why). Only the retired generate hook, which the harness still drives,
 reads them as an opt-out; it is NON-BLOCKING (a scan failure logs and never
 breaks generate). NOTE the carrier split: ``fleet.yaml env:`` reaches composed
 ``bot.conf`` (runtime doors and hooks read it) but does NOT reach the scan —
@@ -609,32 +609,33 @@ class RegistryScanError(RuntimeError):
 
 
 def activation_scan_refusal(paths, fleet) -> str | None:
-    """Why activation's scan of *fleet* would refuse before its first emission, or None.
+    """Why first-fleet setup's scan of *fleet* would refuse before its first emission, or None.
 
-    Activation's identity bindings join to the keyframes the scan commits, so
-    under activation a silenced or opted-out scan is a refusal, never a skip.
-    Each check reads only this process's environment or the fleet's .env tier
-    cascade, so activation asks before it records or pauses anything, and
+    The setup's identity bindings join to the keyframes the scan commits, so
+    there a silenced or opted-out scan is a refusal, never a skip. Each check
+    reads only this process's environment or the fleet's .env tier cascade, so
+    the update's prepare stage asks before it records or stops anything, and
     run_generate_scan(require_commit=True) asks again at the scan. The text is
-    written for the operator: it names the value and the edit that clears it.
+    written for the operator: it names the value, the edit that clears it and
+    the command that resumes the retained update.
     """
     from .. import env_tiers as _env_tiers
-    needs = "the registry scan that activation needs before it starts any bot"
+    needs = "the registry scan that first-fleet setup needs before it starts any bot"
+    resume = "run host update continue"
     if os.environ.get("PLANE_EMIT_DISABLED") == "1":
         return (f"PLANE_EMIT_DISABLED=1 in this command's environment silences {needs};"
-                " unset it and run the command again")
+                f" unset it, then {resume}")
     if os.environ.get("PLANE_EMIT_ENABLED") == "0":
         return (f"PLANE_EMIT_ENABLED=0 in this command's environment opts out of {needs};"
-                " unset it and run the command again")
+                f" unset it, then {resume}")
     try:
         cascade = _env_tiers.resolve(paths, fleet_name=fleet.name)
     except _env_tiers.ResolverUnavailable:
-        return (f"{needs} cannot resolve fleet {fleet.name}'s .env tiers to check"
-                " PLANE_EMIT_ENABLED; run the command again once they resolve")
+        return (f"the check for {needs} cannot resolve fleet {fleet.name}'s .env tiers to read"
+                f" PLANE_EMIT_ENABLED; {resume} once they resolve")
     if _env_tiers.resolves_to(cascade, "PLANE_EMIT_ENABLED", "0"):
         return (f"PLANE_EMIT_ENABLED=0 in {cascade['PLANE_EMIT_ENABLED'].path} opts fleet"
-                f" {fleet.name} out of {needs}; remove that line, then stage a new plan and"
-                " activate it")
+                f" {fleet.name} out of {needs}; remove that line, then {resume}")
     return None
 
 
@@ -695,10 +696,10 @@ def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | N
     dict, or None when a tier has turned the scan OFF. Raises only upward
     through the non-blocking hook in cmd_generate.
 
-    Activation passes require_commit=True after exact ingest/config readiness,
-    before starting any bot or producer. That mode refuses disabled/unavailable
-    recording (activation_scan_refusal, which activation also asks before it
-    records or pauses anything) and incomplete enumeration before the first
+    First-fleet setup passes require_commit=True after exact ingest/config
+    readiness, before starting any bot or producer. That mode refuses
+    disabled/unavailable recording (activation_scan_refusal, which the setup
+    also asks before it records or stops anything) and incomplete enumeration before the first
     emission; success is complete=True, recording='committed', with every
     <=50-event chunk confirmed.
     RegistryScanError.summary discloses acknowledged partial chunks; an exception
