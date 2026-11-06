@@ -247,15 +247,16 @@ def test_candidate_consumer_placement_change_refuses_before_effects():
 
 
 class AddedNative(Native):
-    def __init__(self, directory):
+    def __init__(self, directory, *others):
         super().__init__()
         self.directory = directory
+        self.others = others
         self.state = "not-found not-found inactive"
         self.fail_start = False
 
     def read(self, function, *args):
         assert function == "svc_inventory_catalog"
-        return f"manager\tLinux\ndirectory\t{self.directory}\n"
+        return "".join(["manager\tLinux\n", *(f"directory\t{item}\n" for item in (self.directory, *self.others))])
 
     def call(self, function, *args, timeout=30):
         if function == "svc_inventory_catalog":
@@ -426,10 +427,11 @@ def test_launchd_bot_waits_for_original_readiness_without_replaying_start(tmp_pa
     assert native.ready_timeouts == [240] * len(ready)
 
 
-def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path):
+@pytest.mark.parametrize("linked", [False, True])
+def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path, linked):
     from claudlobby.supervision_inventory import UnitDeclaration
-    directory = tmp_path / "native"
-    directory.mkdir()
+    directory, shared, link = _linked_search_list(tmp_path)
+    others = (link, shared) if linked else ()
     source = tmp_path / "generated.service"
     content = b"[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n"
     item = {"sha256": hashlib.sha256(content).hexdigest(), "mode": 0o644,
@@ -437,9 +439,10 @@ def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path):
             "fleet": None, "bot": None, "service": None, "enroll": True}
     snapshot = {"supervision": {"manager": "Linux", "domain": "", "directory": str(directory)}}
     declaration = UnitDeclaration(source, "host", tmp_path, "", (), None, None, None)
-    native = AddedNative(directory)
+    native = AddedNative(directory, *others)
     row = services._freeze_added(snapshot, native, directory, declaration, item, content, set())
     assert row["kind"] == "added" and row["absence"]["absent"]
+    assert row["search_directories"] == [str(path) for path in (directory, *others)]
     assert "saved_native" not in row and row["installed"] == []
     assert row["enablement"]["path"] == str(directory / "default.target.wants" / source.name)
     assert not Path(row["destination"]).exists()
@@ -460,6 +463,72 @@ def test_independent_absence_rejects_changed_native_witnesses(tmp_path, drift):
     with pytest.raises(RuntimeEvidenceError):
         assert_native_absent(native, manager="Linux", domain="user/123" if drift == "domain" else "",
                              target=target, installed_file=directory / target, search_directories=[directory])
+
+
+def _linked_search_list(tmp_path):
+    """A plain install directory, a directory outside it, and a link to that directory."""
+    directory, shared, link = tmp_path / "native", tmp_path / "shared", tmp_path / "linked"
+    directory.mkdir()
+    shared.mkdir()
+    link.symlink_to(shared)
+    return directory, shared, link
+
+
+def _absence_witnesses(directories, state, *, manager="Linux", domain=""):
+    """What the manager answers to one absence check: its catalog, then the unit's state."""
+    catalog = "".join([f"manager\t{manager}\n", f"domain\t{domain}\n" if domain else "",
+                       *(f"directory\t{item}\n" for item in directories)])
+
+    def call(function, *_args, **_kwargs):
+        stdout = catalog if function == "svc_inventory_catalog" else state
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+    return SimpleNamespace(call=call)
+
+
+@pytest.mark.parametrize("manager,domain,target,name,state", [
+    ("Linux", "", "example.service", "example.service", "not-found not-found inactive"),
+    ("Darwin", "gui/501", "gui/501/example", "example.plist", "unchanged unloaded inactive"),
+])
+def test_independent_absence_accepts_a_link_on_the_search_list(tmp_path, manager, domain, target, name, state):
+    from claudlobby.supervision_runtime import assert_native_absent
+    directory, shared, link = _linked_search_list(tmp_path)
+    directories = [directory, link, shared]
+    evidence = assert_native_absent(_absence_witnesses(directories, state, manager=manager, domain=domain),
+                                    manager=manager, domain=domain, target=target,
+                                    installed_file=directory / name, search_directories=directories)
+    assert evidence.details["absent"] is True
+
+
+@pytest.mark.parametrize("unit,state,refusal", [
+    ("file", "not-found not-found inactive", "already exists"),
+    ("dangling link", "not-found not-found inactive", "already exists"),
+    ("only the manager sees it", "disabled loaded inactive", "absence is unproved"),
+])
+def test_independent_absence_sees_a_unit_behind_a_linked_directory(tmp_path, unit, state, refusal):
+    from claudlobby.supervision_runtime import assert_native_absent, RuntimeEvidenceError
+    directory, shared, link = _linked_search_list(tmp_path)
+    if unit == "file":
+        (shared / "example.service").write_text("[Service]\nExecStart=/bin/true\n")
+    elif unit == "dangling link":
+        (shared / "example.service").symlink_to(tmp_path / "gone")
+    directories = [directory, link]
+    with pytest.raises(RuntimeEvidenceError, match=refusal):
+        assert_native_absent(_absence_witnesses(directories, state), manager="Linux", domain="",
+                             target="example.service", installed_file=directory / "example.service",
+                             search_directories=directories)
+
+
+@pytest.mark.parametrize("placement", ["link", "under a link", "relative entry"])
+def test_independent_absence_refuses_a_bad_placement(tmp_path, placement):
+    from claudlobby.supervision_runtime import assert_native_absent, RuntimeEvidenceError
+    directory, shared, link = _linked_search_list(tmp_path)
+    (shared / "user").mkdir()
+    directories = {"link": [link], "under a link": [link / "user"],
+                   "relative entry": [directory, Path("relative")]}[placement]
+    native = _absence_witnesses(directories, "not-found not-found inactive")
+    with pytest.raises(RuntimeEvidenceError, match="invalid frozen native placement"):
+        assert_native_absent(native, manager="Linux", domain="", target="example.service",
+                             installed_file=directories[0] / "example.service", search_directories=directories)
 
 
 # Shared native contracts survive removal of the activation coordinator.
