@@ -794,18 +794,22 @@ raise SystemExit(update_entry.main(sys.argv[2:]))
 
 
 def _finished_units(store, stage):
-    """How many units the record says this stage has finished; 0 while it cannot be read (#2734).
+    """How many units the record says this stage has finished; 0 while it cannot be read as units (#2734).
 
     A unit with a restore error has not finished: if every unit fails, the stage
-    must still stop and tell someone. An unreadable record is no news, and never
-    stops a stage by itself.
+    must still stop and tell someone. A record that cannot be read is no news, and
+    never stops a stage by itself.
     """
     try:
         record = store.load()
     except UpdateError:
         return 0
-    return sum(progress.get(_STAGE_UNITS[stage]) == "done" and "restore_error" not in progress
-               for progress in (record or {}).get("consumers", {}).values())
+    consumers = record.get("consumers") if record is not None else None
+    if not isinstance(consumers, dict):
+        return 0
+    field = _STAGE_UNITS[stage]
+    return sum(isinstance(progress, dict) and progress.get(field) == "done" and "restore_error" not in progress
+               for progress in consumers.values())
 
 
 def _run_stage(store, stage, command, **options):
@@ -822,7 +826,7 @@ def _run_stage(store, stage, command, **options):
             deadline = time.monotonic() + _STAGE_TIMEOUT
             while True:
                 try:
-                    output, errors = process.communicate(timeout=min(_STAGE_POLL, max(0, deadline - time.monotonic())))
+                    output, errors = process.communicate(timeout=_STAGE_POLL)
                 except subprocess.TimeoutExpired as exc:
                     finished = _finished_units(store, stage) if counted else 0
                     if finished > best:

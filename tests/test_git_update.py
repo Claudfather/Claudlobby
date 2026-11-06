@@ -761,7 +761,7 @@ def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None
     replaces the environment's interpreter with that script. `retained` puts the
     same door in the previous release, whose quiet support retains it at
     quiesce, as a real update does (#2715); `damaged` names the door's scripts
-    that the target breaks.
+    that the target breaks. `units` names its consumers.
     """
     from claudlobby import git_update as updater
     installation, before, _, commit = update
@@ -828,6 +828,7 @@ def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None
     jobs.verify_update_job_runner = lambda *_args, **_kwargs: {"native_member": True}
     monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
     monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
     return installation, channel
 
 
@@ -932,7 +933,6 @@ def test_a_restore_that_keeps_finishing_units_runs_past_the_stage_limit(update, 
     from claudlobby import git_update as updater
     installation, _ = _notice_job(update, monkeypatch, _each_unit("restore", "done", 1.0, 'record.update(phase="done")'),
                                   units=UNITS)
-    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
     monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
     updater._run_native_update(installation)
     record = read_update(installation)
@@ -943,7 +943,6 @@ def test_a_quiesce_that_keeps_stopping_units_runs_past_the_stage_limit(update, m
     """#2734: quiesce counts finished units too, by its own field."""
     from claudlobby import git_update as updater
     installation, _ = _notice_job(update, monkeypatch, _each_unit("stop", "done", 1.0), units=UNITS)
-    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
     monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
     with UpdateStore(installation) as store:
         updater._application_stage(store, "quiesce")
@@ -951,18 +950,22 @@ def test_a_quiesce_that_keeps_stopping_units_runs_past_the_stage_limit(update, m
 
 
 def test_a_restore_failing_every_unit_is_stopped_at_the_limit(update, monkeypatch, tmp_path):
-    """#2734: a unit with a restore error has not finished, and saving is not progress."""
+    """#2734: a unit with a restore error has not finished, and saving is not progress.
+
+    Its three failures end by 0.9 s, and 1.0 s after them it would reach `reached`:
+    past a 1.5 s limit counted from its start, but 0.5 s before the limit a stage
+    that counted those failures as finished would set from the last of them.
+    """
     from claudlobby import git_update as updater
     reached = tmp_path / "reached-the-end"
-    restore = _lines("for turn in range(5):",
-                     '    unit = sorted(record["consumers"])[turn % 3]',
+    restore = _lines('for unit in sorted(record["consumers"]):',
+                     "    time.sleep(0.3)",
                      '    record["consumers"][unit].update(restore="done", restore_error="unit failed")',
                      "    store.save(record)",
-                     "    time.sleep(0.4)",
+                     "time.sleep(1.0)",
                      f"pathlib.Path({str(reached)!r}).touch()",
                      HANG)
     installation, _ = _notice_job(update, monkeypatch, restore, units=UNITS)
-    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
     monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
     with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
         updater._run_native_update(installation)
@@ -1025,6 +1028,12 @@ def test_an_unreadable_record_counts_no_units_and_stops_nothing(update, monkeypa
             assert updater._finished_units(store, "restore") == 0
         finally:
             path.write_bytes(good)
+        odd = store.load()
+        for consumers in (None, {"example.service": "done"}):  # consumers nothing validates
+            odd["consumers"] = consumers
+            store.save(odd)
+            assert updater._finished_units(store, "restore") == 0
+        path.write_bytes(good)
         script = ("import pathlib,time\n"
                   f"path=pathlib.Path({str(path)!r}); good=path.read_bytes()\n"
                   "path.write_bytes(b'{not json'); time.sleep(0.6); path.write_bytes(good)\n")
