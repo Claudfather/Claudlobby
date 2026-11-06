@@ -39,7 +39,7 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance, runtime_route_matches)
     from ..task_operations import TaskRecordingError, _reader
     from ..task_queries import TaskQueryError, show_assignment
@@ -159,9 +159,6 @@ def dispatch(args) -> CommandOutput:
                    if exc.recording == "committed" else
                    "assignment recording is unconfirmed; inspect the request")
         raise _effect_failure(code, message, data=data, request_id=request_id, release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

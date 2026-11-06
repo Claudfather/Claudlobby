@@ -54,7 +54,6 @@ def dispatch(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
 
     if args.seed:
@@ -121,9 +120,6 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", str(exc), data=data) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid bot root or fleet selector", data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "bot operation requires the selected executable and release",
-                             data=data) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected bot release differs from this executable", data=data) from exc
     except (ActivationError, PlanError, OperationContextError) as exc:

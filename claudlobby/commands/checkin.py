@@ -275,7 +275,6 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..request_receipts import ReceiptError
-    from ..runtime_admission import ReleaseMismatch
     from ..task_state import TaskStateError
 
     if args.public_command.startswith("checkin.selection."):
@@ -295,9 +294,6 @@ def dispatch(args) -> CommandOutput:
         data = asdict(exc.result) if exc.result is not None else {}
         raise CommandFailure(exc.code, str(exc), hint=exc.hint, retryable=exc.retryable,
                              data={**(exc.data or {}), **data}) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid check-in root or fleet selector",
                              hint=str(exc)) from exc

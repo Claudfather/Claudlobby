@@ -48,7 +48,6 @@ def _check(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
 
     if args.seed:
         raise CommandFailure("invalid_argument", "selected credential check cannot use the seed fleet")
@@ -61,8 +60,6 @@ def _check(args) -> CommandOutput:
                                    "unknown" if exc.effect_attempted else "unattempted"}) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet or root selector") from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "credential check requires the selected executable") from exc
     except (ActivationError, PlanError, ReleaseError, OperationContextError) as exc:
         # The unit's failure alert points at its journal, so the cause goes there
         # under the refusal: an activation holding the host clears by itself (#2515).

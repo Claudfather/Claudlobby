@@ -50,7 +50,6 @@ def _run(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
     from ..host_job_operations import HostJobError, run_host_job
     from .host import _operator_shell
@@ -73,9 +72,6 @@ def _run(args) -> CommandOutput:
                     "committed configuration and installed native placement are still required")
         raise CommandFailure("unavailable" if exc.unavailable else "conflict", str(exc),
                              data=data, release_id=exc.release_id, hint=hint) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "host job requires the committed Git installation",
-                             data=data) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "host job installation differs from this executable",
                              data=data) from exc

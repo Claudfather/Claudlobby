@@ -18,7 +18,6 @@ def dispatch(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
 
     action = args.public_command.removeprefix("fleet.")
@@ -98,9 +97,6 @@ def dispatch(args) -> CommandOutput:
                              if exc.bot else None) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet root or selector", data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "fleet operation requires the selected executable and release",
-                             data=data) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected fleet release differs from this executable",
                              data=data) from exc

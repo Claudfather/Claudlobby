@@ -321,8 +321,8 @@ def test_events_land_on_the_plane_once_and_read_back_as_fleet_events(tmp_path):
                                "post_tokens": 17666, "session": "s1"}
 
 
-@pytest.mark.parametrize("admission_mismatch", [False, True])
-def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, monkeypatch, admission_mismatch):
+@pytest.mark.parametrize("admission_refused", [False, True])
+def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, monkeypatch, admission_refused):
     from claudlobby import active_config
     from claudlobby.commands import checkin
 
@@ -339,8 +339,8 @@ def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, mo
                              config_fingerprint="c" * 64)
     @contextmanager
     def admitted(*args, **kwargs):
-        if admission_mismatch:
-            raise runtime_admission.ReleaseMismatch(tmp_path, "r1", "different")
+        if admission_refused:
+            raise runtime_admission.ActivationError("Git runtime identity differs from the executing installation")
         yield runtime_admission.GitCurrentRuntime(paths.package.installation,
             stamp.source_revision, stamp.config_fingerprint, {})
     monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
@@ -350,11 +350,11 @@ def test_the_door_records_for_the_selected_fleet_and_names_each_bot(tmp_path, mo
     monkeypatch.setattr(active_config, "runtime_read_stamp", lambda *_args, **_kw: stamp)
     plane = Plane()
     monkeypatch.setattr("claudlobby.plane.emit_api.emit_batch", lambda root, raws: plane(raws))
-    if admission_mismatch:
+    if admission_refused:
         from claudlobby.command_result import CommandFailure
         with pytest.raises(CommandFailure) as failure:
             door.dispatch(SimpleNamespace(public_command="fleet.compactions.record"))
-        assert failure.value.error.code == "release_mismatch"
+        assert failure.value.error.code == "conflict"
         assert _pre(plane) == []
         assert not (paths.fleet_state / _recorder().CURSOR_FILE).exists()
         return

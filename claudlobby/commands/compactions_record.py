@@ -26,8 +26,7 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
-    from .checkin import _scope, _runtime_hint
+    from .checkin import _scope
 
     try:
         destination, origin, selected, _bindings = _scope(args)
@@ -60,9 +59,6 @@ def dispatch(args) -> CommandOutput:
         return CommandOutput(data, release_id=selected.release_id, lines=lines)
     except CommandFailure:
         raise
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected runtime differs from compaction caller",
-                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid compaction root or fleet selector") from exc
     except OperationContextUnavailableError as exc:
