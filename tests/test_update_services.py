@@ -117,6 +117,55 @@ def test_bot_session_drift_refuses_before_parking_or_stop(tmp_path, frozen, obse
     assert not any(call[0] == "svc_activation_pause" for call in native.calls)
 
 
+class ShapedNative(Native):
+    """The session observer answers by call shape, as the real one does: with the frozen unit path and target a
+    missing socket on an active unit reads unknown; the bare binding reads the steady-state answer."""
+
+    def __init__(self, bare="absent"):
+        super().__init__()
+        self.state, self.bare = "enabled loaded active", bare
+
+    def call(self, function, *args, timeout=30):
+        result = super().call(function, *args, timeout=timeout)
+        if function == "svc_bot_session_observe":
+            result.stdout = self.bare if len(args) == 3 else "unknown"
+        return result
+
+
+def _gone_bot(tmp_path, monkeypatch, **progress):
+    row = _drifted_row(tmp_path, "enabled loaded active", bot_binding=[str(tmp_path), "example", str(tmp_path)],
+                       disposition="running")
+    store, native = Store(tmp_path, row), ShapedNative()
+    store.record["consumers"][row["target"]].update(progress)
+    declarations(monkeypatch, row)
+    return row, store, native
+
+
+def test_a_marked_bot_is_stopped_without_reading_its_session_again(tmp_path, monkeypatch):
+    row, store, native = _gone_bot(tmp_path, monkeypatch, session_gone=True)
+    services.quiesce_consumer(store, row["target"], native)
+    assert not any(call[0] == "svc_bot_session_observe" for call in native.calls)
+    pauses = [call for call in native.calls if call[0] == "svc_activation_pause"]
+    assert len(pauses) == 1 and pauses[0][1][-4:] == ("bot-owned", *row["bot_binding"])
+    assert store.record["consumers"][row["target"]]["stop"] == "done"
+
+
+def test_an_unmarked_bot_whose_session_reads_unknown_still_refuses(tmp_path, monkeypatch):
+    row, store, native = _gone_bot(tmp_path, monkeypatch)
+    with pytest.raises(UpdateError, match="bot session disposition is unknown before stop"):
+        services.quiesce_consumer(store, row["target"], native)
+    assert not services._park_path(store, row).exists()
+    assert not any(call[0] == "svc_activation_pause" for call in native.calls)
+
+
+def test_a_marked_bot_with_a_native_session_proof_is_not_checked_live(tmp_path, monkeypatch):
+    from claudlobby import native_session
+    monkeypatch.setattr(native_session, "verify_live", lambda *_: pytest.fail("the process is gone"))
+    row, store, native = _gone_bot(tmp_path, monkeypatch, session_gone=True, checkpoint={"kind": "native-session-v1"})
+    services.quiesce_consumer(store, row["target"], native)
+    assert store.record["consumers"][row["target"]]["stop"] == "done"
+
+
 def _drifted_row(tmp_path, saved, **fields):
     row = intent(tmp_path)
     row.update(saved_native=saved, restore_native=saved, **fields)
@@ -514,9 +563,10 @@ class StartingBotNative(Native):
         return super().call(function, *args, timeout=timeout)
 
 
+@pytest.mark.parametrize("gone", [False, True])
 @pytest.mark.parametrize("added", [False, True])
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_launchd_bot_waits_for_original_readiness_without_replaying_start(tmp_path, monkeypatch, added, interrupted):
+def test_launchd_bot_waits_for_original_readiness_without_replaying_start(tmp_path, monkeypatch, added, interrupted, gone):
     import plistlib
     row = added_intent(tmp_path, monkeypatch)[0] if added else intent(tmp_path)
     content = plistlib.dumps({"RunAtLoad": True, "ProgramArguments": ["/bin/true"]})
@@ -533,6 +583,9 @@ def test_launchd_bot_waits_for_original_readiness_without_replaying_start(tmp_pa
         declarations(monkeypatch, row)
         monkeypatch.setattr(services, "_darwin", lambda *_: None)
     store = Store(tmp_path, row)
+    if gone:
+        # A bot marked session-gone is restored as frozen, exactly as a bot that was running.
+        store.record["consumers"][row["target"]]["session_gone"] = True
     native = StartingBotNative(store, row["target"], fail_ready=interrupted)
     snapshot = {"data_root": str(tmp_path)}
     if interrupted:

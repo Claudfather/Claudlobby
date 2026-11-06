@@ -37,7 +37,7 @@ def record():
     for key, fields in {
         "timer": {"target": "job.timer", "scheduled": False, "phase": "producers"},
         "job": {"target": "job.service", "scheduled": True, "phase": "producers"},
-        "bot": {"target": "bot.service", "scheduled": False, "phase": "bots",
+        "bot": {"target": "bot", "scheduled": False, "phase": "bots",
                 "bot_binding": ["/data/bot", "bot", "/tmp/private"], "disposition": "running"},
         "owner": {"target": "owner.service", "scheduled": False, "phase": "producers"},
         "recorder": {"target": "recorder.service", "scheduled": False, "phase": "ingest"},
@@ -46,7 +46,12 @@ def record():
         rows[key] = {"intent": row}
     return {"phase": "quiesce", "request_id": "original", "config_fingerprint": "render",
             "previous_config": "previous", "candidate_config": {"fingerprint": "candidate"},
-            "target": "target", "consumers": rows, "sql_schema": 14}
+            "target": "target", "consumers": rows, "sql_schema": 14, "scope": _scope(rows)}
+
+
+def _scope(rows):
+    """A frozen scope binds each consumer's intent, keyed by its target."""
+    return operation.consumer_scope([item["intent"] for item in rows.values()])
 
 
 def test_quiesce_schedules_then_one_checkpoint_then_bot_then_recorder(tmp_path, monkeypatch):
@@ -64,11 +69,132 @@ def test_quiesce_schedules_then_one_checkpoint_then_bot_then_recorder(tmp_path, 
         current["consumers"][key]["stop"] = "done"
         store.save(current)
     monkeypatch.setattr(operation, "quiesce_consumer", quiet)
-    operation.quiesce_operation(store, None)
+    operation.quiesce_operation(store, ReadySession())
     assert events == [("stop", "timer"), ("stop", "job"), ("checkpoint", "original"),
                       ("stop", "bot"), ("stop", "owner"), ("stop", "recorder")]
-    operation.quiesce_operation(store, None)
+    operation.quiesce_operation(store, ReadySession())
     assert sum(event[0] == "checkpoint" for event in events) == 1
+
+
+class SessionAdapter:
+    """Answers the session observer by call shape, as the real one does: the frozen unit path and target make a
+    missing socket on an active unit read unknown, and the bare binding reads the steady-state answer."""
+
+    def __init__(self, bare):
+        self.bare, self.calls = bare, []
+
+    def call(self, function, *args, timeout=30):
+        self.calls.append((function, args))
+        assert function == "svc_bot_session_observe"
+        answer = self.bare if len(args) == 3 else "unknown"
+        return SimpleNamespace(returncode=0, stdout=answer, stderr="")
+
+
+class ReadySession:
+    """Reads every bot session ready and leaves every other native call to the adapter it wraps."""
+
+    def __init__(self, inner=None):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def call(self, function, *args, timeout=30):
+        if function == "svc_bot_session_observe":
+            return SimpleNamespace(returncode=0, stdout="ready", stderr="")
+        return self.inner.call(function, *args, timeout=timeout)
+
+
+def _gone_record(disposition="running"):
+    """The frozen scope binds the bot intent."""
+    data = record()
+    data["consumers"]["bot"]["intent"]["disposition"] = disposition
+    data["scope"] = _scope(data["consumers"])
+    return data
+
+
+def _quiesce_with(monkeypatch, store, adapter, checkpoint):
+    events = []
+    monkeypatch.setattr(operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "previous"})
+    monkeypatch.setattr(operation, "read_rendered", lambda *_: SimpleNamespace(check_inputs=lambda: None))
+    monkeypatch.setattr(bot_operations, "save_planned_checkpoint", checkpoint, raising=False)
+    def quiet(store, key, adapter):
+        events.append(key)
+        current = store.load()
+        current["consumers"][key]["stop"] = "done"
+        store.save(current)
+    monkeypatch.setattr(operation, "quiesce_consumer", quiet)
+    return events, lambda: operation.quiesce_operation(store, adapter)
+
+
+def _no_checkpoint(*_args, **_kwargs):
+    pytest.fail("a bot whose session is gone must not be checkpointed")
+
+
+def test_a_frozen_running_bot_whose_session_is_gone_is_marked_and_stopped_without_a_checkpoint(monkeypatch):
+    store, adapter = Store(_gone_record()), SessionAdapter("absent")
+    events, run = _quiesce_with(monkeypatch, store, adapter, _no_checkpoint)
+    run()
+    assert store.load()["consumers"]["bot"]["session_gone"] is True
+    assert events == ["timer", "job", "bot", "owner", "recorder"]
+    assert [call[1] for call in adapter.calls] == [("/data/bot", "bot", "/tmp/private")]
+
+
+def test_a_frozen_running_bot_with_a_ready_session_is_checkpointed_not_marked(monkeypatch):
+    store, adapter, taken = Store(_gone_record()), SessionAdapter("ready"), []
+    events, run = _quiesce_with(monkeypatch, store, adapter, lambda *a, **k: taken.append(1) or {"original": True})
+    run()
+    assert taken == [1] and "session_gone" not in store.load()["consumers"]["bot"]
+
+
+def test_a_session_that_cannot_be_read_keeps_its_checkpoint_attempt_and_is_not_marked(monkeypatch):
+    store, adapter = Store(_gone_record()), SessionAdapter("unknown")
+    def refuse(*_args, **_kwargs):
+        raise bot_operations.BotLifecycleError("no live session")
+    events, run = _quiesce_with(monkeypatch, store, adapter, refuse)
+    with pytest.raises(bot_operations.BotLifecycleError, match="no live session"):
+        run()
+    assert "session_gone" not in store.load()["consumers"]["bot"]
+    assert "bot" not in events
+
+
+def test_a_bot_frozen_stopped_is_never_read_for_a_gone_session(monkeypatch):
+    store, adapter = Store(_gone_record("stopped")), SessionAdapter("absent")
+    events, run = _quiesce_with(monkeypatch, store, adapter, _no_checkpoint)
+    run()
+    assert adapter.calls == [] and "session_gone" not in store.load()["consumers"]["bot"]
+
+
+def test_final_quiet_accepts_a_marked_bot_without_a_checkpoint_and_nothing_else(monkeypatch):
+    def quiet_store(**fields):
+        data = _gone_record()
+        for item in data["consumers"].values():
+            item["stop"] = "done"
+        data["consumers"]["bot"].update(fields)
+        return Store(data), data
+    events = []
+    monkeypatch.setattr(bot_operations, "verify_checkpoint_after_stop",
+                        lambda directory, proof: events.append(("proof", proof)), raising=False)
+    monkeypatch.setattr(operation, "observe_quiet", lambda store, key, adapter: events.append(("quiet", key)))
+    monkeypatch.setattr(operation, "_schema", lambda *_: 14)
+    store, data = quiet_store(session_gone=True)
+    operation.assert_operation_quiet(store, None)
+    assert {key for kind, key in events if kind == "quiet"} == set(data["consumers"])
+    assert not [event for event in events if event[0] == "proof"]
+    store, _ = quiet_store()
+    with pytest.raises(UpdateError, match="running bot lacks its original checkpoint proof"):
+        operation.assert_operation_quiet(store, None)
+    events.clear()
+    store, _ = quiet_store(session_gone=True, checkpoint={"original": True})
+    operation.assert_operation_quiet(store, None)
+    assert ("proof", {"original": True}) in events
+
+
+def test_marking_a_gone_session_twice_reads_it_once():
+    store, adapter = Store(_gone_record()), SessionAdapter("absent")
+    assert operation.mark_session_gone(store, "bot", adapter) is True
+    assert operation.mark_session_gone(store, "bot", adapter) is True
+    assert len(adapter.calls) == 1
 
 
 def test_final_quiet_verifies_original_proof_and_reobserves_every_consumer(monkeypatch):
@@ -99,7 +225,7 @@ def test_resume_before_stop_rechecks_original_native_identity_without_replaying(
     monkeypatch.setattr(bot_operations, "save_planned_checkpoint", recheck)
     monkeypatch.setattr(operation, "quiesce_consumer", lambda *_: pytest.fail("must not stop on changed native identity"))
     with pytest.raises(bot_operations.BotLifecycleError, match="native process differs"):
-        operation.quiesce_operation(store, None)
+        operation.quiesce_operation(store, ReadySession())
     assert events == ["original"]
     assert store.load()["consumers"]["bot"].get("stop") is None
 
@@ -126,6 +252,7 @@ def test_update_adopts_running_session_but_leaves_stopped_bot_and_optional_hando
     data["consumers"] = {"bot": data["consumers"]["bot"]}
     data["consumers"]["bot"]["intent"].update(bot_binding=[str(bot), "example.worker", str(tmpdir)],
                                               disposition=disposition)
+    data["scope"] = _scope(data["consumers"])
     store = Store(data)
     monkeypatch.setattr(operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "previous"})
     monkeypatch.setattr(operation, "read_rendered", lambda *_: SimpleNamespace(check_inputs=lambda: None))
@@ -142,8 +269,8 @@ def test_update_adopts_running_session_but_leaves_stopped_bot_and_optional_hando
         current["consumers"][key]["stop"] = "done"
         store.save(current)
     monkeypatch.setattr(operation, "quiesce_consumer", quiet)
-    result = operation.quiesce_operation(store, adapter)
-    operation.quiesce_operation(store, adapter)
+    result = operation.quiesce_operation(store, ReadySession(adapter))
+    operation.quiesce_operation(store, ReadySession(adapter))
     assert stopped == ["bot"] and result["request_id"] == "original"
     assert (optional.read_bytes(), optional.stat().st_ino) == retained
     assert bool(adapter.calls) == (disposition == "running")

@@ -466,6 +466,20 @@ def _drifted(subject, key, saved, observed, remedy):
                        f'and reads "{observed}" now. {remedy}')
 
 
+def mark_session_gone(store, key, adapter):
+    """Mark a bot this update froze running whose session is gone. Nothing can start it again while the fence is
+    up, so its stop needs no checkpoint and the restore starts it as frozen. The proof is the observer's
+    steady-state read without the frozen unit path: on Linux, its unit active/exited and its private socket
+    missing. Any other read is no proof, and the bot keeps its checkpoint and every refusal."""
+    record, progress, row = _row(store, key)
+    if not progress.get("session_gone"):
+        if _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"]) != "absent":
+            return False
+        progress["session_gone"] = True
+        store.save(record)
+    return True
+
+
 def quiesce_consumer(store, key, adapter):
     record, progress, row = _row(store, key)
     if row.get("kind") == "added":
@@ -493,7 +507,7 @@ def quiesce_consumer(store, key, adapter):
                            else "svc_activation_snapshot", _file(row), key)
         if not native_state_matches(row, observed, stopping=True):
             raise _drifted("native state", key, row["saved_native"], observed, _drift_remedy(row, key, observed))
-        if row["bot_binding"] and not row.get("legacy_parked"):
+        if row["bot_binding"] and not row.get("legacy_parked") and not progress.get("session_gone"):
             session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], _file(row), key)
             if session not in {"ready", "absent", "dead"}:
                 raise UpdateError("bot session disposition is unknown before stop")
@@ -522,7 +536,7 @@ def quiesce_consumer(store, key, adapter):
         return progress
     if progress.get("stop") is None:
         proof = progress.get("checkpoint")
-        if (row["bot_binding"] and proof is not None
+        if (row["bot_binding"] and proof is not None and not progress.get("session_gone")
                 and proof.get("kind") == "native-session-v1"):
             from .native_session import verify_live
             verify_live(Path(row["bot_binding"][0]), proof, adapter)
