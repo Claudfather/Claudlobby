@@ -1,0 +1,3 @@
+### Docs — the existing-host runbook covers holding an old source-puller
+
+`documentation/existing-host-release-conversion.md` described adopting a source-pulling host into sealed releases through `host activate --adopt-existing` and other retired commands. It now points to "Converting an existing sealed host" in the update lifecycle guide and gives the one procedure no other page has: holding an old `pull-root` source-puller before the branch it follows moves, and keeping it retired after the host converts. The fleet-ops skill now says that `bot remove` refuses, since the Git updater does not yet support roster changes, and that `bot stop` takes a bot out of service.
