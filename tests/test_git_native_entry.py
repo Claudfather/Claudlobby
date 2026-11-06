@@ -1,5 +1,6 @@
 """Stable native admission executes only committed commands, without services."""
 
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -141,19 +142,14 @@ def test_fenced_exec_unit_exits_75_and_runs_nothing(native):
     assert "Traceback" not in outcome.stderr
 
 
-@pytest.mark.parametrize("change", ["maintenance", "busy-lock", "unreadable-record"])
-def test_oneshot_refusals_other_than_the_fence_stay_failures(native, change):
+@pytest.mark.parametrize("record, hold", [
+    ('{"schema": 1, "phase": "git", "maintenance": true}', False),
+    ('{"schema": 1, "phase": "prepare", "maintenance": false}', True),
+    ("{", False)], ids=["maintenance", "busy-lock", "unreadable-record"])
+def test_oneshot_refusals_other_than_the_fence_stay_failures(native, record, hold):
     installation, marker, _, _, run, _ = native
-    if change == "maintenance":
-        _write_update(installation, "git", True)
-    elif change == "busy-lock":
-        _write_update(installation, "prepare")
-    else:
-        (installation.data_root / "state/update.json").write_text("{")
-    if change == "busy-lock":
-        with native_start_fence(installation):
-            outcome = run()
-    else:
+    (installation.data_root / "state/update.json").write_text(record)
+    with native_start_fence(installation) if hold else contextlib.nullcontext():
         outcome = run()
     assert outcome.returncode == 6, outcome.stdout + outcome.stderr
     assert not marker.exists()
@@ -297,8 +293,7 @@ def test_actual_shell_admission_holds_lock_and_resolves_recorded_python(native_s
             with native_start_fence(installation):
                 pass
         # Cleanup must work after the coordinator fences new native entries.
-        (installation.data_root / "state/update.json").write_text(json.dumps({
-            "schema": 1, "phase": "quiesce", "maintenance": False}))
+        _write_update(installation, "quiesce")
         _, errors = process.communicate("finish\n", timeout=10)
         assert process.returncode == 0, errors
         with native_start_fence(installation):
@@ -329,9 +324,7 @@ def test_actual_shell_refuses_stale_binding_and_update_fence(native_shell, chang
     elif change == "operation":
         operation = "unrecognized-start"
     else:
-        (installation.data_root / "state/update.json").write_text(json.dumps({
-            "schema": 1, "phase": "quiesce" if change == "quiesce" else "git",
-            "maintenance": change == "maintenance"}))
+        _write_update(installation, "quiesce" if change == "quiesce" else "git", change == "maintenance")
     process = start(operation, **extra)
     _, errors = process.communicate("finish\n", timeout=10)
     assert process.returncode != 0
@@ -341,19 +334,21 @@ def test_actual_shell_refuses_stale_binding_and_update_fence(native_shell, chang
         pass
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["free", "held"])
 @pytest.mark.parametrize("step", ["start-bot", "keepalive", "python-step"])
-def test_actual_shell_exits_75_under_the_fence_and_leaves_no_lock(native_shell, step):
+def test_actual_shell_exits_75_under_the_fence_and_leaves_no_lock(native_shell, step, held):
     installation, directory, _, start = native_shell
     _write_update(installation, "quiesce")
-    if step == "python-step":
-        body = '''set -euo pipefail
+    with native_start_fence(installation) if held else contextlib.nullcontext():
+        if step == "python-step":
+            body = '''set -euo pipefail
 exec 9<"$CLAUDLOBBY_ROOT/state/runtime-use.lock"
 "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" _native-shell python 9
 '''
-        process = start(body=body)
-    else:
-        process = start(step)
-    _, errors = process.communicate("finish\n", timeout=10)
+            process = start(body=body)
+        else:
+            process = start(step)
+        _, errors = process.communicate("finish\n", timeout=10)
     assert process.returncode == 75, errors
     assert not (installation.data_root / "acquired").exists()
     assert "Traceback" not in errors

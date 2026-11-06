@@ -1,7 +1,6 @@
 """The real keepalive sweep pauses quietly under an update's fence and still fails loudly on any other refusal."""
 
 import hashlib
-import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,7 +8,7 @@ import subprocess
 import pytest
 
 from tests.conftest import constructed_env
-from tests.test_git_native_entry import native, native_shell  # noqa: F401
+from tests.test_git_native_entry import _write_update, native, native_shell  # noqa: F401
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
 
@@ -48,14 +47,9 @@ def sweep(native, native_shell, tmp_path):  # noqa: F811
     return installation, run, log, calls
 
 
-def _update(installation, phase, maintenance):
-    (installation.data_root / "state/update.json").write_text(json.dumps({
-        "schema": 1, "phase": phase, "maintenance": maintenance}))
-
-
 def test_sweep_caught_by_the_fence_pauses_without_a_failure_or_alert(sweep):
     installation, run, log, calls = sweep
-    _update(installation, "quiesce", False)
+    _write_update(installation, "quiesce")
     outcome = run()
     assert outcome.returncode == 0, outcome.stderr
     text = log.read_text()
@@ -67,7 +61,7 @@ def test_sweep_caught_by_the_fence_pauses_without_a_failure_or_alert(sweep):
 
 def test_sweep_refused_by_maintenance_fails_and_alerts(sweep):
     installation, run, log, calls = sweep
-    _update(installation, "git", True)
+    _write_update(installation, "git", True)
     outcome = run()
     assert outcome.returncode != 0
     text = log.read_text()
