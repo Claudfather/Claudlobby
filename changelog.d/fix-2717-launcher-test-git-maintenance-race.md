@@ -1,0 +1,3 @@
+### Fixed — tests that delete a fresh Git checkout no longer fail at random on `maintenance.lock` (#2717)
+
+Since Git 2.47, a commit, fetch or merge ends by detaching `git maintenance run --auto`, which still holds `.git/objects/maintenance.lock` after the command returns. A test that then deleted the checkout could list that file and find it gone at its unlink, and `test_stable_launcher_fences_before_loading_missing_source_or_environment[record2]` failed that way once on macOS CI. The launcher played no part: the test was still in its own setup. The shared `_source_installation` fixture and the helper in `tests/test_notify_behind.py` now turn `maintenance.auto` off for their repositories, and two tests read Git's trace to confirm that no maintenance starts.
