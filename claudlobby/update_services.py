@@ -427,14 +427,15 @@ def observe_quiet(store, key, adapter):
 
 def native_state_matches(row, observed, *, stopping=False):
     """Enrollment and load stay fixed. Scheduled work may finish between observations. At the stop, a timer or
-    non-bot service that has only gone down is also as the stop needs it, and the restore brings it back as
-    frozen; a failed service is not, because the pause refuses to reset one (it resets a failed timer)."""
+    non-bot service that has gone down to inactive is also as the stop needs it, and so is a failed timer, which
+    the pause resets; the restore brings each back as frozen. A failed or activating service is not: the pause
+    does not reset a failed service, and one still activating ends failed once it is masked."""
     before, after = row["saved_native"].split(), observed.split()
     if row["scheduled"]:
         return before[:2] == after[:2] and len(after) == 3 and after[2] in {"active", "activating", "inactive", "failed"}
     if observed == row["saved_native"]:
         return True
-    down = {"inactive", "activating", "failed"} if row["target"].endswith(".timer") else {"inactive", "activating"}
+    down = {"inactive", "failed"} if row["target"].endswith(".timer") else {"inactive"}
     return (stopping and not row["bot_binding"] and before[:2] == after[:2] and len(after) == 3
             and before[2] == "active" and after[2] in down)
 
@@ -452,11 +453,13 @@ def _drift_remedy(row, key, observed):
         if now[1] == "masked" and saved[1] != "masked":
             step = f"Run systemctl --user unmask {'--runtime ' if now[0] == 'masked-runtime' else ''}{key}"
         elif now[1] == saved[1]:
-            if now[0] != saved[0] and saved[0] in {"enabled", "disabled"}:
+            if {now[0], saved[0]} == {"enabled", "disabled"}:
                 step = f"Run systemctl --user {saved[0].removesuffix('d')} {key}"
+            elif saved[0] == "disabled" and now[0] == "enabled-runtime":
+                step = f"Run systemctl --user disable --runtime {key}"
             elif now[2] == "failed":
                 step = f"Run systemctl --user reset-failed {key}"
-            elif saved[2] == "inactive" and now[2] in {"active", "activating"}:
+            elif now[2] == "activating" or (saved[2] == "inactive" and now[2] == "active"):
                 step = f"Run systemctl --user stop {key}"
     return f"{step}, then run claudlobby host update continue"
 
