@@ -15,7 +15,6 @@ def dispatch(args) -> CommandOutput:
     from ..host_update_operations import HostUpdateError, run_host_update
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from .releases import _host_root
 
     if any(key in os.environ for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE")):
@@ -32,9 +31,6 @@ def dispatch(args) -> CommandOutput:
     except HostUpdateError as exc:
         data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
         raise CommandFailure("unavailable" if exc.effect_attempted else "conflict", str(exc),
-                             data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "host update requires the selected executable",
                              data=data) from exc
     except (ActivationError, PlanError, ReleaseError, InvalidPathSelector, ResolverUnavailable, RuntimeError) as exc:
         raise CommandFailure("conflict", "selected host update scope cannot be verified", data=data) from exc

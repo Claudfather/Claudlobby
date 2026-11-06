@@ -14,7 +14,6 @@ def dispatch(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_reap import SupervisionReapError, reap_selected_orphans
 
     if args.seed:
@@ -27,8 +26,6 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", str(exc)) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet root or selector") from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "orphan reap requires the selected executable") from exc
     except (ActivationError, PlanError, ReleaseError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected fleet or release cannot be verified") from exc
     except OSError as exc:

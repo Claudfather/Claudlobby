@@ -47,7 +47,6 @@ def _session(args, context) -> CommandOutput:
     from ..config_plan import PlanError
     from ..fleet_operations import FleetLifecycleError, reconcile_fleet
     from ..operation_context import OperationContextError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
 
     try:
@@ -57,8 +56,6 @@ def _session(args, context) -> CommandOutput:
         raise CommandFailure("unavailable" if exc.unavailable else "conflict",
                              "private session or native enrollment could not be established",
                              release_id=exc.release_id) from exc
-    except (ReleaseMismatch) as exc:
-        raise CommandFailure("release_mismatch", "executing native package differs from the selected release") from exc
     except (ActivationError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete") from exc
     except (InventoryError, OSError) as exc:

@@ -189,7 +189,7 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance, runtime_route_matches)
     from .message_write import _bound_release
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
@@ -279,9 +279,6 @@ def dispatch(args) -> CommandOutput:
         # nudge_bound_task translates its own recording failure.
         raise _recording_failure(exc, fleet_name=fleet_name, release_id=release_id,
                                  notification=args.public_command in _REPORTS) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint) from exc
     except (OperationContextUnavailableError, PendingMigrationError, DowngradeError,
             sqlite3.Error, OSError) as exc:
         raise CommandFailure("unavailable", "task identity or storage is unavailable",

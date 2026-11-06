@@ -124,7 +124,7 @@ def dispatch(args) -> CommandOutput:
     from ..releases import ReleaseError
     from ..report_payload import ReportPayload, ReportPayloadError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_route_matches)
 
     release_id = None
@@ -203,9 +203,6 @@ def dispatch(args) -> CommandOutput:
     except ReportPayloadError as exc:
         raise CommandFailure("invalid_argument", "invalid report fields; inspect command help",
                              release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

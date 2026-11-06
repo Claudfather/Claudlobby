@@ -26,8 +26,8 @@ def dispatch(args) -> CommandOutput:
                                      _local_operator_alias)
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
-    from .checkin import _scope, _runtime_hint
+    from ..runtime_admission import RuntimeIdentity, mutation_admission
+    from .checkin import _scope
 
     try:
         if args.seed:
@@ -82,9 +82,6 @@ def dispatch(args) -> CommandOutput:
         raise
     except AutomationStateError as exc:
         raise CommandFailure(exc.code, str(exc)) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from automation caller",
-                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid automation root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

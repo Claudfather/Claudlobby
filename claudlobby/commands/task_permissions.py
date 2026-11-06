@@ -30,7 +30,7 @@ def dispatch(args):
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError, require_current_schema
     from ..request_receipts import ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance)
     from .message_write import _bound_release
     from ..task_operations import TaskRecordingError
@@ -140,8 +140,6 @@ def dispatch(args):
         raise CommandFailure("unavailable", str(exc), release_id=release_id,
             data={"recording": exc.recording, "execution": "not_requested",
                   "request_id": exc.request_id}) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", str(exc), release_id=release_id) from exc
     except TaskQueryError as exc:
         raise CommandFailure(exc.code, str(exc), release_id=release_id) from exc
     except (ActivationError, ReceiptError, TaskStateError, PlanError, OperationContextError) as exc:
