@@ -1924,6 +1924,38 @@ WRAPPER
 cat > "$_SC_BIN/tree.js" <<'TREE'
 require('child_process').spawnSync(__dirname + '/bun', [__dirname + '/wrapper.js', 'start'], {stdio: 'inherit'});
 TREE
+# _sc_await_slot <root pid> <pid file> <bound s>: wait until <pid file> names a
+# live process, the foreign poller holding the slot. Prints "held after N s"
+# and returns 0. Otherwise prints why not and returns 1: at once when the tree
+# has exited, else at <bound> seconds, naming the processes the tree still
+# runs, so a slow start reads as slow and a dead tree as dead. The tree is
+# three node processes, each started by the one before, in a process group of
+# its own (setsid below), which is how its processes are found.
+_sc_await_slot() {
+    local root="$1" pidfile="$2" bound="$3" start=$SECONDS holder tree listing
+    # shellcheck disable=SC2016  # an awk program, not shell
+    listing='$2 == g { s = $1; for (i = 3; i <= NF; i++) { sub(/.*\//, "", $i); s = s " " $i }; out = out (out == "" ? "" : "; ") s } END { print out }'
+    while :; do
+        holder=""
+        if [ -s "$pidfile" ]; then holder="$(tr -cd '0-9' < "$pidfile" 2>/dev/null)" || holder=""; fi
+        if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+            printf 'held after %s s\n' "$((SECONDS - start))"
+            return 0
+        fi
+        if ! kill -0 "$root" 2>/dev/null; then
+            printf 'its tree (pid %s) exited after %s s, and no live process holds %s\n' \
+                "$root" "$((SECONDS - start))" "$pidfile"
+            return 1
+        fi
+        if [ "$((SECONDS - start))" -ge "$bound" ]; then
+            tree="$(ps -A -o pid=,pgid=,args= 2>/dev/null | awk -v g="$root" "$listing")" || tree=""
+            printf 'no live process held %s within %s s; its tree still runs: %s\n' \
+                "$pidfile" "$bound" "${tree:-nothing in its process group}"
+            return 1
+        fi
+        sleep 0.1
+    done
+}
 rm -f "$RB_DIR/state/bot.pid"
 # macOS has no `setsid` utility. The selected test interpreter creates the
 # owned process group before exec, so cleanup below still targets this fixture
@@ -1935,14 +1967,18 @@ env -i PATH="/usr/bin:/bin" TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -
     'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$_SC_BIN/claude" "$_SC_BIN/tree.js" >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
-# Wait for the foreign poller to actually hold the slot; without this the run can
-# race and assert against a bot.pid that does not exist yet, which would PASS for
-# the wrong reason (it would just be scenario 2b again).
+# Wait for the foreign poller to hold the slot before the boot. Without the
+# wait the boot meets an empty slot, which is scenario 2b again, and the flip
+# check below passes for the wrong reason. The old wait was a fixed 100 polls
+# of 0.05 s, and on CI the tree once took longer than that, so the boot ran
+# with no poller (#2716). Bounded at 30 s. A tree that never holds the slot
+# refuses every check in this scenario, naming why, instead of scoring them.
 _sc_ok=no
-for _ in $(seq 1 100); do
-    [ -s "$RB_DIR/state/bot.pid" ] && { _sc_ok=yes; break; }
-    sleep 0.05
-done
+if _sc_slot="$(_sc_await_slot "$_SC_ROOT_PID" "$RB_DIR/state/bot.pid" 30)"; then
+    _sc_ok=yes
+else
+    harness_refuse "the foreign-session poller fixture did not hold the slot: $_sc_slot"
+fi
 harness_check "foreign-session poller holds the slot before the boot (fixture precondition)" "$_sc_ok"
 # The bot-scoped question must answer `up` here -- that is exactly what misled the
 # gate. If this reads anything else the scenario is not reproducing #1530 and the
@@ -1969,6 +2005,7 @@ harness_check "  ...and bring-up still escalates BRIDGE_MISSING (no regression)"
 
 if [ "$fail" -gt "$_scope_fail_before" ]; then
     echo "  --- DIAGNOSTIC: #1530 session-scope checks failed ---"
+    echo "  [fixture wait] ${_sc_slot:-no answer}"
     if [ -s "$RB_DIR/state/bot.pid" ]; then
         _sc_pid="$(cat "$RB_DIR/state/bot.pid")"
         echo "  [foreign poller process]"
