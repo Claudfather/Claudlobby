@@ -2,10 +2,13 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -736,32 +739,47 @@ def test_native_runner_checks_membership_before_operation_and_uses_waiting_lock(
 
 CHAT = "-1001234567890"
 TOKEN = "8888888:AAAAAAAAAAAAAAAAAAAA"
+# Every attempt is logged. A sender with no channel dir has no token (tg-post's exit 1);
+# a refusal, the host's or one sender's, is the carrier's (exit 3).
 TELEGRAM_STUB = """#!/bin/bash
-[ ! -e "$CLAUDLOBBY_ROOT/telegram-refuses" ] || exit 3
+printf '%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" >> "$CLAUDLOBBY_ROOT/telegram-attempts"
+[ -n "$TELEGRAM_STATE_DIR" ] && [ -d "$TELEGRAM_STATE_DIR" ] || exit 1
+[ ! -e "$CLAUDLOBBY_ROOT/telegram-refuses" ] && [ ! -e "$TELEGRAM_STATE_DIR/refuses" ] || exit 3
 printf '%s|%s|%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "${TELEGRAM_BOT_TOKEN:-<none>}" "$1" \\
     >> "$CLAUDLOBBY_ROOT/telegram-capture"
 """
 
 
-def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None):
+def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None, retained=False, damaged=()):
     """An update in phase restore whose job runs `restore` as the target's restore stage.
 
     The target checkout carries the real alert door (lib-common.sh and the
     supervisor.sh it sources) beside a tg-post.sh: a stub that records what it
     is handed, or the real one. The alert chat is a bot of another fleet's tree,
     as on a multi-fleet host, where a host job finds it. `python`, when given,
-    replaces the environment's interpreter with that script.
+    replaces the environment's interpreter with that script. `retained` puts the
+    same door in the previous release, whose quiet support retains it at
+    quiesce, as a real update does (#2715); `damaged` names the door's scripts
+    that the target breaks.
     """
     from claudlobby import git_update as updater
     installation, before, _, commit = update
     repository = Path(__file__).resolve().parents[1]
     package = installation.source / "claudlobby"
+    def door():
+        for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", *(("tg-post.sh",) if real_carrier else ())):
+            shutil.copy2(repository / "claudlobby/_runtime_scripts" / name, package / "_runtime_scripts" / name)
+        if not real_carrier:
+            (package / "_runtime_scripts/tg-post.sh").write_text(TELEGRAM_STUB)
+            (package / "_runtime_scripts/tg-post.sh").chmod(0o755)
+    if retained:
+        door()
+        shutil.copy2(repository / "claudlobby/supervision_runtime.py", package / "supervision_runtime.py")
+        before = commit("Notice fixture previous release")
     shutil.copy2(repository / "claudlobby/git_update.py", package / "git_update.py")
-    for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", *(("tg-post.sh",) if real_carrier else ())):
-        shutil.copy2(repository / "claudlobby/_runtime_scripts" / name, package / "_runtime_scripts" / name)
-    if not real_carrier:
-        (package / "_runtime_scripts/tg-post.sh").write_text(TELEGRAM_STUB)
-        (package / "_runtime_scripts/tg-post.sh").chmod(0o755)
+    door()
+    for name in damaged:
+        (package / "_runtime_scripts" / name).write_text("exit 9 (\n")
     (package / "update_entry.py").write_text(
         "import pathlib,sys,time\n"
         "from .git_update import UpdateStore\n"
@@ -795,6 +813,11 @@ def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None
     with UpdateStore(installation) as store:
         prepare(store, target, consumers={"example.service": {"intent": {
             "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+        if retained:
+            record = store.load()
+            record["phase"] = "quiesce"
+            store.save(record)
+            updater._prepare_quiet_support(store)
         _run(["git", "-C", installation.source, "checkout", "--quiet", target], installation.data_root)
         record = store.load()
         record.update(phase="restore", maintenance=False, config_committed=True,
@@ -810,6 +833,23 @@ def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None
 def _posted(installation):
     capture = installation.data_root / "telegram-capture"
     return [line.split("|", 3) for line in capture.read_text().splitlines()] if capture.exists() else []
+
+
+def _attempts(installation):
+    attempts = installation.data_root / "telegram-attempts"
+    return [tuple(line.split("|", 1)) for line in attempts.read_text().splitlines()] if attempts.exists() else []
+
+
+def _alert_bot(bots, name, chat):
+    """A channel bot with an alert chat, and a sender of its own beside its fleet's bots."""
+    channel = bots.parent / f"{name}-channel"
+    channel.mkdir(parents=True)
+    (channel / ".env").write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (bots / name).mkdir(parents=True)
+    (bots / name / "bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="{name}"\n'
+                                          f'export TELEGRAM_GROUP_CHAT_ID="{chat}"\n'
+                                          f'export TELEGRAM_STATE_DIR="{channel}"\n')
+    return channel
 
 
 HANG = 'print("restoring example.service", file=sys.stderr, flush=True); time.sleep(60)'
@@ -898,6 +938,298 @@ def test_the_notice_rides_the_real_tg_post_under_the_jobs_own_environment(update
     assert "text=FLEET ALERT: host update " in sent and "restore interrupted" in sent
     assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
 
+
+FINISHED_UNHEALTHY = 'record.update(phase="done", health_errors={"example.service": "unit failed to start"})'
+
+
+def test_the_notice_walks_on_to_the_next_alert_recipient_until_one_accepts(update, monkeypatch, capsys):
+    """#2715: a recipient that refuses does not end the notice.
+
+    The resolver's pair is tried first: a bot whose conf was cut mid-write, with
+    a stray quote in its chat and no sender. The worker's sender refuses at the
+    carrier. The next bot with an alert chat, in the resolver's own order, takes it.
+    """
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    bots = installation.data_root / "local/example/runtime/bots"
+    (bots / "alpha").mkdir()
+    (bots / "alpha/bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="alpha"\nexport TELEGRAM_GROUP_CHAT_ID="{CHAT}')
+    (channel / "refuses").touch()
+    sender = _alert_bot(bots, "zeta", CHAT)
+    updater._run_native_update(installation)
+    assert _attempts(installation) == [(f'"{CHAT}', ""), (CHAT, str(channel)), (CHAT, str(sender))]
+    posted = _posted(installation)
+    assert len(posted) == 1 and posted[0][:3] == [CHAT, str(sender), "<none>"]
+    assert "posted that this update did not finish (scan:bot:zeta, after 2 refused)" in capsys.readouterr().err
+
+
+def test_the_notice_tries_each_alert_recipient_once_in_the_resolvers_own_order(update, monkeypatch, capsys, tmp_path):
+    """#2715: the walk is resolve_alert_target's own, not a second copy of it.
+
+    Every recipient refuses. The notice tries each pair once, in the order the
+    resolver itself gives when each bot it picks loses its chat in turn: the
+    root's bots, then each fleet's, a nested fleet's last.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    root = installation.data_root
+    (root / "telegram-refuses").touch()
+    _alert_bot(root / "runtime/bots", "root-bot", CHAT)
+    (root / "local/alpha/runtime/bots/no-chat").mkdir(parents=True)
+    _alert_bot(root / "local/alpha/runtime/bots", "alpha-bot", "-1009999999999")
+    _alert_bot(root / "local/system/inner/runtime/bots", "nested-bot", CHAT)
+    updater._run_native_update(installation)
+    attempts = _attempts(installation)
+    assert len(attempts) == len(set(attempts)) == 4
+    assert "nobody was told that this update did not finish: failed: tg-post.sh exit 3, the last of 4 recipients" \
+        in capsys.readouterr().err
+    script = ('. "$1/lib-common.sh" >/dev/null 2>&1 || exit 9; resolve_alert_target "$2" any >/dev/null 2>&1; '
+              'printf "%s|%s" "${_alert_chat_id:-}" "${_alert_state_dir:-}"')
+    environment = {"PATH": updater._NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()), "TMPDIR": str(tmp_path),
+                   "CLAUDLOBBY_ROOT": str(root), "PLANE_EMIT_DISABLED": "1"}
+    resolved = []
+    while True:
+        pick = subprocess.run(["/bin/bash", "-c", script, "resolve", str(installation.native), str(root / "runtime/bots")],
+                              env=environment, capture_output=True, text=True, check=True).stdout
+        if pick == "|":
+            break
+        resolved.append(tuple(pick.split("|", 1)))
+        confs = [conf for conf in root.glob("**/runtime/bots/*/bot.conf")
+                 if f'TELEGRAM_STATE_DIR="{resolved[-1][1]}"' in conf.read_text()]
+        assert len(confs) == 1 and len(resolved) <= 4
+        confs[0].write_text("".join(line for line in confs[0].read_text().splitlines(keepends=True)
+                                    if "TELEGRAM_GROUP_CHAT_ID" not in line))
+    assert attempts == resolved
+
+
+def test_the_notice_runs_the_alert_door_retained_before_the_cutover(update, monkeypatch, capsys):
+    """#2715: the scripts a failed update installed are not the ones that tell someone.
+
+    The previous release's lib-common.sh, cli-context.sh and tg-post.sh are
+    retained beside the quiet support at quiesce. The target breaks two of them,
+    and the notice still goes out, through the retained copies.
+    """
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, retained=True,
+                                        damaged=("lib-common.sh", "tg-post.sh"))
+    record = read_update(installation)
+    retained = installation.data_root / "state/update-work" / ("quiet-" + record["request_id"])
+    assert set(record["notice_support"]) == {"lib-common.sh", "cli-context.sh", "tg-post.sh"}
+    for name, digest in record["notice_support"].items():
+        assert updater._digest((retained / name).read_bytes()) == digest
+    updater._run_native_update(installation)
+    posted = _posted(installation)
+    assert len(posted) == 1 and posted[0][:2] == [CHAT, str(channel)]
+    assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
+
+
+def test_the_notice_never_runs_a_retained_alert_door_that_changed(update, monkeypatch, capsys):
+    """#2715: a retained copy that no longer matches its digest is not run; the live door is, and the job says so."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, retained=True)
+    record = read_update(installation)
+    retained = installation.data_root / "state/update-work" / ("quiet-" + record["request_id"]) / "tg-post.sh"
+    retained.write_text("#!/bin/bash\nexit 0\n")  # it would claim a post it never made
+    updater._run_native_update(installation)
+    assert len(_posted(installation)) == 1
+    assert ("posted that this update did not finish (scan:bot:worker; its retained alert scripts changed, "
+            "so the live checkout's ran)") in capsys.readouterr().err
+
+
+def test_quiet_support_never_waits_for_an_alert_door_the_previous_release_lacks(update):
+    """#2715: retaining the alert door is best effort; without it the update goes on, and the notice runs the live one."""
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    package = installation.source / "claudlobby"
+    shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/supervision_runtime.py",
+                 package / "supervision_runtime.py")
+    (package / "_runtime_scripts/supervisor.sh").write_text("svc_activation_quiet() { return 3; }\n")
+    before = commit("Previous release without an alert door")
+    (installation.source / "templates/candidate.txt").write_text("next release\n")
+    target = commit("Target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        updater._prepare_quiet_support(store)
+        record = store.load()
+        assert set(record["quiet_support"]) == {"supervisor.sh", "supervision_runtime.py"}
+        assert "notice_support" not in record
+        assert updater._notice_door(store, record) == (installation.native, None)
+
+
+REFUSALS = {
+    "retained_support": "retained independent updater support changed",
+    "bound_job": "native updater differs from retained operation binding/domain",
+    "dispatch_intent": "native updater lacks its original dispatch intent",
+    "membership": "updater caller is external to its exact native job or membership is unknown",
+    "binding": "independent native job has no retained binding",
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(REFUSALS))
+def test_a_job_run_refused_before_the_update_tells_the_alert_chat_unless_it_may_not_be_the_job(
+        update, monkeypatch, capsys, refusal):
+    """#2715: a refusal that leaves the update unfinished is told, as a run that ends is.
+
+    A run refused for its retained support, its bound unit or its dispatch intent
+    posts one notice naming the refusal. A process that has not shown it is the
+    job (no binding, or membership refused or unknown) may be a hand-run `_run`
+    that took the lock while the job waits for it: it posts nothing, and the job
+    reports its own run. No refused run enters the dispatch.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'record.update(phase="done")')
+    message = REFUSALS[refusal]
+    def refuse(*_args, **_kwargs):
+        raise UpdateError(message)
+    if refusal == "retained_support":
+        monkeypatch.setattr(updater, "_retained_job", refuse)
+    elif refusal == "bound_job":
+        monkeypatch.setattr(updater, "_check_bound_job", refuse)
+    elif refusal == "membership":
+        updater._retained_job(None)[0].verify_update_job_runner = refuse
+    else:
+        with UpdateStore(installation) as store:
+            record = store.load()
+            record.pop("job_dispatch" if refusal == "dispatch_intent" else "updater_job")
+            store.save(record)
+    with pytest.raises(UpdateError, match=f"^{re.escape(message)}$"):
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["phase"] == "restore"
+    assert record.get("job_dispatch") == (None if refusal == "dispatch_intent" else {"state": "pending", "attempt": 1})
+    posted, stderr = _posted(installation), capsys.readouterr().err
+    if refusal in {"membership", "binding"}:
+        assert posted == [] and "did not finish" not in stderr
+        return
+    assert len(posted) == 1
+    assert posted[0][3].startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
+                                   f"(root {installation.data_root}, phase restore): {message}. ")
+    assert "posted that this update did not finish (scan:bot:worker)" in stderr
+
+
+@pytest.mark.parametrize("carrier", ["stalls", "stalls_ignoring_sigterm"])
+def test_a_notice_that_hangs_is_stopped_at_its_limit_and_leaves_no_token_behind(update, monkeypatch, capsys, tmp_path,
+                                                                                carrier):
+    """#2702, #2715: the notice's time limit holds, and stopping it leaves no token-bearing file.
+
+    The real tg-post.sh writes its curl config, which holds the token, into
+    lib-common's scratch directory, which its EXIT trap removes; a SIGKILL skips
+    that trap. macOS's mktemp puts that directory where it likes, whatever TMPDIR
+    says, and so does the stand-in here, so no private TMPDIR can catch it. The
+    door gets SIGTERM first, and SIGKILL after a grace for whatever ignores it.
+    A carrier that ignores SIGTERM is promised only that it ends: the bash
+    waiting on it may run its trap only once it ends, which on macOS's bash 3.2
+    was after the SIGKILL.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, real_carrier=True)
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in --config) printf "%s\\n" "$2" > "$CLAUDLOBBY_ROOT/curl-config"; shift 2 ;; *) shift ;; esac\n'
+        "done\n"
+        'printf "%s\\n" "$$" > "$CLAUDLOBBY_ROOT/curl-pid"\n'
+        + ("trap '' TERM\n" if carrier == "stalls_ignoring_sigterm" else "")
+        + "exec sleep 60\n")
+    (fake / "curl").chmod(0o755)
+    (fake / "mktemp").write_text('#!/bin/bash\nunset TMPDIR\nPATH=/usr/bin:/bin exec mktemp "$@"\n')
+    (fake / "mktemp").chmod(0o755)
+    monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
+    monkeypatch.setattr(updater, "_NOTICE_TIMEOUT", 2)
+    monkeypatch.setattr(updater, "_NOTICE_GRACE", 1)
+    started = time.monotonic()
+    updater._run_native_update(installation)
+    elapsed = time.monotonic() - started
+    config = Path((installation.data_root / "curl-config").read_text().strip())
+    left = config.exists()
+    if left:  # remove what a kill leaves, the fixture's token included
+        shutil.rmtree(config.parent, ignore_errors=True)
+    assert not left or carrier == "stalls_ignoring_sigterm", "the token-bearing curl config outlived the notice"
+    assert elapsed < 30
+    assert "nobody was told that this update did not finish: failed: no answer within 2 s" in capsys.readouterr().err
+    pid, deadline = int((installation.data_root / "curl-pid").read_text()), time.monotonic() + 10
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the carrier outlived the notice's limit"
+        time.sleep(0.1)
+
+
+def test_a_notice_that_raises_never_replaces_the_runs_own_error(update, monkeypatch, capsys):
+    """#2702: whatever the notice raises, the run raises its own error."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, HANG)
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the alert door exploded")
+    monkeypatch.setattr(updater, "_send_notice", explode)
+    with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+        updater._run_native_update(installation)
+    assert "nobody was told that this update did not finish: failed: RuntimeError" in capsys.readouterr().err
+    assert _posted(installation) == []
+
+
+def test_the_notice_never_quotes_text_shaped_like_a_credential(update, monkeypatch):
+    """#2715: the chat never gets what a refused stage printed in a credential's shape.
+
+    The record keeps the stage's whole last line, for `host update status`.
+    """
+    from claudlobby import git_update as updater
+    line = ("restore refused: POST https://api.telegram.org/bot8888888:AAAAAAAAAAAAAAAAAAAA/sendMessage with "
+            "ghp_xxxxxxxxxxxxxxxxxxxx and API_PASSWORD=hunter2 for example.service at "
+            "b486af4a7f9eb656c772083457f3a407d2b992e0")
+    installation, _ = _notice_job(update, monkeypatch, f"print({line!r}, file=sys.stderr); raise SystemExit(6)")
+    with pytest.raises(UpdateError, match="^application stage restore refused; continue the retained operation$"):
+        updater._run_native_update(installation)
+    assert read_update(installation)["stage_error"]["detail"].strip().splitlines()[-1] == line
+    (posted,) = _posted(installation)
+    for secret in ("AAAAAAAAAAAAAAAAAAAA", "ghp_xxxxxxxxxxxxxxxxxxxx", "hunter2"):
+        assert secret not in posted[3]
+    assert ("api.telegram.org/bot[redacted]/sendMessage with [redacted] and API_PASSWORD=[redacted] "
+            "for example.service at b486af4a7f9eb656c772083457f3a407d2b992e0") in posted[3]
+
+
+@pytest.mark.parametrize("text, shown", [
+    ("token rejected: 8888888:AAAAAAAAAAAAAAAAAAAA", "token rejected: [redacted]"),
+    ("export TELEGRAM_BOT_TOKEN='8888888:AAAAAAAAAAAAAAAAAAAA'", "export TELEGRAM_BOT_TOKEN='[redacted]'"),
+    ('{"password": "hunter2"}', '{"password": "[redacted]"}'),
+    ("url:password=hunter2", "url:password=[redacted]"),
+    ("api-key: abc123", "api-key: [redacted]"),
+    ("Authorization: Bearer abcdefgh12345678", "Authorization: [redacted]"),
+    ("fetch https://user:hunter2@example.invalid/repo.git", "fetch https://[redacted]@example.invalid/repo.git"),
+    ("push refused for ghp_xxxxxxxxxxxxxxxxxxxx", "push refused for [redacted]"),
+    ("github_pat_" + "x" * 30, "[redacted]"),
+    ("xoxb-0000000000-xxxxxxxxxxxx", "[redacted]"),
+    ("sk-" + "x" * 30, "[redacted]"),
+    ("AKIA" + "X" * 16, "[redacted]"),
+    ("key Q2xhdWRsb2JieUV4YW1wbGVLZXkx ok", "key [redacted] ok"),
+    # what a notice needs, which no credential shape takes
+    ("commit b486af4a7f9eb656c772083457f3a407d2b992e0", None),
+    ("request 00000000-0000-4000-8000-000000000001", None),
+    ("sha256 " + "4e5a6562" * 8, None),
+    ("/opt/example/claudlobby/local/example/runtime/bots/worker/bot.conf", None),
+    ("restoring com.claudlobby.update.0123456789abcdef.service", None),
+    ("interrupted: no result within 900 s; the stage process was stopped", None),
+])
+def test_the_notice_redacts_each_credential_shape_and_keeps_what_it_needs(text, shown):
+    """#2715: the shapes the redaction takes, and what it leaves for the reader."""
+    from claudlobby.git_update import _redacted
+    assert _redacted(text) == (text if shown is None else shown)
+
+
+def test_the_notice_redacts_before_it_clips():
+    """#2715: a token cut by the 300-character clip is redacted whole, never left as a prefix."""
+    from claudlobby.git_update import _unfinished_text
+    failure = UpdateError("x" * 290 + " 8888888:AAAAAAAAAAAAAAAAAAAA")
+    text = _unfinished_text("/root", {"request_id": "request", "phase": "restore"}, failure)
+    assert "8888888" not in text
+    assert "x" * 290 + " [redacted. Whatever it stopped" in text
 
 @pytest.mark.parametrize("initialize", [False, True])
 def test_public_continue_attaches_original_operation_without_mutable_application(update, monkeypatch, initialize):

@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -928,10 +929,38 @@ def _prepare_quiet_support(store):
             raise UpdateError("retained native quiet support changed")
         _write(destination, content)
         hashes[name] = _digest(content)
+    notice = _retain_notice_support(store, directory)
     if _head(store.installation) != record["before"]:
         raise UpdateError("source changed while retaining native quiet support")
     record["quiet_support"] = hashes
+    if notice is not None:
+        record["notice_support"] = notice
     store.save(record)
+
+
+def _retain_notice_support(store, directory):
+    """Retain the alert door's scripts beside the quiet support: their digests, or None.
+
+    The job's notice runs these copies, the previous release's, which carried this
+    host's alerts until the update began, not the ones a failed update has just
+    installed (#2715). Best effort: a script that is missing or cannot be copied
+    never stops the update, and its notice then runs the live checkout's.
+    """
+    hashes = {}
+    try:
+        for name in _NOTICE_SUPPORT:
+            source = store.installation.native / name
+            if source.is_symlink() or not source.is_file():
+                return None
+            content = source.read_bytes()
+            destination = _plain(directory / name)
+            if destination.exists() and destination.read_bytes() != content:
+                return None
+            _write(destination, content)
+            hashes[name] = _digest(content)
+    except (OSError, UpdateError):
+        return None
+    return hashes
 
 
 def _independent_quiet(store):
@@ -1417,34 +1446,109 @@ def apply_or_continue(installation, *, target=None, initialization=None, prepare
 _NOTICE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 #: Seconds the notice may take. tg-post.sh gives Telegram 6 of them.
 _NOTICE_TIMEOUT = 30
+#: Seconds the alert door has to end after its limit's SIGTERM, before SIGKILL (#2715).
+_NOTICE_GRACE = 3
+#: The alert door's scripts, retained beside the quiet support, which already holds
+#: the supervisor.sh that lib-common.sh sources (#2715).
+_NOTICE_SUPPORT = ("lib-common.sh", "cli-context.sh", "tg-post.sh")
 # The installation's own alert door, the one every host job's FLEET ALERT uses:
 # lib-common's resolve_alert_target picks the chat and its sender as one pair,
-# and tg-post.sh posts to Telegram. Its output is the one protocol line below:
-# tg-post can echo a carrier's error, and with it a token.
+# and tg-post.sh posts to Telegram. When that pair refuses, the notice walks on
+# to every other bot with an alert chat, in the resolver's own scan order, until
+# one accepts (#2715). bash runs tg-post.sh, since a retained copy is not
+# executable. Its output is the one protocol line below: tg-post can echo a
+# carrier's error, and with it a token.
 _NOTICE = r'''
 set -u
-. "$1/lib-common.sh" >/dev/null 2>&1 || { printf 'unavailable\tlib-common.sh did not load\n'; exit 0; }
-resolve_alert_target "$2" any >/dev/null 2>&1 || :
+door=$1 bots=$2
+. "$door/lib-common.sh" >/dev/null 2>&1 || { printf 'unavailable\tlib-common.sh did not load\n'; exit 0; }
+set +e
+message=''; IFS= read -r -d '' message
+resolve_alert_target "$bots" any >/dev/null 2>&1
 if [ -z "${_alert_chat_id:-}" ]; then
     printf 'unconfigured\t%s\n' "${_alert_refusal:-no alert chat was found}"
     exit 0
 fi
-message=''; IFS= read -r -d '' message || :
-if TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id" TELEGRAM_STATE_DIR="${_alert_state_dir:-}" \
-        TELEGRAM_BOT_TOKEN="${_alert_token:-}" "$1/tg-post.sh" "$message" >/dev/null 2>&1; then
-    printf 'carrier_accepted\t%s\n' "${_alert_target_src:-}"
+tab=$(printf '\t') tried='' refused=0 last=0
+post() {  # <chat> <sender state dir> <token> <label>: one try per pair; exits once one accepts
+    case "$tried" in *"<$1$tab$2>"*) return 0 ;; esac
+    tried="$tried<$1$tab$2>"
+    TELEGRAM_GROUP_CHAT_ID="$1" TELEGRAM_STATE_DIR="$2" TELEGRAM_BOT_TOKEN="$3" \
+        /bin/bash "$door/tg-post.sh" "$message" >/dev/null 2>&1
+    last=$?
+    if [ "$last" -eq 0 ]; then
+        if [ "$refused" -gt 0 ]; then
+            printf 'carrier_accepted\t%s, after %s refused\n' "$4" "$refused"
+        else
+            printf 'carrier_accepted\t%s\n' "$4"
+        fi
+        exit 0
+    fi
+    refused=$((refused + 1))
+}
+scan() {  # each bot of one bots dir with an alert chat, as first_bot_with_conf reads them
+    local bot chat
+    [ -n "$1" ] && [ -d "$1" ] || return 0
+    for bot in "$1"/*/; do
+        [ -d "$bot" ] || continue
+        chat=$(bot_conf_get "$bot" TELEGRAM_GROUP_CHAT_ID "")
+        [ -n "$chat" ] || continue
+        post "$chat" "$(bot_conf_get_path "$bot" TELEGRAM_STATE_DIR "")" "" "scan:bot:$(basename "$bot")"
+    done
+}
+post "$_alert_chat_id" "${_alert_state_dir:-}" "${_alert_token:-}" "${_alert_target_src:-}"
+# The walk of first_bot_with_conf_any_fleet: this bots dir, then every fleet's.
+scan "$bots"
+while IFS= read -r dir; do
+    [ "$dir" = "$bots" ] || scan "$dir"
+done <<EOF
+$(host_fleet_bots_dirs 2>/dev/null)
+EOF
+if [ "$refused" -gt 1 ]; then
+    printf 'failed\ttg-post.sh exit %s, the last of %s recipients\n' "$last" "$refused"
 else
-    printf 'failed\ttg-post.sh exit %s\n' "$?"
+    printf 'failed\ttg-post.sh exit %s\n' "$last"
 fi
 '''
+#: Shapes of a credential, which the notice never quotes (#2715): a chat is a wider
+#: audience than `host update status`, which keeps the whole line.
+_SECRET_SET = re.compile(r"(?i)([a-z0-9_.-]{0,40}(?:token|secret|passw(?:or)?d|api[_-]?key|private[_-]?key"
+                         r"|credential)[a-z0-9_.-]{0,40}[\"']?\s*[=:]\s*[\"']?)[^\s\"',;]+")
+_CREDENTIALS = re.compile(
+    r"(?i:\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{8,})"  # an HTTP authorization value
+    r"|(?<=://)[^\s/@]+(?=@)"  # a URL's user and password
+    r"|(?<![0-9])[0-9]{5,}:[A-Za-z0-9_-]{20,}"  # a Telegram bot token, in an API URL too
+    r"|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{16,}"  # GitHub
+    r"|xox[abposr]-[A-Za-z0-9-]{10,}"  # Slack
+    r"|sk-[A-Za-z0-9_-]{16,}"  # OpenAI-style
+    r"|AKIA[0-9A-Z]{16}")  # AWS
+_OPAQUE = re.compile(r"[A-Za-z0-9_+=-]{24,}")
+
+
+def _redacted(text):
+    """`text` with each run shaped like a credential replaced by [redacted] (#2715).
+
+    A value set for a key named like a secret, an authorization value, a URL's
+    password, a Telegram token, the prefixed keys of GitHub, Slack, OpenAI-style
+    services and AWS, and any other run of 24 or more characters that mixes upper
+    and lower case and digits, as opaque keys do. A hex digest, a commit, a
+    request id and a path do not mix them, and stay.
+    """
+    text = _SECRET_SET.sub(r"\1[redacted]", text)
+    text = _CREDENTIALS.sub("[redacted]", text)
+    return _OPAQUE.sub(lambda match: "[redacted]" if all(re.search(kind, match.group(0))
+                       for kind in ("[a-z]", "[A-Z]", "[0-9]")) else match.group(0), text)
 
 
 def _unfinished_text(root, record, failure):
-    """The notice for a job run that left the update unfinished, or None when it finished."""
+    """The notice for a job run that left the update unfinished, or None when it finished.
+
+    Each cause it quotes is redacted, then clipped (#2715).
+    """
     if record is None or record["phase"] == "done" and not record.get("health_errors"):
         return None
     def clip(value, limit=300):
-        return " ".join(str(value).split())[:limit]
+        return _redacted(" ".join(str(value).split()))[:limit]
     errors = record.get("health_errors") or {}
     if failure is not None:
         cause = clip(failure) or type(failure).__name__
@@ -1463,10 +1567,67 @@ def _unfinished_text(root, record, failure):
             "update continue from a shell outside any bot session.")
 
 
-def _send_notice(store, text):
-    """Post one line through the installation's alert door: (status, detail)."""
+def _notice_door(store, record):
+    """The scripts directory the notice runs, and a note when it is not the retained one.
+
+    The copies retained beside the quiet support run while each still matches its
+    digest (#2715). An update prepared before they were retained runs the live
+    checkout's, as before; one whose retained copies changed runs them too, and
+    says so.
+    """
+    retained = record.get("notice_support")
+    if retained is None:
+        return store.installation.native, None
+    try:
+        directory = _plain(store.work / ("quiet-" + record["request_id"]))
+        expected = {**retained, "supervisor.sh": record["quiet_support"]["supervisor.sh"]}
+        if set(retained) == set(_NOTICE_SUPPORT) and all(
+                _digest((directory / name).read_bytes()) == digest for name, digest in expected.items()):
+            return directory, None
+    except (OSError, KeyError, TypeError, UpdateError):
+        pass
+    return store.installation.native, "its retained alert scripts changed, so the live checkout's ran"
+
+
+def _stop_door(process):
+    """Stop an alert door past its limit: SIGTERM first, then SIGKILL for what is left (#2715).
+
+    On SIGTERM each bash in the door runs its EXIT trap, where lib-common removes
+    its scratch directory, tg-post.sh's token-bearing curl config among it; a
+    SIGKILL skips that. TMPDIR cannot keep that directory private: macOS's mktemp
+    puts it in the per-user temp directory whatever TMPDIR says. macOS also sends
+    nothing to a group that holds an unreaped zombie, failing with EPERM, so a
+    refused signal is sent again, and the door's own bash is reaped while the
+    group is watched. A child that ignores SIGTERM can hold the bash waiting on
+    it past the grace (macOS's bash 3.2 ran the trap only once it ended), and the
+    SIGKILL then ends both without the cleanup.
+    """
+    for number, grace in ((signal.SIGTERM, _NOTICE_GRACE), (signal.SIGKILL, 5)):
+        deadline = time.monotonic() + grace
+        sent = False
+        while time.monotonic() < deadline:
+            process.poll()
+            try:
+                os.killpg(process.pid, 0 if sent else number)
+                sent = True
+            except ProcessLookupError:
+                deadline = None
+                break
+            except PermissionError:
+                pass
+            time.sleep(0.05)
+        if deadline is None:
+            break
+    try:
+        process.communicate(timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _send_notice(store, door, text):
+    """Post one line through the alert door in `door`: (status, detail)."""
     command = ["/bin/bash", "--noprofile", "--norc", "-c", _NOTICE, "update-notice",
-               str(store.installation.native), str(store.root / "runtime/bots")]
+               str(door), str(store.root / "runtime/bots")]
     environment = {"PATH": _NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()),
                    "CLAUDLOBBY_ROOT": str(store.root), "PLANE_EMIT_DISABLED": "1"}
     try:
@@ -1478,11 +1639,7 @@ def _send_notice(store, text):
     try:
         output, _ = process.communicate(text.encode() + b"\0", timeout=_NOTICE_TIMEOUT)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.communicate(timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _stop_door(process)
         return "failed", f"no answer within {_NOTICE_TIMEOUT} s"
     status, _, detail = output.decode("utf-8", "replace").strip().partition("\t")
     if status not in {"carrier_accepted", "failed", "unconfigured", "unavailable"}:
@@ -1490,7 +1647,7 @@ def _send_notice(store, text):
     return status, detail
 
 
-def _notify_unfinished(store, record, failure):
+def _notify_unfinished(store, failure):
     """Tell a human, once per job run, that this run left the update unfinished (#2702).
 
     This job is the one process still running when an update cannot finish: the
@@ -1499,50 +1656,64 @@ def _notify_unfinished(store, record, failure):
     Telegram, which nothing the update stops carries. The notice never changes
     the run's own outcome.
     """
+    note = None
     try:
+        record = store.load()
         text = _unfinished_text(store.root, record, failure)
         if text is None:
             return
-        status, detail = _send_notice(store, text)
+        door, note = _notice_door(store, record)
+        status, detail = _send_notice(store, door, text)
     except Exception as exc:  # the notice must never replace the update's own result
         status, detail = "failed", type(exc).__name__
+    note = f"; {note}" if note else ""
     if status == "carrier_accepted":
-        print(f"claudlobby update: posted that this update did not finish ({detail})", file=sys.stderr)
+        print(f"claudlobby update: posted that this update did not finish ({detail}{note})", file=sys.stderr)
     else:
         print(f"claudlobby update: nobody was told that this update did not finish: {status}"
-              + (f": {detail}" if detail else ""), file=sys.stderr)
+              + (f": {detail}" if detail else "") + note, file=sys.stderr)
 
 
 def _run_native_update(installation):
     """Fixed job entry: kernel membership, then the one resumable coordinator.
 
-    A run that leaves the update unfinished posts one notice before it exits.
+    A run that leaves the update unfinished posts one notice before it exits, a
+    refused run included (#2715), unless the refusal says this process may not
+    be the update's job.
     """
     with UpdateStore(installation, wait=True) as store:
-        jobs, independent, adapter = _retained_job(store)
-        record = store.load()
-        binding = record.get("updater_job")
-        if binding is None:
-            raise UpdateError("independent native job has no retained binding")
-        jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
-                                      native_target=binding["target"])
-        _check_bound_job(store, jobs, independent, adapter)
-        dispatch = record.get("job_dispatch")
-        if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
-            raise UpdateError("native updater lacks its original dispatch intent")
-        record["job_dispatch"] = {**dispatch, "state": "entered"}
-        store.save(record)
-        failure = None
+        failure, speaks, entered = None, True, False
         try:
+            jobs, independent, adapter = _retained_job(store)
+            record = store.load()
+            # A process that has not shown it is the job may be a hand-run `_run`
+            # that took this lock while the job waits for it: it speaks for no
+            # update, and the job reports its own run.
+            speaks = False
+            binding = record.get("updater_job")
+            if binding is None:
+                raise UpdateError("independent native job has no retained binding")
+            jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
+                                          native_target=binding["target"])
+            speaks = True
+            _check_bound_job(store, jobs, independent, adapter)
+            dispatch = record.get("job_dispatch")
+            if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
+                raise UpdateError("native updater lacks its original dispatch intent")
+            record["job_dispatch"] = {**dispatch, "state": "entered"}
+            store.save(record)
+            entered = True
             return run_prepared_update(store)
         except Exception as exc:
             failure = exc
             raise
         finally:
-            record = store.load()
-            record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
-            store.save(record)
-            _notify_unfinished(store, record, failure)
+            if entered:
+                record = store.load()
+                record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
+                store.save(record)
+            if speaks:
+                _notify_unfinished(store, failure)
 
 
 def main(argv=None):
