@@ -1598,7 +1598,9 @@ def _stop_door(process):
     puts it in the per-user temp directory whatever TMPDIR says. macOS also sends
     nothing to a group that holds an unreaped zombie, failing with EPERM, so a
     refused signal is sent again, and the door's own bash is reaped while the
-    group is watched.
+    group is watched. A child that ignores SIGTERM can hold the bash waiting on
+    it past the grace (macOS's bash 3.2 ran the trap only once it ended), and the
+    SIGKILL then ends both without the cleanup.
     """
     for number, grace in ((signal.SIGTERM, _NOTICE_GRACE), (signal.SIGKILL, 5)):
         deadline = time.monotonic() + grace
