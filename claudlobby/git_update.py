@@ -1117,13 +1117,13 @@ def _run_prepared_update(store):
         # Phase=quiesce fences new native starts. Drain those admitted before
         # that transition before trusting the frozen bot disposition. Release
         # the lock again so existing bots can record their handoff via the CLI.
-        with _exclusive_runtime(store):
+        with _exclusive_runtime(store, "drain"):
             pass
         _prepare_quiet_support(store)
         _application_stage(store, "quiesce")
     record = store.load()
     if record["phase"] in {"quiesce", "git", "environment", "publish", "commit"}:
-        with _exclusive_runtime(store) as fd:
+        with _exclusive_runtime(store, "cutover") as fd:
             record = store.load()
             actual = _head(store.installation)
             if record["phase"] == "quiesce":
@@ -1156,8 +1156,171 @@ def _run_prepared_update(store):
     return cleanup_candidate(store)
 
 
+#: Seconds between tries for the runtime lock. flock keeps no queue, so a writer
+#: that keeps trying takes the first free moment between its readers (#2734).
+_RUNTIME_POLL = 0.05
+#: Seconds between readings of who holds it, for this wait's row in the record.
+_RUNTIME_SCAN = 30
+#: Seconds the updater waits before it names the holders to the alert chat, and goes
+#: on waiting: the longest a bounded reader can ask for (brief --startup-wait).
+_RUNTIME_TELL = 300
+#: Seconds it waits in all before it refuses, with their names. A run that stops leaves
+#: the fence up, and at the second lock the fleet down, so this covers a night.
+_RUNTIME_STOP = 6 * 60 * 60
+#: Holders one line of text names. The record keeps them all.
+_HOLDERS_NAMED = 3
+#: Where Linux reads what each process has open, and macOS's way to ask.
+_PROC = Path("/proc")
+_LSOF = "/usr/sbin/lsof"
+
+
+def _holder(unit, comm, pid, running_s):
+    return {"unit": unit, "comm": "".join(letter for letter in comm if letter.isprintable()),
+            "pid": pid, "running_s": running_s}
+
+
+def _has_open(fds, lock):
+    """Whether a process's fd directory links to `lock`.
+
+    It reads each link and opens nothing: a stat would reach through every fd
+    this user holds, a dead mount's too, and could hang the wait.
+    """
+    for fd in os.listdir(fds):
+        try:
+            if os.readlink(fds / fd) == str(lock):
+                return True
+        except OSError:  # closed while this reads
+            continue
+    return False
+
+
+def _proc_holders(lock):
+    """Linux: what has `lock` open, one row per unit, naming its oldest process.
+
+    A child that inherited the fd holds the lock as its taker did, after the taker
+    has exited too, which is why this reads fds and not /proc/locks: that names the
+    dead pid. A process this user cannot read is passed over: the file is 0600.
+    """
+    uptime = float((_PROC / "uptime").read_text().split()[0])
+    ticks = os.sysconf("SC_CLK_TCK")
+    rows = {}
+    for name in os.listdir(_PROC):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        process = _PROC / name
+        try:
+            if not _has_open(process / "fd", lock):
+                continue
+            comm = (process / "comm").read_text(errors="replace").strip()
+            unit = (process / "cgroup").read_text(errors="replace").strip().rsplit("/", 1)[-1]
+            started = int((process / "stat").read_text(errors="replace").rpartition(")")[2].split()[19]) / ticks
+        except (OSError, ValueError, IndexError):  # gone, or not this user's
+            continue
+        row = _holder(unit or None, comm, int(name), max(0, round(uptime - started)))
+        key = row["unit"] or row["comm"]
+        if key not in rows or row["running_s"] > rows[key]["running_s"]:
+            rows[key] = row
+    return list(rows.values())
+
+
+def _lsof_holders(lock):
+    """macOS: what has `lock` open, as lsof gives it: a pid and a command, with no unit or age."""
+    listing = subprocess.run([_LSOF, "-F", "pc", "--", str(lock)], capture_output=True, text=True,
+                             errors="replace", timeout=10).stdout
+    rows, pid = [], None
+    for line in listing.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("c") and pid != os.getpid():
+            rows.append(_holder(None, line[1:], pid, None))
+    return rows
+
+
+def _lock_holders(lock):
+    """What holds the runtime lock, apart from this process; [] when that cannot be read (#2734).
+
+    A row is a unit, the kernel's short command name, a pid and an age, and never an
+    argument or the environment: these rows reach a chat, and a reader's arguments
+    can carry a secret.
+    """
+    try:
+        return _proc_holders(lock) if sys.platform == "linux" else _lsof_holders(lock)
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return []
+
+
+def _holder_text(rows):
+    """Holders for one line of text: the longest running first, and how many more the record has."""
+    if not rows:
+        return "a holder that could not be named"
+    def name(row):
+        who = f"{row['comm']} pid {row['pid']}"
+        if row["running_s"] is not None:
+            who += f", running {row['running_s']} s"
+        return f"{row['unit']} ({who})" if row["unit"] else who
+    shown = sorted(rows, key=lambda row: row["running_s"] or 0, reverse=True)[:_HOLDERS_NAMED]
+    more = len(rows) - len(shown)
+    return ", ".join(name(row) for row in shown) + (f", and {more} more" if more else "")
+
+
+def _waiting_text(root, record, gate, waited, holders):
+    """The notice for a wait past `_RUNTIME_TELL`, each holder redacted as a cause is (#2715)."""
+    text = (f"FLEET ALERT: host update {record['request_id']} is waiting for the runtime lock "
+            f"(root {root}, phase {record['phase']}): held after {waited:.0f} s by "
+            f"{_redacted(_holder_text(holders))}. It goes on by itself when they finish; nothing needs running.")
+    return text + " Whatever it stopped stays down until then." if gate == "cutover" else text
+
+
+def _record_wait(store, row):
+    record = store.load()
+    record.pop("runtime_wait", None)
+    record.setdefault("runtime_waits", []).append(row)
+    store.save(record)
+
+
+def _wait_for_readers(store, fd, lock, gate):
+    """Take the runtime lock at the first free moment between readers, and record the wait (#2734).
+
+    Telling someone does not end the wait: a run that left would leave the fence
+    up, with no timer able to continue it, and past the second lock the fleet down.
+    """
+    started, told, scanned, seen = time.monotonic(), False, None, {}
+    row = {"gate": gate, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            break
+        now = time.monotonic()
+        waited = now - started
+        stopping, telling = waited >= _RUNTIME_STOP, not told and waited >= _RUNTIME_TELL
+        if stopping or telling or scanned is None or now - scanned >= _RUNTIME_SCAN:
+            scanned, holders = now, _lock_holders(lock)
+            for holder in holders:
+                key = holder["unit"] or holder["comm"]
+                if key not in seen or (holder["running_s"] or 0) >= (seen[key]["running_s"] or 0):
+                    seen[key] = holder
+        if stopping:
+            _record_wait(store, {**row, "outcome": "refused", "seconds": round(waited, 1),
+                                 "told": told, "holders": list(seen.values())})
+            raise UpdateError(f"runtime is still in use after {waited:.0f} s by {_holder_text(holders)}; "
+                              "continue after admitted readers finish")
+        if telling:
+            told = True
+            record = store.load()
+            record["runtime_wait"] = {**row, "seconds": round(waited, 1), "holders": holders}
+            store.save(record)
+            _notify(store, "this update is waiting for the runtime lock",
+                    lambda latest: _waiting_text(store.root, latest, gate, waited, holders))
+        time.sleep(_RUNTIME_POLL)
+    _record_wait(store, {**row, "outcome": "taken", "seconds": round(time.monotonic() - started, 1),
+                         "told": told, "holders": list(seen.values())})
+
+
 @contextmanager
-def _exclusive_runtime(store):
+def _exclusive_runtime(store, gate):
     lock = _plain(store.state / "runtime-use.lock")
     fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -1165,10 +1328,7 @@ def _exclusive_runtime(store):
         if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
                 or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
             raise UpdateError("runtime exclusion file changed")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise UpdateError("runtime is still in use; continue after admitted readers finish") from exc
+        _wait_for_readers(store, fd, lock, gate)
         yield fd
     finally:
         os.close(fd)
@@ -1700,6 +1860,26 @@ def _send_notice(store, door, text):
     return status, detail
 
 
+def _notify(store, subject, compose):
+    """Post `compose(record)` through the alert door and say so on stderr; it never raises (#2702)."""
+    note = None
+    try:
+        record = store.load()
+        text = compose(record)
+        if text is None:
+            return
+        door, note = _notice_door(store, record)
+        status, detail = _send_notice(store, door, text)
+    except Exception as exc:  # a notice must never replace the update's own result
+        status, detail = "failed", type(exc).__name__
+    note = f"; {note}" if note else ""
+    if status == "carrier_accepted":
+        print(f"claudlobby update: posted that {subject} ({detail}{note})", file=sys.stderr)
+    else:
+        print(f"claudlobby update: nobody was told that {subject}: {status}"
+              + (f": {detail}" if detail else "") + note, file=sys.stderr)
+
+
 def _notify_unfinished(store, failure):
     """Tell a human, once per job run, that this run left the update unfinished (#2702).
 
@@ -1709,22 +1889,7 @@ def _notify_unfinished(store, failure):
     Telegram, which nothing the update stops carries. The notice never changes
     the run's own outcome.
     """
-    note = None
-    try:
-        record = store.load()
-        text = _unfinished_text(store.root, record, failure)
-        if text is None:
-            return
-        door, note = _notice_door(store, record)
-        status, detail = _send_notice(store, door, text)
-    except Exception as exc:  # the notice must never replace the update's own result
-        status, detail = "failed", type(exc).__name__
-    note = f"; {note}" if note else ""
-    if status == "carrier_accepted":
-        print(f"claudlobby update: posted that this update did not finish ({detail}{note})", file=sys.stderr)
-    else:
-        print(f"claudlobby update: nobody was told that this update did not finish: {status}"
-              + (f": {detail}" if detail else "") + note, file=sys.stderr)
+    _notify(store, "this update did not finish", lambda record: _unfinished_text(store.root, record, failure))
 
 
 def _run_native_update(installation):
