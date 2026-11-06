@@ -30,6 +30,16 @@ New configuration commits before consumer startup. A failed consumer remains vis
 
 The sealed-release routes (`host activate`, its resume, rollback, adoption and repair/abort modes, `config plan --release` and `migration plan`) are retired as public execution paths; this guide does not describe them as instructions. Historical release/activation/migration evidence remains inspectable with `host releases`, `host status` and `migration status`. Do not delete pending historical evidence to bypass an existing-host conversion or restore requirement.
 
+### While an update runs
+
+Once an update is prepared, its fence turns new native starts away, and the updater waits for the work it admitted before that.
+
+- **A scheduled job that meets the fence skips its tick.** It prints `claudlobby: skipped UNIT: native startup is fenced while the update quiesces consumers` and exits 0, so its `OnFailure=` alert never starts. A resident unit exits 75 and still reads as failed. The native shell that `keepalive.sh` and `start-bot.sh` use exits 75 too, which `keepalive-all.sh` logs as a pause. Maintenance, a busy runtime lock and an unreadable update record still exit 6 (#2741).
+- **The updater waits for readers of the runtime lock.** At both of its gates, before it quiesces consumers and before the cutover, it tries every 50 ms and takes the first free moment. After 300 s it posts one notice to the alert chat naming up to three holders as `<unit> (<command> pid <n>, running <s> s)`, and how many more, and goes on waiting: nothing needs running. From then on, `host update status` shows them all as `runtime_wait`. After 6 hours it refuses, naming them, and `host update continue` starts a fresh wait. Each wait, taken or refused, leaves a row in `runtime_waits` (#2739).
+- **A stage stops only when its units stop finishing.** Quiesce and restore run for as long as units keep finishing. 1,200 s with none finished stops the stage: `stage_error` ends `interrupted: no unit finished within 1200 s; the stage process was stopped`, and the job's notice says so. A unit that records a restore error has not finished. Every other stage stops after 1,200 s in all. Either way, continue the same operation (#2740).
+
+The update that installs these changes still behaves as before: a job run keeps the coordinator it started with, and its fenced jobs run the old launcher until its publish stage installs the new one. If its restore is cut at 900 s, `host update continue` finishes it under the new coordinator. The next update is the first to skip ticks, wait for readers and count units.
+
 ### Converting an existing sealed host
 
 Conversion is a one-time mode of the same updater, not a second activation service. It requires a separately prepared managed installation bound to the existing data root; do not run first-fleet initialization against that root. From its stable CLI, prepare the exact conversion without stopping consumers:
