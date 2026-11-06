@@ -425,31 +425,28 @@ def observe_quiet(store, key, adapter):
     return evidence
 
 
-def native_state_matches(row, observed):
-    """Keep enrollment/load fixed while scheduled work may finish between observations."""
+def native_state_matches(row, observed, *, stopping=False):
+    """Enrollment and load stay fixed. Scheduled work may finish between observations. At the stop, a timer or
+    non-bot service that has only gone down is also as the stop needs it, and the restore brings it back as
+    frozen; a failed service is not, because the pause refuses to reset one (it resets a failed timer)."""
+    before, after = row["saved_native"].split(), observed.split()
     if row["scheduled"]:
-        before, after = row["saved_native"].split(), observed.split()
         return before[:2] == after[:2] and len(after) == 3 and after[2] in {"active", "activating", "inactive", "failed"}
-    return observed == row["saved_native"]
+    if observed == row["saved_native"]:
+        return True
+    down = {"inactive", "activating", "failed"} if row["target"].endswith(".timer") else {"inactive", "activating"}
+    return (stopping and not row["bot_binding"] and before[:2] == after[:2] and len(after) == 3
+            and before[2] == "active" and after[2] in down)
 
 
 _NO_BOT_START = "A bot cannot start while the update's fence is up, so no command clears this"
-
-
-def _only_gone_down(row, key, observed):
-    """A timer or non-bot service that has only gone down is as the stop needs it, and the restore brings it back
-    as frozen. The pause refuses a failed service, so that one stays a refusal that names the reset."""
-    before, after = row["saved_native"].split(), observed.split()
-    down = {"inactive", "activating", "failed"} if key.endswith(".timer") else {"inactive", "activating"}
-    return (not row["bot_binding"] and before[:2] == after[:2] and len(after) == 3
-            and before[2] == "active" and after[2] in down)
 
 
 def _drift_remedy(row, key, observed):
     """What clears a drift. A command is named only where it is known to run no launcher, so it works under the fence."""
     saved, now = row["saved_native"].split(), observed.split()
     step = f'Put {key} back to "{row["saved_native"]}"'
-    if len(now) == 3 and now[1] == saved[1] and row["bot_binding"] and saved[2] == "active" and now[2] == "inactive":
+    if row["bot_binding"] and saved[2] == "active" and (len(now) != 3 or now[2] != "active"):
         return _NO_BOT_START
     if len(now) == 3 and row["manager"] == "Linux":
         if now[1] == "masked" and saved[1] != "masked":
@@ -494,7 +491,7 @@ def quiesce_consumer(store, key, adapter):
         _native(adapter, row, "svc_activation_assert_external", _file(row), key, str(os.getpid()))
         observed = _native(adapter, row, "svc_inventory_state" if row.get("legacy_parked")
                            else "svc_activation_snapshot", _file(row), key)
-        if not native_state_matches(row, observed) and not _only_gone_down(row, key, observed):
+        if not native_state_matches(row, observed, stopping=True):
             raise _drifted("native state", key, row["saved_native"], observed, _drift_remedy(row, key, observed))
         if row["bot_binding"] and not row.get("legacy_parked"):
             session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], _file(row), key)
@@ -503,7 +500,7 @@ def quiesce_consumer(store, key, adapter):
             disposition = "running" if session == "ready" else "stopped"
             if disposition != row["disposition"]:
                 remedy = (_NO_BOT_START if row["disposition"] == "running"
-                          else "Stop its session, then run claudlobby host update continue")
+                          else "Stop its session without stopping its unit, then run claudlobby host update continue")
                 raise _drifted("bot session disposition", key, row["disposition"], disposition, remedy)
     if row["manager"] == "Linux":
         if row.get("legacy_parked"):

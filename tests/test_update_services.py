@@ -123,11 +123,18 @@ def _drifted_row(tmp_path, saved, **fields):
     return row
 
 
-@pytest.mark.parametrize("key,observed", [
-    ("example.service", "enabled loaded inactive"), ("example.service", "enabled loaded activating"),
-    ("example.timer", "enabled loaded inactive"), ("example.timer", "enabled loaded activating"),
-    ("example.timer", "enabled loaded failed")])
-def test_a_unit_that_only_gone_down_passes_the_stop_and_restores_as_frozen(tmp_path, monkeypatch, key, observed):
+def _refusal(tmp_path, saved, now, session=None, **fields):
+    row = _drifted_row(tmp_path, saved, **fields)
+    store, native = Store(tmp_path, row), Native()
+    native.state = now
+    if session is not None:
+        native.session = session
+    with pytest.raises(UpdateError) as caught:
+        services.quiesce_consumer(store, row["target"], native)
+    return str(caught.value), store, native, row
+
+
+def _gone_down_stop(tmp_path, monkeypatch, key, observed):
     row = _drifted_row(tmp_path, "enabled loaded active", target=key)
     store, native = Store(tmp_path, row), Native()
     declarations(monkeypatch, row)
@@ -136,26 +143,42 @@ def test_a_unit_that_only_gone_down_passes_the_stop_and_restores_as_frozen(tmp_p
     pauses = [call for call in native.calls if call[0] == "svc_activation_pause"]
     assert len(pauses) == 1 and pauses[0][1][2] == "enabled loaded active"
     assert store.record["consumers"][key]["stop"] == "done"
-    if key.endswith(".timer"):
-        return  # a timer restored to running needs the held-start fixture of test_update_timer_catch_up.py
+    return store, native
+
+
+@pytest.mark.parametrize("observed", ["enabled loaded inactive", "enabled loaded activating"])
+def test_a_service_that_only_gone_down_passes_the_stop_and_restores_as_frozen(tmp_path, monkeypatch, observed):
+    key = "example.service"
+    store, native = _gone_down_stop(tmp_path, monkeypatch, key, observed)
     services.restore_consumer(store, key, native, {})
     resumes = [call for call in native.calls if call[0] == "svc_activation_resume"]
     assert len(resumes) == 1 and resumes[0][1][2] == "enabled loaded active"
     assert native.state == "enabled loaded active"
 
 
-def test_a_bot_that_has_gone_down_still_refuses_and_names_no_command(tmp_path):
-    row = _drifted_row(tmp_path, "enabled loaded active", bot_binding=[str(tmp_path), "example", str(tmp_path)],
-                       disposition="running")
-    store, native = Store(tmp_path, row), Native()
-    native.state, native.session = "enabled loaded inactive", "ready"
-    with pytest.raises(UpdateError) as caught:
-        services.quiesce_consumer(store, row["target"], native)
-    text = str(caught.value)
+@pytest.mark.parametrize("observed", ["enabled loaded inactive", "enabled loaded activating", "enabled loaded failed"])
+def test_a_timer_that_only_gone_down_passes_the_stop_and_keeps_its_frozen_restore(tmp_path, monkeypatch, observed):
+    # restoring a timer to running needs the held-start fixture of test_update_timer_catch_up.py
+    key = "example.timer"
+    store, _ = _gone_down_stop(tmp_path, monkeypatch, key, observed)
+    assert store.record["consumers"][key]["intent"]["restore_native"] == "enabled loaded active"
+
+
+@pytest.mark.parametrize("now", ["enabled loaded inactive", "enabled loaded failed",
+                                 "masked-runtime masked inactive", "disabled loaded inactive"])
+def test_a_bot_that_has_gone_down_still_refuses_and_names_no_command(tmp_path, now):
+    text, store, native, row = _refusal(tmp_path, "enabled loaded active", now, session="ready",
+                                        bot_binding=[str(tmp_path), "example", str(tmp_path)], disposition="running")
     assert row["target"] in text and services._NO_BOT_START in text
     assert "host update continue" not in text and "systemctl" not in text
     assert not services._park_path(store, row).exists()
     assert not any(call[0] == "svc_activation_pause" for call in native.calls)
+
+
+def test_a_bot_still_active_with_another_unit_file_state_gets_the_table(tmp_path):
+    text, store, native, row = _refusal(tmp_path, "enabled loaded active", "disabled loaded active", session="ready",
+                                        bot_binding=[str(tmp_path), "example", str(tmp_path)], disposition="running")
+    assert f"Run systemctl --user enable {row['target']}, then run claudlobby host update continue" in text
 
 
 @pytest.mark.parametrize("saved,now,step", [
@@ -169,13 +192,9 @@ def test_a_bot_that_has_gone_down_still_refuses_and_names_no_command(tmp_path):
     ids=["enable", "disable", "unmask", "unmask-runtime", "failed-service-does-not-pass", "no-command-runtime-enable",
          "no-command-not-found"])
 def test_a_service_drift_names_the_unit_the_states_and_what_clears_it(tmp_path, saved, now, step):
-    row = _drifted_row(tmp_path, saved)
-    store, native = Store(tmp_path, row), Native()
-    native.state = now
+    text, store, native, row = _refusal(tmp_path, saved, now)
     key = row["target"]
-    with pytest.raises(UpdateError) as caught:
-        services.quiesce_consumer(store, key, native)
-    assert str(caught.value) == (f'native state drifted before stop: {key} was "{saved}" when this update was '
+    assert text == (f'native state drifted before stop: {key} was "{saved}" when this update was '
                                  f'prepared and reads "{now}" now. {step.format(key=key)}, '
                                  'then run claudlobby host update continue')
     assert not any(call[0] == "svc_activation_pause" for call in native.calls)
@@ -183,24 +202,15 @@ def test_a_service_drift_names_the_unit_the_states_and_what_clears_it(tmp_path, 
 
 @pytest.mark.parametrize("now", ["active", "activating"])
 def test_a_unit_started_by_hand_is_told_to_stop(tmp_path, now):
-    row = _drifted_row(tmp_path, "enabled loaded inactive")
-    store, native = Store(tmp_path, row), Native()
-    native.state = f"enabled loaded {now}"
-    with pytest.raises(UpdateError) as caught:
-        services.quiesce_consumer(store, row["target"], native)
-    assert f"Run systemctl --user stop {row['target']}, then run claudlobby host update continue" in str(caught.value)
+    text, store, native, row = _refusal(tmp_path, "enabled loaded inactive", f"enabled loaded {now}")
+    assert f"Run systemctl --user stop {row['target']}, then run claudlobby host update continue" in text
 
 
 @pytest.mark.parametrize("now", ["unchanged unloaded inactive", "unchanged loaded failed"])
 def test_a_launchd_drift_names_no_systemctl(tmp_path, monkeypatch, now):
     key = "gui/501/example"
-    row = _drifted_row(tmp_path, "unchanged loaded active", manager="Darwin", target=key)
-    store, native = Store(tmp_path, row), Native()
-    native.state = now
     monkeypatch.setattr(services, "_darwin", lambda *_: None)
-    with pytest.raises(UpdateError) as caught:
-        services.quiesce_consumer(store, key, native)
-    text = str(caught.value)
+    text, store, native, row = _refusal(tmp_path, "unchanged loaded active", now, manager="Darwin", target=key)
     assert f'Put {key} back to "unchanged loaded active", then run claudlobby host update continue' in text
     assert "systemctl" not in text
 
@@ -210,10 +220,13 @@ def test_native_state_matches_lets_only_scheduled_work_finish_between_observatio
     assert not services.native_state_matches(row, "enabled loaded inactive")
     assert services.native_state_matches(row, "enabled loaded active")
     assert services.native_state_matches({**row, "scheduled": True}, "enabled loaded inactive")
+    assert services.native_state_matches(row, "enabled loaded inactive", stopping=True)
+    assert not services.native_state_matches({**row, "bot_binding": ["a", "b", "c"]}, "enabled loaded inactive",
+                                             stopping=True)
 
 
 @pytest.mark.parametrize("frozen,observed,remedy", [
-    ("stopped", "ready", "Stop its session, then run claudlobby host update continue"),
+    ("stopped", "ready", "Stop its session without stopping its unit, then run claudlobby host update continue"),
     ("running", "absent", services._NO_BOT_START)])
 def test_bot_session_drift_names_both_states_and_what_clears_it(tmp_path, frozen, observed, remedy):
     row = intent(tmp_path)
