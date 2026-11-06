@@ -44,6 +44,11 @@ class Native:
         if function == "svc_activation_pause":
             if self.fail_pause:
                 raise TimeoutError()
+            # The real pause resets only a failed timer or a timer-owned or bot-owned service, so a plain
+            # service still failed or activating after the stop does not settle.
+            if (len(args) == 4 and not args[1].endswith(".timer")
+                    and self.state.split()[-1] in {"failed", "activating"}):
+                return SimpleNamespace(returncode=3, stdout="", stderr="did not settle after stop")
             self.state = "masked-runtime masked inactive"
         if function == "svc_activation_resume":
             if self.fail_resume:
@@ -194,7 +199,7 @@ def _gone_down_stop(tmp_path, monkeypatch, key, observed):
     return store, native
 
 
-@pytest.mark.parametrize("observed", ["enabled loaded inactive", "enabled loaded activating"])
+@pytest.mark.parametrize("observed", ["enabled loaded inactive"])
 def test_a_service_that_only_gone_down_passes_the_stop_and_restores_as_frozen(tmp_path, monkeypatch, observed):
     key = "example.service"
     store, native = _gone_down_stop(tmp_path, monkeypatch, key, observed)
@@ -204,12 +209,33 @@ def test_a_service_that_only_gone_down_passes_the_stop_and_restores_as_frozen(tm
     assert native.state == "enabled loaded active"
 
 
-@pytest.mark.parametrize("observed", ["enabled loaded inactive", "enabled loaded activating", "enabled loaded failed"])
+@pytest.mark.parametrize("observed", ["enabled loaded inactive", "enabled loaded failed"])
 def test_a_timer_that_only_gone_down_passes_the_stop_and_keeps_its_frozen_restore(tmp_path, monkeypatch, observed):
     # restoring a timer to running needs the held-start fixture of test_update_timer_catch_up.py
     key = "example.timer"
     store, _ = _gone_down_stop(tmp_path, monkeypatch, key, observed)
     assert store.record["consumers"][key]["intent"]["restore_native"] == "enabled loaded active"
+
+
+@pytest.mark.parametrize("key", ["example.service", "example.timer"])
+def test_a_unit_still_activating_refuses_and_names_stop(tmp_path, key):
+    text, store, native, row = _refusal(tmp_path, "enabled loaded active", "enabled loaded activating", target=key)
+    assert text.endswith(f"Run systemctl --user stop {key}, then run claudlobby host update continue")
+    assert not services._park_path(store, row).exists()
+    assert not any(call[0] == "svc_activation_pause" for call in native.calls)
+
+
+def test_the_fake_pause_refuses_a_plain_service_the_real_pause_cannot_settle(tmp_path, monkeypatch):
+    key = "example.service"
+    row = _drifted_row(tmp_path, "enabled loaded failed", target=key)
+    store, native = Store(tmp_path, row), Native()
+    declarations(monkeypatch, row)
+    native.state = "enabled loaded failed"
+    with pytest.raises(Exception) as caught:
+        services.quiesce_consumer(store, key, native)
+    assert "native refusal (3)" in str(caught.value)
+    assert sum(call[0] == "svc_activation_pause" for call in native.calls) == 1
+    assert store.record["consumers"][key].get("stop") != "done"
 
 
 @pytest.mark.parametrize("now", ["enabled loaded inactive", "enabled loaded failed",
@@ -236,9 +262,12 @@ def test_a_bot_still_active_with_another_unit_file_state_gets_the_table(tmp_path
     ("enabled loaded active", "masked-runtime masked inactive", "Run systemctl --user unmask --runtime {key}"),
     ("enabled loaded active", "enabled loaded failed", "Run systemctl --user reset-failed {key}"),
     ("enabled-runtime loaded active", "disabled loaded active", 'Put {key} back to "enabled-runtime loaded active"'),
-    ("enabled loaded active", "not-found not-found inactive", 'Put {key} back to "enabled loaded active"')],
+    ("enabled loaded active", "not-found not-found inactive", 'Put {key} back to "enabled loaded active"'),
+    ("enabled loaded active", "enabled loaded activating", "Run systemctl --user stop {key}"),
+    ("disabled loaded inactive", "enabled-runtime loaded inactive", "Run systemctl --user disable --runtime {key}"),
+    ("enabled loaded active", "enabled-runtime loaded active", 'Put {key} back to "enabled loaded active"')],
     ids=["enable", "disable", "unmask", "unmask-runtime", "failed-service-does-not-pass", "no-command-runtime-enable",
-         "no-command-not-found"])
+         "no-command-not-found", "activating-service-does-not-pass", "disable-runtime", "no-command-runtime-only"])
 def test_a_service_drift_names_the_unit_the_states_and_what_clears_it(tmp_path, saved, now, step):
     text, store, native, row = _refusal(tmp_path, saved, now)
     key = row["target"]
@@ -271,6 +300,11 @@ def test_native_state_matches_lets_only_scheduled_work_finish_between_observatio
     assert services.native_state_matches(row, "enabled loaded inactive", stopping=True)
     assert not services.native_state_matches({**row, "bot_binding": ["a", "b", "c"]}, "enabled loaded inactive",
                                              stopping=True)
+    timer = {**row, "target": "example.timer"}
+    assert not services.native_state_matches(row, "enabled loaded activating", stopping=True)
+    assert not services.native_state_matches(timer, "enabled loaded activating", stopping=True)
+    assert not services.native_state_matches(row, "enabled loaded failed", stopping=True)
+    assert services.native_state_matches(timer, "enabled loaded failed", stopping=True)
 
 
 @pytest.mark.parametrize("frozen,observed,remedy", [

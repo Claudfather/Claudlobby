@@ -1,3 +1,3 @@
 ### Fixed — a drift refusal says what changed and what clears it, and a hand-stopped timer no longer stops an update (#2734)
 
-A timer or non-bot service that has only gone down since the update was prepared now passes the stop, and the restore brings it back as frozen. Any other drift names the unit, the state saved and the state read, and the command that clears it where one is known to work under the fence. Bot rows stay exact.
+A timer or non-bot service that has gone down to inactive since the update was prepared now passes the stop, and so does a failed timer, and the restore brings each back as frozen; a failed service, or a unit still activating, refuses and is told to reset-failed or stop it. Any other drift names the unit, the state saved and the state read, and the command that clears it where one is known to work under the fence, including `disable --runtime` for a runtime enablement. Bot rows stay exact.
