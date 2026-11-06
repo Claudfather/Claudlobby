@@ -82,7 +82,7 @@ def test_application_stage_recovery_clears_only_the_matching_successful_error(up
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-        monkeypatch.setattr(updater.subprocess, "run", stage)
+        monkeypatch.setattr(updater, "_run_stage", stage)
         interpreter = Path(sys.executable).resolve()
         with pytest.raises(UpdateError, match="render refused"):
             updater._application_stage(store, "render", python=interpreter)
@@ -100,7 +100,7 @@ def test_application_stage_recovery_clears_only_the_matching_successful_error(up
 
 @pytest.mark.parametrize("interruption, detail", [
     (subprocess.TimeoutExpired("restore", 900, stderr=b"restoring example.service\n"),
-     "restoring example.service\ninterrupted: no result within 900 s; the stage process was stopped"),
+     "restoring example.service\ninterrupted: no unit finished within 900 s; the stage process was stopped"),
     (OSError(12, "Cannot allocate memory"),
      "interrupted: the stage process could not run: [Errno 12] Cannot allocate memory"),
 ], ids=["timeout", "oserror"])
@@ -116,7 +116,7 @@ def test_an_interrupted_stage_keeps_why_until_the_same_stage_succeeds(update, mo
             if isinstance(outcome, BaseException):
                 raise outcome
             return outcome
-        monkeypatch.setattr(updater.subprocess, "run", stage)
+        monkeypatch.setattr(updater, "_run_stage", stage)
         interpreter = Path(sys.executable).resolve()
         with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
             updater._application_stage(store, "restore", python=interpreter)
@@ -134,7 +134,7 @@ def test_invalid_authorization_response_keeps_original_stage_error(update, monke
         record["stage_error"] = {"stage": "authorize", "detail": "original authorization refusal"}
         store.save(record)
         outcomes = iter(["invalid-json", json.dumps({"directory": "/native", "revision": before})])
-        monkeypatch.setattr(updater.subprocess, "run", lambda *_args, **_kwargs:
+        monkeypatch.setattr(updater, "_run_stage", lambda *_args, **_kwargs:
                             subprocess.CompletedProcess([], 0, next(outcomes), ""))
         interpreter = Path(sys.executable).resolve()
         with pytest.raises(UpdateError, match="no bound installation context"):
@@ -750,7 +750,8 @@ printf '%s|%s|%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "${TELEG
 """
 
 
-def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None, retained=False, damaged=()):
+def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None, retained=False, damaged=(),
+                units=("example.service",)):
     """An update in phase restore whose job runs `restore` as the target's restore stage.
 
     The target checkout carries the real alert door (lib-common.sh and the
@@ -811,8 +812,8 @@ def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None
                                   f'export TELEGRAM_GROUP_CHAT_ID="{CHAT}"\n'
                                   f'export TELEGRAM_STATE_DIR="{channel}"\n')
     with UpdateStore(installation) as store:
-        prepare(store, target, consumers={"example.service": {"intent": {
-            "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+        prepare(store, target, consumers={unit: {"intent": {
+            "installed": [{"path": str(installation.data_root / unit)}], "bot_binding": None}} for unit in units})
         if retained:
             record = store.load()
             record["phase"] = "quiesce"
@@ -900,9 +901,9 @@ def test_an_update_job_that_ends_unfinished_tells_the_alert_chat_once(update, mo
     assert "posted that this update did not finish (scan:bot:worker)" in stderr
     if ending == "interrupted":
         assert record["stage_error"] == {"stage": "restore", "detail":
-            "restoring example.service\ninterrupted: no result within 3 s; the stage process was stopped"}
+            "restoring example.service\ninterrupted: no unit finished within 3 s; the stage process was stopped"}
         assert ("application stage restore interrupted; continue the same operation "
-                "(interrupted: no result within 3 s; the stage process was stopped)") in text
+                "(interrupted: no unit finished within 3 s; the stage process was stopped)") in text
     elif ending == "cannot_start":
         assert record["stage_error"]["stage"] == "restore"
         assert record["stage_error"]["detail"].startswith("interrupted: the stage process could not run: ")
@@ -910,6 +911,138 @@ def test_an_update_job_that_ends_unfinished_tells_the_alert_chat_once(update, mo
                 "(interrupted: the stage process could not run: ") in text
     else:
         assert "1 unit(s) reported a health error; example.service: unit failed to start" in text
+
+
+def _lines(*lines):
+    """Statements for `_notice_job`'s restore slot: the later lines sit at the entry's own indent."""
+    return "\n    ".join(lines)
+
+
+def _each_unit(field, value, pause, *more):
+    return _lines('for unit in sorted(record["consumers"]):',
+                  f'    record["consumers"][unit][{field!r}] = {value!r}', '    store.save(record)',
+                  f'    time.sleep({pause})', *more)
+
+
+UNITS = ("example.service", "b.service", "c.service")
+
+
+def test_a_restore_that_keeps_finishing_units_runs_past_the_stage_limit(update, monkeypatch):
+    """#2734: the limit is time without a finished unit; 3 s of work under a 2.5 s limit is healthy."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, _each_unit("restore", "done", 1.0, 'record.update(phase="done")'),
+                                  units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
+    updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["phase"] == "done" and "stage_error" not in record
+
+
+def test_a_quiesce_that_keeps_stopping_units_runs_past_the_stage_limit(update, monkeypatch):
+    """#2734: quiesce counts finished units too, by its own field."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, _each_unit("stop", "done", 1.0), units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
+    with UpdateStore(installation) as store:
+        updater._application_stage(store, "quiesce")
+        assert "stage_error" not in store.load()
+
+
+def test_a_restore_failing_every_unit_is_stopped_at_the_limit(update, monkeypatch, tmp_path):
+    """#2734: a unit with a restore error has not finished, and saving is not progress."""
+    from claudlobby import git_update as updater
+    reached = tmp_path / "reached-the-end"
+    restore = _lines("for turn in range(5):",
+                     '    unit = sorted(record["consumers"])[turn % 3]',
+                     '    record["consumers"][unit].update(restore="done", restore_error="unit failed")',
+                     "    store.save(record)",
+                     "    time.sleep(0.4)",
+                     f"pathlib.Path({str(reached)!r}).touch()",
+                     HANG)
+    installation, _ = _notice_job(update, monkeypatch, restore, units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
+    with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+        updater._run_native_update(installation)
+    detail = read_update(installation)["stage_error"]["detail"]
+    assert detail.endswith("interrupted: no unit finished within 1.5 s; the stage process was stopped")
+    assert not reached.exists()
+
+
+def test_a_hanging_stage_is_stopped_at_the_limit_with_what_it_wrote(update, monkeypatch, tmp_path):
+    """#2734: the timeout carries the stage limit, not the poll, and the process is gone."""
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
+    pidfile = tmp_path / "pid"
+    script = ("import os,sys,time\n"
+              "sys.stderr.write('restoring example.service\\n'); sys.stderr.flush()\n"
+              f"open({str(pidfile)!r},'w').write(str(os.getpid()))\n"
+              "time.sleep(30)\n")
+    installation = update[0]
+    started = time.monotonic()
+    with UpdateStore(installation) as store:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            updater._run_stage(store, "restore", [sys.executable, "-c", script])
+    assert time.monotonic() - started < 10
+    assert raised.value.timeout == updater._STAGE_TIMEOUT
+    errors = raised.value.stderr
+    assert "restoring example.service" in (errors.decode() if isinstance(errors, bytes) else errors)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+
+
+def test_a_stage_without_units_keeps_a_plain_limit(update, monkeypatch):
+    """#2734: no unit to finish, so no look at the record resets the limit."""
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1)
+    started = time.monotonic()
+    with UpdateStore(update[0]) as store:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            updater._run_stage(store, "render", [sys.executable, "-c", "import time; time.sleep(10)"])
+    assert time.monotonic() - started < 5
+    assert updater._interruption(raised.value, "render") == \
+        "interrupted: no result within 1 s; the stage process was stopped"
+    assert updater._interruption(raised.value, "restore") == \
+        "interrupted: no unit finished within 1 s; the stage process was stopped"
+
+
+def test_an_unreadable_record_counts_no_units_and_stops_nothing(update, monkeypatch, tmp_path):
+    """#2734: no news is not bad news; the stage runs on while the record cannot be read."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        path = installation.data_root / "state/update.json"
+        good = path.read_bytes()
+        path.write_bytes(b"{not json")
+        try:
+            assert updater._finished_units(store, "restore") == 0
+        finally:
+            path.write_bytes(good)
+        script = ("import pathlib,time\n"
+                  f"path=pathlib.Path({str(path)!r}); good=path.read_bytes()\n"
+                  "path.write_bytes(b'{not json'); time.sleep(0.6); path.write_bytes(good)\n")
+        result = updater._run_stage(store, "restore", [sys.executable, "-c", script])
+        assert result.returncode == 0 and path.read_bytes() == good
+
+
+def test_a_stage_that_exits_nonzero_hands_its_text_to_the_refusal_path(update, monkeypatch):
+    """#2734: the pipes still reach the caller as text, and a refusal keeps the stage's stderr."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'sys.exit("restore refused unit")')
+    with UpdateStore(installation) as store:
+        result = updater._run_stage(store, "render", [sys.executable, "-c",
+                                    "import sys; print('out'); print('err', file=sys.stderr); sys.exit(6)"])
+        assert (result.returncode, result.stdout, result.stderr) == (6, "out\n", "err\n")
+        with pytest.raises(UpdateError, match="^application stage restore refused; continue the retained operation$"):
+            updater._application_stage(store, "restore")
+        assert store.load()["stage_error"] == {"stage": "restore", "detail": "restore refused unit\n"}
 
 
 def test_the_notice_rides_the_real_tg_post_under_the_jobs_own_environment(update, monkeypatch, capsys, tmp_path):
@@ -2236,7 +2369,7 @@ def test_application_authorization_failure_without_record_reports_actual_boundar
             if failure == "interrupted":
                 raise subprocess.TimeoutExpired("authorize", 900)
             return subprocess.CompletedProcess([], 6, "", "earlier traceback\n  inventory refused unknown native state\x00  \n")
-        monkeypatch.setattr(updater.subprocess, "run", refused)
+        monkeypatch.setattr(updater, "_run_stage", refused)
         with pytest.raises(UpdateError) as raised:
             updater._application_stage(store, "authorize", python=Path(sys.executable).resolve())
         message = str(raised.value)

@@ -752,11 +752,16 @@ def _verify_inherited_lock(path, fd):
     os.set_inheritable(fd, False)
 
 
-#: Seconds one application stage process may run before the coordinator stops it.
-_STAGE_TIMEOUT = 900
+#: Seconds a stage process may run without finishing a unit, or, in a stage with no
+#: units, at all. The longest honest step is a bot's 900 s capture wait (#2734).
+_STAGE_TIMEOUT = 1200
+#: Seconds between looks at the record while a stage runs.
+_STAGE_POLL = 5
+#: The stages that work through units, and the progress field a finished one sets.
+_STAGE_UNITS = {"quiesce": "stop", "restore": "restore"}
 
 
-def _interruption(exc):
+def _interruption(exc, stage):
     """Why a stage process ended without a result: the retained record's detail (#2702).
 
     A refusal keeps the stage's own last words. An interruption has none of its
@@ -764,7 +769,8 @@ def _interruption(exc):
     stopped, in the same 2000 characters.
     """
     if isinstance(exc, subprocess.TimeoutExpired):
-        cause = f"interrupted: no result within {exc.timeout:g} s; the stage process was stopped"
+        waited = "no unit finished" if stage in _STAGE_UNITS else "no result"
+        cause = f"interrupted: {waited} within {exc.timeout:g} s; the stage process was stopped"
         output = exc.stderr or b""
     else:
         cause = f"interrupted: the stage process could not run: {exc}"
@@ -785,6 +791,50 @@ if pathlib.Path(update_entry.__file__).resolve()!=source/'claudlobby/update_entr
     raise SystemExit('application stage entry differs from explicit source')
 raise SystemExit(update_entry.main(sys.argv[2:]))
 """
+
+
+def _finished_units(store, stage):
+    """How many units the record says this stage has finished; 0 while it cannot be read (#2734).
+
+    A unit with a restore error has not finished: if every unit fails, the stage
+    must still stop and tell someone. An unreadable record is no news, and never
+    stops a stage by itself.
+    """
+    try:
+        record = store.load()
+    except UpdateError:
+        return 0
+    return sum(progress.get(_STAGE_UNITS[stage]) == "done" and "restore_error" not in progress
+               for progress in (record or {}).get("consumers", {}).values())
+
+
+def _run_stage(store, stage, command, **options):
+    """Run one stage process to its end, stopping it if `_STAGE_TIMEOUT` s pass with no unit finished.
+
+    This watches finished units and not every save: a stage failing each unit in
+    turn saves as often as a healthy one. The pipes are read all the while, and
+    what the process wrote goes up with the timeout, as subprocess.run's does.
+    """
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options) as process:
+        try:
+            counted = stage in _STAGE_UNITS
+            best = _finished_units(store, stage) if counted else 0
+            deadline = time.monotonic() + _STAGE_TIMEOUT
+            while True:
+                try:
+                    output, errors = process.communicate(timeout=min(_STAGE_POLL, max(0, deadline - time.monotonic())))
+                except subprocess.TimeoutExpired as exc:
+                    finished = _finished_units(store, stage) if counted else 0
+                    if finished > best:
+                        best, deadline = finished, time.monotonic() + _STAGE_TIMEOUT
+                    elif time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(command, _STAGE_TIMEOUT, output=exc.output,
+                                                        stderr=exc.stderr) from None
+                else:
+                    return subprocess.CompletedProcess(command, process.returncode, output, errors)
+        except BaseException:
+            process.kill()
+            raise
 
 
 def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None, initialization=None, convert_sealed=False):
@@ -816,15 +866,14 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
     clean.update(CLAUDLOBBY_INSTALLATION=str(store.installation.directory),
                  CLAUDLOBBY_ROOT=str(store.root), PYTHONDONTWRITEBYTECODE="1")
     try:
-        result = subprocess.run([str(python), "-I", "-B", "-c", _STAGE_IMPORT, str(source), *args],
-                                cwd=store.root, env=clean, pass_fds=tuple(inherited),
-                                capture_output=True, text=True, timeout=_STAGE_TIMEOUT)
+        result = _run_stage(store, stage, [str(python), "-I", "-B", "-c", _STAGE_IMPORT, str(source), *args],
+                            cwd=store.root, env=clean, pass_fds=tuple(inherited))
     except (OSError, subprocess.SubprocessError) as exc:
         record = store.load()
         if record is None:
             raise UpdateError(f"application stage {stage} interrupted before an update operation was recorded") from exc
         # Keep why, as a refusal does: status shows it, and the job's notice names it (#2702).
-        record["stage_error"] = {"stage": stage, "detail": _interruption(exc)}
+        record["stage_error"] = {"stage": stage, "detail": _interruption(exc, stage)}
         store.save(record)
         raise UpdateError(f"application stage {stage} interrupted; continue the same operation") from exc
     if result.returncode:
