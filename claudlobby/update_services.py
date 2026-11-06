@@ -21,7 +21,7 @@ from .supervision_inventory import (
     _environment, _darwin_source, _catalog, _wanted_by, _enablement,
 )
 from .supervision_runtime import (_call, assert_quiescent, assert_native_absent, unit_start_budget,
-                                  assert_private_endpoint_quiet)
+                                  assert_private_endpoint_quiet, RuntimeEvidenceError)
 
 
 def _hash(value):
@@ -361,6 +361,51 @@ def _preserved_mask_quiet(row, adapter):
                             target=row["target"], socket_path=socket).details
 
 
+_PAUSED = "paused, runtime mask preserved; installed publication withheld"
+
+
+def _paused_bot_decided(store, key, adapter):
+    """A bot this update left paused is a health error until someone decides (#2699).
+
+    The update starts nothing and publishes nothing over the mask: nothing proves
+    who placed it, or that the bot's session would resume. So the error keeps the
+    update pending, and every restore pass (`host update continue` included)
+    reads again whether a stop is recorded for the bot (`bot stop`) or it runs
+    again. Either one ends it.
+    """
+    from .stop_record import read_stop
+    record, progress, row = _row(store, key)
+    fleet, bot = row["declaration"].get("fleet"), row["declaration"].get("bot")
+    if read_stop(Path(row["bot_binding"][0])) is not None:
+        decided = "the bot's stop is recorded"
+    else:
+        installed = row["preserved_mask"]["installed_path"]
+        running = False
+        try:
+            state = _native(adapter, row, "svc_inventory_state", installed, key)
+            if state.split()[1:] == ["loaded", "active"]:
+                session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], installed, key)
+                running, state = session == "ready", f"{state}, session {session}"
+        except RuntimeEvidenceError as exc:
+            state = f"unreadable, {exc}"
+        if not running:
+            choice = (f"either resume it (claudlobby --fleet {fleet} bot start {bot}) or record that it "
+                      f"stays stopped (claudlobby --fleet {fleet} bot stop {bot}), and run "
+                      "claudlobby host update continue")
+            if state.split()[:2] == ["masked-runtime", "masked"]:
+                raise UpdateError(f"this update left bot {fleet}/{bot} paused: {key} keeps its runtime mask "
+                                  "and no stop is recorded for the bot, so its unit file was not published. "
+                                  f"Clear the mask (systemctl --user unmask --runtime {key}), then {choice}")
+            raise UpdateError(f"this update left bot {fleet}/{bot} down: {key} does not read as running "
+                              f"(native state: {state}) and no stop is recorded for the bot: {choice}")
+        decided = "the bot runs again"
+    outcome = f"{_PAUSED}; {decided}"
+    if progress.get("outcome") != outcome:
+        progress["outcome"] = outcome
+        store.save(record)
+    return progress
+
+
 def observe_quiet(store, key, adapter):
     """Fresh final observation; caller holds its exclusive maintenance fence."""
     record, progress, row = _row(store, key)
@@ -468,10 +513,20 @@ def restore_consumer(store, key, adapter, current_snapshot):
     if row.get("kind") == "added":
         return _restore_added(store, record, progress, row, adapter, current_snapshot)
     if row.get("preserved_mask"):
-        _preserved_mask_quiet(row, adapter)
-        progress["outcome"] = "paused, runtime mask preserved; installed publication withheld"
-        progress["restore"] = "done"
-        store.save(record)
+        if progress.get("restore") != "done":
+            _preserved_mask_quiet(row, adapter)
+            progress["outcome"] = _PAUSED
+            # The update's own work on this unit ends here: it publishes nothing
+            # over the mask, so the schedules still restore after it. A bot left
+            # paused is reported apart, below.
+            progress["restore"] = "done"
+            if row["bot_binding"]:
+                # Saved with "done", so a pass cut off before the bot is read
+                # leaves it to the next pass, whose read replaces or clears this.
+                progress["restore_error"] = "this update left the bot paused and has not read it since"
+            store.save(record)
+        if row["bot_binding"]:
+            return _paused_bot_decided(store, key, adapter)
         return progress
     if not row["installed"]:
         progress["restore"] = "done"
