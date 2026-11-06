@@ -24,6 +24,10 @@ class InstallationError(ValueError):
     """Installation paths or the managed source cannot be verified."""
 
 
+class FencedError(InstallationError):
+    """An update's fence turned a native start away: nothing failed, and a later start can pass."""
+
+
 def unit_systemd_command(argv) -> str:
     """Literal argv in systemd's quoted command syntax, including $/% escaping."""
     return " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"')
@@ -423,6 +427,19 @@ def _run_git_unit(installation, argv, environment):
     target = parse_git_unit_argv(argv)
     if target.argv[0] != str(installation.cli) or target.root != installation.data_root:
         raise InstallationError("native entry differs from its installation/data root")
+    try:
+        _check_maintenance(installation, native=True)  # before the lock: a fenced job is no reader for the updater
+        _exec_git_unit(installation, target, environment)
+    except FencedError as exc:
+        # A scheduled job that meets the fence ends clean, so its timer raises no failure; a resident
+        # unit must stay a failure or systemd would read it active with nothing running.
+        if target.mode != "oneshot":
+            raise
+        print(f"claudlobby: skipped {target.unit}: {exc}")
+        return 0
+
+
+def _exec_git_unit(installation, target, environment):
     fd = _runtime_lock(installation)
     try:
         _check_maintenance(installation, native=True)
@@ -507,7 +524,7 @@ def _check_maintenance(installation: Installation, *, native=False) -> None:
         if payload["maintenance"]:
             raise InstallationError("maintenance is active; use host update status or recovery")
         if native and payload["phase"] not in {"prepare", "commit", "restore", "done"}:
-            raise InstallationError("native startup is fenced while the update quiesces consumers")
+            raise FencedError("native startup is fenced while the update quiesces consumers")
     except FileNotFoundError:
         return  # no update exists; core admission still owns operational authority
     except (OSError, ValueError, TypeError) as exc:
@@ -581,6 +598,9 @@ def _run_cli(installation, arguments, environment, runtime, fd):
 if __name__ == "__main__":
     try:
         sys.exit(_launch(sys.argv[1:]))
+    except FencedError as exc:
+        print(f"claudlobby: {exc}", file=sys.stderr)
+        sys.exit(75)
     except (InstallationError, OSError) as exc:
         print(f"claudlobby: {exc}", file=sys.stderr)
         sys.exit(6)
