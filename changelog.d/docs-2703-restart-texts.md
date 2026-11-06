@@ -1,0 +1,3 @@
+### Fixed — skills and protocols say what a bot restart does now (#2703)
+
+A plain `bot restart` continues the bot's exact session, but protocols, skills and expertise texts still said a restart clears context, restarted bots to shed it, or had a handoff written that a plain restart never reads. They now say a plain restart continues the same conversation, and name `bot restart BOT --fresh` (#2696) where a fresh session is the aim and `bot compact` where context should be relieved in place. The `restart` skill no longer says a scheduled job invokes it or that resume and startup arrive in one bootstrap envelope, and `advanced-patterns.md` describes the handoff and resume as they work today.

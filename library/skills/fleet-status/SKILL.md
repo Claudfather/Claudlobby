@@ -62,8 +62,9 @@ with `--cursor NEXT_CURSOR` until `data.next_cursor` is null. A withheld summary
 cannot prove the worker did not report degradation. Count completed reports in
 the same window only after reading every page.
 
-Any bot listed there is asking to be restarted — pair it with its completed
-count in the same window before deciding.
+Any bot listed there is asking for a fresh session (`bot restart BOT --fresh`)
+or a compaction (`bot compact BOT`); a plain restart continues the same
+conversation. Pair it with its completed count in the same window before deciding.
 
 The generated context already selects your fleet; reading another fleet is an
 operator action, not this skill. Inspect the result envelope and exit status

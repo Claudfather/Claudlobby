@@ -48,7 +48,8 @@ What this means in practice:
   producing it.
 - **Never estimate, interpolate, or carry forward an old figure.** An invented
   percentage is forbidden by the `no-fabrication` guardrail, and unlike most
-  fabrications this one gets acted on, because restarts are routed by it.
+  fabrications this one gets acted on, because fresh sessions and compactions
+  are routed by it.
 
 The observable picture below stands on its own and does not depend on any
 figure being rendered.
@@ -83,14 +84,17 @@ into a score:
 searchable in the recorded report in a way a prose hedge is not.
 
 ```bash
-claudlobby --json assignment progress ASSIGNMENT_ID --summary "context-degraded — re-read auth.py twice this session; 3 units done. Safe to restart, no WIP." --request-id PROGRESS_UUID
+claudlobby --json assignment progress ASSIGNMENT_ID --summary "context-degraded — re-read auth.py twice this session; 3 units done. Safe for a fresh session, no WIP." --request-id PROGRESS_UUID
 ```
 
-Then state whether a restart is safe **right now**: is your work committed, is
-a report pending, is a PR half-open? That is the part only you know, and it is
-what decides whether the manager acts immediately or waits.
+Then state whether a fresh session is safe **right now**: is your work committed,
+is a report pending, is a PR half-open? That is the part only you know, and it is
+what decides whether the manager acts immediately or waits. The manager relieves
+your context with a compaction (`bot compact`) or a fresh session (`bot restart
+BOT --fresh`, which resumes from your saved handoff); a plain restart continues
+this same conversation and relieves nothing.
 
 Then take no further major task until the manager answers. Raising it early is
-the cheap path — a restart costs minutes, a degraded review cycle costs more —
+the cheap path — a fresh session costs minutes, a degraded review cycle costs more —
 and pushing through silently is the failure mode this protocol exists to
 prevent.
