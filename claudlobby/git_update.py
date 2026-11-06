@@ -20,12 +20,12 @@ import os
 from pathlib import Path
 import re
 import runpy
-import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -1446,6 +1446,8 @@ def apply_or_continue(installation, *, target=None, initialization=None, prepare
 _NOTICE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 #: Seconds the notice may take. tg-post.sh gives Telegram 6 of them.
 _NOTICE_TIMEOUT = 30
+#: Seconds the alert door has to end after its limit's SIGTERM, before SIGKILL (#2715).
+_NOTICE_GRACE = 3
 #: The alert door's scripts, retained beside the quiet support, which already holds
 #: the supervisor.sh that lib-common.sh sources (#2715).
 _NOTICE_SUPPORT = ("lib-common.sh", "cli-context.sh", "tg-post.sh")
@@ -1587,36 +1589,56 @@ def _notice_door(store, record):
     return store.installation.native, "its retained alert scripts changed, so the live checkout's ran"
 
 
-def _send_notice(store, door, text):
-    """Post one line through the alert door in `door`: (status, detail).
+def _stop_door(process):
+    """Stop an alert door past its limit: SIGTERM first, then SIGKILL for what is left (#2715).
 
-    The door's scratch files, tg-post.sh's token-bearing curl config among them,
-    live in a private directory that is removed once the door has ended, even
-    when the time limit had to kill it (#2715).
+    On SIGTERM each bash in the door runs its EXIT trap, where lib-common removes
+    its scratch directory, tg-post.sh's token-bearing curl config among it; a
+    SIGKILL skips that. TMPDIR cannot keep that directory private: macOS's mktemp
+    puts it in the per-user temp directory whatever TMPDIR says. macOS also sends
+    nothing to a group that holds an unreaped zombie, failing with EPERM, so a
+    refused signal is sent again, and the door's own bash is reaped while the
+    group is watched.
     """
-    scratch = tempfile.mkdtemp(prefix="claudlobby-update-notice-")
-    try:
-        command = ["/bin/bash", "--noprofile", "--norc", "-c", _NOTICE, "update-notice",
-                   str(door), str(store.root / "runtime/bots")]
-        environment = {"PATH": _NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()), "TMPDIR": scratch,
-                       "CLAUDLOBBY_ROOT": str(store.root), "PLANE_EMIT_DISABLED": "1"}
-        try:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, cwd=store.root, env=environment,
-                                       start_new_session=True)
-        except OSError as exc:
-            return "failed", f"bash did not start: {exc}"
-        try:
-            output, _ = process.communicate(text.encode() + b"\0", timeout=_NOTICE_TIMEOUT)
-        except subprocess.TimeoutExpired:
+    for number, grace in ((signal.SIGTERM, _NOTICE_GRACE), (signal.SIGKILL, 5)):
+        deadline = time.monotonic() + grace
+        sent = False
+        while time.monotonic() < deadline:
+            process.poll()
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=5)
-            except (OSError, subprocess.SubprocessError):
+                os.killpg(process.pid, 0 if sent else number)
+                sent = True
+            except ProcessLookupError:
+                deadline = None
+                break
+            except PermissionError:
                 pass
-            return "failed", f"no answer within {_NOTICE_TIMEOUT} s"
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+            time.sleep(0.05)
+        if deadline is None:
+            break
+    try:
+        process.communicate(timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _send_notice(store, door, text):
+    """Post one line through the alert door in `door`: (status, detail)."""
+    command = ["/bin/bash", "--noprofile", "--norc", "-c", _NOTICE, "update-notice",
+               str(door), str(store.root / "runtime/bots")]
+    environment = {"PATH": _NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()),
+                   "CLAUDLOBBY_ROOT": str(store.root), "PLANE_EMIT_DISABLED": "1"}
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, cwd=store.root, env=environment,
+                                   start_new_session=True)
+    except OSError as exc:
+        return "failed", f"bash did not start: {exc}"
+    try:
+        output, _ = process.communicate(text.encode() + b"\0", timeout=_NOTICE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _stop_door(process)
+        return "failed", f"no answer within {_NOTICE_TIMEOUT} s"
     status, _, detail = output.decode("utf-8", "replace").strip().partition("\t")
     if status not in {"carrier_accepted", "failed", "unconfigured", "unavailable"}:
         return "failed", "the alert door gave no answer"

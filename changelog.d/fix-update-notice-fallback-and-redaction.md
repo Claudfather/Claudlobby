@@ -6,6 +6,6 @@ It runs the copies of `lib-common.sh`, `cli-context.sh` and `tg-post.sh` that th
 
 A run refused before it reaches the update now sends the notice too: its retained support changed, its native unit differs from the one bound, or its dispatch record is missing. A run that cannot show it is the update's job (no bound job, or membership refused or unknown) still sends nothing, since it may be a hand-run `_run` waiting while the job itself runs.
 
-Text the notice quotes from a failed stage or a refusal is redacted first: a token, a key, a password and similar shapes become `[redacted]`. `host update status` still shows the whole line. The notice's scratch files, among them the token-bearing curl config `tg-post.sh` writes, now live in a private directory that is removed even when the notice's time limit kills it.
+Text the notice quotes from a failed stage or a refusal is redacted first: a token, a key, a password and similar shapes become `[redacted]`. `host update status` still shows the whole line. A notice stopped at its time limit now gets SIGTERM before SIGKILL, so each bash in it runs its exit trap and removes its scratch files, among them the token-bearing curl config `tg-post.sh` writes.
 
 An update job keeps the coordinator it started with. So the job run that installs this change runs without it, and every job run that starts after that run's commit stage has it, a `host update continue` of the same update included. The retained scripts start with the next update's quiesce.

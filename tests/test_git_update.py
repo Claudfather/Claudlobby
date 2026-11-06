@@ -1110,12 +1110,16 @@ def test_a_job_run_refused_before_the_update_tells_the_alert_chat_unless_it_may_
     assert "posted that this update did not finish (scan:bot:worker)" in stderr
 
 
-def test_a_notice_that_hangs_is_stopped_at_its_limit_and_leaves_no_token_behind(update, monkeypatch, capsys, tmp_path):
-    """#2702, #2715: the notice's time limit holds, and its kill leaves no token-bearing file.
+@pytest.mark.parametrize("carrier", ["stalls", "stalls_ignoring_sigterm"])
+def test_a_notice_that_hangs_is_stopped_at_its_limit_and_leaves_no_token_behind(update, monkeypatch, capsys, tmp_path,
+                                                                                carrier):
+    """#2702, #2715: the notice's time limit holds, and stopping it leaves no token-bearing file.
 
     The real tg-post.sh writes its curl config, which holds the token, into
-    lib-common's scratch directory, and a kill skips the cleanup that removes
-    it. The notice's scratch is a private directory removed after the door ends.
+    lib-common's scratch directory, which its EXIT trap removes; a SIGKILL skips
+    that trap. macOS's mktemp puts that directory where it likes, whatever TMPDIR
+    says, and so does the stand-in here, so no private TMPDIR can catch it. The
+    door gets SIGTERM first, and SIGKILL after a grace for whatever ignores it.
     """
     from claudlobby import git_update as updater
     installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, real_carrier=True)
@@ -1127,10 +1131,14 @@ def test_a_notice_that_hangs_is_stopped_at_its_limit_and_leaves_no_token_behind(
         '  case "$1" in --config) printf "%s\\n" "$2" > "$CLAUDLOBBY_ROOT/curl-config"; shift 2 ;; *) shift ;; esac\n'
         "done\n"
         'printf "%s\\n" "$$" > "$CLAUDLOBBY_ROOT/curl-pid"\n'
-        "exec sleep 60\n")
+        + ("trap '' TERM\n" if carrier == "stalls_ignoring_sigterm" else "")
+        + "exec sleep 60\n")
     (fake / "curl").chmod(0o755)
+    (fake / "mktemp").write_text('#!/bin/bash\nunset TMPDIR\nPATH=/usr/bin:/bin exec mktemp "$@"\n')
+    (fake / "mktemp").chmod(0o755)
     monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
     monkeypatch.setattr(updater, "_NOTICE_TIMEOUT", 2)
+    monkeypatch.setattr(updater, "_NOTICE_GRACE", 1)
     started = time.monotonic()
     updater._run_native_update(installation)
     elapsed = time.monotonic() - started
