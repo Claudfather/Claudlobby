@@ -705,15 +705,26 @@ def test_runner_waits_through_a_reader_and_records_both_gates(update, holders, p
 
 
 def test_runner_goes_on_only_after_the_last_of_two_overlapping_readers(update, holders, polls):
+    """#2734: the lock is taken at the first free moment between readers, and only then."""
     from claudlobby import git_update as updater
     installation, _, _, commit = update
     _, target = _runner_source(installation, commit)
     with UpdateStore(installation) as store:
         _, lock = _quiesced(installation, store, target)
         first, second = holders(lock), holders(lock)
-        polls.at[3], polls.at[9] = first.release, second.release
+        before_last = []
+
+        def last():
+            before_last.extend(row["gate"] for row in store.load().get("runtime_waits", []))
+            second.release()
+        polls.at[3], polls.at[9] = first.release, last
         result = updater.run_prepared_update(store)
-        assert result["phase"] == "done" and polls.count >= 9
+        assert result["phase"] == "done"
+        assert before_last == []  # no gate went on while the second reader held the lock
+        drain, cutover = result["runtime_waits"]
+        named = {row["pid"] for row in drain["holders"]}
+        assert drain["gate"] == "drain" and named and named <= {first.pid, second.pid}
+        assert cutover["gate"] == "cutover" and cutover["holders"] == []
 
 
 def test_runner_tells_once_past_the_tell_bound_and_keeps_waiting(update, holders, polls, monkeypatch):
@@ -840,9 +851,13 @@ def test_proc_holders_fold_a_unit_to_its_oldest_and_skip_what_does_not_hold_the_
     process(104, "nofd", "0::/user.slice/app-b.service", 50, links=None)
     process(105, "elsewhere", "0::/user.slice/app-c.service", 50, links="/elsewhere")
     monkeypatch.setattr(updater, "_PROC", proc)
-    rows = sorted(updater._proc_holders(lock), key=lambda row: row["pid"])
-    assert rows == [{"unit": "app-a.service", "comm": "old", "pid": 102, "running_s": 300},
-                    {"unit": None, "comm": "we) ird", "pid": 103, "running_s": 10}]
+    listdir = os.listdir
+    expected = [{"unit": "app-a.service", "comm": "old", "pid": 102, "running_s": 300},
+                {"unit": None, "comm": "we) ird", "pid": 103, "running_s": 10}]
+    for reverse in (False, True):  # whichever process of a unit is read first, its oldest is named
+        monkeypatch.setattr(updater.os, "listdir", lambda path, reverse=reverse: sorted(
+            listdir(path), reverse=reverse) if Path(path) == proc else listdir(path))
+        assert sorted(updater._proc_holders(lock), key=lambda row: row["pid"]) == expected
 
 
 def test_holder_text_names_the_longest_running_and_counts_the_rest():
@@ -862,6 +877,9 @@ def test_waiting_text_adds_the_stays_down_sentence_only_at_the_cutover():
     assert updater._waiting_text("/root", record, "cutover", 12.4, rows).endswith(sentence)
     drain = updater._waiting_text("/root", record, "drain", 12.4, rows)
     assert sentence not in drain and drain.endswith("nothing needs running.")
+    token = "ghp_" + "A1b2C3d4" * 4
+    named = updater._waiting_text("/root", record, "drain", 12.4, [updater._holder(token, "c", 1, 5)])
+    assert token not in named and "by [redacted] (c pid 1, running 5 s)." in named
 
 
 def test_the_record_keeps_a_holder_seen_at_any_scan_at_its_longest_running(update, holders, polls, monkeypatch):
