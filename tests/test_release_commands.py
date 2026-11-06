@@ -17,7 +17,7 @@ from claudlobby.plane.db import db_file
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, migrate
 from tests.test_activation_state import write_activation, write_selection
 from tests.test_migration_apply import write_migration
-from tests.test_migration_plan import releases, _database, _snapshot
+from tests.release_fixtures import releases, _database, _snapshot
 from tests.test_config_install import historical_config_install
 from tests.test_config_plan import historical_plan
 from tests.test_releases import historical_release, installed

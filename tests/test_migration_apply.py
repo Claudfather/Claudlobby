@@ -14,7 +14,7 @@ import pytest
 from claudlobby import activation_state as activation
 from claudlobby import migration_apply as apply
 from claudlobby.plane.db import db_file
-from tests.test_migration_plan import _database
+from tests.release_fixtures import _database
 from tests.test_task_audit import _assignment, _event, _insert, _task
 
 
