@@ -1,5 +1,9 @@
 """Concrete update ordering and interruption contracts, without native effects."""
 from copy import deepcopy
+import os
+import shutil
+import socket
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +12,7 @@ import pytest
 from claudlobby import update_operation as operation
 from claudlobby import bot_operations
 from claudlobby.git_update import UpdateError
+from claudlobby.supervision_runtime import RuntimeEvidenceError
 
 
 class Store:
@@ -69,40 +74,66 @@ def test_quiesce_schedules_then_one_checkpoint_then_bot_then_recorder(tmp_path, 
         current["consumers"][key]["stop"] = "done"
         store.save(current)
     monkeypatch.setattr(operation, "quiesce_consumer", quiet)
-    operation.quiesce_operation(store, ReadySession())
+    operation.quiesce_operation(store, SessionAdapter())
     assert events == [("stop", "timer"), ("stop", "job"), ("checkpoint", "original"),
                       ("stop", "bot"), ("stop", "owner"), ("stop", "recorder")]
-    operation.quiesce_operation(store, ReadySession())
+    operation.quiesce_operation(store, SessionAdapter())
     assert sum(event[0] == "checkpoint" for event in events) == 1
 
 
 class SessionAdapter:
-    """Answers the session observer by call shape, as the real one does: the frozen unit path and target make a
-    missing socket on an active unit read unknown, and the bare binding reads the steady-state answer."""
+    """Answers the session observer with one fixed answer and leaves every other native call to the adapter it
+    wraps, if any. Observer calls are recorded."""
 
-    def __init__(self, bare):
-        self.bare, self.calls = bare, []
-
-    def call(self, function, *args, timeout=30):
-        self.calls.append((function, args))
-        assert function == "svc_bot_session_observe"
-        answer = self.bare if len(args) == 3 else "unknown"
-        return SimpleNamespace(returncode=0, stdout=answer, stderr="")
-
-
-class ReadySession:
-    """Reads every bot session ready and leaves every other native call to the adapter it wraps."""
-
-    def __init__(self, inner=None):
-        self.inner = inner
+    def __init__(self, answer="ready", inner=None):
+        self.answer, self.inner, self.calls = answer, inner, []
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
 
     def call(self, function, *args, timeout=30):
         if function == "svc_bot_session_observe":
-            return SimpleNamespace(returncode=0, stdout="ready", stderr="")
+            self.calls.append((function, args))
+            return SimpleNamespace(returncode=0, stdout=self.answer, stderr="")
         return self.inner.call(function, *args, timeout=timeout)
+
+
+class FailingObserver:
+    """A native observer call that fails."""
+
+    def __init__(self):
+        self.calls = []
+
+    def call(self, function, *args, timeout=30):
+        self.calls.append((function, args))
+        return SimpleNamespace(returncode=3, stdout="", stderr="observer refused")
+
+
+@pytest.fixture
+def private_dir():
+    """A short bot tmpdir (an AF_UNIX path stays under 108 bytes) holding tmux-<uid>/."""
+    path = Path(tempfile.mkdtemp(prefix="sg", dir="/tmp"))
+    (path / f"tmux-{os.getuid()}").mkdir(mode=0o700)
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _bind(private_dir, listening):
+    """Bind the bot's private tmux socket. A closed unlinked one is the file a dead server leaves."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(private_dir / f"tmux-{os.getuid()}" / "bot"))
+    if listening:
+        sock.listen(1)
+        return sock
+    sock.close()
+
+
+def _bound_record(private_dir):
+    """The bot's binding points at the test's private directory."""
+    data = _gone_record()
+    data["consumers"]["bot"]["intent"]["bot_binding"] = ["/data/bot", "bot", str(private_dir)]
+    data["scope"] = _scope(data["consumers"])
+    return data
 
 
 def _gone_record(disposition="running"):
@@ -131,24 +162,60 @@ def _no_checkpoint(*_args, **_kwargs):
     pytest.fail("a bot whose session is gone must not be checkpointed")
 
 
-def test_a_frozen_running_bot_whose_session_is_gone_is_marked_and_stopped_without_a_checkpoint(monkeypatch):
-    store, adapter = Store(_gone_record()), SessionAdapter("absent")
+def _bot_binding(private_dir):
+    return [("/data/bot", "bot", str(private_dir))]
+
+
+def test_a_bot_whose_server_exited_leaving_a_refusing_socket_is_marked_and_stopped_without_a_checkpoint(
+        monkeypatch, private_dir):
+    _bind(private_dir, listening=False)
+    store, adapter = Store(_bound_record(private_dir)), SessionAdapter("unknown")
     events, run = _quiesce_with(monkeypatch, store, adapter, _no_checkpoint)
     run()
     assert store.load()["consumers"]["bot"]["session_gone"] is True
     assert events == ["timer", "job", "bot", "owner", "recorder"]
-    assert [call[1] for call in adapter.calls] == [("/data/bot", "bot", "/tmp/private")]
+    assert [call[1] for call in adapter.calls] == _bot_binding(private_dir)
 
 
-def test_a_frozen_running_bot_with_a_ready_session_is_checkpointed_not_marked(monkeypatch):
-    store, adapter, taken = Store(_gone_record()), SessionAdapter("ready"), []
-    events, run = _quiesce_with(monkeypatch, store, adapter, lambda *a, **k: taken.append(1) or {"original": True})
+def test_a_bot_whose_socket_is_missing_is_marked_and_stopped_without_a_checkpoint(monkeypatch, private_dir):
+    store, adapter = Store(_bound_record(private_dir)), SessionAdapter("absent")
+    events, run = _quiesce_with(monkeypatch, store, adapter, _no_checkpoint)
     run()
-    assert taken == [1] and "session_gone" not in store.load()["consumers"]["bot"]
+    assert store.load()["consumers"]["bot"]["session_gone"] is True
+    assert events == ["timer", "job", "bot", "owner", "recorder"]
+    assert [call[1] for call in adapter.calls] == _bot_binding(private_dir)
 
 
-def test_a_session_that_cannot_be_read_keeps_its_checkpoint_attempt_and_is_not_marked(monkeypatch):
-    store, adapter = Store(_gone_record()), SessionAdapter("unknown")
+def test_a_frozen_running_bot_with_a_ready_session_is_checkpointed_not_marked(monkeypatch, private_dir):
+    server = _bind(private_dir, listening=True)
+    try:
+        store, adapter, taken = Store(_bound_record(private_dir)), SessionAdapter("ready"), []
+        events, run = _quiesce_with(monkeypatch, store, adapter, lambda *a, **k: taken.append(1) or {"original": True})
+        run()
+        assert taken == [1] and "session_gone" not in store.load()["consumers"]["bot"]
+    finally:
+        server.close()
+
+
+def test_a_server_that_still_accepts_keeps_its_checkpoint_attempt_and_is_not_marked(monkeypatch, private_dir):
+    server = _bind(private_dir, listening=True)
+    try:
+        store, adapter = Store(_bound_record(private_dir)), SessionAdapter("unknown")
+        def refuse(*_args, **_kwargs):
+            raise bot_operations.BotLifecycleError("no live session")
+        events, run = _quiesce_with(monkeypatch, store, adapter, refuse)
+        with pytest.raises(bot_operations.BotLifecycleError, match="no live session"):
+            run()
+        assert "session_gone" not in store.load()["consumers"]["bot"]
+        assert "bot" not in events
+    finally:
+        server.close()
+
+
+def test_a_socket_path_that_is_a_regular_file_keeps_its_checkpoint_attempt_and_is_not_marked(
+        monkeypatch, private_dir):
+    (private_dir / f"tmux-{os.getuid()}" / "bot").write_text("not a socket")
+    store, adapter = Store(_bound_record(private_dir)), SessionAdapter("unknown")
     def refuse(*_args, **_kwargs):
         raise bot_operations.BotLifecycleError("no live session")
     events, run = _quiesce_with(monkeypatch, store, adapter, refuse)
@@ -156,6 +223,15 @@ def test_a_session_that_cannot_be_read_keeps_its_checkpoint_attempt_and_is_not_m
         run()
     assert "session_gone" not in store.load()["consumers"]["bot"]
     assert "bot" not in events
+
+
+def test_a_failing_session_observer_raises_and_marks_nothing(monkeypatch, private_dir):
+    store, adapter = Store(_bound_record(private_dir)), FailingObserver()
+    events, run = _quiesce_with(monkeypatch, store, adapter, _no_checkpoint)
+    with pytest.raises(RuntimeEvidenceError):
+        run()
+    assert "session_gone" not in store.load()["consumers"]["bot"]
+    assert len(adapter.calls) == 1 and "bot" not in events
 
 
 def test_a_bot_frozen_stopped_is_never_read_for_a_gone_session(monkeypatch):
@@ -190,8 +266,9 @@ def test_final_quiet_accepts_a_marked_bot_without_a_checkpoint_and_nothing_else(
     assert ("proof", {"original": True}) in events
 
 
-def test_marking_a_gone_session_twice_reads_it_once():
-    store, adapter = Store(_gone_record()), SessionAdapter("absent")
+def test_marking_a_gone_session_twice_reads_it_once(private_dir):
+    _bind(private_dir, listening=False)
+    store, adapter = Store(_bound_record(private_dir)), SessionAdapter("unknown")
     assert operation.mark_session_gone(store, "bot", adapter) is True
     assert operation.mark_session_gone(store, "bot", adapter) is True
     assert len(adapter.calls) == 1
@@ -225,7 +302,7 @@ def test_resume_before_stop_rechecks_original_native_identity_without_replaying(
     monkeypatch.setattr(bot_operations, "save_planned_checkpoint", recheck)
     monkeypatch.setattr(operation, "quiesce_consumer", lambda *_: pytest.fail("must not stop on changed native identity"))
     with pytest.raises(bot_operations.BotLifecycleError, match="native process differs"):
-        operation.quiesce_operation(store, ReadySession())
+        operation.quiesce_operation(store, SessionAdapter())
     assert events == ["original"]
     assert store.load()["consumers"]["bot"].get("stop") is None
 
@@ -269,8 +346,8 @@ def test_update_adopts_running_session_but_leaves_stopped_bot_and_optional_hando
         current["consumers"][key]["stop"] = "done"
         store.save(current)
     monkeypatch.setattr(operation, "quiesce_consumer", quiet)
-    result = operation.quiesce_operation(store, ReadySession(adapter))
-    operation.quiesce_operation(store, ReadySession(adapter))
+    result = operation.quiesce_operation(store, SessionAdapter(inner=adapter))
+    operation.quiesce_operation(store, SessionAdapter(inner=adapter))
     assert stopped == ["bot"] and result["request_id"] == "original"
     assert (optional.read_bytes(), optional.stat().st_ino) == retained
     assert bool(adapter.calls) == (disposition == "running")

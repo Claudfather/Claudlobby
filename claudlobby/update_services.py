@@ -468,12 +468,18 @@ def _drifted(subject, key, saved, observed, remedy):
 
 def mark_session_gone(store, key, adapter):
     """Mark a bot this update froze running whose session is gone. Nothing can start it again while the fence is
-    up, so its stop needs no checkpoint and the restore starts it as frozen. The proof is the observer's
-    steady-state read without the frozen unit path: on Linux, its unit active/exited and its private socket
-    missing. Any other read is no proof, and the bot keeps its checkpoint and every refusal."""
+    up, so its stop needs no checkpoint and the restore starts it as frozen. The proof is the one the quiet check
+    takes after a stop: the bot's private socket missing, or owned and refusing a connection, so no tmux server
+    is listening. The session observer, which also checks the bot's binding, must not read it ready. A socket that
+    still accepts, or a read that fails, is no proof: the bot keeps its checkpoint and every refusal."""
     record, progress, row = _row(store, key)
     if not progress.get("session_gone"):
-        if _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"]) != "absent":
+        binding = row["bot_binding"]
+        if _native(adapter, row, "svc_bot_session_observe", *binding) == "ready":
+            return False
+        try:
+            assert_private_endpoint_quiet(Path(binding[2]) / f"tmux-{os.getuid()}" / binding[1], target=key)
+        except RuntimeEvidenceError:
             return False
         progress["session_gone"] = True
         store.save(record)

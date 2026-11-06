@@ -117,25 +117,24 @@ def test_bot_session_drift_refuses_before_parking_or_stop(tmp_path, frozen, obse
     assert not any(call[0] == "svc_activation_pause" for call in native.calls)
 
 
-class ShapedNative(Native):
-    """The session observer answers by call shape, as the real one does: with the frozen unit path and target a
-    missing socket on an active unit reads unknown; the bare binding reads the steady-state answer."""
+class UnknownSessionNative(Native):
+    """The session observer reads unknown, as it does for an active unit with no readable session."""
 
-    def __init__(self, bare="absent"):
+    def __init__(self):
         super().__init__()
-        self.state, self.bare = "enabled loaded active", bare
+        self.state = "enabled loaded active"
 
     def call(self, function, *args, timeout=30):
         result = super().call(function, *args, timeout=timeout)
         if function == "svc_bot_session_observe":
-            result.stdout = self.bare if len(args) == 3 else "unknown"
+            result.stdout = "unknown"
         return result
 
 
 def _gone_bot(tmp_path, monkeypatch, **progress):
     row = _drifted_row(tmp_path, "enabled loaded active", bot_binding=[str(tmp_path), "example", str(tmp_path)],
                        disposition="running")
-    store, native = Store(tmp_path, row), ShapedNative()
+    store, native = Store(tmp_path, row), UnknownSessionNative()
     store.record["consumers"][row["target"]].update(progress)
     declarations(monkeypatch, row)
     return row, store, native
