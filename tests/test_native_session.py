@@ -167,6 +167,52 @@ def test_headless_or_foreign_hook_cannot_replace_retained_identity(bound):
     assert (b.bot / "data" / native.NAME).read_bytes() == before
 
 
+@pytest.mark.parametrize("source", ["compact", "clear"])
+@pytest.mark.parametrize("where", ["projects/example-checkout", "memory"])
+def test_session_working_below_the_bot_directory_is_captured_and_resumed(bound, monkeypatch, capsys, where, source):
+    # SessionStart names the session's current directory, which follows its shell
+    # into a checkout. The composed hook command drives this entry with the payload.
+    import io
+    import sys
+    from claudlobby import resources, supervision_inventory
+    b = bound
+    monkeypatch.setattr(resources, "get_resources", lambda: b.adapter.package)
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _package: b.adapter)
+    sid = OTHER if source == "clear" else b.receipt["session_id"]
+    (b.bot / where).mkdir(parents=True)
+    payload = {**session_start(b.bot, b.account, sid, source=source), "cwd": str(b.bot / where)}
+    Path(payload["transcript_path"]).write_bytes(b"context after the session moved into a subdirectory\n")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    args = SimpleNamespace(root=b.bot.parent, directory=b.bot, label=b.label, tmpdir=b.tmpdir, action="capture")
+    assert native.entry(args) == 0, capsys.readouterr().err
+    receipt = native.read(b.bot)
+    assert receipt["session_id"] == sid and receipt["cwd"] == str(b.bot)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", sid)
+
+
+@pytest.mark.parametrize("where", ["parent", "another bot", "name-prefix sibling", "unrelated",
+                                   "dot-dot escape", "symlink out", "relative", "missing", "nul byte"])
+def test_session_outside_the_bot_directory_is_refused_before_observation(bound, tmp_path, where):
+    b = bound
+    elsewhere, another = tmp_path / "elsewhere", b.bot.parent / "another-bot"
+    for directory in (elsewhere, another, b.bot / "projects", Path(str(b.bot) + "-two")):
+        directory.mkdir(exist_ok=True)
+    (b.bot / "projects" / "link").symlink_to(elsewhere, target_is_directory=True)
+    cwd = {"parent": str(b.bot.parent), "another bot": str(another),
+           "name-prefix sibling": str(b.bot) + "-two", "unrelated": str(elsewhere),
+           "dot-dot escape": str(b.bot / "projects" / ".." / ".." / "another-bot"),
+           "symlink out": str(b.bot / "projects" / "link"), "relative": "projects",
+           "missing": None, "nul byte": str(b.bot / "projects") + "\0"}[where]
+    payload = {**session_start(b.bot, b.account, b.receipt["session_id"], source="compact"), "cwd": cwd}
+    if cwd is None:
+        del payload["cwd"]
+    before, calls = (b.bot / "data" / native.NAME).read_bytes(), len(b.adapter.calls)
+    with pytest.raises(native.NativeSessionError, match="unsupported native SessionStart identity"):
+        native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter, payload, caller=123)
+    assert (b.bot / "data" / native.NAME).read_bytes() == before
+    assert len(b.adapter.calls) == calls
+
+
 @pytest.mark.parametrize("drift", ["account", "label", "tmpdir", "transcript"])
 def test_continuation_refuses_binding_drift_without_overwriting_receipt(bound, drift):
     b = bound

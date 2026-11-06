@@ -48,6 +48,17 @@ def _plain(path, *, directory=False):
     return path
 
 
+def _inside(value, bot_dir):
+    """The bot directory or a directory below it, named without redirection."""
+    if not isinstance(value, str):
+        return False
+    path = Path(value)
+    try:
+        return path.is_relative_to(bot_dir) and path.resolve() == path
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _path(bot_dir):
     return _plain(_plain(bot_dir, directory=True) / "data", directory=True) / NAME
 
@@ -331,9 +342,11 @@ def launch(bot_dir, label, tmpdir, account):
 
 
 def capture(bot_dir, label, tmpdir, account, adapter, payload, *, caller):
+    # The payload names the session's current directory, which follows its shell
+    # into a checkout. The receipt keeps the bot directory a resume starts in.
     if (not isinstance(payload, dict) or payload.get("hook_event_name") != "SessionStart"
             or payload.get("source") not in {"startup", "resume", "clear", "compact"}
-            or not _uuid(payload.get("session_id")) or payload.get("cwd") != str(bot_dir)):
+            or not _uuid(payload.get("session_id")) or not _inside(payload.get("cwd"), bot_dir)):
         raise NativeSessionError("unsupported native SessionStart identity")
     current = observe(adapter, bot_dir, label, tmpdir, caller=caller)
     prior = _binding(read(bot_dir), bot_dir, label, tmpdir, account)
