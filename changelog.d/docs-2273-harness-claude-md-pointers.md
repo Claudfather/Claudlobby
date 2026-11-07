@@ -1,0 +1,5 @@
+### Changed — `harness/CLAUDE.md` keeps every rule and guard and moves its reference text behind a pointer (#2273)
+
+A Claude Code session attaches `harness/CLAUDE.md` whole the first time it reads or edits a file under `harness/`, and carries it on every later call. Every rule stays word for word, and so does every guard a script keeps: what it refuses, never does or asserts. The rest of each script's row (what it does and how, its flags, outputs, measurements and history) moves, word for word, to the same script's row of a new `documentation/harness-script-reference.md`, behind one pointer. One sentence is reworded so that it stays true: the file is now "the index and the rules".
+
+The file goes from 27,966 to 18,476 bytes, and from 10,523 to 6,898 tokens by Claude Code's own `/context`. A session that reads a file under `harness/` carries 3,625 fewer tokens on every later call. Whether sessions follow the rules as well with this text behind a pointer is not measured. `harness/AGENTS.md` stays a byte copy.
