@@ -46,7 +46,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_FILES = 512
-MAX_BYTES = 64 * 1024 * 1024
+# The usage read (#717) takes each transcript from its end back to the
+# window's start, so what it costs follows the window, not the file. This
+# bounds the bytes one bot's read takes in all; past it the coverage is
+# partial and says how many bytes went unread. One bot's 24 h window measured
+# 95 MB across 62 transcripts, so this allows 2.8 times that.
+MAX_BYTES = 256 * 1024 * 1024
 MAX_ENTRIES = 8192
 
 # The live-context read (#2206) runs backwards from the end of the newest
@@ -186,7 +191,6 @@ class ParseResult:
     unkeyed_turns: int = 0
     duplicate_messages: int = 0
     conflicting_duplicates: int = 0
-    truncated_file: int = 0
 
 
 def _int(v) -> int:
@@ -333,8 +337,48 @@ def compaction_row(obj) -> dict | None:
             "session": _text(obj.get("sessionId")), "uuid": _text(obj.get("uuid"))}
 
 
+def _row_record(obj) -> tuple | None:
+    """What counting takes from one assistant row: its flat usage, its
+    ``(session, message)`` key, whether a sidechain wrote it, its model and its
+    outbound comms; None when it carries no usage."""
+    values = _row_usage(obj)
+    if values is None:
+        return None
+    msg = obj["message"]
+    blocks, chars = _scan_comms(msg.get("content"))
+    return (values, (obj.get("sessionId"), msg.get("id")), bool(obj.get("isSidechain")),
+            msg.get("model"), blocks, chars)
+
+
+def _tally(result: ParseResult, seen: dict, record: tuple) -> None:
+    """Count one row's ``_row_record`` into ``result``, rows taken in file
+    order: a message's first row gives its usage, and each later row with its
+    key adds only its comms (content-block lines may carry distinct tools;
+    only flat usage repeats)."""
+    values, key, sidechain, model, blocks, chars = record
+    bucket = result.sidechain if sidechain else result.main
+    bucket.comms_blocks += blocks
+    bucket.comms_chars += chars
+    if all(isinstance(part, str) and part for part in key):
+        if key in seen:
+            result.duplicate_messages += 1
+            if seen[key] != values:
+                result.conflicting_duplicates += 1
+            return
+        seen[key] = values
+    else:
+        result.unkeyed_turns += 1
+    bucket.turns += 1
+    bucket.input_tokens += values[0]
+    bucket.output_tokens += values[1]
+    bucket.cache_creation_input_tokens += values[2]
+    bucket.cache_read_input_tokens += values[3]
+    if isinstance(model, str) and model:
+        bucket.models.add(model)
+
+
 def parse_file(path: str, *, since: datetime | None = None,
-               until: datetime | None = None, max_bytes: int | None = None) -> ParseResult:
+               until: datetime | None = None) -> ParseResult:
     """Count each identified assistant message once within this file and window.
 
     Real interactive transcripts repeat flat usage on multiple content-block
@@ -345,15 +389,7 @@ def parse_file(path: str, *, since: datetime | None = None,
     result = ParseResult(path=path)
     seen: dict[tuple[str, str], tuple[int, int, int, int]] = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
-        read_bytes = 0
-        while True:
-            line = fh.readline(max_bytes + 1 if max_bytes is not None else -1)
-            if not line:
-                break
-            read_bytes += len(line.encode("utf-8", errors="replace"))
-            if max_bytes is not None and read_bytes > max_bytes:
-                result.truncated_file = 1
-                break
+        for line in fh:
             # Cheap reject of non-assistant lines (~70% of a transcript) before the
             # json.loads allocation: an assistant turn always contains the literal
             # substring "assistant" (its own type/role value spells it).
@@ -375,39 +411,11 @@ def parse_file(path: str, *, since: datetime | None = None,
                     continue
                 if until is not None and instant > until:
                     continue
-            values = _row_usage(obj)
-            if values is None:
+            record = _row_record(obj)
+            if record is None:
                 result.missing_usage += 1
                 continue
-            msg = obj["message"]
-            key = (obj.get("sessionId"), msg.get("id"))
-            if all(isinstance(part, str) and part for part in key):
-                if key in seen:
-                    result.duplicate_messages += 1
-                    if seen[key] != values:
-                        result.conflicting_duplicates += 1
-                    # Distinct content-block lines may still contain distinct
-                    # communication tools; only flat usage is repeated.
-                    blocks, chars = _scan_comms(msg.get("content"))
-                    bucket = result.sidechain if obj.get("isSidechain") else result.main
-                    bucket.comms_blocks += blocks
-                    bucket.comms_chars += chars
-                    continue
-                seen[key] = values
-            else:
-                result.unkeyed_turns += 1
-            bucket = result.sidechain if obj.get("isSidechain") else result.main
-            bucket.turns += 1
-            bucket.input_tokens += values[0]
-            bucket.output_tokens += values[1]
-            bucket.cache_creation_input_tokens += values[2]
-            bucket.cache_read_input_tokens += values[3]
-            model = msg.get("model")
-            if isinstance(model, str) and model:
-                bucket.models.add(model)
-            blocks, chars = _scan_comms(msg.get("content"))
-            bucket.comms_blocks += blocks
-            bucket.comms_chars += chars
+            _tally(result, seen, record)
     return result
 
 
@@ -416,8 +424,7 @@ def _bounded_files(directory: Path, since: datetime):
     files: list[tuple[Path, int]] = []
     issues: list[str] = []
     stack = [(directory, 0)]
-    entries = bytes_total = 0
-    skipped = outside_window = 0
+    entries = skipped = outside_window = 0
     while stack:
         current, depth = stack.pop()
         try:
@@ -455,12 +462,11 @@ def _bounded_files(directory: Path, since: datetime):
             if stat.st_mtime < since.timestamp():
                 outside_window += 1
                 continue
-            if len(files) >= MAX_FILES or bytes_total + stat.st_size > MAX_BYTES:
-                issues.append("file_or_byte_limit_reached")
+            if len(files) >= MAX_FILES:
+                issues.append("file_limit_reached")
                 skipped += 1
                 return files, issues, skipped, outside_window
-            files.append((Path(child.path), stat.st_size))
-            bytes_total += stat.st_size
+            files.append((Path(child.path), stat.st_size, stat.st_mtime))
     return files, issues, skipped, outside_window
 
 
@@ -674,6 +680,60 @@ def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
                        else "no_main_usage_row_in_transcript")}
 
 
+def parse_window(path: str, size: int, since: datetime, until: datetime,
+                 budget: int) -> tuple[ParseResult, int, str]:
+    """What ``parse_file(path, since=since, until=until)`` counts in the
+    file's first ``size`` bytes, read from that end backwards in 64 KiB
+    blocks and never more than ``budget`` bytes (#717). Claude Code appends
+    rows in time order, so the read stops at the first assistant row older
+    than ``since``: every row before it is older too (of 83,108 timed
+    assistant rows in 435 real transcripts, none was older than a row before
+    it). The rows read are
+    counted oldest first, as ``parse_file`` takes them. Returns the counts,
+    the bytes read, and where the read stopped: ``window_start``,
+    ``file_start`` or ``byte_limit``. Bytes appended after the listing
+    measured ``size`` are not read; the window closed before that listing."""
+    result = ParseResult(path=path)
+    records = []
+    ended = "file_start"
+    with open(path, "rb") as fh:
+        tail = _Tail(fh, size, budget)
+        for line in tail.lines():
+            if b"assistant" not in line:
+                continue
+            # Decoded as parse_file reads, so a bad byte reads the same in both.
+            obj = _loads(line.decode("utf-8", errors="replace"))
+            if obj is None:  # no line naming "assistant" is the JSON null
+                result.malformed_lines += 1
+                continue
+            if not isinstance(obj, dict) or obj.get("type") != "assistant":
+                continue
+            instant = _row_instant(obj)
+            if instant is None:
+                result.missing_timestamps += 1
+                continue
+            if instant < since:
+                ended = "window_start"
+                break
+            if instant > until:
+                continue
+            record = _row_record(obj)
+            if record is None:
+                result.missing_usage += 1
+            else:
+                records.append(record)
+        if tail.capped:  # set only when the read ran out of budget, never at a break
+            ended = "byte_limit"
+    seen: dict = {}
+    for record in reversed(records):
+        _tally(result, seen, record)
+    return result, tail.bytes_read, ended
+
+
+# Coverage issues from the listing that leave further files uncounted.
+_LISTING_LIMITS = ("entry_limit_reached", "file_limit_reached", "depth_limit_reached")
+
+
 def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
                       until: datetime) -> dict:
     """Read current-cwd Claude transcripts for one declared bot, with coverage."""
@@ -695,29 +755,46 @@ def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
                 "issues": [source.issue], **shared, "files_read": 0,
                 "files_skipped_at_least": 0}}
     files, issues, skipped, outside_window = _bounded_files(source.directory, since)
+    # The most recently written first, so a read cut at the byte limit leaves
+    # the oldest bytes unread.
+    files.sort(key=lambda entry: entry[2], reverse=True)
     main = Usage()
     side = Usage()
-    unreadable_files = 0
+    files_read = 0
     diagnostics = {name: 0 for name in ("malformed_lines", "missing_timestamps",
                    "missing_usage", "unkeyed_turns", "duplicate_messages",
-                   "conflicting_duplicates", "truncated_file")}
-    for path, size in files:
+                   "conflicting_duplicates")}
+    # What the read took and what it left: bytes older than the window are
+    # proven so by a row; bytes left at the byte limit are a coverage gap.
+    read = {"bytes_read": 0, "bytes_before_window": 0, "bytes_unread_at_limit": 0}
+    for index, (path, size, _mtime) in enumerate(files):
+        if read["bytes_read"] >= MAX_BYTES:
+            issues.append("byte_limit_reached")
+            skipped += len(files) - index
+            read["bytes_unread_at_limit"] += sum(entry[1] for entry in files[index:])
+            break
         try:
-            row = parse_file(str(path), since=since, until=until, max_bytes=size)
+            row, taken, ended = parse_window(str(path), size, since, until,
+                                             MAX_BYTES - read["bytes_read"])
         except OSError:
             skipped += 1
-            unreadable_files += 1
             issues.append("unreadable_transcript_file")
             continue
+        files_read += 1
+        read["bytes_read"] += taken
+        if ended == "window_start":
+            read["bytes_before_window"] += size - taken
+        elif ended == "byte_limit":
+            issues.append("byte_limit_reached")
+            read["bytes_unread_at_limit"] += size - taken
         main += row.main
         side += row.sidechain
         for name in diagnostics:
             diagnostics[name] += getattr(row, name)
     if any(diagnostics[name] for name in ("malformed_lines", "missing_timestamps",
                                              "missing_usage", "unkeyed_turns",
-                                             "conflicting_duplicates", "truncated_file")):
+                                             "conflicting_duplicates")):
         issues.append("transcript_rows_not_fully_attributable")
-    files_read = len(files) - unreadable_files
     # A complete scan with no in-window candidates is an idle bot: observed zero.
     idle = not files and not issues
     if not files_read and not idle:
@@ -730,8 +807,8 @@ def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
                          "issues": sorted(set(issues)), "files_read": files_read,
                          "files_skipped_at_least": skipped, "candidate_files": len(files),
                          "additional_files_after_limit": "unknown" if any(
-                             "limit_reached" in issue for issue in issues) else 0,
-                         "older_files_excluded_by_mtime": outside_window,
+                             issue in _LISTING_LIMITS for issue in issues) else 0,
+                         "older_files_excluded_by_mtime": outside_window, **read,
                          "limits": {"files": MAX_FILES, "bytes": MAX_BYTES,
                                     "entries": MAX_ENTRIES, "depth": 4},
                          "diagnostics": diagnostics,
