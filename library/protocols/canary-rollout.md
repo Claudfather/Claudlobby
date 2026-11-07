@@ -1,6 +1,6 @@
 ---
 title: Canary Rollout
-description: Manager protocol — by default, validate a framework release in an independent canary root before coordinated host activation.
+description: Manager protocol — by default, validate a framework change in an independent canary root before the production host update.
 ---
 
 # Canary Rollout
@@ -29,11 +29,11 @@ Reach for a canary by default when a change to the **Claudfather framework itsel
 
 A fleet-wide production canary adds no value here — don't spend one:
 
-- **An individual bot operation under an unchanged release** — the blast radius is already one bot. A composed config change is different: activation currently coordinates the whole host, even when only one bot's source changed.
+- **An individual bot operation under an unchanged installation** — the blast radius is already one bot. A composed config change is different: an update covers the whole installation, even when only one bot's source changed.
 - **App-repo (product) work** — shipping a feature or fix to a product repo is not a fleet-wide framework rollout. The product's own tests and deploy gates cover it.
 - **Non-runtime changes** — docs, README, planning files: nothing to drill.
 
-Library, skill and permission changes use the same staged activation as code. They are not a restart-free exception.
+Library, skill and permission changes use the same Git update as code. They are not a restart-free exception.
 
 Judgment call in one line: would a bad version of this change hurt more than one running bot at once? Yes → canary. No → ship it.
 
@@ -42,11 +42,11 @@ Judgment call in one line: would a bad version of this change hurt more than one
 Once you have decided to canary:
 
 1. **Use an independent canary data root.** Declare a small fleet with its own manager, unique bot service labels and host `unit_prefix`. Use separate Plane state and credentials; omit outbound channels unless a throwaway channel is part of the check. Never share a production bot directory or token.
-2. **Assemble the candidate with `host setup`, then stage `config plan --release RELEASE_ID`.** Use the exact sealed CLI returned by setup and an explicit `--root` on every command. Review `config diff PLAN_ID`: every unit, path and restart must belong to the canary. The [getting-started guide](../../documentation/getting-started.md) describes the release inputs and setup commands.
-3. **The operator activates the canary plan** with `host activate PLAN_ID --install-directory PATH` from an external shell. Stage the affected skill, grants and config together, then exercise real delegation and the affected operation. Observe the receiver, command result and durable record; process liveness alone is insufficient.
+2. **The operator prepares the candidate with `host setup`, then `fleet setup --plan-only`.** Use that installation's stable CLI and an explicit `--root` on every command. Review `config diff FINGERPRINT`: every unit, path and restart must belong to the canary. The [getting-started guide](../../documentation/getting-started.md) describes the setup inputs and commands.
+3. **The operator continues that operation** with `host update continue` from an external shell; a later candidate takes `host update apply FULL_COMMIT`, which is effectful, not a preview. Put the affected skill, grants and config in one candidate, then exercise real delegation and the affected operation. Observe the receiver, command result and durable record; process liveness alone is insufficient.
 4. **Record the exact candidate and results.** Fix observed failures and repeat only the affected checks. Independent-root evidence proves the candidate works there; it does not prove production data migration, Pi timing or another OS's native manager.
-5. **Review production activation separately.** `config plan` and `host activate` currently coordinate the whole host; there is no single-bot composition or activation shortcut. Existing no-restart holds block that production activation, not independent canary work. Honor the operator's rollout authorization and work-in-progress holds.
-6. **Observe the activated host.** Verify the affected paths and selected release after rollout. Retain previous immutable releases for explicit rollback; never repair generated files by hand. Then run each merged PR's rollout check against it (the `verify-rollout` guardrail). Its commands are text from the PR body: read what each does before running it, and run them only for a PR whose author can triage the repository, as a fleet PR's can, or after someone who can has said to.
+5. **Review the production update separately.** `host update apply` covers the whole installation; there is no single-bot composition or update shortcut. Existing no-restart holds block that production update, not independent canary work. Honor the operator's rollout authorization and work-in-progress holds.
+6. **Observe the updated host.** Verify the affected paths and the commit `host update status` reports after rollout; never repair generated files by hand. Then run each merged PR's rollout check against it (the `verify-rollout` guardrail). Its commands are text from the PR body: read what each does before running it, and run them only for a PR whose author can triage the repository, as a fleet PR's can, or after someone who can has said to.
 
 ## Why this exists
 
