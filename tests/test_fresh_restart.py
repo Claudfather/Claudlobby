@@ -7,6 +7,7 @@ to retire, and its receipt is renewed all the same.
 
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -114,3 +115,89 @@ def test_a_fresh_restart_of_a_bot_with_no_live_session_renews_its_receipt(
     renewed = native_session.read(bot_dir)
     assert renewed["session_id"] != original["session_id"] and renewed["pending"] is False
     assert worker.native.actions == ["start"]
+
+
+_DOMAIN = "linux:00000000000000000000000000000000:pid:[4026531836]"
+
+
+def _provider_starts(monkeypatch, worker):
+    """Report each pane's process start, as the Linux observer does (the shared fake
+    reports pids only), and fail the readiness wait while the receipt is pending: the
+    real wait polls its confirm until the ceiling and then returns 3 (#2748)."""
+    native, call = worker.native, worker.native.call
+    bot_dir = worker.root / "runtime/bots/worker"
+
+    def observed(function, *args, timeout=30):
+        result = call(function, *args, timeout=timeout)
+        if function == "svc_bot_native_session" and args[3:] == ("", "start"):
+            start = f"Linux:{1000 + native.native_pid}:{_DOMAIN}"
+            return subprocess.CompletedProcess(result.args, 0, result.stdout.rstrip("\n") + "\t" + start + "\n", "")
+        if function == "svc_activation_bot_ready" and native_session.read(bot_dir)["pending"]:
+            return subprocess.CompletedProcess(result.args, 3, "", "")
+        return result
+    monkeypatch.setattr(native, "call", observed)
+
+
+def _provider_record(worker, sid):
+    """The provider's PID record for the current pane, in the captured Linux shape."""
+    pid = worker.native.native_pid
+    path = worker.account / "sessions" / f"{pid}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"pid": pid, "sessionId": sid, "cwd": str(worker.root / "runtime/bots/worker"),
+                                "procStart": str(1000 + pid), "pidDomain": _DOMAIN, "kind": "interactive",
+                                "entrypoint": "cli", "version": "2.1.316"}))
+
+
+def _launch_without_capture(bot, label, tmpdir, account, adapter):
+    """The launch as the fake performs it, except its SessionStart capture never lands."""
+    native_session.launch(bot, label, tmpdir, account)
+    transcript = Path(native_session.read(bot)["transcript"])
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    if not transcript.exists():
+        transcript.write_bytes(b"context of the launched session\n")
+    return native_session.read(bot)
+
+
+def test_a_plain_restart_after_a_fresh_start_whose_capture_missed_keeps_the_session(
+        cold, monkeypatch, capsys):  # noqa: F811
+    """#2748: the fresh restart reads unverified when its capture misses; the plain restart
+    after it adopts the running session from the provider's record and continues it."""
+    import tests.test_native_session as shapes
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _provider_starts(monkeypatch, worker)
+    bot_dir = worker.root / "runtime/bots/worker"
+    retired = native_session.read(bot_dir)["session_id"]
+    with monkeypatch.context() as patch:
+        patch.setattr(shapes, "retain_native_session", _launch_without_capture)
+        fresh = worker.call("bot", "restart", "worker", "--fresh", expected=6)
+    assert fresh["error"]["message"].startswith("bot lifecycle effect is unverified")
+    renewed = native_session.read(bot_dir)
+    assert renewed["session_id"] != retired and renewed["pending"] is True and renewed["process"] is None
+    _provider_record(worker, renewed["session_id"])
+    plain = worker.call("bot", "restart", "worker")["data"]
+    assert plain["state"] == "running" and plain["handoff"] == "native_session"
+    kept = native_session.read(bot_dir)
+    assert kept["session_id"] == renewed["session_id"] and kept["pending"] is False
+    assert "provider_start" not in kept  # the continued session's own capture confirmed it
+    assert worker.native.actions == ["start", "start"]
+
+
+@pytest.mark.parametrize("refusal", ["another pane", "another session"])
+def test_a_refused_restart_says_why(cold, monkeypatch, capsys, refusal):  # noqa: F811
+    """#2748: the door keeps a refused restart's own reason, as it does for a stop."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _provider_starts(monkeypatch, worker)
+    bot_dir = worker.root / "runtime/bots/worker"
+    if refusal == "another pane":
+        worker.native.native_pid += 1  # the pane is not the receipt's process
+        reason = "native session is not the recorded process"
+    else:
+        # A pending launch whose provider record names another session (a /clear).
+        native_session.renew(bot_dir, "com.example.worker", worker.private_tmpdir, worker.account)
+        _launch_without_capture(bot_dir, "com.example.worker", worker.private_tmpdir, worker.account, None)
+        _provider_record(worker, "00000000-0000-4000-8000-000000000002")
+        reason = "native provider session is not the pending launch"
+    receipt = native_session._path(bot_dir).read_bytes()
+    refused = worker.call("bot", "restart", "worker", expected=6)
+    assert refused["error"]["code"] == "unavailable" and refused["error"]["message"] == reason
+    assert worker.native.actions == [] and native_session._path(bot_dir).read_bytes() == receipt
