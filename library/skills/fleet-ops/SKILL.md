@@ -145,7 +145,7 @@ task and assignment lifecycle; and ordinary message send and reply. The
 generated bot context selects your fleet and identity; check it with `claudlobby --json
 context show`. Discover exact flags with `claudlobby --help` and `claudlobby
 <group> <verb> --help`.
-Command forms, flags and read outputs are in `.claude/skills/fleet-ops/command-reference.md`, under the section each `§` pointer below names; it adds no rule.
+Command forms, flags and read outputs are in `.claude/skills/fleet-ops/command-reference.md`; `§X` below means its section X, and it adds no rule.
 
 Run each CLI example as one literal command in its own Bash tool call. Replace
 placeholders with recorded IDs or names before running it. Read the returned
@@ -154,7 +154,7 @@ result through `python`, `head`, or another shell command, and do not wrap it
 in `echo`, shell variables, or command substitution. Those additions are not
 the granted CLI operation and can trigger a permission prompt.
 
-Read before acting: the commands are in §Reads.
+Read before acting: §Reads.
 
 The brief defaults to your bot and combines mission, open work, workstreams,
 reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspect
@@ -263,7 +263,7 @@ the results and do not automatically resend. Ordinary messages use `message
 send` and never imply a fleet alert.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
-with a retained `--request-id UUID` for each mutation. `renew` extends the lease without crediting
+with a retained `--request-id UUID` for each mutation. Their flags are in §Workstreams. `renew` extends the lease without crediting
 progress. Inspect `workstream show ID` and the brief's blocked waits after an
 uncertain recording; replaying a UUID never sends a notification.
 
@@ -287,18 +287,18 @@ Use the canonical ID returned by a read. A task ID and assignment ID are
 different. If a command refuses a historical or wrong-kind reference, follow
 its scoped canonical hint; do not treat the old reference as an alias.
 
-To admit work into your own fleet, retain one canonical UUID for the operation: the commands are in §Task lifecycle.
+To admit work into your own fleet, retain one canonical UUID for the operation: §Task lifecycle.
 
 Only the fleet manager routes, delivers, or changes its fleet's assignments.
 Assign first; then deliver the exact assignment using an existing UTF-8
-message file you supply and retain through an uncertain outcome: the commands are in §Task lifecycle.
+message file you supply and retain through an uncertain outcome: §Task lifecycle.
 
 If delivery is unknown, the message may already have been sent. Inspect the
 same request and receipt; do not automatically resend or mint another request.
 
 An assignment row is not delivery proof, and delivery is not worker
 acceptance. Once you receive an assignment addressed to you, acknowledge that
-exact assignment before reporting work: the commands are in §Task lifecycle.
+exact assignment before reporting work: §Task lifecycle.
 
 For a setback, use `assignment block`, `return`, or `fail` with `--reason`,
 never an old task ID. `assignment progress` alone may include `--percent 0..100`;
@@ -359,7 +359,7 @@ not grant another actor's authority.
 
 When there is no assignment to report against, submit an explicitly unlinked
 report to your own fleet manager. It sends a report message and does not
-transition a task: the commands are in §Reports.
+transition a task: §Reports.
 
 Retain that UUID for the same report. If its outcome is uncertain or exit 11,
 inspect the recorded request and transport outcome; do not automatically
@@ -379,14 +379,14 @@ another bot's reports. Unavailable history is unknown, never proof that no
 worker is waiting.
 
 For an ordinary message to a declared bot, retain a new request UUID and
-inspect its recorded outcome and receiver proof separately: the commands are in §Messages.
+inspect its recorded outcome and receiver proof separately: §Messages.
 
 Reply only to a message addressed to you. The reply goes to the parent's
 recorded sender; do not choose another recipient. A reply to a human sender
 (`human:NAME`) is recorded on the plane and carried by nothing: it reports
 delivery `not_requested`, there is no receipt to wait for, and the human reads
 it with `message wait MESSAGE_ID --for reply`. Retain a new UUID for this
-reply and use that same UUID to inspect an uncertain outcome: the commands are in §Messages.
+reply and use that same UUID to inspect an uncertain outcome: §Messages.
 
 A visible marker or assignment row alone is not delivery proof. A missing or
 unavailable receipt stays unverified. `message wait MESSAGE_ID --for reply
