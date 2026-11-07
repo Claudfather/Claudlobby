@@ -1,6 +1,6 @@
 ---
 name: fleet-pulse
-description: "Use when you manage a fleet and a worker looks dead, stuck or silent, and you want it recovered, not only reported, or when you need the fleet event schema or an `event list` read recipe. Runs the selected fleet pulse and acts on findings — restart dead workers, flag stuck panes, protect WIP."
+description: "Use when you manage a fleet and a worker looks dead, stuck or silent, and you want it recovered, not only reported. Runs the selected fleet pulse and acts on findings — restart dead workers, flag stuck panes, protect WIP. For the event schema or an `event list` read recipe, read the Event reference in `.claude/skills/fleet-pulse/SKILL.md`: invoking `/fleet-pulse` starts a pulse run."
 argument-hint: "[<bot-name>]"
 ---
 
@@ -84,7 +84,7 @@ If scoped to a single bot, only report that bot's status.
 
 ## Rules
 
-- Manager-only skill. Workers never read event logs or run pulse checks.
+- Manager-only skill. Workers never read event logs or run pulse checks, but a bot that composes the `fleet-observability` protocol, such as a monitor, may read the Event reference below, whatever its Configuration lines say about managers.
 - Run the public pulse command first and require `ok: true` with `data.tick: completed`. Never treat that result alone as a healthy-fleet verdict.
 - **This rule has to stay followable, which is why it names a test you can apply.** It was once "never restart a bot with uncommitted WIP" against an event that fired thousands of times a week, so it forbade restarting anyone — and managers stopped obeying it without ever deciding to (#1728). An instruction nobody can follow is an instruction nobody follows.
 - Never restart a bot whose `wip_uncommitted` paths include anything you cannot name as a build artifact. The event is a protection signal — and judge it on its `paths`, never its count. **`dirty_untracked > 0` does not mean "just build artifacts":** an unadded new source file is untracked and is the case where losing the work is unrecoverable, since no copy of it exists anywhere.
