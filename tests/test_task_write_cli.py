@@ -155,17 +155,20 @@ def test_reassign_closes_predecessor_and_replay_keeps_exact_provenance(active, c
     assert routed["data"]["recording"] == "committed"
     assert routed["data"]["delivery"] == routed["data"]["notification"] == "not_requested"
     assert _counts(root)[2:] == (before[2] + 1, 0, before[4] + 1)
-    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
+    data = _call(capsys, root, "task", "show", task_id)["data"]
+    shown = data["task"]
     with sqlite3.connect(db_file(root)) as conn:
         manager_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='actor' AND alias=?",
                                    ("bot:example/manager",)).fetchone()[0]
-    assert shown["current_assignment"]["assignment_id"] == successor
-    assert shown["current_assignment"]["assigned_by_uid"] == manager_uid
+    assert shown["current_assignment_id"] == successor
+    current = next(item for item in shown["assignments"] if item["assignment_id"] == shown["current_assignment_id"])
+    assert current["assigned_by_uid"] == manager_uid
     prior = next(item for item in shown["assignments"] if item["assignment_id"] == original)
     assert prior["state"] == "closed"
-    assert prior["terminal_event"]["event"] == "reassigned"
-    assert prior["terminal_event"]["successor_id"] == successor
-    assert prior["terminal_event"]["actor_uid"] == manager_uid
+    closing = next(event for event in data["events"] if event["event_id"] == prior["terminal_event_id"])
+    assert closing["event"] == "reassigned"
+    assert closing["successor_id"] == successor
+    assert closing["actor_uid"] == manager_uid
 
     after = _counts(root)
     replay = _call(capsys, root, *argv)
@@ -195,11 +198,13 @@ def test_withdraw_closes_queued_task_and_retains_caller_separate_from_by(active,
     assert withdrawn["data"]["assignment_id"] is None
     assert withdrawn["data"]["delivery"] == "not_requested"
     assert _counts(root)[2:] == (0, 0, before[4] + 1)
-    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
+    data = _call(capsys, root, "task", "show", task_id)["data"]
+    shown = data["task"]
     with sqlite3.connect(db_file(root)) as conn:
         manager_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='actor' AND alias=?",
                                    ("bot:example/manager",)).fetchone()[0]
-    assert shown["terminal_event"]["actor_uid"] == manager_uid
+    closing = next(event for event in data["events"] if event["event_id"] == shown["terminal_event_id"])
+    assert closing["actor_uid"] == manager_uid
     receipt = next((root / "state/requests").glob(f"*/{request_id}.json"))
     assert json.loads(receipt.read_text())["intent"]["caller_uid"] == shown["created_by_uid"]
     assert shown["created_by_uid"] != manager_uid
@@ -251,8 +256,9 @@ def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, cap
     assert raised["data"]["state"] == "queued" and raised["data"]["assignment_id"] is None
     assert raised["data"]["delivery"] == raised["data"]["notification"] == "not_requested"
     assert _counts(root)[2:] == (0, 0, before[4] + 1)
-    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
-    assert shown["history"][-1]["event"] == "escalated"
+    data = _call(capsys, root, "task", "show", task_id)["data"]
+    history = [event for event in data["events"] if event["task_id"] == task_id]
+    assert history[-1]["event"] == "escalated"
     with sqlite3.connect(db_file(root)) as conn:
         detail = conn.execute("SELECT assignment_id, detail FROM events "
                               "WHERE kind='task' AND event='escalated' AND work_item_id=?",
