@@ -1,0 +1,3 @@
+### Added — every PR body names what ran for it, under a required `## Harness` section (#2792)
+
+The section names what CI ran that exercises the change, each instrument or live test run for the PR with its result, or, in one line, why none applies. The rollout check's reader (`.github/workflows/verify-rollout.yml`) fails a body without it, or with nothing in it, in the same run and under the same check name, so the merge guardrails gate it as they gate the Rollout check. The PR template and the `verify-rollout` guardrail carry the section, and the review methodology asks reviewers to read it against the PR's checks. A PR opened before this merged is judged by it at its next push or body edit.

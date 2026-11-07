@@ -11,9 +11,13 @@ CI, a green deploy and a healthy service prove that a system still runs. None of
 
 ## Author: write the check before review
 
-Every PR body has a `## Rollout check` section with four lines. `.github/pull_request_template.md` carries them, but `gh pr create --body` and `--body-file` skip the template, so write them yourself:
+Every PR body has a `## Harness` section, which names what ran for the PR before review, and a `## Rollout check` section with four lines. `.github/pull_request_template.md` carries them, but `gh pr create --body` and `--body-file` skip the template, so write them yourself:
 
 ```markdown
+## Harness
+- **CI:** <!-- what CI ran that exercises this change: the jobs and tests that cover it -->
+- **Live:** <!-- each live test or instrument run for this PR: the command, where it ran, and its result -->
+
 ## Rollout check
 - **Observe:** <!-- what to read in production (a command, endpoint, job, event or record) and the exact value or shape expected -->
 - **Control:** <!-- what the same check shows today, or on a case this change must not touch, so that a pass cannot be vacuous -->
@@ -21,20 +25,21 @@ Every PR body has a `## Rollout check` section with four lines. `.github/pull_re
 - **Who:** <!-- any bot with the fleet's credentials, or operator only, and why -->
 ```
 
-The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. A change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
+The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. Under `## Harness`, either line is enough; a change that no CI job or live test exercises carries one line instead: `N/A:` and why. Under `## Rollout check`, a change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
 
-**Open the PR as a draft until its body has the section.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before the section is written fails at once, and the failed run notifies whoever triggered it.
+**Open the PR as a draft until its body has both sections.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before the section is written fails at once, and the failed run notifies whoever triggered it.
 
 ## Reviewer
 
-A missing or vacuous check is a request-changes item. CI fails these:
+A missing or vacuous section is a request-changes item. CI fails these:
 
 - a missing section;
 - a section that is only in a fenced block or an HTML comment;
-- an empty field, or one that says only `N/A`, `none` or `TBD`;
+- an empty Rollout check field, or one that says only `N/A`, `none` or `TBD`;
+- a `## Harness` that names nothing;
 - an exemption that the changed paths do not bear out.
 
-Only you can judge whether the check would actually prove the change.
+Only you can judge whether the check would actually prove the change, and whether `## Harness` is true: its **CI:** line against the PR's own checks, and each **Live:** run for its result. A runtime change with no **Live:** run, where the repo requires a live test, is a request-changes item.
 
 **A PR that changes anything under `.github/workflows/` can rename or replace the job that checks it**, so its rollout check proves nothing for it. CI flags such a PR. Review the workflow change itself and name it in your verdict. Without that, the merger refuses.
 
