@@ -7,7 +7,7 @@ the index and the rules.
 
 ## Index
 
-- `validate-bot-change.sh` — end-to-end harness for bot behavior changes (throwaway bot + tmux)
+- `validate-bot-change.sh` — end-to-end harness for bot behavior changes (throwaway bot + tmux); writes and starts user units under `$HOME` and leaves empty ones: give it a scratch HOME, as CI does
 - `coldstart-harness.sh` — prepare and reap for the cold-start onboarding simulation
 - `compose.py` — runs the compositor for these instruments without selecting or activating a release
 - `freshbox-boot-gate.sh` — boots a bot on a fresh config dir; checks composed permissions hold
