@@ -120,10 +120,7 @@ tool_grants:
 A fresh session (a new bot, or `bot restart BOT --fresh`) first receives the configured resume command as its own submission, when the bot's handoff is under a day old, then its authored startup prompt as another; a restart that continues the session receives neither. If the resume Skill is unavailable, requests permission, is refused, or fails to establish restored context, stop and report before following the startup prompt; do not reproduce the Skill another way. Preserve nonfatal repository-scan caveats. A submission is not proof that either step completed.
 
 Before a new mutation, run this granted standalone command once to mint its
-request UUID. It needs only `python3`, on Linux and macOS alike, and prints the
-lowercase form the CLI requires. `-I` keeps the current directory off the import
-path and ignores `PYTHON*` variables, so a `uuid.py` in a checkout under review
-cannot run in place of the standard library's. `uuidgen` is not granted: a stock
+request UUID. `uuidgen` is not granted: a stock
 Debian host does not have it.
 
 ```bash
@@ -139,8 +136,7 @@ which tier supplies or blanks each variable. `config explain KEY --bot BOT`
 narrows that read. Values are never printed; this describes source configuration,
 not proof that a running session has reloaded it.
 
-Use `claudlobby --json library list` to discover available skills, guardrails,
-expertise and other composition components. Source authoring with `bot create`
+Source authoring with `bot create`
 or `library create` requires the operator or an explicitly equipped author;
 review and activate configuration separately.
 
@@ -149,6 +145,7 @@ task and assignment lifecycle; and ordinary message send and reply. The
 generated bot context selects your fleet and identity; check it with `claudlobby --json
 context show`. Discover exact flags with `claudlobby --help` and `claudlobby
 <group> <verb> --help`.
+Command forms, flags and read outputs are in `.claude/skills/fleet-ops/command-reference.md`; `§X` below means its section X, and it adds no rule.
 
 Run each CLI example as one literal command in its own Bash tool call. Replace
 placeholders with recorded IDs or names before running it. Read the returned
@@ -157,17 +154,7 @@ result through `python`, `head`, or another shell command, and do not wrap it
 in `echo`, shell variables, or command substitution. Those additions are not
 the granted CLI operation and can trigger a permission prompt.
 
-Read before acting:
-
-```bash
-claudlobby --json brief
-claudlobby --json fleet inbox
-claudlobby --json task list
-claudlobby --json task show TASK_ID
-claudlobby --json task reviews OWNER/REPO --pr N
-claudlobby --json assignment show ASSIGNMENT_ID
-claudlobby --json workstream list
-```
+Read before acting: §Reads.
 
 The brief defaults to your bot and combines mission, open work, workstreams,
 reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspect
@@ -176,28 +163,15 @@ Unacknowledged report rows (`reports.unacked`) are in the fleet manager's view o
 oldest 50; any other view carries their number (`reports.count`) and the command that
 lists them (`reports.list_command`).
 `--bot BOT` changes only the view. It does not change your caller identity.
-For current session and supervision evidence, use `claudlobby --json fleet status`
-or `claudlobby --json bot status BOT`. Each bot's `context` there is the input,
-cache-read and cache-write tokens of its newest main-chain call, with that
-call's time, read from its transcript; `tokens` is null with a `reason`, never 0,
-when the transcript cannot answer, and `compacted_after` names a compaction
-written since that call. `claudlobby --json bot session BOT` reads
-the selected private session and native enrollment; it does not inspect another
-process by name. Use `claudlobby --json bot logs BOT` or the manager's
-`claudlobby --json fleet logs` for bounded file tails. A missing bot log is
+The session, supervision, log and utilization reads are in §Session and supervision reads. A missing bot log is
 different from an unreadable source. Native state and recorded activity are
 separate observations. `claudlobby --json fleet uptime --window 24h` reports each
 bot's up share of observed time beside the share observed; unobserved time is
 neither downtime nor health.
-`claudlobby --json fleet utilization` reports busy share and observed seconds from
-Plane heartbeat samples alongside canonical task assignments. A bot with no
+A bot with no
 observed BUSY/IDLE duration is unknown, not idle.
 
-When token counts are needed, run `claudlobby --json bot usage BOT --since 24h`,
-`claudlobby --json fleet usage --since 24h`, or
-`claudlobby --json brief --usage-since 24h` for the brief viewer's concise
-summary. These on-demand reads cover only configured accounts' current bot
-directory transcripts in the selected window. Inspect `coverage` before using
+The token-count reads are in §Usage reads. Inspect `coverage` before using
 counts; quota and reset time are unavailable without a provider observation.
 Ordinary and boot briefs do not scan transcripts.
 
@@ -231,14 +205,6 @@ to submit `/compact`. A successful result means only that the control was
 submitted; inspect the session before claiming interruption or compaction.
 An unknown result may have reached the pane, so do not automatically retry.
 
-```bash
-claudlobby --json bot start WORKER
-claudlobby --json bot restart WORKER
-claudlobby --json bot restart WORKER --fresh
-claudlobby --json bot stop WORKER
-claudlobby --json bot stop WORKER --reason "parked until the review lands"
-```
-
 `start` is idempotent when the selected bot's session is already ready; use
 `restart` for an intentional bounce: it waits for an idle prompt, continues the
 same conversation and ends with a fresh bridge/session readiness check. Add
@@ -253,8 +219,7 @@ Read `data.recording`: `degraded` means the record or its plane row did not
 land, and running the same stop again records it. A start that returns
 `data.stop_record_kept: true` could not remove that record: until it is
 removed, a loss of the bot's unit reads as a deliberate stop.
-For a slow bridge, `bot restart WORKER --ceiling SECONDS` overrides the
-per-bot readiness budget with a positive number. Read `data.changed`,
+Read `data.changed`,
 `data.readiness`, and `data.native_outcome` in the JSON result before claiming
 what happened. If an effect or readiness is unverified, inspect the selected
 native unit and private session before another operation. Workers cannot use
@@ -298,9 +263,7 @@ the results and do not automatically resend. Ordinary messages use `message
 send` and never imply a fleet alert.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
-with a retained `--request-id UUID` for each mutation. `block ID --on
-human:NAME --note TEXT` records a declared wait; `unblock ID --note TEXT`
-restores that same ID to active. `renew` extends the lease without crediting
+with a retained `--request-id UUID` for each mutation. Their flags are in §Workstreams. `renew` extends the lease without crediting
 progress. Inspect `workstream show ID` and the brief's blocked waits after an
 uncertain recording; replaying a UUID never sends a notification.
 
@@ -324,36 +287,18 @@ Use the canonical ID returned by a read. A task ID and assignment ID are
 different. If a command refuses a historical or wrong-kind reference, follow
 its scoped canonical hint; do not treat the old reference as an alias.
 
-To admit work into your own fleet, retain one canonical UUID for the operation:
-
-```bash
-claudlobby --json task admit --title "Concrete outcome" --request-id ADMIT_UUID
-claudlobby --json task show TASK_ID
-```
+To admit work into your own fleet, retain one canonical UUID for the operation: §Task lifecycle.
 
 Only the fleet manager routes, delivers, or changes its fleet's assignments.
 Assign first; then deliver the exact assignment using an existing UTF-8
-message file you supply and retain through an uncertain outcome:
-
-```bash
-claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID
-claudlobby --json assignment show ASSIGNMENT_ID
-claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELIVER_UUID
-```
+message file you supply and retain through an uncertain outcome: §Task lifecycle.
 
 If delivery is unknown, the message may already have been sent. Inspect the
 same request and receipt; do not automatically resend or mint another request.
 
 An assignment row is not delivery proof, and delivery is not worker
 acceptance. Once you receive an assignment addressed to you, acknowledge that
-exact assignment before reporting work:
-
-```bash
-claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID
-claudlobby --json assignment progress ASSIGNMENT_ID --summary "Started the review" --request-id PROGRESS_UUID
-claudlobby --json assignment complete ASSIGNMENT_ID --summary "Reviewed the change" --request-id COMPLETE_UUID
-claudlobby --json assignment show ASSIGNMENT_ID
-```
+exact assignment before reporting work: §Task lifecycle.
 
 For a setback, use `assignment block`, `return`, or `fail` with `--reason`,
 never an old task ID. `assignment progress` alone may include `--percent 0..100`;
@@ -414,12 +359,7 @@ not grant another actor's authority.
 
 When there is no assignment to report against, submit an explicitly unlinked
 report to your own fleet manager. It sends a report message and does not
-transition a task:
-
-```bash
-claudlobby --json fleet reports submit --status completed --summary "Completed the review" --request-id REPORT_UUID
-claudlobby --json request show REPORT_UUID
-```
+transition a task: §Reports.
 
 Retain that UUID for the same report. If its outcome is uncertain or exit 11,
 inspect the recorded request and transport outcome; do not automatically
@@ -439,26 +379,14 @@ another bot's reports. Unavailable history is unknown, never proof that no
 worker is waiting.
 
 For an ordinary message to a declared bot, retain a new request UUID and
-inspect its recorded outcome and receiver proof separately:
-
-```bash
-claudlobby --json message send --to WORKER --text "A concrete question" --request-id UUID
-claudlobby --json request show UUID
-claudlobby --json message show MESSAGE_ID
-claudlobby --json message receipt MESSAGE_ID
-```
+inspect its recorded outcome and receiver proof separately: §Messages.
 
 Reply only to a message addressed to you. The reply goes to the parent's
 recorded sender; do not choose another recipient. A reply to a human sender
 (`human:NAME`) is recorded on the plane and carried by nothing: it reports
 delivery `not_requested`, there is no receipt to wait for, and the human reads
 it with `message wait MESSAGE_ID --for reply`. Retain a new UUID for this
-reply and use that same UUID to inspect an uncertain outcome:
-
-```bash
-claudlobby --json message reply MESSAGE_ID --text "The requested answer" --request-id REPLY_UUID
-claudlobby --json request show REPLY_UUID
-```
+reply and use that same UUID to inspect an uncertain outcome: §Messages.
 
 A visible marker or assignment row alone is not delivery proof. A missing or
 unavailable receipt stays unverified. `message wait MESSAGE_ID --for reply
@@ -483,11 +411,7 @@ claudlobby --json project list
 claudlobby --json project show PROJECT
 ```
 
-`bot show BOT` answers what a bot has at hand: its role and manager and what is
-composed into it (`data.bot.effective_configuration.equipment`: skills, MCP
-servers, protocols, guardrails, principles and the rest). `bot capabilities BOT`
-adds its permission rules as SHA-256 hashes, the arguments withheld, and is about
-four times as long; read it to compare rule sets, not to learn the equipment. Both
+What `bot show BOT` and `bot capabilities BOT` print is in §Orientation reads. Both
 describe what was composed, not what a running session enforces:
 `permissions.enforcement` and `runtime_observed` always read `unknown` or
 `not_probed`, because nothing probes the session, and unknown is not "off". `project list` and
