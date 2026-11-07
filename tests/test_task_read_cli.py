@@ -1,6 +1,7 @@
 """Public canonical reads from a selected private activation and real SQLite."""
 
 import builtins
+from dataclasses import asdict
 import json
 from pathlib import Path
 import re
@@ -13,7 +14,7 @@ from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
 from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
-from tests.test_task_state import _assignment, _task
+from tests.test_task_state import _assignment, _event, _task
 
 
 @pytest.fixture
@@ -266,3 +267,74 @@ def test_git_task_read_refuses_configuration_change_during_query(active, monkeyp
     result = _call(capsys, root, "task", "list", expected=4)
     assert result["error"]["retryable"] is True
     assert "items" not in result["data"]
+
+
+def _event_plane(root, host):
+    """wi_main: asg_a (accepted, progress, one event under wi_other's task_id, closed by a
+    task-level cancelled ingested after its row), asg_b (closed by its own event), asg_c (no
+    events of its own; the cancel closes it too); a task-level event with no assignment.
+    wi_two: two open assignments. wi_one: one current assignment."""
+    from claudlobby.activation_identity import read_current_identity_bindings
+    fleet = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
+    with sqlite3.connect(db_file(root)) as conn:
+        for tid in ("wi_main", "wi_other", "wi_two", "wi_one"):
+            _task(conn, tid, fleet_uid=fleet)
+        for aid, tid in (("asg_a", "wi_main"), ("asg_b", "wi_main"), ("asg_c", "wi_main"),
+                         ("asg_t1", "wi_two"), ("asg_t2", "wi_two"), ("asg_one", "wi_one")):
+            _assignment(conn, aid, tid, fleet_uid=fleet)
+        for tid, aid, name in (("wi_main", "asg_a", "accepted"), ("wi_main", "asg_a", "progress"),
+                               ("wi_other", "asg_a", "progress"), ("wi_main", "asg_b", "returned_blocked"),
+                               ("wi_main", None, "nudged"), ("wi_main", None, "cancelled")):
+            _event(conn, tid, aid, name, fleet_uid=fleet)
+    return fleet
+
+
+def test_assignment_show_prints_each_event_once_and_keeps_every_fact(active, capsys):
+    root, host = active
+    fleet = _event_plane(root, host)
+    from claudlobby.task_queries import show_assignment
+    shown = {}
+    with sqlite3.connect(db_file(root)) as conn:
+        for aid in ("asg_a", "asg_b", "asg_c", "asg_t1", "asg_t2", "asg_one"):
+            # The printed text, not `_call`'s parse: only the text shows an event printed twice.
+            assert main(["--root", str(root), "--json", "assignment", "show", aid]) == 0
+            out = capsys.readouterr().out
+            data = shown[aid] = json.loads(out)["data"]
+            events = data["events"]
+            ids = [e["event_id"] for e in events]
+            assert [e["ingest_seq"] for e in events] == sorted(e["ingest_seq"] for e in events)
+            named = [i["event_id"] for i in data["task"]["issues"]]  # an issue names its event; not a TaskEvent
+            for event_id in ids:
+                assert out.count(f'"event_id":"{event_id}"') == 1 + named.count(event_id)
+            # Every value of main's output, from the same reducer views, is still reachable.
+            view = show_assignment(conn, aid, fleet_uid=fleet)
+            old_a, old_t = json.loads(json.dumps(asdict(view.assignment))), json.loads(json.dumps(asdict(view.task)))
+            by_id = {e["event_id"]: e for e in events}
+            assert old_a["history"] == [e for e in events if e["assignment_id"] == aid]
+            assert old_t["history"] == [e for e in events if e["task_id"] == old_t["task_id"]]
+            new_t = data["task"]
+            for old, new in [(old_a, data["assignment"]), *zip(old_t["assignments"], new_t["assignments"])]:
+                assert old["terminal_event"] == (by_id[new["terminal_event_id"]] if new["terminal_event_id"] else None)
+                assert {k: v for k, v in old.items() if k not in ("history", "terminal_event")} == {
+                    k: v for k, v in new.items() if k != "terminal_event_id"}
+            closing = new_t["terminal_event_id"]
+            assert old_t["terminal_event"] == (by_id[closing] if closing else None)
+            assert (old_t["current_assignment"] or {}).get("assignment_id") == new_t["current_assignment_id"]
+            nested = ("history", "terminal_event", "current_assignment", "assignments")
+            added = ("terminal_event_id", "current_assignment_id", "assignments")
+            assert ({k: v for k, v in old_t.items() if k not in nested}
+                    == {k: v for k, v in new_t.items() if k not in added})
+    a, b = shown["asg_a"], shown["asg_b"]
+    # One ledger for the task, whichever of its assignments is shown.
+    assert len(a["events"]) == len(b["events"]) == len(shown["asg_c"]["events"]) == 6
+    assert any(e["task_id"] == "wi_other" for e in a["events"])
+    assert a["assignment"]["terminal_event_id"] == a["task"]["terminal_event_id"] is not None
+    cancel = next(e for e in a["events"] if e["event_id"] == a["task"]["terminal_event_id"])
+    assert cancel["assignment_id"] is None
+    assert b["assignment"]["terminal_event_id"] not in (None, b["task"]["terminal_event_id"])
+    one = shown["asg_one"]
+    assert one["task"]["current_assignment_id"] == "asg_one" and one["assignment"]["terminal_event_id"] is None
+    for two in (shown["asg_t1"], shown["asg_t2"]):
+        assert two["task"]["current_assignment_id"] is None
+        assert [i["code"] for i in two["task"]["issues"] if i["blocking"]] == ["multiple_current_assignments"]
+        assert [x["terminal_event_id"] for x in two["task"]["assignments"]] == [None, None]
