@@ -27,7 +27,11 @@
 # must be, and the marker is written by a shell builtin.
 
 set -uo pipefail
-# Read first, on every path: the writer must not meet a closed pipe.
+# Read first, on every path: the writer must not meet a closed pipe. A closed
+# stdin would hand fd 0 to the pipe the payload is read through, and cat would
+# wait on it until the hook's timeout: give it /dev/null instead (bash checks a
+# /dev/fd/N path against the descriptor itself).
+[ -e /dev/fd/0 ] || exec </dev/null
 PAYLOAD="$(cat 2>/dev/null || true)"
 case "${BOT_DIR:-}" in /*) ;; *) exit 0 ;; esac
 [ -d "$BOT_DIR/data" ] || exit 0
