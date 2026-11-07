@@ -18,11 +18,10 @@ from tests.test_heavy_slot_run import WRAPPER, _env, _events, _run, _wait_for, s
 
 REPO = Path(__file__).resolve().parent.parent
 # vm_stat's format as macOS 14 prints it, with numbers chosen for these tests: not a
-# recording. The darwin-only test below reads the real output on CI's macOS runner
-# and records it in that run's junit report.
+# recording. RECORDED is one.
 FIXTURE = REPO / "tests/fixtures/vm_stat-darwin.txt"
-# Real vm_stat output, whole, as the darwin-only test below recorded it on CI's
-# macos-latest runner (#2786's first run, the junit report of its macOS shard 2).
+# Real vm_stat output, whole, recorded on CI's macos-latest runner (Actions run
+# 42407388415, the junit report of its macOS shard 2).
 RECORDED = REPO / "tests/fixtures/vm_stat-macos-runner.txt"
 hs = load_lib_module("heavy-slot")
 
@@ -116,26 +115,6 @@ def test_the_ps_table_and_the_proc_table_agree():
         "  102   100   100 S    Sat Nov  7  10:00:02 2026\n")
     assert sorted(table) == [100, 102]
     assert table[102] == (100, 100, "Sat Nov 7 10:00:02 2026")
-
-
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS vm_stat")
-def test_on_macos_the_reader_and_avail_ram_mb_agree_on_this_hosts_vm_stat(tmp_path, record_property,
-                                                                         monkeypatch):
-    text = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10).stdout
-    record_property("vm_stat", text)
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    cap = tmp_path / "captured.txt"
-    cap.write_text(text)
-    (fake / "vm_stat").write_text(f"#!/bin/sh\ncat {cap}\n")
-    (fake / "vm_stat").chmod(0o755)
-    lib = REPO / "claudlobby/_runtime_scripts/lib-common.sh"
-    out = subprocess.run(
-        ["bash", "-c", f". {lib}; avail_ram_mb"], capture_output=True, text=True, timeout=30,
-        env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}).stdout.strip()
-    assert hs._vm_stat_mib(text) == int(out)
-    monkeypatch.delenv("HEAVY_SLOT_PROC", raising=False)
-    assert hs._mem_available_mib() > 0
 
 
 def test_the_stop_watch():
