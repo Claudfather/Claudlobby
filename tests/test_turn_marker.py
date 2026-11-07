@@ -1,8 +1,9 @@
 """turn-marker.sh (#1053): the bot's own record of when input last reached its
 session (data/.turn-input) and when its last turn ended (data/.turn-ended).
 
-Payloads are built as Claude Code sends them, compact JSON, identifiers faked.
-Nothing reads the markers yet; these tests pin what writes them.
+Payloads take the shape Claude Code 2.1.319 sent this hook in a headless run:
+compact JSON, its keys in that order, identifiers and paths faked. Nothing
+reads the markers yet; these tests pin what writes them.
 """
 
 from __future__ import annotations
@@ -33,7 +34,9 @@ def _payload(event: str, *, compact: bool = True, **extra) -> str:
         "session_id": "00000000-0000-4000-8000-000000000000",
         "transcript_path": "/tmp/harness/transcript.jsonl",
         "cwd": "/tmp/harness",
+        "prompt_id": "00000000-0000-4000-8000-000000000001",
         "permission_mode": "default",
+        **({"effort": {"level": "medium"}} if event == "Stop" else {}),
         "hook_event_name": event,
         **extra,
     }
@@ -45,7 +48,12 @@ def _extra(event: str) -> dict:
         return {"prompt": "hello"}
     if event == "StopFailure":
         return {"error": "server_error", "last_assistant_message": "API Error: 529"}
-    return {"stop_hook_active": False, "last_assistant_message": "Done."}
+    return {
+        "stop_hook_active": False,
+        "last_assistant_message": "Done.",
+        "background_tasks": [],
+        "session_crons": [],
+    }
 
 
 def _run(env_bot_dir: str | None, payload: str, cwd: Path | None = None):
