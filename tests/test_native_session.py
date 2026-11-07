@@ -640,14 +640,20 @@ def test_renew_lets_an_older_bot_without_a_receipt_start_fresh(older):
 
 
 def _missed_capture(b, *, mode, relaunched=True):
-    """A launch whose SessionStart capture never lands, so its receipt stays pending (#2748)."""
+    """A launch whose SessionStart capture never lands, so its receipt stays pending (#2748).
+
+    "fresh" renews the receipt as a fresh restart does, "resume" takes a plain restart's
+    planned checkpoint, and "first" is a bot's first start, before any receipt.
+    """
     if mode == "fresh":
         native.renew(b.bot, b.label, b.tmpdir, b.account)
-    else:
+    elif mode == "resume":
         native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="planned")
+    else:
+        native._path(b.bot).unlink()
+    launched = native.launch(b.bot, b.label, b.tmpdir, b.account)
     pending = native.read(b.bot)
-    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == (mode, pending["session_id"])
-    pending = native.read(b.bot)
+    assert launched == ("resume" if mode == "resume" else "fresh", pending["session_id"])
     assert pending["pending"] is True
     transcript = Path(pending["transcript"])
     if not transcript.exists():
@@ -725,3 +731,189 @@ def test_a_busy_pending_launch_waits_for_idle_then_is_adopted(bound, monkeypatch
                                                   operation_id="restart")
     assert len(waits) == 1 and proof["session"]["session_id"] == pending["session_id"]
     assert native.read(b.bot)["pending"] is False
+
+
+def _confirm_entry(b, monkeypatch):
+    """The readiness wait's `_native-session confirm`, through the private CLI entry."""
+    from claudlobby import resources, supervision_inventory
+    monkeypatch.setattr(resources, "get_resources", lambda: b.adapter.package)
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _package: b.adapter)
+    args = SimpleNamespace(root=b.bot.parent, directory=b.bot, label=b.label, tmpdir=b.tmpdir, action="confirm")
+    return lambda: native.entry(args)
+
+
+@pytest.mark.parametrize("launch", ["fresh restart", "first start", "resumed launch"])
+def test_the_readiness_confirm_adopts_a_launch_whose_capture_never_landed(bound, monkeypatch, launch):
+    """#2748: the wait's confirm adopts the launch from the provider's PID record at its first
+    poll, instead of polling it to the readiness ceiling. A resumed launch is a plain restart's,
+    a stopped bot's start, or a host update's restart of a running bot."""
+    b = bound
+    confirm = _confirm_entry(b, monkeypatch)
+    pending = _missed_capture(b, mode={"fresh restart": "fresh", "first start": "first",
+                                       "resumed launch": "resume"}[launch])
+    provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    assert confirm() == 0
+    adopted = native.read(b.bot)
+    assert adopted == {**pending, "process": f"{b.adapter.generation}:{b.adapter.pid}", "pending": False,
+                       "checkpoint": None, "provider_start": b.adapter.kernel_start}
+    assert native.confirm(b.bot, expected=pending) == adopted  # the fresh restart's last proof
+    assert confirm() == 0
+    # The plain restart after it rereads the same record, and its launch continues the session.
+    proof = native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="restart")
+    native.verify_live(b.bot, proof, b.adapter)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", pending["session_id"])
+
+
+@pytest.mark.parametrize("unproven", [
+    "retired process", "another session", "stale start", "cwd", "no record", "another pid's record",
+    "no transcript", "empty transcript", "unsupported domain", "pane unobservable", "pane restarted",
+    "record rewritten"])
+def test_the_readiness_confirm_waits_until_the_provider_proves_the_launch(bound, monkeypatch, unproven):
+    """#2748: short of proof, the confirm leaves the receipt untouched and returns 75, so the wait
+    polls on as before, even when the record contradicts the launch: a stale record a reused pid
+    left must not end it. The poll after the record proves the launch adopts it."""
+    b = bound
+    confirm = _confirm_entry(b, monkeypatch)
+    retired = b.receipt["session_id"]
+    pending = _missed_capture(b, mode="fresh", relaunched=unproven != "retired process")
+    transcript = Path(pending["transcript"])
+    context = transcript.read_bytes()
+    record = provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    proof = record.read_bytes()
+    observe = native.observe
+
+    def changed(change):
+        """Run `change` during the adoption's second observation of the pane."""
+        seen = []
+        def observed(*args, **kwargs):
+            current = observe(*args, **kwargs)
+            if kwargs.get("process_start"):
+                seen.append(current)
+                if len(seen) == 2:
+                    return change(current)
+            return current
+        monkeypatch.setattr(native, "observe", observed)
+
+    def undo():
+        record.write_bytes(proof)
+        transcript.write_bytes(context)
+    if unproven in {"retired process", "another session", "stale start", "cwd"}:
+        drift = {"retired process": {"sessionId": retired},  # the pane, until its unit restarts
+                 "another session": {"sessionId": OTHER},  # a /clear in the launched session
+                 "stale start": {"procStart": str(int(LINUX_START) + 1)},  # an earlier process, same pid
+                 "cwd": {"cwd": str(b.bot.parent / "other-bot")}}[unproven]
+        record.write_text(json.dumps({**json.loads(proof), **drift}))
+        if unproven == "retired process":
+            def undo():
+                b.adapter.pid += 1  # the launched process, which writes its own record
+                provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    elif unproven == "no record":
+        record.unlink()
+    elif unproven == "another pid's record":
+        record.with_name(f"{b.adapter.pid + 7}.json").write_text(
+            json.dumps({**json.loads(proof), "pid": b.adapter.pid + 7}))
+        (transcript.parent / (OTHER + ".jsonl")).write_bytes(b"a newer session\n")
+        record.unlink()
+    elif unproven == "no transcript":
+        transcript.unlink()
+    elif unproven == "empty transcript":
+        transcript.write_bytes(b"")
+    elif unproven == "unsupported domain":
+        b.adapter.kernel_start = "Other:" + LINUX_START
+        def undo():
+            b.adapter.kernel_start = "Linux:" + LINUX_START + ":" + LINUX_DOMAIN
+    elif unproven == "pane unobservable":
+        call = b.adapter.call
+        b.adapter.call = lambda function, *args, **kwargs: subprocess.CompletedProcess([function], 3, "", "")
+        def undo():
+            b.adapter.call = call
+    elif unproven == "pane restarted":
+        changed(lambda current: {**current, "process": f"{b.adapter.generation + 1}:{b.adapter.pid}"})
+        def undo():
+            monkeypatch.setattr(native, "observe", observe)
+    else:
+        def clear(current):
+            record.write_text(json.dumps({**json.loads(proof), "sessionId": OTHER}))  # between the reads
+            return current
+        changed(clear)
+        def undo():
+            monkeypatch.setattr(native, "observe", observe)
+            record.write_bytes(proof)
+    receipt = native._path(b.bot).read_bytes()
+    assert confirm() == 75
+    assert native._path(b.bot).read_bytes() == receipt
+    undo()
+    assert confirm() == 0
+    adopted = native.read(b.bot)
+    assert adopted["session_id"] == pending["session_id"] and adopted["pending"] is False
+
+
+@pytest.mark.parametrize("lands", ["during adoption", "after adoption"])
+def test_a_capture_that_lands_late_still_confirms_the_launch(bound, monkeypatch, lands):
+    """#2748: a capture landing between the adoption's observations and its publication keeps
+    the receipt, and the confirm reads it as confirmed; one landing after the adoption confirms
+    the same session and drops the adoption's mark."""
+    b = bound
+    confirm = _confirm_entry(b, monkeypatch)
+    pending = _missed_capture(b, mode="fresh")
+    provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    hook = session_start(b.bot, b.account, pending["session_id"])
+    if lands == "during adoption":
+        observe, seen = native.observe, []
+        def observed(*args, **kwargs):
+            current = observe(*args, **kwargs)
+            if kwargs.get("process_start"):
+                seen.append(current)
+                if len(seen) == 2:
+                    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter, hook, caller=os.getpid())
+            return current
+        monkeypatch.setattr(native, "observe", observed)
+        assert confirm() == 0 and len(seen) == 2
+    else:
+        assert confirm() == 0 and "provider_start" in native.read(b.bot)
+        native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter, hook, caller=os.getpid())
+    hooked = native.read(b.bot)
+    assert hooked["session_id"] == pending["session_id"] and hooked["pending"] is False
+    assert "provider_start" not in hooked
+    assert confirm() == 0
+
+
+def test_both_readers_of_a_pending_receipt_prove_it_by_one_rule(bound, monkeypatch):
+    """#2748: checkpoint() and the readiness confirm prove a pending launch through the same
+    function, once for each observation of the pane, so the two cannot drift apart."""
+    b = bound
+    confirm = _confirm_entry(b, monkeypatch)
+    proved, rule = [], native._launch_identity
+    def spy(bot_dir, account, launch, current):
+        proved.append(launch["session_id"])
+        return rule(bot_dir, account, launch, current)
+    monkeypatch.setattr(native, "_launch_identity", spy)
+    for door in ("readiness confirm", "checkpoint"):
+        pending = _missed_capture(b, mode="fresh")
+        provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+        proved.clear()
+        if door == "readiness confirm":
+            assert confirm() == 0
+        else:
+            native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="restart")
+        assert proved == [pending["session_id"]] * 2 and native.read(b.bot)["pending"] is False
+
+
+@pytest.mark.parametrize("mode", ["fresh", "first"])
+def test_the_launch_after_a_missed_capture_continues_the_id_its_session_used(bound, mode):
+    """#2748: a launch whose session wrote its transcript before its capture missed is continued,
+    since --session-id refuses an id already in use; one that wrote nothing is retried fresh."""
+    b = bound
+    pending = _missed_capture(b, mode=mode)  # and no confirm adopted it: say the session died first
+    transcript = Path(pending["transcript"])
+    context = transcript.read_bytes()
+    transcript.write_bytes(b"")
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("fresh", pending["session_id"])
+    transcript.write_bytes(context)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", pending["session_id"])
+    relaunched = native.read(b.bot)
+    assert relaunched["pending"] is True and relaunched["process"] is None
+    b.adapter.pid += 1
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, pending["session_id"], source="resume"), caller=os.getpid())
+    assert native.confirm(b.bot, expected=pending)["session_id"] == pending["session_id"]

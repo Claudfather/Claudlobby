@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -122,10 +123,13 @@ _DOMAIN = "linux:00000000000000000000000000000000:pid:[4026531836]"
 
 def _provider_starts(monkeypatch, worker):
     """Report each pane's process start, as the Linux observer does (the shared fake
-    reports pids only), and fail the readiness wait while the receipt is pending: the
-    real wait polls its confirm until the ceiling and then returns 3 (#2748)."""
+    reports pids only), and run the readiness wait's confirm door while the receipt is
+    pending: the real wait polls it until the ceiling, then returns 3 (#2748)."""
+    from claudlobby import resources, supervision_inventory
     native, call = worker.native, worker.native.call
     bot_dir = worker.root / "runtime/bots/worker"
+    door = SimpleNamespace(root=worker.root, directory=bot_dir, label="com.example.worker",
+                           tmpdir=worker.private_tmpdir, action="confirm")
 
     def observed(function, *args, timeout=30):
         result = call(function, *args, timeout=timeout)
@@ -133,7 +137,12 @@ def _provider_starts(monkeypatch, worker):
             start = f"Linux:{1000 + native.native_pid}:{_DOMAIN}"
             return subprocess.CompletedProcess(result.args, 0, result.stdout.rstrip("\n") + "\t" + start + "\n", "")
         if function == "svc_activation_bot_ready" and native_session.read(bot_dir)["pending"]:
-            return subprocess.CompletedProcess(result.args, 3, "", "")
+            with monkeypatch.context() as scoped:
+                scoped.setattr(resources, "get_resources", lambda: native.package)
+                scoped.setattr(supervision_inventory, "Adapter", lambda _package: native)
+                confirmed = native_session.entry(door)
+            if confirmed != 0:
+                return subprocess.CompletedProcess(result.args, 3, "", "")
         return result
     monkeypatch.setattr(native, "call", observed)
 
@@ -160,8 +169,9 @@ def _launch_without_capture(bot, label, tmpdir, account, adapter):
 
 def test_a_plain_restart_after_a_fresh_start_whose_capture_missed_keeps_the_session(
         cold, monkeypatch, capsys):  # noqa: F811
-    """#2748: the fresh restart reads unverified when its capture misses; the plain restart
-    after it adopts the running session from the provider's record and continues it."""
+    """#2748: with no provider record during its wait, a fresh restart whose capture misses
+    reads unverified at the ceiling; the plain restart after it adopts the running session
+    from the provider's record and continues it."""
     import tests.test_native_session as shapes
     worker = _worker_cli(cold, monkeypatch, capsys)
     _provider_starts(monkeypatch, worker)
@@ -178,6 +188,36 @@ def test_a_plain_restart_after_a_fresh_start_whose_capture_missed_keeps_the_sess
     assert plain["state"] == "running" and plain["handoff"] == "native_session"
     kept = native_session.read(bot_dir)
     assert kept["session_id"] == renewed["session_id"] and kept["pending"] is False
+    assert "provider_start" not in kept  # the continued session's own capture confirmed it
+    assert worker.native.actions == ["start", "start"]
+
+
+def test_a_fresh_restart_whose_capture_missed_is_adopted_at_its_readiness_wait(
+        cold, monkeypatch, capsys):  # noqa: F811
+    """#2748: the provider still writes its PID record when the capture misses, and the wait's
+    confirm adopts the launch from it, so the fresh restart reads ready instead of unverified
+    at its ceiling. The plain restart after it continues the same session."""
+    import tests.test_native_session as shapes
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _provider_starts(monkeypatch, worker)
+    bot_dir = worker.root / "runtime/bots/worker"
+    retired = native_session.read(bot_dir)["session_id"]
+
+    def launch_writing_only_the_record(bot, label, tmpdir, account, adapter):
+        launched = _launch_without_capture(bot, label, tmpdir, account, adapter)
+        _provider_record(worker, launched["session_id"])
+        return launched
+    with monkeypatch.context() as patch:
+        patch.setattr(shapes, "retain_native_session", launch_writing_only_the_record)
+        fresh = worker.call("bot", "restart", "worker", "--fresh")["data"]
+    assert fresh["state"] == "running" and fresh["handoff"] == "fresh_session"
+    adopted = native_session.read(bot_dir)
+    assert adopted["session_id"] != retired and adopted["pending"] is False
+    assert adopted["provider_start"] == f"Linux:{1000 + worker.native.native_pid}:{_DOMAIN}"
+    plain = worker.call("bot", "restart", "worker")["data"]
+    assert plain["state"] == "running" and plain["handoff"] == "native_session"
+    kept = native_session.read(bot_dir)
+    assert kept["session_id"] == adopted["session_id"] and kept["pending"] is False
     assert "provider_start" not in kept  # the continued session's own capture confirmed it
     assert worker.native.actions == ["start", "start"]
 
