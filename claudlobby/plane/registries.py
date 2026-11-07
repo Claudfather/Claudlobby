@@ -257,6 +257,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # One Claude Code compaction, from its compact_boundary transcript row,
     # recorded once by the pulse (claudlobby.compactions, #2206).
     "compaction": "notice",
+    # #1053: a bot's request for its own compaction (`bot compact` on itself:
+    # data.request_id, data.context) and its withdrawal (`--cancel`). A reader
+    # acts on the request file, data/.compact-request, never on these rows.
+    "compact_requested": "notice",
+    "compact_cancelled": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.

@@ -45,10 +45,38 @@ def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFai
                           data={**data, "cause": cause})
 
 
+def _canonical_uuid(value: str) -> bool:
+    from uuid import UUID
+
+    try:
+        return str(UUID(value)) == value
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def own_compaction_lines(result) -> tuple[str, ...]:
+    """What a bot's `compact` on itself recorded (#1053). It never types."""
+    who = f"{result.fleet}/{result.bot}"
+    request_id = (result.request or {}).get("request_id")
+    line = {
+        "requested": f"{who}: compaction requested (request {request_id}); nothing was typed, "
+                     "and nothing acts on a request yet.",
+        "pending": f"{who}: a compaction request is already pending (request {request_id}); "
+                   "nothing new was recorded.",
+        "replayed": f"{who}: this request ID was already recorded; nothing new was recorded.",
+        "cancelled": f"{who}: compaction request {request_id} cancelled.",
+        "none_pending": f"{who}: no compaction request is pending; nothing was cancelled.",
+    }[result.outcome]
+    if result.recording == "degraded":
+        line += " Its plane row did not land; the request file stands."
+    return (line,)
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..bot_operations import (BotLifecycleError, check_handoff, control_bot, handoff_bot,
                                   set_bot_running)
+    from ..compact_request import CompactRequestResult
     from ..config_plan import PlanError
     from ..context import resolve_paths
     from ..operation_context import OperationContextError
@@ -72,6 +100,9 @@ def dispatch(args) -> CommandOutput:
             check_reason(reason)
         except StopRecordError as exc:
             raise CommandFailure("invalid_argument", str(exc)) from exc
+    request_id = getattr(args, "request_id", None)
+    if request_id is not None and not _canonical_uuid(request_id):
+        raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
     data = {"fleet": args.fleet, "bot": args.bot_id, "requested": action,
             "native_outcome": "unattempted", "runtime_state": "unknown"}
     try:
@@ -81,7 +112,8 @@ def dispatch(args) -> CommandOutput:
         elif action == "handoff":
             result = handoff_bot(root=root, fleet=args.fleet, bot=args.bot_id)
         elif action in {"interrupt", "compact"}:
-            result = control_bot(root=root, fleet=args.fleet, bot=args.bot_id, control=action)
+            result = control_bot(root=root, fleet=args.fleet, bot=args.bot_id, control=action,
+                                 request_id=request_id, cancel=getattr(args, "cancel", False))
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
@@ -143,6 +175,10 @@ def dispatch(args) -> CommandOutput:
                  if result.handoff == "saved" else
                  f"{result.fleet}/{result.bot}: handoff skipped ({result.reason}); no new handoff verified.",)
         return CommandOutput(data, release_id=result.release_id, lines=lines)
+    if action == "compact" and isinstance(result, CompactRequestResult):
+        data = asdict(result)
+        data["native_outcome"] = "unattempted"
+        return CommandOutput(data, release_id=result.release_id, lines=own_compaction_lines(result))
     if action in {"interrupt", "compact"}:
         data = asdict(result)
         data["native_outcome"] = "submitted"
