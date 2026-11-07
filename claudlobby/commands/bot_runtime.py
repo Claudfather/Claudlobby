@@ -113,7 +113,10 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("unavailable", message, data=data, release_id=exc.release_id,
                                  hint=hint) from exc
         if exc.unavailable:
-            message = str(exc) if action == "stop" else "bot native or session readiness cannot be established"
+            # A refused stop or restart says why (#2748): a restart refusal is often a
+            # checkpoint refusal, and the generic line hid which.
+            message = (str(exc) if action in {"stop", "restart"}
+                       else "bot native or session readiness cannot be established")
             raise CommandFailure("unavailable", message,
                                  data=data,
                                  hint="inspect the exact private session; use bot restart for an intentional bounce") from exc

@@ -247,17 +247,22 @@ def checkpoint(bot_dir, label, tmpdir, adapter, *, operation_id, account=None):
     if account is None:
         account = checkpoint_account(bot_dir, label, adapter)
     original = read(bot_dir)
-    adopting = original is None or "provider_start" in original
     value = None if original is None else _binding(original, bot_dir, label, tmpdir, account)
+    # A launch stays pending when its SessionStart capture never lands (#2748). Adopt
+    # it from the provider's PID record as a legacy receipt, for its own session only.
+    pending = value is not None and value["pending"]
+    adopting = original is None or pending or "provider_start" in original
     current = observe(adapter, bot_dir, label, tmpdir, process_start=adopting)
     if adopting and not current["process_start"].startswith(("Darwin:", "Linux:")):
         raise NativeSessionError("native provider process domain is unsupported")
-    if original is not None and (value["pending"] or value["process"] != current["process"]
-            or adopting and value["provider_start"] != current["process_start"]):
+    if original is not None and not pending and (value["process"] != current["process"]
+            or "provider_start" in original and value["provider_start"] != current["process_start"]):
         raise NativeSessionError("native session is not the recorded process")
     if not current["idle"]:
         raise NativeSessionBusy("native session is busy or has queued input")
     identity = _provider_session(bot_dir, account, current) if adopting else None
+    if pending and identity["sessionId"] != value["session_id"]:
+        raise NativeSessionError("native provider session is not the pending launch")
     if adopting:
         value = _adopted_value(bot_dir, label, tmpdir, account, current, identity)
     image = _image(value)

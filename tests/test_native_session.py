@@ -637,3 +637,91 @@ def test_renew_lets_an_older_bot_without_a_receipt_start_fresh(older):
         native.launch(b.bot, b.label, b.tmpdir, b.account)
     renewed = native.renew(b.bot, b.label, b.tmpdir, b.account)
     assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("fresh", renewed["session_id"])
+
+
+def _missed_capture(b, *, mode, relaunched=True):
+    """A launch whose SessionStart capture never lands, so its receipt stays pending (#2748)."""
+    if mode == "fresh":
+        native.renew(b.bot, b.label, b.tmpdir, b.account)
+    else:
+        native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="planned")
+    pending = native.read(b.bot)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == (mode, pending["session_id"])
+    pending = native.read(b.bot)
+    assert pending["pending"] is True
+    transcript = Path(pending["transcript"])
+    if not transcript.exists():
+        transcript.write_bytes(b"context of the launched session\n")
+    if relaunched:
+        b.adapter.pid += 1  # the launched process, whose SessionStart hook wrote nothing
+    b.adapter.kernel_start = "Linux:" + LINUX_START + ":" + LINUX_DOMAIN
+    return pending
+
+
+@pytest.mark.parametrize("mode", ["fresh", "resume"])
+def test_a_pending_launch_whose_capture_never_landed_is_adopted_for_its_own_session(bound, mode):
+    """#2748: the planned checkpoint adopts it from the provider's PID record, then it resumes."""
+    b = bound
+    pending = _missed_capture(b, mode=mode)
+    provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    proof = native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="restart")
+    session = proof["session"]
+    assert session["session_id"] == pending["session_id"] and session["pending"] is False
+    assert session["process"] == f"{b.adapter.generation}:{b.adapter.pid}"
+    assert session["provider_start"] == b.adapter.kernel_start
+    assert native.read(b.bot) == session
+    native.verify_live(b.bot, proof, b.adapter)
+    assert native.launch(b.bot, b.label, b.tmpdir, b.account) == ("resume", pending["session_id"])
+    b.adapter.pid += 1
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, pending["session_id"], source="resume"), caller=os.getpid())
+    assert "provider_start" not in native.confirm(b.bot, expected=session)
+
+
+@pytest.mark.parametrize("drift", ["retired process", "another session", "stale start", "cwd", "no record"])
+def test_a_pending_launch_is_adopted_only_when_the_provider_proves_it(bound, drift):
+    """#2748: the record must name the pending session at the pane's own process start."""
+    b = bound
+    retired = b.receipt["session_id"]
+    # The retired process is still the pane until its unit restarts; its record names its own session.
+    pending = _missed_capture(b, mode="fresh", relaunched=drift != "retired process")
+    record = provider_record(b.bot, b.account, b.adapter,
+                             retired if drift == "retired process" else pending["session_id"])
+    value = json.loads(record.read_bytes())
+    if drift == "another session":
+        value["sessionId"] = OTHER  # a /clear in the launched session
+    elif drift == "stale start":
+        value["procStart"] = str(int(LINUX_START) + 1)
+    elif drift == "cwd":
+        value["cwd"] = str(b.bot.parent / "other-bot")
+    if drift == "no record":
+        record.unlink()
+    else:
+        record.write_text(json.dumps(value))
+    before = (b.bot / "data" / native.NAME).read_bytes()
+    if drift == "no record":
+        with pytest.raises(FileNotFoundError):
+            native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="restart")
+    else:
+        reason = {"retired process": "not the pending launch", "another session": "not the pending launch",
+                  "stale start": "another process start", "cwd": "does not bind"}[drift]
+        with pytest.raises(native.NativeSessionError, match=reason):
+            native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="restart")
+    assert (b.bot / "data" / native.NAME).read_bytes() == before
+
+
+def test_a_busy_pending_launch_waits_for_idle_then_is_adopted(bound, monkeypatch):
+    """#2748: as for any planned checkpoint, a busy pane is waited for, and nothing is published meanwhile."""
+    b = bound
+    pending = _missed_capture(b, mode="fresh")
+    provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    b.adapter.idle = False
+    waits = []
+    def become_idle(seconds):
+        assert native.read(b.bot) == pending
+        waits.append(seconds); b.adapter.idle = True
+    monkeypatch.setattr(bot_operations.time, "sleep", become_idle)
+    proof = bot_operations.save_planned_checkpoint(b.bot, b.label, str(b.tmpdir), b.adapter,
+                                                  operation_id="restart")
+    assert len(waits) == 1 and proof["session"]["session_id"] == pending["session_id"]
+    assert native.read(b.bot)["pending"] is False
