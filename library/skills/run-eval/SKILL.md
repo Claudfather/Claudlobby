@@ -27,7 +27,7 @@ Write these down first, every row: an eval missing one cannot produce a verdict 
 | **Battery** | Tasks chosen now, representative of the real workload. Verdicts are **per task type**, never pooled. |
 | **Baseline** | Control arm identical in everything except the target. |
 | **Reps** | Paired reps per task; stopping rule is the CI rule below, not your judgement. |
-| **Verdict** | Axes, threshold per axis, CI method/width/seed. |
+| **Verdict** | An axis for every cost the change moves, a threshold per axis, CI method/width/seed. |
 | **Pins** | Model version, artifact hash, battery version, harness version. |
 
 If a threshold is not yet ratified, the run emits **INCONCLUSIVE by construction**. Do not substitute a permissive default to get a result — a gate that can green itself before its bar exists is worse than no gate.
@@ -64,12 +64,12 @@ Run control and treatment **paired** — compare within a task and rep, then agg
 
 Three outcomes. Apply the pre-registered rule; do not add an axis or move a threshold after seeing data. If the pre-registration was wrong, say so and re-register publicly, as a new run, never as a quiet edit.
 
-- **PASS** — every co-primary axis clears its bar.
-- **FAIL** — an axis is measurably below its bar.
+- **PASS** — on every co-primary axis, the confidence interval clears its bar.
+- **FAIL** — on any axis, the interval lies entirely below its bar.
 - **STRADDLE** — CI spans the bar; extend reps up to `--reps-max`.
 - **INCONCLUSIVE** — still straddling at `--reps-max`.
 
-**INCONCLUSIVE is never rounded up to PASS.** Reps extend on a straddling interval, never on a disappointing one. If more than one axis is in play, *all* must clear — a win on one and a regression on another is a FAIL, not a trade to argue in prose. If such a trade is worth making, a human decides and records it; the gate never absorbs it.
+**INCONCLUSIVE is never rounded up to PASS.** Reps extend on a straddling interval, never on a disappointing one. Where a change has more than one cost, gate on all of them: *all* must clear — a win on one and a regression on another is a FAIL, not a trade to argue in prose. If such a trade is worth making, a human decides and records it; the gate never absorbs it.
 
 ## Step 5: Report
 
