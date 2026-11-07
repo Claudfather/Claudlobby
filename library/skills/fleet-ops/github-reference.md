@@ -1,10 +1,8 @@
 # GitHub reference
 
-Reference that the `GitHub MCP` integration (`library/integrations/github.md`) points to. The integration keeps the rules; nothing here is a step.
+Reference that the `github` integration points to. The integration keeps the rules; nothing here is a step.
 
 ## Gotcha: reading a piped `gh` call's exit status
-
-In the paragraph below, "this one" is the integration's section of this name.
 
 Verified live under a fleet-wide 401: two bots independently ran `gh api ... | head` while diagnosing it, all three probes returned rc `0` against a body reading `Bad credentials`, and both first offered those rc values as evidence that auth was fine. Both reported correctly only because they read the response *bodies*. A warning filed under the wrong failure mode is nearly as good as absent — which is why this one is not filed under any mode.
 

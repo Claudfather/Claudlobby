@@ -45,7 +45,7 @@ too, so do not read it as a GitHub gotcha.
 
 What follows is the part that *is* `gh`-specific.
 
-The measured incidents behind this section and the three gotchas below, with the 403 divergence table, are in `.claude/skills/fleet-ops/github-reference.md` under the same headings; it adds no rule.
+The measured incidents behind this gotcha and the three below, with the 403 divergence table, are in `.claude/skills/fleet-ops/github-reference.md`; it adds no rule.
 
 **`${PIPESTATUS[0]}` alone is not sufficient for `gh`**: `gh api` writes the error body to stdout as well as stderr, so anything already reading the stream is parsing an error that looks like a payload — a `--jq` default (`.field // "none"`) substitutes silently, and even a non-empty `grep -c` can be counting the error text. Read the body, not any single status.
 
