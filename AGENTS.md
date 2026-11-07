@@ -12,17 +12,12 @@ Compositor for agent-CLI fleets — Claude Code today, Codex through the executi
 
 ## Ecosystem boundary
 
-Claudlobby is the stack's **composition system**: it turns `fleet.yaml` into wired bots —
-identities, plugins, env, permission grants, supervision — and owns fleet *policy* (what each bot
-may do, including vault writer topology). Engineering-workflow behavior is clauDNA's; the durable
-knowledge corpus is Claudron's. The local rules:
+What claudlobby is beside clauDNA and Claudron is in
+[`documentation/architecture/overview.md`](documentation/architecture/overview.md). The local rules:
 
-- **Skills here are fleet operations.** `library/skills/` operate the fleet itself (dispatch,
-  restart, pulse) — runtime content that happens to use the skill format. Engineering-workflow
-  skills belong in clauDNA.
-- **Durable knowledge lives in the vault.** `library/` composes context into bots; it is not the
-  corpus. Learned-the-hard-way content accrues through the Claudron door (`/claudna:capture`),
-  not as new library files (see `library/CLAUDE.md`).
+- **Skills here are fleet operations.** Engineering-workflow skills belong in clauDNA.
+- **Durable knowledge lives in the vault.** Learned-the-hard-way content accrues through the
+  Claudron door (`/claudna:capture`), not as new library files (see `library/CLAUDE.md`).
 - **Consume siblings by contract, never by assertion.** Wire what is shipped (the `claudron` CLI
   door; the `claudron_compat.py` floor); never validate or warn about a sibling surface that does
   not exist at the pinned version. The canonical vault env var is `CLAUDRON_VAULT_PATH` (Claudron
@@ -33,41 +28,16 @@ knowledge corpus is Claudron's. The local rules:
 
 ## Architecture
 
-```
-fleet.yaml          →  managed Git host update  →  runtime/bots/<name>/
-library/                                         ├── CLAUDE.md      (composed instructions)
-  expertise/                                     ├── bot.conf       (env vars, sourced at startup)
-  skills/                                        ├── .mcp.json      (MCP server config)
-  mcp/                                           ├── .claude/       (settings.local.json, skills/ symlinks)
-  guardrails/                                    ├── *.service      (systemd unit, Linux)
-  protocols/                                     ├── *.plist        (launchd unit, macOS)
-  integrations/                                  ├── memory/        (bot-owned persistent state)
-  resources/                                     ├── data/          (bot-owned data — mutable, never regenerated)
-  lessons/                                       ├── tools/         (composited scripts — generated, never hand-edited)
-  principles/                                    ├── logs/          (bot log files)
-  permissions/                                   └── projects/      (git checkouts, gitignored)
-  post_actions/
-  tools/
-  voices/
-templates/claude.md.j2
-```
+The architecture diagram, the other key concepts, bot supervision and the canonical task commands are in [`documentation/architecture/overview.md`](documentation/architecture/overview.md).
 
-The compositor reads `fleet.yaml` (which declares bots, their expertise, skills, MCP servers, guardrails, etc.) and assembles each bot's directory from the shared `library/`. The template `claude.md.j2` owns all top-level structure — library files supply slot content.
+The template `claude.md.j2` owns all top-level structure — library files supply slot content.
 
 ### Key concepts
 
-- **Expertise** — Role definitions (e.g. `software-engineering`, `orchestration`, `code-review`). Each bot gets one or more. This is who the bot is.
-- **Skills** — Composable slash-command packages in `library/skills/<name>/SKILL.md`. What the bot can do.
 - **MCP fragments** — JSON wire configs in `library/mcp/` with `${ENV_VAR}` placeholders. Never real tokens.
-- **Guardrails** — Safety rules composed per-bot (e.g. `no-push-main`, `snowflake-read-only`).
-- **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
 - **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
-- **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
-- **Voices** — Optional personality overlays in `library/voices/`.
 
 ### Runtime model
-
-Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet. The canonical `claudlobby task admit` / `task assign` commands record work; `assignment deliver` sends the committed assignment, and `assignment progress|block|return|complete|fail` records a linked worker report. `message send` and `fleet reports submit` handle ordinary and unlinked communication.
 
 **Changing a running fleet:** read timing, not file type, determines when a change reaches a bot (#1310). `CLAUDE.md`, `bot.conf` and `.mcp.json` are read at session start; changes wait for restart. Skills, hooks and runtime scripts are read on demand; publication reaches running bots immediately. Composed permissions apply at the next tool call. Validate in an independent installation before publication; see [fleet-update-lifecycle](documentation/fleet-update-lifecycle.md).
 
@@ -230,9 +200,11 @@ git diff --cached    # no secrets, no fleet-specific UUIDs, no hardcoded paths
 
 ### Instruction files: CLAUDE.md and AGENTS.md
 
-Claude Code reads `CLAUDE.md`; Codex reads `AGENTS.md`. Each `AGENTS.md` is a **committed byte-for-byte copy of the `CLAUDE.md` beside it**, and each `.agents/skills/<name>/` a copy of `.claude/skills/<name>/` (copies, because `tests/prepare_resources.py` refuses symlinks). Edit the Claude-side file, then copy it over (`cp CLAUDE.md AGENTS.md`); never reword the copy.
+Each `AGENTS.md` is a **committed byte-for-byte copy of the `CLAUDE.md` beside it**, and each `.agents/skills/<name>/` a copy of `.claude/skills/<name>/` (copies, because `tests/prepare_resources.py` refuses symlinks). Edit the Claude-side file, then copy it over (`cp CLAUDE.md AGENTS.md`); never reword the copy.
 
-Every session started in this checkout loads this file whole, and so does every bot under it, since Claude Code reads each parent directory's `CLAUDE.md`. Nested files load on use only. Claude Code reads one when a session opens a file in its folder, if that folder is under where the session started (so bots never do). Codex reads the `AGENTS.md` chain from the root to its start folder within one 32 KiB budget (measured), so a nested file gets only what the files above it leave; tell Codex to read it. `tests/test_instruction_budget.py` enforces the copies, the indexes and both budgets: the chain through each nested file's rules (up to its `## Script reference`) fits in 32 KiB, and each nested file stays under Claude Code's 150k-character warning. Keep one line per thing here; a script's history goes in its own header.
+Codex reads the `AGENTS.md` chain from the root to its start folder within one 32 KiB budget (measured), so a nested file gets only what the files above it leave; tell Codex to read it. `tests/test_instruction_budget.py` enforces the copies, the indexes and both budgets: the chain through each nested file's rules (up to its `## Script reference`) fits in 32 KiB, and each nested file stays under Claude Code's 150k-character warning. Keep one line per thing here; a script's history goes in its own header.
+
+How Claude Code and Codex load these files is in [`documentation/instruction-files.md`](documentation/instruction-files.md); it adds no rule.
 
 ### Adding library content
 
@@ -287,48 +259,9 @@ Entries go in `changelog.d/<head branch, each / as ->.md`, never in `CHANGELOG.m
 
 ## Key Commands
 
+The rest of the command list (composition, operations, a manager's acts on one open task, scaffolding and migrations) is in [`documentation/key-commands.md`](documentation/key-commands.md).
+
 ```bash
-# Composition
-claudlobby config validate  # check fleet.yaml against library
-claudlobby config diff [<FINGERPRINT>]  # current rendered drift, or the pending render
-claudlobby host update apply [FULL_COMMIT]  # fetch the trusted source and apply one host update
-claudlobby host update status  # original operation and consumer progress
-claudlobby host update continue  # continue the same request
-claudlobby library list  # available building blocks
-claudlobby bot create --interactive  # author a bot; this does not start it
-
-# Operations
-claudlobby bot start <bot>  # start a declared bot through the lifecycle owner
-claudlobby fleet start  # enroll and start the selected fleet's bots
-claudlobby fleet reconcile  # audit the fleet's supervision state
-claudlobby fleet status  # fleet health dashboard
-claudlobby bot status <name>  # one bot in detail
-claudlobby host doctor [--switches]  # pre-flight diagnostic; --switches: every switch and its arming line
-claudlobby host credentials reconcile  # declared vs stored vs equipped credentials
-claudlobby config validate --runtime  # self-containment audit (--strict, --bot)
-claudlobby host supervision reap-orphans --dry-run  # stale supervision units; --apply removes
-claudlobby fleet reports list [--since <RFC3339>]  # the fleet's reports, from the plane
-claudlobby fleet reports ack --through <ACK_CURSOR> --request-id <UUID>  # explicit report acknowledgement
-claudlobby fleet uptime  # per-bot uptime, MTBR, restart rate
-claudlobby event list  # the fleet's events (rc 3 when the plane cannot answer)
-claudlobby workstream list  # the fleet's workstream registry
-claudlobby brief --bot <name> [--json] # one read door over fleet state for a bot
-claudlobby host cache warm  # pre-download npx + uvx MCP packages
-claudlobby bot move <bot> --to <fleet> # move a bot between fleets
-
-# A manager's acts on one open task (#1481), and the check-in
-claudlobby --json task withdraw TASK_ID --reason "…" --request-id UUID  # terminal withdrawal
-claudlobby --json task escalate TASK_ID --question "…" --request-id UUID  # non-terminal: ask a human
-claudlobby --json task nudge TASK_ID --reason TEXT --request-id UUID  # record a nudge and notify the fleet manager
-claudlobby --fleet <F> task recheck --request-id UUID [--dry-run]  # ask the manager about due work
-claudlobby --json --fleet F checkin <list|show> [...]  # check-in decisions and outcomes
-claudlobby --json --fleet F checkin record --file FILE [--selection-file FILE] --request-id UUID [--dry-run]  # commit before acting
-claudlobby checkin selection <verify|focus-refs> FILE  # offline selection checks
-
-# Scaffolding and one-time migrations (see each --help)
-claudlobby library create --kind <skill|guardrail>
-claudlobby migration <env|data|cron|memory|lessons|workstreams>
-
 # After an unplanned reboot — RUN THIS BEFORE RESCUING ANYTHING
 claudlobby/_runtime_scripts/selfstart-snapshot.sh  # how many bots self-started (#1002)
 
