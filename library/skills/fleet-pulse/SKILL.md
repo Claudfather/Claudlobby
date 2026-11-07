@@ -1,6 +1,6 @@
 ---
 name: fleet-pulse
-description: "Use when you manage a fleet and a worker looks dead, stuck or silent, and you want it recovered, not only reported. Runs the selected fleet pulse and acts on findings — restart dead workers, flag stuck panes, protect WIP."
+description: "Use when you manage a fleet and a worker looks dead, stuck or silent, and you want it recovered, not only reported, or when you need the fleet event schema or an `event list` read recipe. Runs the selected fleet pulse and acts on findings — restart dead workers, flag stuck panes, protect WIP."
 argument-hint: "[<bot-name>]"
 ---
 
@@ -92,3 +92,83 @@ If scoped to a single bot, only report that bot's status.
 - For `pane_stuck`, always inspect the bot's session and log tail before restarting — a long-running test or build is not stuck.
 - Post findings to Telegram so the human has visibility, even when taking autonomous action.
 - If the pulse command fails, report the error and stop. Do not act on stale data.
+
+## Event reference
+
+Reference that the `fleet-observability` protocol points to, not a step of the pulse run above. The protocol keeps the guards.
+
+### Event Schema
+
+```json
+{"ts": "...", "bot": "...", "type": "...", "source": "vitals|pulse|audit", "data": {...}}
+```
+
+- **ts** — ISO 8601 timestamp
+- **bot** — bot identifier
+- **type** — event classification (open-ended, match on what you care about)
+- **source** — `vitals` (bot-emitted), `pulse` (external check), or `audit` (rolling code-audit sweep)
+- **data** — type-specific payload (open object)
+
+### Reading Events
+
+Use `claudlobby event list` — never a hand-rolled loop over bot directories. This is **not** a fix
+for a live break: run verbatim on an armed bot, the loop below still works, including for denied
+siblings — confirmed directly, independently, by two different bots on two different sessions.
+The mechanism (otis, `shared/planning/active/2026-08-27-deny-bypass-probe.md`): the permission
+matcher resolves a variable **only if its value is assigned in the same command as a literal** —
+`b=ravi; cat .../$b/...` is denied correctly (and `b=otis; cat .../$b/...` allowed correctly, both
+resolved against the right bot). An expansion the matcher **cannot** statically resolve from the
+command text — a glob-bound loop variable, `${RANDOM}`, `${PIPESTATUS[0]}` — makes it fail open,
+regardless of where that expansion sits or whether the path beside it is literal. The loop below
+binds `"$bot_dir"` from `"$BOTS_DIR"/*/`, a glob expansion depending on filesystem state at
+runtime — unresolvable from the command text alone — which is why it evades where a same-command
+literal assignment would not.
+
+That is exactly the problem. **It works by accident**, on some permission-matcher blind spot, not
+by design — and the same evasion is why it's silent in the reassuring direction if the matcher
+is ever tightened: an event sweep that stops resolving would return no events, indistinguishable
+from a healthy fleet, with no warning that anything changed. Separately from permissions entirely,
+`claudlobby event list` is also just the better tool for this: it's the same door `brief.py`'s alerts
+section already consumes, and it adds type/critical filtering and coverage-honesty disclosure a
+hand-rolled loop doesn't have.
+
+Tail today's events across the fleet:
+
+```bash
+claudlobby --json event list --limit 50
+```
+
+Scope to one bot — e.g. before dispatch, or cross-referencing a linked report:
+
+```bash
+claudlobby --json event list --bot "$BOT_NAME" --limit 20
+```
+
+Filter for actionable events:
+
+```bash
+claudlobby --json event list --critical --limit 200
+```
+
+### Retention
+
+Event files older than 7 days are automatically reaped by both `bot-vitals.sh` (on each hook invocation) and `fleet-pulse.sh` (on each cron run). No archiving — build archive-to-claudron if trend analysis proves valuable later.
+
+### Configuration
+
+Opt-in per bot via fleet.yaml. Hooks go on all bots; this protocol goes on managers only.
+
+```yaml
+bots:
+  manager-bot:
+    protocols:
+      - fleet-observability    # manager reads event logs
+  worker-bot:
+    hooks:
+      PreToolUse:
+        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
+      PostToolUse:
+        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
+```
+
+Workers emit events but never read them. Managers read events but hooks are optional on them (useful if the manager also does tool work).

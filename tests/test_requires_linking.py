@@ -25,6 +25,7 @@ from claudlobby.config import load_fleet
 from claudlobby.freshbox import audit_bot
 from claudlobby.loader import iter_library_requires, library_requires
 from tests.package_fixtures import git_package, source_package
+from tests.conftest import install_real_template
 from claudlobby.paths import Paths
 from claudlobby.plane.registry_emit import bot_payload
 from claudlobby.validator import validate
@@ -998,12 +999,12 @@ def _equip_sprocket(fleet_dir: Path) -> None:
     (fleet_dir / "templates" / "claude.md.j2").unlink()
 
 
-def _compose_lead(fleet_dir: Path) -> tuple[Path, list[str], str]:
-    """Compose the lead for real; return its directory, allow rules and CLAUDE.md."""
+def _compose_lead(fleet_dir: Path, bot_id: str = "lead") -> tuple[Path, list[str], str]:
+    """Compose a bot (the lead by default) for real; return its directory, allow rules and CLAUDE.md."""
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
-    compose_bot(fleet.bots["lead"], fleet, paths, log=lambda m: None)
-    bot_dir = paths.bot_runtime("lead")
+    compose_bot(fleet.bots[bot_id], fleet, paths, log=lambda m: None)
+    bot_dir = paths.bot_runtime(bot_id)
     settings = json.loads((bot_dir / ".claude" / "settings.local.json").read_text())
     return bot_dir, settings["permissions"]["allow"], (bot_dir / "CLAUDE.md").read_text()
 
@@ -1102,3 +1103,33 @@ def test_the_registry_keyframe_and_freshbox_see_what_an_integration_brings(fleet
     orphans = [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_grant"]
     assert not any("gadget-tool" in f.detail for f in orphans), orphans
     assert not any("Skill(gadget" in f.detail for f in orphans), orphans
+
+
+# ---------------------------------------------------------------------------
+# The real fleet-observability protocol brings the real fleet-pulse skill (#717)
+# ---------------------------------------------------------------------------
+
+
+def test_a_bot_composing_fleet_observability_gets_fleet_pulse(fleet_dir):
+    """The protocol points at the fleet-pulse skill for its reference text, so it
+    requires the skill: a manager and a bot that manages nobody each compose the
+    real protocol, declare no skill, and still get the skill linked where the
+    pointer names it, granted, and carrying the moved sections."""
+    for rel in ("protocols/fleet-observability.md", "skills/fleet-pulse/SKILL.md"):
+        dest = fleet_dir / "library" / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes((source_package().library / rel).read_bytes())
+    install_real_template(fleet_dir)
+    _no_skill_defaults(fleet_dir)
+    for bot_id in ("lead", "worker-1"):
+        _equip(fleet_dir, bot_id, protocols=["fleet-observability"])
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    assert not any("fleet-pulse" in fleet.bots[b].skills for b in ("lead", "worker-1"))  # only required
+    pointer = ".claude/skills/fleet-pulse/SKILL.md"
+    for bot_id in ("lead", "worker-1"):
+        bot_dir, allow, claude_md = _compose_lead(fleet_dir, bot_id)
+        assert pointer in claude_md, bot_id
+        skill = (bot_dir / pointer).read_text()
+        for heading in ("### Event Schema", "### Reading Events", "### Retention", "### Configuration"):
+            assert heading in skill, (bot_id, heading)
+        assert "Skill(fleet-pulse)" in allow, bot_id
