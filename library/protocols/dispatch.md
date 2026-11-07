@@ -5,65 +5,42 @@ title: Dispatch Protocol
 # Dispatch Protocol
 
 Fleet work is admitted before it is assigned, and assignment is recorded before
-delivery. Use the canonical `task_id` and `assignment_id` returned by each step;
-these are different IDs. The default `/fleet-ops` skill owns the full command
-contract, grants, request reconciliation, and worker reporting. Discover the
-current grammar with `claudlobby task --help` and `claudlobby assignment --help`.
+delivery. The fleet-ops guide supplied in your instructions (also the
+`/fleet-ops` skill) owns the full command contract, grants, request
+reconciliation, and worker reporting: the admit, assign and deliver commands,
+the canonical IDs each step returns, request UUIDs, what to do after an
+uncertain outcome, the message door, the reads of current state,
+`task withdraw`, `reassign` and `escalate`, the result of `bot start`, and
+`fleet reconcile`. This protocol adds only what a manager checks around them.
 
 ## Manager task flow
 
 Choose a concrete outcome and prepare an existing UTF-8 delivery file with the
 worker's instructions and relevant plan, repo, deadline, and project context.
-For one operation, retain its UUID; each *new* operation gets a different UUID.
-Inspect each schema-1 result before proceeding:
+Admit with the task's repo and project; the guide shows the assign and deliver
+steps that follow:
 
 ```bash
 claudlobby --json task admit --title "Run the security audit" --repo org/repo-a --project PROJECT_KEY --request-id ADMIT_UUID
-claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID
-claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELIVER_UUID
 ```
 
-`task admit` leaves queued fleet-owned work even when no worker is ready.
-`task assign` records routing but is not delivery or acceptance. Only the
-manager delivers to the current assignment; the worker accepts and reports
-against that assignment. A check-in decision uses `task assign TASK_ID --bot
-WORKER --checkin ck_... --request-id ASSIGN_UUID` *after* the check-in decision
-has committed. Do not add `--checkin` to admit. The check-in skill owns the
-record-before-act sequence.
+`task admit` leaves queued fleet-owned work even when no worker is ready. A
+check-in decision uses `task assign TASK_ID --bot WORKER --checkin ck_...
+--request-id ASSIGN_UUID` *after* the check-in decision has committed. Do not
+add `--checkin` to admit. The check-in skill owns the record-before-act
+sequence.
 
-If a write or send has an uncertain outcome, inspect `claudlobby --json request
-show UUID` and the relevant task, assignment, or message receipt. A committed
-fact or submitted send may already exist. Do not automatically resubmit with a
-new UUID or resend the delivery file. A historical dispatch reference is not
-an alias for either canonical ID; use the scoped hint from the read command.
-
-For an ordinary question that does not create work, use the message door:
-
-```bash
-claudlobby --json message send --to WORKER --text "What did the audit find?" --request-id MESSAGE_UUID
-claudlobby --json request show MESSAGE_UUID
-claudlobby --json message show MESSAGE_ID
-```
-
-Message recording, arrival proof, and any reply are separate observations.
-Do not turn a question into a task solely to deliver text. A worker answers a
-note that asked for no work with `fleet reports submit`, the explicitly unlinked
-report: it links no task and closes nothing.
+For an ordinary question that does not create work, use the guide's message
+door. Do not turn a question into a task solely to deliver text.
 
 ## Follow-up and re-check
 
-Read `claudlobby --json task show TASK_ID` or `claudlobby --json fleet inbox`
-for current state. `claudlobby --json brief` shows fleet-owned open work for a
-manager, including queued intake, with canonical IDs and explicit unresolved
-history. An absent deadline alert is not proof that work completed. Re-checks
-ask the current manager to inspect overdue or aged open tasks; use the task ID
-in the notice. An assignment a person made with no deadline is a standing goal:
-the re-check lists it by ID but never asks about it on age alone. A nudge asks
-for a decision and does not itself change task
-state. Use `task withdraw`, `task reassign`, or `task escalate` according to the
-current CLI help and retained request-ID policy. Escalation asks one concrete
-human decision; it is not a status poll. Do not silently convert an uncertain
-send into a second assignment or a second task.
+An absent deadline alert is not proof that work completed. Re-checks ask the
+current manager to inspect overdue or aged open tasks; use the task ID in the
+notice. An assignment a person made with no deadline is a standing goal: the
+re-check lists it by ID but never asks about it on age alone. A nudge asks for
+a decision and does not itself change task state. Escalation asks one concrete
+human decision; it is not a status poll.
 
 ### Always zone a timestamp
 
@@ -79,11 +56,6 @@ selected release and exact supervision unit, enrolling and starting the bot
 when needed; an already-ready session is left running. A raw `start-bot.sh`
 session is not supervised.
 
-```bash
-# Replace WORKER_ID with the target's literal declared bot ID.
-claudlobby --json bot start WORKER_ID
-```
-
 Dispatch only after the result has `ok: true`, `data.state: "running"`,
 `data.native_outcome: "observed"`, and `data.readiness` of
 `current_session_ready`, `bridge_ready`, or `session_ready`. The first proves
@@ -92,18 +64,10 @@ non-channel or intentionally tokenless outcome. On a conflict or unavailable
 result, inspect the exact unit and private session; do not fall back to a raw
 launcher or deliver into unknown readiness.
 
-To audit the selected fleet's supervision state, run:
-
-```bash
-claudlobby --json fleet reconcile
-```
-
-This reports discrepancies without changing enrollment or pruning state. A
-manager may explicitly start a declared worker with `claudlobby --json bot start
-BOT`; inspect its native outcome and readiness before delivery. Unknown
-ownership, unexpected units and retained undeclared directories require operator
-inspection. There is no public `--enroll` repair flag and no reason to invoke a
-private script from a bot session.
+When `fleet reconcile` reports unknown ownership, unexpected units or retained
+undeclared directories, they require operator inspection. There is no public
+`--enroll` repair flag and no reason to invoke a private script from a bot
+session.
 
 ## Preflight: check shared knowledge before dispatch
 
