@@ -3,11 +3,62 @@
 from __future__ import annotations
 
 from contextlib import closing
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
 from ..reference_hints import note_prefix
+
+
+def _own_fields(record, *nested) -> dict:
+    """`asdict(record)` without the named nested fields, which are never copied."""
+    own = asdict(replace(record, **dict.fromkeys(nested)))
+    for name in nested:
+        del own[name]
+    return own
+
+
+def _event_id(event) -> str | None:
+    return event.event_id if event else None
+
+
+def _assignment_record(assignment) -> dict:
+    """The assignment's own fields; its closing event is named by ID."""
+    record = _own_fields(assignment, "history", "terminal_event")
+    record["terminal_event_id"] = _event_id(assignment.terminal_event)
+    return record
+
+
+def _task_record(task) -> dict:
+    """The task's own fields and one `_assignment_record` per assignment; the
+    current assignment and the closing event are named by ID."""
+    record = _own_fields(task, "current_assignment", "assignments", "history", "terminal_event")
+    current = task.current_assignment
+    record.update(assignments=[_assignment_record(item) for item in task.assignments],
+                  current_assignment_id=current.assignment_id if current else None,
+                  terminal_event_id=_event_id(task.terminal_event))
+    return record
+
+
+def _event_ledger(task) -> list[dict]:
+    """Every event the read carries, once, ordered by (ingest_seq, event_id): the
+    task's history, each assignment's history and every closing event, so each
+    `terminal_event_id` resolves in the ledger."""
+    events = {}
+    found = [*task.history, task.terminal_event]
+    for item in task.assignments:
+        found += [*item.history, item.terminal_event]
+    for event in found:
+        if event is not None:
+            events.setdefault(event.event_id, event)
+    return [asdict(event) for event in sorted(events.values(), key=lambda e: (e.ingest_seq, e.event_id))]
+
+
+def _assignment_show_data(view) -> dict:
+    """Assignment show: the shown assignment and its task as records that name
+    events by ID, plus `events`, where each recorded event appears once."""
+    return {"assignment": _assignment_record(view.assignment), "task": _task_record(view.task),
+            "events": _event_ledger(view.task)}
 
 
 def _read(args) -> CommandOutput:
@@ -76,7 +127,7 @@ def _read(args) -> CommandOutput:
                 # The delivery, from the rows `assignment deliver` recorded (#2379).
                 delivery = assignment_delivery(conn, view.assignment)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "assignment": asdict(view.assignment), "task": asdict(view.task),
+                        **_assignment_show_data(view),
                         "delivery": asdict(delivery) if delivery else None}
                 lines = (f"{view.assignment.assignment_id}\t{view.assignment.state}\t"
                          f"{view.task.task_id}",)

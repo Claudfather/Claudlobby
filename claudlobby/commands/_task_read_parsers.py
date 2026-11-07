@@ -45,9 +45,10 @@ def register_task_read_subparsers(sub, task_children):
     assignment = sub.add_parser("assignment", help="Read canonical assignment records")
     children = assignment.add_subparsers(dest="assignment_command", required=True)
     showing = _route(children, "show", "assignment.show", "Show one canonical assignment ID",
-                     description="Show one canonical assignment ID: its state, history, task and recorded "
-                                 "delivery. The deadline watch (not_due, overdue, orphaned, past_due) is not "
-                                 "part of this record; claudlobby brief reports it.")
+                     description="Show one canonical assignment ID: its state, its task, each recorded "
+                                 "event once (data.events) and the recorded delivery. The deadline watch "
+                                 "(not_due, overdue, orphaned, past_due) is not part of this record; "
+                                 "claudlobby brief reports it.")
     showing.add_argument("assignment_id", metavar="ASSIGNMENT_ID",
                          help="An assignment ID, or asg_ and at least 8 of its hex digits")
     return children
