@@ -31,7 +31,9 @@ def register_task_read_subparsers(sub, task_children):
     listing.add_argument("--bot", metavar="BOT", help="Only assignments for this active bot")
     listing.add_argument("--limit", type=int, default=100, metavar="N", help="Page size, 1 to 1000")
     listing.add_argument("--cursor", metavar="TOKEN", help="Continue the same scope and filters")
-    showing = _route(task_children, "show", "task.show", "Show one canonical task ID")
+    showing = _route(task_children, "show", "task.show", "Show one canonical task ID",
+                     description="Show one canonical task ID: its state, each of its assignments and "
+                                 "each recorded event once (data.events).")
     showing.add_argument("task_id", metavar="TASK_ID",
                          help="A task ID, or wi_ and at least 8 of its hex digits")
 

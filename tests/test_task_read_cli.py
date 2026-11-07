@@ -269,22 +269,28 @@ def test_git_task_read_refuses_configuration_change_during_query(active, monkeyp
     assert "items" not in result["data"]
 
 
+TASK_HEX = "wi_" + "c0ffee11" + "0" * 24  # a prefix read needs wi_ and 8 hex digits
+
+
 def _event_plane(root, host):
     """wi_main: asg_a (accepted, progress, one event under wi_other's task_id, closed by a
     task-level cancelled ingested after its row), asg_b (closed by its own event), asg_c (no
     events of its own; the cancel closes it too); a task-level event with no assignment.
-    wi_two: two open assignments. wi_one: one current assignment."""
+    wi_two: two open assignments. wi_one: one current assignment. TASK_HEX, which a prefix can
+    name: one current assignment (asg_hex) with one event."""
     from claudlobby.activation_identity import read_current_identity_bindings
     fleet = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
     with sqlite3.connect(db_file(root)) as conn:
-        for tid in ("wi_main", "wi_other", "wi_two", "wi_one"):
+        for tid in ("wi_main", "wi_other", "wi_two", "wi_one", TASK_HEX):
             _task(conn, tid, fleet_uid=fleet)
         for aid, tid in (("asg_a", "wi_main"), ("asg_b", "wi_main"), ("asg_c", "wi_main"),
-                         ("asg_t1", "wi_two"), ("asg_t2", "wi_two"), ("asg_one", "wi_one")):
+                         ("asg_t1", "wi_two"), ("asg_t2", "wi_two"), ("asg_one", "wi_one"),
+                         ("asg_hex", TASK_HEX)):
             _assignment(conn, aid, tid, fleet_uid=fleet)
         for tid, aid, name in (("wi_main", "asg_a", "accepted"), ("wi_main", "asg_a", "progress"),
                                ("wi_other", "asg_a", "progress"), ("wi_main", "asg_b", "returned_blocked"),
-                               ("wi_main", None, "nudged"), ("wi_main", None, "cancelled")):
+                               ("wi_main", None, "nudged"), ("wi_main", None, "cancelled"),
+                               (TASK_HEX, "asg_hex", "accepted")):
             _event(conn, tid, aid, name, fleet_uid=fleet)
     return fleet
 
@@ -338,3 +344,79 @@ def test_assignment_show_prints_each_event_once_and_keeps_every_fact(active, cap
         assert two["task"]["current_assignment_id"] is None
         assert [i["code"] for i in two["task"]["issues"] if i["blocking"]] == ["multiple_current_assignments"]
         assert [x["terminal_event_id"] for x in two["task"]["assignments"]] == [None, None]
+
+
+def _old_task_show(data):
+    """Main's `data["task"]` of `task show`, rebuilt from this head's `data["task"]` and
+    `data["events"]` with #2768's derivations and nothing else. Lists keep their order."""
+    events = data["events"]
+    by_id = {e["event_id"]: e for e in events}
+
+    def with_events(record, key, own):
+        old = {k: v for k, v in record.items() if k != "terminal_event_id"}
+        old["history"] = [e for e in events if e[key] == own]
+        closing = record["terminal_event_id"]
+        old["terminal_event"] = by_id[closing] if closing else None
+        return old
+
+    task = data["task"]
+    assignments = [with_events(a, "assignment_id", a["assignment_id"]) for a in task["assignments"]]
+    old = with_events({k: v for k, v in task.items() if k not in ("assignments", "current_assignment_id")},
+                      "task_id", task["task_id"])
+    old["assignments"] = assignments
+    current = task["current_assignment_id"]
+    old["current_assignment"] = (next(a for a in assignments if a["assignment_id"] == current)
+                                 if current else None)
+    return old
+
+
+def test_task_show_prints_each_event_once_and_keeps_every_fact(active, capsys):
+    root, host = active
+    fleet = _event_plane(root, host)
+    from claudlobby.task_queries import show_task
+    listed = _call(capsys, root, "task", "list", "--state", "all")["data"]  # an unchanged door's envelope
+    shown = {}
+    with sqlite3.connect(db_file(root)) as conn:
+        for tid in ("wi_main", "wi_other", "wi_two", "wi_one", TASK_HEX):
+            # The printed text, not `_call`'s parse: only the text shows an event printed twice.
+            assert main(["--root", str(root), "--json", "task", "show", tid]) == 0
+            out = capsys.readouterr().out
+            data = shown[tid] = json.loads(out)["data"]
+            assert "events" in data and "history" not in data["task"]
+            events = data["events"]
+            keys = [(e["ingest_seq"], e["event_id"]) for e in events]
+            assert keys == sorted(keys) and len(set(keys)) == len(keys)
+            named = [i["event_id"] for i in data["task"]["issues"]]  # an issue names its event; not a TaskEvent
+            for _, event_id in keys:
+                assert out.count(f'"event_id":"{event_id}"') == 1 + named.count(event_id)
+            # Main's whole data["task"], lists in order, from the new task and events alone.
+            old = json.loads(json.dumps(asdict(show_task(conn, tid, fleet_uid=fleet))))
+            assert _old_task_show(data) == old
+            assert old["history"] == [e for e in events if e["task_id"] == tid]
+            # Every other key of data (fleet, manager, provenance) is what task list prints; no prefix note.
+            assert ({k: v for k, v in data.items() if k not in ("task", "events")}
+                    == {k: v for k, v in listed.items() if k not in ("bot", "items", "next_cursor", "issues")})
+    wi_main, other, two, one = (shown[t]["task"] for t in ("wi_main", "wi_other", "wi_two", "wi_one"))
+    main_events = shown["wi_main"]["events"]
+    assert len(main_events) == 6 and wi_main["state"] == "cancelled" and wi_main["current_assignment_id"] is None
+    closers = {a["assignment_id"]: a["terminal_event_id"] for a in wi_main["assignments"]}
+    # The task-level cancel closes asg_a and asg_c, whose histories do not hold it; asg_b closed itself.
+    assert closers["asg_a"] == closers["asg_c"] == wi_main["terminal_event_id"] is not None
+    assert closers["asg_b"] not in (None, closers["asg_a"])
+    assert any(e["task_id"] == "wi_other" and e["assignment_id"] == "asg_a" for e in main_events)
+    # wi_other has no assignment of its own; its one event names wi_main's asg_a.
+    assert other["assignments"] == [] and other["terminal_event_id"] is None and other["state"] == "queued"
+    assert [(e["task_id"], e["assignment_id"]) for e in shown["wi_other"]["events"]] == [("wi_other", "asg_a")]
+    assert [i["code"] for i in other["issues"]] == ["mismatched_task_event"]
+    assert one["current_assignment_id"] == "asg_one" and one["state"] == "assigned"
+    assert two["current_assignment_id"] is None and two["state"] is None
+    assert [i["code"] for i in two["issues"] if i["blocking"]] == ["multiple_current_assignments"]
+    assert [a["terminal_event_id"] for a in two["assignments"]] == [None, None]
+    # The same task in the same shape from either door.
+    asg = _call(capsys, root, "assignment", "show", "asg_a")["data"]
+    assert asg["task"] == wi_main and asg["events"] == main_events
+    # A prefix read adds resolved_from_prefix and nothing else.
+    prefixed = _call(capsys, root, "task", "show", "wi_c0ffee11")["data"]
+    assert prefixed["resolved_from_prefix"] == {"prefix": "wi_c0ffee11", "id": TASK_HEX}
+    assert {k: v for k, v in prefixed.items() if k != "resolved_from_prefix"} == shown[TASK_HEX]
+    assert shown[TASK_HEX]["task"]["current_assignment_id"] == "asg_hex"

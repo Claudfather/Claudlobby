@@ -119,7 +119,7 @@ def _read(args) -> CommandOutput:
             elif args.public_command == "task.show":
                 task = show_task(conn, args.task_id, fleet_uid=bindings["fleet_uid"], prefix=True)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "task": asdict(task)}
+                        "task": _task_record(task), "events": _event_ledger(task)}
                 lines = note_prefix(data, (f"{task.task_id}\t{task.state or 'unresolved'}\t{task.title}",),
                                     args.task_id, task.task_id)
             else:
