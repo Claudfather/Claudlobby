@@ -67,7 +67,7 @@ def test_the_vm_stat_reader_on_output_recorded_on_a_mac():
 
 
 def test_where_there_is_no_meminfo_the_watch_reads_vm_stat(se):  # noqa: F811
-    proc = se.tmp / "proc"
+    proc = se.tmp / "proc-empty"
     proc.mkdir()  # no meminfo here
     vm = se.tmp / "vm_stat.txt"
     over = FIXTURE.read_text().replace("12345.", "400000.")  # ~6.2 GiB free

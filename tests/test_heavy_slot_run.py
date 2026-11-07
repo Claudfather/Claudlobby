@@ -49,8 +49,13 @@ def se(tmp_path):
     stub = bin_dir / "pytest"
     stub.write_text(STUB)
     stub.chmod(0o755)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text("MemTotal: 67108864 kB\nMemAvailable: 67108864 kB\n")
+    (proc / "loadavg").write_text("1.00 1.00 1.00 1/100 42\n")
     env = constructed_env(
         PATH=f"{bin_dir}:{os.environ['PATH']}",
+        HEAVY_SLOT_PROC=proc,
         HEAVY_SLOT_DIR=tmp_path / "state",
         HEAVY_SLOT_EVENTS_FILE=tmp_path / "events.jsonl",
         HEAVY_SLOT_BOOT_ID="this-boot",
@@ -707,14 +712,14 @@ def _pid_of(path: Path) -> int:
 
 
 class TestTheStopLine:
-    def test_with_no_run_lines_the_job_runs_in_the_callers_group_as_before(self, se):
+    def test_with_no_run_lines_the_default_line_watches_the_run(self, se):
         _stub(se, 'ps -o pgid= -p $$ | tr -d " " > "$STUB_DIR/pg.self"\n'
-                  'ps -o pgid= -p $PPID | tr -d " " > "$STUB_DIR/pg.parent"\n'
+                  'echo $$ > "$STUB_DIR/pid.self"\n'
                   'touch "$STUB_DIR/ran.$$"\n')
         assert _run(se, "pytest").returncode == 0
-        assert (se.tmp / "pg.self").read_text() == (se.tmp / "pg.parent").read_text() != ""
+        assert (se.tmp / "pg.self").read_text().strip() == (se.tmp / "pid.self").read_text().strip()
         rec = _record(se)
-        assert not {"lines", "peak", "ended"} & set(rec)
+        assert rec["lines"]["stop_mib"] == 3800 and rec["lines_from"] == "default"
         released = [e for e in _events(se) if e["type"] == "heavy_slot_released"][0]
         assert set(released["data"]) == {"slot", "shape", "exit", "started_at", "duration_s"}
 
@@ -733,7 +738,7 @@ class TestTheStopLine:
     @pytest.mark.parametrize("text", [
         "bogus = 1\n",
         "stop_mib = lots\n",
-        "poll_s = 1\n",
+        "stop_mib = 0\n",
         "stop_mib = 3800\ndebounce_reads = 0\n",
         "stop_mib = 3800\ndebounce_reads = 1.5\n",
         "stop_mib = 3800\npoll_s = 61\n",
@@ -785,7 +790,7 @@ class TestTheStopLine:
 
     def test_a_reading_that_fails_never_stops_the_run(self, se):
         _arm(se)
-        (se.tmp / "proc").mkdir()  # no meminfo here
+        (se.tmp / "proc" / "meminfo").unlink()  # no meminfo here
         bad = se.tmp / "bad-vm-stat"
         bad.write_text("#!/bin/sh\nexit 1\n")
         bad.chmod(0o755)
@@ -847,13 +852,14 @@ class TestTheStopLine:
         assert _record(se)["state"] == "released"
         assert "heavy_slot_stopped" not in [e["type"] for e in _events(se)]
 
-    def test_status_shows_the_run_line_only_when_a_file_exists(self, se):
-        off = _status(se)
-        assert "run line" not in off.stdout
-        assert json.loads(_status(se, "--json").stdout)["run_lines"] is None
-        _arm(se)
-        assert "3800" in _status(se).stdout and "run line:" in _status(se).stdout
-        assert json.loads(_status(se, "--json").stdout)["run_lines"]["stop_mib"] == 3800
+    def test_status_always_shows_the_run_line(self, se):
+        out = _status(se).stdout
+        assert "run line:" in out and "3800" in out and "(default)" in out
+        info = json.loads(_status(se, "--json").stdout)["run_lines"]
+        assert info["stop_mib"] == 3800 and info["file"] == "default"
+        _arm(se, "poll_s = 1\n")  # a file sets values, never off
+        info = json.loads(_status(se, "--json").stdout)["run_lines"]
+        assert info["stop_mib"] == 3800 and info["poll_s"] == 1
         _arm(se, "bogus = 1\n")
         assert "NOT ARMED" in _status(se).stdout
         assert "error" in json.loads(_status(se, "--json").stdout)["run_lines"]

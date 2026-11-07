@@ -26,16 +26,17 @@ runs a headless render through its render profile:
     holder reports it: a different boot id means the job was running when the
     host reset, the evidence #1644 lacks. A call that cannot take a slot,
     because every slot is held or a free one is another caller's turn, takes
-    a ticket in the queue (#2124) and exits 75. With
-    ``state/heavy-slot/run-lines`` present (RUN_LINES names its lines; ``stop_mib`` is
-    required) the job runs in a session of its own and this process reads the
-    host's free memory every ``poll_s`` (MemAvailable where there is a meminfo,
+    a ticket in the queue (#2124) and exits 75. The job runs in a session of
+    its own, and this process reads the host's free memory every ``poll_s``
+    (MemAvailable where there is a meminfo,
     else vm_stat); once ``debounce_reads`` readings in a row are under
     ``stop_mib`` it sends SIGTERM to the job's process group and to every process
     it found to have left that group (by parent link), SIGKILL after ``grace_s``,
     then releases the slot and exits 79 with a ``heavy_slot_stopped`` event. A
-    reading that fails never stops the job, and a file it cannot read refuses
-    every plain run at exit 2. Without the file nothing changes (#2221).
+    reading that fails never stops the job. Every plain run is watched: the line
+    is on by default at 3800 MiB (RUN_LINES names the lines and holds the
+    defaults), ``state/heavy-slot/run-lines`` sets other values and never turns
+    it off, and a file it cannot read refuses every plain run at exit 2 (#2221).
 
 ``run --profile render -- ARGV``
     A headless browser render, which plain ``run`` refuses: a render is a
@@ -84,9 +85,10 @@ call through at once, without a restart; ``state/heavy-slot/no-queue`` makes
 every caller decide on the slots alone, as before the queue;
 ``state/heavy-slot/render-lines`` sets the render profile's lines (``name =
 value``; RENDER_LINES names them and holds the defaults), and a file it cannot
-read refuses every render. ``state/heavy-slot/run-lines`` arms the stop line of a
-plain ``run`` (``name = value``; RUN_LINES), and a file it cannot read refuses
-every plain run. ``state/heavy-slot/render-record`` is the render
+read refuses every render. ``state/heavy-slot/run-lines`` sets other values for the
+stop line every plain ``run`` is watched by, on by default at 3800 MiB and never
+off (``name = value``; RUN_LINES), and a file it cannot read refuses every plain
+run. ``state/heavy-slot/render-record`` is the render
 profile's record of kills and hold lifts, one JSON object per line; a file it
 cannot read refuses every render too. The environment's HEAVY_SLOT_TICKET_IDLE_S overrides
 TICKET_IDLE_S for the process that reads it. Test seams: HEAVY_SLOT_DIR,
@@ -1685,12 +1687,12 @@ class LinesError(Exception):
 
 # The plain run's stop line (state/heavy-slot/run-lines, same format as the render
 # lines). stop_mib: stop the job while the host's free memory stays under this many
-# MiB (no default: the file exists only to arm the line, so one without it is an
-# error). debounce_reads: how many readings in a row must be under it (a whole
+# MiB. On by default at the host's ruled stop line, the render profile's stop_mib;
+# a file sets other values, never off. debounce_reads: how many readings in a row must be under it (a whole
 # number). poll_s: seconds between two readings (at most 60). grace_s: seconds
 # between SIGTERM and SIGKILL. A stop line is crossed only UNDER its number, as
 # the render's is: a reading equal to it does not stop the job.
-RUN_LINES = {"stop_mib": None, "debounce_reads": 2.0, "poll_s": 2.0, "grace_s": 10.0}
+RUN_LINES = {"stop_mib": 3800.0, "debounce_reads": 2.0, "poll_s": 2.0, "grace_s": 10.0}
 RUN_LINES_FILE = "run-lines"
 
 
@@ -1734,21 +1736,21 @@ def render_lines(d: Path) -> Tuple[dict, str]:
     return (dict(RENDER_LINES), "default") if lines is None else (lines, str(f))
 
 
-def run_lines(d: Path) -> Optional[dict]:
-    """The plain run's stop line, or None when state/heavy-slot/run-lines does
-    not exist (a run is then not watched). LinesError when the file cannot be
-    read, sets no stop_mib, or gives debounce_reads a number that is not whole:
-    every plain heavy run refuses."""
+def run_lines(d: Path) -> Tuple[dict, str]:
+    """(the plain run's lines, where they came from): RUN_LINES with the host's own
+    numbers from state/heavy-slot/run-lines over them, read on every use. LinesError
+    when the file cannot be read as lines or gives debounce_reads a number that is
+    not whole: every plain heavy run refuses."""
     f = d / RUN_LINES_FILE
     lines = _read_lines(f, RUN_LINES, "run")
     if lines is None:
-        return None
-    if lines["stop_mib"] is None:
-        raise LinesError(f"{f} sets no stop_mib, and the file exists only to arm the stop line")
+        lines, source = dict(RUN_LINES), "default"
+    else:
+        source = str(f)
     if lines["debounce_reads"] != int(lines["debounce_reads"]):
         raise LinesError(f"{f}: debounce_reads needs a whole number")
     lines["debounce_reads"] = int(lines["debounce_reads"])
-    return lines
+    return lines, source
 
 
 # The retry rule (the host's render rule; its owner ruled 2026-10-19 that the
@@ -2949,10 +2951,10 @@ def cmd_run(args: List[str]) -> int:
               "directly (#1686)", file=sys.stderr)
         return 2
     d = slot_dir()
-    stop_lines = None
+    stop_lines = lines_from = None
     if profile is None:
         try:
-            stop_lines = run_lines(d)
+            stop_lines, lines_from = run_lines(d)
         except LinesError as e:
             print(f"heavy-slot: NOT RUN: {e}. No plain heavy run starts until the file reads "
                   "(#2221).", file=sys.stderr)
@@ -2978,9 +2980,6 @@ def cmd_run(args: List[str]) -> int:
 
     def send(signum):
         try:
-            if stop_lines is None:
-                child.send_signal(signum)
-                return
             try:
                 os.killpg(child.pid, signum)  # the job leads a session of its own
             except OSError:
@@ -3000,8 +2999,7 @@ def cmd_run(args: List[str]) -> int:
     _report_unreleased(fd, slot, boot)
     started = time.time()
     record = _held_record(slot, n, shape, tool, boot, started)
-    if stop_lines is not None:
-        record["lines"] = stop_lines
+    record.update(lines=stop_lines, lines_from=lines_from)
     _write(fd, record)
     _emit("heavy_slot_acquired", _acquired(slot, n, shape, record, mine, why, started))
     delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
@@ -3012,11 +3010,8 @@ def cmd_run(args: List[str]) -> int:
             pass
     watch = group = outcome = None  # outcome: how the stop line ended the job, if it did
     try:
-        if stop_lines is None:
-            child = subprocess.Popen(argv)
-        else:
-            child = subprocess.Popen(argv, start_new_session=True,
-                                     preexec_fn=_parent_death_hook(signal.SIGTERM))
+        child = subprocess.Popen(argv, start_new_session=True,
+                                 preexec_fn=_parent_death_hook(signal.SIGTERM))
     except FileNotFoundError:
         print(f"heavy-slot: {argv[0]}: command not found", file=sys.stderr)
         rc = 127
@@ -3026,11 +3021,8 @@ def cmd_run(args: List[str]) -> int:
     if child is not None:
         for signum in pending:
             send(signum)
-        if stop_lines is None:
-            rc = child.wait()
-        else:
-            group, watch = _Group(child.pid), _StopWatch(stop_lines)
-            rc, outcome = _watch(child, group, watch, stop_lines)
+        group, watch = _Group(child.pid), _StopWatch(stop_lines)
+        rc, outcome = _watch(child, group, watch, stop_lines)
     stopped = outcome is not None
     status = EX_STOPPED if stopped else rc if rc >= 0 else 128 - rc
     ended = time.time()
@@ -3038,8 +3030,7 @@ def cmd_run(args: List[str]) -> int:
                   exit=status, duration_s=round(ended - started, 1))
     released = {"slot": slot, "shape": shape, "exit": status,
                 "started_at": record["started_at"], "duration_s": record["duration_s"]}
-    if stop_lines is not None:
-        record["ended"] = "stopped" if stopped else "done"
+    record["ended"] = "stopped" if stopped else "done"
     if watch is not None:
         record.update(peak=watch.peak, escapees=len(group.escapees))
     if stopped:
@@ -3184,12 +3175,12 @@ def cmd_status(args: List[str]) -> int:
         render = {"hold": None, "retry_at": None, "error": str(e)}
         render_line = f"renders: NOT RUN, the render record cannot be read: {e}"
     try:
-        armed = run_lines(d)
-        run_info = None if armed is None else dict(armed, file=str(d / RUN_LINES_FILE))
-        run_line = "" if armed is None else (
+        armed, armed_from = run_lines(d)
+        run_info = dict(armed, file=armed_from)
+        run_line = (
             f"run line: stop under {armed['stop_mib']:g} MiB for {armed['debounce_reads']} "
             f"readings, {armed['poll_s']:g} s apart, KILL {armed['grace_s']:g} s after TERM "
-            f"({d / RUN_LINES_FILE})")
+            f"({armed_from})")
     except LinesError as e:
         run_info = {"error": str(e)}
         run_line = f"run line: NOT ARMED: {e}, so every plain heavy run refuses"
