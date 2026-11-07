@@ -1,0 +1,3 @@
+### Changed — the check-in protocol keeps its rules and points to its skill for the record command (#717)
+
+Every leaf manager carries the `checkin` protocol on every call. It now names `checkin record` and points to `/checkin` for the full command line, which the skill gives at the step that records the decision; it leaves the rule of one request UUID per operation to the fleet-ops guide, which states it for every bot; and it says once, not twice, that the `manager-checkin` fleet job sends `/checkin`. By Claude Code's `/context`, the protocol's composed section went from 1,113 to 1,018 tokens; whether managers check in as well with the command read from the skill is not measured. Every rule stays in the protocol.
