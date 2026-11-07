@@ -1,40 +1,37 @@
 """#1053 PR 2: a bot's `bot compact` on itself records a request and types nothing.
 
 The CLI runs over test_bot_operations' fake native adapter, which records every
-native call, so "types nothing" is an empty call list. The plane is a stand-in
-that holds each row's key, as the plane does, and answers a repeated key with
-`duplicate`.
+native call, so "types nothing" is an empty call list. The plane is the fixture's
+real plane: `_plane` keeps the rows it commits, so a replay reads `duplicate` only
+where the plane itself says so.
 """
 
-from types import SimpleNamespace
 import json
 
 import pytest
 
 from claudlobby.plane import emit_api
+from claudlobby.plane.ids import derive_hex
 from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_bot_operations import _worker_cli
 
 RID1 = "11111111-1111-4111-8111-111111111111"
 RID2 = "22222222-2222-4222-8222-222222222222"
 RID3 = "33333333-3333-4333-8333-333333333333"
+RID4 = "44444444-4444-4444-8444-444444444444"
 
 
 def _plane(monkeypatch, *, refuse=False):
-    """Rows the door hands the plane; a key the plane already holds reads duplicate."""
-    rows, keys = [], set()
+    """The fixture's real plane, with the rows it committed kept in order; a row it
+    already holds reads duplicate and is not kept. With `refuse`, no plane at all."""
+    rows, real = [], emit_api.emit_batch
 
-    def emit(_root, events, require_commit=False):
+    def emit(root, events, require_commit=False):
         assert require_commit is True
         if refuse:
             raise OSError("the plane is unavailable")
-        out = []
-        for event in events:
-            ref = event["source_ref"]
-            out.append(SimpleNamespace(status="duplicate" if ref in keys else "committed"))
-            if ref not in keys:
-                keys.add(ref)
-                rows.append(event)
+        out = real(root, events, require_commit=require_commit)
+        rows.extend(event for event, outcome in zip(events, out) if outcome.status == "committed")
         return out
     monkeypatch.setattr(emit_api, "emit_batch", emit)
     return rows
@@ -111,11 +108,37 @@ def test_a_request_id_the_plane_holds_records_nothing_once_its_request_is_gone(w
     worker.call("bot", "compact", "worker", "--request-id", RID1, use_root=False)
     worker.call("bot", "compact", "worker", "--cancel", "--request-id", RID3, use_root=False)
     replayed = worker.call("bot", "compact", "worker", "--request-id", RID1, use_root=False)["data"]
-    assert (replayed["outcome"], replayed["request"]) == ("replayed", None)
+    assert (replayed["outcome"], replayed["request"], replayed["recording"]) == ("replayed", None, None)
     assert _record(worker) is None and len(worker.rows) == 2
+    # The plane keeps one row per event ID, and the request's is derived from its
+    # request ID: that is what refuses the replay.
+    assert worker.rows[0]["event_id"] == "ev_" + derive_hex(f"compact_requested:{RID1}")
+    listed = worker.call("event", "list", "--type", "compact_requested", "--bot", "worker",
+                         "--since", "1h", use_root=False)["data"]["items"]
+    assert len(listed) == 1
     # A new request ID asks again.
     fresh = worker.call("bot", "compact", "worker", "--request-id", RID2, use_root=False)["data"]
     assert fresh["outcome"] == "requested" and _record(worker)["request_id"] == RID2
+    assert len(worker.rows) == 3
+
+
+def test_a_cancel_retried_under_its_cancel_id_takes_nothing(worker):
+    worker.call("bot", "compact", "worker", "--request-id", RID1, use_root=False)
+    worker.call("bot", "compact", "worker", "--cancel", "--request-id", RID3, use_root=False)
+    worker.call("bot", "compact", "worker", "--request-id", RID2, use_root=False)
+    later = _record(worker)
+    retried = worker.call("bot", "compact", "worker", "--cancel", "--request-id", RID3,
+                          use_root=False)["data"]
+    assert (retried["outcome"], retried["request"], retried["recording"]) == ("replayed", None, None)
+    assert _record(worker) == later and len(worker.rows) == 3
+    data = worker.root / "runtime/bots/worker/data"
+    assert [p.name for p in data.glob(".compact-request*")] == [".compact-request"]
+    # A new cancel ID withdraws it.
+    cancelled = worker.call("bot", "compact", "worker", "--cancel", "--request-id", RID4,
+                            use_root=False)["data"]
+    assert (cancelled["outcome"], cancelled["request"]) == ("cancelled", later)
+    assert _record(worker) is None and len(worker.rows) == 4
+    assert worker.native.calls == []
 
 
 def test_a_plane_that_refuses_the_row_leaves_the_request_standing(worker, monkeypatch):

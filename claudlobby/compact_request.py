@@ -8,7 +8,10 @@ away and writes `compact_cancelled`.
 
 - One request at a time: a call while one is pending returns that one.
 - One request per request ID: a call whose request ID the plane already holds
-  records nothing (`replayed`), so a replayed call cannot ask twice.
+  records nothing (`replayed`), so a replayed call cannot ask twice. The row's
+  event ID is derived from its event and request ID, and the plane keeps one
+  row per event ID. A cancel retried under its cancel ID is `replayed` too: it
+  puts back the request it took, so a retry cannot withdraw a later request.
 - The file is the fact a reader acts on and the row is the audit trail. The
   file is written first, and a plane that refuses the row does not refuse the
   request (`recording: degraded`), as with the stop door's record (#2243).
@@ -132,12 +135,17 @@ def take_request(bot_dir: Path) -> dict | None:
 
 def _row(root: Path, event: str, *, fleet: str, bot: str, request_id: str, data: dict) -> str:
     """The plane's row for a request or a cancel: committed, duplicate (the plane
-    already holds this request ID's row) or degraded. Never raises."""
+    already holds this request ID's row) or degraded. Never raises. The plane
+    keeps one row per event ID, so the event ID is derived from the event and the
+    request ID: a fresh one each call would let a replayed call add a row."""
     from .plane.emit_api import emit_batch
     from .plane.fleet_events import fleet_event_request
+    from .plane.ids import derive_hex
 
+    key = f"{event}:{request_id}"
     raw = fleet_event_request(event, fleet=fleet, subject_kind="actor", subject=f"bot:{fleet}/{bot}",
-                              source="lifecycle", key=f"{event}:{request_id}", data=data)
+                              source="lifecycle", event_id="ev_" + derive_hex(key), key=key,
+                              data=data)
     try:
         recorded = emit_batch(root, [raw], require_commit=True)[0]
     except Exception:  # noqa: BLE001 - a request must not depend on the plane
@@ -163,7 +171,12 @@ def record_own_compaction(root: Path, *, fleet: str, bot: str, bot_dir: Path, re
                          data={"by": by, "request_id": request_id,
                                "cancelled_request_id": taken.get("request_id"),
                                "requested_at": taken.get("requested_at")})
-        return "cancelled", taken, "committed" if recording == "duplicate" else recording
+        if recording == "duplicate":
+            # This cancel ID cancelled before: put back the request just taken, so a
+            # retried cancel cannot withdraw a request made after the first one.
+            write_request(bot_dir, taken)
+            return "replayed", None, None
+        return "cancelled", taken, recording
     pending = read_request(bot_dir)
     if pending is not None:
         return "pending", pending, None
