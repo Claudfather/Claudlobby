@@ -848,6 +848,29 @@ def test_the_readiness_confirm_waits_until_the_provider_proves_the_launch(bound,
     assert adopted["session_id"] == pending["session_id"] and adopted["pending"] is False
 
 
+def test_a_resumed_launch_is_not_adopted_while_the_pane_is_still_the_process_it_replaces(bound, monkeypatch):
+    """#2748: a resumed launch keeps the process it replaces, and that process's record names
+    the same session. While it is still the pane (between launch() and the kill-session after
+    it in start-bot.sh), neither door adopts it: adopting it would refuse the replacement's
+    capture. Once the replacement is the pane, the confirm adopts it and its capture lands."""
+    b = bound
+    confirm = _confirm_entry(b, monkeypatch)
+    pending = _missed_capture(b, mode="resume", relaunched=False)
+    assert pending["process"] == f"{b.adapter.generation}:{b.adapter.pid}"  # the pane, retained
+    provider_record(b.bot, b.account, b.adapter, pending["session_id"])  # its own record
+    receipt = native._path(b.bot).read_bytes()
+    assert confirm() == 75
+    with pytest.raises(native.NativeSessionError, match="still the process the pending launch replaces"):
+        native.checkpoint(b.bot, b.label, b.tmpdir, b.adapter, operation_id="restart")
+    assert native._path(b.bot).read_bytes() == receipt
+    b.adapter.pid += 1  # the replacement, whose capture has not landed yet
+    provider_record(b.bot, b.account, b.adapter, pending["session_id"])
+    assert confirm() == 0
+    native.capture(b.bot, b.label, b.tmpdir, b.account, b.adapter,
+                   session_start(b.bot, b.account, pending["session_id"], source="resume"), caller=os.getpid())
+    hooked = native.read(b.bot)
+    assert hooked["process"] == f"{b.adapter.generation}:{b.adapter.pid}" and "provider_start" not in hooked
+
 @pytest.mark.parametrize("lands", ["during adoption", "after adoption"])
 def test_a_capture_that_lands_late_still_confirms_the_launch(bound, monkeypatch, lands):
     """#2748: a capture landing between the adoption's observations and its publication keeps

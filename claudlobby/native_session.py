@@ -229,9 +229,14 @@ def _launch_identity(bot_dir, account, launch, current):
 
     A launch stays pending when its SessionStart capture never lands. Both readers of such
     a receipt adopt it by this one rule, checkpoint() and the readiness confirm
-    (_adopt_launch): the exact PID record of the pane process, at its own process start,
-    names the session the receipt retains, and that session has written its transcript.
+    (_adopt_launch): the pane is not the process a resumed launch replaces, the exact PID
+    record of the pane process, at its own process start, names the session the receipt
+    retains, and that session has written its transcript.
     """
+    if current["process"] == launch["process"]:
+        # A resumed launch keeps the process it replaces, whose record names the same session,
+        # until its own capture lands. Adopting that process would refuse the replacement's.
+        raise NativeSessionError("native pane is still the process the pending launch replaces")
     identity = _provider_session(bot_dir, account, current)
     if identity["sessionId"] != launch["session_id"]:
         raise NativeSessionError("native provider session is not the pending launch")
