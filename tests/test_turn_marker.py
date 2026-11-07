@@ -22,7 +22,10 @@ COMMAND = "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
 MARKERS = {"UserPromptSubmit": ".turn-input", "Stop": ".turn-ended", "StopFailure": ".turn-ended"}
 # The event key as a prompt might quote it; JSON escapes its quotes in transit.
 QUOTED = '"hook_event_name":"Stop"'
-CLEAN = (0, "", "")  # exit 0, empty stdout, empty stderr
+# Exit 0 with empty stdout and stderr, on every path: a UserPromptSubmit hook's
+# stdout joins the prompt on every bot and its exit 2 blocks the prompt; a Stop
+# hook's exit 2 keeps the turn going.
+CLEAN = (0, "", "")
 
 
 def _payload(event: str, *, compact: bool = True, **extra) -> str:
@@ -128,6 +131,19 @@ def test_a_prompt_quoting_another_event_is_read_by_its_own_key(bot):
 )
 def test_any_other_event_stamps_nothing(bot, payload):
     assert _run(str(bot), payload) == CLEAN
+    assert _names(bot / "data") == []
+
+
+def test_a_closed_stdin_exits_0(bot):
+    """No payload at all: cat fails, and the hook still prints nothing and exits 0."""
+    r = subprocess.run(
+        ["bash", "-c", 'exec bash "$0" <&-', str(HOOK)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "BOT_DIR": str(bot)},
+        timeout=30,
+    )
+    assert (r.returncode, r.stdout, r.stderr) == CLEAN
     assert _names(bot / "data") == []
 
 
