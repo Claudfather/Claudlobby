@@ -10,8 +10,10 @@ delivery. The fleet-ops guide supplied in your instructions (also the
 reconciliation, and worker reporting: the admit, assign and deliver commands,
 the canonical IDs each step returns, request UUIDs, what to do after an
 uncertain outcome, the message door, the reads of current state,
-`task withdraw`, `reassign` and `escalate`, the result of `bot start`, and
-`fleet reconcile`. This protocol adds only what a manager checks around them.
+`task escalate`, the `bot start` command and which of its result fields to
+read, and `fleet reconcile`. For `task withdraw` and `task reassign` it names
+their `--help`. The readiness gate on a `bot start` result, below, is this
+protocol's own. This protocol adds only what a manager checks around them.
 
 ## Manager task flow
 
