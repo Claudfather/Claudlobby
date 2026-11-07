@@ -269,22 +269,28 @@ def test_git_task_read_refuses_configuration_change_during_query(active, monkeyp
     assert "items" not in result["data"]
 
 
+TASK_HEX = "wi_" + "c0ffee11" + "0" * 24  # a prefix read needs wi_ and 8 hex digits
+
+
 def _event_plane(root, host):
     """wi_main: asg_a (accepted, progress, one event under wi_other's task_id, closed by a
     task-level cancelled ingested after its row), asg_b (closed by its own event), asg_c (no
     events of its own; the cancel closes it too); a task-level event with no assignment.
-    wi_two: two open assignments. wi_one: one current assignment."""
+    wi_two: two open assignments. wi_one: one current assignment. TASK_HEX, which a prefix can
+    name: one current assignment (asg_hex) with one event."""
     from claudlobby.activation_identity import read_current_identity_bindings
     fleet = read_current_identity_bindings(root, "example", package=host.package)["fleet_uid"]
     with sqlite3.connect(db_file(root)) as conn:
-        for tid in ("wi_main", "wi_other", "wi_two", "wi_one"):
+        for tid in ("wi_main", "wi_other", "wi_two", "wi_one", TASK_HEX):
             _task(conn, tid, fleet_uid=fleet)
         for aid, tid in (("asg_a", "wi_main"), ("asg_b", "wi_main"), ("asg_c", "wi_main"),
-                         ("asg_t1", "wi_two"), ("asg_t2", "wi_two"), ("asg_one", "wi_one")):
+                         ("asg_t1", "wi_two"), ("asg_t2", "wi_two"), ("asg_one", "wi_one"),
+                         ("asg_hex", TASK_HEX)):
             _assignment(conn, aid, tid, fleet_uid=fleet)
         for tid, aid, name in (("wi_main", "asg_a", "accepted"), ("wi_main", "asg_a", "progress"),
                                ("wi_other", "asg_a", "progress"), ("wi_main", "asg_b", "returned_blocked"),
-                               ("wi_main", None, "nudged"), ("wi_main", None, "cancelled")):
+                               ("wi_main", None, "nudged"), ("wi_main", None, "cancelled"),
+                               (TASK_HEX, "asg_hex", "accepted")):
             _event(conn, tid, aid, name, fleet_uid=fleet)
     return fleet
 
@@ -340,9 +346,6 @@ def test_assignment_show_prints_each_event_once_and_keeps_every_fact(active, cap
         assert [x["terminal_event_id"] for x in two["task"]["assignments"]] == [None, None]
 
 
-TASK_HEX = "wi_" + "c0ffee11" + "0" * 24  # a prefix read needs wi_ and 8 hex digits
-
-
 def _old_task_show(data):
     """Main's `data["task"]` of `task show`, rebuilt from this head's `data["task"]` and
     `data["events"]` with #2768's derivations and nothing else. Lists keep their order."""
@@ -370,10 +373,6 @@ def _old_task_show(data):
 def test_task_show_prints_each_event_once_and_keeps_every_fact(active, capsys):
     root, host = active
     fleet = _event_plane(root, host)
-    with sqlite3.connect(db_file(root)) as conn:  # one task a prefix can name, with a current assignment
-        _task(conn, TASK_HEX, fleet_uid=fleet)
-        _assignment(conn, "asg_hex", TASK_HEX, fleet_uid=fleet)
-        _event(conn, TASK_HEX, "asg_hex", "accepted", fleet_uid=fleet)
     from claudlobby.task_queries import show_task
     listed = _call(capsys, root, "task", "list", "--state", "all")["data"]  # an unchanged door's envelope
     shown = {}
