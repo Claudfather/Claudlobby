@@ -6,7 +6,7 @@ argument-hint: "[--dry-run|--real] [--target <what>] [--reps N] [--reps-max N]"
 
 # Run Eval
 
-Produce a verdict that can change a decision. Implements the `eval-workflow` protocol; the verdict it emits is what the `ab-gating-rollout` gate consumes.
+Produce a verdict that can change a decision. This skill is the procedure behind two protocols that say only when it applies: `eval-workflow` (an eval is due) and `ab-gating-rollout` (a PR needs a verdict before it lands). Every rule for running the eval, and what its verdict does to the PR, is here.
 
 **Default is `--dry-run`.** Real runs cost real money and are opt-in — see Modes.
 
@@ -15,11 +15,11 @@ Produce a verdict that can change a decision. Implements the `eval-workflow` pro
 - A PR claims a measurable effect (cheaper, faster, fewer tokens) and needs the pre-land gate.
 - You want to know whether a protocol/prompt/model change actually does what it says.
 
-**When not to use:** correctness fixes, refactors claiming no effect, docs. If no result would change what you ship, do not run this — you are buying a number, not an answer. Say so and move on.
+**When not to use:** correctness fixes, refactors claiming no effect, docs. If no result would change what you ship, do not run this — you are buying a number, not an answer. Say so and move on. An effect you cannot state so that an eval could refute it is no claim either: drop it from the PR body and land the change on its other merits.
 
 ## Step 1: Pre-register — before any run
 
-Write these down first. An eval registered after the results are known is not evidence.
+Write these down first, every row: an eval missing one cannot produce a verdict anyone should act on, and one registered after the results are known is not evidence.
 
 | Field | Rule |
 |-------|------|
@@ -27,7 +27,7 @@ Write these down first. An eval registered after the results are known is not ev
 | **Battery** | Tasks chosen now, representative of the real workload. Verdicts are **per task type**, never pooled. |
 | **Baseline** | Control arm identical in everything except the target. |
 | **Reps** | Paired reps per task; stopping rule is the CI rule below, not your judgement. |
-| **Verdict** | Axes, threshold per axis, CI method/width/seed. |
+| **Verdict** | An axis for every cost the change moves, a threshold per axis, CI method/width/seed. |
 | **Pins** | Model version, artifact hash, battery version, harness version. |
 
 If a threshold is not yet ratified, the run emits **INCONCLUSIVE by construction**. Do not substitute a permissive default to get a result — a gate that can green itself before its bar exists is worse than no gate.
@@ -43,6 +43,8 @@ cells = tasks x reps x variants
 Estimate tokens per cell and multiply. Check the total against the fleet's budget ceiling **now**. An eval that discovers its cost at the end has already spent it.
 
 If the number is uncomfortable, cut reps or battery *before* running and record that you did — a narrowed battery is a scope statement the verdict has to carry.
+
+If the eval would cost more than the change is worth, that is itself a finding: say so, and land the change without its effect claim rather than run a matrix nobody wanted.
 
 ## Step 3: Run
 
@@ -60,14 +62,14 @@ Run control and treatment **paired** — compare within a task and rep, then agg
 
 ## Step 4: Verdict
 
-Three outcomes. Apply the pre-registered rule; do not add an axis or move a threshold after seeing data.
+Three outcomes. Apply the pre-registered rule; do not add an axis or move a threshold after seeing data. If the pre-registration was wrong, say so and re-register publicly, as a new run, never as a quiet edit.
 
-- **PASS** — every co-primary axis clears its bar.
-- **FAIL** — an axis is measurably below its bar.
+- **PASS** — on every co-primary axis, the confidence interval clears its bar.
+- **FAIL** — on any axis, the interval lies entirely below its bar.
 - **STRADDLE** — CI spans the bar; extend reps up to `--reps-max`.
 - **INCONCLUSIVE** — still straddling at `--reps-max`.
 
-**INCONCLUSIVE is never rounded up to PASS.** Reps extend on a straddling interval, never on a disappointing one. If more than one axis is in play, *all* must clear — a win on one and a regression on another is a FAIL, not a trade to argue in prose.
+**INCONCLUSIVE is never rounded up to PASS.** Reps extend on a straddling interval, never on a disappointing one. Where a change has more than one cost, gate on all of them: *all* must clear — a win on one and a regression on another is a FAIL, not a trade to argue in prose. If such a trade is worth making, a human decides and records it; the gate never absorbs it.
 
 ## Step 5: Report
 
@@ -82,11 +84,25 @@ Also report **what was not measured** — every eval has a scope boundary the nu
 
 Report INCONCLUSIVE as plainly as PASS. Attach the verdict to the PR when this is running as the `ab-gating-rollout` gate.
 
+## Step 6: What the verdict does to the PR
+
+When this runs as the `ab-gating-rollout` gate:
+
+| Verdict | The PR |
+|---------|--------|
+| **PASS** | The gate is satisfied: review and merge go on their normal terms. |
+| **FAIL** | It does not land on this effect claim. Fix the change, or withdraw the claim. |
+| **INCONCLUSIVE** | It does not pass the gate. It may land only on a different, stated justification (it is simpler, it removes a dependency), with the effect claim taken out of its body; never on the original claim with the eval called noisy. |
+
+"Directionally right" and "no evidence of harm" are not the bar: a change that cannot show its effect has not earned a landing on it.
+
+The gate decides before merge whether a change may land on its claim; `canary-rollout` decides after merge how a landed change rolls out. Neither covers the other: a change that claims an effect and ships fleet-wide passes both.
+
 ## Modes
 
 | Mode | Behaviour |
 |------|-----------|
-| `--dry-run` (**default**) | Zero model calls. Synthesized inputs driven through the **real** measurement and verdict path, so the wiring stays honest between real runs. CI-safe. |
+| `--dry-run` (**default**) | Zero model calls. Synthesized inputs driven through the **real** measurement and verdict path, so the wiring stays honest between real runs. CI-safe, and the only mode CI runs. |
 | `--real` | Requires `AB_EVAL_REAL=1` in the environment as well as the flag. Boots real bots and spends real quota. |
 
 Real mode is deliberately two-key: a flag alone cannot trip it, and the env gate cannot trip it without intent. Never set `AB_EVAL_REAL` on a bot's standing config.
@@ -97,5 +113,5 @@ Confirm the sized cost with the user before a real run. If the harness refuses r
 
 - Report the verdict you got, including when it is not the one hoped for.
 - Never re-run to a better number.
-- Never narrow the battery after seeing results.
+- Never narrow or otherwise change the battery after seeing results: a battery edited in response to results is no longer evidence.
 - A verdict whose pins no longer match the running system is **expired**, not weak evidence. Re-run or drop the claim.
