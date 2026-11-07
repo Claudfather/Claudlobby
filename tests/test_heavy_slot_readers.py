@@ -21,6 +21,9 @@ REPO = Path(__file__).resolve().parent.parent
 # recording. The darwin-only test below reads the real output on CI's macOS runner
 # and records it in that run's junit report.
 FIXTURE = REPO / "tests/fixtures/vm_stat-darwin.txt"
+# Real vm_stat output, whole, as the darwin-only test below recorded it on CI's
+# macos-latest runner (#2786's first run, the junit report of its macOS shard 2).
+RECORDED = REPO / "tests/fixtures/vm_stat-macos-runner.txt"
 hs = load_lib_module("heavy-slot")
 
 LINUX = sys.platform.startswith("linux")
@@ -57,6 +60,11 @@ def test_the_vm_stat_reader_counts_free_inactive_and_speculative_pages():
     for counter in ("Pages free", "Pages inactive", "Pages speculative"):
         with pytest.raises(ValueError):
             hs._vm_stat_mib("\n".join(x for x in lines if not x.startswith(counter)))
+
+
+def test_the_vm_stat_reader_on_output_recorded_on_a_mac():
+    # Pages free 44252 + inactive 251126 + speculative 161846, in 16384-byte pages.
+    assert hs._vm_stat_mib(RECORDED.read_text()) == 7144
 
 
 def test_where_there_is_no_meminfo_the_watch_reads_vm_stat(se):  # noqa: F811
