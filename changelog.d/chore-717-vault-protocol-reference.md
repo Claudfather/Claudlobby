@@ -1,0 +1,3 @@
+### Changed — the vault form of the Shared Documentation protocol keeps its rules and moves its reasons to a file every bot links (#717)
+
+Every bot wired to a Claudron vault carries the `shared-documentation-vault` protocol on every call. Its reasons, with the Claudron #143 evidence, are now in `library/skills/fleet-ops/vault-reference.md`, word for word, and the protocol keeps a one-line pointer to it. Every bot links the `fleet-ops` skill, so the file reaches each bot that composes the protocol at no cost per call. By Claude Code's `/context`, the protocol's composed section went from 1,821 to 1,363 tokens; whether bots follow the vault rules as well with their reasons in a separate file is not measured. Every rule stays in the protocol.
