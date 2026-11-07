@@ -157,3 +157,25 @@ def test_a_managers_call_on_its_worker_still_types_and_on_itself_records(worker,
     own = worker.call("bot", "compact", "manager", "--request-id", RID2, use_root=False)["data"]
     assert own["outcome"] == "requested" and _record(worker, "manager")["by"] == "bot:example/manager"
     assert worker.native.calls.count("svc_bot_control_exact") == 1
+
+
+def test_the_request_file_is_created_only_where_none_is_pending(tmp_path):  # noqa: F811
+    """The race the CLI tests cannot reach: a second create finds the name taken and
+    leaves the first request as it was, and no temporary file stays behind."""
+    from claudlobby.compact_request import read_request, write_request
+
+    assert write_request(tmp_path, {"request_id": RID1}) is True
+    assert write_request(tmp_path, {"request_id": RID2}) is False
+    assert read_request(tmp_path) == {"request_id": RID1}
+    assert [p.name for p in (tmp_path / "data").iterdir()] == [".compact-request"]
+
+
+def test_of_two_takers_one_gets_the_request(tmp_path):  # noqa: F811
+    from claudlobby.compact_request import take_request, write_request
+
+    write_request(tmp_path, {"request_id": RID1})
+    assert take_request(tmp_path) == {"request_id": RID1}
+    assert take_request(tmp_path) is None
+    (tmp_path / "data/.compact-request").write_text("not json\n")
+    assert take_request(tmp_path) == {}  # an unreadable request is still taken
+    assert list((tmp_path / "data").iterdir()) == []
