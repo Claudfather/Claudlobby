@@ -1,0 +1,3 @@
+### Added — every bot records when input last reached its session and when its last turn ended (#1053)
+
+A new hook, `turn-marker.sh`, composed for every bot on `UserPromptSubmit`, `Stop` and `StopFailure`, writes `data/.turn-input` when a prompt is submitted and `data/.turn-ended` when a turn ends, normally or on an error. The file's modification time is the fact, and its one line names the event that wrote it. Nothing reads the markers yet: they are the first step of compaction at task close (#1053), where keepalive will tell a finished turn from a running one by them. The hook prints nothing and exits 0 on every path, so it never adds to a prompt, blocks one, or keeps a turn going.
