@@ -30,8 +30,13 @@ check-in decision uses `task assign TASK_ID --bot WORKER --checkin ck_...
 add `--checkin` to admit. The check-in skill owns the record-before-act
 sequence.
 
+Do not turn an uncertain send or admit into a second assignment or a second
+task.
+
 For an ordinary question that does not create work, use the guide's message
-door. Do not turn a question into a task solely to deliver text.
+door. Do not turn a question into a task solely to deliver text. A worker
+answers a note that asked for no work with `fleet reports submit`, the
+explicitly unlinked report: it links no task and closes nothing.
 
 ## Follow-up and re-check
 
