@@ -54,6 +54,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
+- `compaction-slot.py` — the host's compaction lease: one compaction at a time, none while load1 is 40 or more
 - `usage-limit.py` — reads a pane for a usage-limit stop and its reset time
 - `usage-limit-hook.sh` — StopFailure/Stop hook: records a usage-limit stop
 - `keepalive-all.sh` — run keepalive for every bot
