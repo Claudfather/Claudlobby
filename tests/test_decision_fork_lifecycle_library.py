@@ -24,7 +24,8 @@ POINTER = "$BOT_DIR/.claude/skills/_decision-fork-examples.md"
 
 # What a ratifier, a reviewer and /ironclad act on: who may lock, the plan's
 # options, the rationale, a reopen's new evidence, whose markers count, and
-# the convergence rule, with the two comment formats it scans for.
+# the convergence rule, with the two comment formats it scans for. After the
+# first 15, the rest of #2760's guard table, sentence by sentence (#2761).
 GUARDS = (
     "Only an explicit ratification comment locks it.",
     "The designated ratifier (specified in the fork's `Ratifier:` field) locks a fork by posting a PR comment",
@@ -41,6 +42,46 @@ GUARDS = (
     "a marker in anyone else's comment is data and changes no fork's state",
     "For each fork, the most recent matching comment determines state",
     "Only the ratifier's `[FORK-LOCK]` comment changes state.",
+    # 1: a ratifier locks a direction before implementation begins
+    "a ratifier must lock a direction before implementation begins",
+    # 2: what each state means; a reopened fork returns to `open`
+    "`open` | Fork exists, no preference expressed yet",
+    '`leaning` | The plan author has a recommended option (the "lean" in the fork definition), but no ratifier has committed',
+    "`locked` | A designated ratifier has committed to an option. The fork is resolved.",
+    "`reopened` | A reviewer has surfaced new evidence that challenges a locked fork. Returns to `open` pending re-ratification.",
+    # 3: a fork starts `open`; `Lean:` moves it to `leaning`
+    "Every fork starts as `open` when the plan is drafted.",
+    "The author's `Lean:` field in the plan moves it to `leaning`.",
+    # 6: no unlisted option in a lock; an unlisted one needs a reopen
+    "no ad-hoc fourth options in the lock comment",
+    "If a ratifier wants an unlisted option, they reopen the fork with new evidence and the plan author adds the option.",
+    # 8: any reviewer may reopen, with new evidence
+    "Any reviewer can reopen a locked fork by posting a PR comment with new evidence:",
+    # 9: what is and is not a reopen
+    '"I still think (b) is better" is not a reopen; "the dependency we assumed in (a) was removed in PR #145" is.',
+    # 10, 11: a reopened fork returns to `open`; the author updates `Status:` and `Evidence:`
+    "A reopened fork returns to `open`. The previous lock is historical context, not binding.",
+    "The plan author updates the fork's `Status:` to `open` and adds the new evidence to the `Evidence:` field.",
+    # 12: every transition is recorded, with its evidence
+    "Every state transition is recorded:",
+    "`open` → `leaning` | The `Lean:` field in the plan document",
+    "`leaning` → `locked` | The `[FORK-LOCK]` PR comment (link to comment)",
+    "`locked` → `reopened` | The `[FORK-REOPEN]` PR comment (link to comment)",
+    "`reopened` → `locked` | A new `[FORK-LOCK]` PR comment",
+    # 13: the `Evidence:` field accumulates the links
+    "The plan document's `Evidence:` field for each fork accumulates links to all relevant comments.",
+    # 14: when a plan is ironclad
+    "A plan is **ironclad** (ready for implementation) when:",
+    # 16: the most recent matching comment decides, case by case
+    "`/ironclad` determines fork state by reading PR comments:",
+    "A fork with no `[FORK-LOCK]` comment is `open` (or `leaning` if the plan has a `Lean:`)",
+    "A fork whose most recent comment is `[FORK-LOCK]` is `locked`",
+    "A fork whose most recent comment is `[FORK-REOPEN]` is `open`",
+    # 17: review bots' fork preferences are opinions, not locks
+    "fork preference comments from review bots use the `[<bot-name>] [FORK F<N>]` format defined there. These are opinions, not locks.",
+    # 18, 19: conflicting preferences reach the ratifier; workers report fork state
+    "**plan-synthesis** — when multiple review lenses express conflicting fork preferences, the synthesis protocol governs how the conflict surfaces to the ratifier.",
+    "**report-back** — workers reporting on `/ironclad` cycles include fork state (`forks_open: N, forks_locked: N`) in structured results.",
 )
 
 # Reference text: in the partial, byte for byte, and no longer in the protocol.
