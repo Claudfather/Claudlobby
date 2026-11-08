@@ -1,6 +1,6 @@
 ### Added — a delivery to a bot waits for its compaction to end, and presses no extra Enter into it (#1053)
 
-While the host's compaction slot holds a lease naming a bot, a Claude Code compaction is in flight there. Its pane then draws "Compacting conversation…", which the busy check does not match, so until now a compacting bot read as idle.
+While the host's compaction slot holds a lease naming a bot, a Claude Code compaction is in flight there. Its pane alone cannot show it: on Claude Code 2.1.319 the footer draws "esc to interrupt" while the input box is empty or shows queued messages, but not while a message sits typed in the box, and the "Compacting conversation…" line is not the busy check's activity-line shape.
 
 - Every delivery through the CLI's messaging transport (`message send` and `reply`, `assignment deliver`, `fleet reports submit`, and the notices that assignment reports and task acts send) waits for that lease to end, reading the slot every 2 seconds and for 60 seconds at most, and then sends as to any busy bot. A delivery to any other bot does not wait. One that waited says so in one line on stderr.
 - The CLI's repair Enter (the one it presses when a message is still held in the box after the receipt wait) presses nothing while the lease lives; its look reads `compacting`.

@@ -4122,9 +4122,11 @@ bot_is_busy() {
     local pane fleet
     pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null | tail -10) || true
     pane_is_busy "$pane" && return 0
-    # #1053 (build PR 6): a compacting pane draws "Compacting conversation…",
-    # which pane_is_busy does not match, so the slot's lease decides. The bot's
-    # fleet comes from its own bot.conf; its ID is its session's name.
+    # #1053 (build PR 6): the slot's lease decides for a compacting bot. On
+    # Claude Code 2.1.319 its pane's footer draws "esc to interrupt" while the box
+    # is empty or shows queued messages, but not while typed text sits in the box,
+    # and its "Compacting conversation…" line is not the activity line's shape.
+    # The bot's fleet comes from its own bot.conf; its ID is its session's name.
     fleet="${FLEET_NAME:-}"
     [ -z "$bot_dir" ] || fleet=$(bot_conf_get "$bot_dir" FLEET_NAME "$fleet")
     compaction_lease_left "$fleet" "$session" >/dev/null && return 0

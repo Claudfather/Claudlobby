@@ -17,9 +17,11 @@ paste chip in a box that read_box found empty just before the send.
 A compaction in flight is the one wait (#1053, build PR 6). While the host's
 compaction slot holds a lease naming the destination's bot, ``send`` waits for
 it to end, at most ``_COMPACTION_WAIT_S`` (60 s), before its native call, and
-``press_held_enter`` presses nothing. Claude Code draws "Compacting
-conversation…" then, which the busy check does not match, so the pane alone
-would read idle. ``compaction_lease`` is the one read: it runs the reader that
+``press_held_enter`` presses nothing. The pane alone cannot tell: on Claude
+Code 2.1.319 a compacting pane's footer draws "esc to interrupt" while its box
+is empty or shows queued messages, but not while a message sits typed in the
+box, and its "Compacting conversation…" line is not the activity line's shape.
+``compaction_lease`` is the one read: it runs the reader that
 lib-common's compaction_lease_left runs, the same text, so the two cannot differ.
 """
 
@@ -344,8 +346,9 @@ set -uo pipefail
 . "$1" >/dev/null 2>&1 || { printf 'repair-v1\tunknown\t0\t-\n'; exit 3; }
 _repair_look_and_press() {
     local pane verdict ok match pressed
-    # #1053 (build PR 6): no Enter while a compaction lease names the bot. Its
-    # pane draws no running turn then, so the look below would read it idle.
+    # #1053 (build PR 6): no Enter while a compaction lease names the bot. With
+    # text in its box a compacting pane draws no busy hint, so the look below
+    # could read it idle.
     if compaction_lease_left "$FLEET_NAME" "$3" >/dev/null 2>&1; then
         printf 'repair-v1\tcompacting\t0\t-\n'; return 0
     fi

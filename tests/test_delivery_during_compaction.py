@@ -1,9 +1,9 @@
 """#1053 PR 6: deliveries during a compaction.
 
 While the host's compaction slot (compaction-slot.py, the build's PR 3) holds a
-lease naming a bot, a compaction is in flight there. Its pane draws "Compacting
-conversation…", which the busy check does not match, so the pane alone reads
-idle. Three readers now ask the slot: bot_is_busy and the CLI's repair Enter
+lease naming a bot, a compaction is in flight there. The pane alone cannot tell:
+on Claude Code 2.1.319 its footer draws "esc to interrupt" while the box is empty
+or shows queued messages, but not while a message sits typed in the box. Three readers now ask the slot: bot_is_busy and the CLI's repair Enter
 (which presses nothing while the lease lives) through lib-common's
 compaction_lease_left, and the CLI's send (which waits for the lease to end, at
 most 60 s, then sends as to any busy bot) by running the same reader itself.
