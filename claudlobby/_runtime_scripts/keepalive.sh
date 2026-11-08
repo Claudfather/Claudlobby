@@ -2,15 +2,17 @@
 # Bot keepalive — restart dead sessions, log idle state.
 # Usage: keepalive.sh /path/to/bot/dir
 #
-# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for the one
-# gated reload path below. Pressing Enter at an empty prompt submits any "ghost"
-# text — including Claude Code's greyed-out auto-completion suggestions — which
-# causes the bot to act on input the user never typed. The reload path is safe
-# because it types a FIXED slash command as the first input, then Enter (so Enter
-# submits that command, never ghost text), and fires ONLY when a fleet reload is
-# pending (data/.reload-pending) and the pane is confirmed IDLE. This is the
-# single activation point for Mechanism 1 of the fleet update lifecycle:
-# reload-fleet.sh marks bots; keepalive performs the /reload at the next idle tick.
+# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for two gated
+# paths below, the reload and the compaction. Pressing Enter at an empty prompt
+# submits any "ghost" text — including Claude Code's greyed-out auto-completion
+# suggestions — which causes the bot to act on input the user never typed. Both
+# paths are safe because each types a FIXED slash command as the first input,
+# then Enter (so Enter submits that command, never ghost text). The reload path
+# fires ONLY when a fleet reload is pending (data/.reload-pending) and the pane
+# is confirmed IDLE: the single activation point for Mechanism 1 of the fleet
+# update lifecycle (reload-fleet.sh marks bots; keepalive performs the /reload at
+# the next idle tick). The compaction path (compact_tick, #1053) types /compact
+# ONLY for a pending request (data/.compact-request), once its guards hold.
 
 set -euo pipefail
 
