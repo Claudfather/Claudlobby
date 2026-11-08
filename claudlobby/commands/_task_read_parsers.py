@@ -25,7 +25,9 @@ def _route(children, verb, command, help, description=None):
 
 
 def register_task_read_subparsers(sub, task_children):
-    listing = _route(task_children, "list", "task.list", "List canonical tasks in the active fleet")
+    listing = _route(task_children, "list", "task.list", "List canonical tasks in the active fleet",
+                     description="List canonical tasks in the active fleet: each task's state and "
+                                 "assignments, and each recorded event of the page once (data.events).")
     listing.add_argument("--state", default="open", choices=(
         "open", "queued", "assigned", "active", "blocked", "completed", "failed", "cancelled", "all"))
     listing.add_argument("--bot", metavar="BOT", help="Only assignments for this active bot")
