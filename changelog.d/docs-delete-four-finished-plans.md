@@ -1,0 +1,3 @@
+### Removed — four more finished plans under documentation/plans/
+
+The observable plane's Phase-1 kernel plan and Phase-2 ingest plan, the Claudron consumption plan and the L3 lessons triage ledger are deleted from `documentation/plans/` and `documentation/plans/archive/`; git history keeps them. Where other files pointed at them, they now name the issues and PRs that carried that work (#509, #517, #1341, #1345, #1372, #1384) or say the plan is in git history. The lessons-migrate docstring and `library/lessons/README.md` give the classification in `claudlobby/commands/lessons_migrate.py` as the record of each note's verdict.
