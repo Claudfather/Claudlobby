@@ -40,18 +40,26 @@ def _task_record(task) -> dict:
     return record
 
 
-def _event_ledger(task) -> list[dict]:
-    """Every event the read carries, once, ordered by (ingest_seq, event_id): the
+def _event_ledger(*tasks) -> list[dict]:
+    """Every event the read carries, once, ordered by (ingest_seq, event_id): each
     task's history, each assignment's history and every closing event, so each
-    `terminal_event_id` resolves in the ledger."""
+    `terminal_event_id` resolves in the ledger. An event two tasks hold, such as
+    one recorded under another task's assignment, appears once."""
     events = {}
-    found = [*task.history, task.terminal_event]
-    for item in task.assignments:
-        found += [*item.history, item.terminal_event]
-    for event in found:
-        if event is not None:
-            events.setdefault(event.event_id, event)
+    for task in tasks:
+        found = [*task.history, task.terminal_event]
+        for item in task.assignments:
+            found += [*item.history, item.terminal_event]
+        for event in found:
+            if event is not None:
+                events.setdefault(event.event_id, event)
     return [asdict(event) for event in sorted(events.values(), key=lambda e: (e.ingest_seq, e.event_id))]
+
+
+def _task_page(tasks) -> dict:
+    """A page of tasks, as task list and the inbox's work print it: one `_task_record`
+    per task, plus `events`, where each event the page's tasks hold appears once."""
+    return {"items": [_task_record(task) for task in tasks], "events": _event_ledger(*tasks)}
 
 
 def _assignment_show_data(view) -> dict:
@@ -110,7 +118,7 @@ def _read(args) -> CommandOutput:
                 page = list_tasks(conn, fleet_uid=bindings["fleet_uid"], state=args.state,
                                   bot_uid=bot_uid, limit=args.limit, cursor=args.cursor)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "bot": args.bot, "items": [asdict(item) for item in page.items],
+                        "bot": args.bot, **_task_page(page.items),
                         "next_cursor": page.next_cursor, "issues": [asdict(issue) for issue in page.issues]}
                 lines = tuple(f"{item.task_id}\t{item.state or 'unresolved'}\t{item.title}"
                               for item in page.items)

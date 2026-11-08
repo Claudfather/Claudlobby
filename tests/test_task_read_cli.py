@@ -374,7 +374,7 @@ def test_task_show_prints_each_event_once_and_keeps_every_fact(active, capsys):
     root, host = active
     fleet = _event_plane(root, host)
     from claudlobby.task_queries import show_task
-    listed = _call(capsys, root, "task", "list", "--state", "all")["data"]  # an unchanged door's envelope
+    listed = _call(capsys, root, "task", "list", "--state", "all")["data"]  # task list's envelope
     shown = {}
     with sqlite3.connect(db_file(root)) as conn:
         for tid in ("wi_main", "wi_other", "wi_two", "wi_one", TASK_HEX):
@@ -395,7 +395,7 @@ def test_task_show_prints_each_event_once_and_keeps_every_fact(active, capsys):
             assert old["history"] == [e for e in events if e["task_id"] == tid]
             # Every other key of data (fleet, manager, provenance) is what task list prints; no prefix note.
             assert ({k: v for k, v in data.items() if k not in ("task", "events")}
-                    == {k: v for k, v in listed.items() if k not in ("bot", "items", "next_cursor", "issues")})
+                    == {k: v for k, v in listed.items() if k not in ("bot", "items", "events", "next_cursor", "issues")})
     wi_main, other, two, one = (shown[t]["task"] for t in ("wi_main", "wi_other", "wi_two", "wi_one"))
     main_events = shown["wi_main"]["events"]
     assert len(main_events) == 6 and wi_main["state"] == "cancelled" and wi_main["current_assignment_id"] is None
@@ -420,3 +420,76 @@ def test_task_show_prints_each_event_once_and_keeps_every_fact(active, capsys):
     assert prefixed["resolved_from_prefix"] == {"prefix": "wi_c0ffee11", "id": TASK_HEX}
     assert {k: v for k, v in prefixed.items() if k != "resolved_from_prefix"} == shown[TASK_HEX]
     assert shown[TASK_HEX]["task"]["current_assignment_id"] == "asg_hex"
+
+
+def _events_printed(value) -> list:
+    """The `event_id` of every event object anywhere in a printed result: an object with
+    `event` and `event_id`. A task, assignment or issue record, an escalation row and a
+    report carry no `event` key, so none of them is counted."""
+    if isinstance(value, dict):
+        own = [value["event_id"]] if "event" in value and "event_id" in value else []
+        return own + [found for item in value.values() for found in _events_printed(item)]
+    if isinstance(value, list):
+        return [found for item in value for found in _events_printed(item)]
+    return []
+
+
+def _check_page(printed, page, tasks) -> list:
+    """One printed page of tasks (`page` holds its `items` and `events`) against the
+    reducer's own `tasks`; returns main's task records, as main printed them."""
+    # The printed result, parsed whole: an event object anywhere in it is counted.
+    found = _events_printed(printed)
+    assert len(found) == len(set(found)), "an event is printed more than once"
+    assert not any({"history", "terminal_event", "current_assignment"} & set(record)
+                   for item in page["items"] for record in (item, *item["assignments"]))
+    old = json.loads(json.dumps([asdict(task) for task in tasks]))
+    # Main's whole records, lists in order, from this head's records and the page's events
+    # with #2768's derivations and nothing else.
+    assert [_old_task_show({"task": item, "events": page["events"]}) for item in page["items"]] == old
+    # The page's events are the events main's records held, each once, in ingest order.
+    keys = [(e["ingest_seq"], e["event_id"]) for e in page["events"]]
+    assert keys == sorted(keys) and {event_id for _, event_id in keys} == set(_events_printed(old))
+    return old
+
+
+def test_task_list_prints_each_event_once_and_keeps_every_fact(active, capsys):
+    root, host = active
+    fleet = _event_plane(root, host)
+    from claudlobby.task_queries import list_tasks
+
+    def read(conn, flags, **query):
+        assert main(["--root", str(root), "--json", "task", "list", *flags]) == 0
+        data = json.loads(capsys.readouterr().out)["data"]
+        page = list_tasks(conn, fleet_uid=fleet, **query)
+        old = _check_page(data, data, page.items)
+        assert data["next_cursor"] == page.next_cursor
+        assert data["issues"] == json.loads(json.dumps([asdict(issue) for issue in page.issues]))
+        return data, old
+
+    with sqlite3.connect(db_file(root)) as conn:
+        everything, old = read(conn, ("--state", "all"), state="all")
+        # Main printed the event recorded under wi_other with wi_main's asg_a twice: in the
+        # history of asg_a and in wi_other's. It is printed once, and both derive it.
+        crossed = [e["event_id"] for e in everything["events"] if e["task_id"] == "wi_other"]
+        assert len(crossed) == 1 and _events_printed(old).count(crossed[0]) == 2
+        assert len(everything["events"]) == 7
+        # Each page holds the events of its own tasks; a cursor continues as before.
+        cursor, paged = None, []
+        while True:
+            flags = ("--state", "all", "--limit", "2", *(("--cursor", cursor) if cursor else ()))
+            page, _ = read(conn, flags, state="all", limit=2, cursor=cursor)
+            paged.append([item["task_id"] for item in page["items"]])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        assert paged == [["wi_main", "wi_other"], ["wi_two", "wi_one"], [TASK_HEX]]
+        assert [item["task_id"] for item in read(conn, (), state="open")[0]["items"]] == [
+            "wi_other", "wi_one", TASK_HEX]
+    # The same task in the same shape from task list and task show.
+    for item in everything["items"]:
+        shown = _call(capsys, root, "task", "show", item["task_id"])["data"]
+        assert shown["task"] == item
+        held = {item["task_id"], *(a["assignment_id"] for a in item["assignments"])}
+        closers = {item["terminal_event_id"], *(a["terminal_event_id"] for a in item["assignments"])}
+        assert shown["events"] == [e for e in everything["events"] if e["task_id"] in held
+                                   or e["assignment_id"] in held or e["event_id"] in closers]

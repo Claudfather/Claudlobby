@@ -1,0 +1,10 @@
+### Changed — `task list` and `fleet inbox` print each event once (#2771)
+
+`claudlobby --json task list` printed each task whole: its history, each assignment's history and closing event, and the current assignment again, so an event appeared up to four times. An event recorded with one task's ID under another task's assignment appeared under both tasks. `fleet inbox` printed its open work the same way. Each event now appears once per read, in ingest order: in `data.events` for `task list`, and in `data.work.events` for `fleet inbox`. That list holds every event of the page's tasks. Each task is printed as `task show` has printed it since #2773, naming its events by ID:
+
+- Each task record in `data.items` and `data.work.items`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. A task's history is the entries of the page's events with its `task_id`; the current assignment's record is its entry in the task's `assignments`.
+- Each record in a task's `assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of the page's events with its `assignment_id`.
+- Schema-1's top-level keys are unchanged, as are every other field, the cursors, `issues`, the inbox's reports and attention, and the plain-text lines. `task list --help` now says where the events are.
+- A jq read of a removed key now gets null. That is also what an open task's `terminal_event` and a task with no current assignment's `current_assignment` read before, so to tell them apart, read `state`, `terminal_event_id` or `current_assignment_id`.
+
+On one fleet's live plane, a `task list --state all` page of 100 tasks went from 864,842 to 475,916 characters (−45.0%), and the open page of three tasks from 12,019 to 6,435 (−46.5%). `fleet inbox` saves the same 5,584 characters in its work section. Tokens, and whether a reader acts as well on the shorter read, are not measured.
