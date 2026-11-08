@@ -334,8 +334,9 @@ jobs:
               """The gate, on a PR offered with a body that fails: re-read the body every POLL_S
               seconds, for up to WAIT_S, until it passes. Usually the edit's own run replaces
               this one first. Returns the last read's problems; a failed read raises."""
+              # Flushed: stdout is a pipe here, and a pending gate's log should say why it waits.
               print(f"The body fails as offered. Re-reading it every {POLL_S} s for up to "
-                    f"{WAIT_S} s: \"Rollout check (no wait)\" has failed on it at once.")
+                    f"{WAIT_S} s: \"Rollout check (no wait)\" has failed on it at once.", flush=True)
               start = time.monotonic()
               deadline = start + WAIT_S
               while time.monotonic() < deadline:

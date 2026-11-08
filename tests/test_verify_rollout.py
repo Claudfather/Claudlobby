@@ -33,6 +33,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -120,10 +121,11 @@ class Run:
                    if any(re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+", a) for a in call))
 
 
-def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_caller=NARROW_CALLER,
-              fail=None, docs_run="", tests_run="", pr="7", event_body=None, role="gate",
-              action="edited", wait_s=WAIT_TEST_S) -> Run:
-    """Run the checker as one job of the workflow does. A list for body serves one body per
+def _prepare(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_caller=NARROW_CALLER,
+             fail=None, docs_run="", tests_run="", pr="7", event_body=None, role="gate",
+             action="edited", wait_s=WAIT_TEST_S):
+    """Write the checker and the stand-in gh for one job's run, and return the script, its
+    environment, and the call log and summary paths. A list for body serves one body per
     read, the last one repeating. The default event is an edit, which both jobs judge once."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     script = tmp_path / "checker.py"
@@ -154,6 +156,12 @@ def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_call
         event.write_text(json.dumps({"pull_request": {"number": int(pr), "body": event_body}}),
                          encoding="utf-8")
         env["GITHUB_EVENT_PATH"] = str(event)
+    return script, env, log, summary
+
+
+def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), **opts) -> Run:
+    """Run the checker as one job of the workflow does (_prepare takes the options)."""
+    script, env, log, summary = _prepare(tmp_path, body, files, **opts)
     proc = subprocess.run([sys.executable, str(script)], env=env, capture_output=True,
                           text=True, timeout=60)
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
@@ -625,6 +633,22 @@ def test_the_cue_fails_with_the_text_the_check_always_gave(tmp_path):
     once = run_check(tmp_path / "once", NO_SECTION, role="gate", action="edited")
     assert cue.rc == once.rc == 1
     assert cue.out == once.out
+
+
+def test_the_gate_says_at_once_why_it_waits(tmp_path):
+    """Its stdout is a pipe, so the line is flushed: a pending gate's log says why it waits."""
+    script, env, _, _ = _prepare(tmp_path, [NO_SECTION], action="opened", wait_s=8)
+    start = time.monotonic()
+    proc = subprocess.Popen([sys.executable, str(script)], env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True)
+    try:
+        first = proc.stdout.readline()
+        elapsed = time.monotonic() - start
+    finally:
+        proc.kill()
+        proc.communicate(timeout=60)
+    assert first.startswith("The body fails as offered."), first
+    assert elapsed < 4, f"the wait line came {elapsed:.1f} s in, when the gate ended"
 
 
 def test_a_body_that_passes_as_offered_is_not_waited_on(tmp_path):
