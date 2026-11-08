@@ -20,6 +20,8 @@ Pass-bar (per task type):
   STRADDLE (CI spans the bar) -> extend reps; at --reps-max it becomes
   INCONCLUSIVE. INCONCLUSIVE is NEVER rounded up to PASS. With no --threshold
   (the F2 sentinel) every task is INCONCLUSIVE by construction.
+  A task with an "unscored" quality row (the F2 stub's) is INCONCLUSIVE
+  ("quality unscored") whatever the threshold, token axes or mechanical check.
 
 Usage:
   ab-comms-verdict.py RESULTS.jsonl [--out verdict.json] [--threshold F]
@@ -97,20 +99,22 @@ def _task_verdict(
     ps_ci,
     cw_ci,
     mech_ok,
-    qual_ok,
+    quality,
     threshold,
     cost_threshold,
     reps_now,
     reps_max,
 ):
     """Decide one task type. Returns (verdict, reason, sets_straddle)."""
+    if quality == "unscored":
+        return "INCONCLUSIVE", "quality unscored", False
     if not threshold:
         return "INCONCLUSIVE", "no F2-ratified threshold (T pending)", False
     if not ps or not cw:
         return "INCONCLUSIVE", "insufficient paired data", False
     if not mech_ok:
         return "FAIL", "mechanical invariant failure", False
-    if not qual_ok:
+    if quality != "pass":
         return "FAIL", "quality gate failure", False
     T = float(threshold)
     ps_pass = ps_ci[0] is not None and ps_ci[0] >= T
@@ -145,7 +149,11 @@ def compute(
         cw = rel_reductions(treps, "cost_weighted_total")
         all_rows = [v for reps in treps.values() for v in reps.values()]
         mech_ok = all(v.get("mech_ok", False) for v in all_rows)
-        qual_ok = all((v.get("quality") or {}).get("gate") == "pass" for v in all_rows)
+        gates = [(v.get("quality") or {}).get("gate") for v in all_rows]
+        if "unscored" in gates:
+            quality = "unscored"
+        else:
+            quality = "pass" if all(g == "pass" for g in gates) else "fail"
         ps_ci, cw_ci = bootstrap_ci(ps), bootstrap_ci(cw)
         verdict, reason, straddled = _task_verdict(
             ps,
@@ -153,7 +161,7 @@ def compute(
             ps_ci,
             cw_ci,
             mech_ok,
-            qual_ok,
+            quality,
             threshold,
             cost_threshold,
             reps_now,
@@ -172,7 +180,7 @@ def compute(
                     "median_reduction": _median(cw),
                     "ci": list(cw_ci),
                 },
-                "quality": "stub (F2-pending)",
+                "quality": quality,
                 "verdict": verdict,
                 "reason": reason,
             }

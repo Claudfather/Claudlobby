@@ -31,8 +31,9 @@
 #                   into run_cell is F2 follow-up.
 #
 # The default verdict is INCONCLUSIVE BY CONSTRUCTION: with no F2-ratified
-# threshold T and a stub quality scorer, the harness can never emit PASS. That is
-# the intended safety posture — the skeleton cannot green a real gate pre-F2.
+# threshold T, or with the stub quality scorer, the harness can never emit
+# PASS. That is the intended safety posture — the skeleton cannot green a real
+# gate pre-F2.
 #
 # Real interactive Claude Code may repeat one assistant message's flat usage
 # across content-block lines. The accounting owner deduplicates a known
@@ -920,8 +921,8 @@ battery_dispatch_text() {  # $1 task
 battery_must_persist() {  # $1 task -> the must_persist facts (empty until F2)
     printf ''
 }
-score_quality() {  # $1 task -> a JSON quality object. Stub passes until F2.
-    printf '{"gate":"pass","scorer":"stub","note":"F2-pending"}'
+score_quality() {  # $1 task -> a JSON quality object. The stub scores nothing until F2.
+    printf '{"gate":"unscored","scorer":"stub","note":"F2-pending"}'
 }
 mechanical_check() {  # $1 task  $2 must_persist  $3 transcript -> "true"|"false"
     # MECHANICAL seam (always-on in real mode): asserts the [BOTREPORT] ledger-row
