@@ -1,0 +1,3 @@
+### Removed — four names nothing reads
+
+`ConfigInstall.retained_directories` in `claudlobby/config_install.py`, `Resolution.origin_hint` in `claudlobby/env_tiers.py`, `ENV_READ` in `claudlobby/isolation.py` and `_FEEDBACK_GENERATED_ENV` in `claudlobby/plane/owner_feedback.py` are deleted, with the `_GENERATED_ENV` import that only the last one used. No code read any of them. No journal row carries the `retained` key the first was built from. The second's comment said the register fills it, but no code ever set it. The env-read lint calls `_env_read_re()` itself. The owner feedback adapter refuses `BOT_SERVICE` and `CLAUDLOBBY_TIMER_CONTEXT` through the action context in `plane/owner_service.py`, which `tests/test_plane_owner_feedback.py` checks.
