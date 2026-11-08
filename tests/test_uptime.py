@@ -16,7 +16,6 @@ from claudlobby.uptime import (
     compute_metrics,
     aggregate_fleet,
     format_table,
-    format_json,
     _fmt_duration,
 )
 
@@ -332,19 +331,6 @@ class TestFormatTable:
         table = format_table(results, window="24h")
         assert "empty" in table
         assert "\u2014" in table
-
-
-# -- format_json -----------------------------------------------------------
-
-
-class TestFormatJson:
-    def test_valid_json_output(self):
-        import json
-
-        results = {"bot1": {"24h": {"uptime_pct": 99.0}}}
-        output = format_json(results)
-        parsed = json.loads(output)
-        assert parsed["bot1"]["24h"]["uptime_pct"] == 99.0
 
 
 # -- _fmt_duration ---------------------------------------------------------

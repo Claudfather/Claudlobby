@@ -819,37 +819,3 @@ def exits_nonzero(findings: list[Finding], *, strict: bool) -> bool:
     if has_failures(findings):
         return True
     return strict and any(f.severity == WARN for f in findings)
-
-
-def format_report(fleet: FleetConfig, findings: list[Finding]) -> str:
-    """Human-readable fresh-box self-containment report (the over-grant report)."""
-    lines = [
-        f"Fresh-box self-containment audit — {fleet.name} ({len(fleet.bots)} bots)"
-    ]
-    # INFO is visibility only (it never blocks, even under --strict), so it
-    # must not hide the verdict either: a fleet whose only findings are INFO
-    # lines is still self-contained, and says so above them.
-    if not [f for f in findings if f.severity != INFO]:
-        lines.append(
-            "  OK — every grant traces to an equipped source; Tier-A settings "
-            "composed per-bot. Self-contained."
-        )
-        if not findings:
-            return "\n".join(lines)
-
-    by_bot: dict[str, list[Finding]] = {}
-    for f in findings:
-        by_bot.setdefault(f.bot_id, []).append(f)
-    icons = {FAIL: "FAIL", WARN: "warn", INFO: "info"}
-    for bot_id in sorted(by_bot):
-        lines.append(f"  {bot_id}:")
-        for f in by_bot[bot_id]:
-            lines.append(
-                f"    [{icons.get(f.severity, f.severity)}] {f.kind}: {f.detail}"
-            )
-
-    fails = sum(1 for f in findings if f.severity == FAIL)
-    warns = sum(1 for f in findings if f.severity == WARN)
-    infos = sum(1 for f in findings if f.severity == INFO)
-    lines.append(f"  {fails} fail, {warns} warn, {infos} info")
-    return "\n".join(lines)
