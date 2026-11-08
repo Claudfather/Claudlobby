@@ -6,8 +6,9 @@ its review checked each one. One `in` check per kept rule sentence: a later trim
 that drops one fails here, and a rule reworded on purpose changes its line here
 in the same PR (#2761). The critical-types table and the per-type loop are held
 to the event registry by tests/test_event_type_registry.py. The skill's
-description names the file the protocol's pointer names, and the skill's first
-rule lets a bot that composes the protocol read the reference."""
+description names the file the protocol's pointer names, a file in the skill's
+own directory, and the skill's first rule lets a bot that composes the protocol
+read the reference."""
 
 from __future__ import annotations
 
@@ -235,13 +236,16 @@ SKILL_FILE = re.compile(r"`(\.claude/skills/[^`]+)`")
 
 
 def test_the_pointer_and_the_skill_description_name_one_file():
-    """The two say where the event reference is; each passes every other test
+    """The two say where the event reference is: a file in the skill's own directory,
+    which a bot links as `.claude/skills/fleet-pulse/`. Each passes every other test
     while it names a file the other does not (#2755's review, Note A)."""
     pointed = set(SKILL_FILE.findall(_body()))
     described = set(SKILL_FILE.findall(parse_frontmatter(SKILL.read_text())[0]["description"]))
     assert len(pointed) == 1 and described == pointed, (pointed, described)
     path = pointed.pop()
-    assert (LIBRARY / "skills" / path.removeprefix(".claude/skills/")).is_file(), path
+    skill_dir = SKILL.parent.resolve()
+    target = (skill_dir.parent / path.removeprefix(".claude/skills/")).resolve()
+    assert skill_dir in target.parents and target.is_file(), path
 
 
 # The clause the cut added to the skill's first rule, so a bot that composes the
