@@ -65,27 +65,6 @@ def preflight(starts, *, managed=()):
                 "inspect its private socket directory, and retry activation") from exc
 
 
-def managed_listeners(source_plan, inventory):
-    """Use the selected plan and verified enrollment, never a label alone."""
-    from ..installation import parse_git_unit_argv
-
-    if source_plan is None:
-        return set()
-    installed = {str(unit.declaration.source) for unit in inventory.units if unit.installed}
-    result = set()
-    if not isinstance(source_plan,dict):
-        raise ActivationRefusal("managed owner listeners require committed Git configuration")
-    items = source_plan["units"]
-    for item in items:
-        if item["source"] not in installed or not item["enroll"] or item["admission"] is None:
-            continue  # a unit template (#2522) has no admission and listens on nothing
-        unit = parse_git_unit_argv(item["admission"]["argv"])
-        path = unit_socket(unit)
-        if path is not None:
-            result.add((unit.unit, path))
-    return result
-
-
 # Process proof lasts for one synchronous adapter invocation, never a server
 # instance/session. Context-local state keeps concurrent requests independent.
 _ACTION_PROCESS = ContextVar('owner_action_process', default=None)

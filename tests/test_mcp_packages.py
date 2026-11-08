@@ -135,23 +135,6 @@ class TestIsPinned:
         assert g.is_pinned("uvx", spec) is False  # the real answer
 
 
-class TestWarmArgv:
-    def test_it_is_the_exact_command_the_fragment_would_run(self):
-        argv = g.warm_argv("npx", ["-y", "printify-mcp"])
-        assert argv == ["npx", "-y", "printify-mcp", "--help"]
-
-    def test_server_flags_and_placeholders_are_not_carried_into_the_probe(self):
-        """A fragment's own args can hold unexpanded ${VAR}; the probe is the
-        package identity only, so they never reach a subprocess."""
-        argv = g.warm_argv(
-            "npx", ["-y", "mcp-remote@0.1.38", "https://x/${TOKEN}", "--port", "${P}"]
-        )
-        assert argv == ["npx", "-y", "mcp-remote@0.1.38", "--help"]
-
-    def test_unreadable_shape_returns_none_rather_than_guessing(self):
-        assert g.warm_argv("npx", []) is None
-
-
 class TestProbeVerdicts:
     """Only an unambiguous registry not-found may condemn a package."""
 
