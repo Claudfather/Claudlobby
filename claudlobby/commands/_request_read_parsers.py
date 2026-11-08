@@ -1,14 +1,8 @@
 """Dependency-light registration for retained request inspection."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".request_read", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".request_read")
 
 
 def register_request_read_subparsers(sub):
