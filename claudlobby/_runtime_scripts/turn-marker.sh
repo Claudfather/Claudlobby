@@ -11,9 +11,9 @@
 #                                                an API error)
 #
 # The fact is the file's modification time. Its one line names the event that
-# last wrote it, and each write replaces it. Nothing reads the markers yet:
-# #1053's compaction executor will, beside data/.last-tool-call (bot-vitals.sh),
-# to tell a finished turn from a running one. A reader compares all three: a
+# last wrote it, and each write replaces it. keepalive's compaction executor
+# (keepalive.sh, compact_tick; #1053 build PR 4) reads them, beside
+# data/.last-tool-call (bot-vitals.sh), to tell a finished turn from a running one. A reader compares all three: a
 # Stop that another Stop hook blocks lets the turn go on, so .turn-ended alone
 # can be older than the turn's next tool call. They outlive a session restart:
 # nothing removes them, and data-sweep.sh does not match their names.

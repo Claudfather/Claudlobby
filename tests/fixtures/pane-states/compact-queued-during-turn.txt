@@ -1,0 +1,24 @@
+
+❯ Say hello pr4-live-P1-782b45ec.
+
+● Stand-in reply.
+
+✻ Cogitated for 0s · done 12:01 AM
+
+❯ Say goodbye pr4-live-P2-4dace5e5.
+
+● Stand-in reply.
+
+✻ Cogitated for 0s · done 12:01 AM
+
+❯ Wait a moment pr4-live-HOLD-a63014ea.
+
+❯ And then this pr4-live-Q-336ab32e.
+  ctrl+x ctrl+s to send now
+
+● Generating…
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt

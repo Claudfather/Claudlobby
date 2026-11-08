@@ -2,15 +2,17 @@
 # Bot keepalive — restart dead sessions, log idle state.
 # Usage: keepalive.sh /path/to/bot/dir
 #
-# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for the one
-# gated reload path below. Pressing Enter at an empty prompt submits any "ghost"
-# text — including Claude Code's greyed-out auto-completion suggestions — which
-# causes the bot to act on input the user never typed. The reload path is safe
-# because it types a FIXED slash command as the first input, then Enter (so Enter
-# submits that command, never ghost text), and fires ONLY when a fleet reload is
-# pending (data/.reload-pending) and the pane is confirmed IDLE. This is the
-# single activation point for Mechanism 1 of the fleet update lifecycle:
-# reload-fleet.sh marks bots; keepalive performs the /reload at the next idle tick.
+# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for two gated
+# paths below, the reload and the compaction. Pressing Enter at an empty prompt
+# submits any "ghost" text — including Claude Code's greyed-out auto-completion
+# suggestions — which causes the bot to act on input the user never typed. Both
+# paths are safe because each types a FIXED slash command as the first input,
+# then Enter (so Enter submits that command, never ghost text). The reload path
+# fires ONLY when a fleet reload is pending (data/.reload-pending) and the pane
+# is confirmed IDLE: the single activation point for Mechanism 1 of the fleet
+# update lifecycle (reload-fleet.sh marks bots; keepalive performs the /reload at
+# the next idle tick). The compaction path (compact_tick, #1053) types /compact
+# ONLY for a pending request (data/.compact-request), once its guards hold.
 
 set -euo pipefail
 
@@ -399,6 +401,240 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
 fi
 
 # ---------------------------------------------------------------------------
+# Compaction for a pending request (#1053, build PR 4)
+# ---------------------------------------------------------------------------
+# A bot asks for its own compaction with `bot compact <its own ID>` (PR 2): the
+# request is data/.compact-request. On every tick with one pending, compact_tick
+# types the one fixed command /compact once every guard holds:
+#   - the request's own (compact-guard.py check): under 2 hours old by its
+#     requested_epoch; no assignment delivered to the bot since it; no
+#     compaction, and no new session, since it; for a request made at a close,
+#     a context still at or over the floor; and no composed PreCompact hook that
+#     would refuse the first compaction;
+#   - the turn markers (PR 1): the last turn ended COMPACT_TURN_SETTLE_S (10 s)
+#     ago or more, after the last input and the last tool call;
+#   - the whole screen (pane_compact_ready): no running turn, no menu or dialog,
+#     no text in the box, and a prompt;
+#   - the host's compaction slot (compaction-slot.py): free, and taken.
+# Then, holding the pane's send lock, it reads the request, the markers and the
+# screen again: a screen that changed since the tick's read, or any other fact
+# that moved, vetoes and frees the slot. It types through pane_send_verified's
+# locked send with its repairs off, as `bot compact` does, takes the request
+# away and writes compaction_sent. Nothing from the request is ever typed.
+#
+# Each later tick looks for the proof, the compaction's compact_boundary row
+# newer than the send (compact-guard.py proof): compaction_proven with its
+# sizes, and the slot is released. None within the lease's 10 minutes is
+# compaction_not_proven (critical), and nothing resends. While a send waits for
+# its proof (data/.compact-sent), no request is acted on. A guard that says
+# "not now" writes compaction_skipped once per reason per request
+# (data/.compact-skipped); one that ends a request writes it once. A typed
+# /compact runs no UserPromptSubmit hook and no Stop (measured on 2.1.319), so
+# the executor's own send moves neither turn marker.
+_COMPACT_SENT="$BOT_DIR/data/.compact-sent"
+_COMPACT_SKIPPED="$BOT_DIR/data/.compact-skipped"
+_COMPACT_PROOF_S=600   # compaction-slot.py's LEASE_S: the proof's deadline
+
+# _compact_transcripts: the bot's transcript directory, as transcript_usage's
+# transcript_source finds it: its account's config dir (bot.conf, else the
+# environment, else ~/.claude), projects/, the bot dir's slug.
+_compact_transcripts() {
+    local cfg slug
+    cfg="$(bot_conf_get_path "$BOT_DIR" CLAUDE_CONFIG_DIR "" 2>/dev/null || true)"
+    [ -n "$cfg" ] || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    case "$cfg" in \~/*) cfg="$HOME/${cfg#\~/}" ;; esac
+    slug="$(claude_cwd_slug "$BOT_DIR")"
+    printf '%s/projects/%s' "$cfg" "$slug"
+}
+
+# _compact_guard <verb> <args...>: compact-guard.py, stdlib, stderr to the log.
+_compact_guard() {
+    python3 -S -E "$LIB_DIR/compact-guard.py" "$@" 2>>"$LOG"
+}
+
+# _compact_markers_idle: prints why the turn markers do not say idle, or
+# nothing (rc 0) when the last turn ended long enough ago, after the last input
+# and the last tool call.
+_compact_markers_idle() {
+    local ended="$BOT_DIR/data/.turn-ended" e now
+    e=$(stat_mtime "$ended" 2>/dev/null) || { printf 'no_turn_end'; return 1; }
+    marker_is_newer "$ended" "$BOT_DIR/data/.turn-input" || { printf 'input_after_turn_end'; return 1; }
+    marker_is_newer "$ended" "$BOT_DIR/data/.last-tool-call" || { printf 'tool_call_after_turn_end'; return 1; }
+    now=$(date +%s)
+    if [ "$(( now - e ))" -lt "${COMPACT_TURN_SETTLE_S:-10}" ]; then
+        printf 'turn_ended_%ss_ago' "$(( now - e ))"
+        return 1
+    fi
+    return 0
+}
+
+# _compact_once <request_id> <reason> <data_json>: one compaction_skipped row
+# per reason per request.
+_compact_once() {
+    local key
+    key="$1"$'\t'"$2"
+    if [ -f "$_COMPACT_SKIPPED" ] && grep -qxF "$key" "$_COMPACT_SKIPPED" 2>/dev/null; then
+        return 0
+    fi
+    emit_fleet_event compaction_skipped keepalive "$3" "$BOT_DIR" "$BOT_NAME" || true
+    printf '%s\n' "$key" >> "$_COMPACT_SKIPPED" 2>/dev/null || true
+}
+
+# _compact_request_over: a request ended; its once-per-reason marks and the
+# guard's cached engine reading go with it.
+_compact_request_over() {
+    rm -f "$_COMPACT_SKIPPED" "$BOT_DIR/data/.compact-guard-cache"
+}
+
+# _compact_release <lease>: free the slot; a lease already over changes nothing.
+_compact_release() {
+    [ -n "$1" ] && [ "$1" != "-" ] || return 0
+    python3 -S -E "$LIB_DIR/compaction-slot.py" release --fleet "$FLEET_NAME" \
+        --bot "$BOT_NAME" --lease "$1" >>"$LOG" 2>&1 || true
+}
+
+# _compact_num <value>: a JSON number, or null.
+_compact_num() {
+    case "$1" in ''|*[!0-9]*) printf 'null' ;; *) printf '%s' "$1" ;; esac
+}
+
+# _compact_send_locked <request_id> <frame>: run under the pane's send lock.
+# Reads the request, the markers and the screen again, then types /compact.
+# Prints "veto <why>" and returns 5 when a fact moved since the tick's read.
+_compact_send_locked() {
+    local rid="$1" before="$2" now_frame why
+    if ! grep -qF "\"request_id\": \"$rid\"" "$BOT_DIR/data/.compact-request" 2>/dev/null; then
+        printf 'veto request_gone'; return 5
+    fi
+    why=$(_compact_markers_idle) || { printf 'veto markers:%s' "$why"; return 5; }
+    now_frame=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) \
+        || { printf 'veto capture_failed'; return 5; }
+    [ "$now_frame" = "$before" ] || { printf 'veto frame_changed'; return 5; }
+    why=$(pane_compact_ready "$now_frame") || { printf 'veto screen:%s' "$why"; return 5; }
+    PANE_SEND_VERIFY_TICKS=0 _pane_send_verified_locked "$TMUX_SOCKET" "$TMUX_SESSION" /compact
+}
+
+# _compact_proof <transcripts>: a send in flight: proven, not proven, or wait.
+_compact_proof() {
+    local t0="" lease="" rid="" by="" req_at="" out state at trig pre post now row
+    IFS=$'\t' read -r t0 lease rid by req_at < "$_COMPACT_SENT" 2>/dev/null || true
+    case "$t0" in
+        ''|*[!0-9]*)
+            echo "$(ts_iso) COMPACT — $_COMPACT_SENT unreadable; removed" >> "$LOG"
+            rm -f "$_COMPACT_SENT"; return 0 ;;
+    esac
+    out=$(_compact_guard proof --transcripts "$1" --since "$t0") || out="unknown	guard_failed"
+    IFS=$'\t' read -r state at trig pre post <<< "${out%%$'\n'*}" || true
+    now=$(date +%s)
+    if [ "$state" = proven ]; then
+        _compact_release "$lease"
+        printf -v row '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","at":"%s","trigger":"%s","pre_tokens":%s,"post_tokens":%s,"lease":"%s"}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(epoch_to_iso_utc "$t0")" "$(json_escape "$at")" "$(json_escape "$trig")" \
+            "$(_compact_num "$pre")" "$(_compact_num "$post")" "$(json_escape "$lease")"
+        emit_fleet_event compaction_proven keepalive "$row" "$BOT_DIR" "$BOT_NAME" || true
+        rm -f "$_COMPACT_SENT"
+        echo "$(ts_iso) COMPACT — proven: boundary at $at, $pre to $post tokens" >> "$LOG"
+    elif [ "$(( now - t0 ))" -ge "$_COMPACT_PROOF_S" ]; then
+        _compact_release "$lease"
+        printf -v row '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","waited_s":%s,"proof":"%s","lease":"%s"}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(epoch_to_iso_utc "$t0")" "$(( now - t0 ))" "$(json_escape "${state:-unknown} ${at:-}")" \
+            "$(json_escape "$lease")"
+        emit_fleet_event compaction_not_proven keepalive "$row" "$BOT_DIR" "$BOT_NAME" || true
+        rm -f "$_COMPACT_SENT"
+        echo "$(ts_iso) COMPACT — NOT proven: no compact_boundary row in $(( now - t0 ))s since the send (${state:-unknown} ${at:-}); nothing resent" >> "$LOG"
+    else
+        echo "$(ts_iso) COMPACT — sent $(( now - t0 ))s ago, waiting for its boundary row (${state:-unknown})" >> "$LOG"
+    fi
+}
+
+compact_tick() {
+    local transcripts out verdict reason hook rid by req_at req_epoch data why frame
+    local slot srsn lease ends rc t0 sent
+    transcripts=$(_compact_transcripts)
+    if [ -f "$_COMPACT_SENT" ]; then
+        _compact_proof "$transcripts"
+        return 0
+    fi
+    [ -f "$BOT_DIR/data/.compact-request" ] || return 0
+    out=$(_compact_guard check --bot-dir "$BOT_DIR" --root "${CLAUDLOBBY_ROOT:-}" \
+        --fleet "${FLEET_NAME:-}" --bot "$BOT_NAME" --transcripts "$transcripts" \
+        --loop "$(bot_conf_get "$BOT_DIR" CLAUDRON_SESSION_LOOP "")" \
+        --reflect "$(bot_conf_get "$BOT_DIR" CLAUDNA_PRECOMPACT_REFLECT "")") || {
+        echo "$(ts_iso) COMPACT — compact-guard.py failed; the request stays" >> "$LOG"
+        return 0
+    }
+    IFS=$'\t' read -r verdict reason hook rid by req_at req_epoch <<< "${out%%$'\n'*}" || true
+    [ "$hook" != - ] || hook=""
+    data="${out#*$'\n'}"
+    case "$data" in '{'*'}') ;; *) data='{}' ;; esac
+    case "$verdict" in
+        none) return 0 ;;
+        drop)
+            emit_fleet_event compaction_skipped keepalive "$data" "$BOT_DIR" "$BOT_NAME" || true
+            _compact_request_over
+            echo "$(ts_iso) COMPACT — request $rid dropped unsent: $reason" >> "$LOG"
+            return 0 ;;
+        skip)
+            _compact_once "$rid" "$reason" "$data"
+            echo "$(ts_iso) COMPACT — request $rid kept, not now: $reason${hook:+ ($hook)}" >> "$LOG"
+            return 0 ;;
+        go) ;;
+        *)
+            echo "$(ts_iso) COMPACT — compact-guard.py gave no verdict; the request stays" >> "$LOG"
+            return 0 ;;
+    esac
+    why=$(_compact_markers_idle) || {
+        echo "$(ts_iso) COMPACT — request $rid waits: $why" >> "$LOG"; return 0; }
+    frame=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || {
+        echo "$(ts_iso) COMPACT — request $rid waits: the pane could not be read" >> "$LOG"; return 0; }
+    why=$(pane_compact_ready "$frame") || {
+        echo "$(ts_iso) COMPACT — request $rid waits: screen $why" >> "$LOG"; return 0; }
+    rc=0
+    slot=$(python3 -S -E "$LIB_DIR/compaction-slot.py" take --fleet "${FLEET_NAME:-}" \
+        --bot "$BOT_NAME" --json 2>>"$LOG") || rc=$?
+    case "$slot" in '{'*'}') ;; *) slot='{}' ;; esac
+    if [ "$rc" -ne 0 ]; then
+        srsn=$(printf '%s' "$slot" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')
+        _compact_once "$rid" "slot_${srsn:-refused}" "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","reason":"slot_%s","request":"kept","slot":%s,"guard":%s}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "${srsn:-refused}" "$slot" "$data")"
+        echo "$(ts_iso) COMPACT — request $rid kept: the compaction slot refused (${srsn:-rc $rc})" >> "$LOG"
+        return 0
+    fi
+    lease=$(printf '%s' "$slot" | sed -n 's/.*"lease": "\([0-9a-f]*\)".*/\1/p')
+    ends=$(printf '%s' "$slot" | sed -n 's/.*"ends_at": "\([^"]*\)".*/\1/p')
+    t0=$(date +%s)
+    rc=0
+    sent=$(_pane_with_send_lock compact "${COMPACT_LOCK_WAIT_S:-10}" "$TMUX_SOCKET" "$TMUX_SESSION" \
+        _compact_send_locked "$rid" "$frame") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _compact_release "$lease"
+        case "$rc" in
+            5) why="${sent#veto }" ;;
+            75) why="send_lock_busy" ;;
+            3) why="send_not_submitted" ;;
+            4) why="send_refused_held_or_menu" ;;
+            *) why="send_failed_rc_$rc" ;;
+        esac
+        _compact_once "$rid" "${why%%:*}" "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","reason":"%s","request":"kept","guard":%s}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(json_escape "$why")" "$data")"
+        echo "$(ts_iso) COMPACT — request $rid kept, no keys: $why" >> "$LOG"
+        return 0
+    fi
+    _compact_guard take --bot-dir "$BOT_DIR" >/dev/null || true
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t0" "${lease:--}" "$rid" "$by" "$req_at" > "$_COMPACT_SENT"
+    _compact_request_over
+    emit_fleet_event compaction_sent keepalive "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","lease":"%s","lease_ends_at":"%s","guard":%s}' \
+        "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+        "$(epoch_to_iso_utc "$t0")" "$(json_escape "$lease")" "$(json_escape "$ends")" "$data")" \
+        "$BOT_DIR" "$BOT_NAME" || true
+    echo "$(ts_iso) COMPACT — sent /compact for request $rid (lease $lease until $ends)" >> "$LOG"
+}
+
+# ---------------------------------------------------------------------------
 # Pane-state classification
 # ---------------------------------------------------------------------------
 # Detection strategy (ordered by reliability):
@@ -744,6 +980,10 @@ case "$state" in
         # that later lands in the box makes the pane read HELD (#2070) or
         # UNKNOWN, never IDLE, so it is never typed twice.
         if [ -f "$BOT_DIR/data/.reload-pending" ]; then
+            # #1053: a tick that tries the reload types no /compact, whatever the
+            # send returns: a command that did not submit can sit in the box, or
+            # arrive there, under the /compact.
+            _reload_tried=1
             if send_reload_command "/reload-plugins" && send_reload_command "/reload-skills"; then
                 rm -f "$BOT_DIR/data/.reload-pending"
                 echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
@@ -784,5 +1024,10 @@ case "$state" in
         fi
         ;;
 esac
+# #1053: a pending compaction request (see compact_tick), on any tick but a
+# usage limit's or one that tried to type a reload, whatever that send returned.
+if [ "$state" != LIMIT ] && [ -z "${_reload_tried:-}" ]; then
+    compact_tick
+fi
 _channel_check
 plane_presence_samples "$state"

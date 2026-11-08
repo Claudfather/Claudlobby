@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """compaction-slot.py — one compaction at a time on the host (#1053, build PR 3).
 
-A lease for one Claude Code compaction on the host. The build's executor (PR 4)
-is to take it just before it types `/compact` into a bot's pane, and to release
-it once the compaction is proven or has ended. Nothing takes it yet.
+A lease for one Claude Code compaction on the host. keepalive's compaction
+executor (keepalive.sh, compact_tick; #1053 build PR 4) takes it just before it
+types `/compact` into a bot's pane, and releases it once the compaction is proven
+or has ended.
 
 ``take --fleet F --bot B [--json]``
     Grants a lease that names the bot, the time it was taken (the send time) and

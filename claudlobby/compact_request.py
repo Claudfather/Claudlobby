@@ -16,9 +16,10 @@ away and writes `compact_cancelled`.
   file is written first, and a plane that refuses the row does not refuse the
   request (`recording: degraded`), as with the stop door's record (#2243).
 
-Nothing acts on a request yet. The build's executor (PR 4) is to read this
-file, type `/compact` at the bot's next idle, empty prompt, and take the
-request away as `take_request` does.
+keepalive's compaction executor (keepalive.sh, compact_tick; build PR 4) acts on
+this file: it types `/compact` at the bot's next idle, empty prompt once every
+guard holds, and takes the request away with `take_request`, through
+compact-guard.py, which reads `requested_epoch` for the request's age.
 """
 from __future__ import annotations
 

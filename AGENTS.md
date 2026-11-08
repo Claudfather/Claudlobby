@@ -55,6 +55,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
 - `compaction-slot.py` — the host's compaction lease: one compaction at a time, none while load1 is 40 or more
+- `compact-guard.py` — the request side of keepalive's compaction: a request's guards, its take, and the proof
 - `usage-limit.py` — reads a pane for a usage-limit stop and its reset time
 - `usage-limit-hook.sh` — StopFailure/Stop hook: records a usage-limit stop
 - `keepalive-all.sh` — run keepalive for every bot
