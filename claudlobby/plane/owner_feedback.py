@@ -28,13 +28,7 @@ from .owner_task_action_protocol import runtime_fields, same_runtime
 from .ids import ID_PATTERNS, read_host_uid
 from .owner_action_authorization import action_authorization
 from .owner_access import AccessDenied, OwnerFeedbackGrant, VerifiedReader
-from .owner_messages import _GENERATED_ENV
 from .owner_source import admit_source, inspect_source
-
-
-# Feedback additionally refuses explicit service/timer carriers by presence.
-# Keep sibling adapter contracts unchanged; empty markers are still carriers.
-_FEEDBACK_GENERATED_ENV = (*_GENERATED_ENV, "BOT_SERVICE", "CLAUDLOBBY_TIMER_CONTEXT")
 
 
 @dataclass(frozen=True)
