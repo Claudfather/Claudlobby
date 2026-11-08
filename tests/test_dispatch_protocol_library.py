@@ -31,9 +31,12 @@ KEPT = (
     "This protocol adds only what a manager checks around them.",
     # 5: the delivery file
     "Choose a concrete outcome and prepare an existing UTF-8 delivery file with the worker's instructions and relevant plan, repo, deadline, and project context.",
-    # 8: admit with the task's repo and project
+    # 8: admit with the task's repo and project; the command's example title and repo
+    # are left out, so it is pinned as the three parts around them
     "Admit with the task's repo and project; the guide shows the assign and deliver steps that follow:",
-    'claudlobby --json task admit --title "Run the security audit" --repo org/repo-a --project PROJECT_KEY --request-id ADMIT_UUID',
+    "claudlobby --json task admit --title",
+    "--repo",
+    "--project PROJECT_KEY --request-id ADMIT_UUID",
     # 10: admitting queues the work
     "`task admit` leaves queued fleet-owned work even when no worker is ready.",
     # 13: `--checkin` only after the decision has committed, never on admit
