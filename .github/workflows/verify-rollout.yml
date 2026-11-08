@@ -10,7 +10,7 @@ name: Verify rollout
 #     rollout-check:
 #       uses: Claudfather/Claudlobby/.github/workflows/verify-rollout.yml@<full sha>
 #
-# The caller's job id and this file's job name make the check
+# The caller's job id and the gate job's name make the check
 # "rollout-check / Rollout check" in a PR's status rollup. The merge guardrails
 # read that name, so keep both.
 #
@@ -43,6 +43,16 @@ on:
         default: ""
 
 jobs:
+  # Two jobs run the one checker below (#2797). This one, the gate, has the name the
+  # merge guardrails read. When a PR is offered (opened, reopened or marked ready for
+  # review) with a body that fails, the gate re-reads the body every 15 s for up to
+  # 180 s before it fails, so an edit made in that time passes it. The cue, the job
+  # after it, judges once and fails at once, as the gate alone used to: authors write
+  # the section when a check fails, so that failure is what prompts the edit, and
+  # continue-on-error keeps it from failing the run. On any other event both judge
+  # once. The cue's steps are the gate's, by YAML alias, so the checker has one copy.
+  # The names are plain text, not a matrix's: a skipped matrix job, as a draft's is,
+  # shows its name unexpanded, and the gate would lose the name the guardrails read.
   check:
     name: Rollout check
     # A draft is not checked (#2467). It cannot merge, and marking it ready for review
@@ -52,16 +62,19 @@ jobs:
     # which pass only a newest run reading SUCCESS, refuse it. A required check passes
     # a skipped job, and the draft flag is the event's, so a re-run of a draft's run is
     # skipped again: the guide's step 4 says what that leaves untested.
-    if: github.event.pull_request.draft != true
+    if: &not-a-draft github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
+    # A new event's run replaces a gate that is still waiting, and only that.
     concurrency:
       group: verify-rollout-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
-    steps:
+    env:
+      ROLE: gate
+    steps: &checker
       - name: The PR body names what ran and its production check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,6 +83,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           DOCS_PATHS_RUN: ${{ inputs.docs-paths }}
           TESTS_PATHS_RUN: ${{ inputs.tests-paths }}
+          EVENT_ACTION: ${{ github.event.action }}
         run: |
           python3 - <<'PY'
           import fnmatch
@@ -77,6 +91,7 @@ jobs:
           import re
           import subprocess
           import sys
+          import time
 
           CALLER = ".github/workflows/rollout-check.yml"
           FIELDS = ("Observe", "Control", "When", "Who")
@@ -100,10 +115,17 @@ jobs:
           NA_SAYS = PREFIX + r"n/?a\s*(?:\*\*|__)?\s*[:—–-]\s*(?:\*\*|__)?"
           NA_KIND = re.compile(NA_SAYS + r"\s*(docs-only|tests-only)\b", re.I)
           NA_WHY = re.compile(NA_SAYS + r"(.*)$", re.I)
+          # The gate's wait for an edit when a PR is offered with a body that fails. These are
+          # constants, not inputs, so nothing can turn the wait off.
+          OFFERED = {"opened", "reopened", "ready_for_review"}
+          WAIT_S = 180
+          POLL_S = 15
 
           REPO = os.environ.get("REPO", "")
           PR = os.environ.get("PR_NUMBER", "")
           DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "")
+          ROLE = os.environ.get("ROLE", "")
+          EVENT_ACTION = os.environ.get("EVENT_ACTION", "")
 
 
           class LookupFailed(Exception):
@@ -327,13 +349,39 @@ jobs:
                       "`N/A: <why none applies>`"]
 
 
+          def read_body():
+              return gh("the PR body", f"repos/{REPO}/pulls/{PR}", "--jq", '.body // ""')
+
+
+          def wait_for_edit(changed, problems):
+              """The gate, on a PR offered with a body that fails: re-read the body every POLL_S
+              seconds, for up to WAIT_S, until it passes. Usually the edit's own run replaces
+              this one first. Returns the last read's problems; a failed read raises."""
+              # Flushed: stdout is a pipe here, and a pending gate's log should say why it waits.
+              print(f"The body fails as offered. Re-reading it every {POLL_S} s for up to "
+                    f"{WAIT_S} s: \"Rollout check (no wait)\" has failed on it at once.", flush=True)
+              start = time.monotonic()
+              deadline = start + WAIT_S
+              while time.monotonic() < deadline:
+                  time.sleep(max(0.0, min(POLL_S, deadline - time.monotonic())))
+                  body = read_body()
+                  problems = judge_harness(body) + judge(body, changed)
+                  if not problems:
+                      line = ("Rollout check: the body was incomplete when the PR was offered "
+                              f"and passed after {round(time.monotonic() - start)} s.")
+                      summary(line)
+                      print(line)
+                      break
+              return problems
+
+
           def main():
               if not PR:
                   print("Not a pull request: there is no PR body to check.")
                   return 0
               problems = []
               try:
-                  body = gh("the PR body", f"repos/{REPO}/pulls/{PR}", "--jq", '.body // ""')
+                  body = read_body()
                   listing = gh("the PR's changed files", "--paginate",
                                f"repos/{REPO}/pulls/{PR}/files?per_page=100",
                                "--jq", ".[] | .filename, (.previous_filename // empty)")
@@ -347,6 +395,8 @@ jobs:
                       summary("Changes workflow files, for the reviewer: " + ", ".join(workflows))
                   problems += judge_harness(body)
                   problems += judge(body, changed)
+                  if problems and ROLE == "gate" and EVENT_ACTION in OFFERED:
+                      problems = wait_for_edit(changed, problems)
               except LookupFailed as exc:
                   problems.append(str(exc))
               if problems:
@@ -368,3 +418,19 @@ jobs:
 
           sys.exit(main())
           PY
+
+  cue:
+    name: Rollout check (no wait)
+    if: *not-a-draft
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    concurrency:
+      group: verify-rollout-cue-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
+    env:
+      ROLE: cue
+    steps: *checker
