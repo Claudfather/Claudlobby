@@ -266,8 +266,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # /compact (data: the request, the slot's lease, every guard's reading); a
     # compact_boundary row newer than the send proved it (with its sizes); or
     # none came within the lease's 10 minutes, critical, since a compaction
-    # asked for and not done is a fault the manager's brief shows and nothing
-    # resends. A guard that said not now, or ended the request unsent, writes
+    # asked for and not done is a fault nothing resends: `event list --critical`
+    # and the bot's own brief show it. A guard that said not now, or ended the
+    # request unsent, writes
     # compaction_skipped with its reason, once per reason per request.
     "compaction_sent": "notice",
     "compaction_proven": "notice",
