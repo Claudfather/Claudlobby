@@ -19,6 +19,10 @@ What it must hold:
 - the check's name in the rollup is the name the merge guardrails read.
 - a draft is not checked, and marking it ready for review runs the check, so a body
   finished while the PR is a draft leaves no failed run (#2467); a failing run says so.
+- the body also names what ran for the PR, under "## Harness" (#2792): what CI ran,
+  each instrument or live test run with its result, or one line saying why none
+  applies. Any one of them filled in passes; a missing section, or one that names
+  nothing, fails.
 - two jobs run the one checker (#2797). When a PR is offered (opened, reopened or
   marked ready) with a body that fails, the gate, which has the rollup name, re-reads
   the body for up to 180 s, so an edit in that time passes it; the cue judges once and
@@ -47,7 +51,7 @@ TEMPLATE = REPO / ".github" / "pull_request_template.md"
 FAKE_GH = REPO / "tests" / "fixtures" / "fake-gh-rollout.py"
 GUARDRAILS = REPO / "library" / "guardrails"
 CHECK_NAME = "rollout-check / Rollout check"
-SUCCESS_LINE = "Rollout check: the PR body names its rollout check."
+SUCCESS_LINE = "Rollout check: the PR body names what ran and its rollout check."
 # The gate's wait, shortened for these tests: test_the_shipped_wait_is_180_s_read_every_15_s
 # pins the real values. A body that passes ends the wait at once, and each read of the fake
 # gh is a new process, so the wait is long enough for a slow host to reach the edit.
@@ -61,6 +65,10 @@ FILLED = """\
 - **When:** right after the release that contains the merge is active
 - **Who:** any bot with the fleet's credentials
 """
+
+#: Put in front of each body unless a test passes its own, so the tests of the Rollout
+#: check read only that section's findings.
+HARNESS = "## Harness\n- **CI:** the harness job's scenarios, which run this checker\n\n"
 
 NARROW_CALLER = """\
 name: Rollout check
@@ -123,10 +131,14 @@ class Run:
 
 def _prepare(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_caller=NARROW_CALLER,
              fail=None, docs_run="", tests_run="", pr="7", event_body=None, role="gate",
-             action="edited", wait_s=WAIT_TEST_S):
+             action="edited", wait_s=WAIT_TEST_S, harness=HARNESS):
     """Write the checker and the stand-in gh for one job's run, and return the script, its
     environment, and the call log and summary paths. A list for body serves one body per
-    read, the last one repeating. The default event is an edit, which both jobs judge once."""
+    read, the last one repeating. The default event is an edit, which both jobs judge once.
+    harness goes in front of each body served that is not empty; None leaves them as given."""
+    def with_harness(text):
+        return harness + text if harness and isinstance(text, str) and text else text
+    body = [with_harness(b) for b in body] if isinstance(body, list) else with_harness(body)
     tmp_path.mkdir(parents=True, exist_ok=True)
     script = tmp_path / "checker.py"
     script.write_text(_checker_with_wait(wait_s, POLL_TEST_S), encoding="utf-8")
@@ -214,14 +226,15 @@ def test_the_template_as_shipped_fails_and_filled_in_passes(tmp_path):
     if not TEMPLATE.exists():
         pytest.fail(f"missing {TEMPLATE.relative_to(REPO)}")
     template = TEMPLATE.read_text(encoding="utf-8")
-    run = run_check(tmp_path / "as-shipped", template)
+    run = run_check(tmp_path / "as-shipped", template, harness=None)
     assert run.rc == 1
+    assert any('"## Harness" names nothing' in e for e in run.errors), run.out
     for name in ("Observe", "Control", "When", "Who"):
         assert any(f"**{name}:**" in e for e in run.errors), (name, run.out)
-    filled = re.sub(r"(\*\*(?:Observe|Control|When|Who):\*\*) <!--.*?-->", r"\1 a real answer",
-                    template)
-    assert filled != template, "the template's four fields should each carry a comment prompt"
-    run = run_check(tmp_path / "filled", filled)
+    prompt = r"(\*\*(?:CI|Live|Observe|Control|When|Who):\*\*) <!--.*?-->"
+    assert len(re.findall(prompt, template)) == 6, "each of the six fields carries a comment prompt"
+    filled = re.sub(prompt, r"\1 a real answer", template)
+    run = run_check(tmp_path / "filled", filled, harness=None)
     assert run.rc == 0, run.out
 
 
@@ -579,11 +592,89 @@ def test_the_guardrails_skeleton_left_unfilled_fails(tmp_path):
     """Bots write the section from the guardrail's skeleton: gh pr create --body skips the
     template. Left unfilled, it must fail like the template does."""
     text = (GUARDRAILS / "verify-rollout.md").read_text(encoding="utf-8")
-    skeleton = re.search(r"```markdown\n(## Rollout check\n.*?)```", text, re.S).group(1)
-    run = run_check(tmp_path, skeleton)
+    skeleton = re.search(r"```markdown\n(## Harness\n.*?)```", text, re.S).group(1)
+    assert "\n## Rollout check\n" in skeleton, "one skeleton carries both sections"
+    run = run_check(tmp_path, skeleton, harness=None)
     assert run.rc == 1
+    assert any('"## Harness" names nothing' in e for e in run.errors), run.out
     for name in ("Observe", "Control", "When", "Who"):
         assert any(f"**{name}:**" in e for e in run.errors), (name, run.out)
+
+
+# --- what ran for the PR: "## Harness" (#2792) ------------------------------------------
+
+def test_a_body_with_no_harness_section_fails(tmp_path):
+    run = run_check(tmp_path, FILLED, harness=None)
+    assert run.rc == 1
+    assert run.errors == ['::error title=Rollout check::the PR body has no "## Harness" section'], run.out
+
+
+@pytest.mark.parametrize("answer", [
+    "- **CI:** the harness job's validate-bot-change scenarios, which source the changed script",
+    "- **Live:** `harness/rehearse-held-push.sh` in a scratch root: PASS, 3 of 3 checks",
+    "N/A: a typo in a comment, which no scenario, instrument or live test reads",
+], ids=["a-what-ci-ran", "b-a-live-run-and-its-result", "c-why-none-applies"])
+def test_each_harness_answer_alone_passes(tmp_path, answer):
+    run = run_check(tmp_path, FILLED, harness=f"## Harness\n{answer}\n\n")
+    assert run.rc == 0, run.out
+    assert run.errors == []
+
+
+@pytest.mark.parametrize("lines", [
+    "",
+    "- **CI:**\n- **Live:**\n",
+    "- **CI:** <!-- what CI ran -->\n- **Live:** <!-- each live test -->\n",
+    "- **CI:** N/A\n- **Live:** TBD\n",
+    "N/A\n",
+    "**N/A:** none\n",
+    "The harness job ran.\n",
+], ids=["empty", "labels-left-empty", "prompts-left-in", "vacuous-answers", "n-a-without-why",
+        "n-a-with-a-vacuous-why", "prose-without-a-label"])
+def test_a_harness_section_that_names_nothing_fails(tmp_path, lines):
+    run = run_check(tmp_path, FILLED, harness="## Harness\n" + lines + "\n")
+    assert run.rc == 1
+    assert any('"## Harness" names nothing' in e for e in run.errors), run.out
+
+
+@pytest.mark.parametrize("wrapped", ["```\n## Harness\n- **CI:** x\n```\n",
+                                     "<!--\n## Harness\n- **CI:** x\n-->\n"],
+                         ids=["fenced", "commented"])
+def test_a_harness_heading_github_does_not_show_does_not_count(tmp_path, wrapped):
+    run = run_check(tmp_path, wrapped + "\n" + FILLED, harness=None)
+    assert run.rc == 1
+    assert any('no "## Harness" section' in e for e in run.errors), run.out
+
+
+def test_the_harness_section_ends_at_the_next_heading_and_may_follow_the_rollout_check(tmp_path):
+    split = "## Harness\n\n## Notes\n- **CI:** the harness job\n\n" + FILLED
+    run = run_check(tmp_path / "split", split, harness=None)
+    assert run.rc == 1
+    assert any('"## Harness" names nothing' in e for e in run.errors), run.out
+    after = FILLED + "\n## Harness\n- **Live:** the held-push rehearsal: PASS\n"
+    assert run_check(tmp_path / "after", after, harness=None).rc == 0
+
+
+def test_a_live_run_given_as_a_fenced_command_passes(tmp_path):
+    harness = "## Harness\n- **Live:**\n  ```bash\n  harness/rehearse-held-push.sh\n  ```\n\n"
+    assert run_check(tmp_path, FILLED, harness=harness).rc == 0
+
+
+def test_both_sections_are_judged_in_one_run(tmp_path):
+    """One run names every missing section, so one edit can fix the body."""
+    run = run_check(tmp_path, "## Summary\nA fix.\n", harness=None)
+    assert run.rc == 1
+    assert any('no "## Harness" section' in e for e in run.errors), run.out
+    assert any('no "## Rollout check" section' in e for e in run.errors), run.out
+    told = " ".join(line for line in run.out.splitlines() if not line.startswith("::"))
+    assert "## Harness" in told and "## Rollout check" in told, run.out
+
+
+def test_a_failed_lookup_keeps_the_harness_finding(tmp_path):
+    run = run_check(tmp_path, "## Rollout check\nN/A: docs-only\n", files=["documentation/a.md"],
+                    fail={"contents": "502"}, harness=None)
+    assert run.rc == 1
+    assert any('no "## Harness" section' in e for e in run.errors), run.out
+    assert any("could not read" in e for e in run.errors), run.out
 
 
 # --- the gate waits for an edit when a PR is offered (#2797) ------------------------------
@@ -610,6 +701,20 @@ def test_the_gate_fails_at_its_deadline_when_no_edit_comes(tmp_path):
     assert run.body_reads >= 2, "the gate re-reads the body before it fails"
     assert any('no "## Rollout check" section' in e for e in run.errors), run.out
     assert not WAITED.search(run.out)
+
+
+def test_the_gate_waits_for_the_harness_section_too(tmp_path):
+    """The wait re-judges the whole body, so an edit that adds "## Harness" passes the gate,
+    and a body still without it fails the gate at its deadline."""
+    run = run_check(tmp_path / "edited", [FILLED, FILLED, HARNESS + FILLED], action="opened",
+                    harness=None)
+    assert run.rc == 0, run.out + run.err
+    assert run.body_reads == 3
+    assert WAITED.search(run.out), run.out
+    late = run_check(tmp_path / "late", [FILLED], action="opened", wait_s=0.5, harness=None)
+    assert late.rc == 1
+    assert late.body_reads >= 2, "the gate re-reads the body before it fails"
+    assert any('no "## Harness" section' in e for e in late.errors), late.out
 
 
 @pytest.mark.parametrize("action", ["edited", "synchronize"])

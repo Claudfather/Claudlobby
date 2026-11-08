@@ -251,9 +251,9 @@ Files in `runtime/bots/<name>/` are composed by the Git updater. Hand-edits are 
 2. Review and validate authored changes in an independent canary, then operator `host update apply FULL_COMMIT`. Inspect `host update status`; continue interruptions with the original request. `config diff` checks published drift, not unapplied source.
 3. If the bot drifted during a session (`claudlobby config diff --bot <name>` shows changed files), review the changes and edit their authored source in `library/`
 
-### Every PR body: a Rollout check
+### Every PR body: a Harness section and a Rollout check
 
-CI's `rollout-check / Rollout check` fails a PR whose body has no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its four lines into the body and fill each in: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md`, `CHANGELOG.md` or `changelog.d/**` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` or `changelog.d/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
+CI's `rollout-check / Rollout check` fails a PR whose body has no `## Harness` or no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its lines into the body and fill them in. Under `## Harness`: `- **CI:**` (what CI ran: the harness job's scenarios, any test that runs an instrument), `- **Live:**` (each instrument or live test run, with its result), or both; or the one line `N/A: <why none applies>`. Under `## Rollout check`: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md`, `CHANGELOG.md` or `changelog.d/**` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` or `changelog.d/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
 
 ### Changelog
 

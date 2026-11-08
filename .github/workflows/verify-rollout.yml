@@ -2,8 +2,9 @@ name: Verify rollout
 
 # The CI half of library/guardrails/verify-rollout.md (#2111): every PR names, in a
 # "## Rollout check" section, the production check that proves it works once it is
-# live. A repo adopts it with one caller file, .github/workflows/rollout-check.yml,
-# shaped like this repo's own (copy it and pin `uses:` to a full commit sha):
+# live, and in a "## Harness" section what ran for it before review (#2792). A repo
+# adopts it with one caller file, .github/workflows/rollout-check.yml, shaped like
+# this repo's own (copy it and pin `uses:` to a full commit sha):
 #
 #   jobs:
 #     rollout-check:
@@ -74,7 +75,7 @@ jobs:
     env:
       ROLE: gate
     steps: &checker
-      - name: The PR body names its production check
+      - name: The PR body names what ran and its production check
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -94,21 +95,26 @@ jobs:
 
           CALLER = ".github/workflows/rollout-check.yml"
           FIELDS = ("Observe", "Control", "When", "Who")
+          HARNESS_FIELDS = ("CI", "Live")
           VACUOUS = {"", "n/a", "na", "none", "nothing", "-", "--", "tbd", "todo", "?", "..."}
           KINDS = {"docs-only": "docs-paths", "tests-only": "tests-paths"}
           CODE = "[code block]"
-          HEADING = re.compile(r"^ {0,3}##[ \t]+rollout check:?(?:[ \t]+#+)?[ \t]*$", re.I)
+          HEADING_FORM = r"^ {0,3}##[ \t]+%s:?(?:[ \t]+#+)?[ \t]*$"
+          HEADING = re.compile(HEADING_FORM % "rollout check", re.I)
+          HARNESS_HEADING = re.compile(HEADING_FORM % "harness", re.I)
           NEXT_SECTION = re.compile(r"^ {0,3}#{1,2}(?:[ \t]|$)")
           BLOCK_START = re.compile(r"^\s*(?:[-*+]|\d+[.)])[ \t]|^ {0,3}#{1,6}(?:[ \t]|$)")
           COMMENT_BLOCK = re.compile(r"^ {0,3}<!--")
           FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
           FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
           PREFIX = r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__)?\s*"
-          LABEL = re.compile(PREFIX + r"(observe|control|when|who)\s*(?:\*\*|__)?\s*:"
-                             r"\s*(?:\*\*|__)?(.*)$", re.I)
+          LABEL_FORM = PREFIX + r"(%s)\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?(.*)$"
+          LABEL = re.compile(LABEL_FORM % "|".join(FIELDS), re.I)
+          HARNESS_LABEL = re.compile(LABEL_FORM % "|".join(HARNESS_FIELDS), re.I)
           NA = re.compile(PREFIX + r"n/?a\b", re.I)
-          NA_KIND = re.compile(PREFIX + r"n/?a\s*(?:\*\*|__)?\s*[:—–-]\s*(?:\*\*|__)?\s*"
-                               r"(docs-only|tests-only)\b", re.I)
+          NA_SAYS = PREFIX + r"n/?a\s*(?:\*\*|__)?\s*[:—–-]\s*(?:\*\*|__)?"
+          NA_KIND = re.compile(NA_SAYS + r"\s*(docs-only|tests-only)\b", re.I)
+          NA_WHY = re.compile(NA_SAYS + r"(.*)$", re.I)
           # The gate's wait for an edit when a PR is offered with a body that fails. These are
           # constants, not inputs, so nothing can turn the wait off.
           OFFERED = {"opened", "reopened", "ready_for_review"}
@@ -236,26 +242,27 @@ jobs:
 
 
 
-          def section(body):
+          def section(body, heading=HEADING):
               lines = visible_lines(body)
               for i, line in enumerate(lines):
-                  if HEADING.match(line):
+                  if heading.match(line):
                       rest = lines[i + 1:]
                       end = next((j for j, l in enumerate(rest) if NEXT_SECTION.match(l)), len(rest))
                       return rest[:end]
               return None
 
 
-          def fields(lines):
+          def fields(lines, label=LABEL, names=FIELDS):
               # A value ends with its list item or paragraph, as GitHub renders it: after a
               # blank line only an indented line continues it, so text under a last section
               # (the footer most bodies end with) is not the last field's answer.
+              canonical = {name.lower(): name for name in names}
               found, current, blank = {}, None, False
               for line in lines:
-                  label = LABEL.match(line)
-                  if label:
-                      current = label.group(1).capitalize()
-                      found.setdefault(current, []).append(label.group(2))
+                  match = label.match(line)
+                  if match:
+                      current = canonical[match.group(1).lower()]
+                      found.setdefault(current, []).append(match.group(2))
                   elif not line.strip():
                       blank = True
                       continue
@@ -326,6 +333,22 @@ jobs:
               return problems
 
 
+          def judge_harness(body):
+              """What ran for the PR (#2792): what CI ran, each instrument or live test run
+              with its result, or one line saying why none applies. Any one of them filled
+              in passes; whether it is true is the reviewer's to judge."""
+              lines = section(body, HARNESS_HEADING)
+              if lines is None:
+                  return ['the PR body has no "## Harness" section']
+              answers = list(fields(lines, HARNESS_LABEL, HARNESS_FIELDS).values())
+              answers += [m.group(1) for m in map(NA_WHY.match, lines) if m]
+              if any(not vacuous(answer) for answer in answers):
+                  return []
+              return ['"## Harness" names nothing: fill in **CI:** (what CI ran) or **Live:** (each '
+                      "instrument or live test run for this PR, with its result), or give one line, "
+                      "`N/A: <why none applies>`"]
+
+
           def read_body():
               return gh("the PR body", f"repos/{REPO}/pulls/{PR}", "--jq", '.body // ""')
 
@@ -341,7 +364,8 @@ jobs:
               deadline = start + WAIT_S
               while time.monotonic() < deadline:
                   time.sleep(max(0.0, min(POLL_S, deadline - time.monotonic())))
-                  problems = judge(read_body(), changed)
+                  body = read_body()
+                  problems = judge_harness(body) + judge(body, changed)
                   if not problems:
                       line = ("Rollout check: the body was incomplete when the PR was offered "
                               f"and passed after {round(time.monotonic() - start)} s.")
@@ -355,6 +379,7 @@ jobs:
               if not PR:
                   print("Not a pull request: there is no PR body to check.")
                   return 0
+              problems = []
               try:
                   body = read_body()
                   listing = gh("the PR's changed files", "--paginate",
@@ -368,24 +393,26 @@ jobs:
                                "result proves nothing for it: the merger needs a reviewer verdict "
                                "that names the workflow change.")
                       summary("Changes workflow files, for the reviewer: " + ", ".join(workflows))
-                  problems = judge(body, changed)
+                  problems += judge_harness(body)
+                  problems += judge(body, changed)
                   if problems and ROLE == "gate" and EVENT_ACTION in OFFERED:
                       problems = wait_for_edit(changed, problems)
               except LookupFailed as exc:
-                  problems = [str(exc)]
+                  problems.append(str(exc))
               if problems:
                   for problem in problems:
                       annotate("error", problem)
                   summary("Rollout check FAILED: " + "; ".join(problems))
-                  print('Fill in "## Rollout check" with Observe, Control, When and Who, or one '
-                        "line, `N/A: docs-only` or `N/A: tests-only` (library/guardrails/"
-                        "verify-rollout.md in Claudfather/Claudlobby). Saving the edited body "
-                        "re-runs this check.")
-                  print("A draft is not checked: keep a PR a draft until its body has this "
-                        "section, and marking it ready for review runs this check.")
+                  print('The body needs "## Harness", naming what ran with **CI:** or **Live:**, or '
+                        'one line, `N/A: <why none applies>`, and "## Rollout check", with Observe, '
+                        "Control, When and Who, or one line, `N/A: docs-only` or `N/A: tests-only` "
+                        "(library/guardrails/verify-rollout.md in Claudfather/Claudlobby). Saving "
+                        "the edited body re-runs this check.")
+                  print("A draft is not checked: keep a PR a draft until its body has both "
+                        "sections, and marking it ready for review runs this check.")
                   return 1
-              summary("Rollout check: the PR body names its rollout check.")
-              print("Rollout check: the PR body names its rollout check.")
+              summary("Rollout check: the PR body names what ran and its rollout check.")
+              print("Rollout check: the PR body names what ran and its rollout check.")
               return 0
 
 
