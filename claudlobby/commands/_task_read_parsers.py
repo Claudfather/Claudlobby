@@ -1,20 +1,9 @@
 """Dependency-light registration for canonical task and assignment reads."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".task_read", __package__).dispatch(args),
-                   json_output=args.json)
-
-
-def _review_dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".task_reviews", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".task_read")
+_review_dispatch = lazy(".task_reviews")
 
 
 def _route(children, verb, command, help, description=None):

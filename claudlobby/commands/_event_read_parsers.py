@@ -1,14 +1,8 @@
 """Dependency-light registration for canonical fleet event reads."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".events", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".events")
 
 
 def register_event_read_subparsers(sub):

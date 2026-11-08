@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _run(args):
-    return execute(args.public_command,
-                   lambda: import_module(".migration_converters", __package__).dispatch(args),
-                   json_output=args.json)
+_run = lazy(".migration_converters")
 
 
 def _route(children, name, help_text):
