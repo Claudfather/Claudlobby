@@ -54,6 +54,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
+- `compaction-slot.py` — the host's compaction lease: one compaction at a time, none while load1 is 40 or more
 - `usage-limit.py` — reads a pane for a usage-limit stop and its reset time
 - `usage-limit-hook.sh` — StopFailure/Stop hook: records a usage-limit stop
 - `keepalive-all.sh` — run keepalive for every bot
@@ -250,9 +251,9 @@ Files in `runtime/bots/<name>/` are composed by the Git updater. Hand-edits are 
 2. Review and validate authored changes in an independent canary, then operator `host update apply FULL_COMMIT`. Inspect `host update status`; continue interruptions with the original request. `config diff` checks published drift, not unapplied source.
 3. If the bot drifted during a session (`claudlobby config diff --bot <name>` shows changed files), review the changes and edit their authored source in `library/`
 
-### Every PR body: a Rollout check
+### Every PR body: a Harness section and a Rollout check
 
-CI's `rollout-check / Rollout check` fails a PR whose body has no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its four lines into the body and fill each in: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md`, `CHANGELOG.md` or `changelog.d/**` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` or `changelog.d/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
+CI's `rollout-check / Rollout check` fails a PR whose body has no `## Harness` or no `## Rollout check` section. `gh pr create --body` and the API skip `.github/pull_request_template.md`, so copy its lines into the body and fill them in. Under `## Harness`: `- **CI:**` (what CI ran: the harness job's scenarios, any test that runs an instrument), `- **Live:**` (each instrument or live test run, with its result), or both; or the one line `N/A: <why none applies>`. Under `## Rollout check`: `- **Observe:**`, `- **Control:**`, `- **When:**`, `- **Who:**`. A PR that changes only `documentation/**`, `README.md`, `CHANGELOG.md` or `changelog.d/**` may put the one line `N/A: docs-only` there instead, and one that changes only `tests/**` or `changelog.d/**` the line `N/A: tests-only`. Rules: `library/guardrails/verify-rollout.md`.
 
 ### Changelog
 

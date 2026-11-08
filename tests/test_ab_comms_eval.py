@@ -9,7 +9,7 @@ surfaces:
     results fixtures whose verdicts are deterministic (the bootstrap is seeded).
 
 The default verdict is INCONCLUSIVE by construction: with no F2-ratified
-threshold, the harness can never emit PASS.
+threshold, or with the stub quality scorer, the harness can never emit PASS.
 """
 
 from __future__ import annotations
@@ -99,8 +99,8 @@ def _kv(stdout, key):
     raise AssertionError(f"{key}= not found in harness output")
 
 
-def _pair(task, rep, ps_wo, ps_wi, cw_wo, cw_wi):
-    q = {"gate": "pass"}
+def _pair(task, rep, ps_wo, ps_wi, cw_wo, cw_wi, quality=None):
+    q = {"gate": "pass"} if quality is None else quality
     return [
         {
             "task": task,
@@ -176,6 +176,35 @@ class TestDryRun:
             assert d["pins"]["weights"]["output"] == 5.0
             axes = d["per_task"][0]
             assert "protocol_sensitive" in axes and "cost_weighted_total" in axes
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stub_scored_rows_never_pass(self):
+        # The synthetic tokens clear --threshold 0.15 on both co-primary axes, so
+        # the verdict read PASS while the stub scored quality "pass". The stub
+        # now scores nothing, and a quality nobody scored never passes.
+        r = _run(
+            "--dry-run", "--keep", "--tasks", "1", "--reps", "2", "--threshold", "0.15"
+        )
+        assert r.returncode == 0, r.stderr + r.stdout
+        assert "ALL SCAFFOLDING CHECKS PASSED" in r.stdout
+        root = _kv(r.stdout, "ROOT")
+        try:
+            body = Path(_kv(r.stdout, "RESULTS")).read_text()
+            rows = [json.loads(line) for line in body.splitlines() if line.strip()]
+            assert rows and all(row["quality"]["gate"] == "unscored" for row in rows)
+            d = json.loads(Path(_kv(r.stdout, "VERDICT")).read_text())
+            assert d["pins"]["threshold"] == 0.15
+            (t,) = d["per_task"]
+            # The bar is cleared on both axes, so only the quality holds it back.
+            assert t["protocol_sensitive"]["ci"][0] >= 0.15
+            assert t["cost_weighted_total"]["ci"][0] >= 0.0
+            assert (t["verdict"], t["reason"], t["quality"]) == (
+                "INCONCLUSIVE",
+                "quality unscored",
+                "unscored",
+            )
+            assert d["overall"] == "INCONCLUSIVE"
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -264,3 +293,22 @@ class TestComputeVerdict:
             rows += _pair("T1", rep, 1000, 100, 1000, 100)
         d = _module_verdict(tmp_path, "no_t", rows)
         assert d["overall"] == "INCONCLUSIVE"
+
+    @pytest.mark.parametrize("threshold", [None, "0.15", "0.5"])
+    def test_unscored_quality_is_inconclusive_whatever_the_threshold(
+        self, tmp_path, threshold
+    ):
+        # A 20% / 30% reduction clears 0.15 and misses 0.5, and with no threshold
+        # the sentinel applies: an unscored row is judged in none of the three.
+        rows = []
+        for rep in (1, 2, 3):
+            rows += _pair("T1", rep, 1000, 800, 1000, 700, quality={"gate": "unscored"})
+        flags = () if threshold is None else ("--threshold", threshold)
+        d = _module_verdict(tmp_path, "unscored", rows, *flags)
+        assert d["overall"] == "INCONCLUSIVE"
+        (t,) = d["per_task"]
+        assert (t["verdict"], t["reason"], t["quality"]) == (
+            "INCONCLUSIVE",
+            "quality unscored",
+            "unscored",
+        )

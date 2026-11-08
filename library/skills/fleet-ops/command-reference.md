@@ -113,6 +113,12 @@ claudlobby --json request show REPLY_UUID
 
 `bot show BOT` answers what a bot has at hand: its role and manager and what is
 composed into it (`data.bot.effective_configuration.equipment`: skills, MCP
-servers, protocols, guardrails, principles and the rest). `bot capabilities BOT`
+servers, protocols, guardrails, principles and the rest). Its
+`effective_configuration.precompact` says which `PreCompact` hooks the compose gives
+the bot: `claudron_session_loop` (the composer's own test, in `bot.conf` as
+`CLAUDRON_SESSION_LOOP`), `claudna_precompact_reflect`, and the composed settings'
+`PreCompact` commands, each named `claudron` or `other` and identified by SHA-256,
+with `matches_declaration` false where the settings are older than the declaration. A
+plugin's hooks and the account's own settings are not listed. `bot capabilities BOT`
 adds its permission rules as SHA-256 hashes, the arguments withheld, and is about
 four times as long; read it to compare rule sets, not to learn the equipment.
