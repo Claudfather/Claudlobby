@@ -782,7 +782,9 @@ class Paths:
                         return cls(root=root, package=package)
                     flat = root / "local" / fleet
                     raise FileNotFoundError(
-                        f"Fleet overlay not found: {flat} (run `claudlobby new-fleet {fleet}` to scaffold)"
+                        f"Fleet overlay not found: {flat} (`claudlobby --fleet {fleet} fleet setup`"
+                        f" prepares a host's first fleet; declare a later one in {flat}/fleet.yaml"
+                        " and apply it with `host update apply FULL_COMMIT_SHA`)"
                     )
 
         if fleet_dir is None and not seed:
