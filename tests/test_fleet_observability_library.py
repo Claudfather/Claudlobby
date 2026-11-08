@@ -5,7 +5,9 @@ place; its body lists 22 of them, the Decision Table's 21 rows among them, and
 its review checked each one. One `in` check per kept rule sentence: a later trim
 that drops one fails here, and a rule reworded on purpose changes its line here
 in the same PR (#2761). The critical-types table and the per-type loop are held
-to the event registry by tests/test_event_type_registry.py."""
+to the event registry by tests/test_event_type_registry.py. The skill's
+description names the file the protocol's pointer names, and the skill's first
+rule lets a bot that composes the protocol read the reference."""
 
 from __future__ import annotations
 
@@ -14,7 +16,9 @@ from pathlib import Path
 
 from claudlobby.loader import parse_frontmatter
 
-PROTOCOL = Path(__file__).resolve().parent.parent / "library" / "protocols" / "fleet-observability.md"
+LIBRARY = Path(__file__).resolve().parent.parent / "library"
+PROTOCOL = LIBRARY / "protocols" / "fleet-observability.md"
+SKILL = LIBRARY / "skills" / "fleet-pulse" / "SKILL.md"
 
 
 def _flat(text: str) -> str:
@@ -223,4 +227,33 @@ def test_each_decision_table_row_keeps_its_rules():
     rows = _decision_rows()
     missing = [(event, s) for event, kept in DECISION.items() for s in kept
                if _flat(s) not in rows.get(event, "")]
+    assert not missing, missing
+
+
+# A skill file named in backticks, as the pointer and the description name it.
+SKILL_FILE = re.compile(r"`(\.claude/skills/[^`]+)`")
+
+
+def test_the_pointer_and_the_skill_description_name_one_file():
+    """The two say where the event reference is; each passes every other test
+    while it names a file the other does not (#2755's review, Note A)."""
+    pointed = set(SKILL_FILE.findall(_body()))
+    described = set(SKILL_FILE.findall(parse_frontmatter(SKILL.read_text())[0]["description"]))
+    assert len(pointed) == 1 and described == pointed, (pointed, described)
+    path = pointed.pop()
+    assert (LIBRARY / "skills" / path.removeprefix(".claude/skills/")).is_file(), path
+
+
+# The clause the cut added to the skill's first rule, so a bot that composes the
+# protocol may read the reference whether or not it manages a fleet; the example it
+# gives ("such as a monitor") is left out.
+PULSE_RULE = (
+    "but a bot that composes the `fleet-observability` protocol",
+    "may read the Event reference below, whatever its Configuration lines say about managers.",
+)
+
+
+def test_the_fleet_pulse_skill_lets_a_protocol_bot_read_the_reference():
+    body = _flat(parse_frontmatter(SKILL.read_text())[1])
+    missing = [s for s in PULSE_RULE if _flat(s) not in body]
     assert not missing, missing
