@@ -19,6 +19,11 @@ What it must hold:
 - the check's name in the rollup is the name the merge guardrails read.
 - a draft is not checked, and marking it ready for review runs the check, so a body
   finished while the PR is a draft leaves no failed run (#2467); a failing run says so.
+- two jobs run the one checker (#2797). When a PR is offered (opened, reopened or
+  marked ready) with a body that fails, the gate, which has the rollup name, re-reads
+  the body for up to 180 s, so an edit in that time passes it; the cue judges once and
+  fails at once, as the check always did, and cannot fail the run. On any other event
+  both judge once, and a failed read during the wait fails at once.
 """
 
 from __future__ import annotations
@@ -41,6 +46,12 @@ TEMPLATE = REPO / ".github" / "pull_request_template.md"
 FAKE_GH = REPO / "tests" / "fixtures" / "fake-gh-rollout.py"
 GUARDRAILS = REPO / "library" / "guardrails"
 CHECK_NAME = "rollout-check / Rollout check"
+SUCCESS_LINE = "Rollout check: the PR body names its rollout check."
+# The gate's wait, shortened for these tests: test_the_shipped_wait_is_180_s_read_every_15_s
+# pins the real values. A body that passes ends the wait at once, and each read of the fake
+# gh is a new process, so the wait is long enough for a slow host to reach the edit.
+WAIT_TEST_S = 5
+POLL_TEST_S = 0.05
 
 FILLED = """\
 ## Rollout check
@@ -79,6 +90,14 @@ def _checker_source() -> str:
     return found[0]
 
 
+def _checker_with_wait(wait_s: float, poll_s: float) -> str:
+    source = _checker_source()
+    for name, value in (("WAIT_S", wait_s), ("POLL_S", poll_s)):
+        source, count = re.subn(rf"^{name} = \d+$", f"{name} = {value}", source, flags=re.M)
+        assert count == 1, f"the checker must set {name} once, as a whole number of seconds"
+    return source
+
+
 class Run:
     def __init__(self, proc: subprocess.CompletedProcess, calls: list[list[str]], summary: str):
         self.rc = proc.returncode
@@ -95,12 +114,20 @@ class Run:
     def warnings(self) -> list[str]:
         return [l for l in self.out.splitlines() if l.startswith("::warning")]
 
+    @property
+    def body_reads(self) -> int:
+        return sum(1 for call in self.calls
+                   if any(re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+", a) for a in call))
+
 
 def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_caller=NARROW_CALLER,
-              fail=None, docs_run="", tests_run="", pr="7", event_body=None) -> Run:
+              fail=None, docs_run="", tests_run="", pr="7", event_body=None, role="gate",
+              action="edited", wait_s=WAIT_TEST_S) -> Run:
+    """Run the checker as one job of the workflow does. A list for body serves one body per
+    read, the last one repeating. The default event is an edit, which both jobs judge once."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     script = tmp_path / "checker.py"
-    script.write_text(_checker_source(), encoding="utf-8")
+    script.write_text(_checker_with_wait(wait_s, POLL_TEST_S), encoding="utf-8")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     # A /bin/sh shim, so the stand-in runs under this interpreter on every runner
@@ -110,7 +137,8 @@ def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_call
     (fake_bin / "gh").chmod(0o755)
     entries = [f if isinstance(f, dict) else {"filename": f} for f in files]
     state = tmp_path / "state.json"
-    state.write_text(json.dumps({"body": body, "files": entries, "base_caller": base_caller,
+    served = {"bodies": body} if isinstance(body, list) else {"body": body}
+    state.write_text(json.dumps({**served, "files": entries, "base_caller": base_caller,
                                  "fail": fail or {}}), encoding="utf-8")
     log = tmp_path / "gh-calls.log"
     log.write_text("", encoding="utf-8")
@@ -118,6 +146,7 @@ def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_call
     env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUTF8": "1",
            "REPO": "example-org/example-repo", "PR_NUMBER": pr, "DEFAULT_BRANCH": "main",
            "DOCS_PATHS_RUN": docs_run, "TESTS_PATHS_RUN": tests_run,
+           "ROLE": role, "EVENT_ACTION": action,
            "FAKE_GH_STATE": str(state), "FAKE_GH_LOG": str(log),
            "GITHUB_STEP_SUMMARY": str(summary)}
     if event_body is not None:
@@ -428,7 +457,7 @@ def test_the_rollup_name_is_the_name_the_merge_guardrails_read():
     caller, reusable = _load(CALLER), _load(REUSABLE)
     (job_id, job), = caller["jobs"].items()
     assert job["uses"] == "./.github/workflows/verify-rollout.yml"
-    (_, check), = reusable["jobs"].items()
+    check = reusable["jobs"]["check"]
     assert f"{job.get('name', job_id)} / {check['name']}" == CHECK_NAME
     for name in ("merge-policy-auto-admin.md", "merge-policy-auto-after-review.md",
                  "verify-rollout.md"):
@@ -456,6 +485,27 @@ def test_a_draft_is_skipped_and_marking_it_ready_runs_the_check():
     assert "if" not in caller["jobs"]["rollout-check"], "skip drafts in the reusable job"
     check = _load(REUSABLE)["jobs"]["check"]
     assert check.get("if") == "github.event.pull_request.draft != true"
+
+
+def test_a_gate_and_a_cue_run_the_one_checker():
+    """The gate has the rollup name; the cue's failure shows but cannot fail the run. The
+    names are plain text: a skipped matrix job, as a draft's is, shows its name unexpanded."""
+    jobs = _load(REUSABLE)["jobs"]
+    assert set(jobs) == {"check", "cue"}
+    gate, cue = jobs["check"], jobs["cue"]
+    assert (gate["name"], cue["name"]) == ("Rollout check", "Rollout check (no wait)")
+    assert (gate["env"], cue["env"]) == ({"ROLE": "gate"}, {"ROLE": "cue"})
+    assert cue["continue-on-error"] is True and "continue-on-error" not in gate
+    assert cue["steps"] is gate["steps"], "the cue's steps must be the gate's, by YAML alias"
+    assert cue["if"] == gate["if"]
+    assert cue["permissions"] == gate["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert (cue["runs-on"], cue["timeout-minutes"]) == (gate["runs-on"], gate["timeout-minutes"])
+    assert "strategy" not in gate and "strategy" not in cue
+    assert gate["concurrency"]["group"] != cue["concurrency"]["group"], \
+        "a new event's run must replace a waiting gate, not the cue"
+    assert gate["concurrency"]["cancel-in-progress"] is True
+    (step,) = gate["steps"]
+    assert step["env"]["EVENT_ACTION"] == "${{ github.event.action }}"
 
 
 def test_the_checker_takes_every_value_from_the_environment():
@@ -526,3 +576,79 @@ def test_the_guardrails_skeleton_left_unfilled_fails(tmp_path):
     assert run.rc == 1
     for name in ("Observe", "Control", "When", "Who"):
         assert any(f"**{name}:**" in e for e in run.errors), (name, run.out)
+
+
+# --- the gate waits for an edit when a PR is offered (#2797) ------------------------------
+
+NO_SECTION = "## Summary\nA fix.\n"
+WAITED = re.compile(r"^Rollout check: the body was incomplete when the PR was offered and "
+                    r"passed after \d+ s\.$", re.M)
+
+
+@pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review"])
+def test_the_gate_passes_an_edit_made_while_it_waits(tmp_path, action):
+    """Authors write the section once the cue has failed; an edit inside the wait passes."""
+    run = run_check(tmp_path, [NO_SECTION, NO_SECTION, FILLED], action=action)
+    assert run.rc == 0, run.out + run.err
+    assert run.body_reads == 3
+    assert WAITED.search(run.out), run.out
+    assert run.out.splitlines()[-1] == SUCCESS_LINE
+    assert run.errors == [], "a body that passed in the wait leaves no error annotation"
+
+
+def test_the_gate_fails_at_its_deadline_when_no_edit_comes(tmp_path):
+    run = run_check(tmp_path, [NO_SECTION], action="opened", wait_s=0.5)
+    assert run.rc == 1
+    assert run.body_reads >= 2, "the gate re-reads the body before it fails"
+    assert any('no "## Rollout check" section' in e for e in run.errors), run.out
+    assert not WAITED.search(run.out)
+
+
+@pytest.mark.parametrize("action", ["edited", "synchronize"])
+def test_an_edit_or_a_push_is_judged_once(tmp_path, action):
+    """Each later edit or push has a run of its own."""
+    run = run_check(tmp_path, [NO_SECTION, FILLED], action=action)
+    assert run.rc == 1
+    assert run.body_reads == 1
+
+
+@pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review", "edited"])
+def test_the_cue_judges_once_and_fails_at_once(tmp_path, action):
+    """Its failure is what prompts the edit, so it never waits."""
+    run = run_check(tmp_path, [NO_SECTION, FILLED], role="cue", action=action)
+    assert run.rc == 1
+    assert run.body_reads == 1
+
+
+def test_the_cue_fails_with_the_text_the_check_always_gave(tmp_path):
+    cue = run_check(tmp_path / "cue", NO_SECTION, role="cue", action="opened")
+    once = run_check(tmp_path / "once", NO_SECTION, role="gate", action="edited")
+    assert cue.rc == once.rc == 1
+    assert cue.out == once.out
+
+
+def test_a_body_that_passes_as_offered_is_not_waited_on(tmp_path):
+    run = run_check(tmp_path, [FILLED, NO_SECTION], action="opened")
+    assert run.rc == 0
+    assert run.body_reads == 1
+    assert not WAITED.search(run.out)
+    assert SUCCESS_LINE in run.out.splitlines()
+
+
+def test_a_failed_read_during_the_wait_fails_at_once(tmp_path):
+    run = run_check(tmp_path, [NO_SECTION, {"fail": "502"}, FILLED], action="opened")
+    assert run.rc == 1
+    assert run.body_reads == 2
+    assert any("could not read the PR body" in e for e in run.errors), run.out
+
+
+def test_the_shipped_wait_is_180_s_read_every_15_s():
+    """Constants, not inputs: nothing turns the wait off. The success line is the one that
+    rollout checks search job logs for, so it stays as it was."""
+    source = _checker_source()
+    assert re.search(r"^WAIT_S = 180$", source, re.M)
+    assert re.search(r"^POLL_S = 15$", source, re.M)
+    assert re.search(r'^OFFERED = \{"opened", "reopened", "ready_for_review"\}$', source, re.M)
+    assert f'print("{SUCCESS_LINE}")' in source
+    guide = (GUARDRAILS / "verify-rollout.md").read_text(encoding="utf-8")
+    assert "180 s" in guide and "`rollout-check / Rollout check (no wait)`" in guide

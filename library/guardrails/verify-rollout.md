@@ -23,7 +23,7 @@ Every PR body has a `## Rollout check` section with four lines. `.github/pull_re
 
 The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. A change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
 
-**Open the PR as a draft until its body has the section.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before the section is written fails at once, and the failed run notifies whoever triggered it.
+**Open the PR as a draft until its body has the section.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before the section is written fails `rollout-check / Rollout check (no wait)` at once. That check does not gate the merge: `rollout-check / Rollout check` re-reads the body for up to 180 s before it fails, so an edit made in that time passes it. A body still without the section then fails it, and the failed run notifies whoever triggered it.
 
 ## Reviewer
 
