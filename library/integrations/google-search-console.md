@@ -275,7 +275,8 @@ low-CTR queries → `get_advanced_search_analytics` to see which page ranks for 
   see that property.
 - **`uvx: command not found`** → host missing `uv` / `uvx`.
 - **A read tool prompts instead of running** → it isn't in `read_only_tools` /
-  `tool_grants`. Add it to both (mirrored) and regenerate.
+  `tool_grants`. Add it to both (mirrored), then the operator applies the
+  reviewed change with `host update apply FULL_COMMIT`.
 
 ## When NOT to use this
 

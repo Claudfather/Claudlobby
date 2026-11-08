@@ -84,7 +84,7 @@ Invoke it through the bot's skill directory, never a library path — the symlin
 "$BOT_DIR/.claude/skills/<name>/<helper>.sh" <args>
 ```
 
-**Helper here, or `library/tools/`?** `tools/` exists for **compose-time parameterization** — a `tool.yaml` manifest and a Jinja template rendered per-bot into `$BOT_DIR/tools/`. A helper with no compose-time params gains nothing from that machinery and splitting one capability across two library categories costs cohesion. The test: does the script need a value baked in at `generate` time? Yes → `library/tools/`. No, it reads everything from runtime env → keep it in the skill dir.
+**Helper here, or `library/tools/`?** `tools/` exists for **compose-time parameterization** — a `tool.yaml` manifest and a Jinja template rendered per-bot into `$BOT_DIR/tools/`. A helper with no compose-time params gains nothing from that machinery and splitting one capability across two library categories costs cohesion. The test: does the script need a value baked in at composition time? Yes → `library/tools/`. No, it reads everything from runtime env → keep it in the skill dir.
 
 Two things `tools/` does for free that a skill-dir helper owns itself:
 
@@ -103,7 +103,7 @@ Live credentials never belong in CI. If you take the second path, say why in the
 
 ## Composition
 
-In a sealed release, activation copies the selected skills into each bot as frozen bytes; only the development-only composition the test harness uses links them. So an edit to `library/skills/<name>/SKILL.md` reaches a running fleet only through a release, `config plan` and `host activate` (`documentation/fleet-update-lifecycle.md`, "Refreshing a skill's installed copies"). Listed in fleet.yaml: `skills: [dispatch, fleet-status, prs]`.
+A host update copies the selected skills into each bot as frozen bytes; only the development-only composition the test harness uses links them. So an edit to `library/skills/<name>/SKILL.md` reaches a running fleet only through the operator's `host update apply FULL_COMMIT` (`documentation/fleet-update-lifecycle.md`, "Refreshing a skill's installed copies"). Listed in fleet.yaml: `skills: [dispatch, fleet-status, prs]`.
 
 ## Naming
 

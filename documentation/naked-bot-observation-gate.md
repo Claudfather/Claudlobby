@@ -225,9 +225,9 @@ land fleet-wide with freshbox green throughout.
 > not visibility to a reader — it is validator coverage.** A `load_fleet`
 > default lands in `bot.<type>`, so `validator.py` checks that every named entry
 > exists in the library, and every `FleetConfig` consumer can see it. A composer
-> default never enters `BotConfig`: **`claudlobby validate` cannot see it**, so a
+> default never enters `BotConfig`: **`config validate` cannot see it**, so a
 > registry entry naming a missing library file passes validation and fails at
-> `generate`, on real fleets, only for the fleets that did not opt out.
+> composition, on real fleets, only for the fleets that did not opt out.
 >
 > `tests/test_defaults_registry.py::test_every_registered_entry_resolves_to_a_library_file`
 > covers the shared `library/` for all twelve types, which is the cheap half. It
