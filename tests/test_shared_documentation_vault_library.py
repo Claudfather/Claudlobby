@@ -5,10 +5,12 @@ the rules; its body maps 25 guards to the lines that hold them, and its review
 checked each one. One `in` check per kept rule sentence: a later trim that drops
 one fails here, and a rule reworded on purpose changes its line here in the same
 PR (#2761). tests/test_shared_docs_default.py composes stand-in copies, so it
-pins none of this text."""
+pins none of this text. The reasons the cut moved out are checked the other way:
+none of their sentences comes back into the protocol."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from claudlobby.loader import parse_frontmatter
@@ -76,3 +78,39 @@ def test_the_protocol_keeps_its_rule_sentences():
     assert fm["title"] == "Shared Documentation"
     missing = [s for s in KEPT if _flat(s) not in _flat(body)]
     assert not missing, missing
+
+
+# The five spans #2758 moved out to `fleet-ops/vault-reference.md`, under the names its
+# table gives them, one sentence at a time: a sentence that comes back into the protocol
+# puts its tokens back on every call of a vault-wired bot.
+MOVED_OUT = (
+    # Why `INDEX.md` is off limits
+    "This is the one rule that distinguishes a vault-wired fleet from a raw-tree one, and it is not a style preference: the fleet's `shared/` tree is *inside* `$CLAUDRON_VAULT_PATH`, so those INDEX files are vault files.",
+    "Opening them by hand is the thing the vault door exists to replace, and it silently misses everything in the vault's other tiers.",
+    # The Claudron #143 evidence for short queries
+    "The brevity is not style: **`recall` ranks correctly on short queries and collapses on prose** (Claudron #143 — score saturates, and the result set becomes a function of the vault rather than of your query).",
+    "Measured, same door, same subject, only length differing: a three-word query returned the exact note first; a one-sentence description of the *same idea* returned five notes from an unrelated domain.",
+    # What a degraded recall looks like
+    "Under #143 what comes back is a topically self-consistent cluster from an adjacent domain — it reads exactly like a real relevance-ranked answer, which is why it gets accepted instead of retried.",
+    "Obvious garbage would be safer.",
+    # The maintainer note for when #143 is fixed
+    "**This section is a MITIGATION, not the fix.**",
+    "The defect is Claudron #143; this protocol only points people at the door.",
+    "Written assuming #143 is **unfixed**.",
+    "If it lands such that prose ranks correctly, revisit both rungs above rather than leaving them to rot — the short-query rule stays harmless, but the reasoning attached to it would no longer be true.",
+    # What `capture` does
+    "The capture verb types and dedups the note and puts it in the right tier.",
+    "Hand-creating a file in the tree bypasses both and is how near-duplicate notes accumulate.",
+)
+
+
+def _prose(text: str) -> str:
+    """Whitespace-collapsed with blockquote markers dropped: the maintainer note was a
+    quoted block, and a quoted sentence that wraps carries a `>` inside it."""
+    return _flat(re.sub(r"(?m)^\s*>", " ", text))
+
+
+def test_the_reasons_the_cut_moved_out_stay_out():
+    body = _prose(parse_frontmatter(PROTOCOL.read_text())[1])
+    back = [s for s in MOVED_OUT if _prose(s) in body]
+    assert not back, back
