@@ -4047,13 +4047,65 @@ bot_dir_for_session() {
     printf '%s' "$target"
 }
 
+# The host compaction slot's own reader, asked about one bot (#1053, build PR
+# 6): compaction-slot.py's status(), the function behind its `status --json`,
+# so the rule for a live lease stays written once, in the slot. argv: the slot
+# script, the fleet, the bot. One line on stdout, and exit 0, always: `held
+# <seconds left>`, `free`, or `unreadable <why>`. claudlobby/message_transport.py
+# runs the same text with no shell; a test holds the two equal, so change both.
+_COMPACTION_LEASE_PY='# compaction-lease (#1053)
+import importlib.util, sys
+def answer(path, fleet, bot):
+    spec = importlib.util.spec_from_file_location("compaction_slot", path)
+    slot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(slot)
+    out = slot.status()[1]
+    lease = out.get("lease") or {}
+    if out.get("state") != "held" or (lease.get("fleet"), lease.get("bot")) != (fleet, bot):
+        return "free"
+    left = lease.get("left_s")
+    return "held %.1f" % (left if isinstance(left, (int, float)) else 0.0)
+try:
+    print(answer(*sys.argv[1:4]))
+except Exception as e:
+    print("unreadable %s: %s" % (type(e).__name__, " ".join(str(e).split())[:200]))
+'
+
+# compaction_lease_left <fleet> <bot>
+# Whether a Claude Code compaction is in flight for <fleet>/<bot>, by the host
+# compaction slot (compaction-slot.py, beside this file), whose lease the
+# build's executor takes just before it types /compact (#1053, build PR 6).
+# Prints the seconds left on a live lease that names the bot, and returns 0.
+# Returns 1, printing nothing, when none does: no slot in this release, no
+# lease, another bot's or another fleet's, one that has ended (released, at its
+# end, or taken before a host reset), or a record the slot cannot read, which
+# holds nothing by the slot's own rule. Returns 3, saying why on stderr, when
+# the slot cannot be asked at all (no python3, no data root); the callers then
+# go on as they did before the slot, so a broken reader never stops a send. A
+# bot is named as its lease names it: its fleet and its ID, which is also the
+# name of its tmux session. A python3 start per call: bot_is_busy asks only
+# once the marker and the pane have read the bot idle.
+compaction_lease_left() {
+    local fleet="${1:-}" bot="${2:-}" slot="$_LIB_COMMON_DIR/compaction-slot.py" out
+    [ -n "$fleet" ] && [ -n "$bot" ] && [ -f "$slot" ] || return 1
+    out=$(python3 -I -S -c "$_COMPACTION_LEASE_PY" "$slot" "$fleet" "$bot" 2>/dev/null || true)
+    case "$out" in
+        'held '*) printf '%s\n' "${out#held }"; return 0 ;;
+        free) return 1 ;;
+    esac
+    printf 'compaction_lease_left: the compaction slot could not be read for %s/%s (%s); read as no compaction in flight\n' \
+        "$fleet" "$bot" "${out:-no answer from python3}" >&2
+    return 3
+}
+
 # bot_is_busy <socket> <session> [bot_dir]
 # THE busy check for keystroke injectors. Marker-first: a data/.last-tool-call
 # fresher than KEEPALIVE_ACTIVE_WINDOW_S (default _ACTIVE_WINDOW_DEFAULT)
 # reads BUSY without touching tmux (rendering-immune, and the common case for
-# a working bot). Fallback: capture the pane and apply pane_is_busy. bot_dir
-# is resolved from the session name when not supplied; when unresolvable the
-# pane alone decides.
+# a working bot). Fallback: capture the pane and apply pane_is_busy; a pane it
+# reads idle is still busy while a compaction lease names the bot
+# (compaction_lease_left). bot_dir is resolved from the session name when not
+# supplied; when unresolvable the pane and the lease decide.
 # Returns 0 = busy (do NOT inject), 1 = not busy; rc 2 on empty session.
 bot_is_busy() {
     local socket="${1:-}" session="${2:-}" bot_dir="${3:-}"
@@ -4067,9 +4119,16 @@ bot_is_busy() {
     if [ -n "$bot_dir" ] && marker_age_within "$bot_dir/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
         return 0
     fi
-    local pane
+    local pane fleet
     pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null | tail -10) || true
-    pane_is_busy "$pane"
+    pane_is_busy "$pane" && return 0
+    # #1053 (build PR 6): a compacting pane draws "Compacting conversation…",
+    # which pane_is_busy does not match, so the slot's lease decides. The bot's
+    # fleet comes from its own bot.conf; its ID is its session's name.
+    fleet="${FLEET_NAME:-}"
+    [ -z "$bot_dir" ] || fleet=$(bot_conf_get "$bot_dir" FLEET_NAME "$fleet")
+    compaction_lease_left "$fleet" "$session" >/dev/null && return 0
+    return 1
 }
 
 # marker_is_newer <marker_a> <marker_b>

@@ -13,6 +13,14 @@ pane write.
 after a receipt wait found no receipt (#2105): it reads the pane, and presses one
 Enter only when ``held_delivery_match`` finds this message there: its text, or one
 paste chip in a box that read_box found empty just before the send.
+
+A compaction in flight is the one wait (#1053, build PR 6). While the host's
+compaction slot holds a lease naming the destination's bot, ``send`` waits for
+it to end, at most ``_COMPACTION_WAIT_S`` (60 s), before its native call, and
+``press_held_enter`` presses nothing. Claude Code draws "Compacting
+conversation…" then, which the busy check does not match, so the pane alone
+would read idle. ``compaction_lease`` is the one read: it runs the reader that
+lib-common's compaction_lease_left runs, the same text, so the two cannot differ.
 """
 
 from __future__ import annotations
@@ -23,6 +31,8 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
+import time
 from typing import Literal
 
 from .plane.ids import ID_PATTERNS
@@ -144,8 +154,97 @@ def _proof(output: bytes | None) -> tuple[int | None, str | None, int | None]:
     return int(rc), digest.decode() if digest else None, int(length) if length else None
 
 
+# The reader lib-common's compaction_lease_left runs (#1053, build PR 6),
+# character for character (tests/test_delivery_during_compaction.py pins it): the
+# host compaction slot's own status(), asked about one bot. argv: the slot
+# script, the fleet, the bot. One line on stdout, always: `held <seconds left>`,
+# `free`, or `unreadable <why>`. The CLI runs it with no shell, so a delivery
+# starts no second copy of the native helper.
+_COMPACTION_LEASE_PY = '''# compaction-lease (#1053)
+import importlib.util, sys
+def answer(path, fleet, bot):
+    spec = importlib.util.spec_from_file_location("compaction_slot", path)
+    slot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(slot)
+    out = slot.status()[1]
+    lease = out.get("lease") or {}
+    if out.get("state") != "held" or (lease.get("fleet"), lease.get("bot")) != (fleet, bot):
+        return "free"
+    left = lease.get("left_s")
+    return "held %.1f" % (left if isinstance(left, (int, float)) else 0.0)
+try:
+    print(answer(*sys.argv[1:4]))
+except Exception as e:
+    print("unreadable %s: %s" % (type(e).__name__, " ".join(str(e).split())[:200]))
+'''
+
+# A delivery waits this long at most for the destination's compaction to end,
+# reading the slot every _COMPACTION_POLL_S. The build plan's bound: a CLI call
+# held longer, with its native call and receipt wait after it, would outlive the
+# 2-minute default limit of the tool call a manager runs it in.
+_COMPACTION_WAIT_S = 60
+_COMPACTION_POLL_S = 2
+_sleep = time.sleep
+_clock = time.monotonic
+
+
+def compaction_lease(package: PackageResources, destination: TransportDestination, *,
+                     timeout: float = 5, runner=None) -> float | None:
+    """Seconds left on a live compaction lease naming the destination's bot, or
+    None: no lease names it, the release has no slot, or the slot could not be
+    read (#1053, build PR 6), which one stderr line names. One read of the
+    slot under the destination's data root; nothing is sent. A release without
+    the slot starts no process."""
+    if not isinstance(destination, TransportDestination):
+        raise ValueError("a frozen TransportDestination is required")
+    slot = package.native / "compaction-slot.py"
+    if not slot.is_absolute() or not slot.is_file():
+        return None
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+           "LC_ALL": "C", "CLAUDLOBBY_ROOT": str(destination.root)}
+    command = [sys.executable or "python3", "-I", "-S", "-c", _COMPACTION_LEASE_PY, str(slot),
+               destination.fleet, destination.session]
+    try:
+        result = (runner or _run)(command, input=b"", env=env, timeout=timeout)
+        answer = (result.stdout or b"").decode("utf-8", "replace")
+    except (subprocess.TimeoutExpired, OSError, _StartedFailure):
+        answer = "no answer"
+    found = re.fullmatch(r"held ([0-9]+(?:\.[0-9]+)?)\n", answer)
+    if found:
+        return float(found.group(1))
+    if answer != "free\n":
+        print(f"message transport: the compaction slot could not be read for "
+              f"{destination.fleet}/{destination.session} ({answer.strip()[:200] or 'no answer'}); "
+              "read as no compaction in flight", file=sys.stderr)
+    return None
+
+
+def _await_compaction(package: PackageResources, destination: TransportDestination,
+                      read) -> float | None:
+    """Wait while a compaction lease names the destination's bot, at most
+    _COMPACTION_WAIT_S (#1053, build PR 6). Returns the seconds waited, or None
+    when no lease named it at the first read. Past the limit, or once the slot
+    cannot be read, the send goes on as to any busy bot."""
+    start = _clock()
+    left = read(package, destination)
+    if left is None:
+        return None
+    while left is not None:
+        elapsed = _clock() - start
+        if elapsed >= _COMPACTION_WAIT_S:
+            break
+        _sleep(max(0.2, min(_COMPACTION_POLL_S, left, _COMPACTION_WAIT_S - elapsed)))
+        left = read(package, destination)
+    waited = _clock() - start
+    state = ("its compaction is still in flight, so the message goes in now, as to a busy bot"
+             if left is not None else "its compaction has ended")
+    print(f"message transport: waited {waited:.0f} s for {destination.fleet}/{destination.session}; "
+          f"{state}", file=sys.stderr)
+    return waited
+
+
 def send(package: PackageResources, destination: TransportDestination, *, message_id: str,
-         body: str, timeout: float = 30, runner=None) -> TransportOutcome:
+         body: str, timeout: float = 30, runner=None, lease=None) -> TransportOutcome:
     """Attempt exactly one native submission; no automatic payload/Enter retry.
 
     The runner seam has subprocess byte-input semantics. Only pre-call validation
@@ -159,6 +258,9 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
     repairs. Native chunk/settle defaults remain intact; readiness/health admission
     and the receipt-gated idle Enter repair (press_held_enter) belong to the
     operation owner.
+    Before the native call it waits while a compaction lease names the
+    destination's bot (_await_compaction, at most 60 s; ``lease`` stands in for
+    compaction_lease). ``timeout`` bounds the native call alone, not that wait.
     """
     if not isinstance(destination, TransportDestination):
         raise ValueError("a frozen TransportDestination is required")
@@ -179,6 +281,7 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
            "FLEET_NAME": destination.fleet, "TMUX_TMPDIR": str(destination.tmux_tmpdir),
            "TMPDIR": str(destination.tmux_tmpdir), "PLANE_MSG_ID": message_id,
            "PLANE_EMIT_DISABLED": "1", "PANE_SEND_VERIFY_TICKS": "0"}
+    _await_compaction(package, destination, lease or compaction_lease)
     command = ["/bin/bash", "--noprofile", "--norc", "-c", _SCRIPT, "message-transport",
                str(native), destination.socket, destination.session]
     try:
@@ -220,7 +323,8 @@ class EnterRepairOutcome:
     """One look at the recipient's box, and whether one Enter followed it.
 
     verdict is held_delivery_match's (text, chip, busy, not-held, not-shown, glued,
-    chips, chip-lines, chip-unproven), ``changed`` when the box no longer holds what an earlier
+    chips, chip-lines, chip-unproven), ``compacting`` while a compaction lease names the
+    bot (nothing is read or pressed), ``changed`` when the box no longer holds what an earlier
     look matched, or ``unknown`` when the pane could not be read or the native call
     failed. match names what was matched (``text``, or ``chip#N`` with the chip's
     number) so a later look can require the same; pressed is true only when the
@@ -240,6 +344,11 @@ set -uo pipefail
 . "$1" >/dev/null 2>&1 || { printf 'repair-v1\tunknown\t0\t-\n'; exit 3; }
 _repair_look_and_press() {
     local pane verdict ok match pressed
+    # #1053 (build PR 6): no Enter while a compaction lease names the bot. Its
+    # pane draws no running turn then, so the look below would read it idle.
+    if compaction_lease_left "$FLEET_NAME" "$3" >/dev/null 2>&1; then
+        printf 'repair-v1\tcompacting\t0\t-\n'; return 0
+    fi
     pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'repair-v1\tunknown\t0\t-\n'; return 3; }
     verdict=$(held_delivery_match "$pane" "$4" "${6:-}") && ok=1 || ok=0
     match=-
@@ -270,7 +379,7 @@ exit 0
 '''
 
 _VERDICTS = frozenset({"text", "chip", "busy", "not-held", "not-shown", "glued", "chips", "chip-lines",
-                       "chip-unproven", "changed", "unknown"})
+                       "chip-unproven", "compacting", "changed", "unknown"})
 
 
 def press_held_enter(package: PackageResources, destination: TransportDestination, *,
@@ -278,10 +387,12 @@ def press_held_enter(package: PackageResources, destination: TransportDestinatio
                      timeout: float = 15, runner=None) -> EnterRepairOutcome:
     """Press ONE Enter in the recipient's box when it holds this message.
 
-    Never sends the payload, never a second key. ``expect`` is an earlier look's
-    match: this look presses only if it matches the same. ``before`` is read_box's
-    answer from just before the send: a lone paste chip carries no message id, so
-    it is pressed only when the box was ``empty`` then. The operation owner
+    Never sends the payload, never a second key, and nothing at all while a
+    compaction lease names the bot (verdict ``compacting``, #1053 build PR 6).
+    ``expect`` is an earlier look's match: this look presses only if it matches
+    the same. ``before`` is read_box's answer from just before the send: a lone
+    paste chip carries no message id, so it is pressed only when the box was
+    ``empty`` then. The operation owner
     decides whether a second look is due. The same fixed native environment as
     send(): no inherited shell state, the Plane unreachable from the native side
     (the owner records the repair), the exact =session: target."""
