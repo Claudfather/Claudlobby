@@ -138,7 +138,8 @@ not proof that a running session has reloaded it.
 
 Source authoring with `bot create`
 or `library create` requires the operator or an explicitly equipped author;
-review and activate configuration separately.
+the operator applies the reviewed configuration separately with
+`host update apply FULL_COMMIT`.
 
 Use this guide for task, assignment, message, and request reads; the admitted
 task and assignment lifecycle; and ordinary message send and reply. The
@@ -244,7 +245,8 @@ reports completed bots and the failed bot; inspect those outcomes before retryin
 The manager can run `claudlobby --json fleet reload` to refresh the selected
 plugins and mark running bots for reload when idle. Read `plugins_refreshed`
 and `bots_marked` in the result. This command does not compose configuration
-or change enrollment; authored configuration changes require operator activation.
+or change enrollment; authored configuration changes need the operator's
+`host update apply FULL_COMMIT`.
 
 The manager can run `claudlobby --json fleet pulse` for a fleet health sweep.
 `data.tick == "completed"` means the sweep finished; inspect its summary for bot health.

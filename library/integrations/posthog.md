@@ -181,7 +181,8 @@ Typical flow: `event-definitions-list` / `property-definitions` to find field na
 - **Empty results / wrong project** → `POSTHOG_PROJECT_ID` points at a project the key
   can't see, or the wrong project. Confirm with `projects-get`.
 - **A read tool prompts instead of running** → it isn't in `read_only_tools` /
-  `tool_grants`. Add it to both (mirrored) and regenerate.
+  `tool_grants`. Add it to both (mirrored), then the operator applies the
+  reviewed change with `host update apply FULL_COMMIT`.
 - **Connection refused / transport errors** → `mcp-remote` version or Node issue, or
   the wrong endpoint host. Confirm `POSTHOG_HOST` and that Node is on PATH.
 

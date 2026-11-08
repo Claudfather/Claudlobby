@@ -48,7 +48,7 @@ If the eval would cost more than the change is worth, that is itself a finding: 
 
 ## Step 3: Run
 
-These developer instruments live in a Claudlobby source checkout, not in a sealed release. Locate that checkout before running them; its A/B fixture uses the private `harness/compose.py` composition helper. If the checkout is unavailable, ask the operator to run the evaluation there.
+These developer instruments live in a Claudlobby source checkout. Locate that checkout before running them; its A/B fixture uses the private `harness/compose.py` composition helper. If the checkout is unavailable, ask the operator to run the evaluation there.
 
 Existing assets — use them, do not rebuild:
 
