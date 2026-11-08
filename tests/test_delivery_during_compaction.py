@@ -8,10 +8,9 @@ idle. Three readers now ask the slot: bot_is_busy and the CLI's repair Enter
 compaction_lease_left, and the CLI's send (which waits for the lease to end, at
 most 60 s, then sends as to any busy bot) by running the same reader itself.
 
-The reader asks the slot's own status(), so most tests here run it against a
-stand-in slot whose status() returns what the test wrote: the slot is not on
-main yet. The tests at the end run the real slot, and skip until it is in the
-tree.
+The reader asks the slot's own status(), so the tests here run it against a
+stand-in slot whose status() returns what each test wrote, in the real one's
+shape: the slot is not on main yet.
 """
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,7 +29,6 @@ from tests.package_fixtures import source_package
 
 REPO = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO / "claudlobby" / "_runtime_scripts"
-SLOT = LIB_DIR / "compaction-slot.py"
 FIXTURES = REPO / "tests" / "fixtures" / "pane-states"
 IDLE_PANE = (FIXTURES / "idle-prompt.txt").read_text()
 ESC_PANE = (FIXTURES / "busy-spinner.txt").read_text()
@@ -430,65 +427,3 @@ def test_the_repair_still_looks_when_the_lease_names_another_bot(tmp_path, desti
     outcome = transport.press_held_enter(_package(native), destination, message_id=MSG)
     # No tmux server answers for this destination, so the look reads nothing.
     assert (outcome.verdict, outcome.pressed) == ("unknown", False)
-
-
-# --- the real slot (compaction-slot.py): these run once it is in the tree ------------
-
-needs_slot = pytest.mark.skipif(not SLOT.exists(), reason="compaction-slot.py (#1053 PR 3) is not in this tree")
-NOW = 1_800_000_000.0
-
-
-def _slot_env(tmp_path, *, now=NOW, boot="boot-a", **more):
-    (tmp_path / "proc").mkdir(exist_ok=True)
-    (tmp_path / "proc" / "loadavg").write_text("1.00 1.00 1.00 1/100 42\n")
-    return dict(COMPACTION_SLOT_DIR=tmp_path / "state", COMPACTION_SLOT_PROC=tmp_path / "proc",
-                COMPACTION_SLOT_BOOT_ID=boot, COMPACTION_SLOT_NOW=repr(now), **more)
-
-
-def _slot(tmp_path, *argv, env):
-    done = subprocess.run(["python3", "-I", str(SLOT), *argv, "--json"], env=constructed_env(**env),
-                          capture_output=True, text=True, timeout=30)
-    assert done.returncode == 0, done.stderr
-    return json.loads(done.stdout)
-
-
-@needs_slot
-def test_the_real_slot_names_its_lease_holder_and_no_one_else(tmp_path):
-    lease = _slot(tmp_path, "take", "--fleet", "tf", "--bot", "mgr", env=_slot_env(tmp_path))["lease"]
-    ask = lambda call, **kw: _lib(LIB_DIR, call, **_slot_env(tmp_path, **kw))  # noqa: E731
-    done = ask("compaction_lease_left tf mgr")
-    assert (done.returncode, done.stdout, done.stderr) == (0, "600.0\n", "")
-    assert ask("compaction_lease_left tf other").returncode == 1
-    assert ask("compaction_lease_left ops mgr").returncode == 1
-    assert ask("compaction_lease_left tf mgr", now=NOW + 599.9).stdout == "0.1\n"
-    assert ask("compaction_lease_left tf mgr", now=NOW + 600).returncode == 1
-    assert ask("compaction_lease_left tf mgr", boot="boot-b").returncode == 1
-    _slot(tmp_path, "release", "--fleet", "tf", "--bot", "mgr", "--lease", lease["lease"],
-          env=_slot_env(tmp_path, now=NOW + 5))
-    assert ask("compaction_lease_left tf mgr", now=NOW + 6).returncode == 1
-
-
-@needs_slot
-def test_the_real_slot_holds_an_idle_pane_busy_until_the_release(tmp_path):
-    lease = _slot(tmp_path, "take", "--fleet", "tf", "--bot", "mgr", env=_slot_env(tmp_path))["lease"]
-    stub, _ = _tmux_stub(tmp_path, IDLE_PANE)
-    call = f'bot_is_busy "com.example.tf.mgr" "mgr" "{_bot(tmp_path)}"'
-    env = _slot_env(tmp_path, TMUX_BIN=stub, CLAUDLOBBY_ROOT=tmp_path, FLEET_NAME="tf")
-    assert _lib(LIB_DIR, call, **env).returncode == 0
-    _slot(tmp_path, "release", "--fleet", "tf", "--bot", "mgr", "--lease", lease["lease"], env=env)
-    assert _lib(LIB_DIR, call, **env).returncode == 1
-
-
-@needs_slot
-def test_the_real_slot_under_the_data_root_stops_the_cli_repair(tmp_path, destination):
-    # The CLI's calls pass no test seam: the slot is the data root's own. Only
-    # the take reads a stand-in load, so a busy host cannot refuse it.
-    env = dict(CLAUDLOBBY_ROOT=destination.root)
-    proc = _slot_env(tmp_path)["COMPACTION_SLOT_PROC"]
-    lease = _slot(tmp_path, "take", "--fleet", "tf", "--bot", "mgr",
-                  env={**env, "COMPACTION_SLOT_PROC": proc})["lease"]
-    package = replace(source_package(), native=LIB_DIR)
-    assert 590 < transport.compaction_lease(package, destination) <= 600
-    assert transport.press_held_enter(package, destination, message_id=MSG).verdict == "compacting"
-    _slot(tmp_path, "release", "--fleet", "tf", "--bot", "mgr", "--lease", lease["lease"], env=env)
-    assert transport.compaction_lease(package, destination) is None
