@@ -262,6 +262,17 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # acts on the request file, data/.compact-request, never on these rows.
     "compact_requested": "notice",
     "compact_cancelled": "notice",
+    # #1053 build PR 4: keepalive's executor acting on that request. It typed
+    # /compact (data: the request, the slot's lease, every guard's reading); a
+    # compact_boundary row newer than the send proved it (with its sizes); or
+    # none came within the lease's 10 minutes, critical, since a compaction
+    # asked for and not done is a fault the manager's brief shows and nothing
+    # resends. A guard that said not now, or ended the request unsent, writes
+    # compaction_skipped with its reason, once per reason per request.
+    "compaction_sent": "notice",
+    "compaction_proven": "notice",
+    "compaction_not_proven": "critical",
+    "compaction_skipped": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.

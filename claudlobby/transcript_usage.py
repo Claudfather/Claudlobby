@@ -635,22 +635,32 @@ def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
     stopping at the row and never past ``cap``. ``bytes_read`` counts that last
     read.
     """
-    result = {"tokens": None, "at": None, "reason": None, "session": None,
-              "compacted_after": None, "bytes_read": 0, "cap": cap}
     source = transcript_source(paths, fleet, bot_id)
     if source.directory is None:
-        return {**result, "reason": source.issue}
-    sessions, issue = session_transcripts(source.directory)
+        return {"tokens": None, "at": None, "reason": source.issue, "session": None,
+                "compacted_after": None, "bytes_read": 0, "cap": cap}
+    return context_in(source.directory, cap=cap, head_cap=head_cap)
+
+
+def context_in(directory: Path, *, cap: int = CONTEXT_TAIL_BYTES,
+               head_cap: int = SESSION_HEAD_BYTES) -> dict:
+    """``current_context`` for a bot whose transcript directory is known: what it
+    reads once ``transcript_source`` has found the directory. A runtime script
+    that knows the bot's directory (#1053's compact-guard.py) calls this, so it
+    reads the context as the CLI does without loading the fleet's config."""
+    result = {"tokens": None, "at": None, "reason": None, "session": None,
+              "compacted_after": None, "bytes_read": 0, "cap": cap}
+    sessions, issue = session_transcripts(directory)
     chosen = None
     if issue is None:
-        chosen, issue = newest_own_session(source.directory, sessions, cap=head_cap)
+        chosen, issue = newest_own_session(directory, sessions, cap=head_cap)
     if chosen is None:
         return {**result, "reason": issue or "no_transcript"}
     name, size, _ = chosen
     result["session"] = name[:-len(".jsonl")]
     tail = None
     try:
-        with open(source.directory / name, "rb") as fh:
+        with open(directory / name, "rb") as fh:
             tail = _Tail(fh, size, cap)
             for line in tail.lines():
                 if b'"compact_boundary"' in line:
@@ -678,6 +688,57 @@ def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
     return {**result, "bytes_read": tail.bytes_read,
             "reason": ("no_main_usage_row_within_cap" if tail.capped
                        else "no_main_usage_row_in_transcript")}
+
+
+def compaction_since(directory: Path, since: float, *, cap: int = CONTEXT_TAIL_BYTES,
+                     head_cap: int = SESSION_HEAD_BYTES) -> dict:
+    """The newest compaction a bot's own newest session wrote at or after
+    ``since`` (epoch seconds), for #1053's executor: its ``compact_boundary`` row
+    as ``compaction_row`` reads it (``at``, ``trigger``, ``pre_tokens``,
+    ``post_tokens``), or None. Unlike ``compacted_after`` it does not stop at the
+    newest usage row, so a turn after the compaction does not hide it.
+
+    The session's rows are read from its end backwards, in 64 KiB blocks, and the
+    read stops at the first timed row older than ``since`` (Claude Code appends
+    rows in time order; see ``parse_window``), and never past ``cap``. A read
+    that reaches the session's first row without passing ``since`` sets
+    ``session_after: true``: the whole session is newer than ``since``. ``reason``
+    names why the answer is unknown: a capped read, or an unreadable listing,
+    session or file."""
+    result = {"compaction": None, "session_after": False, "reason": None, "session": None,
+              "bytes_read": 0, "cap": cap}
+    sessions, issue = session_transcripts(directory)
+    chosen = None
+    if issue is None:
+        chosen, issue = newest_own_session(directory, sessions, cap=head_cap)
+    if chosen is None:
+        return {**result, "reason": issue or "no_transcript"}
+    name, size, _ = chosen
+    result["session"] = name[:-len(".jsonl")]
+    floor = datetime.fromtimestamp(since, timezone.utc)
+    tail = None
+    try:
+        with open(directory / name, "rb") as fh:
+            tail = _Tail(fh, size, cap)
+            for line in tail.lines():
+                obj = _loads(line)
+                at = _row_instant(obj) if isinstance(obj, dict) else None
+                if at is None:
+                    continue
+                if at < floor:
+                    return {**result, "bytes_read": tail.bytes_read}
+                if b'"compact_boundary"' in line:
+                    row = compaction_row(obj)
+                    if row is not None:
+                        return {**result, "bytes_read": tail.bytes_read,
+                                "compaction": {key: row[key] for key in (
+                                    "at", "trigger", "pre_tokens", "post_tokens")}}
+    except OSError:
+        return {**result, "reason": "unreadable_transcript_file",
+                "bytes_read": tail.bytes_read if tail else 0}
+    if tail.capped:
+        return {**result, "bytes_read": tail.bytes_read, "reason": "since_not_reached_within_cap"}
+    return {**result, "bytes_read": tail.bytes_read, "session_after": True}
 
 
 def parse_window(path: str, size: int, since: datetime, until: datetime,

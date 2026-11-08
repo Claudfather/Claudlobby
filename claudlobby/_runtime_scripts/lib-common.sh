@@ -3955,6 +3955,53 @@ _pane_region_is_menu() {
         END { exit !found }'
 }
 
+# pane_compact_ready <pane_text>
+# The whole-screen idle test #1053's executor reads before it types /compact
+# (keepalive.sh, compact_tick): on the tick's capture, and again on a capture
+# taken under the pane's send lock just before the keys. Four facts, each a
+# veto, read in this order on the WHOLE screen, never keepalive's last ten
+# lines: no running turn (pane_is_busy; a task list or an agent tree drawn under
+# the activity line pushes it out of those ten lines), no menu or dialog
+# (pane_is_menu), no text in the input box (pane_is_held, pane_box_end_held),
+# and an input prompt (pane_input_region finds the box, and pane_is_idle reads
+# the screen idle). pane_is_idle alone proves nothing: it reads most running
+# turns' screens as idle too, so it is the last leg, after the vetoes.
+#
+# Prints nothing and returns 0 when all four hold. Otherwise prints the first
+# that failed (busy, menu, held, no_prompt) and returns 1, or no_utf8_locale
+# when the host has no UTF-8 locale to read under. The locale is pinned
+# (_pane_utf8_locale): under LC_ALL=C pane_is_idle reads frames idle that it
+# does not under UTF-8, and keepalive's own unit runs under en_US.UTF-8.
+pane_compact_ready() {
+    local text="$1" region
+    _pane_utf8_locale || { printf 'no_utf8_locale'; return 1; }
+    local -x LC_ALL="$_PANE_UTF8_LOCALE"
+    if pane_is_busy "$text"; then printf 'busy'; return 1; fi
+    if pane_is_menu "$text"; then printf 'menu'; return 1; fi
+    if pane_is_held "$text" || pane_box_end_held "$text"; then printf 'held'; return 1; fi
+    region=$(pane_input_region "$text")
+    if [ -z "$region" ] || ! pane_is_idle "$text"; then printf 'no_prompt'; return 1; fi
+    return 0
+}
+
+# _pane_utf8_locale
+# Sets _PANE_UTF8_LOCALE to the UTF-8 locale pane_compact_ready reads under:
+# en_US.UTF-8, the one keepalive's unit runs under, where the host has it, else
+# C.UTF-8, in either spelling `locale -a` lists. Read once per shell; returns 1,
+# setting nothing, when the host has neither.
+_PANE_UTF8_LOCALE=""
+_pane_utf8_locale() {
+    [ -z "$_PANE_UTF8_LOCALE" ] || return 0
+    local have name
+    have=$'\n'"$(locale -a 2>/dev/null || true)"$'\n'
+    for name in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; do
+        case "$have" in
+            *$'\n'"$name"$'\n'*) _PANE_UTF8_LOCALE="$name"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # _held_box_squeezed <region>
 # The input box's own text, from pane_input_region's first line (the glyph line)
 # to the rule drawn under the box, with the glyph and every blank (space, tab,
