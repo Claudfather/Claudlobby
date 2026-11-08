@@ -99,7 +99,8 @@ KEPT = (
 
 # Each Decision Table row keeps what the event means and what the manager does,
 # checked inside that row: every sentence but its payload field lists, its history,
-# and its notes on mechanism.
+# and its notes on mechanism. Where a sentence holds one of those beside a rule, only
+# the rule's part is pinned.
 DECISION = {
     "activity_stuck": (
         "Bot has made **no tool call** for longer than its threshold, counted from its last tool call or the last tick keepalive saw no turn running, whichever is later, AND keepalive has not classified it as idle (no recent `data/.idle` marker).",
@@ -123,7 +124,7 @@ DECISION = {
     ),
     "pane_unknown": (
         "keepalive **cannot read the bot's pane**: no running turn, no prompt, no held box and no usage limit (its `UNKNOWN` verdict), for longer than `OBSERVABILITY_PANE_UNKNOWN_THRESHOLD` (default 1800 s) with no tool call since.",
-        "After an idle tick such a pane keeps its idle marker, so `activity_stuck` never fires for it (#997).",
+        "`activity_stuck` never fires for it",
         "**Look at its pane before sending it anything**: a menu or a dialog may be waiting for a key.",
         "Choose an option by its label, never by its position, and never usage credits.",
         "Do not restart it first: a restart discards what the pane holds.",
@@ -139,7 +140,7 @@ DECISION = {
     "crash_loop": (
         "The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running).",
         "**Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either.",
-        "The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt).",
+        "The cause is in the bot's `logs/startup.log`",
         "Fix the cause, or escalate to the human.",
     ),
     "channel_refused": (
@@ -171,7 +172,7 @@ DECISION = {
         "A browser has run for **more than 15 minutes outside a heavy-slot render scope** (#2332).",
         "**The pulse never stops it** and pushes it once.",
         "Find what opened it and close it there, through the bot that started it or the operator at the desktop; never kill a browser by name, because every bot shares the user.",
-        "Bot sessions have had no display since #2332, so a browser one opened anyway took a path the cut does not cover: report it.",
+        "a browser one opened anyway took a path the cut does not cover: report it.",
     ),
     "unit_failed": (
         "An owned **unit is in the failed state** (#2532): one of the fleet's jobs, or an instance of its failure template, which means the alert a failed job sends did not go out.",
