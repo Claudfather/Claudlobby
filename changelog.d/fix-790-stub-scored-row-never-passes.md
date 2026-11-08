@@ -1,0 +1,3 @@
+### Fixed — an A/B comms-eval task whose quality the stub scored can no longer PASS (#790)
+
+The quality stub in `harness/ab-comms-eval.sh` wrote `"gate":"pass"`, so once a run was given `--threshold`, `harness/ab-comms-verdict.py` could read PASS on the token axes alone: a dry run with `--threshold 0.15` read PASS. The stub now writes `"gate":"unscored"`, and a task with any unscored row is INCONCLUSIVE ("quality unscored") whatever the threshold, the token axes or the mechanical check. Each task's `quality` in the verdict now reports what its rows say (`unscored`, `pass` or `fail`) instead of a fixed label.
