@@ -249,7 +249,8 @@ campaigns → drill with `meta_ads_get_adset_insights` / `meta_ads_get_ad_insigh
 - **`(#17)` / `(#80000)` rate-limit** → back off and widen date buckets; reduce
   parallel insights calls.
 - **A read tool prompts instead of running** → it isn't in `read_only_tools` /
-  `tool_grants`. Add it to both (mirrored) and regenerate.
+  `tool_grants`. Add it to both (mirrored), then the operator applies the
+  reviewed change with `host update apply FULL_COMMIT`.
 - **`npx: command not found`** → host missing Node / `npx`.
 
 ## When NOT to use this

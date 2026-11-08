@@ -510,8 +510,8 @@ count_send_retries() {
 # the primitive directly against the recipient transcript rather than through a
 # whole boot. Forwarding them here would put a second, unpinned arm axis into a
 # design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
-# (#1099) is here because no boot send calls the receipt gate: it is
-# dispatch-task.sh's. The #2036 send-lock knobs are here too: the lock wait
+# (#1099) is here because no boot send calls the receipt gate. The #2036
+# send-lock knobs are here too: the lock wait
 # only ever runs when another sender holds the pane, which a boot sample does
 # not arrange, and PANE_SEND_LOCK_DIR is a test seam that a measurement must
 # never move (senders that disagree on it do not exclude each other).

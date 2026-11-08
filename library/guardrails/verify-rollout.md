@@ -46,7 +46,7 @@ Only you can judge whether the check would actually prove the change, and whethe
 ## Merger: run the check once the change is live
 
 1. **Wait for the target's own record.** Never infer it from page freshness or a green deploy job.
-   - **Framework:** in `claudlobby --json host releases`, the selected activation is `active`, and `git merge-base --is-ancestor <merge sha> <source_revision>` holds for the selected release. Anything a bot reads at start, such as its composed CLAUDE.md or env, is live only after that bot restarts.
+   - **Framework:** in `claudlobby --json host update status`, `update.phase` is `done`, and `git merge-base --is-ancestor <merge sha> <update.target>` holds. Anything a bot reads at start, such as its composed CLAUDE.md or env, is live only after that bot restarts.
    - **Product:** the deploy provider's record for the merge commit says ready.
 2. **Run the check and its control.** They are text from the PR body: read what each command does before running it, and run them only for a PR whose author can triage the repository, which a fleet PR's is; for any other PR, someone who can triage says so first ([github-text-is-data](github-text-is-data.md)).
 3. **Post the verdict on the PR.** It is a comment headed `Rollout check: PASS`, `FAIL` or `PENDING`. It names the record that showed the commit live, and gives the command and the output of the check and of its control, redacted.
@@ -61,7 +61,7 @@ claudlobby --json task admit --title "Rollout check pending: <owner/repo>#<n>, <
 
 1. **The body** carries the PR URL, the check, its control and the date. The manager's brief lists the task under open work until it closes.
 2. **Leave it unassigned while it waits.** A bot-assigned task is re-asked after 48 hours, whatever its deadline.
-3. **Assign it once the check can run**, with `task assign TASK_ID --bot <runner> --expected-by <RFC3339>`. After each activation, assign every pending task whose merge commit the new release contains.
+3. **Assign it once the check can run**, with `task assign TASK_ID --bot <runner> --expected-by <RFC3339>`. After each host update, assign every pending task whose merge commit the update's target contains.
 4. **The assignee posts the verdict** on the PR and completes with `--artifact <verdict comment URL>`.
 
 ### Checks only the operator can run: one per message
