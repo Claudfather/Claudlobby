@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict
 import re
 import sqlite3
-from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
+from ..request_ids import canonical_request_id
 
 
 def _text(value, name, *, cap=4096):
@@ -21,15 +21,6 @@ def _id(value):
     if not isinstance(value, str) or not re.fullmatch(r"ws-[a-z0-9][a-z0-9-]{0,127}", value):
         raise CommandFailure("invalid_argument", "workstream ID must use ws- followed by a slug")
     return value
-
-
-def _request(value):
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
 
 
 def _inputs(args, destination):
@@ -104,7 +95,7 @@ def _write(args, destination, origin, selected, bindings):
     from ..runtime_admission import RuntimeIdentity, mutation_admission
     from ..workstream_operations import apply
 
-    request_id = _request(args.request_id)
+    request_id = canonical_request_id(args.request_id)
     data = _inputs(args, destination)
     if args.dry_run:
         return CommandOutput({"validated": True, "recording": "not_attempted",

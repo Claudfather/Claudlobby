@@ -5,10 +5,9 @@ Success results contain data only; the CLI chooses its display lines.
 """
 from __future__ import annotations
 
-from uuid import UUID
-
 from .application_result import ApplicationOutcome
 from .command_result import CommandFailure
+from .request_ids import canonical_request_id
 from .task_operations import UNSPECIFIED_ASSIGNMENT
 
 
@@ -18,15 +17,6 @@ def _reference(value: str, field: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise CommandFailure("invalid_argument", f"{field} requires a task or assignment reference")
     return value
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
 
 
 def _text(value: str, field: str) -> str:
@@ -160,7 +150,7 @@ def nudge_bound_task(ctx, route, package, *, request_id, task_id, reason, by=Non
     from .task_operations import TaskRecordingError, nudge
     from .runtime_admission import runtime_provenance
 
-    _request_id(request_id)
+    canonical_request_id(request_id)
     _reference(task_id, "TASK_ID")
     _text(reason, "reason")
     if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
@@ -191,7 +181,7 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
     from .runtime_admission import runtime_provenance
     from .task_operations import TaskRecordingError, feedback
 
-    _request_id(request_id)
+    canonical_request_id(request_id)
     if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
             or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
             or route.caller_fleet_uid is not None or ctx.caller_fleet_uid is not None
