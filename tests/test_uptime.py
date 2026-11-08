@@ -25,11 +25,6 @@ from claudlobby.uptime import (
 TZ = timezone(timedelta(hours=-4))
 
 
-def _ts(hour: int, minute: int = 0) -> str:
-    """Build an ISO timestamp string for 2026-05-17 at given hour:min -04:00."""
-    return datetime(2026, 5, 17, hour, minute, tzinfo=TZ).isoformat()
-
-
 class TestComputeMetrics:
     def test_empty_entries(self):
         # #891: nothing observed is unknown, not 0% up.
