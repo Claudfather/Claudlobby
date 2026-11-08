@@ -646,6 +646,24 @@ def test_a_usage_limit_tick_sends_nothing(rig):
     assert _sent(rig.keys()) == 1
 
 
+# --- the interpreter keepalive runs the guard with ------------------------------------
+
+def test_the_guards_package_modules_load_under_the_hosts_system_python():
+    """keepalive runs compact-guard.py as `python3 -S -E`, the host's system Python:
+    3.9 on macOS (Apple's /usr/bin/python3), where an `X | None` annotation evaluated
+    when its function is defined raises TypeError. Each module the guard loads defers
+    its annotations, so none is evaluated at import (a run on macOS with
+    transcript_usage.py lacking this read every tick as a failed guard)."""
+    import ast
+    for rel in ("claudlobby/transcript_usage.py", "claudlobby/compact_request.py",
+                "claudlobby/_runtime_scripts/compact-guard.py"):
+        tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
+        futures = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+        assert any(a.name == "annotations" for n in futures for a in n.names), rel
+    src = (LIB / "compact-guard.py").read_text(encoding="utf-8")
+    assert set(re.findall(r'_package_module\("([a-z_]+)"\)', src)) == {"compact_request", "transcript_usage"}
+
+
 # --- the whole-screen test on every captured frame --------------------------------
 
 READY = {"idle-before-turn", "turn-end-b-idle", "delivery-a-idle", "compacted-idle"}
