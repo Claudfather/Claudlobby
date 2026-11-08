@@ -796,14 +796,56 @@ suc_main() {
     exit "$vrc"
 }
 
+# --- run pins: taken before any cell, recorded in the verdict --------------
+# harness_revision <tree> -> the commit the harness tree is at, with "-dirty"
+# when its tracked files differ from it (the test harness/compose.py makes of a
+# clean committed tree), or nothing when the tree has no commit of its own. A
+# real verdict takes only a clean commit.
+harness_revision() {
+    local rev
+    [ -e "$1/.git" ] || return 0
+    rev="$(git -C "$1" rev-parse --verify -q HEAD 2>/dev/null)" || return 0
+    if git -C "$1" diff --quiet HEAD 2>/dev/null; then
+        printf '%s' "$rev"
+    else
+        printf '%s-dirty' "$rev"
+    fi
+}
+
+# composed_sha256 <bot dir> <root token> -> one sha256 over what a cell's
+# session reads in an arm's composed bot directory: each file's sha256 beside
+# its path there, sorted, links followed. The composed paths carry the run
+# root's name (<root token>), which is read as "<root>", so two runs of one
+# revision pin the same value. bot.conf and the unit files are left out: the
+# supervisor reads them, a headless cell does not, and they carry the run's HOME
+# and the hash of its fleet.yaml.
+composed_sha256() {
+    python3 -c 'import hashlib, os, sys
+top, token = sys.argv[1], sys.argv[2].encode()
+entries = []
+for d, dirs, files in os.walk(top, followlinks=True):
+    for name in files:
+        rel = os.path.relpath(os.path.join(d, name), top)
+        if rel == name and (name == "bot.conf" or name.endswith((".service", ".timer", ".plist"))):
+            continue
+        with open(os.path.join(d, name), "rb") as fh:
+            entries.append((rel, hashlib.sha256(fh.read().replace(token, b"<root>")).hexdigest()))
+if not entries:
+    sys.exit("composed_sha256: no file to pin under " + top)
+manifest = "".join("%s  %s\n" % (digest, rel) for rel, digest in sorted(entries))
+print(hashlib.sha256(manifest.encode("utf-8", "surrogateescape")).hexdigest())' "$1" "$2"
+}
+
 # --- verdict computation: thin wrapper over harness/ab-comms-verdict.py ----------
 # The pass-bar / bootstrap / verdict logic is a standalone stdlib module (sibling
 # to the transcript accounting owner, following the dispatch-overdue.py precedent) so it is
 # directly unit-testable and F2 can extend the threshold + scorer there. This
 # wrapper only threads the harness pins into it.
 compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
-    local ph=""
+    local ph="" real=""
     [ "${PROTO_PLACEHOLDER:-0}" = 1 ] && ph="--proto-placeholder"
+    # Any run but a dry run is real, and its verdict needs every run pin.
+    [ "$DRY_RUN" = 1 ] || real="--real"
     python3 "$HARNESS/ab-comms-verdict.py" "$1" \
         --out "$2" \
         --threshold "$THRESHOLD" \
@@ -813,7 +855,11 @@ compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
         --claude-version "$CLAUDE_VER" \
         --proto-hash "${PROTO_HASH:-unknown}" \
         --weights-file "${WEIGHTS_FILE:-}" \
-        $ph
+        --battery-sha256 "${BATTERY_SHA256:-}" \
+        --harness-revision "${HARNESS_REVISION:-}" \
+        --composed-sha256 "without=${COMPOSED_WITHOUT:-}" \
+        --composed-sha256 "with=${COMPOSED_WITH:-}" \
+        $ph $real
 }
 
 # Sourced for unit tests (conftest call_script_fn drives cov_count_re and the
@@ -931,6 +977,23 @@ mechanical_check() {  # $1 task  $2 must_persist  $3 transcript -> "true"|"false
     # artifacts, so it passes; threading it here (fed the must_persist facts) means
     # F2 / real mode slot the real predicate without restructuring run_cell.
     printf 'true'
+}
+
+# write_battery <file> <tasks> -> the battery as the cells get it: each task's
+# dispatch text and must_persist facts, in run order. Its sha256 is the battery
+# pin.
+write_battery() {
+    local t
+    local -a a=()
+    for t in $2; do
+        a+=("$t" "$(battery_dispatch_text "$t")" "$(battery_must_persist "$t")")
+    done
+    python3 -c 'import json, sys
+a = sys.argv[2:]
+tasks = [{"id": a[i], "dispatch": a[i + 1], "must_persist": a[i + 2]} for i in range(0, len(a), 3)]
+with open(sys.argv[1], "w") as fh:
+    json.dump({"tasks": tasks}, fh, indent=2, sort_keys=True)
+    fh.write("\n")' "$1" ${a[@]+"${a[@]}"}
 }
 
 # --- variant fixture: composed by REAL claudlobby generate -------------------
@@ -1106,6 +1169,16 @@ VERDICT="$ROOT/verdict.json"
 TASKS="$(resolve_tasks)"
 printf 'tasks: %s   reps: %s (max %s)   threshold: %s\n' "$TASKS" "$REPS" "$REPS_MAX" "${THRESHOLD:-<none: INCONCLUSIVE>}"
 
+# The run pins, taken before any cell: the battery the cells get, the commit the
+# harness runs at, and what each arm's session reads.
+write_battery "$ROOT/battery.json" "$TASKS" || die "could not write the battery file"
+BATTERY_SHA256="$(_sha256 "$ROOT/battery.json")"
+HARNESS_REVISION="$(harness_revision "$SRC")"
+COMPOSED_WITHOUT="$(composed_sha256 "$ROOT/runtime/bots/ab-without" "$(basename "$ROOT")")" \
+    || die "could not pin what the WITHOUT arm reads"
+COMPOSED_WITH="$(composed_sha256 "$ROOT/runtime/bots/ab-with" "$(basename "$ROOT")")" \
+    || die "could not pin what the WITH arm reads"
+
 # Run the paired matrix; extend one rep at a time to reps-max while any task
 # straddles the bar (the stopping rule). With the default (no threshold) every
 # task is INCONCLUSIVE immediately, so this settles in a single round.
@@ -1157,6 +1230,15 @@ assert "pins" in d and "weights" in d["pins"], "missing pins/weights"
 assert not (d["overall"]=="PASS" and d["pins"]["threshold"] is None), "PASS without a ratified T"' \
     "$VERDICT" 2>/dev/null && r=yes || r=no
 harness_check "verdict.json valid: both axes, pins, no bare-PASS without T" "$r"
+python3 -c 'import json, re, sys
+p = json.load(open(sys.argv[1]))["pins"]
+arms = p["composed_sha256"]
+digests = [p["battery_sha256"], arms.get("without"), arms.get("with")]
+assert all(isinstance(v, str) and re.fullmatch("[0-9a-f]{64}", v) for v in digests), "a pin is missing"
+assert sorted(arms) == ["with", "without"] and arms["with"] != arms["without"], "the arms pin one output"
+assert p["harness_revision"] == (sys.argv[2] or None), "not the revision taken"' \
+    "$VERDICT" "$HARNESS_REVISION" 2>/dev/null && r=yes || r=no
+harness_check "verdict.json pins the battery, the harness revision and each arm" "$r"
 # zero model calls: no auth landed in either per-bot CLAUDE_CONFIG_DIR
 find "$ROOT"/config-with "$ROOT"/config-without -name '.credentials.json' 2>/dev/null | grep -q . && r=no || r=yes
 harness_check "no CLAUDE_CONFIG_DIR auth touched (zero model calls)" "$r"

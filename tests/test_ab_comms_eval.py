@@ -14,13 +14,18 @@ threshold, or with the stub quality scorer, the harness can never emit PASS.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import call_script_fn
 
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -128,9 +133,10 @@ def _pair(task, rep, ps_wo, ps_wi, cw_wo, cw_wi, quality=None):
 VERDICT_MODULE = REPO_DIR / "harness" / "ab-comms-verdict.py"
 
 
-def _module_verdict(tmp_path, name, rows, *flags):
+def _verdict_run(tmp_path, name, rows, *flags):
     # Exercise the standalone verdict module directly (reps-now == reps-max so a
-    # straddle resolves to its terminal INCONCLUSIVE, never PASS).
+    # straddle resolves to its terminal INCONCLUSIVE, never PASS). Returns the run
+    # and the --out path, which a refused verdict leaves unwritten.
     f = tmp_path / f"{name}.jsonl"
     f.write_text("".join(json.dumps(r) + "\n" for r in rows))
     out = tmp_path / f"{name}.verdict.json"
@@ -151,8 +157,45 @@ def _module_verdict(tmp_path, name, rows, *flags):
         capture_output=True,
         text=True,
     )
+    return r, out
+
+
+def _module_verdict(tmp_path, name, rows, *flags):
+    r, out = _verdict_run(tmp_path, name, rows, *flags)
     assert r.returncode == 0, r.stderr + r.stdout
     return json.loads(out.read_text())
+
+
+# The run pins a real verdict needs, by the name a refusal gives each.
+_RUN_PINS = {
+    "battery_sha256": "b" * 64,
+    "harness_revision": "c" * 40,
+    "composed_sha256.without": "d" * 64,
+    "composed_sha256.with": "e" * 64,
+}
+
+
+def _pin_flags(**changes):
+    """The verdict module's flags for _RUN_PINS, with each change applied (None drops it)."""
+    flags = []
+    for name, value in {**_RUN_PINS, **changes}.items():
+        if value is None:
+            continue
+        if name.startswith("composed_sha256."):
+            flags += ["--composed-sha256", name.split(".", 1)[1] + "=" + value]
+        else:
+            flags += ["--" + name.replace("_", "-"), value]
+    return flags
+
+
+def _named(pin, text):
+    # composed_sha256.with must not match inside composed_sha256.without.
+    return re.search(r"\b" + re.escape(pin) + r"\b", text) is not None
+
+
+def _sourced_fn(call, **values):
+    """Run one harness function, sourced, with its arguments passed as variables."""
+    return call_script_fn(SCRIPT, call, env={**os.environ, **values}).strip()
 
 
 @pytest.mark.usefixtures("_selected_built_cli")
@@ -207,6 +250,41 @@ class TestDryRun:
             assert d["overall"] == "INCONCLUSIVE"
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_the_verdict_pins_its_battery_harness_and_arms(self):
+        # Two dry runs differ only by their temporary root, so they pin the same
+        # values. The arms differ by the protocol, so their composed pins differ.
+        head = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "rev-parse", "--verify", "-q", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        runs = []
+        for _ in range(2):
+            r = _run("--dry-run", "--keep", "--tasks", "2", "--reps", "1")
+            assert r.returncode == 0, r.stderr + r.stdout
+            root = Path(_kv(r.stdout, "ROOT"))
+            try:
+                pins = json.loads(Path(_kv(r.stdout, "VERDICT")).read_text())["pins"]
+                battery = root / "battery.json"
+                digest = hashlib.sha256(battery.read_bytes()).hexdigest()
+                assert pins["battery_sha256"] == digest
+                tasks = json.loads(battery.read_text())["tasks"]
+                assert [t["id"] for t in tasks] == ["T1", "T2"]
+                runs.append(pins)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+        first, second = runs
+        if head:
+            assert first["harness_revision"] in (head, head + "-dirty")
+        else:
+            assert first["harness_revision"] is None
+        arms = first["composed_sha256"]
+        assert sorted(arms) == ["with", "without"]
+        assert all(re.fullmatch("[0-9a-f]{64}", v) for v in arms.values())
+        assert arms["with"] != arms["without"]
+        keys = ("battery_sha256", "harness_revision", "composed_sha256")
+        assert {k: second[k] for k in keys} == {k: first[k] for k in keys}
 
     def test_no_auth_files_created_in_config_dirs(self):
         r = _run("--dry-run", "--keep", "--tasks", "1", "--reps", "1")
@@ -312,3 +390,124 @@ class TestComputeVerdict:
             "quality unscored",
             "unscored",
         )
+
+
+class TestVerdictPins:
+    """The run pins: what the verdict records, and the refusal of a real verdict
+    that lacks one."""
+
+    @staticmethod
+    def _rows():
+        rows = []
+        for rep in (1, 2, 3):
+            rows += _pair("T1", rep, 1000, 800, 1000, 700)  # 20% ps, 30% cwt
+        return rows
+
+    def test_the_verdict_records_the_run_pins(self, tmp_path):
+        d = _module_verdict(tmp_path, "pins", self._rows(), *_pin_flags())
+        p = d["pins"]
+        assert p["battery_sha256"] == "b" * 64
+        assert p["harness_revision"] == "c" * 40
+        assert p["composed_sha256"] == {"without": "d" * 64, "with": "e" * 64}
+
+    def test_a_real_verdict_with_every_pin_is_judged_as_before(self, tmp_path):
+        flags = ("--real", "--threshold", "0.1", *_pin_flags())
+        d = _module_verdict(tmp_path, "real", self._rows(), *flags)
+        assert d["overall"] == "PASS"
+
+    @pytest.mark.parametrize(
+        "pin, value",
+        [
+            ("battery_sha256", None),
+            ("battery_sha256", "unknown"),
+            ("harness_revision", None),
+            ("harness_revision", "c" * 40 + "-dirty"),
+            ("harness_revision", "c" * 7),
+            ("composed_sha256.without", None),
+            ("composed_sha256.with", None),
+        ],
+    )
+    def test_a_real_verdict_missing_a_pin_is_refused_naming_it(
+        self, tmp_path, pin, value
+    ):
+        flags = ("--real", "--threshold", "0.1", *_pin_flags(**{pin: value}))
+        r, out = _verdict_run(tmp_path, "refused", self._rows(), *flags)
+        assert r.returncode == 3, r.stderr + r.stdout
+        assert [p for p in _RUN_PINS if _named(p, r.stderr)] == [pin], r.stderr
+        assert not out.exists()
+
+    def test_without_real_an_unpinned_verdict_is_still_computed(self, tmp_path):
+        # A dry run, or a verdict recomputed from a results file, records a
+        # missing pin as null rather than refusing.
+        d = _module_verdict(tmp_path, "unpinned", self._rows(), "--threshold", "0.1")
+        p = d["pins"]
+        assert (p["battery_sha256"], p["harness_revision"]) == (None, None)
+        assert p["composed_sha256"] == {}
+        assert d["overall"] == "PASS"
+
+
+class TestRunPinFunctions:
+    """The harness functions that take the pins, run sourced."""
+
+    def test_the_composed_pin_covers_what_a_session_reads(self, tmp_path):
+        def bot(name, token, claude="rules", skill="steps", conf="a=1"):
+            top = tmp_path / name
+            (top / ".claude" / "skills").mkdir(parents=True)
+            (top / "CLAUDE.md").write_text(f"{claude} for /tmp/{token}/runtime\n")
+            (top / ".claude" / "settings.local.json").write_text(
+                f'{{"command": "/tmp/.harness-installation-{token}/bin/claudlobby"}}\n'
+            )
+            linked = tmp_path / f"{name}-library" / "fleet-ops"
+            linked.mkdir(parents=True)
+            (linked / "SKILL.md").write_text(skill + "\n")
+            (top / ".claude" / "skills" / "fleet-ops").symlink_to(linked)
+            (top / "bot.conf").write_text(f"{conf} /tmp/{token}\n")
+            (top / "abev.x.service").write_text(conf + "\n")
+            (top / "abev.x.plist").write_text(conf + "\n")
+            return top, token
+
+        def pin(made):
+            top, token = made
+            return _sourced_fn(
+                'composed_sha256 "$PIN_DIR" "$PIN_TOKEN"',
+                PIN_DIR=str(top),
+                PIN_TOKEN=token,
+            )
+
+        base = pin(bot("a", "ab-comms-eval.AAAAAA"))
+        assert re.fullmatch("[0-9a-f]{64}", base)
+        # Another run's root, and a link to another copy of the same skill.
+        assert pin(bot("b", "ab-comms-eval.BBBBBB")) == base
+        # bot.conf and the unit files are the supervisor's.
+        assert pin(bot("c", "ab-comms-eval.AAAAAA", conf="a=2")) == base
+        # The composed text, and a file a link points at, are the session's.
+        assert pin(bot("d", "ab-comms-eval.AAAAAA", claude="rule")) != base
+        assert pin(bot("e", "ab-comms-eval.AAAAAA", skill="step")) != base
+
+    def test_the_harness_revision_is_the_trees_commit(self, tmp_path):
+        tree = tmp_path / "tree"
+        tree.mkdir()
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(tree), "-c", "user.name=Example",
+                 "-c", "user.email=example@example.com",
+                 "-c", "commit.gpgsign=false", *args],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        def revision(d):
+            return _sourced_fn('harness_revision "$PIN_DIR"', PIN_DIR=str(d))
+
+        git("init", "-q")
+        assert revision(tree) == ""  # no commit yet
+        (tree / "f").write_text("1\n")
+        git("add", "f")
+        git("commit", "-q", "-m", "one")
+        head = git("rev-parse", "HEAD")
+        assert revision(tree) == head
+        (tree / "f").write_text("2\n")
+        assert revision(tree) == head + "-dirty"
+        # A directory inside that repository is not a tree with a commit of its own.
+        (tree / "export").mkdir()
+        assert revision(tree / "export") == ""

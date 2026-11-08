@@ -23,10 +23,21 @@ Pass-bar (per task type):
   A task with an "unscored" quality row (the F2 stub's) is INCONCLUSIVE
   ("quality unscored") whatever the threshold, token axes or mechanical check.
 
+Pins: the models, weights, threshold, cost threshold, reps, claude version and
+protocol hash, and three run pins the harness takes before any cell: the sha256
+of the battery the cells got (--battery-sha256), the commit the harness tree is
+at (--harness-revision, "-dirty" when its tracked files differ from it) and,
+once per arm, the sha256 of what that arm's session reads in its composed bot
+directory (--composed-sha256 ARM=SHA). A missing pin is recorded as null. With
+--real the verdict is a real run's, and it is refused when a run pin is
+missing: exit 3, each missing pin named on stderr, nothing written.
+
 Usage:
   ab-comms-verdict.py RESULTS.jsonl [--out verdict.json] [--threshold F]
       [--cost-threshold F] [--reps-now N] [--reps-max N] [--claude-version S]
       [--proto-hash S] [--proto-placeholder] [--weights-file F]
+      [--battery-sha256 S] [--harness-revision S] [--composed-sha256 ARM=S]...
+      [--real]
 
 Emits verdict.json (--out) + a markdown table on stdout + a final
 ANY_STRADDLE=<0|1> line the harness stopping rule reads.
@@ -37,11 +48,15 @@ import json
 import os
 import random
 import statistics
+import sys
 
 # Pre-registered, deterministic bootstrap: seeded so dry-run and tests reproduce.
 BOOTSTRAP_N = 2000
 BOOTSTRAP_SEED = 0
 CI_PCT = 90  # two-sided -> 5th and 95th percentiles of the bootstrap medians
+
+REFUSED = 3  # the exit status of a real run's verdict that lacks a run pin
+_HEX = frozenset("0123456789abcdef")
 
 
 def _load_rows(path):
@@ -225,6 +240,32 @@ def compute(
     return doc, any_straddle
 
 
+def _is_hex(value, *lengths):
+    return isinstance(value, str) and len(value) in lengths and set(value) <= _HEX
+
+
+def unpinned(pins, arms):
+    """The run pins a real verdict lacks, as (name, value) pairs. The battery and
+    each arm's composed output are sha256 digests; the harness revision is a
+    commit, so a "-dirty" tree is not pinned."""
+    gaps = []
+    if not _is_hex(pins["battery_sha256"], 64):
+        gaps.append(("battery_sha256", pins["battery_sha256"]))
+    if not _is_hex(pins["harness_revision"], 40, 64):
+        gaps.append(("harness_revision", pins["harness_revision"]))
+    for arm in arms:
+        if not _is_hex(pins["composed_sha256"].get(arm), 64):
+            gaps.append(("composed_sha256." + arm, pins["composed_sha256"].get(arm)))
+    return gaps
+
+
+def _arm_pin(text):
+    arm, sep, sha = text.partition("=")
+    if not sep or not arm:
+        raise argparse.ArgumentTypeError("expected ARM=SHA256, got %r" % text)
+    return arm, sha
+
+
 def _pct(x):
     return "n/a" if x is None else "%.1f%%" % (100 * x)
 
@@ -278,6 +319,27 @@ def main(argv=None):
     ap.add_argument("--proto-hash", default="unknown")
     ap.add_argument("--proto-placeholder", action="store_true")
     ap.add_argument("--weights-file", default="")
+    ap.add_argument(
+        "--battery-sha256", default="", help="sha256 of the battery the cells got"
+    )
+    ap.add_argument(
+        "--harness-revision",
+        default="",
+        help="the harness tree's commit (-dirty when its tracked files differ)",
+    )
+    ap.add_argument(
+        "--composed-sha256",
+        type=_arm_pin,
+        action="append",
+        default=[],
+        metavar="ARM=SHA256",
+        help="sha256 of what one arm's session reads (once per arm)",
+    )
+    ap.add_argument(
+        "--real",
+        action="store_true",
+        help="a real run's verdict: refused (exit 3) when a run pin is missing",
+    )
     args = ap.parse_args(argv)
 
     weights = None
@@ -287,18 +349,36 @@ def main(argv=None):
         except (ValueError, OSError):
             weights = None
 
+    rows = _load_rows(args.results)
+    pins_extra = {
+        "claude_version": args.claude_version,
+        "protocol_file_sha256": args.proto_hash,
+        "protocol_is_placeholder": args.proto_placeholder,
+        "battery_sha256": args.battery_sha256 or None,
+        "harness_revision": args.harness_revision or None,
+        "composed_sha256": {arm: sha or None for arm, sha in args.composed_sha256},
+    }
+    if args.real:
+        gaps = unpinned(pins_extra, sorted({r["variant"] for r in rows}))
+        if gaps:
+            print(
+                "ab-comms-verdict: refused: a real run's verdict needs every run pin,"
+                " and these are not pinned: "
+                + "; ".join(
+                    "%s (%s)" % (name, "none" if value is None else json.dumps(value))
+                    for name, value in gaps
+                ),
+                file=sys.stderr,
+            )
+            return REFUSED
     doc, any_straddle = compute(
-        _load_rows(args.results),
+        rows,
         threshold=args.threshold.strip(),
         cost_threshold=args.cost_threshold,
         reps_now=args.reps_now,
         reps_max=args.reps_max,
         weights=weights,
-        pins_extra={
-            "claude_version": args.claude_version,
-            "protocol_file_sha256": args.proto_hash,
-            "protocol_is_placeholder": args.proto_placeholder,
-        },
+        pins_extra=pins_extra,
     )
     if args.out:
         with open(args.out, "w") as fh:
