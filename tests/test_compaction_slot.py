@@ -1,10 +1,12 @@
-"""#1053 PR 3: one compaction at a time on the host (compaction-slot.py).
+"""#1053 PR 3: one compaction at a time on the host (compaction-slot.py), and the
+operator's stop: a `disabled` entry in the slot's directory refuses every take.
 
-Driven through the script by its path, as the build's executor is to run it, so
-its execute bit and shebang are pinned too. Every test has its own slot directory
-(COMPACTION_SLOT_DIR), a stand-in /proc for the load (COMPACTION_SLOT_PROC), a
-boot ID and a clock (COMPACTION_SLOT_NOW), so nothing here reaches the host's
-slot. Nothing in the framework takes the slot yet.
+Driven through the script by its path, so its execute bit and shebang are pinned
+too. Every test has its own slot directory (COMPACTION_SLOT_DIR), a stand-in /proc
+for the load (COMPACTION_SLOT_PROC), a boot ID and a clock (COMPACTION_SLOT_NOW),
+so nothing here reaches the host's slot. keepalive's compaction executor
+(keepalive.sh, compact_tick) takes the slot; tests/test_keepalive_compact.py
+drives it there.
 """
 from __future__ import annotations
 
@@ -184,7 +186,7 @@ def test_a_record_that_cannot_be_read_holds_nothing(slot):
 def test_status_reads_free_with_the_load_beside_the_line(slot):
     status = _status(slot, load="3.25")
     assert status == {"state": "free", "lease": None, "last": None, "load1": 3.25,
-                      "load_line": 40.0}
+                      "load_line": 40.0, "disabled": False}
     assert not (slot / "state").exists()  # a status read makes nothing
 
 
@@ -199,3 +201,103 @@ def test_the_slot_lives_in_the_data_root_and_needs_one(slot):
     assert took.returncode == 0 and took.stdout.startswith("granted: lease "), took.stderr
     record = json.loads((root / "state/compaction-slot/lease.json").read_text())
     assert (record["fleet"], record["bot"]) == ("fleet-a", "alpha")
+
+
+# --- the operator's stop: anything named `disabled` in the slot's directory -----------
+
+def _place(path: Path, kind: str) -> None:
+    if kind == "empty file":
+        path.write_text("")
+    elif kind == "file with text":
+        path.write_text("stopped while the host is looked at\n")
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "dangling link":
+        path.symlink_to("nowhere")
+    else:  # a FIFO, which a read would hang on: the stop is never opened
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize("kind", ["empty file", "file with text", "directory", "dangling link",
+                                  "fifo"])
+def test_the_stop_refuses_every_take_writing_nothing_until_it_is_removed(slot, kind):
+    state = slot / "state"
+    state.mkdir()
+    stop = state / "disabled"
+    _place(stop, kind)
+    for bot in ("alpha", "beta"):
+        rc, refused = _take(slot, bot)
+        assert (rc, refused["outcome"], refused["reason"]) == (75, "refused", "disabled")
+        assert refused["stop"]["path"] == str(stop) and refused["stop"]["since"]
+    assert sorted(os.listdir(state)) == ["disabled"]  # no lock, no lease: nothing written
+    status = _status(slot)
+    assert (status["state"], status["disabled"], status["stop"]["path"]) == ("free", True, str(stop))
+    if kind == "directory":
+        stop.rmdir()
+    else:
+        stop.unlink()
+    status = _status(slot)
+    assert status["disabled"] is False and "stop" not in status
+    rc, granted = _take(slot, "alpha")
+    assert (rc, granted["outcome"]) == (0, "granted")
+
+
+def test_a_stop_placed_while_a_take_waits_for_the_lock_refuses_that_take(slot):
+    """The take starts with no stop in place, meets the slot's lock, and decides after
+    the stop is placed: it reads the stop again under the lock."""
+    state = slot / "state"
+    state.mkdir()
+    fd = os.open(state / "lock", os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        taker = subprocess.Popen([str(SCRIPT), "take", "--fleet", "fleet-a", "--bot", "alpha",
+                                  "--json"], env=_env(slot), cwd=slot, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        time.sleep(0.5)  # past its first read of the stop, inside its 2 s wait for the lock
+        (state / "disabled").touch()
+    finally:
+        os.close(fd)
+    out, err = taker.communicate(timeout=30)
+    assert err == "", err
+    assert (taker.returncode, json.loads(out)["reason"]) == (75, "disabled")
+    assert not (state / "lease.json").exists()
+
+
+def test_a_live_lease_outlives_the_stop_and_its_release_still_works(slot):
+    rc, first = _take(slot, "alpha")
+    assert rc == 0
+    (slot / "state/disabled").touch()
+    rc, refused = _take(slot, "beta", now=NOW + 1)
+    assert (rc, refused["reason"]) == (75, "disabled")  # the stop, before the holder
+    status = _status(slot, now=NOW + 1)
+    assert (status["state"], status["lease"]["bot"], status["disabled"]) == ("held", "alpha", True)
+    rc, released = _release(slot, "alpha", first["lease"]["lease"], now=NOW + 2)
+    assert (rc, released["outcome"]) == (0, "released")
+    status = _status(slot, now=NOW + 2)
+    assert (status["state"], status["last"]["ended"], status["disabled"]) == ("free", "released", True)
+    assert (slot / "state/disabled").exists()  # a release leaves the stop in place
+    read = subprocess.run([str(SCRIPT), "status"], env=_env(slot, now=NOW + 2), cwd=slot,
+                          capture_output=True, text=True, timeout=30)
+    assert read.returncode == 0, read.stderr
+    assert f"; stopped by {slot / 'state/disabled'} since " in read.stdout
+    assert "every take is refused" in read.stdout
+    took = subprocess.run([str(SCRIPT), "take", "--fleet", "fleet-a", "--bot", "beta"],
+                          env=_env(slot, now=NOW + 3), cwd=slot, capture_output=True, text=True,
+                          timeout=30)
+    assert took.returncode == 75 and took.stdout.startswith("refused: stopped by "), took.stdout
+
+
+def test_a_stop_that_cannot_be_looked_at_grants_nothing(slot):
+    loop = slot / "loop"
+    loop.symlink_to("loop")  # every path through it is a link loop: lstat fails ELOOP
+    env = constructed_env(COMPACTION_SLOT_DIR=loop, COMPACTION_SLOT_PROC=slot / "proc",
+                          COMPACTION_SLOT_BOOT_ID="boot-a", COMPACTION_SLOT_NOW=repr(NOW))
+    took = subprocess.run([str(SCRIPT), "take", "--fleet", "fleet-a", "--bot", "alpha", "--json"],
+                          env=env, cwd=slot, capture_output=True, text=True, timeout=30)
+    assert (took.returncode, took.stdout) == (2, "")
+    assert f"the stop {loop / 'disabled'} cannot be looked at" in took.stderr
+    read = subprocess.run([str(SCRIPT), "status", "--json"], env=env, cwd=slot,
+                          capture_output=True, text=True, timeout=30)
+    assert read.returncode == 0, read.stderr
+    status = json.loads(read.stdout)
+    assert status["disabled"] is None and status["stop"]["error"], status
