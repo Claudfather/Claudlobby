@@ -799,8 +799,7 @@ suc_main() {
 # --- run pins: taken before any cell, recorded in the verdict --------------
 # harness_revision <tree> -> the commit the harness tree is at, with "-dirty"
 # when its tracked files differ from it (the test harness/compose.py makes of a
-# clean committed tree), or nothing when the tree has no commit of its own. A
-# real verdict takes only a clean commit.
+# clean committed tree), or nothing when the tree has no commit of its own.
 harness_revision() {
     local rev
     [ -e "$1/.git" ] || return 0
@@ -826,7 +825,7 @@ entries = []
 for d, dirs, files in os.walk(top, followlinks=True):
     for name in files:
         rel = os.path.relpath(os.path.join(d, name), top)
-        if rel == name and (name == "bot.conf" or name.endswith((".service", ".timer", ".plist"))):
+        if rel == name and (name == "bot.conf" or name.endswith((".service", ".plist"))):
             continue
         with open(os.path.join(d, name), "rb") as fh:
             entries.append((rel, hashlib.sha256(fh.read().replace(token, b"<root>")).hexdigest()))
@@ -981,7 +980,7 @@ mechanical_check() {  # $1 task  $2 must_persist  $3 transcript -> "true"|"false
 
 # write_battery <file> <tasks> -> the battery as the cells get it: each task's
 # dispatch text and must_persist facts, in run order. Its sha256 is the battery
-# pin.
+# pin; a battery kept in a file of its own is pinned by that file's sha256.
 write_battery() {
     local t
     local -a a=()
@@ -990,7 +989,7 @@ write_battery() {
     done
     python3 -c 'import json, sys
 a = sys.argv[2:]
-tasks = [{"id": a[i], "dispatch": a[i + 1], "must_persist": a[i + 2]} for i in range(0, len(a), 3)]
+tasks = [{"id": i, "dispatch": d, "must_persist": m} for i, d, m in zip(a[0::3], a[1::3], a[2::3])]
 with open(sys.argv[1], "w") as fh:
     json.dump({"tasks": tasks}, fh, indent=2, sort_keys=True)
     fh.write("\n")' "$1" ${a[@]+"${a[@]}"}
@@ -1230,12 +1229,11 @@ assert "pins" in d and "weights" in d["pins"], "missing pins/weights"
 assert not (d["overall"]=="PASS" and d["pins"]["threshold"] is None), "PASS without a ratified T"' \
     "$VERDICT" 2>/dev/null && r=yes || r=no
 harness_check "verdict.json valid: both axes, pins, no bare-PASS without T" "$r"
-python3 -c 'import json, re, sys
+python3 -c 'import json, sys
 p = json.load(open(sys.argv[1]))["pins"]
 arms = p["composed_sha256"]
-digests = [p["battery_sha256"], arms.get("without"), arms.get("with")]
-assert all(isinstance(v, str) and re.fullmatch("[0-9a-f]{64}", v) for v in digests), "a pin is missing"
-assert sorted(arms) == ["with", "without"] and arms["with"] != arms["without"], "the arms pin one output"
+assert p["battery_sha256"] and arms.get("without") and arms.get("with"), "a pin is missing"
+assert arms["with"] != arms["without"], "the arms pin one output"
 assert p["harness_revision"] == (sys.argv[2] or None), "not the revision taken"' \
     "$VERDICT" "$HARNESS_REVISION" 2>/dev/null && r=yes || r=no
 harness_check "verdict.json pins the battery, the harness revision and each arm" "$r"

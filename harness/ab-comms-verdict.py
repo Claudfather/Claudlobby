@@ -47,6 +47,7 @@ import argparse
 import json
 import os
 import random
+import re
 import statistics
 import sys
 
@@ -56,7 +57,8 @@ BOOTSTRAP_SEED = 0
 CI_PCT = 90  # two-sided -> 5th and 95th percentiles of the bootstrap medians
 
 REFUSED = 3  # the exit status of a real run's verdict that lacks a run pin
-_HEX = frozenset("0123456789abcdef")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def _load_rows(path):
@@ -240,23 +242,18 @@ def compute(
     return doc, any_straddle
 
 
-def _is_hex(value, *lengths):
-    return isinstance(value, str) and len(value) in lengths and set(value) <= _HEX
-
-
 def unpinned(pins, arms):
     """The run pins a real verdict lacks, as (name, value) pairs. The battery and
     each arm's composed output are sha256 digests; the harness revision is a
     commit, so a "-dirty" tree is not pinned."""
-    gaps = []
-    if not _is_hex(pins["battery_sha256"], 64):
-        gaps.append(("battery_sha256", pins["battery_sha256"]))
-    if not _is_hex(pins["harness_revision"], 40, 64):
-        gaps.append(("harness_revision", pins["harness_revision"]))
-    for arm in arms:
-        if not _is_hex(pins["composed_sha256"].get(arm), 64):
-            gaps.append(("composed_sha256." + arm, pins["composed_sha256"].get(arm)))
-    return gaps
+    wanted = [
+        ("battery_sha256", pins["battery_sha256"], _SHA256),
+        ("harness_revision", pins["harness_revision"], _COMMIT),
+    ] + [
+        ("composed_sha256." + arm, pins["composed_sha256"].get(arm), _SHA256)
+        for arm in arms
+    ]
+    return [(name, v) for name, v, form in wanted if not form.fullmatch(v or "")]
 
 
 def _arm_pin(text):
