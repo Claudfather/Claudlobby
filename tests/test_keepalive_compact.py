@@ -87,7 +87,13 @@ if cmd == "send-keys":
             rest = rest[1:]
         text = rest[0] if rest else ""
         log("TEXT " + text)
-        wr("typed", rd("typed") + text)
+        # A file `fault` reading "fail TEXT" fails that keystroke; "drop TEXT"
+        # takes it and never shows it in the box.
+        mode, _, target = rd("fault").strip().partition(" ")
+        if text == target and mode == "fail":
+            sys.exit(1)
+        if text != target or mode != "drop":
+            wr("typed", rd("typed") + text)
         sys.exit(0)
     for key in rest:
         log("KEY " + key)
@@ -644,6 +650,35 @@ def test_a_usage_limit_tick_sends_nothing(rig):
     rig.show("idle-before-turn")
     rig.tick()
     assert _sent(rig.keys()) == 1
+
+
+@pytest.mark.parametrize("fault", [
+    None,                     # the control: both commands go through
+    "fail /reload-skills",    # its keystroke fails
+    "drop /reload-skills",    # the box never shows it, so its Enter is withheld
+    "fail /reload-plugins",   # the first command's keystroke fails
+])
+def test_a_tick_that_tries_a_reload_sends_no_compact_whatever_the_reload_returns(rig, fault):
+    """An idle tick types a pending fleet reload. A tick that tries it types no
+    /compact, whether or not its commands go through: one that did not submit can
+    sit in the box, or arrive there, under the /compact."""
+    rig.request()
+    (rig.data / ".reload-pending").touch()
+    rig.show("idle-before-turn", on_submit="idle-before-turn")
+    (rig.stub_dir / "fault").write_text(fault or "")
+    rig.tick()
+    keys = rig.keys()
+    if fault is None:
+        assert keys == ["TEXT /reload-plugins", "KEY Enter", "TEXT /reload-skills", "KEY Enter"]
+    assert keys[:1] == ["TEXT /reload-plugins"] and _sent(keys) == 0, keys
+    assert rig.compact_log() == [] and rig.rows("compaction_sent") == [] and rig.pending()
+    assert (rig.data / ".reload-pending").exists() is (fault is not None)
+    (rig.stub_dir / "fault").write_text("")   # the fault clears
+    if fault is not None:
+        rig.tick()                             # the reload goes through, and no /compact
+        assert _sent(rig.keys()) == 0 and not (rig.data / ".reload-pending").exists()
+    rig.tick()                                 # the next idle tick sends it
+    assert _sent(rig.keys()) == 1 and not rig.pending()
 
 
 # --- the interpreter keepalive runs the guard with ------------------------------------

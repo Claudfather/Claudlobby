@@ -980,9 +980,12 @@ case "$state" in
         # that later lands in the box makes the pane read HELD (#2070) or
         # UNKNOWN, never IDLE, so it is never typed twice.
         if [ -f "$BOT_DIR/data/.reload-pending" ]; then
+            # #1053: a tick that tries the reload types no /compact, whatever the
+            # send returns: a command that did not submit can sit in the box, or
+            # arrive there, under the /compact.
+            _reload_tried=1
             if send_reload_command "/reload-plugins" && send_reload_command "/reload-skills"; then
                 rm -f "$BOT_DIR/data/.reload-pending"
-                _reload_sent=1
                 echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
                 emit_keepalive_event "RELOAD" "sent /reload-plugins + /reload-skills"
             else
@@ -1022,8 +1025,8 @@ case "$state" in
         ;;
 esac
 # #1053: a pending compaction request (see compact_tick), on any tick but a
-# usage limit's or one that just typed a reload.
-if [ "$state" != LIMIT ] && [ -z "${_reload_sent:-}" ]; then
+# usage limit's or one that tried to type a reload, whatever that send returned.
+if [ "$state" != LIMIT ] && [ -z "${_reload_tried:-}" ]; then
     compact_tick
 fi
 _channel_check
