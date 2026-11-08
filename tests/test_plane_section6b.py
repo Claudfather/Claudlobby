@@ -2,7 +2,7 @@
 producers fail toward EMPTY, and the two vocabulary intakes.
 
 Provenance: the #1341 fleet review's domain-fit findings, dispositioned in
-documentation/plans/2026-08-24-observable-plane-phase2-ingest.md §6b."""
+the Phase-2 plan's §6b and built in PR-B (#1372)."""
 
 from __future__ import annotations
 

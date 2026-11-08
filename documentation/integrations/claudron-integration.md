@@ -2,7 +2,7 @@
 
 How claudlobby connects to [Claudron](https://github.com/Claudfather/Claudron) — the ecosystem's knowledge hub. Claudron owns the long-lived knowledge corpus in a **tenant-owned vault** (a private git repo of plain markdown); claudlobby consumes it. Claudlobby never stores the corpus, never forks Claudron's `SCHEMA.md` (the tri-repo schema SSOT), and never writes `runtime/`, `.env`, or operator PII into a vault.
 
-The original receiving-side plan, `documentation/plans/2026-07-07-claudron-consumption.md` (EPIC #509), was closed 2026-07-24 as superseded by the cross-repo boundary-separation program — it is kept for its reasoning trail, not as a live plan. **This page is the current record of what's actually shipped.** Open follow-through work is tracked at #1248 ("the five orphans of the closed #509 epic"). Claudron's side is Claudfather/Claudron#14.
+The original receiving-side plan (EPIC #509) was closed 2026-07-24 as superseded by the cross-repo boundary-separation program. Its plan document is in git history for its reasoning trail; it is not a live plan. **This page is the current record of what's actually shipped.** Open follow-through work is tracked at #1248 ("the five orphans of the closed #509 epic"). Claudron's side is Claudfather/Claudron#14.
 
 ## What works today (at v0.9.0)
 
@@ -96,7 +96,7 @@ Tracked, not built. Nothing here is a defect in a fleet that lacks it:
 
 ## References
 
-- Original plan (superseded, historical): `documentation/plans/2026-07-07-claudron-consumption.md` · EPIC #509 (children #510–#514, all closed)
+- Original plan (superseded, historical): EPIC #509 (children #510–#514, all closed); the plan document is in git history
 - Current follow-through: #1248 (open residuals #560, #562, #564, #745, #746)
 - Claudron roadmap: Claudfather/Claudron#14 · MCP contract: Claudfather/Claudron#17
 - Schema SSOT: `SCHEMA.md` at the Claudron repo root (their E1)

@@ -1,4 +1,4 @@
-"""Guards for the Claudron integration floor (plan 2026-07-07-claudron-consumption, 1c).
+"""Guards for the Claudron integration floor (epic #509, P1 item 1c, built in #517).
 
 Invariants: the [vault] extra stays pinned (never a bare git URL), the compat
 table stays well-formed, the integration doc stays in sync with the table it
