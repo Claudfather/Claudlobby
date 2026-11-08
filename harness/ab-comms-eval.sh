@@ -817,8 +817,8 @@ harness_revision() {
 # its path there, sorted, links followed. The composed paths carry the run
 # root's name (<root token>), which is read as "<root>", so two runs of one
 # revision pin the same value. bot.conf and the unit files are left out: the
-# supervisor reads them, a headless cell does not, and they carry the run's HOME
-# and the hash of its fleet.yaml.
+# supervisor reads them, a headless cell does not, and bot.conf carries the
+# sha256 of the run's fleet.yaml and a launchd unit the run's HOME.
 composed_sha256() {
     python3 -c 'import hashlib, os, sys
 top, token = sys.argv[1], sys.argv[2].encode()
